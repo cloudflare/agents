@@ -1,5 +1,15 @@
 # @cloudflare/voice
 
+## 0.1.4
+
+### Patch Changes
+
+- [#1458](https://github.com/cloudflare/agents/pull/1458) [`84cb429`](https://github.com/cloudflare/agents/commit/84cb429f7f41becc5e6ff0592f0308c52a5134f1) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fix Workers AI STT session edge cases for Flux and Nova 3.
+
+  Flux now preserves the latest non-empty interim transcript for the active turn so an `EndOfTurn` event with an empty `transcript` can still emit the completed utterance. Nova 3 now defensively normalizes finalized segment state before reading it to avoid stale teardown messages throwing during abnormal close paths.
+
+- [#1462](https://github.com/cloudflare/agents/pull/1462) [`5f6214d`](https://github.com/cloudflare/agents/commit/5f6214dccfe3ba9bf243ec15d291b37b9659a54c) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fix `withVoice` text streaming for AI SDK `textStream` responses so TTS audio is produced when `onTurn()` returns `streamText(...).textStream` directly.
+
 ## 0.1.3
 
 ### Patch Changes
@@ -29,6 +39,7 @@
   The transcriber session is now created at `start_call` and lives for the entire call duration. The model handles turn detection — no client-side `start_of_speech`/`end_of_speech` required for STT. Voice agents use `keepAlive` to prevent DO eviction during calls.
 
   New API:
+
   - `transcriber` property replaces `stt`, `streamingStt`, and `vad`
   - `createTranscriber(connection)` hook for runtime model switching
   - `WorkersAIFluxSTT` — per-call Flux sessions (recommended for `withVoice`)
@@ -38,6 +49,7 @@
   - Duplicate `start_call` is silently ignored when already in a call
 
   Removed:
+
   - `stt` (batch STT), `streamingStt` (per-utterance streaming), `vad` (server-side VAD)
   - `WorkersAISTT`, `WorkersAIVAD`, `pcmToWav`
   - `prerollMs`, `vadThreshold`, `vadPushbackSeconds`, `vadRetryMs`, `minAudioBytes` options

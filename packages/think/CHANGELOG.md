@@ -1,5 +1,30 @@
 # @cloudflare/think
 
+## 0.6.0
+
+### Minor Changes
+
+- [#1456](https://github.com/cloudflare/agents/pull/1456) [`787e73d`](https://github.com/cloudflare/agents/commit/787e73dbc6bdee3aee5f44099a1bc64f119c934f) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Stop applying `pruneMessages({ toolCalls: "before-last-2-messages" })` to the model context by default. The previous default silently stripped client-side tool results (no `execute`, output supplied via `addToolOutput`) from any turn beyond the second, breaking multi-turn flows where the user's choices live in those tool results (see [#1455](https://github.com/cloudflare/agents/issues/1455)). `truncateOlderMessages` still runs as before, so context cost stays bounded.
+
+  This is a behavior change. Subclasses that relied on the old aggressive pruning can opt back in from `beforeTurn`:
+
+  ```typescript
+  import { pruneMessages } from "ai";
+
+  beforeTurn(ctx) {
+    return {
+      messages: pruneMessages({
+        messages: ctx.messages,
+        toolCalls: "before-last-2-messages"
+      })
+    };
+  }
+  ```
+
+### Patch Changes
+
+- [#1463](https://github.com/cloudflare/agents/pull/1463) [`ab2b1db`](https://github.com/cloudflare/agents/commit/ab2b1db31971ac2d2ddab9d962986f208c69a422) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Avoid throwing when the chat stream resume ACK fallback races with a closed WebSocket connection. The `_handleStreamResumeAck` fallback that fires when `ResumableStream.replayCompletedChunksByRequestId` returns `false` now goes through a `sendIfOpen` helper that swallows the `TypeError: WebSocket send() after close` race instead of letting it propagate up through `onMessage`.
+
 ## 0.5.3
 
 ### Patch Changes
@@ -55,7 +80,7 @@
 
   ```typescript
   const result = await this.saveMessages(messages, {
-    signal: controller.signal
+    signal: controller.signal,
   });
   if (result.status === "aborted") {
     // Inference loop terminated mid-stream; partial chunks persisted.
@@ -63,6 +88,7 @@
   ```
 
   The signal is linked to Think's per-turn `AbortController` for the duration of the call. When it aborts:
+
   - the inference loop's signal aborts (the same path `chat-request-cancel` takes);
   - partial chunks already streamed are persisted to the resumable stream;
   - `saveMessages` resolves with `{ status: "aborted" }`;
@@ -75,6 +101,7 @@
   `SaveMessagesResult.status` now includes `"aborted"` alongside `"completed"` and `"skipped"`. Existing callers that only switch on `"completed"` are unaffected.
 
   **Limitations.**
+
   - `AbortSignal` cannot cross Durable Object RPC. Construct the controller inside the DO that calls `saveMessages`. To bridge a parent's intent into a child DO, return a `ReadableStream` from the child whose `cancel` callback aborts a per-turn controller — `examples/agents-as-tools` shows the canonical pattern.
   - The signal lives in memory only. If the DO hibernates mid-turn and `chatRecovery` is enabled, the recovered turn calls `continueLastTurn()` internally without the original signal — an abort fired after restart has no effect on the recovered turn.
 
@@ -89,11 +116,13 @@
   This extracts the `latest`/`merge`/`drop`/`debounce` admission state machine into a `SubmitConcurrencyController` exported from `agents/chat`. `AIChatAgent` semantics (including merge persistence) are preserved. `Think` now picks up the same pending-enqueue protection, so an overlapping submit is still detected while an accepted request is between admission and turn queue registration.
 
   Additional fixes:
+
   - `Think` now captures the turn generation immediately after admission and threads it into `_turnQueue.enqueue`, so a clear that lands between admission and queue registration cannot run a stale turn.
   - Pending-enqueue tracking is now bound to a release function tied to the controller's reset epoch, so a release from a pre-reset submit can no longer erase a post-reset submit's marker and let a third submit slip through as non-overlapping.
   - Debounce cancellation correctly resolves all in-flight waiters instead of overwriting a single timer slot.
 
 - [#1394](https://github.com/cloudflare/agents/pull/1394) [`a0a0d17`](https://github.com/cloudflare/agents/commit/a0a0d179a862547715b0dd2e38d37065f24eabe5) Thanks [@threepointone](https://github.com/threepointone)! - think: add `beforeStep` lifecycle hook and `output` passthrough on `TurnConfig`.
+
   - **`beforeStep(ctx)`** — new lifecycle hook called before each AI SDK step in the agentic loop, wired to `streamText({ prepareStep })`. Receives a `PrepareStepContext` (the AI SDK's `PrepareStepFunction` parameter — `steps`, `stepNumber`, `model`, `messages`, `experimental_context`) and may return a `StepConfig` (`PrepareStepResult`) to override `model`, `toolChoice`, `activeTools`, `system`, `messages`, `experimental_context`, or `providerOptions` for the current step. Use `beforeTurn` for turn-wide assembly and `beforeStep` when the decision depends on the step number or previous step results. Resolves [#1363](https://github.com/cloudflare/agents/issues/1363).
   - **`TurnConfig.output`** — new optional field on `TurnConfig` forwarded to `streamText`. Accepts the AI SDK's structured-output spec (e.g. `Output.object({ schema })`, `Output.text()`) so a single agent can keep tools enabled on intermediate turns and return schema-validated structured output on a designated turn — without losing tools at model construction. Combine with `activeTools: []` for providers that strip tools when `responseFormat: "json"` is active (e.g. `workers-ai-provider`). Resolves [#1383](https://github.com/cloudflare/agents/issues/1383).
   - New re-exports from `@cloudflare/think`: `PrepareStepFunction`, `PrepareStepResult`, `PrepareStepContext`, `StepConfig`.
@@ -191,6 +220,7 @@
   ### `subAgent()` cross-DO I/O fix
 
   Three issues in the facet initialization path caused `"Cannot perform I/O on behalf of a different Durable Object"` errors when spawning sub-agents in production:
+
   - `subAgent()` constructed a `Request` in the parent DO and passed it to the child via `stub.fetch()`. The `Request` carried native I/O tied to the parent isolate, which the child rejected.
   - The facet flag was set _after_ the first `onStart()` ran, so `broadcastMcpServers()` fired with `_isFacet === false` on the initial boot.
   - `_broadcastProtocol()`, the inherited `broadcast()`, and `_workflow_broadcast()` iterated the connection registry without an `_isFacet` guard, letting broadcasts reach into the parent DO's WebSocket registry from a child isolate.
@@ -200,12 +230,14 @@
   ### `"experimental"` compatibility flag no longer required
 
   `ctx.facets`, `ctx.exports`, and `env.LOADER` (Worker Loader) have graduated out of the `"experimental"` compatibility flag in workerd. `agents` and `@cloudflare/think` no longer require it:
+
   - `subAgent()` / `abortSubAgent()` / `deleteSubAgent()` — the `@experimental` JSDoc tag and runtime error messages no longer reference the flag. The runtime guards on `ctx.facets` / `ctx.exports` stay in place and now nudge users toward updating `compatibility_date` instead.
   - `Think` — the `@experimental` JSDoc tag no longer references the flag.
 
   No code change is required; remove `"experimental"` from your `compatibility_flags` in `wrangler.jsonc` if it was only there for these features.
 
 - [#1332](https://github.com/cloudflare/agents/pull/1332) [`7cb8acf`](https://github.com/cloudflare/agents/commit/7cb8acff8281a30bc17980e506ab5582f3cb1c72) Thanks [@threepointone](https://github.com/threepointone)! - Expose `createdAt` on fiber and chat recovery contexts so apps can suppress continuations for stale, interrupted turns.
+
   - `FiberRecoveryContext` (from `agents`) gains `createdAt: number` — epoch milliseconds when `runFiber` started, read from the `cf_agents_runs` row that was already tracked internally.
   - `ChatRecoveryContext` (from `@cloudflare/ai-chat` and `@cloudflare/think`) gains the same `createdAt` field, threaded through from the underlying fiber.
 
@@ -271,6 +303,7 @@
 - [#1270](https://github.com/cloudflare/agents/pull/1270) [`87b4512`](https://github.com/cloudflare/agents/commit/87b4512985e47de659bf970a65a6d1951f5855fe) Thanks [@threepointone](https://github.com/threepointone)! - Wire Session into Think as the storage layer, achieving full feature parity with AIChatAgent plus Session-backed advantages.
 
   **Think (`@cloudflare/think`):**
+
   - Session integration: `this.messages` backed by `session.getHistory()`, tree-structured messages, context blocks, compaction, FTS5 search
   - `configureSession()` override for context blocks, compaction, search, skills (sync or async)
   - `assembleContext()` returns `{ system, messages }` with context block composition
@@ -289,10 +322,12 @@
   - Constructor wraps `onStart` — subclasses never need `super.onStart()`
 
   **agents (`agents/chat`):**
+
   - Extract `AbortRegistry`, `applyToolUpdate` + builders, `parseProtocolMessage` into shared `agents/chat` layer
   - Add `applyChunkToParts` export for fiber recovery
 
   **AIChatAgent (`@cloudflare/ai-chat`):**
+
   - Refactor to use shared `AbortRegistry` from `agents/chat`
   - Add `continuation` flag to `OnChatMessageOptions`
   - Export `getAgentMessages()` and tool part helpers
@@ -307,6 +342,7 @@
   `Think` now extends `Agent` directly (no mixin). Fiber support is inherited from the base class.
 
   **Breaking (experimental APIs only):**
+
   - Removed `withFibers` mixin (`agents/experimental/forever`)
   - Removed `withDurableChat` mixin (`@cloudflare/ai-chat/experimental/forever`)
   - Removed `./experimental/forever` export from both packages
