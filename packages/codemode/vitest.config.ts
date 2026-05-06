@@ -9,6 +9,7 @@ export default defineConfig({
   ],
   test: {
     name: "workers",
-    include: ["src/tests/**/*.test.ts"]
+    include: ["src/tests/**/*.test.ts"],
+    exclude: ["src/tests/**/*.browser.test.ts"]
   }
 });

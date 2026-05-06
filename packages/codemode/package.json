@@ -63,13 +63,19 @@
       "types": "./dist/tanstack-ai.d.ts",
       "import": "./dist/tanstack-ai.js",
       "require": "./dist/tanstack-ai.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js",
+      "require": "./dist/browser.js"
     }
   },
   "scripts": {
     "build": "tsx ./scripts/build.ts",
     "test": "vitest run",
     "test:e2e": "npx playwright test --config e2e/playwright.config.ts",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:browser": "vitest run --config vitest.browser.config.ts"
   },
   "keywords": [
     "cloudflare",
