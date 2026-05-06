@@ -223,11 +223,7 @@ an iframe sandbox on the page.
 ```typescript
 import { AIChatAgent, createToolsFromClientSchemas } from "@cloudflare/ai-chat";
 import { createWorkersAI } from "workers-ai-provider";
-import {
-  streamText,
-  convertToModelMessages,
-  stepCountIs
-} from "ai";
+import { streamText, convertToModelMessages, stepCountIs } from "ai";
 
 export class BrowserCodemodeAgent extends AIChatAgent<Env> {
   async onChatMessage(_onFinish, options) {
