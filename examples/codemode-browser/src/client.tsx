@@ -382,34 +382,46 @@ function App() {
         </div>
       </div>
 
-      <footer className="px-5 py-4 bg-kumo-base border-t border-kumo-line">
-        <div className="max-w-3xl mx-auto flex gap-2">
-          <InputArea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                send();
-              }
-            }}
-            placeholder="Ask codemode to use browser tools..."
-            disabled={isStreaming}
-          />
-          <Button
-            variant="primary"
-            shape="square"
-            icon={<PaperPlaneRightIcon size={18} />}
-            onClick={send}
-            disabled={!input.trim() || isStreaming}
-            loading={isStreaming}
-            aria-label="Send"
-          />
+      <div className="border-t border-kumo-line bg-kumo-base">
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            send();
+          }}
+          className="max-w-3xl mx-auto px-5 py-4"
+        >
+          <div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm focus-within:ring-2 focus-within:ring-kumo-ring focus-within:border-transparent transition-shadow">
+            <InputArea
+              value={input}
+              onValueChange={setInput}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  send();
+                }
+              }}
+              placeholder="Ask codemode to use browser tools..."
+              disabled={isStreaming}
+              rows={2}
+              className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"
+            />
+            <Button
+              type="submit"
+              variant="primary"
+              shape="square"
+              size="sm"
+              icon={<PaperPlaneRightIcon size={18} />}
+              disabled={!input.trim() || isStreaming}
+              loading={isStreaming}
+              aria-label="Send"
+              className="mb-0.5"
+            />
+          </div>
+        </form>
+        <div className="flex justify-center pb-3">
+          <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
         </div>
-        <div className="max-w-3xl mx-auto mt-2 flex justify-end">
-          <PoweredByCloudflare />
-        </div>
-      </footer>
+      </div>
     </div>
   );
 }
