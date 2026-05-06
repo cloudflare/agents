@@ -17,6 +17,7 @@ A project management chat app where the LLM writes and executes code to orchestr
 - `useAgentChat` for streaming chat with message persistence
 - Collapsible tool cards showing generated code, results, and console output
 - Kumo design system components with dark/light mode
+- Browser client-tool variant documented in [`../../docs/codemode.md`](../../docs/codemode.md#browser-executor-with-dynamic-client-tools)
 
 **Tools (`src/tools.ts`):**
 
@@ -38,3 +39,19 @@ Uses Workers AI (no API key needed) with `@cf/moonshotai/kimi-k2.5`.
 - "Create a project called Alpha" -- LLM writes code that calls `codemode.createProject()`
 - "Add 3 tasks to Alpha" -- LLM chains multiple tool calls in a single code block
 - "List all projects and their tasks" -- LLM composes results from multiple tools
+- Open Settings to switch between Dynamic Worker and Node Server executors
+
+## Browser client-tool variant
+
+The example app in this folder is server-executor focused to keep the runtime
+surface small for review. If you want codemode to run entirely in the browser,
+the docs now include a companion pattern that:
+
+- defines browser-side tool functions directly
+- builds codemode with `createBrowserCodeTool(...)`
+- adapts the resulting descriptor to `Record<string, AITool>`
+- registers the resulting `codemode` tool through
+  `useAgentChat({ tools, onToolCall })`
+
+See [`docs/codemode.md`](../../docs/codemode.md#browser-executor-with-dynamic-client-tools)
+for the full server + client example.

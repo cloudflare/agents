@@ -106,7 +106,7 @@ beforeTurn(ctx: TurnContext): TurnConfig | void | Promise<TurnConfig | void>
 | Field          | Type                      | Description                                                              |
 | -------------- | ------------------------- | ------------------------------------------------------------------------ |
 | `system`       | `string`                  | Assembled system prompt (from context blocks or `getSystemPrompt()`)     |
-| `messages`     | `ModelMessage[]`          | Assembled model messages (truncated, pruned)                             |
+| `messages`     | `ModelMessage[]`          | Assembled model messages (truncated)                                     |
 | `tools`        | `ToolSet`                 | Merged tool set (workspace + getTools + session + MCP + client + caller) |
 | `model`        | `LanguageModel`           | The model from `getModel()`                                              |
 | `continuation` | `boolean`                 | Whether this is a continuation turn (auto-continue after tool result)    |
@@ -178,6 +178,38 @@ beforeTurn(ctx: TurnContext) {
   if (ctx.messages.length > 100) {
     return { maxSteps: 3 };
   }
+}
+```
+
+Prune older tool calls from the model context with the AI SDK's [`pruneMessages`](https://ai-sdk.dev/):
+
+```typescript
+import { pruneMessages } from "ai";
+
+beforeTurn(ctx: TurnContext) {
+  return {
+    messages: pruneMessages({
+      messages: ctx.messages,
+      toolCalls: "before-last-2-messages"
+    })
+  };
+}
+```
+
+Scope pruning per-tool with the array form so client-side tool results survive across turns:
+
+```typescript
+import { pruneMessages } from "ai";
+
+beforeTurn(ctx: TurnContext) {
+  return {
+    messages: pruneMessages({
+      messages: ctx.messages,
+      toolCalls: [
+        { type: "before-last-2-messages", tools: ["read_file", "search"] }
+      ]
+    })
+  };
 }
 ```
 

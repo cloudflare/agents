@@ -1,0 +1,58 @@
+name: Semgrep OSS scan
+on:
+  pull_request: {}
+  push:
+    branches: [main, master]
+  workflow_dispatch: {}
+  schedule:
+    # Run at midnight UTC on Saturdays. The `gate` job below filters
+    # scheduled runs to the first Saturday of each month. We avoid
+    # encoding "first Saturday" in cron itself because POSIX cron applies
+    # OR semantics when both day-of-month and day-of-week are
+    # non-wildcard, so e.g. `0 0 1-7 * 6` would fire every day 1-7 *and*
+    # every Saturday, not just the first Saturday.
+    - cron: "0 0 * * 6"
+concurrency:
+  group: semgrep-${{ github.event_name }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  gate:
+    name: gate
+    runs-on: ubuntu-slim
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          DAY=$(date -u +%-d)
+          if [ "$DAY" -le 7 ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping scheduled run: day-of-month $DAY is not in the first 7 days."
+          fi
+  semgrep:
+    name: semgrep-oss
+    needs: [gate]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - id: cache-semgrep
+        uses: actions/cache@v5
+        with:
+          path: ~/.local
+          key: semgrep-1.160.0-${{ runner.os }}
+      - if: steps.cache-semgrep.outputs.cache-hit != 'true'
+        run: pip install --user semgrep==1.160.0
+      - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: semgrep scan --config=auto

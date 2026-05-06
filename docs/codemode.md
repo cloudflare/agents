@@ -211,6 +211,117 @@ const codemode = createCodeTool({
 
 Tool names with hyphens or dots (common in MCP) are automatically sanitized to valid JavaScript identifiers (e.g., `my-server.list-items` becomes `my_server_list_items`).
 
+### Browser executor with dynamic client tools
+
+If your tools live in the browser instead of the Agent, build codemode from
+those browser-side functions and register it with whatever client-tool layer
+you already use. This keeps the server generic while running generated code in
+an iframe sandbox on the page.
+
+**Server:**
+
+```typescript
+import { AIChatAgent, createToolsFromClientSchemas } from "@cloudflare/ai-chat";
+import { createWorkersAI } from "workers-ai-provider";
+import { streamText, convertToModelMessages, stepCountIs } from "ai";
+
+export class BrowserCodemodeAgent extends AIChatAgent<Env> {
+  async onChatMessage(_onFinish, options) {
+    const workersai = createWorkersAI({ binding: this.env.AI });
+
+    const result = streamText({
+      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      messages: await convertToModelMessages(this.messages),
+      tools: createToolsFromClientSchemas(options?.clientTools),
+      stopWhen: stepCountIs(10)
+    });
+
+    return result.toUIMessageStreamResponse();
+  }
+}
+```
+
+**Client:**
+
+```tsx
+import { useAgent } from "agents/react";
+import { useAgentChat, type AITool } from "@cloudflare/ai-chat/react";
+import {
+  IframeSandboxExecutor,
+  createBrowserCodeTool
+} from "@cloudflare/codemode/browser";
+
+const browserTools = {
+  getPageTitle: {
+    description: "Get the current page title",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: []
+    },
+    execute: async () => ({ title: document.title })
+  },
+  getSelectionText: {
+    description: "Get the user's current text selection",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: []
+    },
+    execute: async () => ({
+      text: window.getSelection()?.toString() ?? ""
+    })
+  }
+};
+
+const codemode = createBrowserCodeTool({
+  tools: browserTools,
+  executor: new IframeSandboxExecutor()
+});
+
+function BrowserCodemodeChat() {
+  const agent = useAgent({ agent: "BrowserCodemodeAgent" });
+
+  const tools: Record<string, AITool> = {
+    codemode: {
+      description: codemode.description,
+      parameters: codemode.inputSchema,
+      execute: codemode.execute
+    }
+  };
+
+  const { messages, sendMessage } = useAgentChat({
+    agent,
+    tools,
+    onToolCall: async ({ toolCall, addToolOutput }) => {
+      const tool = tools[toolCall.toolName];
+      if (tool?.execute) {
+        const output = await tool.execute(toolCall.input);
+        addToolOutput({ toolCallId: toolCall.toolCallId, output });
+      }
+    }
+  });
+
+  // Render your chat UI...
+}
+```
+
+This pattern is useful when:
+
+- the browser owns the tool surface at runtime
+- your page exposes client-side capabilities that only the browser can run
+- you want codemode's typed code-generation prompt without routing tool
+  execution through the server
+
+If your browser tools are dynamic, rebuild the codemode descriptor whenever the
+tool set changes and re-register it with your client tool layer. Codemode stays
+agnostic about where those tools come from.
+
+If you need approval-gated tools, use the standard `needsApproval` +
+`useAgentChat` approval flow described in
+[Human in the Loop](./human-in-the-loop.md). Codemode currently excludes tools
+with `needsApproval` instead of pausing execution for approval.
+
 ## The Executor interface
 
 The `Executor` interface is deliberately minimal — implement it to run code in any sandbox:

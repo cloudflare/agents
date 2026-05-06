@@ -67,6 +67,23 @@ export type {
   SaveMessagesResult
 } from "agents/chat";
 
+function sendIfOpen(connection: Connection, message: string): boolean {
+  try {
+    connection.send(message);
+    return true;
+  } catch (error) {
+    if (isWebSocketClosedSendError(error)) return false;
+    throw error;
+  }
+}
+
+function isWebSocketClosedSendError(error: unknown): boolean {
+  return (
+    error instanceof TypeError &&
+    error.message.includes("WebSocket send() after close")
+  );
+}
+
 export type ChatMessage = UIMessage;
 
 const TIMED_OUT = Symbol("timed-out");
@@ -881,7 +898,8 @@ export class AIChatAgent<
               data.id
             )
           ) {
-            connection.send(
+            sendIfOpen(
+              connection,
               JSON.stringify({
                 body: "",
                 done: true,

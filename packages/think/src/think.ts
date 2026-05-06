@@ -94,12 +94,7 @@ import type {
   TypedToolResult,
   UIMessage
 } from "ai";
-import {
-  convertToModelMessages,
-  pruneMessages,
-  stepCountIs,
-  streamText
-} from "ai";
+import { convertToModelMessages, stepCountIs, streamText } from "ai";
 
 // Re-export AI SDK types that appear on Think's public lifecycle hooks
 // so users can import them from a single place.
@@ -166,6 +161,23 @@ const MSG_CHAT_CLEAR = CHAT_MESSAGE_TYPES.CHAT_CLEAR;
 const MSG_STREAM_RESUMING = CHAT_MESSAGE_TYPES.STREAM_RESUMING;
 const MSG_STREAM_RESUME_NONE = CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE;
 const MSG_MESSAGE_UPDATED = CHAT_MESSAGE_TYPES.MESSAGE_UPDATED;
+
+function sendIfOpen(connection: Connection, message: string): boolean {
+  try {
+    connection.send(message);
+    return true;
+  } catch (error) {
+    if (isWebSocketClosedSendError(error)) return false;
+    throw error;
+  }
+}
+
+function isWebSocketClosedSendError(error: unknown): boolean {
+  return (
+    error instanceof TypeError &&
+    error.message.includes("WebSocket send() after close")
+  );
+}
 
 /**
  * Callback interface for streaming chat events from a Think sub-agent.
@@ -1188,10 +1200,7 @@ export class Think<
 
     const history = this.session.getHistory();
     const truncated = truncateOlderMessages(history) as UIMessage[];
-    const messages = pruneMessages({
-      messages: await convertToModelMessages(truncated, { tools }),
-      toolCalls: "before-last-2-messages"
-    });
+    const messages = await convertToModelMessages(truncated, { tools });
 
     if (messages.length === 0) {
       throw new Error(
@@ -2598,7 +2607,8 @@ export class Think<
         requestId
       )
     ) {
-      connection.send(
+      sendIfOpen(
+        connection,
         JSON.stringify({
           body: "",
           done: true,

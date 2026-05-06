@@ -899,6 +899,47 @@ describe("Think — model message conversion", () => {
   });
 });
 
+// ── tool-call preservation (no default pruning) ─────────────────
+
+describe("Think — tool call preservation", () => {
+  it("preserves earlier client-side tool results across turns", async () => {
+    // Regression for cloudflare/agents#1455. Think no longer applies
+    // `pruneMessages` by default, so client-side tool outputs (whose
+    // user choices live in the assistant tool-result part) survive
+    // follow-up turns and reach the model. Subclasses that want the
+    // old aggressive pruning can apply it themselves in `beforeTurn`.
+    const agent = await freshAgent("preserve-client-tools");
+    for (let i = 0; i < 3; i++) {
+      await agent.persistTestMessage({
+        id: `u-${i}`,
+        role: "user",
+        parts: [{ type: "text", text: `question ${i}` }]
+      });
+      await agent.persistTestMessage({
+        id: `a-${i}`,
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-clientChoice",
+            toolCallId: `tc-${i}`,
+            state: "output-available",
+            input: { question: `q${i}` },
+            output: `user-choice-${i}`
+          } as UIMessage["parts"][number]
+        ]
+      });
+    }
+
+    await agent.testChat("follow up");
+
+    const json = await agent.getLastBeforeTurnMessagesJson();
+    expect(json).not.toBeNull();
+    expect(json).toContain("user-choice-0");
+    expect(json).toContain("user-choice-1");
+    expect(json).toContain("user-choice-2");
+  });
+});
+
 // ── saveMessages ─────────────────────────────────────────────────
 
 describe("Think — saveMessages", () => {
