@@ -1,0 +1,29 @@
+{
+  "name": "codemode-browser-demo",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "public"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "BrowserCodemode",
+        "class_name": "BrowserCodemode"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["BrowserCodemode"]
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  },
+  "observability": {
+    "enabled": true
+  }
+}
