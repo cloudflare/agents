@@ -510,6 +510,48 @@ describe("resolveToolMergeId", () => {
     expect(result).toBe(msg);
   });
 
+  it("adopts server ID after merging server output into a client approval-responded part (preserved approval field is ignored)", () => {
+    const server = [
+      assistantMsg("srv-a1", "Approved tool", {
+        parts: [
+          { type: "text", text: "Approved tool" },
+          {
+            type: "tool-calc",
+            toolCallId: "tc1",
+            toolName: "calc",
+            state: "output-available",
+            input: { expression: "1 + 1" },
+            output: 2
+          } as unknown as ChatMessage["parts"][number]
+        ] as ChatMessage["parts"]
+      })
+    ];
+    const client = [
+      assistantMsg("cli-a1", "Approved tool", {
+        parts: [
+          { type: "text", text: "Approved tool" },
+          {
+            type: "tool-calc",
+            toolCallId: "tc1",
+            toolName: "calc",
+            state: "approval-responded",
+            input: { expression: "1 + 1" },
+            approval: { id: "apr-1", approved: true }
+          } as unknown as ChatMessage["parts"][number]
+        ] as ChatMessage["parts"]
+      })
+    ];
+
+    const merged = reconcileMessages(client, server);
+    const mergedPart = merged[0].parts[1] as Record<string, unknown>;
+    expect(mergedPart.state).toBe("output-available");
+    expect(mergedPart.output).toBe(2);
+    expect(mergedPart.approval).toEqual({ id: "apr-1", approved: true });
+
+    const result = resolveToolMergeId(merged[0], server);
+    expect(result.id).toBe("srv-a1");
+  });
+
   it("uses first matching tool part when multiple exist", () => {
     const server = [
       toolAssistantMsg("srv-a1", "tc1", "output-available", { output: 1 }),

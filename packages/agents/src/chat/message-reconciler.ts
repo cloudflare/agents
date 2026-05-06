@@ -290,7 +290,8 @@ function normalizeToolPart(
 ): Record<string, unknown> {
   const normalized: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(part)) {
-    if (key === "state" || key === "preliminary") continue;
+    if (key === "state" || key === "preliminary" || key === "approval")
+      continue;
     normalized[key] = value;
   }
   return normalized;
