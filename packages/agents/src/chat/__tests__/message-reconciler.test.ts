@@ -135,6 +135,64 @@ describe("reconcileMessages — tool output merge", () => {
       "client"
     );
   });
+
+  it("does not merge server output into a different turn that reused the same provider-local toolCallId", () => {
+    const server = [
+      assistantMsg("srv-a1", "First answer", {
+        parts: [
+          { type: "text", text: "First answer" },
+          {
+            type: "tool-calc",
+            toolCallId: "functions.calc:0",
+            toolName: "calc",
+            state: "output-available",
+            input: { expression: "1 + 1" },
+            output: 2
+          } as unknown as ChatMessage["parts"][number]
+        ] as ChatMessage["parts"]
+      })
+    ];
+    const client = [
+      assistantMsg("cli-a2", "Second answer", {
+        parts: [
+          { type: "text", text: "Second answer" },
+          {
+            type: "tool-calc",
+            toolCallId: "functions.calc:0",
+            toolName: "calc",
+            state: "input-available",
+            input: { expression: "2 + 2" }
+          } as unknown as ChatMessage["parts"][number]
+        ] as ChatMessage["parts"]
+      })
+    ];
+
+    const result = reconcileMessages(client, server);
+    const toolPart = result[0].parts[1] as Record<string, unknown>;
+
+    expect(toolPart.state).toBe("input-available");
+    expect(toolPart.output).toBeUndefined();
+  });
+
+  it("does not merge server output into another tool-only turn with different input", () => {
+    const server = [
+      toolAssistantMsg("srv-a1", "functions.calc:0", "output-available", {
+        input: { expression: "1 + 1" },
+        output: 2
+      })
+    ];
+    const client = [
+      toolAssistantMsg("cli-a2", "functions.calc:0", "input-available", {
+        input: { expression: "2 + 2" }
+      })
+    ];
+
+    const result = reconcileMessages(client, server);
+    const toolPart = result[0].parts[0] as Record<string, unknown>;
+
+    expect(toolPart.state).toBe("input-available");
+    expect(toolPart.output).toBeUndefined();
+  });
 });
 
 // ── reconcileMessages: ID reconciliation ──────────────────────────
@@ -314,6 +372,125 @@ describe("resolveToolMergeId", () => {
     const result = resolveToolMergeId(msg, server);
     expect(result.id).toBe("cli-a1");
     expect(result).toBe(msg);
+  });
+
+  it("does not adopt server ID for a completed later tool call with a reused provider-local toolCallId", () => {
+    const server = [
+      assistantMsg("srv-a1", "First answer", {
+        parts: [
+          { type: "text", text: "First answer" },
+          {
+            type: "tool-calc",
+            toolCallId: "functions.calc:0",
+            toolName: "calc",
+            state: "output-available",
+            input: { expression: "1 + 1" },
+            output: 2
+          } as unknown as ChatMessage["parts"][number]
+        ] as ChatMessage["parts"]
+      })
+    ];
+    const msg = assistantMsg("cli-a2", "Second answer", {
+      parts: [
+        { type: "text", text: "Second answer" },
+        {
+          type: "tool-calc",
+          toolCallId: "functions.calc:0",
+          toolName: "calc",
+          state: "output-available",
+          input: { expression: "2 + 2" },
+          output: 4
+        } as unknown as ChatMessage["parts"][number]
+      ] as ChatMessage["parts"]
+    });
+
+    const result = resolveToolMergeId(msg, server);
+
+    expect(result.id).toBe("cli-a2");
+    expect(result).toBe(msg);
+  });
+
+  it("adopts server ID for a duplicate completed tool snapshot with matching content and output", () => {
+    const server = [
+      assistantMsg("srv-a1", "First answer", {
+        parts: [
+          { type: "text", text: "First answer" },
+          {
+            type: "tool-calc",
+            toolCallId: "functions.calc:0",
+            toolName: "calc",
+            state: "output-available",
+            input: { expression: "1 + 1" },
+            output: 2
+          } as unknown as ChatMessage["parts"][number]
+        ] as ChatMessage["parts"]
+      })
+    ];
+    const msg = assistantMsg("cli-a1", "First answer", {
+      parts: [
+        { type: "text", text: "First answer" },
+        {
+          type: "tool-calc",
+          toolCallId: "functions.calc:0",
+          toolName: "calc",
+          state: "output-available",
+          input: { expression: "1 + 1" },
+          output: 2
+        } as unknown as ChatMessage["parts"][number]
+      ] as ChatMessage["parts"]
+    });
+
+    const result = resolveToolMergeId(msg, server);
+
+    expect(result.id).toBe("srv-a1");
+  });
+
+  it("skips incompatible reused toolCallId matches before adopting a compatible later server message", () => {
+    const server = [
+      assistantMsg("srv-a1", "First answer", {
+        parts: [
+          { type: "text", text: "First answer" },
+          {
+            type: "tool-calc",
+            toolCallId: "functions.calc:0",
+            toolName: "calc",
+            state: "output-available",
+            input: { expression: "1 + 1" },
+            output: 2
+          } as unknown as ChatMessage["parts"][number]
+        ] as ChatMessage["parts"]
+      }),
+      assistantMsg("srv-a2", "Second answer", {
+        parts: [
+          { type: "text", text: "Second answer" },
+          {
+            type: "tool-calc",
+            toolCallId: "functions.calc:0",
+            toolName: "calc",
+            state: "output-available",
+            input: { expression: "2 + 2" },
+            output: 4
+          } as unknown as ChatMessage["parts"][number]
+        ] as ChatMessage["parts"]
+      })
+    ];
+    const msg = assistantMsg("cli-a2", "Second answer", {
+      parts: [
+        { type: "text", text: "Second answer" },
+        {
+          type: "tool-calc",
+          toolCallId: "functions.calc:0",
+          toolName: "calc",
+          state: "output-available",
+          input: { expression: "2 + 2" },
+          output: 4
+        } as unknown as ChatMessage["parts"][number]
+      ] as ChatMessage["parts"]
+    });
+
+    const result = resolveToolMergeId(msg, server);
+
+    expect(result.id).toBe("srv-a2");
   });
 
   it("returns non-assistant messages unchanged", () => {

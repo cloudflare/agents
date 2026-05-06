@@ -11,6 +11,81 @@ type TestToolCallPart = Extract<
 >;
 
 describe("Merge Incoming With Server State", () => {
+  it("preserves multiple assistant messages when provider-local toolCallIds are reused across turns", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    const reusedToolCallId = "functions.getWeather:0";
+
+    const firstAssistant: ChatMessage = {
+      id: "assistant-reused-tool-1",
+      role: "assistant",
+      parts: [
+        { type: "text", text: "First answer" },
+        {
+          type: "tool-getWeather",
+          toolCallId: reusedToolCallId,
+          state: "output-available",
+          input: { city: "London" },
+          output: "Rainy, 12°C"
+        } as unknown as ChatMessage["parts"][number]
+      ]
+    };
+
+    const secondAssistant: ChatMessage = {
+      id: "assistant-reused-tool-2",
+      role: "assistant",
+      parts: [
+        { type: "text", text: "Second answer" },
+        {
+          type: "tool-getWeather",
+          toolCallId: reusedToolCallId,
+          state: "output-available",
+          input: { city: "Paris" },
+          output: "Sunny, 22°C"
+        } as unknown as ChatMessage["parts"][number]
+      ]
+    };
+
+    await agentStub.persistMessages([
+      {
+        id: "user-reused-tool-1",
+        role: "user",
+        parts: [{ type: "text", text: "Weather in London?" }]
+      },
+      firstAssistant
+    ]);
+
+    await agentStub.persistMessages([
+      ...((await agentStub.getPersistedMessages()) as ChatMessage[]),
+      {
+        id: "user-reused-tool-2",
+        role: "user",
+        parts: [{ type: "text", text: "Weather in Paris?" }]
+      },
+      secondAssistant
+    ]);
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = persisted.filter((m) => m.role === "assistant");
+
+    expect(assistantMessages.length).toBe(2);
+    expect(assistantMessages.map((m) => m.id)).toEqual([
+      "assistant-reused-tool-1",
+      "assistant-reused-tool-2"
+    ]);
+    expect((assistantMessages[0].parts[1] as { output?: unknown }).output).toBe(
+      "Rainy, 12°C"
+    );
+    expect((assistantMessages[1].parts[1] as { output?: unknown }).output).toBe(
+      "Sunny, 22°C"
+    );
+
+    ws.close(1000);
+  });
+
   it("preserves server-side tool outputs when client sends messages without them", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

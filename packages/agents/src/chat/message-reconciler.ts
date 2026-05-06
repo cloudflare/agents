@@ -41,8 +41,8 @@ export function reconcileMessages(
 
 /**
  * For a single message, resolve its ID by matching toolCallId against server state.
- * Prevents duplicate DB rows when client IDs differ from server IDs.
- * Tool call IDs are unique per conversation, so matching is safe regardless of state.
+ * Prevents duplicate DB rows when client IDs differ from server IDs, while
+ * avoiding overwrites from providers that reuse toolCallIds across turns.
  */
 export function resolveToolMergeId(
   message: UIMessage,
@@ -55,7 +55,11 @@ export function resolveToolMergeId(
   for (const part of message.parts) {
     if ("toolCallId" in part && part.toolCallId) {
       const toolCallId = part.toolCallId as string;
-      const existing = findMessageByToolCallId(serverMessages, toolCallId);
+      const existing = findCompatibleMessageByToolCallId(
+        message,
+        serverMessages,
+        toolCallId
+      );
       if (existing && existing.id !== message.id) {
         return { ...message, id: existing.id };
       }
@@ -84,26 +88,6 @@ function mergeServerToolOutputs(
   incoming: UIMessage[],
   serverMessages: readonly UIMessage[]
 ): UIMessage[] {
-  const serverToolOutputs = new Map<string, unknown>();
-  for (const msg of serverMessages) {
-    if (msg.role !== "assistant") continue;
-    for (const part of msg.parts) {
-      if (
-        "toolCallId" in part &&
-        "state" in part &&
-        part.state === "output-available" &&
-        "output" in part
-      ) {
-        serverToolOutputs.set(
-          part.toolCallId as string,
-          (part as { output: unknown }).output
-        );
-      }
-    }
-  }
-
-  if (serverToolOutputs.size === 0) return incoming;
-
   return incoming.map((msg) => {
     if (msg.role !== "assistant") return msg;
 
@@ -114,15 +98,21 @@ function mergeServerToolOutputs(
         "state" in part &&
         (part.state === "input-available" ||
           part.state === "approval-requested" ||
-          part.state === "approval-responded") &&
-        serverToolOutputs.has(part.toolCallId as string)
+          part.state === "approval-responded")
       ) {
-        hasChanges = true;
-        return {
-          ...part,
-          state: "output-available" as const,
-          output: serverToolOutputs.get(part.toolCallId as string)
-        };
+        const output = findCompatibleServerToolOutput(
+          msg,
+          serverMessages,
+          part.toolCallId as string
+        );
+        if (output.found) {
+          hasChanges = true;
+          return {
+            ...part,
+            state: "output-available" as const,
+            output: output.value
+          };
+        }
       }
       return part;
     }) as UIMessage["parts"];
@@ -193,16 +183,128 @@ function hasToolCallPart(message: UIMessage): boolean {
   return message.parts.some((part) => "toolCallId" in part);
 }
 
-function findMessageByToolCallId(
+function findCompatibleServerToolOutput(
+  incoming: UIMessage,
+  serverMessages: readonly UIMessage[],
+  toolCallId: string
+): { found: true; value: unknown } | { found: false } {
+  for (const serverMessage of serverMessages) {
+    if (serverMessage.role !== "assistant") continue;
+    if (!shouldAdoptServerIdForToolMerge(incoming, serverMessage, toolCallId)) {
+      continue;
+    }
+
+    const part = findToolPart(serverMessage, toolCallId);
+    if (
+      part &&
+      "state" in part &&
+      part.state === "output-available" &&
+      "output" in part
+    ) {
+      return { found: true, value: (part as { output: unknown }).output };
+    }
+  }
+
+  return { found: false };
+}
+
+function shouldAdoptServerIdForToolMerge(
+  incoming: UIMessage,
+  existing: UIMessage,
+  toolCallId: string
+): boolean {
+  const incomingPart = findToolPart(incoming, toolCallId);
+  const existingPart = findToolPart(existing, toolCallId);
+  if (!incomingPart || !existingPart) return false;
+
+  if (isTerminalToolPart(incomingPart) && isTerminalToolPart(existingPart)) {
+    return (
+      normalizedMessageParts(incoming) === normalizedMessageParts(existing)
+    );
+  }
+
+  return (
+    nonToolPartsKey(incoming) === nonToolPartsKey(existing) &&
+    toolPartsCompatibleForMerge(incomingPart, existingPart)
+  );
+}
+
+function toolPartsCompatibleForMerge(
+  incomingPart: UIMessage["parts"][number],
+  existingPart: UIMessage["parts"][number]
+): boolean {
+  if (incomingPart.type !== existingPart.type) return false;
+
+  if (
+    "toolName" in incomingPart &&
+    "toolName" in existingPart &&
+    incomingPart.toolName !== existingPart.toolName
+  ) {
+    return false;
+  }
+
+  if ("input" in incomingPart && "input" in existingPart) {
+    return (
+      JSON.stringify(incomingPart.input) === JSON.stringify(existingPart.input)
+    );
+  }
+
+  return true;
+}
+
+function findToolPart(
+  message: UIMessage,
+  toolCallId: string
+): UIMessage["parts"][number] | undefined {
+  return message.parts.find(
+    (part) => "toolCallId" in part && part.toolCallId === toolCallId
+  );
+}
+
+function isTerminalToolPart(part: UIMessage["parts"][number]): boolean {
+  if (!("state" in part)) return false;
+  return (
+    part.state === "output-available" ||
+    part.state === "output-error" ||
+    part.state === "output-denied"
+  );
+}
+
+function nonToolPartsKey(message: UIMessage): string {
+  return JSON.stringify(
+    message.parts.filter((part) => !("toolCallId" in part))
+  );
+}
+
+function normalizedMessageParts(message: UIMessage): string {
+  return JSON.stringify(
+    message.parts.map((part) => {
+      if (!("toolCallId" in part)) return part;
+      return normalizeToolPart(part);
+    })
+  );
+}
+
+function normalizeToolPart(
+  part: UIMessage["parts"][number]
+): Record<string, unknown> {
+  const normalized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(part)) {
+    if (key === "state" || key === "preliminary") continue;
+    normalized[key] = value;
+  }
+  return normalized;
+}
+
+function findCompatibleMessageByToolCallId(
+  incoming: UIMessage,
   messages: readonly UIMessage[],
   toolCallId: string
 ): UIMessage | undefined {
   for (const msg of messages) {
     if (msg.role !== "assistant") continue;
-    for (const part of msg.parts) {
-      if ("toolCallId" in part && part.toolCallId === toolCallId) {
-        return msg;
-      }
+    if (shouldAdoptServerIdForToolMerge(incoming, msg, toolCallId)) {
+      return msg;
     }
   }
   return undefined;
