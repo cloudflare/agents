@@ -6,6 +6,7 @@ import {
   generateTypesFromJsonSchema,
   type JsonSchemaToolDescriptors
 } from "./json-schema-types";
+import { normalizeCode } from "./normalize";
 import { sanitizeToolName } from "./utils";
 import type { Executor } from "./executor";
 
@@ -247,48 +248,6 @@ export interface OpenApiMcpServerOptions {
   description?: string;
 }
 
-/**
- * Resolve internal $ref pointers in a JSON object against the root document.
- * Only handles `#/` internal refs. External file refs are left as-is.
- */
-function resolveRefs(
-  obj: unknown,
-  root: Record<string, unknown>,
-  seen = new Set<string>()
-): unknown {
-  if (obj === null || obj === undefined) return obj;
-  if (typeof obj !== "object") return obj;
-  if (Array.isArray(obj))
-    return obj.map((item) => resolveRefs(item, root, seen));
-
-  const record = obj as Record<string, unknown>;
-
-  if ("$ref" in record && typeof record.$ref === "string") {
-    const ref = record.$ref;
-    if (seen.has(ref)) return { $circular: ref };
-    if (!ref.startsWith("#/")) return record;
-    seen.add(ref);
-
-    const parts = ref
-      .slice(2)
-      .split("/")
-      .map((s) => s.replace(/~1/g, "/").replace(/~0/g, "~"));
-    let resolved: unknown = root;
-    for (const part of parts) {
-      resolved = (resolved as Record<string, unknown>)?.[part];
-    }
-    const result = resolveRefs(resolved, root, seen);
-    seen.delete(ref);
-    return result;
-  }
-
-  const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(record)) {
-    result[key] = resolveRefs(value, root, seen);
-  }
-  return result;
-}
-
 const SPEC_TYPES = `
 // OpenAPI 3.x spec with $refs resolved inline.
 // The spec object follows the standard OpenAPI 3.x structure.
@@ -356,10 +315,67 @@ interface RequestOptions {
   rawBody?: boolean;
 }
 
+${SPEC_TYPES}
+
 declare const codemode: {
+  spec(): Promise<OpenApiSpec>;
   request(options: RequestOptions): Promise<unknown>;
 };
 `;
+
+function createOpenApiSandboxCode(
+  code: string,
+  spec: Record<string, unknown>,
+  includeRequest: boolean
+): string {
+  const normalized = normalizeCode(code);
+  const specJson = JSON.stringify(spec).replace(/</g, "\\u003c");
+  const requestFn = includeRequest
+    ? `request: async (options) => await __openapiHost.request(options)`
+    : "";
+
+  return `async () => {
+const __rawSpec = ${specJson};
+const __resolveRefs = (obj, root, seen = new Set()) => {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj !== "object") return obj;
+  if (Array.isArray(obj)) return obj.map((item) => __resolveRefs(item, root, seen));
+
+  if (Object.prototype.hasOwnProperty.call(obj, "$ref") && typeof obj.$ref === "string") {
+    const ref = obj.$ref;
+    if (seen.has(ref)) return { $circular: ref };
+    if (!ref.startsWith("#/")) return obj;
+    seen.add(ref);
+
+    const parts = ref
+      .slice(2)
+      .split("/")
+      .map((s) => s.replace(/~1/g, "/").replace(/~0/g, "~"));
+    let resolved = root;
+    for (const part of parts) resolved = resolved?.[part];
+    const result = __resolveRefs(resolved, root, seen);
+    seen.delete(ref);
+    return result;
+  }
+
+  const result = {};
+  for (const [key, value] of Object.entries(obj)) result[key] = __resolveRefs(value, root, seen);
+  return result;
+};
+let __resolvedSpec;
+const __truncateResponse = (content) => {
+  const text = typeof content === "string" ? content : (JSON.stringify(content, null, 2) ?? "undefined");
+  if (text.length <= ${MAX_CHARS}) return text;
+  const truncated = text.slice(0, ${MAX_CHARS});
+  const estimatedTokens = Math.ceil(text.length / ${CHARS_PER_TOKEN});
+  return truncated + "\\n\\n--- TRUNCATED ---\\nResponse was ~" + estimatedTokens.toLocaleString() + " tokens (limit: ${MAX_TOKENS.toLocaleString()}). Use more specific queries to reduce response size.";
+};
+const codemode = {
+  spec: async () => (__resolvedSpec ??= __resolveRefs(__rawSpec, __rawSpec))${requestFn ? `,\n  ${requestFn}` : ""}
+};
+return __truncateResponse(await (${normalized})());
+}`;
+}
 
 /**
  * Create an MCP server with search + execute tools from an OpenAPI spec.
@@ -377,7 +393,7 @@ export function openApiMcpServer(options: OpenApiMcpServerOptions): McpServer {
     description
   } = options;
 
-  const resolved = resolveRefs(options.spec, options.spec);
+  const spec = options.spec;
 
   const server = new McpServer({ name, version });
 
@@ -421,9 +437,10 @@ async () => {
     },
     async ({ code }) => {
       try {
-        const result = await executor.execute(code, [
-          { name: "codemode", fns: { spec: async () => resolved } }
-        ]);
+        const result = await executor.execute(
+          createOpenApiSandboxCode(code, spec, false),
+          []
+        );
         if (result.error) {
           return {
             content: [
@@ -471,14 +488,17 @@ async () => {
     },
     async ({ code }) => {
       try {
-        const result = await executor.execute(code, [
-          {
-            name: "codemode",
-            fns: {
-              request: (args: unknown) => requestFn(args as RequestOptions)
+        const result = await executor.execute(
+          createOpenApiSandboxCode(code, spec, true),
+          [
+            {
+              name: "__openapiHost",
+              fns: {
+                request: (args: unknown) => requestFn(args as RequestOptions)
+              }
             }
-          }
-        ]);
+          ]
+        );
         if (result.error) {
           return {
             content: [
