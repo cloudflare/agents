@@ -94,12 +94,7 @@ import type {
   TypedToolResult,
   UIMessage
 } from "ai";
-import {
-  convertToModelMessages,
-  pruneMessages,
-  stepCountIs,
-  streamText
-} from "ai";
+import { convertToModelMessages, stepCountIs, streamText } from "ai";
 
 // Re-export AI SDK types that appear on Think's public lifecycle hooks
 // so users can import them from a single place.
@@ -1205,10 +1200,7 @@ export class Think<
 
     const history = this.session.getHistory();
     const truncated = truncateOlderMessages(history) as UIMessage[];
-    const messages = pruneMessages({
-      messages: await convertToModelMessages(truncated, { tools }),
-      toolCalls: "before-last-2-messages"
-    });
+    const messages = await convertToModelMessages(truncated, { tools });
 
     if (messages.length === 0) {
       throw new Error(
