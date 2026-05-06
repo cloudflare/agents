@@ -238,6 +238,21 @@ describe("applyChunkToParts", () => {
       expect(part.input).toEqual({ city: "London" });
     });
 
+    it("tool-input-available preserves the original provider tool call id", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "turn-12:functions.calc:0",
+        originalToolCallId: "functions.calc:0",
+        toolName: "calc",
+        input: { expression: "1 + 1" }
+      });
+      expect(parts.length).toBe(1);
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.toolCallId).toBe("turn-12:functions.calc:0");
+      expect(part.originalToolCallId).toBe("functions.calc:0");
+    });
+
     it("tool-output-available updates existing tool part", () => {
       const parts = makeParts();
       applyChunkToParts(parts, {

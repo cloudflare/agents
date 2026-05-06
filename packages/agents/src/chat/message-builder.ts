@@ -32,6 +32,8 @@ export type StreamChunkData = {
   title?: string;
   filename?: string;
   toolCallId?: string;
+  /** Provider/client-local ID before SDK turn-scoped augmentation. */
+  originalToolCallId?: string;
   toolName?: string;
   input?: unknown;
   inputTextDelta?: string;
@@ -201,6 +203,10 @@ export function applyChunkToParts(
       parts.push({
         type: `tool-${chunk.toolName}`,
         toolCallId: chunk.toolCallId,
+        ...(chunk.originalToolCallId != null &&
+        chunk.originalToolCallId !== chunk.toolCallId
+          ? { originalToolCallId: chunk.originalToolCallId }
+          : {}),
         toolName: chunk.toolName,
         state: "input-streaming",
         input: undefined,
@@ -258,6 +264,10 @@ export function applyChunkToParts(
       parts.push({
         type: `tool-${chunk.toolName}`,
         toolCallId: chunk.toolCallId,
+        ...(chunk.originalToolCallId != null &&
+        chunk.originalToolCallId !== chunk.toolCallId
+          ? { originalToolCallId: chunk.originalToolCallId }
+          : {}),
         toolName: chunk.toolName,
         state: "input-available",
         input: chunk.input,
@@ -300,6 +310,10 @@ export function applyChunkToParts(
         parts.push({
           type: `tool-${chunk.toolName}`,
           toolCallId: chunk.toolCallId,
+          ...(chunk.originalToolCallId != null &&
+          chunk.originalToolCallId !== chunk.toolCallId
+            ? { originalToolCallId: chunk.originalToolCallId }
+            : {}),
           toolName: chunk.toolName,
           state: "output-error",
           input: chunk.input,

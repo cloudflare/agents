@@ -76,12 +76,22 @@ describe("Merge Incoming With Server State", () => {
       "assistant-reused-tool-1",
       "assistant-reused-tool-2"
     ]);
-    expect((assistantMessages[0].parts[1] as { output?: unknown }).output).toBe(
-      "Rainy, 12°C"
-    );
-    expect((assistantMessages[1].parts[1] as { output?: unknown }).output).toBe(
-      "Sunny, 22°C"
-    );
+    const firstToolPart = assistantMessages[0].parts[1] as {
+      toolCallId?: string;
+      originalToolCallId?: string;
+      output?: unknown;
+    };
+    const secondToolPart = assistantMessages[1].parts[1] as {
+      toolCallId?: string;
+      originalToolCallId?: string;
+      output?: unknown;
+    };
+    expect(firstToolPart.toolCallId).toBe("turn-1:functions.getWeather:0");
+    expect(secondToolPart.toolCallId).toBe("turn-2:functions.getWeather:0");
+    expect(firstToolPart.originalToolCallId).toBe(reusedToolCallId);
+    expect(secondToolPart.originalToolCallId).toBe(reusedToolCallId);
+    expect(firstToolPart.output).toBe("Rainy, 12°C");
+    expect(secondToolPart.output).toBe("Sunny, 22°C");
 
     ws.close(1000);
   });

@@ -101,6 +101,8 @@ const PROVIDER_TOOL_OPAQUE_STRING_KEY_PREFIX = "encrypted";
  */
 const PROVIDER_TOOL_MAX_STRING_LENGTH = 500;
 
+const AUGMENTED_TOOL_CALL_ID_PATTERN = /^turn-\d+:/;
+
 /**
  * Validates that a parsed message has the minimum required structure.
  * Returns false for messages that would cause runtime errors downstream
@@ -2937,8 +2939,12 @@ export class AIChatAgent<
     /** @internal */
     options?: { _deleteStaleRows?: boolean }
   ) {
-    const mergedMessages = reconcileMessages(messages, this.messages, (msg) =>
-      this._sanitizeMessageForPersistence(msg)
+    const messagesWithAugmentedToolCalls =
+      this._augmentToolCallIdsForPersistence(messages);
+    const mergedMessages = reconcileMessages(
+      messagesWithAugmentedToolCalls,
+      this.messages,
+      (msg) => this._sanitizeMessageForPersistence(msg)
     );
 
     // Persist only new or changed messages (incremental persistence).
@@ -3053,6 +3059,210 @@ export class AIChatAgent<
       role: "assistant",
       parts: []
     };
+  }
+
+  private _getAssistantTurnOrdinal(message: UIMessage): number {
+    let assistantOrdinal = 0;
+    for (const existing of this.messages) {
+      if (existing.role !== "assistant") continue;
+      assistantOrdinal++;
+      if (existing.id === message.id) return assistantOrdinal;
+    }
+
+    return assistantOrdinal + 1;
+  }
+
+  private _augmentToolCallIdsForPersistence(
+    messages: UIMessage[]
+  ): UIMessage[] {
+    let nextNewAssistantOrdinal =
+      this.messages.filter((message) => message.role === "assistant").length +
+      1;
+
+    return messages.map((message) => {
+      if (message.role !== "assistant") return message;
+
+      const existingOrdinal = this._getExistingAssistantTurnOrdinal(message.id);
+      const turnOrdinal = existingOrdinal ?? nextNewAssistantOrdinal++;
+      return AIChatAgent._augmentToolCallIdsInMessage(message, turnOrdinal);
+    });
+  }
+
+  private _getExistingAssistantTurnOrdinal(
+    messageId: string
+  ): number | undefined {
+    let assistantOrdinal = 0;
+    for (const existing of this.messages) {
+      if (existing.role !== "assistant") continue;
+      assistantOrdinal++;
+      if (existing.id === messageId) return assistantOrdinal;
+    }
+    return undefined;
+  }
+
+  private static _augmentToolCallIdsInMessage(
+    message: UIMessage,
+    turnOrdinal: number
+  ): UIMessage {
+    const counters = new Map<string, number>();
+    let changed = false;
+
+    const parts = message.parts.map((part) => {
+      const record = part as Record<string, unknown>;
+      const currentId = record.toolCallId;
+      if (typeof currentId !== "string") return part;
+
+      const baseName = AIChatAgent._toolCallBaseName(record, currentId);
+      if (AUGMENTED_TOOL_CALL_ID_PATTERN.test(currentId)) {
+        counters.set(baseName, (counters.get(baseName) ?? 0) + 1);
+        return part;
+      }
+
+      const occurrence = counters.get(baseName) ?? 0;
+      counters.set(baseName, occurrence + 1);
+      changed = true;
+
+      return {
+        ...record,
+        toolCallId: `turn-${turnOrdinal}:${baseName}:${occurrence}`,
+        originalToolCallId:
+          typeof record.originalToolCallId === "string"
+            ? record.originalToolCallId
+            : currentId
+      } as unknown as UIMessage["parts"][number];
+    }) as UIMessage["parts"];
+
+    return changed ? { ...message, parts } : message;
+  }
+
+  private _augmentToolCallChunkId(
+    parts: UIMessage["parts"],
+    chunk: StreamChunkData,
+    toolCallIdMap: Map<string, string>,
+    turnOrdinal: number
+  ): StreamChunkData {
+    if (!chunk.type.startsWith("tool-") || !chunk.toolCallId) return chunk;
+    if (AUGMENTED_TOOL_CALL_ID_PATTERN.test(chunk.toolCallId)) return chunk;
+
+    const originalToolCallId = chunk.toolCallId;
+    const existingAugmentedId =
+      toolCallIdMap.get(originalToolCallId) ??
+      AIChatAgent._findAugmentedToolCallId(parts, originalToolCallId) ??
+      (AIChatAgent._canStartToolCall(chunk)
+        ? undefined
+        : this._findAugmentedToolCallIdInMessages(originalToolCallId));
+
+    if (existingAugmentedId) {
+      toolCallIdMap.set(originalToolCallId, existingAugmentedId);
+      return {
+        ...chunk,
+        toolCallId: existingAugmentedId,
+        originalToolCallId
+      };
+    }
+
+    if (!AIChatAgent._canStartToolCall(chunk)) return chunk;
+
+    const baseName = AIChatAgent._toolCallBaseName(
+      chunk as Record<string, unknown>,
+      originalToolCallId
+    );
+    const occurrence = AIChatAgent._countExistingToolCallsForBase(
+      parts,
+      baseName
+    );
+    const augmentedId = `turn-${turnOrdinal}:${baseName}:${occurrence}`;
+    toolCallIdMap.set(originalToolCallId, augmentedId);
+
+    return {
+      ...chunk,
+      toolCallId: augmentedId,
+      originalToolCallId
+    };
+  }
+
+  private static _canStartToolCall(chunk: StreamChunkData): boolean {
+    return (
+      chunk.type === "tool-input-start" ||
+      chunk.type === "tool-input-available" ||
+      chunk.type === "tool-input-error"
+    );
+  }
+
+  private _findAugmentedToolCallIdInMessages(
+    originalToolCallId: string
+  ): string | undefined {
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const candidate = AIChatAgent._findAugmentedToolCallId(
+        this.messages[i].parts,
+        originalToolCallId
+      );
+      if (candidate) return candidate;
+    }
+    return undefined;
+  }
+
+  private static _findAugmentedToolCallId(
+    parts: UIMessage["parts"],
+    originalToolCallId: string
+  ): string | undefined {
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const record = parts[i] as Record<string, unknown>;
+      const candidate = record.toolCallId;
+      if (typeof candidate !== "string") continue;
+      if (
+        record.originalToolCallId === originalToolCallId ||
+        candidate === originalToolCallId
+      ) {
+        return candidate;
+      }
+    }
+    return undefined;
+  }
+
+  private static _countExistingToolCallsForBase(
+    parts: UIMessage["parts"],
+    baseName: string
+  ): number {
+    let count = 0;
+    for (const part of parts) {
+      const record = part as Record<string, unknown>;
+      if (record.toolCallId == null) continue;
+      const partBaseName = AIChatAgent._toolCallBaseName(
+        record,
+        typeof record.originalToolCallId === "string"
+          ? record.originalToolCallId
+          : typeof record.toolCallId === "string"
+            ? record.toolCallId
+            : undefined
+      );
+      if (partBaseName === baseName) count++;
+    }
+    return count;
+  }
+
+  private static _toolCallBaseName(
+    record: Record<string, unknown>,
+    fallbackId: string | undefined
+  ): string {
+    if (typeof record.toolName === "string" && record.toolName.length > 0) {
+      return record.toolName.startsWith("functions.")
+        ? record.toolName
+        : `functions.${record.toolName}`;
+    }
+
+    if (typeof record.type === "string" && record.type.startsWith("tool-")) {
+      const toolName = record.type.slice("tool-".length);
+      if (toolName.length > 0) return `functions.${toolName}`;
+    }
+
+    if (fallbackId) {
+      const match = /^(?<name>.+):\d+$/.exec(fallbackId);
+      const name = match?.groups?.name ?? fallbackId;
+      return name.startsWith("functions.") ? name : `functions.${name}`;
+    }
+
+    return "functions.tool";
   }
 
   /**
@@ -3650,6 +3860,8 @@ export class AIChatAgent<
     // than creating new blocks. Track whether we've already resumed each type.
     let continuationTextResumed = false;
     let continuationReasoningResumed = false;
+    const turnOrdinal = this._getAssistantTurnOrdinal(message);
+    const toolCallIdMap = new Map<string, string>();
 
     // Cancel the reader when the abort signal fires (e.g. client pressed stop).
     // This ensures we stop broadcasting chunks even if the underlying stream
@@ -3696,7 +3908,13 @@ export class AIChatAgent<
       for (const line of lines) {
         if (line.startsWith("data: ") && line !== "data: [DONE]") {
           try {
-            const data: UIMessageChunk = JSON.parse(line.slice(6));
+            let data = JSON.parse(line.slice(6)) as UIMessageChunk;
+            data = this._augmentToolCallChunkId(
+              message.parts,
+              data as StreamChunkData,
+              toolCallIdMap,
+              turnOrdinal
+            ) as UIMessageChunk;
 
             // During continuation, merge into existing parts rather than
             // creating new blocks:
