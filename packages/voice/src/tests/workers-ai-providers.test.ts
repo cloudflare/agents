@@ -126,6 +126,51 @@ describe("WorkersAIFluxSTT", () => {
 
     expect(utterances).toEqual([]);
   });
+
+  it("preserves the default Flux input when no multilingual options are provided", async () => {
+    const ai = new MockAi();
+
+    new WorkersAIFluxSTT(ai).createSession();
+    await waitForConnect(ai);
+
+    expect(ai.calls).toHaveLength(1);
+    expect(ai.calls[0].model).toBe("@cf/deepgram/flux");
+    expect(ai.calls[0].input).toEqual({
+      encoding: "linear16",
+      sample_rate: "16000"
+    });
+    expect(ai.calls[0].options).toEqual({ websocket: true });
+  });
+
+  it("uses Flux Multilingual automatically when language hints are provided", async () => {
+    const ai = new MockAi();
+
+    new WorkersAIFluxSTT(ai, {
+      languageHints: ["en", "es"]
+    }).createSession();
+    await waitForConnect(ai);
+
+    expect(ai.calls).toHaveLength(1);
+    expect(ai.calls[0].input).toMatchObject({
+      model: "flux-general-multi",
+      language_hint: ["en", "es"]
+    });
+  });
+
+  it("passes explicit Flux model selection for multilingual auto-detection", async () => {
+    const ai = new MockAi();
+
+    new WorkersAIFluxSTT(ai, {
+      model: "flux-general-multi"
+    }).createSession();
+    await waitForConnect(ai);
+
+    expect(ai.calls).toHaveLength(1);
+    expect(ai.calls[0].input).toMatchObject({
+      model: "flux-general-multi"
+    });
+    expect(ai.calls[0].input).not.toHaveProperty("language_hint");
+  });
 });
 
 describe("WorkersAINova3STT", () => {

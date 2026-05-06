@@ -35,6 +35,11 @@ const VoiceAgent = withVoice(Agent);
 
 export class MyAgent extends VoiceAgent<Env> {
   transcriber = new WorkersAIFluxSTT(this.env.AI);
+  // For Flux Multilingual, use:
+  // transcriber = new WorkersAIFluxSTT(this.env.AI, {
+  //   model: "flux-general-multi",
+  //   languageHints: ["en", "es"]
+  // });
   tts = new WorkersAITTS(this.env.AI);
 
   async onTurn(transcript: string, context: VoiceTurnContext) {
@@ -153,6 +158,22 @@ All default providers use Workers AI bindings -- no API keys required:
 | `WorkersAIFluxSTT`  | Continuous STT | `@cf/deepgram/flux`   | `withVoice`      |
 | `WorkersAINova3STT` | Continuous STT | `@cf/deepgram/nova-3` | `withVoiceInput` |
 | `WorkersAITTS`      | TTS            | `@cf/deepgram/aura-1` | Both             |
+
+`WorkersAIFluxSTT` supports Flux Multilingual via the underlying Deepgram Flux model variant:
+
+```typescript
+// Multilingual auto-detect
+transcriber = new WorkersAIFluxSTT(this.env.AI, {
+  model: "flux-general-multi"
+});
+
+// Bias recognition toward expected languages
+transcriber = new WorkersAIFluxSTT(this.env.AI, {
+  languageHints: ["en", "es"]
+});
+```
+
+When `languageHints` is provided, `WorkersAIFluxSTT` automatically requests `flux-general-multi` unless you set `model` explicitly.
 
 ## Third-party providers
 
