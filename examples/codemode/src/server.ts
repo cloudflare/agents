@@ -4,8 +4,7 @@ import {
   createToolsFromClientSchemas,
   type ClientToolSchema
 } from "@cloudflare/ai-chat";
-import { createCodeTool, generateTypes } from "@cloudflare/codemode/ai";
-import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+import { generateTypes } from "@cloudflare/codemode/ai";
 import {
   streamText,
   stepCountIs,
@@ -70,22 +69,9 @@ export class Codemode extends AIChatAgent<Env> {
 
   async onChatMessage(
     _onFinish?: unknown,
-    options?: {
-      clientTools?: ClientToolSchema[];
-      executor?: "browser" | "dynamic-worker";
-    }
+    options?: { clientTools?: ClientToolSchema[] }
   ) {
     const workersai = createWorkersAI({ binding: this.env.AI });
-
-    const useBrowserExecutor = options?.executor === "browser";
-    const tools = useBrowserExecutor
-      ? createToolsFromClientSchemas(options?.clientTools)
-      : {
-          codemode: createCodeTool({
-            tools: { ...this.tools, ...this.mcp.getAITools() },
-            executor: new DynamicWorkerExecutor({ loader: this.env.LOADER })
-          })
-        };
 
     const result = streamText({
       model: workersai("@cf/moonshotai/kimi-k2.6", {
@@ -95,16 +81,13 @@ export class Codemode extends AIChatAgent<Env> {
         "You are a helpful project management assistant. " +
         "You can create and manage projects, tasks, sprints, and comments using the codemode tool. " +
         "When you need to perform operations, use the codemode tool to write JavaScript " +
-        "that calls the available functions on the `codemode` object. " +
-        (useBrowserExecutor
-          ? "The codemode tool is running in the browser iframe executor with browser-memory tools."
-          : "The codemode tool is running in a Dynamic Worker executor with server-side tools."),
+        "that calls the available functions on the `codemode` object.",
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
         toolCalls: "before-last-2-messages",
         reasoning: "before-last-message"
       }),
-      tools,
+      tools: createToolsFromClientSchemas(options?.clientTools),
       stopWhen: stepCountIs(10)
     });
 

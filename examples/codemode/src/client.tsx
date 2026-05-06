@@ -44,8 +44,6 @@ import {
   SunIcon
 } from "@phosphor-icons/react";
 
-type ExecutorMode = "dynamic-worker" | "browser";
-
 interface McpTool {
   serverId: string;
   name: string;
@@ -336,8 +334,6 @@ function ToolCard({ toolPart }: { toolPart: ToolPart }) {
 }
 
 function SettingsPanel({
-  executorMode,
-  onExecutorModeChange,
   onClose,
   mcpTools,
   mcpState,
@@ -346,8 +342,6 @@ function SettingsPanel({
   onRefreshMcpTools,
   mcpLoading
 }: {
-  executorMode: ExecutorMode;
-  onExecutorModeChange: (mode: ExecutorMode) => void;
   onClose: () => void;
   mcpTools: McpTool[];
   mcpState: MCPServersState;
@@ -405,55 +399,6 @@ function SettingsPanel({
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-6">
-          <div className="relative">
-            <div className="absolute -inset-3 bg-gradient-to-br from-blue-500/5 via-transparent to-cyan-500/5 rounded-2xl -z-10" />
-            <div className="flex items-center gap-2 mb-3">
-              <LightningIcon
-                size={16}
-                className="text-blue-500"
-                weight="duotone"
-              />
-              <span className="text-xs font-semibold text-kumo-secondary uppercase tracking-wider">
-                Executor
-              </span>
-            </div>
-            <div className="space-y-2 p-3 bg-kumo-elevated/50 rounded-xl border border-kumo-line">
-              <label className="flex items-start gap-2 cursor-pointer">
-                <input
-                  type="radio"
-                  name="executor"
-                  checked={executorMode === "dynamic-worker"}
-                  onChange={() => onExecutorModeChange("dynamic-worker")}
-                />
-                <span>
-                  <Text size="sm" bold>
-                    Dynamic Worker
-                  </Text>
-                  <Text size="xs" variant="secondary">
-                    Run generated code server-side in the Worker Loader sandbox.
-                  </Text>
-                </span>
-              </label>
-              <label className="flex items-start gap-2 cursor-pointer">
-                <input
-                  type="radio"
-                  name="executor"
-                  checked={executorMode === "browser"}
-                  onChange={() => onExecutorModeChange("browser")}
-                />
-                <span>
-                  <Text size="sm" bold>
-                    Browser iframe
-                  </Text>
-                  <Text size="xs" variant="secondary">
-                    Run generated code client-side in the iframe sandbox with
-                    browser-memory tools.
-                  </Text>
-                </span>
-              </label>
-            </div>
-          </div>
-
           <div className="relative">
             <div className="absolute -inset-3 bg-gradient-to-br from-orange-500/5 via-transparent to-amber-500/5 rounded-2xl -z-10" />
             <div className="flex items-center gap-2 mb-3">
@@ -695,8 +640,6 @@ function ModeToggle() {
 function App() {
   const [input, setInput] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [executorMode, setExecutorMode] =
-    useState<ExecutorMode>("dynamic-worker");
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
   const [mcpTools, setMcpTools] = useState<McpTool[]>([]);
@@ -721,10 +664,8 @@ function App() {
 
   const { messages, sendMessage, clearHistory, status } = useAgentChat({
     agent,
-    body: { executor: executorMode },
-    tools: executorMode === "browser" ? browserCodemodeTools : undefined,
+    tools: browserCodemodeTools,
     onToolCall: async ({ toolCall, addToolOutput }) => {
-      if (executorMode !== "browser") return;
       const tool = browserCodemodeTools[toolCall.toolName];
       if (!tool?.execute) return;
       const output = await tool.execute(toolCall.input);
@@ -952,8 +893,6 @@ function App() {
 
       {settingsOpen && (
         <SettingsPanel
-          executorMode={executorMode}
-          onExecutorModeChange={setExecutorMode}
           onClose={() => setSettingsOpen(false)}
           mcpTools={mcpTools}
           mcpState={mcpState}
