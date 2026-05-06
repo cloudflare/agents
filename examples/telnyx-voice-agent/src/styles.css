@@ -1,0 +1,14 @@
+/* Tailwind ignores node_modules by default, so scan Kumo both when running in
+   this monorepo and when the example is copied out standalone. */
+@source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+@source "../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+@import "tailwindcss";
+@import "@cloudflare/kumo/styles/tailwind";
+
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+}
