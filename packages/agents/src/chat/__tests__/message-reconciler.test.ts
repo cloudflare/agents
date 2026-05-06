@@ -174,6 +174,45 @@ describe("reconcileMessages — tool output merge", () => {
     expect(toolPart.output).toBeUndefined();
   });
 
+  it("merges server tool output into a stale client snapshot that carries an extra step-start marker", () => {
+    const server = [
+      assistantMsg("srv-a1", "", {
+        parts: [
+          {
+            type: "tool-generateImage",
+            toolCallId: "tc1",
+            toolName: "generateImage",
+            state: "output-available",
+            input: { prompt: "a cat" },
+            output: { url: "https://example.test/cat.png" }
+          } as unknown as ChatMessage["parts"][number]
+        ] as ChatMessage["parts"]
+      })
+    ];
+    const client = [
+      assistantMsg("cli-a1", "", {
+        parts: [
+          {
+            type: "step-start"
+          } as unknown as ChatMessage["parts"][number],
+          {
+            type: "tool-generateImage",
+            toolCallId: "tc1",
+            toolName: "generateImage",
+            state: "input-available",
+            input: { prompt: "a cat" }
+          } as unknown as ChatMessage["parts"][number]
+        ] as ChatMessage["parts"]
+      })
+    ];
+
+    const result = reconcileMessages(client, server);
+    const toolPart = result[0].parts[1] as Record<string, unknown>;
+
+    expect(toolPart.state).toBe("output-available");
+    expect(toolPart.output).toEqual({ url: "https://example.test/cat.png" });
+  });
+
   it("does not merge server output into another tool-only turn with different input", () => {
     const server = [
       toolAssistantMsg("srv-a1", "functions.calc:0", "output-available", {
@@ -549,6 +588,44 @@ describe("resolveToolMergeId", () => {
     expect(mergedPart.approval).toEqual({ id: "apr-1", approved: true });
 
     const result = resolveToolMergeId(merged[0], server);
+    expect(result.id).toBe("srv-a1");
+  });
+
+  it("adopts server ID for an optimistic snapshot whose extra step-start marker should not block ID adoption", () => {
+    const server = [
+      assistantMsg("srv-a1", "", {
+        parts: [
+          {
+            type: "tool-generateImage",
+            toolCallId: "tc1",
+            toolName: "generateImage",
+            state: "output-available",
+            input: { prompt: "a cat" },
+            output: { url: "https://example.test/cat.png" }
+          } as unknown as ChatMessage["parts"][number]
+        ] as ChatMessage["parts"]
+      })
+    ];
+    const client = [
+      assistantMsg("cli-a1", "", {
+        parts: [
+          {
+            type: "step-start"
+          } as unknown as ChatMessage["parts"][number],
+          {
+            type: "tool-generateImage",
+            toolCallId: "tc1",
+            toolName: "generateImage",
+            state: "input-available",
+            input: { prompt: "a cat" }
+          } as unknown as ChatMessage["parts"][number]
+        ] as ChatMessage["parts"]
+      })
+    ];
+
+    const merged = reconcileMessages(client, server);
+    const result = resolveToolMergeId(merged[0], server);
+
     expect(result.id).toBe("srv-a1");
   });
 

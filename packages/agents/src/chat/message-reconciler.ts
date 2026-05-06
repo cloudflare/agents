@@ -223,10 +223,7 @@ function shouldAdoptServerIdForToolMerge(
     );
   }
 
-  return (
-    nonToolPartsKey(incoming) === nonToolPartsKey(existing) &&
-    toolPartsCompatibleForMerge(incomingPart, existingPart)
-  );
+  return toolPartsCompatibleForMerge(incomingPart, existingPart);
 }
 
 function toolPartsCompatibleForMerge(
@@ -270,18 +267,14 @@ function isTerminalToolPart(part: UIMessage["parts"][number]): boolean {
   );
 }
 
-function nonToolPartsKey(message: UIMessage): string {
-  return JSON.stringify(
-    message.parts.filter((part) => !("toolCallId" in part))
-  );
-}
-
 function normalizedMessageParts(message: UIMessage): string {
   return JSON.stringify(
-    message.parts.map((part) => {
-      if (!("toolCallId" in part)) return part;
-      return normalizeToolPart(part);
-    })
+    message.parts
+      .filter((part) => part.type !== "step-start")
+      .map((part) => {
+        if (!("toolCallId" in part)) return part;
+        return normalizeToolPart(part);
+      })
   );
 }
 
