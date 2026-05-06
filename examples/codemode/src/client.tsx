@@ -1,12 +1,7 @@
 import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
 import type { MCPServersState } from "agents";
-import { useAgentChat, type AITool } from "@cloudflare/ai-chat/react";
-import {
-  IframeSandboxExecutor,
-  createBrowserCodeTool,
-  type JsonSchemaExecutableToolDescriptors
-} from "@cloudflare/codemode/browser";
+import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { isToolUIPart } from "ai";
 import "./styles.css";
 import { useState, useEffect, useRef, useCallback } from "react";
@@ -63,94 +58,6 @@ interface ToolPart {
     [key: string]: unknown;
   };
 }
-
-const projectStore = {
-  projects: [] as Array<{ id: number; name: string }>,
-  tasks: [] as Array<{
-    id: number;
-    projectId: number;
-    title: string;
-    done: boolean;
-  }>
-};
-
-const browserProjectTools: JsonSchemaExecutableToolDescriptors = {
-  createProject: {
-    description: "Create a new project in browser memory",
-    inputSchema: {
-      type: "object",
-      properties: { name: { type: "string", description: "Project name" } },
-      required: ["name"]
-    },
-    execute: async (args) => {
-      const name = String(args.name);
-      const project = { id: projectStore.projects.length + 1, name };
-      projectStore.projects.push(project);
-      return project;
-    }
-  },
-  listProjects: {
-    description: "List projects from browser memory",
-    inputSchema: { type: "object", properties: {}, required: [] },
-    execute: async () => projectStore.projects
-  },
-  createTask: {
-    description: "Create a task in browser memory",
-    inputSchema: {
-      type: "object",
-      properties: {
-        projectId: { type: "number" },
-        title: { type: "string" }
-      },
-      required: ["projectId", "title"]
-    },
-    execute: async (args) => {
-      const projectId = Number(args.projectId);
-      const title = String(args.title);
-      const task = {
-        id: projectStore.tasks.length + 1,
-        projectId,
-        title,
-        done: false
-      };
-      projectStore.tasks.push(task);
-      return task;
-    }
-  },
-  listTasks: {
-    description: "List tasks from browser memory",
-    inputSchema: {
-      type: "object",
-      properties: { projectId: { type: "number" } },
-      required: []
-    },
-    execute: async (args) => {
-      const projectId =
-        args.projectId == null ? undefined : Number(args.projectId);
-      return projectId == null
-        ? projectStore.tasks
-        : projectStore.tasks.filter((task) => task.projectId === projectId);
-    }
-  },
-  getPageInfo: {
-    description: "Get browser page information",
-    inputSchema: { type: "object", properties: {}, required: [] },
-    execute: async () => ({ title: document.title, url: location.href })
-  }
-};
-
-const browserCodemode = createBrowserCodeTool({
-  tools: browserProjectTools,
-  executor: new IframeSandboxExecutor()
-});
-
-const browserCodemodeTools: Record<string, AITool> = {
-  codemode: {
-    description: browserCodemode.description,
-    parameters: browserCodemode.inputSchema,
-    execute: (input) => browserCodemode.execute(input as { code: string })
-  }
-};
 
 const TOOLS: { name: string; description: string }[] = [
   { name: "createProject", description: "Create a new project" },
@@ -663,14 +570,7 @@ function App() {
   });
 
   const { messages, sendMessage, clearHistory, status } = useAgentChat({
-    agent,
-    tools: browserCodemodeTools,
-    onToolCall: async ({ toolCall, addToolOutput }) => {
-      const tool = browserCodemodeTools[toolCall.toolName];
-      if (!tool?.execute) return;
-      const output = await tool.execute(toolCall.input);
-      addToolOutput({ toolCallId: toolCall.toolCallId, output });
-    }
+    agent
   });
 
   const isStreaming = status === "streaming";

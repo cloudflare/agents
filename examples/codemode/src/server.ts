@@ -1,10 +1,7 @@
 import { routeAgentRequest, callable } from "agents";
-import {
-  AIChatAgent,
-  createToolsFromClientSchemas,
-  type ClientToolSchema
-} from "@cloudflare/ai-chat";
-import { generateTypes } from "@cloudflare/codemode/ai";
+import { AIChatAgent } from "@cloudflare/ai-chat";
+import { createCodeTool, generateTypes } from "@cloudflare/codemode/ai";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import {
   streamText,
   stepCountIs,
@@ -67,11 +64,20 @@ export class Codemode extends AIChatAgent<Env> {
     return { success: true, removed: serverId };
   }
 
-  async onChatMessage(
-    _onFinish?: unknown,
-    options?: { clientTools?: ClientToolSchema[] }
-  ) {
+  async onChatMessage() {
     const workersai = createWorkersAI({ binding: this.env.AI });
+
+    const executor = new DynamicWorkerExecutor({
+      loader: this.env.LOADER
+    });
+
+    const mcpTools = this.mcp.getAITools();
+    const allTools = { ...this.tools, ...mcpTools };
+
+    const codemode = createCodeTool({
+      tools: allTools,
+      executor
+    });
 
     const result = streamText({
       model: workersai("@cf/moonshotai/kimi-k2.6", {
@@ -87,7 +93,7 @@ export class Codemode extends AIChatAgent<Env> {
         toolCalls: "before-last-2-messages",
         reasoning: "before-last-message"
       }),
-      tools: createToolsFromClientSchemas(options?.clientTools),
+      tools: { codemode },
       stopWhen: stepCountIs(10)
     });
 
