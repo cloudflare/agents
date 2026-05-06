@@ -56,6 +56,50 @@ function callText(result: Awaited<ReturnType<Client["callTool"]>>): string {
   return (result.content as Array<{ type: string; text: string }>)[0].text;
 }
 
+function buildReferencedOpenApiSpec({
+  operations,
+  properties
+}: {
+  operations: number;
+  properties: number;
+}) {
+  const bigSchema = {
+    type: "object",
+    properties: Object.fromEntries(
+      Array.from({ length: properties }, (_, i) => [
+        `field_${i}`,
+        { type: "string", description: "x".repeat(100) }
+      ])
+    )
+  };
+
+  return {
+    openapi: "3.1.0",
+    info: { title: "Synthetic", version: "1" },
+    paths: Object.fromEntries(
+      Array.from({ length: operations }, (_, i) => [
+        `/items/${i}`,
+        {
+          get: {
+            operationId: `getItem${i}`,
+            responses: {
+              "200": {
+                description: "ok",
+                content: {
+                  "application/json": {
+                    schema: { $ref: "#/components/schemas/BigSchema" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ])
+    ),
+    components: { schemas: { BigSchema: bigSchema } }
+  };
+}
+
 describe("codeMcpServer", () => {
   it("should expose a single code tool", async () => {
     const upstream = createUpstreamServer();
@@ -600,6 +644,27 @@ describe("openApiMcpServer", () => {
       type: "array",
       items: { type: "object", properties: { id: { type: "string" } } }
     });
+
+    await client.close();
+  });
+
+  it("search should resolve large specs inside the sandbox instead of crossing RPC pre-expanded", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const server = openApiMcpServer({
+      spec: buildReferencedOpenApiSpec({ operations: 2000, properties: 200 }),
+      executor,
+      request: async () => ({})
+    });
+    const client = await connectClient(server);
+
+    const result = await client.callTool({
+      name: "search",
+      arguments: {
+        code: "async () => { const spec = await codemode.spec(); return Object.keys(spec.paths).length; }"
+      }
+    });
+
+    expect(callText(result)).toBe("2000");
 
     await client.close();
   });
