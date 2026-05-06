@@ -143,7 +143,7 @@ export function createBrowserCodeTool(
   const allTools = toRecord(options.tools);
   const toolMap: JsonSchemaExecutableToolDescriptors = {};
   for (const [name, tool] of Object.entries(allTools)) {
-    if (!hasNeedsApproval(tool as Record<string, unknown>)) {
+    if (!hasNeedsApproval(tool as unknown as Record<string, unknown>)) {
       toolMap[name] = tool;
     }
   }
