@@ -6,6 +6,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, cleanup } from "vitest-browser-react";
 import { useEffect, act } from "react";
+import { PartySocket } from "partysocket";
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -297,6 +298,117 @@ describe("useVoiceAgent", () => {
           container.querySelector('[data-testid="error"]')?.textContent
         ).toBe("Connection lost. Reconnecting...");
       });
+    });
+
+    it("should not construct or connect a client when disabled", async () => {
+      const { container, getResult } = await renderHook({ enabled: false });
+
+      expect(vi.mocked(PartySocket)).not.toHaveBeenCalled();
+      expect(socketInstance).toBeNull();
+      expect(
+        container.querySelector('[data-testid="status"]')?.textContent
+      ).toBe("idle");
+      expect(
+        container.querySelector('[data-testid="connected"]')?.textContent
+      ).toBe("false");
+
+      await act(async () => {
+        await getResult().startCall();
+      });
+      act(() => {
+        getResult().endCall();
+        getResult().toggleMute();
+        getResult().sendText("hello");
+        getResult().sendJSON({ type: "app_message" });
+      });
+
+      expect(socketSend).not.toHaveBeenCalled();
+    });
+
+    it("should connect when enabled flips false to true without firing onReconnect", async () => {
+      const onReconnect = vi.fn();
+      let latestResult: UseVoiceAgentReturn | null = null;
+      const onResult = vi.fn((r: UseVoiceAgentReturn) => {
+        latestResult = r;
+      });
+      const getLatestResult = () => {
+        if (!latestResult) throw new Error("Hook has not rendered yet");
+        return latestResult;
+      };
+
+      const screen = await render(
+        <TestVoiceComponent
+          options={{ agent: "voice-agent", enabled: false, onReconnect }}
+          onResult={onResult}
+        />
+      );
+      await sleep(10);
+
+      expect(vi.mocked(PartySocket)).not.toHaveBeenCalled();
+
+      await act(async () => {
+        screen.rerender(
+          <TestVoiceComponent
+            options={{ agent: "voice-agent", enabled: true, onReconnect }}
+            onResult={onResult}
+          />
+        );
+        await sleep(10);
+      });
+
+      expect(vi.mocked(PartySocket)).toHaveBeenCalledTimes(1);
+      expect(onReconnect).not.toHaveBeenCalled();
+      await vi.waitFor(() => {
+        expect(getLatestResult().connected).toBe(true);
+      });
+    });
+
+    it("should disconnect and reset state when enabled flips true to false", async () => {
+      let latestResult: UseVoiceAgentReturn | null = null;
+      const onResult = vi.fn((r: UseVoiceAgentReturn) => {
+        latestResult = r;
+      });
+      const getLatestResult = () => {
+        if (!latestResult) throw new Error("Hook has not rendered yet");
+        return latestResult;
+      };
+
+      const screen = await render(
+        <TestVoiceComponent
+          options={{ agent: "voice-agent" }}
+          onResult={onResult}
+        />
+      );
+      await sleep(10);
+
+      await vi.waitFor(() => {
+        expect(getLatestResult().connected).toBe(true);
+      });
+
+      act(() => {
+        fireJSON({ type: "status", status: "listening" });
+        fireJSON({ type: "transcript", role: "user", text: "hello" });
+      });
+
+      await vi.waitFor(() => {
+        expect(getLatestResult().status).toBe("listening");
+        expect(getLatestResult().transcript).toHaveLength(1);
+      });
+
+      await act(async () => {
+        screen.rerender(
+          <TestVoiceComponent
+            options={{ agent: "voice-agent", enabled: false }}
+            onResult={onResult}
+          />
+        );
+        await sleep(10);
+      });
+
+      expect(socketClose).toHaveBeenCalledTimes(1);
+      expect(getLatestResult().status).toBe("idle");
+      expect(getLatestResult().transcript).toHaveLength(0);
+      expect(getLatestResult().connected).toBe(false);
     });
   });
 

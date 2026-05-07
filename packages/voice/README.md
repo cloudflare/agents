@@ -133,7 +133,11 @@ function App() {
     toggleMute, // () => void
     sendText, // (text: string) => void
     sendJSON // (data: Record<string, unknown>) => void
-  } = useVoiceAgent({ agent: "my-agent" });
+  } = useVoiceAgent({
+    agent: "my-agent",
+    // Set false to delay connecting until async prerequisites are ready.
+    enabled: true
+  });
 
   return <div>Status: {status}</div>;
 }

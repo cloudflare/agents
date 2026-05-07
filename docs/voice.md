@@ -335,9 +335,12 @@ const {
 } = useVoiceAgent({
   agent: "MyAgent", // Required: Durable Object class name
   name: "default", // Instance name (default: "default")
-  host: window.location.host // Host to connect to
+  host: window.location.host, // Host to connect to
+  enabled: true // Set false to delay connecting until prerequisites are ready
 });
 ```
+
+Use `enabled: false` when the app must wait for async connection prerequisites, such as a user-scoped capability token. While disabled, the hook does not create or connect a `VoiceClient` and returns the idle/disconnected state. When `enabled` changes to `true`, the hook connects with the current options.
 
 #### Tuning Options
 

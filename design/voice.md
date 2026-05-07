@@ -387,6 +387,8 @@ JSON message handling narrows the `try/catch` to only cover `JSON.parse`. Listen
 - `useVoiceAgent(options)` — wraps `VoiceClient` for `withVoice` agents
 - `useVoiceInput(options)` — wraps `VoiceClient` for `withVoiceInput` agents
 
+`useVoiceAgent` accepts `enabled?: boolean` as a React lifecycle gate. While disabled, the hook keeps the exposed state in the idle/disconnected shape and does not construct or connect a `VoiceClient`. Enabling the hook creates a client with the current options; disabling it tears down the active client. This keeps credential/bootstrap readiness in the React hook module instead of forcing callers to provide dormant `VoiceTransport` adapters.
+
 Both include tuning knobs (`silenceThreshold`, `silenceDurationMs`, `interruptThreshold`, `interruptChunks`) in the connection key so changing them triggers client recreation.
 
 ## Tradeoffs

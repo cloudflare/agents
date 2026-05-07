@@ -25,6 +25,12 @@ export { WebSocketVoiceTransport } from "./voice-client";
 /** Options accepted by useVoiceAgent. */
 export interface UseVoiceAgentOptions extends VoiceClientOptions {
   /**
+   * Whether the hook should create and connect a VoiceClient.
+   *
+   * @default true
+   */
+  enabled?: boolean;
+  /**
    * Called when the hook reconnects due to option changes (e.g., agent name
    * or instance name changed). Use this to show a toast or notification.
    */
@@ -242,6 +248,8 @@ export function useVoiceAgent(
     [options.query]
   );
 
+  const enabled = options.enabled ?? true;
+
   const connectionKey = useMemo(
     () =>
       `${options.agent}:${options.name ?? "default"}:${options.host ?? ""}:${options.silenceThreshold ?? ""}:${options.silenceDurationMs ?? ""}:${options.interruptThreshold ?? ""}:${options.interruptChunks ?? ""}:${queryString}`,
@@ -257,8 +265,13 @@ export function useVoiceAgent(
     ]
   );
 
+  const effectKey = useMemo(
+    () => `${enabled ? "enabled" : "disabled"}:${connectionKey}`,
+    [enabled, connectionKey]
+  );
+
   const clientRef = useRef<VoiceClient | null>(null);
-  const prevKeyRef = useRef(connectionKey);
+  const activeKeyRef = useRef<string | null>(null);
   const onReconnectRef = useRef(options.onReconnect);
   onReconnectRef.current = options.onReconnect;
 
@@ -273,18 +286,11 @@ export function useVoiceAgent(
   const [interimTranscript, setInterimTranscript] = useState<string | null>(
     null
   );
+  const [lastCustomMessage, setLastCustomMessage] = useState<unknown>(null);
 
   // Connect on mount or when connection identity changes
   useEffect(() => {
-    const isReconnect = prevKeyRef.current !== connectionKey;
-    prevKeyRef.current = connectionKey;
-
-    // Fire reconnect callback (e.g., to show a toast)
-    if (isReconnect) {
-      onReconnectRef.current?.();
-    }
-
-    // Reset state for a fresh connection
+    // Reset state for a fresh or disabled connection
     setStatus("idle");
     setTranscript([]);
     setMetrics(null);
@@ -293,8 +299,29 @@ export function useVoiceAgent(
     setConnected(false);
     setError(null);
     setInterimTranscript(null);
+    setLastCustomMessage(null);
 
-    const client = new VoiceClient(options);
+    if (!enabled) {
+      clientRef.current = null;
+      activeKeyRef.current = null;
+      return;
+    }
+
+    const isReconnect =
+      activeKeyRef.current !== null && activeKeyRef.current !== connectionKey;
+    activeKeyRef.current = connectionKey;
+
+    // Fire reconnect callback (e.g., to show a toast)
+    if (isReconnect) {
+      onReconnectRef.current?.();
+    }
+
+    const {
+      enabled: _enabled,
+      onReconnect: _onReconnect,
+      ...clientOptions
+    } = options;
+    const client = new VoiceClient(clientOptions);
     clientRef.current = client;
     client.connect();
 
@@ -326,25 +353,29 @@ export function useVoiceAgent(
       client.removeEventListener("mutechange", onMute);
       client.removeEventListener("connectionchange", onConnection);
       client.removeEventListener("error", onError);
+      if (clientRef.current === client) {
+        clientRef.current = null;
+      }
       client.disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reconnect when connection identity changes
-  }, [connectionKey]);
+  }, [effectKey]);
 
   // Stable action callbacks — always use the latest client
-  const startCall = useCallback(() => clientRef.current!.startCall(), []);
-  const endCall = useCallback(() => clientRef.current!.endCall(), []);
-  const toggleMute = useCallback(() => clientRef.current!.toggleMute(), []);
+  const startCall = useCallback(
+    () => clientRef.current?.startCall() ?? Promise.resolve(),
+    []
+  );
+  const endCall = useCallback(() => clientRef.current?.endCall(), []);
+  const toggleMute = useCallback(() => clientRef.current?.toggleMute(), []);
   const sendText = useCallback(
-    (text: string) => clientRef.current!.sendText(text),
+    (text: string) => clientRef.current?.sendText(text),
     []
   );
   const sendJSON = useCallback(
-    (data: Record<string, unknown>) => clientRef.current!.sendJSON(data),
+    (data: Record<string, unknown>) => clientRef.current?.sendJSON(data),
     []
   );
-
-  const [lastCustomMessage, setLastCustomMessage] = useState<unknown>(null);
 
   // Listen for custom messages — needs a separate effect since it must
   // attach to the latest client.
@@ -354,7 +385,7 @@ export function useVoiceAgent(
     const onCustom = (msg: unknown) => setLastCustomMessage(msg);
     client.addEventListener("custommessage", onCustom);
     return () => client.removeEventListener("custommessage", onCustom);
-  }, [connectionKey]);
+  }, [effectKey]);
 
   return {
     status,
