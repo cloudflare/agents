@@ -4,6 +4,7 @@ import {
   type MessageExtraInfo,
   InitializeRequestSchema,
   isJSONRPCResultResponse,
+  isJSONRPCErrorResponse,
   isJSONRPCNotification
 } from "@modelcontextprotocol/sdk/types.js";
 import type { McpAgent } from ".";
@@ -21,8 +22,9 @@ export const MCP_HTTP_METHOD_HEADER = "cf-mcp-method";
 
 /**
  * Since we use WebSockets to bridge the client to the
- * MCP transport in the Agent, we use this header to include
- * the original request body.
+ * MCP transport in the Agent, this reserved header is stripped
+ * from forwarded request metadata. Request bodies are sent over
+ * the WebSocket data channel, not this header.
  */
 export const MCP_MESSAGE_HEADER = "cf-mcp-message";
 
@@ -231,14 +233,12 @@ export const createStreamingHttpHandler = (
         request.headers.forEach((value, key) => {
           existingHeaders[key] = value;
         });
+        delete existingHeaders[MCP_MESSAGE_HEADER];
 
         const req = new Request(request.url, {
           headers: {
             ...existingHeaders,
             [MCP_HTTP_METHOD_HEADER]: "POST",
-            [MCP_MESSAGE_HEADER]: Buffer.from(
-              JSON.stringify(messages)
-            ).toString("base64"),
             Upgrade: "websocket"
           }
         });
@@ -310,15 +310,17 @@ export const createStreamingHttpHandler = (
           onClose().catch(console.error);
         });
 
+        ws.send(JSON.stringify(messages));
+
         // If there are no requests, we send the messages to the agent and acknowledge the request with a 202
         // since we don't expect any responses back through this connection
         const hasOnlyNotificationsOrResponses = messages.every(
-          (msg) => isJSONRPCNotification(msg) || isJSONRPCResultResponse(msg)
+          (msg) =>
+            isJSONRPCNotification(msg) ||
+            isJSONRPCResultResponse(msg) ||
+            isJSONRPCErrorResponse(msg)
         );
         if (hasOnlyNotificationsOrResponses) {
-          // closing the websocket will also close the SSE connection
-          ws.close();
-
           return new Response(null, {
             headers: corsHeaders(request, options.corsOptions),
             status: 202

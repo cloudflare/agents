@@ -8,10 +8,11 @@ import type {
 import {
   JSONRPCMessageSchema,
   isJSONRPCErrorResponse,
+  isJSONRPCRequest,
   isJSONRPCResultResponse,
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
-import type { Connection, ConnectionContext } from "../";
+import type { Connection, ConnectionContext, WSMessage } from "../";
 import { Agent } from "../index";
 import type { BaseTransportType, MaybePromise, ServeOptions } from "./types";
 import {
@@ -25,6 +26,14 @@ import {
 } from "./utils";
 import { McpSSETransport, StreamableHTTPServerTransport } from "./transport";
 import { RPCServerTransport, type RPCServerTransportOptions } from "./rpc";
+
+type StreamableHttpPostState = {
+  _mcpHttpMethod?: "POST";
+  _mcpRequest?: {
+    headers: Record<string, string>;
+    url: string;
+  };
+};
 
 export abstract class McpAgent<
   Env extends Cloudflare.Env = Cloudflare.Env,
@@ -205,26 +214,16 @@ export abstract class McpAgent<
         if (this._transport instanceof StreamableHTTPServerTransport) {
           switch (req.headers.get(MCP_HTTP_METHOD_HEADER)) {
             case "POST": {
-              // This returns the response directly to the client
-              const payloadHeader = req.headers.get(MCP_MESSAGE_HEADER);
-              let rawPayload: string;
+              const headers = Object.fromEntries(req.headers.entries());
+              delete headers[MCP_MESSAGE_HEADER];
 
-              if (!payloadHeader) {
-                rawPayload = "{}";
-              } else {
-                try {
-                  rawPayload = Buffer.from(payloadHeader, "base64").toString(
-                    "utf-8"
-                  );
-                } catch (_error) {
-                  throw new Error(
-                    "Internal Server Error: Failed to decode MCP message header"
-                  );
+              conn.setState({
+                _mcpHttpMethod: "POST",
+                _mcpRequest: {
+                  headers,
+                  url: req.url
                 }
-              }
-
-              const parsedBody = JSON.parse(rawPayload);
-              this._transport?.handlePostRequest(req, parsedBody);
+              });
               break;
             }
             case "GET":
@@ -232,6 +231,45 @@ export abstract class McpAgent<
               break;
           }
         }
+    }
+  }
+
+  async onMessage(
+    conn: Connection<StreamableHttpPostState>,
+    message: WSMessage
+  ): Promise<void> {
+    if (
+      this.getTransportType() !== "streamable-http" ||
+      !(this._transport instanceof StreamableHTTPServerTransport) ||
+      conn.state?._mcpHttpMethod !== "POST" ||
+      !conn.state._mcpRequest
+    ) {
+      return;
+    }
+
+    try {
+      const rawPayload =
+        typeof message === "string"
+          ? message
+          : new TextDecoder().decode(message as BufferSource);
+      const parsedBody = JSON.parse(rawPayload);
+      const rawMessages = Array.isArray(parsedBody) ? parsedBody : [parsedBody];
+      const messages = rawMessages.map((msg) =>
+        JSONRPCMessageSchema.parse(msg)
+      );
+      const request = new Request(conn.state._mcpRequest.url, {
+        headers: conn.state._mcpRequest.headers,
+        method: "POST"
+      });
+
+      await this._transport.handlePostRequest(request, parsedBody);
+
+      if (!messages.some(isJSONRPCRequest)) {
+        conn.close(1000, "Accepted");
+      }
+    } catch (error) {
+      this._transport.onerror?.(error as Error);
+      conn.close(1011, "Failed to process MCP message");
     }
   }
 
