@@ -5740,7 +5740,6 @@ export class Agent<
         return this._resultFromAgentToolRow<Output>(existing);
       }
       return await this._replayAndInterruptAgentToolRun<Output>(
-        cls,
         existing,
         "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
       );
@@ -5836,16 +5835,7 @@ export class Agent<
           status: "aborted",
           error: reason
         };
-        this._updateAgentToolTerminal(runId, result);
-        this._broadcastAgentToolTerminal(
-          options.parentToolCallId,
-          sequence,
-          result
-        );
-        await this.onAgentToolFinish(
-          { ...runInfo, status: "aborted", completedAt: Date.now() },
-          result
-        );
+        await this._finishAgentToolRun(runInfo, result, { sequence });
         return result;
       } else {
         parentAbortListener = () => {
@@ -5891,16 +5881,7 @@ export class Agent<
           status: "aborted",
           error: reason
         };
-        this._updateAgentToolTerminal(runId, result);
-        this._broadcastAgentToolTerminal(
-          options.parentToolCallId,
-          sequence,
-          result
-        );
-        await this.onAgentToolFinish(
-          { ...runInfo, status: "aborted", completedAt: Date.now() },
-          result
-        );
+        await this._finishAgentToolRun(runInfo, result, { sequence });
         return result;
       }
 
@@ -5910,16 +5891,10 @@ export class Agent<
         agentType,
         inspection
       );
-      this._updateAgentToolTerminal(runId, result, inspection.completedAt);
-      this._broadcastAgentToolTerminal(
-        options.parentToolCallId,
+      await this._finishAgentToolRun(runInfo, result, {
         sequence,
-        result
-      );
-      await this.onAgentToolFinish(
-        { ...runInfo, status: result.status, completedAt: Date.now() },
-        result
-      );
+        completedAt: inspection.completedAt
+      });
       return result;
     } catch (error) {
       if (options.signal?.aborted) {
@@ -5934,16 +5909,7 @@ export class Agent<
           status: "aborted",
           error: reason
         };
-        this._updateAgentToolTerminal(runId, result);
-        this._broadcastAgentToolTerminal(
-          options.parentToolCallId,
-          sequence,
-          result
-        );
-        await this.onAgentToolFinish(
-          { ...runInfo, status: "aborted", completedAt: Date.now() },
-          result
-        );
+        await this._finishAgentToolRun(runInfo, result, { sequence });
         return result;
       }
       const message = error instanceof Error ? error.message : String(error);
@@ -5953,16 +5919,7 @@ export class Agent<
         status: "error",
         error: message
       };
-      this._updateAgentToolTerminal(runId, result);
-      this._broadcastAgentToolTerminal(
-        options.parentToolCallId,
-        sequence,
-        result
-      );
-      await this.onAgentToolFinish(
-        { ...runInfo, status: "error", completedAt: Date.now() },
-        result
-      );
+      await this._finishAgentToolRun(runInfo, result, { sequence });
       return result;
     } finally {
       if (parentAbortListener && options.signal) {
@@ -6087,6 +6044,26 @@ export class Agent<
     };
   }
 
+  private _agentToolRunInfoFromRow(
+    row: AgentToolRunStorageRow,
+    status: AgentToolRunStatus = row.status,
+    completedAt = row.completed_at ?? undefined
+  ): AgentToolRunInfo {
+    return {
+      runId: row.run_id,
+      parentToolCallId: row.parent_tool_call_id ?? undefined,
+      agentType: row.agent_type,
+      inputPreview: this._parseAgentToolJson(row.input_preview),
+      status,
+      display: this._parseAgentToolJson(row.display_metadata) as
+        | AgentToolDisplayMetadata
+        | undefined,
+      displayOrder: row.display_order,
+      startedAt: row.started_at,
+      completedAt
+    };
+  }
+
   private _terminalResultFromInspection<Output>(
     agentType: string,
     inspection: AgentToolRunInspection<Output>
@@ -6114,6 +6091,26 @@ export class Agent<
       status: "error",
       error: inspection.error ?? "Agent tool run failed"
     };
+  }
+
+  private async _finishAgentToolRun<Output>(
+    run: AgentToolRunInfo,
+    result: RunAgentToolResult<Output>,
+    options?: { sequence?: number; completedAt?: number }
+  ): Promise<void> {
+    const completedAt = options?.completedAt ?? Date.now();
+    this._updateAgentToolTerminal(run.runId, result, completedAt);
+    if (options?.sequence !== undefined) {
+      this._broadcastAgentToolTerminal(
+        run.parentToolCallId,
+        options.sequence,
+        result
+      );
+    }
+    await this.onAgentToolFinish(
+      { ...run, status: result.status, completedAt },
+      result
+    );
   }
 
   private _updateAgentToolTerminal<Output>(
@@ -6205,6 +6202,28 @@ export class Agent<
       );
     }
     return next;
+  }
+
+  private async _broadcastAgentToolStoredChunks(
+    row: Pick<
+      AgentToolRunStorageRow,
+      "run_id" | "agent_type" | "parent_tool_call_id"
+    >,
+    sequence: number,
+    replay?: true,
+    connection?: Connection
+  ): Promise<number> {
+    const child = await this._cf_resolveSubAgent(row.agent_type, row.run_id);
+    const adapter = this._asAgentToolChildAdapter(child);
+    const chunks = await adapter.getAgentToolChunks(row.run_id);
+    return this._broadcastAgentToolChunks(
+      row.parent_tool_call_id ?? undefined,
+      row.run_id,
+      chunks,
+      sequence,
+      replay,
+      connection
+    );
   }
 
   private async _forwardAgentToolStream(
@@ -6377,25 +6396,12 @@ export class Agent<
   }
 
   private async _replayAndInterruptAgentToolRun<Output>(
-    cls: ChatCapableAgentClass,
     row: AgentToolRunStorageRow,
     message: string
   ): Promise<RunAgentToolResult<Output>> {
-    const parentToolCallId = row.parent_tool_call_id ?? undefined;
     let sequence = 1;
     try {
-      const child = await this.subAgent(
-        cls as SubAgentClass<Agent>,
-        row.run_id
-      );
-      const adapter = this._asAgentToolChildAdapter<unknown, Output>(child);
-      const chunks = await adapter.getAgentToolChunks(row.run_id);
-      sequence = this._broadcastAgentToolChunks(
-        parentToolCallId,
-        row.run_id,
-        chunks,
-        sequence
-      );
+      sequence = await this._broadcastAgentToolStoredChunks(row, sequence);
     } catch {
       // Interruption is still the honest parent state if replay fails.
     }
@@ -6405,8 +6411,9 @@ export class Agent<
       status: "interrupted",
       error: message
     };
-    this._updateAgentToolTerminal(row.run_id, result);
-    this._broadcastAgentToolTerminal(parentToolCallId, sequence, result);
+    await this._finishAgentToolRun(this._agentToolRunInfoFromRow(row), result, {
+      sequence
+    });
     return result;
   }
 
@@ -6450,16 +6457,8 @@ export class Agent<
       );
 
       try {
-        const child = await this.subAgent(
-          this._agentToolClassByName(row.agent_type),
-          row.run_id
-        );
-        const adapter = this._asAgentToolChildAdapter(child);
-        const chunks = await adapter.getAgentToolChunks(row.run_id);
-        sequence = this._broadcastAgentToolChunks(
-          parentToolCallId,
-          row.run_id,
-          chunks,
+        sequence = await this._broadcastAgentToolStoredChunks(
+          row,
           sequence,
           true,
           connection
@@ -6488,53 +6487,65 @@ export class Agent<
   }
 
   private async _reconcileAgentToolRuns(): Promise<void> {
-    const rows = this.sql<{ run_id: string; agent_type: string }>`
-      SELECT run_id, agent_type FROM cf_agent_tool_runs
+    const rows = this.sql<AgentToolRunStorageRow>`
+      SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
+             summary, output_json, error_message, display_metadata, display_order,
+             started_at, completed_at
+      FROM cf_agent_tool_runs
       WHERE status IN ('starting', 'running')
       ORDER BY started_at ASC
     `;
     for (const row of rows) {
+      let sequence = 1;
+      let completedAt: number | undefined;
+      let result: RunAgentToolResult;
       try {
-        const cls = this._agentToolClassByName(row.agent_type);
-        if (!this.hasSubAgent(cls, row.run_id)) {
-          this._updateAgentToolTerminal(row.run_id, {
-            runId: row.run_id,
-            agentType: row.agent_type,
-            status: "interrupted",
-            error: "Agent tool child was not found during parent recovery."
-          });
-          continue;
-        }
-        const child = await this.subAgent(cls, row.run_id);
+        const child = await this._cf_resolveSubAgent(
+          row.agent_type,
+          row.run_id
+        );
         const adapter = this._asAgentToolChildAdapter(child);
         const inspection = await adapter.inspectAgentToolRun(row.run_id);
+        try {
+          sequence = await this._broadcastAgentToolStoredChunks(row, sequence);
+        } catch {
+          // Terminal reconciliation should still complete if chunk replay fails.
+        }
         if (
           !inspection ||
           inspection.status === "running" ||
           inspection.status === "starting"
         ) {
-          this._updateAgentToolTerminal(row.run_id, {
+          result = {
             runId: row.run_id,
             agentType: row.agent_type,
             status: "interrupted",
             error:
               "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
-          });
+          };
         } else {
-          this._updateAgentToolTerminal(
-            row.run_id,
-            this._terminalResultFromInspection(row.agent_type, inspection),
-            inspection.completedAt
+          result = this._terminalResultFromInspection(
+            row.agent_type,
+            inspection
           );
+          completedAt = inspection.completedAt;
         }
       } catch {
-        this._updateAgentToolTerminal(row.run_id, {
+        result = {
           runId: row.run_id,
           agentType: row.agent_type,
           status: "interrupted",
           error: "Agent tool run could not be inspected during parent recovery."
-        });
+        };
       }
+      await this._finishAgentToolRun(
+        this._agentToolRunInfoFromRow(row),
+        result,
+        {
+          sequence,
+          completedAt
+        }
+      );
     }
   }
 

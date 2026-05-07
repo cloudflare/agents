@@ -1,6 +1,8 @@
 import { env } from "cloudflare:workers";
 import type {
   AgentToolEventMessage,
+  AgentToolLifecycleResult,
+  AgentToolRunInfo,
   AgentToolRunInspection,
   AgentToolStoredChunk,
   RunAgentToolResult
@@ -33,6 +35,23 @@ type ParentStub = DurableObjectStub & {
     runId?: string
   ): Promise<RunAgentToolResult>;
   getEventsForTest(): Promise<AgentToolEventMessage[]>;
+  getFinishesForTest(): Promise<
+    { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[]
+  >;
+  reconcileCompletedChildForTest(
+    input: {
+      prompt: string;
+      delayMs?: number;
+      chunkDelayMs?: number;
+      structured?: boolean;
+      streamError?: string;
+    },
+    runId?: string
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
+    inspection: AgentToolRunInspection;
+  }>;
   inspectChild(runId: string): Promise<AgentToolRunInspection | null>;
   getChildChunks(
     runId: string,
@@ -119,6 +138,49 @@ describe("AIChatAgent as an agent-tool child", () => {
 
     const laterChunks = await parent.getChildChunks(runId, 0);
     expect(laterChunks.every((chunk) => chunk.sequence > 0)).toBe(true);
+  });
+
+  it("finalizes lifecycle hooks and terminal events during parent recovery reconciliation", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    const { events, finishes, inspection } =
+      await parent.reconcileCompletedChildForTest(
+        { prompt: "recover completed child" },
+        runId
+      );
+
+    expect(inspection).toMatchObject({
+      runId,
+      status: "completed",
+      summary: "AIChat child handled: recover completed child",
+      output: "AIChat child handled: recover completed child"
+    });
+    expect(finishes).toEqual([
+      {
+        run: expect.objectContaining({
+          runId,
+          parentToolCallId: "test-tool-call",
+          agentType: "AIChatAgentToolChild",
+          status: "completed",
+          inputPreview: "recover completed child",
+          display: { name: "test child" }
+        }),
+        result: expect.objectContaining({
+          status: "completed",
+          summary: "AIChat child handled: recover completed child"
+        })
+      }
+    ]);
+    expect(events.map((event) => event.event.kind)).toContain("finished");
+    expect(events.at(-1)).toMatchObject({
+      parentToolCallId: "test-tool-call",
+      event: {
+        kind: "finished",
+        runId,
+        summary: "AIChat child handled: recover completed child"
+      }
+    });
   });
 
   it("returns the retained parent registry result without re-running the child", async () => {

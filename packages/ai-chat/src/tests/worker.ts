@@ -13,6 +13,8 @@ import { Agent, getCurrentAgent, routeAgentRequest } from "agents";
 import { MessageType, type OutgoingMessage } from "../types";
 import type {
   AgentToolEventMessage,
+  AgentToolLifecycleResult,
+  AgentToolRunInfo,
   AgentToolRunInspection,
   AgentToolStoredChunk,
   RunAgentToolResult
@@ -1878,8 +1880,14 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }
 }
 
+type AgentToolFinishForTest = {
+  run: AgentToolRunInfo;
+  result: AgentToolLifecycleResult;
+};
+
 export class AIChatAgentToolParent extends Agent<Env> {
   private events: AgentToolEventMessage[] = [];
+  private finishes: AgentToolFinishForTest[] = [];
 
   override broadcast(
     msg: string | ArrayBuffer | ArrayBufferView,
@@ -1898,11 +1906,19 @@ export class AIChatAgentToolParent extends Agent<Env> {
     super.broadcast(msg, without);
   }
 
+  override async onAgentToolFinish(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): Promise<void> {
+    this.finishes.push({ run, result });
+  }
+
   async runChild(
     input: AgentToolInput,
     runId = crypto.randomUUID()
   ): Promise<RunAgentToolResult> {
     this.events = [];
+    this.finishes = [];
     return this.runAgentTool(AIChatAgentToolChild, {
       runId,
       parentToolCallId: "test-tool-call",
@@ -1937,6 +1953,60 @@ export class AIChatAgentToolParent extends Agent<Env> {
 
   getEventsForTest(): AgentToolEventMessage[] {
     return this.events;
+  }
+
+  getFinishesForTest(): AgentToolFinishForTest[] {
+    return this.finishes;
+  }
+
+  async reconcileCompletedChildForTest(
+    input: AgentToolInput,
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    inspection: AgentToolRunInspection;
+  }> {
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const started = await child.startAgentToolRun(input, { runId });
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, input_preview,
+        input_redacted, status, display_metadata, display_order, started_at
+      ) VALUES (
+        ${runId}, 'test-tool-call', 'AIChatAgentToolChild',
+        ${JSON.stringify(input.prompt)}, 1, 'running',
+        ${JSON.stringify({ name: "test child" })}, 0, ${started.startedAt}
+      )
+    `;
+
+    let inspection = await child.inspectAgentToolRun(runId);
+    for (let attempt = 0; attempt < 50; attempt++) {
+      if (
+        inspection &&
+        inspection.status !== "running" &&
+        inspection.status !== "starting"
+      ) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      inspection = await child.inspectAgentToolRun(runId);
+    }
+    if (
+      !inspection ||
+      inspection.status === "running" ||
+      inspection.status === "starting"
+    ) {
+      throw new Error("Timed out waiting for child agent-tool completion");
+    }
+
+    this.events = [];
+    this.finishes = [];
+    await (
+      this as unknown as { _reconcileAgentToolRuns(): Promise<void> }
+    )._reconcileAgentToolRuns();
+
+    return { events: this.events, finishes: this.finishes, inspection };
   }
 
   async inspectChild(runId: string): Promise<AgentToolRunInspection | null> {
