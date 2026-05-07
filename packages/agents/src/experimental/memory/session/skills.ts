@@ -44,20 +44,29 @@ export function isSkillProvider(provider: unknown): provider is SkillProvider {
  *
  * Descriptions are pulled from R2 custom metadata (`description` key).
  * If a prefix is provided, it is prepended on storage operations and
- * stripped from keys in metadata.
+ * stripped from keys in metadata. `keys`, when provided, is matched against
+ * these prefix-relative keys.
  *
  * @example
  * ```ts
- * const skills = new R2SkillProvider(env.SKILLS_BUCKET, { prefix: "skills/" });
+ * const skills = new R2SkillProvider(env.SKILLS_BUCKET, {
+ *   prefix: "skills/",
+ *   keys: ["code-review", "debugging"]
+ * });
  * ```
  */
 export class R2SkillProvider implements SkillProvider {
   private bucket: R2Bucket;
   private prefix: string;
+  private keys: Set<string> | null;
 
-  constructor(bucket: R2Bucket, options?: { prefix?: string }) {
+  constructor(
+    bucket: R2Bucket,
+    options?: { prefix?: string; keys?: string[] }
+  ) {
     this.bucket = bucket;
     this.prefix = options?.prefix ?? "";
+    this.keys = options?.keys?.length ? new Set(options.keys) : null;
   }
 
   async get(): Promise<string | null> {
@@ -73,6 +82,7 @@ export class R2SkillProvider implements SkillProvider {
       } as any);
       for (const obj of listed.objects) {
         const key = obj.key.slice(this.prefix.length);
+        if (!this.allowsKey(key)) continue;
         const desc = obj.customMetadata?.description;
         entries.push(`- ${key}${desc ? `: ${desc}` : ""}`);
       }
@@ -83,6 +93,7 @@ export class R2SkillProvider implements SkillProvider {
   }
 
   async load(key: string): Promise<string | null> {
+    if (!this.allowsKey(key)) return null;
     const obj = await this.bucket.get(this.prefix + key);
     if (!obj) return null;
     return obj.text();
@@ -92,5 +103,9 @@ export class R2SkillProvider implements SkillProvider {
     await this.bucket.put(this.prefix + key, content, {
       customMetadata: description ? { description } : undefined
     });
+  }
+
+  private allowsKey(key: string): boolean {
+    return this.keys === null || this.keys.has(key);
   }
 }
