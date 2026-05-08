@@ -256,7 +256,14 @@ export class WebSocketChatTransport<
           }
         };
 
+        const onClose = () => {
+          finish(() => controller.close());
+        };
+
         agent.addEventListener("message", onMessage, {
+          signal: abortController.signal
+        });
+        agent.addEventListener("close", onClose, {
           signal: abortController.signal
         });
       },

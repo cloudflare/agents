@@ -32,6 +32,10 @@ function createMockAgent() {
       target.dispatchEvent(
         new MessageEvent("message", { data: JSON.stringify(data) })
       );
+    },
+    /** Simulate the underlying WebSocket closing */
+    close() {
+      target.dispatchEvent(new CloseEvent("close"));
     }
   };
 }
@@ -48,6 +52,34 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
       agent,
       activeRequestIds
     });
+  });
+
+  // ── sendMessages lifecycle ───────────────────────────────────────────
+
+  it("closes the original sendMessages stream when the socket closes before done", async () => {
+    const stream = await transport.sendMessages({
+      chatId: "chat-1",
+      messages: [
+        {
+          id: "user-1",
+          role: "user",
+          parts: [{ type: "text", text: "hello" }]
+        }
+      ],
+      abortSignal: undefined,
+      trigger: "submit-message"
+    });
+    const reader = stream.getReader();
+
+    expect(activeRequestIds.size).toBe(1);
+
+    agent.close();
+
+    await expect(reader.read()).resolves.toEqual({
+      done: true,
+      value: undefined
+    });
+    expect(activeRequestIds.size).toBe(0);
   });
 
   // ── handleStreamResuming basics ──────────────────────────────────────
