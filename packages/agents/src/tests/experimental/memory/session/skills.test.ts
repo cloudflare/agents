@@ -4,7 +4,10 @@ import {
   type ContextProvider,
   type WritableContextProvider
 } from "../../../../experimental/memory/session/context";
-import type { SkillProvider } from "../../../../experimental/memory/session/skills";
+import {
+  R2SkillProvider,
+  type SkillProvider
+} from "../../../../experimental/memory/session/skills";
 
 // ── In-memory providers for tests ──────────────────────────────
 
@@ -25,6 +28,68 @@ class WritableProvider implements WritableContextProvider {
   }
   async set(content: string) {
     this.value = content;
+  }
+}
+
+type MockR2Object = {
+  key: string;
+  content: string;
+  customMetadata?: Record<string, string>;
+  text(): Promise<string>;
+};
+
+class MockR2Bucket {
+  gets: string[] = [];
+  puts: Array<{
+    key: string;
+    content: string;
+    options?: R2PutOptions;
+  }> = [];
+  private objects: Map<string, MockR2Object>;
+
+  constructor(
+    objects: Record<
+      string,
+      { content: string; customMetadata?: Record<string, string> }
+    > = {}
+  ) {
+    this.objects = new Map(
+      Object.entries(objects).map(([key, value]) => [
+        key,
+        {
+          key,
+          content: value.content,
+          customMetadata: value.customMetadata,
+          text: async () => value.content
+        }
+      ])
+    );
+  }
+
+  async list(options?: { prefix?: string }) {
+    const prefix = options?.prefix ?? "";
+    return {
+      objects: Array.from(this.objects.values()).filter((obj) =>
+        obj.key.startsWith(prefix)
+      ),
+      truncated: false,
+      cursor: undefined
+    };
+  }
+
+  async get(key: string) {
+    this.gets.push(key);
+    return this.objects.get(key) ?? null;
+  }
+
+  async put(key: string, content: string, options?: R2PutOptions) {
+    this.puts.push({ key, content, options });
+    this.objects.set(key, {
+      key,
+      content,
+      customMetadata: options?.customMetadata,
+      text: async () => content
+    });
   }
 }
 
@@ -53,6 +118,87 @@ class MemorySkillProvider implements SkillProvider {
     this.skills.set(key, { content, description });
   }
 }
+
+// ── R2 skill provider ──────────────────────────────────────────
+
+describe("R2SkillProvider", () => {
+  it("filters metadata to configured keys relative to prefix", async () => {
+    const bucket = new MockR2Bucket({
+      "skills/tax": {
+        content: "Tax skill",
+        customMetadata: { description: "Tax workflows" }
+      },
+      "skills/bank-reconciliation": {
+        content: "Bank skill",
+        customMetadata: { description: "Bank reconciliation" }
+      },
+      "skills/hidden": {
+        content: "Hidden skill",
+        customMetadata: { description: "Should not be listed" }
+      },
+      "other/tax": { content: "Outside prefix" }
+    });
+    const provider = new R2SkillProvider(bucket as unknown as R2Bucket, {
+      prefix: "skills/",
+      keys: ["tax", "bank-reconciliation"]
+    });
+
+    const metadata = await provider.get();
+
+    expect(metadata).toBe(
+      "- tax: Tax workflows\n- bank-reconciliation: Bank reconciliation"
+    );
+  });
+
+  it("does not fetch disallowed keys", async () => {
+    const bucket = new MockR2Bucket({
+      "skills/tax": { content: "Tax skill" },
+      "skills/hidden": { content: "Hidden skill" }
+    });
+    const provider = new R2SkillProvider(bucket as unknown as R2Bucket, {
+      prefix: "skills/",
+      keys: ["tax"]
+    });
+
+    await expect(provider.load("tax")).resolves.toBe("Tax skill");
+    await expect(provider.load("hidden")).resolves.toBeNull();
+    expect(bucket.gets).toEqual(["skills/tax"]);
+  });
+
+  it("treats omitted or empty keys as exposing all keys", async () => {
+    const bucket = new MockR2Bucket({
+      tax: { content: "Tax skill" },
+      hidden: { content: "Hidden skill" }
+    });
+
+    await expect(
+      new R2SkillProvider(bucket as unknown as R2Bucket).get()
+    ).resolves.toBe("- tax\n- hidden");
+    await expect(
+      new R2SkillProvider(bucket as unknown as R2Bucket, { keys: [] }).load(
+        "hidden"
+      )
+    ).resolves.toBe("Hidden skill");
+  });
+
+  it("keeps set unchanged when keys are configured", async () => {
+    const bucket = new MockR2Bucket();
+    const provider = new R2SkillProvider(bucket as unknown as R2Bucket, {
+      prefix: "skills/",
+      keys: ["tax"]
+    });
+
+    await provider.set("hidden", "Hidden skill", "Still writable");
+
+    expect(bucket.puts).toEqual([
+      {
+        key: "skills/hidden",
+        content: "Hidden skill",
+        options: { customMetadata: { description: "Still writable" } }
+      }
+    ]);
+  });
+});
 
 // ── Provider type detection ────────────────────────────────────
 
