@@ -2,4 +2,4 @@
 "agents": patch
 ---
 
-Ensure recovered agent-tool runs go through the same terminal lifecycle path as live runs. Parent recovery reconciliation now replays stored child chunks, broadcasts terminal agent-tool events, and invokes `onAgentToolFinish` after updating the parent run registry.
+Fixed a bug that could cause client state to drift from internal Durable Object state when agent tool calls spanned a Durable Object restart.
