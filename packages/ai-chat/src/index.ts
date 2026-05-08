@@ -3708,11 +3708,12 @@ export class AIChatAgent<
             //   state "streaming" (interrupted mid-generation). Parts with
             //   state "done" or no state create new blocks as usual (e.g.
             //   tool auto-continuation).
-            // - reasoning-start: server-side message building skips appending
-            //   a new reasoning part when one already exists, so re-reasoning
-            //   during continuation merges into the same persisted block. The
-            //   chunk is still forwarded to clients to keep the UI stream
-            //   protocol valid.
+            // - reasoning-start: suppressed only when the last reasoning part
+            //   has state "streaming" (interrupted mid-generation). Completed
+            //   reasoning blocks from earlier in the turn must not swallow new
+            //   continuation reasoning, otherwise the streamed reasoning block
+            //   disappears when the final persisted message replaces the live
+            //   stream.
             let skipServerApply = false;
             if (continuation) {
               if (!continuationTextResumed && data.type === "text-start") {
@@ -3735,17 +3736,22 @@ export class AIChatAgent<
                 data.type === "reasoning-start"
               ) {
                 for (let k = message.parts.length - 1; k >= 0; k--) {
-                  if (message.parts[k].type === "reasoning") {
-                    continuationReasoningResumed = true;
+                  const part = message.parts[k];
+                  if (part.type === "reasoning") {
+                    if (
+                      "state" in part &&
+                      (part as { state: string }).state === "streaming"
+                    ) {
+                      continuationReasoningResumed = true;
+                    }
                     break;
                   }
                 }
-                // Keep the persisted continuation merged into the cloned
-                // reasoning part, but still forward reasoning-start to the
-                // client. AI SDK v6 requires reasoning-start before any
+                // For interrupted continuations, keep appending to the cloned
+                // streaming reasoning part but still forward reasoning-start to
+                // the client. AI SDK v6 requires reasoning-start before any
                 // reasoning-delta in the stream processor's active-part
-                // registry, even when the message already contains a
-                // completed reasoning part from earlier in the turn.
+                // registry.
                 skipServerApply = continuationReasoningResumed;
               }
             }

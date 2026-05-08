@@ -640,9 +640,28 @@ describe("Client tools continuation", () => {
       const reasoningParts = persistedAssistant!.parts.filter(
         (part) => part.type === "reasoning"
       );
-      expect(reasoningParts).toHaveLength(1);
+      expect(reasoningParts).toHaveLength(2);
       expect(reasoningParts[0]).toMatchObject({
-        text: "initial reasoningcontinuation reasoning",
+        text: "initial reasoning",
+        state: "done"
+      });
+      expect(reasoningParts[1]).toMatchObject({
+        text: "continuation reasoning",
+        state: "done"
+      });
+
+      const persistedMessages =
+        (await agentStub.getPersistedMessages()) as ChatMessage[];
+      const storedAssistant = persistedMessages.find(
+        (message) => message.id === "assistant-issue-1480"
+      );
+      expect(storedAssistant).toBeDefined();
+      const storedReasoningParts = storedAssistant!.parts.filter(
+        (part) => part.type === "reasoning"
+      );
+      expect(storedReasoningParts).toHaveLength(2);
+      expect(storedReasoningParts[1]).toMatchObject({
+        text: "continuation reasoning",
         state: "done"
       });
     } finally {
