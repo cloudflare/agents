@@ -222,6 +222,7 @@ type AgentToolChildRunRow = {
   stream_id: string | null;
   status: AgentToolChildRunStatus;
   summary: string | null;
+  output_json: string | null;
   error_message: string | null;
   started_at: number;
   completed_at: number | null;
@@ -1913,18 +1914,34 @@ export class Think<
         stream_id TEXT,
         status TEXT NOT NULL,
         summary TEXT,
+        output_json TEXT,
         error_message TEXT,
         started_at INTEGER NOT NULL,
         completed_at INTEGER
       )
     `;
+
+    this._addAgentToolChildRunColumnIfMissing(
+      "ALTER TABLE cf_agent_tool_child_runs ADD COLUMN output_json TEXT"
+    );
+  }
+
+  private _addAgentToolChildRunColumnIfMissing(sql: string): void {
+    try {
+      this.ctx.storage.sql.exec(sql);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.toLowerCase().includes("duplicate column")) {
+        throw error;
+      }
+    }
   }
 
   private _readAgentToolChildRun(runId: string): AgentToolChildRunRow | null {
     this._ensureAgentToolChildRunTable();
     const rows = this.sql<AgentToolChildRunRow>`
-      SELECT run_id, request_id, stream_id, status, summary, error_message,
-             started_at, completed_at
+      SELECT run_id, request_id, stream_id, status, summary, output_json,
+             error_message, started_at, completed_at
       FROM cf_agent_tool_child_runs
       WHERE run_id = ${runId}
       LIMIT 1
@@ -1936,12 +1953,17 @@ export class Think<
     row: AgentToolChildRunRow,
     output?: Output
   ): AgentToolRunInspection<Output> {
+    const storedOutput =
+      row.output_json === null
+        ? output
+        : (Think._parseAgentToolOutput(row.output_json) as Output);
+
     return {
       runId: row.run_id,
       status: row.status,
       requestId: row.request_id ?? undefined,
       streamId: row.stream_id ?? undefined,
-      output,
+      output: storedOutput,
       summary: row.summary ?? undefined,
       error: row.error_message ?? undefined,
       startedAt: row.started_at,
@@ -1961,6 +1983,20 @@ export class Think<
 
   protected getAgentToolOutput(_runId: string): unknown {
     return undefined;
+  }
+
+  protected getAgentToolSummary(runId: string, output: unknown): string {
+    const text = this._getAgentToolFinalText(runId);
+    if (text) return text;
+    if (typeof output === "string") return output;
+    if (output !== undefined) {
+      try {
+        return JSON.stringify(output);
+      } catch {
+        return String(output);
+      }
+    }
+    return "";
   }
 
   async startAgentToolRun(
@@ -2003,25 +2039,24 @@ export class Think<
           this._resumableStream
             .getAllStreamMetadata()
             .find((m) => m.request_id === result.requestId)?.id ?? null;
-        const summary = this._getAgentToolFinalText(options.runId);
+        const output = this.getAgentToolOutput(options.runId);
+        const summary = this.getAgentToolSummary(options.runId, output);
         const streamError = this._agentToolLastErrors.get(options.runId);
         const status: AgentToolChildRunStatus =
           result.status === "aborted"
             ? "aborted"
-            : streamError || !summary
+            : streamError
               ? "error"
               : "completed";
-        const error =
-          status === "error"
-            ? (streamError ??
-              `${this.constructor.name} finished without producing assistant text.`)
-            : null;
+        const error: string | null =
+          status === "error" ? (streamError ?? "Agent tool run failed.") : null;
         this.sql`
           UPDATE cf_agent_tool_child_runs
           SET request_id = ${result.requestId},
               stream_id = ${streamId},
               status = ${status},
               summary = ${summary},
+              output_json = ${Think._stringifyAgentToolOutput(output)},
               error_message = ${error},
               completed_at = ${Date.now()}
           WHERE run_id = ${options.runId}
@@ -2138,6 +2173,24 @@ export class Think<
       }
     });
     return stream as unknown as ReadableStream<AgentToolStoredChunk>;
+  }
+
+  private static _stringifyAgentToolOutput(output: unknown): string | null {
+    if (output === undefined) return null;
+    try {
+      return JSON.stringify(output);
+    } catch {
+      return JSON.stringify(String(output));
+    }
+  }
+
+  private static _parseAgentToolOutput(value: string | null): unknown {
+    if (value === null) return undefined;
+    try {
+      return JSON.parse(value);
+    } catch {
+      return undefined;
+    }
   }
 
   private _getAgentToolFinalText(runId: string): string | null {

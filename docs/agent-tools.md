@@ -91,6 +91,26 @@ The generated tool calls `this.runAgentTool(ChildAgent, ...)`, streams
 summary to the parent model. If the run fails, aborts, or is interrupted, the
 tool returns a structured failure instead of an empty success value.
 
+For `Think` children that do workflow-style work without user-facing assistant
+text, override `getAgentToolOutput()` and, if needed, `getAgentToolSummary()`.
+Assistant text remains the default summary when present, but a Think agent-tool
+run can complete successfully without emitting text chunks.
+
+```ts
+export class Extractor extends Think<Env> {
+  protected override getAgentToolOutput(runId: string) {
+    const rows = this.sql<{ result_json: string }>`
+      SELECT result_json FROM extraction_runs WHERE id = ${runId}
+    `;
+    return rows[0] ? JSON.parse(rows[0].result_json) : undefined;
+  }
+
+  protected override getAgentToolSummary(_runId: string, output: unknown) {
+    return output ? "Extraction complete" : "";
+  }
+}
+```
+
 ## Run an Agent tool imperatively
 
 Use `runAgentTool()` for deterministic workflows, scheduled work, HTTP

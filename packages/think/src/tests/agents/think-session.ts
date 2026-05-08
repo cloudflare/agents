@@ -306,6 +306,8 @@ export class ThinkTestAgent extends Think {
     afterChunks: number;
     message: string;
   } | null = null;
+  private _stripTextResponseForTest = false;
+  private _agentToolOutputForTest = new Map<string, unknown>();
   private _responseLog: ChatResponseResult[] = [];
 
   override onChatError(error: unknown): unknown {
@@ -346,6 +348,10 @@ export class ThinkTestAgent extends Think {
 
   override onChatResponse(result: ChatResponseResult): void {
     this._responseLog.push(result);
+  }
+
+  protected override getAgentToolOutput(runId: string): unknown {
+    return this._agentToolOutputForTest.get(runId);
   }
 
   override beforeTurn(ctx: TurnContext): TurnConfig | void {
@@ -502,39 +508,60 @@ export class ThinkTestAgent extends Think {
   protected override _transformInferenceResult(
     result: StreamableResult
   ): StreamableResult {
-    if (!this._errorConfig) return result;
+    if (!this._errorConfig && !this._stripTextResponseForTest) return result;
 
     const config = this._errorConfig;
-    const originalStream = result.toUIMessageStream();
-    const reader = (originalStream as unknown as ReadableStream).getReader();
-    let chunkCount = 0;
-    let shouldThrow = false;
+    const stripText = this._stripTextResponseForTest;
 
-    const wrapped: AsyncIterable<unknown> = {
-      [Symbol.asyncIterator]() {
-        return {
-          async next() {
-            if (shouldThrow) {
-              await reader.cancel();
-              throw new SimulatedChatError(config.message);
-            }
-            const { done, value } = await reader.read();
-            if (done) return { done: true as const, value: undefined };
-            chunkCount++;
-            if (chunkCount >= config.afterChunks) {
-              shouldThrow = true;
-            }
-            return { done: false as const, value };
-          },
-          async return() {
-            await reader.cancel();
-            return { done: true as const, value: undefined };
+    return {
+      toUIMessageStream(options?: { sendReasoning?: boolean }) {
+        const originalStream = result.toUIMessageStream(options);
+        const reader = (
+          originalStream as unknown as ReadableStream<unknown>
+        ).getReader();
+        let chunkCount = 0;
+        let shouldThrow = false;
+
+        const wrapped: AsyncIterable<unknown> = {
+          [Symbol.asyncIterator]() {
+            return {
+              async next() {
+                while (true) {
+                  if (shouldThrow && config) {
+                    await reader.cancel();
+                    throw new SimulatedChatError(config.message);
+                  }
+                  const { done, value } = await reader.read();
+                  if (done) return { done: true as const, value: undefined };
+                  chunkCount++;
+                  if (config && chunkCount >= config.afterChunks) {
+                    shouldThrow = true;
+                  }
+                  if (
+                    stripText &&
+                    value != null &&
+                    typeof value === "object" &&
+                    "type" in value &&
+                    (value.type === "text-start" ||
+                      value.type === "text-delta" ||
+                      value.type === "text-end")
+                  ) {
+                    continue;
+                  }
+                  return { done: false as const, value };
+                }
+              },
+              async return() {
+                await reader.cancel();
+                return { done: true as const, value: undefined };
+              }
+            };
           }
         };
+
+        return wrapped;
       }
     };
-
-    return { toUIMessageStream: () => wrapped };
   }
 
   // ── Test-specific public methods ───────────────────────────────
@@ -643,6 +670,21 @@ export class ThinkTestAgent extends Think {
 
   async setResponse(response: string): Promise<void> {
     this._response = response;
+  }
+
+  async setStripTextResponseForTest(strip: boolean): Promise<void> {
+    this._stripTextResponseForTest = strip;
+  }
+
+  async setAgentToolOutputForTest(
+    runId: string,
+    output: unknown
+  ): Promise<void> {
+    this._agentToolOutputForTest.set(runId, output);
+  }
+
+  async clearAgentToolOutputForTest(runId: string): Promise<void> {
+    this._agentToolOutputForTest.delete(runId);
   }
 
   private _multiChunks: string[] | null = null;

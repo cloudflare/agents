@@ -33,6 +33,14 @@ Durable Object RPC. If a parent restarts while a run is non-terminal, V1 replays
 stored chunks and marks the parent row `interrupted`; live-tail reattach is
 deferred.
 
+Think child completion is not tied to assistant text. Assistant text is only the
+default summary source for chat-like helper agents. Workflow-style Think
+children can complete without text chunks and can expose durable structured
+output through `getAgentToolOutput()` plus an optional `getAgentToolSummary()`
+override. This keeps execution, observation, and result synthesis separate:
+finishing the turn determines terminal status, child chunks are retained for UI
+observation, and output/summary hooks determine what the parent receives.
+
 ## Tradeoffs
 
 - Runs and facets are retained by default so refresh, drill-in, and debugging
