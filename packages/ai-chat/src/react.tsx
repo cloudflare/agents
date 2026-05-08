@@ -14,7 +14,8 @@ import { MessageType } from "./types";
 import { broadcastTransition, type BroadcastStreamState } from "agents/chat";
 import {
   WebSocketChatTransport,
-  type AgentConnection
+  type AgentConnection,
+  type ServerTurnCancellationPolicy
 } from "./ws-chat-transport";
 
 /**
@@ -461,6 +462,25 @@ type UseAgentChatOptions<
    */
   resume?: boolean;
   /**
+   * Treat the browser as a reconnectable observer of a durable server turn.
+   * Generic client-side stream abort/cleanup becomes local-only, while
+   * explicit stop() still cancels the server turn.
+   *
+   * This is an intent-level alias for
+   * serverTurnCancellation: "explicit-only".
+   *
+   * @default false
+   */
+  durable?: boolean;
+  /**
+   * Controls whether generic client-side abort/cancel lifecycle propagates
+   * to the durable server turn. Use "explicit-only" when the browser should
+   * be able to detach and later resume without stopping server work.
+   *
+   * @default "on-client-abort"
+   */
+  serverTurnCancellation?: ServerTurnCancellationPolicy;
+  /**
    * Custom data to include in every chat request body.
    * Accepts a static object or a function that returns one (for dynamic values).
    * These fields are available in `onChatMessage` via `options.body`.
@@ -615,10 +635,16 @@ export function useAgentChat<
     autoContinueAfterToolResult = true, // Server auto-continues after tool results/approvals
     autoSendAfterAllConfirmationsResolved = true, // Legacy option for client-side batching
     resume = true, // Enable stream resumption by default
+    durable = false,
+    serverTurnCancellation: serverTurnCancellationOption,
     body: bodyOption,
     prepareSendMessagesRequest,
     ...rest
   } = options;
+
+  const serverTurnCancellation: ServerTurnCancellationPolicy =
+    serverTurnCancellationOption ??
+    (durable ? "explicit-only" : "on-client-abort");
 
   // Emit deprecation warnings for deprecated options (once per session)
   if (manualToolsRequiringConfirmation) {
@@ -887,6 +913,7 @@ export function useAgentChat<
     customTransportRef.current = new WebSocketChatTransport<ChatMessage>({
       agent: agentRef.current,
       activeRequestIds: localRequestIdsRef.current,
+      serverTurnCancellation,
       prepareBody: async ({ messages: msgs, trigger, messageId }) => {
         // Start with the top-level body option (static or dynamic)
         let extraBody: Record<string, unknown> = {};
@@ -928,6 +955,7 @@ export function useAgentChat<
   // Always point the transport at the latest socket so sends/listeners
   // go through the current connection after _pk changes.
   customTransportRef.current.agent = agentRef.current;
+  customTransportRef.current.setServerTurnCancellation(serverTurnCancellation);
   const customTransport = customTransportRef.current;
 
   // Use a stable Chat ID that doesn't change when _pk changes.
@@ -1020,6 +1048,7 @@ export function useAgentChat<
 
   const stopWithToolContinuationAbort: typeof stop = useCallback(async () => {
     try {
+      customTransport.cancelActiveServerTurn();
       await stop();
     } finally {
       customTransport.abortActiveToolContinuation();

@@ -12,6 +12,8 @@ When you use `AIChatAgent` with `useAgentChat`:
 
 No extra code is needed -- it just works.
 
+If your app treats the browser as a reconnectable observer of a long-running turn, set `durable: true` on `useAgentChat`. This keeps generic client stream abort/cleanup local to the browser while preserving explicit `stop()` as server-side cancellation.
+
 ## Example
 
 ### Server
@@ -49,8 +51,10 @@ function Chat() {
   });
 
   const { messages, sendMessage, status } = useAgentChat({
-    agent
+    agent,
+    durable: true
     // resume: true is the default - streams automatically resume on reconnect
+    // durable: true means browser cleanup does not cancel the server turn
   });
 
   // ... render your chat UI
@@ -79,6 +83,19 @@ function Chat() {
 ### The `replay` flag
 
 Replayed chunks include `replay: true` to distinguish them from live chunks. The client uses this to batch-apply all replayed chunks before rendering, which prevents intermediate states (like reasoning "Thinking..." indicators) from flashing briefly during replay. During a live stream, chunks arrive gradually and React renders each intermediate state naturally.
+
+## Durable client cleanup
+
+`resume: true` controls whether the client tries to reconnect to an active stream. `durable: true` controls cancellation semantics: generic client stream abort/cleanup is local-only, while explicit `stop()` still cancels the server turn.
+
+```tsx
+const { messages, stop } = useAgentChat({
+  agent,
+  durable: true
+});
+```
+
+Advanced clients can set `serverTurnCancellation: "explicit-only"` directly. The default remains `"on-client-abort"` for backward compatibility.
 
 ## Disabling Resume
 

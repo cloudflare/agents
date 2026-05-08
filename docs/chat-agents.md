@@ -775,16 +775,18 @@ function Chat() {
 
 ### Options
 
-| Option                        | Type                                            | Default  | Description                                                                                                              |
-| ----------------------------- | ----------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `agent`                       | `ReturnType<typeof useAgent>`                   | Required | Agent connection from `useAgent`                                                                                         |
-| `onToolCall`                  | `({ toolCall, addToolOutput }) => void`         | —        | Handle client-side tool execution                                                                                        |
-| `autoContinueAfterToolResult` | `boolean`                                       | `true`   | Auto-continue conversation after client tool results and approvals                                                       |
-| `resume`                      | `boolean`                                       | `true`   | Enable automatic stream resumption on reconnect                                                                          |
-| `body`                        | `object \| () => object`                        | —        | Custom data sent with every request                                                                                      |
-| `prepareSendMessagesRequest`  | `(options) => { body?, headers? }`              | —        | Advanced per-request customization                                                                                       |
-| `tools`                       | `Record<string, AITool>`                        | —        | Dynamic client-defined tools for SDK/platform use cases. Schemas are sent to the server automatically                    |
-| `getInitialMessages`          | `(options) => Promise<ChatMessage[]>` or `null` | —        | Custom initial message loader. Set to `null` to skip the HTTP fetch entirely (useful when providing `messages` directly) |
+| Option                        | Type                                            | Default             | Description                                                                                                                                             |
+| ----------------------------- | ----------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agent`                       | `ReturnType<typeof useAgent>`                   | Required            | Agent connection from `useAgent`                                                                                                                        |
+| `onToolCall`                  | `({ toolCall, addToolOutput }) => void`         | —                   | Handle client-side tool execution                                                                                                                       |
+| `autoContinueAfterToolResult` | `boolean`                                       | `true`              | Auto-continue conversation after client tool results and approvals                                                                                      |
+| `resume`                      | `boolean`                                       | `true`              | Enable automatic stream resumption on reconnect                                                                                                         |
+| `durable`                     | `boolean`                                       | `false`             | Treat the browser as a reconnectable observer: generic client stream abort/cleanup is local-only, while explicit `stop()` still cancels the server turn |
+| `serverTurnCancellation`      | `"on-client-abort" \| "explicit-only"`          | `"on-client-abort"` | Advanced cancellation policy. `durable: true` defaults this to `"explicit-only"` unless explicitly overridden                                           |
+| `body`                        | `object \| () => object`                        | —                   | Custom data sent with every request                                                                                                                     |
+| `prepareSendMessagesRequest`  | `(options) => { body?, headers? }`              | —                   | Advanced per-request customization                                                                                                                      |
+| `tools`                       | `Record<string, AITool>`                        | —                   | Dynamic client-defined tools for SDK/platform use cases. Schemas are sent to the server automatically                                                   |
+| `getInitialMessages`          | `(options) => Promise<ChatMessage[]>` or `null` | —                   | Custom initial message loader. Set to `null` to skip the HTTP fetch entirely (useful when providing `messages` directly)                                |
 
 ### Return Values
 
@@ -1169,7 +1171,13 @@ When streaming is active:
 2. If the client disconnects, the server continues streaming and buffering
 3. When the client reconnects, it receives all buffered chunks and resumes live streaming
 
-Disable with `resume: false`:
+For durable sessions where the browser should be a reconnectable observer of the turn, set `durable: true`. Generic client stream abort/cleanup stays local to the browser, but an explicit `stop()` still sends server cancellation:
+
+```tsx
+const { messages, stop } = useAgentChat({ agent, durable: true });
+```
+
+Disable resume with `resume: false`:
 
 ```tsx
 const { messages } = useAgentChat({ agent, resume: false });

@@ -29,6 +29,8 @@ export interface AgentConnection {
   ) => void;
 }
 
+export type ServerTurnCancellationPolicy = "on-client-abort" | "explicit-only";
+
 export type WebSocketChatTransportOptions<
   ChatMessage extends UIMessage = UIMessage
 > = {
@@ -49,6 +51,13 @@ export type WebSocketChatTransportOptions<
    * Used by the onAgentMessage handler to skip messages already handled by the transport.
    */
   activeRequestIds?: Set<string>;
+  /**
+   * Controls whether generic client-side abort/cancel lifecycle should
+   * propagate to the durable server turn. Explicit cancellation via
+   * cancelActiveServerTurn() always sends CF_AGENT_CHAT_REQUEST_CANCEL.
+   * @default "on-client-abort"
+   */
+  serverTurnCancellation?: ServerTurnCancellationPolicy;
 };
 
 /**
@@ -62,6 +71,7 @@ export class WebSocketChatTransport<
   agent: AgentConnection;
   private prepareBody?: WebSocketChatTransportOptions<ChatMessage>["prepareBody"];
   private activeRequestIds?: Set<string>;
+  private serverTurnCancellation: ServerTurnCancellationPolicy;
 
   // Pending resume resolver — set by reconnectToStream, called by
   // handleStreamResuming when onAgentMessage sees CF_AGENT_STREAM_RESUMING.
@@ -75,11 +85,29 @@ export class WebSocketChatTransport<
   // to "submitted" before the server starts streaming.
   private _expectToolContinuation = false;
   private _abortToolContinuation: (() => boolean) | null = null;
+  private _cancelActiveRequest: (() => boolean) | null = null;
 
   constructor(options: WebSocketChatTransportOptions<ChatMessage>) {
     this.agent = options.agent;
     this.prepareBody = options.prepareBody;
     this.activeRequestIds = options.activeRequestIds;
+    this.serverTurnCancellation =
+      options.serverTurnCancellation ?? "on-client-abort";
+  }
+
+  setServerTurnCancellation(policy: ServerTurnCancellationPolicy) {
+    this.serverTurnCancellation = policy;
+  }
+
+  /**
+   * Explicitly cancel the active durable server turn, if any.
+   * This is separate from generic client-side abort/cancel lifecycle so
+   * durable clients can detach locally without stopping server work.
+   */
+  cancelActiveServerTurn(): boolean {
+    const cancelledRequest = this._cancelActiveRequest?.() ?? false;
+    const cancelledToolContinuation = this.abortActiveToolContinuation();
+    return cancelledRequest || cancelledToolContinuation;
   }
 
   /**
@@ -175,11 +203,14 @@ export class WebSocketChatTransport<
     // Single cleanup helper — every terminal path (done, error, abort)
     // goes through here exactly once.
     // keepId: when true, do NOT remove requestId from activeIds. Used by
-    // onAbort so that onAgentMessage continues to skip in-flight chunks
-    // and the server's final done:true broadcast until cleanup happens there.
+    // explicit cancellation so onAgentMessage skips in-flight chunks
+    // and the server's final done:true signal until cleanup happens there.
     const finish = (action: () => void, keepId = false) => {
       if (completed) return;
       completed = true;
+      if (this._cancelActiveRequest === cancelActiveRequest) {
+        this._cancelActiveRequest = null;
+      }
       try {
         action();
       } catch {
@@ -194,13 +225,7 @@ export class WebSocketChatTransport<
     const abortError = new Error("Aborted");
     abortError.name = "AbortError";
 
-    // Abort handler: send cancel to server, then terminate the stream.
-    // Used by both the caller's abortSignal and stream.cancel().
-    // keepId=true: keep requestId in activeIds so onAgentMessage skips any
-    // in-flight chunks the server broadcasts before its done:true signal.
-    // The ID is removed by onAgentMessage when done:true is received.
-    const onAbort = () => {
-      if (completed) return;
+    const sendCancelFrame = () => {
       try {
         agent.send(
           JSON.stringify({
@@ -211,7 +236,28 @@ export class WebSocketChatTransport<
       } catch {
         // Ignore failures (e.g. agent already disconnected)
       }
+    };
+
+    const cancelActiveRequest = () => {
+      if (completed) return false;
+      sendCancelFrame();
       finish(() => streamController.error(abortError), true);
+      return true;
+    };
+    this._cancelActiveRequest = cancelActiveRequest;
+
+    // Abort handler: terminate the local stream. By default this preserves
+    // existing behavior and also cancels the durable server turn. In
+    // explicit-only mode, generic AI SDK abort/cancel lifecycle is local-only;
+    // use cancelActiveServerTurn() for user/app initiated cancellation.
+    const onAbort = () => {
+      if (completed) return;
+      if (this.serverTurnCancellation === "on-client-abort") {
+        sendCancelFrame();
+        finish(() => streamController.error(abortError), true);
+      } else {
+        finish(() => streamController.error(abortError));
+      }
     };
 
     // streamController is assigned synchronously by start(), so it is
