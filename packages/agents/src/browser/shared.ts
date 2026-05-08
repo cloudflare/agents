@@ -1,7 +1,19 @@
 import type { ResolvedProvider } from "@cloudflare/codemode";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
-import { CdpSession, connectBrowser, connectUrl } from "./cdp-session";
+import type { BrowserLease, BrowserSessionOptions } from "./session-manager";
+import {
+  createBrowserSessionManager,
+  hasReusableBrowserSession
+} from "./session-manager";
 import { truncateResponse } from "./truncate";
+
+export {
+  hasReusableBrowserSession,
+  type BrowserSessionOptions,
+  type BrowserSessionStore,
+  type ReusableBrowserSessionOptions,
+  type StoredBrowserSession
+} from "./session-manager";
 
 export interface BrowserToolsOptions {
   /** Browser Rendering binding (Fetcher) — used in production */
@@ -14,6 +26,8 @@ export interface BrowserToolsOptions {
   loader: WorkerLoader;
   /** Execution timeout in milliseconds (default: 30000) */
   timeout?: number;
+  /** Optional browser session lifecycle. Defaults to one fresh session per execute call. */
+  session?: BrowserSessionOptions;
 }
 
 interface RawCdpCommand {
@@ -207,6 +221,12 @@ async function fetchCdpSpecFromBrowser(
   });
 }
 
+export const SESSION_INFO_DESCRIPTION = `Return metadata for the current reusable browser session, including active targets, page URLs, titles, and Live View URLs when enabled. Use this to orient yourself before continuing a multi-step browsing task.`;
+
+export const CLOSE_SESSION_DESCRIPTION = `Close the current reusable browser session. Use this when the browsing task is complete or the user asks to close the browser. Closing releases Browser Run resources and clears browser state.`;
+
+export const RESET_SESSION_DESCRIPTION = `Reset the current reusable browser session by closing any existing browser and creating a fresh one. Use this when stale browser state is causing problems or the user asks for a fresh browser.`;
+
 export const EXECUTE_DESCRIPTION = `Execute CDP commands against a live browser session using JavaScript code.
 
 Available in your code:
@@ -274,6 +294,7 @@ export function createBrowserToolHandlers(options: BrowserToolsOptions) {
     loader: options.loader,
     timeout: options.timeout
   });
+  const sessionManager = createBrowserSessionManager(options);
 
   async function search(code: string): Promise<ToolResult> {
     try {
@@ -310,40 +331,29 @@ export function createBrowserToolHandlers(options: BrowserToolsOptions) {
   }
 
   async function execute(code: string): Promise<ToolResult> {
-    let session: CdpSession | undefined;
+    let lease: BrowserLease | undefined;
     try {
-      if (options.cdpUrl) {
-        session = await connectUrl(options.cdpUrl, {
-          timeoutMs: options.timeout,
-          headers: options.cdpHeaders
-        });
-      } else if (options.browser) {
-        session = await connectBrowser(options.browser, options.timeout);
-      } else {
-        return {
-          text: "Either 'browser' (Fetcher binding) or 'cdpUrl' must be provided",
-          isError: true
-        };
-      }
+      lease = await sessionManager.acquire();
+      const session = lease.session;
 
       const providers: ResolvedProvider[] = [
         {
           name: "cdp",
           fns: {
             send: async (method: unknown, params: unknown, opts: unknown) =>
-              session!.send(
+              session.send(
                 method as string,
                 params,
                 opts as { timeoutMs?: number; sessionId?: string }
               ),
             attachToTarget: async (targetId: unknown, opts: unknown) =>
-              session!.attachToTarget(
+              session.attachToTarget(
                 targetId as string,
                 opts as { timeoutMs?: number }
               ),
             getDebugLog: async (limit: unknown) =>
-              session!.getDebugLog(limit as number | undefined),
-            clearDebugLog: async () => session!.clearDebugLog()
+              session.getDebugLog(limit as number | undefined),
+            clearDebugLog: async () => session.clearDebugLog()
           },
           positionalArgs: true
         }
@@ -357,9 +367,36 @@ export function createBrowserToolHandlers(options: BrowserToolsOptions) {
     } catch (error) {
       return { text: formatError(error), isError: true };
     } finally {
-      session?.close();
+      await lease?.release();
     }
   }
 
-  return { search, execute };
+  async function sessionInfo(): Promise<ToolResult> {
+    try {
+      const info = await sessionManager.info();
+      return { text: truncateResponse(info ?? { status: "none" }) };
+    } catch (error) {
+      return { text: formatError(error), isError: true };
+    }
+  }
+
+  async function closeSession(): Promise<ToolResult> {
+    try {
+      await sessionManager.close();
+      return { text: JSON.stringify({ status: "closed" }) };
+    } catch (error) {
+      return { text: formatError(error), isError: true };
+    }
+  }
+
+  async function resetSession(): Promise<ToolResult> {
+    try {
+      const info = await sessionManager.reset();
+      return { text: truncateResponse(info ?? { status: "none" }) };
+    } catch (error) {
+      return { text: formatError(error), isError: true };
+    }
+  }
+
+  return { search, execute, sessionInfo, closeSession, resetSession };
 }

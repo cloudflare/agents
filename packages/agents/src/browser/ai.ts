@@ -3,7 +3,11 @@ import type { ToolSet } from "ai";
 import { z } from "zod";
 import {
   createBrowserToolHandlers,
+  hasReusableBrowserSession,
   SEARCH_DESCRIPTION,
+  SESSION_INFO_DESCRIPTION,
+  CLOSE_SESSION_DESCRIPTION,
+  RESET_SESSION_DESCRIPTION,
   EXECUTE_DESCRIPTION,
   type BrowserToolsOptions
 } from "./shared";
@@ -36,7 +40,7 @@ export type { BrowserToolsOptions } from "./shared";
 export function createBrowserTools(options: BrowserToolsOptions): ToolSet {
   const handlers = createBrowserToolHandlers(options);
 
-  return {
+  const browserTools: ToolSet = {
     browser_search: tool({
       description: SEARCH_DESCRIPTION,
       inputSchema: z.object({
@@ -69,4 +73,44 @@ export function createBrowserTools(options: BrowserToolsOptions): ToolSet {
       }
     })
   };
+
+  if (hasReusableBrowserSession(options)) {
+    browserTools.browser_session_info = tool({
+      description: SESSION_INFO_DESCRIPTION,
+      inputSchema: z.object({}),
+      execute: async () => {
+        const result = await handlers.sessionInfo();
+        if (result.isError) {
+          throw new Error(result.text);
+        }
+        return result.text;
+      }
+    });
+
+    browserTools.browser_close_session = tool({
+      description: CLOSE_SESSION_DESCRIPTION,
+      inputSchema: z.object({}),
+      execute: async () => {
+        const result = await handlers.closeSession();
+        if (result.isError) {
+          throw new Error(result.text);
+        }
+        return result.text;
+      }
+    });
+
+    browserTools.browser_reset_session = tool({
+      description: RESET_SESSION_DESCRIPTION,
+      inputSchema: z.object({}),
+      execute: async () => {
+        const result = await handlers.resetSession();
+        if (result.isError) {
+          throw new Error(result.text);
+        }
+        return result.text;
+      }
+    });
+  }
+
+  return browserTools;
 }

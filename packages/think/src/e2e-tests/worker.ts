@@ -5,8 +5,9 @@
  */
 import { createWorkersAI } from "workers-ai-provider";
 import { Agent, callable, routeAgentRequest } from "agents";
-import type { LanguageModel, UIMessage } from "ai";
+import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { Think, Workspace } from "../think";
+import { createBrowserTools } from "../tools/browser";
 import type { ChatRecoveryContext, ChatRecoveryOptions } from "../think";
 
 type Env = {
@@ -14,8 +15,11 @@ type Env = {
   ThinkRecoveryE2EAgent: DurableObjectNamespace<ThinkRecoveryE2EAgent>;
   ThinkRecoveryHelperParent: DurableObjectNamespace<ThinkRecoveryHelperParent>;
   ThinkRecoveryHelperAgent: DurableObjectNamespace<ThinkRecoveryHelperAgent>;
+  ThinkBrowserE2EAgent: DurableObjectNamespace<ThinkBrowserE2EAgent>;
   AI: Ai;
   R2: R2Bucket;
+  BROWSER: Fetcher;
+  LOADER: WorkerLoader;
 };
 
 export class TestAssistant extends Think<Env> {
@@ -83,6 +87,76 @@ function createSlowE2EMockModel(): LanguageModel {
       return Promise.resolve({ stream });
     }
   } as LanguageModel;
+}
+
+type ExecutableTool<Input> = {
+  execute(input: Input): unknown | Promise<unknown>;
+};
+
+function executableTool<Input>(
+  tools: ToolSet,
+  name: string
+): ExecutableTool<Input> {
+  const candidate = tools[name] as unknown;
+  if (
+    typeof candidate !== "object" ||
+    candidate === null ||
+    !("execute" in candidate) ||
+    typeof candidate.execute !== "function"
+  ) {
+    throw new Error(`Tool ${name} is not executable`);
+  }
+  return candidate as ExecutableTool<Input>;
+}
+
+export class ThinkBrowserE2EAgent extends Think<Env> {
+  override getModel(): LanguageModel {
+    return createSlowE2EMockModel();
+  }
+
+  override getTools(): ToolSet {
+    return {
+      ...createBrowserTools({
+        browser: this.env.BROWSER,
+        loader: this.env.LOADER,
+        session: {
+          mode: "reuse",
+          keepAliveMs: 600_000,
+          liveView: true
+        }
+      })
+    };
+  }
+
+  @callable()
+  async executeBrowserTool(code: string): Promise<string> {
+    const tool = executableTool<{ code: string }>(
+      this.getTools(),
+      "browser_execute"
+    );
+    const result = await tool.execute({ code });
+    return String(result);
+  }
+
+  @callable()
+  async browserSessionInfo(): Promise<string> {
+    const tool = executableTool<Record<string, never>>(
+      this.getTools(),
+      "browser_session_info"
+    );
+    const result = await tool.execute({});
+    return String(result);
+  }
+
+  @callable()
+  async closeBrowserSession(): Promise<string> {
+    const tool = executableTool<Record<string, never>>(
+      this.getTools(),
+      "browser_close_session"
+    );
+    const result = await tool.execute({});
+    return String(result);
+  }
 }
 
 export class ThinkRecoveryE2EAgent extends Think<Env> {

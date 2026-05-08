@@ -316,6 +316,63 @@ describe("browser tools e2e", () => {
     });
   });
 
+  describe("reusable browser sessions", () => {
+    afterAll(async () => {
+      await callAgent("testCloseReuse").catch(() => undefined);
+    });
+
+    it("should preserve browser targets across execute calls", async () => {
+      const first = (await callAgent("testExecuteReuse", [
+        `async () => {
+          const { targetId } = await cdp.send("Target.createTarget", { url: "about:blank" });
+          const sessionId = await cdp.attachToTarget(targetId);
+          await cdp.send("Runtime.enable", {}, { sessionId });
+          await cdp.send("Page.navigate", { url: "data:text/html,<title>Reusable Session</title><body>persisted</body>" }, { sessionId });
+          for (let i = 0; i < 20; i++) {
+            const { result } = await cdp.send("Runtime.evaluate", { expression: "document.title" }, { sessionId });
+            if (result.value === "Reusable Session") break;
+            await new Promise(r => setTimeout(r, 50));
+          }
+          return { targetId };
+        }`
+      ])) as { text: string; isError?: boolean };
+
+      expect(first.isError).toBeFalsy();
+      const { targetId } = JSON.parse(first.text) as { targetId: string };
+
+      const second = (await callAgent("testExecuteReuse", [
+        `async () => {
+          const { targetInfos } = await cdp.send("Target.getTargets");
+          const target = targetInfos.find(t => t.targetId === ${JSON.stringify(targetId)});
+          if (!target) return { found: false };
+          const sessionId = await cdp.attachToTarget(target.targetId);
+          const { result } = await cdp.send("Runtime.evaluate", { expression: "document.title" }, { sessionId });
+          return { found: true, title: result.value };
+        }`
+      ])) as { text: string; isError?: boolean };
+
+      expect(second.isError).toBeFalsy();
+      expect(JSON.parse(second.text)).toEqual({
+        found: true,
+        title: "Reusable Session"
+      });
+
+      const info = (await callAgent("testReuseInfo")) as {
+        text: string;
+        isError?: boolean;
+      };
+      expect(info.isError).toBeFalsy();
+      const parsedInfo = JSON.parse(info.text) as {
+        sessionId?: string;
+        targets?: Array<{ id: string; devtoolsFrontendUrl?: string }>;
+      };
+      expect(parsedInfo.sessionId).toBeTruthy();
+      expect(parsedInfo.targets?.some((target) => target.id === targetId)).toBe(
+        true
+      );
+    });
+  });
+
   describe("integration scenarios", () => {
     it("should navigate to a page and get its title", async () => {
       const result = (await callAgent("testExecute", [

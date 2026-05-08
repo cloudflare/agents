@@ -285,7 +285,39 @@ This adds two tools to your agent:
 
 Both tools use the code-mode pattern — the model writes JavaScript async arrow functions that run in a sandboxed Worker isolate. In `browser_search`, the sandbox has access to `spec.get()` which returns the full normalized CDP protocol. In `browser_execute`, the sandbox has access to `cdp.send()`, `cdp.attachToTarget()`, and debug log helpers.
 
-Each `browser_execute` call opens a fresh browser session and closes it when the code finishes. For page-scoped CDP commands (`Page.*`, `Runtime.*`, `DOM.*`), the model must create a target, attach to it, and pass the `sessionId`.
+Each `browser_execute` call opens a fresh browser session and closes it when the code finishes by default. For page-scoped CDP commands (`Page.*`, `Runtime.*`, `DOM.*`), the model must create a target, attach to it, and pass the `sessionId`.
+
+For multi-step browsing workflows, enable a reusable Browser Run session:
+
+```typescript
+getTools() {
+  return {
+    ...createBrowserTools({
+      browser: this.env.BROWSER,
+      loader: this.env.LOADER,
+      session: {
+        mode: "reuse",
+        keepAliveMs: 600_000,
+        liveView: true
+      }
+    })
+  };
+}
+```
+
+In Think, `session: { mode: "reuse" }` automatically uses this agent/chat as the session owner and stores the Browser Run session id in the agent Durable Object. The CDP WebSocket is still opened only for the tool call and disconnected afterward, so this works across hibernation and restarts while the Browser Run session remains alive.
+
+Reusable mode adds three lifecycle tools:
+
+| Tool                    | Description                                              |
+| ----------------------- | -------------------------------------------------------- |
+| `browser_session_info`  | Return active targets, URLs, titles, and Live View URLs  |
+| `browser_close_session` | Close the reusable browser and release Browser Run usage |
+| `browser_reset_session` | Close any current browser and start from a fresh session |
+
+When `liveView` is enabled, Think broadcasts browser session metadata to connected clients using a `browser-session` message so UIs can render an “Open Live View” action without requiring the model to surface the URL in chat text. Live View URLs expire after five minutes if they are not opened; call `browser_session_info` again to refresh them.
+
+Reusable sessions preserve tabs, cookies, local storage, and page state, but they also consume Browser Run time while alive. Browser Run closes idle sessions automatically, and the tools recover by creating a fresh session if the stored session has expired. Call `browser_close_session` when the browsing task is done.
 
 ### Combining with Other Tools
 
