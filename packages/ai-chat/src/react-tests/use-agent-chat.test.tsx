@@ -3899,6 +3899,85 @@ describe("useAgentChat isServerStreaming / isStreaming (issue #1226)", () => {
       .toHaveTextContent("false");
   });
 
+  it("isServerStreaming resets when a fallback-observed stream later becomes transport-owned", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "server-stream-fallback-to-transport",
+      url: "ws://localhost:3000/agents/chat/server-stream-fallback-to-transport?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[]
+      });
+      chatInstance = chat;
+      return (
+        <div data-testid="isServerStreaming">
+          {String(chat.isServerStreaming)}
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await act(async () => {
+      dispatch(target, { type: "cf_agent_stream_resume_none" });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "fallback-to-transport-1"
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("true");
+
+    await act(async () => {
+      void chatInstance!.resumeStream();
+      await sleep(10);
+    });
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "fallback-to-transport-1"
+      });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "fallback-to-transport-1",
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("false");
+  });
+
   it("isServerStreaming works with continuation broadcasts", async () => {
     const { agent, target } = createAgentWithTarget({
       name: "server-stream-continuation",
