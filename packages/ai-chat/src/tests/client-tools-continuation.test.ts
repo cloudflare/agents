@@ -509,6 +509,147 @@ describe("Client tools continuation", () => {
     }
   });
 
+  it("preserves reasoning-start before reasoning-delta during approval continuation (#1480)", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+    try {
+      const userMessage: ChatMessage = {
+        id: "msg-issue-1480",
+        role: "user",
+        parts: [{ type: "text", text: "Hello" }]
+      };
+
+      let resolveInitialDone: (value: boolean) => void;
+      const initialDonePromise = new Promise<boolean>((res) => {
+        resolveInitialDone = res;
+      });
+      const initialTimeout = setTimeout(() => resolveInitialDone(false), 3000);
+
+      ws.addEventListener("message", function initialHandler(e: MessageEvent) {
+        const data = JSON.parse(e.data as string);
+        if (data.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE && data.done) {
+          clearTimeout(initialTimeout);
+          resolveInitialDone(true);
+          ws.removeEventListener("message", initialHandler);
+        }
+      });
+
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+          id: "req-issue-1480-initial",
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [userMessage],
+              reasoningContinuation: true,
+              delayContinuationChunks: true
+            })
+          }
+        })
+      );
+      expect(await initialDonePromise).toBe(true);
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+      await agentStub.persistMessages([
+        userMessage,
+        {
+          id: "assistant-issue-1480",
+          role: "assistant",
+          parts: [
+            {
+              type: "reasoning",
+              text: "initial reasoning",
+              state: "done"
+            },
+            {
+              type: "tool-changeBackgroundColor",
+              toolCallId: "call_issue_1480",
+              state: "approval-requested",
+              input: { color: "blue" },
+              approval: { id: "approval_issue_1480" }
+            }
+          ] as ChatMessage["parts"]
+        }
+      ]);
+
+      const receivedMessages = collectMessages(ws);
+
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_APPROVAL,
+          toolCallId: "call_issue_1480",
+          approved: true,
+          autoContinue: true
+        })
+      );
+
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+        })
+      );
+
+      const resuming = (await waitForMessage(
+        receivedMessages,
+        (message) => message.type === MessageType.CF_AGENT_STREAM_RESUMING
+      )) as { id: string } | undefined;
+      expect(resuming).toBeDefined();
+
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+          id: resuming!.id
+        })
+      );
+
+      const done = await waitForMessage(
+        receivedMessages,
+        (message) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.done === true
+      );
+      expect(done).toBeDefined();
+
+      const chunkTypes = receivedMessages
+        .filter(
+          (message) =>
+            message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+            typeof message.body === "string" &&
+            message.body.length > 0
+        )
+        .map((message) => JSON.parse(message.body as string).type as string);
+
+      const reasoningStartIndex = chunkTypes.indexOf("reasoning-start");
+      const reasoningDeltaIndex = chunkTypes.indexOf("reasoning-delta");
+
+      expect(reasoningStartIndex).toBeGreaterThanOrEqual(0);
+      expect(reasoningDeltaIndex).toBeGreaterThan(reasoningStartIndex);
+
+      const persistedMessagesBroadcast = (await waitForMessage(
+        receivedMessages,
+        (message) => message.type === MessageType.CF_AGENT_CHAT_MESSAGES
+      )) as { messages: ChatMessage[] } | undefined;
+      expect(persistedMessagesBroadcast).toBeDefined();
+
+      const persistedAssistant = persistedMessagesBroadcast!.messages.find(
+        (message) => message.id === "assistant-issue-1480"
+      );
+      expect(persistedAssistant).toBeDefined();
+      const reasoningParts = persistedAssistant!.parts.filter(
+        (part) => part.type === "reasoning"
+      );
+      expect(reasoningParts).toHaveLength(1);
+      expect(reasoningParts[0]).toMatchObject({
+        text: "initial reasoningcontinuation reasoning",
+        state: "done"
+      });
+    } finally {
+      ws.close(1000);
+    }
+  });
+
   it("should send resume-none when an auto-continuation returns no body", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

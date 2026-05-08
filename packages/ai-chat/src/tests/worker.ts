@@ -158,6 +158,36 @@ export class TestChatAgent extends AIChatAgent<Env> {
       ]);
     }
 
+    if (
+      options?.continuation === true &&
+      options.body?.reasoningContinuation === true
+    ) {
+      const chunks = [
+        { type: "start" },
+        { type: "reasoning-start", id: "reasoning_issue_1480" },
+        {
+          type: "reasoning-delta",
+          id: "reasoning_issue_1480",
+          delta: "continuation reasoning"
+        },
+        { type: "reasoning-end", id: "reasoning_issue_1480" },
+        { type: "text-start", id: "text_issue_1480" },
+        {
+          type: "text-delta",
+          id: "text_issue_1480",
+          delta: "continuation answer"
+        },
+        { type: "text-end", id: "text_issue_1480" },
+        { type: "finish" }
+      ];
+
+      if (options.body.delayContinuationChunks === true) {
+        return makeDelayedSSEChunkResponse(chunks, 100);
+      }
+
+      return makeSSEChunkResponse(chunks);
+    }
+
     // Issue #1404: simulate the OpenAI Responses API "provider replay"
     // pattern. When asked to continue after a tool result, some providers
     // re-emit the prior tool call (start + delta + available) plus the

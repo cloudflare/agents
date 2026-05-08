@@ -3708,9 +3708,12 @@ export class AIChatAgent<
             //   state "streaming" (interrupted mid-generation). Parts with
             //   state "done" or no state create new blocks as usual (e.g.
             //   tool auto-continuation).
-            // - reasoning-start: always suppressed when an existing
-            //   reasoning part exists — re-reasoning during continuation
-            //   appends to the same block rather than creating a new one.
+            // - reasoning-start: server-side message building skips appending
+            //   a new reasoning part when one already exists, so re-reasoning
+            //   during continuation merges into the same persisted block. The
+            //   chunk is still forwarded to clients to keep the UI stream
+            //   protocol valid.
+            let skipServerApply = false;
             if (continuation) {
               if (!continuationTextResumed && data.type === "text-start") {
                 for (let k = message.parts.length - 1; k >= 0; k--) {
@@ -3737,7 +3740,13 @@ export class AIChatAgent<
                     break;
                   }
                 }
-                if (continuationReasoningResumed) continue;
+                // Keep the persisted continuation merged into the cloned
+                // reasoning part, but still forward reasoning-start to the
+                // client. AI SDK v6 requires reasoning-start before any
+                // reasoning-delta in the stream processor's active-part
+                // registry, even when the message already contains a
+                // completed reasoning part from earlier in the turn.
+                skipServerApply = continuationReasoningResumed;
               }
             }
 
@@ -3770,7 +3779,9 @@ export class AIChatAgent<
             // Delegate message building to the shared parser.
             // It handles: text, reasoning, file, source, tool lifecycle,
             // step boundaries — all the part types needed for UIMessage.
-            const handled = applyChunkToParts(message.parts, data);
+            const handled = skipServerApply
+              ? true
+              : applyChunkToParts(message.parts, data);
 
             // When a tool enters approval-requested state, the stream is
             // paused waiting for user approval. Persist the streaming message
