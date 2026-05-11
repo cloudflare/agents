@@ -184,6 +184,11 @@ function compactArrayMarker(
   maxChars: number,
   originalLength: number
 ): unknown[] {
+  const structuredMarker = compactObjectMarker(maxChars, originalLength);
+  if (stringifyForLength([structuredMarker]).length <= maxChars) {
+    return [structuredMarker];
+  }
+
   const marker = [
     `Array output omitted because it was too large to preserve structurally ${truncatedSuffix(originalLength)}`
   ];
@@ -192,7 +197,7 @@ function compactArrayMarker(
     return marker;
   }
 
-  return [truncateString("", maxChars, originalLength)];
+  return [truncatedSuffix(originalLength).slice(0, maxChars)];
 }
 
 function childMaxChars(maxChars: number, childCount: number): number {

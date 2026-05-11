@@ -69,6 +69,37 @@ describe("truncateOlderMessages", () => {
     expect(firstOutput(messages[0])).toMatchObject({ content: largeContent });
   });
 
+  it("preserves truncation context for nested arrays with small budgets", () => {
+    const messages = [
+      toolMessage("old-tool", {
+        a: Array.from({ length: 1000 }, (_, i) => i),
+        b: Array.from({ length: 1000 }, (_, i) => i),
+        c: Array.from({ length: 1000 }, (_, i) => i),
+        d: Array.from({ length: 1000 }, (_, i) => i),
+        e: Array.from({ length: 1000 }, (_, i) => i),
+        f: Array.from({ length: 1000 }, (_, i) => i),
+        g: Array.from({ length: 1000 }, (_, i) => i)
+      }),
+      textMessage("recent-1", "recent one"),
+      textMessage("recent-2", "recent two")
+    ];
+
+    const truncated = truncateOlderMessages(messages, {
+      keepRecent: 2,
+      maxToolOutputChars: 500
+    });
+    const output = firstOutput(truncated[0]) as {
+      a: Array<Record<string, unknown> | string>;
+    };
+
+    expect(output.a).toHaveLength(1);
+    expect(output.a[0]).not.toBe("");
+    expect(output.a[0]).toMatchObject({
+      __truncated: true,
+      __truncatedChars: expect.any(Number)
+    });
+  });
+
   it("leaves recent tool outputs intact", () => {
     const recentOutput = {
       path: "/recent.txt",
