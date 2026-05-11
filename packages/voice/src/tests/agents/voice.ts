@@ -28,11 +28,13 @@ class TestTranscriberSession implements TranscriberSession {
   #utteranceCount = 0;
   #closed = false;
   #onInterim: ((text: string) => void) | undefined;
+  #onSpeechStart: ((text?: string) => void) | undefined;
   #onUtterance: ((text: string) => void) | undefined;
   #utteranceThreshold: number;
 
   constructor(options?: TranscriberSessionOptions, utteranceThreshold = 20000) {
     this.#onInterim = options?.onInterim;
+    this.#onSpeechStart = options?.onSpeechStart;
     this.#onUtterance = options?.onUtterance;
     this.#utteranceThreshold = utteranceThreshold;
   }
@@ -40,6 +42,7 @@ class TestTranscriberSession implements TranscriberSession {
   feed(chunk: ArrayBuffer): void {
     if (this.#closed) return;
     this.#totalBytes += chunk.byteLength;
+    this.#onSpeechStart?.(`hearing ${this.#totalBytes} bytes`);
     this.#onInterim?.(`hearing ${this.#totalBytes} bytes`);
 
     const nextThreshold = (this.#utteranceCount + 1) * this.#utteranceThreshold;
@@ -85,11 +88,15 @@ export class TestVoiceAgent extends VoiceBase {
   #callEndCount = 0;
   #interruptCount = 0;
   #beforeCallStartResult = true;
+  #turnDelayMs = 0;
 
   async onTurn(
     transcript: string,
     _context: VoiceTurnContext
   ): Promise<string> {
+    if (this.#turnDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.#turnDelayMs));
+    }
     return `Echo: ${transcript}`;
   }
 
@@ -116,6 +123,12 @@ export class TestVoiceAgent extends VoiceBase {
       switch (parsed.type) {
         case "_set_before_call_start":
           this.#beforeCallStartResult = parsed.value;
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_set_turn_delay":
+          this.#turnDelayMs = parsed.value;
           connection.send(
             JSON.stringify({ type: "_ack", command: parsed.type })
           );

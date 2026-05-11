@@ -276,6 +276,7 @@ export class VoiceClient {
   #playbackQueue: ArrayBuffer[] = [];
   #isPlaying = false;
   #activeSource: AudioBufferSourceNode | null = null;
+  #playbackGeneration = 0;
   #interruptChunkCount = 0;
 
   // Event listeners
@@ -599,6 +600,9 @@ export class VoiceClient {
         this.#interimTranscript = msg.text as string;
         this.#emit("interimtranscript", this.#interimTranscript);
         break;
+      case "playback_interrupt":
+        this.#stopPlayback();
+        break;
       case "transcript":
         // Final transcript arrived — clear interim
         this.#interimTranscript = null;
@@ -608,12 +612,7 @@ export class VoiceClient {
         // With continuous STT, the model detects the user's speech
         // server-side, so this arrives before the client's interrupt
         // detection fires.
-        if (msg.role === "user" && this.#isPlaying) {
-          this.#activeSource?.stop();
-          this.#activeSource = null;
-          this.#playbackQueue = [];
-          this.#isPlaying = false;
-        }
+        if (msg.role === "user" && this.#isPlaying) this.#stopPlayback();
 
         this.#transcript = [
           ...this.#transcript,
@@ -707,7 +706,7 @@ export class VoiceClient {
 
   // --- Audio playback ---
 
-  async #playAudio(audioData: ArrayBuffer): Promise<void> {
+  async #playAudio(audioData: ArrayBuffer, generation: number): Promise<void> {
     try {
       const ctx = await this.#getAudioContext();
 
@@ -724,10 +723,12 @@ export class VoiceClient {
         // mp3, wav, opus — let the browser decode
         audioBuffer = await ctx.decodeAudioData(audioData.slice(0));
       }
+      if (generation !== this.#playbackGeneration) return;
 
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(ctx.destination);
+      if (generation !== this.#playbackGeneration) return;
       this.#activeSource = source;
 
       return new Promise<void>((resolve) => {
@@ -747,12 +748,33 @@ export class VoiceClient {
   async #processPlaybackQueue(): Promise<void> {
     if (this.#isPlaying || this.#playbackQueue.length === 0) return;
     this.#isPlaying = true;
+    const generation = this.#playbackGeneration;
 
-    while (this.#playbackQueue.length > 0) {
+    while (
+      generation === this.#playbackGeneration &&
+      this.#playbackQueue.length > 0
+    ) {
       const audioData = this.#playbackQueue.shift()!;
-      await this.#playAudio(audioData);
+      await this.#playAudio(audioData, generation);
     }
 
+    if (generation === this.#playbackGeneration) {
+      this.#isPlaying = false;
+    }
+  }
+
+  #stopPlayback(): void {
+    const source = this.#activeSource;
+    this.#playbackGeneration++;
+    this.#activeSource = null;
+    if (source) {
+      try {
+        source.stop();
+      } catch {
+        // The source may already have ended or been stopped by another signal.
+      }
+    }
+    this.#playbackQueue = [];
     this.#isPlaying = false;
   }
 

@@ -550,6 +550,9 @@ export function withVoice<TBase extends AgentLike>(
             text
           });
         },
+        onSpeechStart: () => {
+          this.#handleBargeIn(connection);
+        },
         onUtterance: (transcript: string) => {
           this.#sendJSON(connection, {
             type: "transcript_interim",
@@ -581,6 +584,13 @@ export function withVoice<TBase extends AgentLike>(
     #handleInterrupt(connection: Connection) {
       this.#cm.abortPipeline(connection.id);
       this.#cm.clearAudioBuffer(connection.id);
+      this.#sendJSON(connection, { type: "status", status: "listening" });
+      this.onInterrupt(connection);
+    }
+
+    #handleBargeIn(connection: Connection) {
+      if (!this.#cm.abortPipeline(connection.id)) return;
+      this.#sendJSON(connection, { type: "playback_interrupt" });
       this.#sendJSON(connection, { type: "status", status: "listening" });
       this.onInterrupt(connection);
     }

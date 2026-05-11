@@ -4,16 +4,16 @@ A real-time voice agent running entirely inside a Durable Object. Talk to an AI 
 
 Uses Workers AI for all models — zero external API keys required:
 
-- **STT**: Deepgram Nova 3 (`@cf/deepgram/nova-3`)
+- **STT**: Deepgram Flux (`@cf/deepgram/flux`) by default, with a Nova 3 (`@cf/deepgram/nova-3`) option in the UI
 - **TTS**: Deepgram Aura (`@cf/deepgram/aura-1`)
-- **VAD**: Pipecat Smart Turn v2 (`@cf/pipecat-ai/smart-turn-v2`)
-- **LLM**: Kimi K2.5 (`@cf/moonshotai/kimi-k2.5`)
+- **Turn detection**: Flux `StartOfTurn` / `EndOfTurn` events
+- **LLM**: Kimi K2.6 (`@cf/moonshotai/kimi-k2.6`), GPT OSS 20B, or GLM 4.7 Flash
 
 ## Run it
 
 ```bash
 npm install
-npm run dev
+npm run start
 ```
 
 No API keys needed — all AI models run via the Workers AI binding.
@@ -25,11 +25,10 @@ Browser                          Durable Object (VoiceAgent)
 ┌──────────┐   binary WS frames   ┌──────────────────────────┐
 │ Mic PCM  │ ────────────────────► │ Audio Buffer             │
 │ (16kHz)  │                       │   ↓                      │
-│          │   JSON: end_of_speech │ VAD (smart-turn-v2)      │
-│          │ ────────────────────► │   ↓                      │
-│          │                       │ STT (nova-3)             │
+│          │                       │ STT (flux)               │
+│          │                       │   ↓                      │
 │          │   JSON: transcript    │   ↓                      │
-│          │ ◄──────────────────── │ LLM (kimi-k2.5)      │
+│          │ ◄──────────────────── │ LLM                      │
 │          │   binary: MP3 audio   │   ↓ (sentence chunking)  │
 │ Speaker  │ ◄──────────────────── │ TTS (aura-1, streaming)  │
 └──────────┘                       └──────────────────────────┘
@@ -38,17 +37,16 @@ Browser                          Durable Object (VoiceAgent)
 
 1. Browser captures mic audio via AudioWorklet, downsamples to 16kHz mono PCM
 2. PCM streams to the Agent over the existing WebSocket connection (binary frames)
-3. Client-side silence detection (500ms) triggers end-of-speech
-4. Server-side VAD (smart-turn-v2) confirms the user finished speaking
-5. Agent runs the voice pipeline: STT → LLM (with tools) → streaming TTS
-6. TTS audio streams back per-sentence as MP3 while the LLM is still generating
-7. Browser decodes and plays audio; user can interrupt at any time
+3. Flux detects speech start and turn completion server-side
+4. Agent runs the voice pipeline: STT → LLM (with tools) → streaming TTS
+5. TTS audio streams back per-sentence as MP3 while the LLM is still generating
+6. Browser decodes and plays audio; user can interrupt at any time
 
 ## Features
 
 - **Streaming TTS** — LLM output is split into sentences and synthesized concurrently, so the user hears the first sentence while the rest is still being generated.
-- **Interruption handling** — speak over the agent to cut it off mid-sentence. The client detects sustained speech during playback and aborts the server pipeline.
-- **Server-side VAD** — `smart-turn-v2` validates end-of-speech after client silence detection, reducing false triggers on mid-sentence pauses.
+- **Interruption handling** — speak over the agent to cut it off mid-sentence. Flux speech-start events abort the server pipeline and stop queued browser playback; client audio-level detection remains as a fallback.
+- **Server-side turn detection** — Flux handles speech boundaries, so the example does not need client-side end-of-speech signaling to run the voice pipeline.
 - **Conversation persistence** — all messages are stored in SQLite and survive restarts. The agent remembers previous conversations.
 - **Agent tools** — the LLM can call `get_current_time`, `set_reminder`, and `get_weather` during conversation.
 - **Proactive scheduling** — reminders set via voice fire on schedule and are spoken to connected clients (or saved to history if disconnected).

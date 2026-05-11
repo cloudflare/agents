@@ -120,9 +120,12 @@ export class AudioConnectionManager {
     return controller.signal;
   }
 
-  abortPipeline(connectionId: string): void {
-    this.#activePipeline.get(connectionId)?.abort();
+  abortPipeline(connectionId: string): boolean {
+    const controller = this.#activePipeline.get(connectionId);
+    if (!controller) return false;
+    controller.abort();
     this.#activePipeline.delete(connectionId);
+    return true;
   }
 
   /**

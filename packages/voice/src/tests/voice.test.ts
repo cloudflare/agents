@@ -329,6 +329,73 @@ describe("VoiceAgent — multi-turn", () => {
 });
 
 describe("VoiceAgent — interrupt", () => {
+  it("aborts an active pipeline on model-detected speech start", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "_set_turn_delay", value: 1000 });
+    await waitForType(ws, "_ack");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    sendJSON(ws, { type: "text_message", text: "long response" });
+    await waitForStatus(ws, "thinking");
+
+    ws.send(new ArrayBuffer(5000));
+
+    const interrupt = (await waitForType(ws, "playback_interrupt")) as Record<
+      string,
+      unknown
+    >;
+    expect(interrupt).toEqual({ type: "playback_interrupt" });
+    await waitForStatus(ws, "listening");
+
+    sendJSON(ws, { type: "_get_counts" });
+    const counts = (await waitForType(ws, "_counts")) as Record<
+      string,
+      unknown
+    >;
+    expect(counts.interrupt).toBe(1);
+
+    // The transcriber session stays alive after barge-in.
+    for (let i = 0; i < 3; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+
+    const transcript = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript" &&
+        (m as Record<string, unknown>).role === "user"
+    )) as Record<string, unknown>;
+    expect((transcript.text as string).includes("utterance 1")).toBe(true);
+
+    ws.close();
+  });
+
+  it("does not count model-detected speech as interrupt while already listening", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    ws.send(new ArrayBuffer(5000));
+    await waitForType(ws, "transcript_interim");
+
+    sendJSON(ws, { type: "_get_counts" });
+    const counts = (await waitForType(ws, "_counts")) as Record<
+      string,
+      unknown
+    >;
+    expect(counts.interrupt).toBe(0);
+
+    ws.close();
+  });
+
   it("aborts pipeline on interrupt but session survives for next turn", async () => {
     const { ws } = await connectWS(uniquePath());
     await waitForStatus(ws, "idle");

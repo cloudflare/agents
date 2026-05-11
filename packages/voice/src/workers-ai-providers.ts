@@ -172,6 +172,7 @@ interface FluxEvent {
  */
 class FluxSession implements TranscriberSession {
   #onInterim: ((text: string) => void) | undefined;
+  #onSpeechStart: ((text?: string) => void) | undefined;
   #onUtterance: ((text: string) => void) | undefined;
 
   #ws: WebSocket | null = null;
@@ -187,6 +188,7 @@ class FluxSession implements TranscriberSession {
     options?: TranscriberSessionOptions
   ) {
     this.#onInterim = options?.onInterim;
+    this.#onSpeechStart = options?.onSpeechStart;
     this.#onUtterance = options?.onUtterance;
     this.#connect(ai, config);
   }
@@ -289,6 +291,11 @@ class FluxSession implements TranscriberSession {
       switch (data.event) {
         case "StartOfTurn":
           this.#currentTranscript = "";
+          this.#onSpeechStart?.(transcript || undefined);
+          if (transcript) {
+            this.#currentTranscript = transcript;
+            this.#onInterim?.(transcript);
+          }
           break;
 
         case "Update":
@@ -315,7 +322,10 @@ class FluxSession implements TranscriberSession {
           break;
 
         case "TurnResumed":
-          this.#currentTranscript = "";
+          this.#currentTranscript = transcript;
+          if (transcript) {
+            this.#onInterim?.(transcript);
+          }
           break;
       }
     } catch {

@@ -50,6 +50,7 @@ export type VoiceServerMessage =
   | { type: "transcript_delta"; text: string }
   | { type: "transcript_end"; text: string }
   | { type: "transcript_interim"; text: string }
+  | { type: "playback_interrupt" }
   | {
       type: "metrics";
       llm_ms: number;
@@ -117,6 +118,13 @@ export interface TranscriberSessionOptions {
    * This text may change as more audio arrives.
    */
   onInterim?: (text: string) => void;
+  /**
+   * Called when the model detects the start of user speech.
+   *
+   * Providers can use this for low-latency barge-in before a final
+   * utterance is available. The transcript may be omitted or unstable.
+   */
+  onSpeechStart?: (text?: string) => void;
   /**
    * Called when the model detects a complete utterance.
    * The transcript is the stable text for this turn.

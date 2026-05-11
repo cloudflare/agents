@@ -91,6 +91,43 @@ describe("WorkersAIFluxSTT", () => {
     expect(utterances).toEqual(["hello world"]);
   });
 
+  it("uses StartOfTurn transcript when EndOfTurn transcript is empty", async () => {
+    const ai = new MockAi();
+    const utterances: string[] = [];
+    const interims: string[] = [];
+    const speechStarts: Array<string | undefined> = [];
+
+    new WorkersAIFluxSTT(ai).createSession({
+      onInterim: (text) => interims.push(text),
+      onSpeechStart: (text) => speechStarts.push(text),
+      onUtterance: (text) => utterances.push(text)
+    });
+
+    const socket = await waitForConnect(ai);
+    socket.message(
+      JSON.stringify({ event: "StartOfTurn", transcript: "hello" })
+    );
+    socket.message(JSON.stringify({ event: "EndOfTurn", transcript: "" }));
+
+    expect(interims).toEqual(["hello"]);
+    expect(speechStarts).toEqual(["hello"]);
+    expect(utterances).toEqual(["hello"]);
+  });
+
+  it("emits speech start without requiring a transcript", async () => {
+    const ai = new MockAi();
+    const speechStarts: Array<string | undefined> = [];
+
+    new WorkersAIFluxSTT(ai).createSession({
+      onSpeechStart: (text) => speechStarts.push(text)
+    });
+
+    const socket = await waitForConnect(ai);
+    socket.message(JSON.stringify({ event: "StartOfTurn" }));
+
+    expect(speechStarts).toEqual([undefined]);
+  });
+
   it("prefers non-empty EndOfTurn transcript and clears turn state", async () => {
     const ai = new MockAi();
     const utterances: string[] = [];
@@ -125,6 +162,29 @@ describe("WorkersAIFluxSTT", () => {
     socket.message(JSON.stringify({ event: "EndOfTurn", transcript: "" }));
 
     expect(utterances).toEqual([]);
+  });
+
+  it("uses resumed transcript instead of stale eager transcript", async () => {
+    const ai = new MockAi();
+    const utterances: string[] = [];
+    const interims: string[] = [];
+
+    new WorkersAIFluxSTT(ai).createSession({
+      onInterim: (text) => interims.push(text),
+      onUtterance: (text) => utterances.push(text)
+    });
+
+    const socket = await waitForConnect(ai);
+    socket.message(
+      JSON.stringify({ event: "EagerEndOfTurn", transcript: "not done" })
+    );
+    socket.message(
+      JSON.stringify({ event: "TurnResumed", transcript: "not done yet" })
+    );
+    socket.message(JSON.stringify({ event: "EndOfTurn", transcript: "" }));
+
+    expect(interims).toEqual(["not done", "not done yet"]);
+    expect(utterances).toEqual(["not done yet"]);
   });
 });
 
@@ -189,5 +249,35 @@ describe("WorkersAINova3STT", () => {
     );
 
     expect(utterances).toEqual([]);
+  });
+
+  it("handles late Results messages after websocket close", async () => {
+    const ai = new MockAi();
+    const utterances: string[] = [];
+
+    new WorkersAINova3STT(ai).createSession({
+      onUtterance: (text) => utterances.push(text)
+    });
+
+    const socket = await waitForConnect(ai);
+    socket.message(
+      JSON.stringify({
+        type: "Results",
+        is_final: true,
+        speech_final: false,
+        channel: { alternatives: [{ transcript: "late" }] }
+      })
+    );
+    socket.close();
+    socket.message(
+      JSON.stringify({
+        type: "Results",
+        is_final: true,
+        speech_final: true,
+        channel: { alternatives: [{ transcript: "message" }] }
+      })
+    );
+
+    expect(utterances).toEqual(["late message"]);
   });
 });
