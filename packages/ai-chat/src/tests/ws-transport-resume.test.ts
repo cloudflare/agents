@@ -239,6 +239,26 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
     expect(result.done).toBe(true);
   });
 
+  it("tool continuation closes and clears resolvers when socket closes before handshake", async () => {
+    transport.expectToolContinuation();
+
+    const stream = (await transport.reconnectToStream({
+      chatId: "chat-1"
+    })) as ReadableStream<UIMessageChunk>;
+    const reader = stream.getReader();
+
+    agent.close();
+
+    await expect(reader.read()).resolves.toEqual({
+      done: true,
+      value: undefined
+    });
+    expect(transport.handleStreamResuming({ id: "late-tool" })).toBe(false);
+    expect(transport.handleStreamResumeNone()).toBe(false);
+    expect(transport.abortActiveToolContinuation()).toBe(false);
+    expect(activeRequestIds.size).toBe(0);
+  });
+
   it("abortActiveToolContinuation sends cancel for the continuation request", async () => {
     transport.expectToolContinuation();
 
@@ -270,6 +290,39 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
 
     expect(transport.abortActiveToolContinuation()).toBe(true);
     expect(activeRequestIds.has("req-keep-id")).toBe(true);
+  });
+
+  it("tool continuation closes and removes requestId when socket closes mid-stream", async () => {
+    transport.expectToolContinuation();
+
+    const stream = (await transport.reconnectToStream({
+      chatId: "chat-1"
+    })) as ReadableStream<UIMessageChunk>;
+    const reader = stream.getReader();
+
+    expect(transport.handleStreamResuming({ id: "req-tool-close" })).toBe(true);
+    expect(activeRequestIds.has("req-tool-close")).toBe(true);
+
+    agent.dispatch({
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+      id: "req-tool-close",
+      body: '{"type":"text-start","id":"t1"}',
+      done: false
+    });
+
+    await expect(reader.read()).resolves.toEqual({
+      done: false,
+      value: { type: "text-start", id: "t1" }
+    });
+
+    agent.close();
+
+    await expect(reader.read()).resolves.toEqual({
+      done: true,
+      value: undefined
+    });
+    expect(activeRequestIds.has("req-tool-close")).toBe(false);
+    expect(transport.abortActiveToolContinuation()).toBe(false);
   });
 
   it("abortActiveToolContinuation returns false when no continuation is active", async () => {
@@ -570,6 +623,36 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
     await reader.read(); // { done: true }
 
     expect(activeRequestIds.has("req-cleanup")).toBe(false);
+  });
+
+  it("removes requestId from activeRequestIds when resumed stream socket closes", async () => {
+    const promise = transport.reconnectToStream({ chatId: "chat-1" });
+
+    transport.handleStreamResuming({ id: "req-close-cleanup" });
+    const stream = await promise;
+    const reader = stream!.getReader();
+
+    expect(activeRequestIds.has("req-close-cleanup")).toBe(true);
+
+    agent.dispatch({
+      type: "cf_agent_use_chat_response",
+      id: "req-close-cleanup",
+      body: '{"type":"text-start","id":"t1"}',
+      done: false
+    });
+
+    await expect(reader.read()).resolves.toEqual({
+      done: false,
+      value: { type: "text-start", id: "t1" }
+    });
+
+    agent.close();
+
+    await expect(reader.read()).resolves.toEqual({
+      done: true,
+      value: undefined
+    });
+    expect(activeRequestIds.has("req-close-cleanup")).toBe(false);
   });
 
   it("stream ignores chunks for different request IDs", async () => {

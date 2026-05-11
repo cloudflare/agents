@@ -549,7 +549,15 @@ export class WebSocketChatTransport<
           }
         };
 
+        const onClose = () => {
+          if (timeout) clearTimeout(timeout);
+          finish(() => controller.close(), onResume, onResumeNone);
+        };
+
         agent.addEventListener("message", onMessage, {
+          signal: streamController.signal
+        });
+        agent.addEventListener("close", onClose, {
           signal: streamController.signal
         });
 
@@ -631,7 +639,14 @@ export class WebSocketChatTransport<
           }
         };
 
+        const onClose = () => {
+          finish(() => controller.close());
+        };
+
         agent.addEventListener("message", onMessage, {
+          signal: chunkController.signal
+        });
+        agent.addEventListener("close", onClose, {
           signal: chunkController.signal
         });
       },
