@@ -193,4 +193,46 @@ describe("VoiceClient playback interrupt", () => {
 
     expect(audioContext.source).toBeNull();
   });
+
+  it("does not start playback if call ends while audio is decoding", async () => {
+    const transport = new MockTransport();
+    const client = new VoiceClient({ agent: "test-agent", transport });
+    audioContext.deferDecode = true;
+
+    client.connect();
+    transport.receive(JSON.stringify({ type: "audio_config", format: "mp3" }));
+    transport.receive(new ArrayBuffer(4));
+    await Promise.resolve();
+
+    expect(audioContext.pendingDecode).toBeDefined();
+    client.endCall();
+    expect(transport.sentJSON).toContainEqual({ type: "end_call" });
+
+    audioContext.pendingDecode?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(audioContext.source).toBeNull();
+  });
+
+  it("does not start playback if client disconnects while audio is decoding", async () => {
+    const transport = new MockTransport();
+    const client = new VoiceClient({ agent: "test-agent", transport });
+    audioContext.deferDecode = true;
+
+    client.connect();
+    transport.receive(JSON.stringify({ type: "audio_config", format: "mp3" }));
+    transport.receive(new ArrayBuffer(4));
+    await Promise.resolve();
+
+    expect(audioContext.pendingDecode).toBeDefined();
+    client.disconnect();
+    expect(transport.connected).toBe(false);
+
+    audioContext.pendingDecode?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(audioContext.source).toBeNull();
+  });
 });

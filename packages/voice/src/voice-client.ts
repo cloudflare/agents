@@ -491,10 +491,7 @@ export class VoiceClient {
     } else {
       this.#stopMic();
     }
-    this.#activeSource?.stop();
-    this.#activeSource = null;
-    this.#playbackQueue = [];
-    this.#isPlaying = false;
+    this.#stopPlayback();
     this.#closeAudioContext();
     this.#resetDetection();
     this.#status = "idle";
