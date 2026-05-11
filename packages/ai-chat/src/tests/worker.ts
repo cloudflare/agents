@@ -1888,6 +1888,8 @@ type AgentToolFinishForTest = {
 export class AIChatAgentToolParent extends Agent<Env> {
   private events: AgentToolEventMessage[] = [];
   private finishes: AgentToolFinishForTest[] = [];
+  private finishRunIdsToThrow = new Set<string>();
+  private lifecycleOrder: string[] = [];
 
   override broadcast(
     msg: string | ArrayBuffer | ArrayBufferView,
@@ -1911,6 +1913,10 @@ export class AIChatAgentToolParent extends Agent<Env> {
     result: AgentToolLifecycleResult
   ): Promise<void> {
     this.finishes.push({ run, result });
+    this.lifecycleOrder.push(`finish:${run.runId}`);
+    if (this.finishRunIdsToThrow.has(run.runId)) {
+      throw new Error(`finish failed for ${run.runId}`);
+    }
   }
 
   async runChild(
@@ -1959,6 +1965,87 @@ export class AIChatAgentToolParent extends Agent<Env> {
     return this.finishes;
   }
 
+  private insertRecoverableParentRunForTest(
+    runId: string,
+    agentType: string,
+    inputPreview: string,
+    startedAt: number,
+    status: "starting" | "running" = "running"
+  ): void {
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, input_preview,
+        input_redacted, status, display_metadata, display_order, started_at
+      ) VALUES (
+        ${runId}, 'test-tool-call', ${agentType},
+        ${JSON.stringify(inputPreview)}, 1, ${status},
+        ${JSON.stringify({ name: "test child" })}, 0, ${startedAt}
+      )
+    `;
+  }
+
+  private async waitForTerminalInspectionForTest(
+    child: {
+      inspectAgentToolRun(
+        runId: string
+      ): Promise<AgentToolRunInspection | null>;
+    },
+    runId: string
+  ): Promise<AgentToolRunInspection> {
+    let inspection = await child.inspectAgentToolRun(runId);
+    for (let attempt = 0; attempt < 50; attempt++) {
+      if (
+        inspection &&
+        inspection.status !== "running" &&
+        inspection.status !== "starting"
+      ) {
+        return inspection;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      inspection = await child.inspectAgentToolRun(runId);
+    }
+    throw new Error("Timed out waiting for child agent-tool completion");
+  }
+
+  private async prepareCompletedChildForRecoveryTest(
+    input: AgentToolInput,
+    runId: string
+  ): Promise<AgentToolRunInspection> {
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const started = await child.startAgentToolRun(input, { runId });
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "AIChatAgentToolChild",
+      input.prompt,
+      started.startedAt
+    );
+    return this.waitForTerminalInspectionForTest(child, runId);
+  }
+
+  private async reconcileAgentToolRunsForTest(options?: {
+    deferFinishHooks?: boolean;
+  }): Promise<Array<() => Promise<void>>> {
+    return (
+      this as unknown as {
+        _reconcileAgentToolRuns(options?: {
+          deferFinishHooks?: boolean;
+        }): Promise<Array<() => Promise<void>>>;
+      }
+    )._reconcileAgentToolRuns(options);
+  }
+
+  private async runDeferredAgentToolFinishHooksForTest(
+    hooks: Array<() => Promise<void>>
+  ): Promise<void> {
+    await (
+      this as unknown as {
+        _runDeferredAgentToolFinishHooks(
+          hooks: Array<() => Promise<void>>
+        ): Promise<void>;
+      }
+    )._runDeferredAgentToolFinishHooks(hooks);
+  }
+
   async reconcileCompletedChildForTest(
     input: AgentToolInput,
     runId = crypto.randomUUID()
@@ -1967,46 +2054,155 @@ export class AIChatAgentToolParent extends Agent<Env> {
     finishes: AgentToolFinishForTest[];
     inspection: AgentToolRunInspection;
   }> {
-    const child = await this.subAgent(AIChatAgentToolChild, runId);
-    const started = await child.startAgentToolRun(input, { runId });
-    this.sql`
-      INSERT INTO cf_agent_tool_runs (
-        run_id, parent_tool_call_id, agent_type, input_preview,
-        input_redacted, status, display_metadata, display_order, started_at
-      ) VALUES (
-        ${runId}, 'test-tool-call', 'AIChatAgentToolChild',
-        ${JSON.stringify(input.prompt)}, 1, 'running',
-        ${JSON.stringify({ name: "test child" })}, 0, ${started.startedAt}
-      )
-    `;
+    const inspection = await this.prepareCompletedChildForRecoveryTest(
+      input,
+      runId
+    );
+    this.events = [];
+    this.finishes = [];
+    await this.reconcileAgentToolRunsForTest();
 
-    let inspection = await child.inspectAgentToolRun(runId);
-    for (let attempt = 0; attempt < 50; attempt++) {
-      if (
-        inspection &&
-        inspection.status !== "running" &&
-        inspection.status !== "starting"
-      ) {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      inspection = await child.inspectAgentToolRun(runId);
-    }
-    if (
-      !inspection ||
-      inspection.status === "running" ||
-      inspection.status === "starting"
-    ) {
-      throw new Error("Timed out waiting for child agent-tool completion");
-    }
+    return { events: this.events, finishes: this.finishes, inspection };
+  }
+
+  async reconcileRunningChildForTest(
+    input: AgentToolInput,
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+  }> {
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const started = await child.startAgentToolRun(
+      { ...input, delayMs: input.delayMs ?? 10_000 },
+      { runId }
+    );
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "AIChatAgentToolChild",
+      input.prompt,
+      started.startedAt
+    );
 
     this.events = [];
     this.finishes = [];
-    await (
-      this as unknown as { _reconcileAgentToolRuns(): Promise<void> }
-    )._reconcileAgentToolRuns();
+    try {
+      await this.reconcileAgentToolRunsForTest();
+    } finally {
+      await child.cancelAgentToolRun(runId, "test cleanup");
+    }
 
-    return { events: this.events, finishes: this.finishes, inspection };
+    return { events: this.events, finishes: this.finishes };
+  }
+
+  async reconcileMissingChildForTest(runId = crypto.randomUUID()): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+  }> {
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "MissingAgentToolChild",
+      "missing child",
+      Date.now()
+    );
+
+    this.events = [];
+    this.finishes = [];
+    await this.reconcileAgentToolRunsForTest();
+
+    return { events: this.events, finishes: this.finishes };
+  }
+
+  async reconcileCompletedChildWithDeferredFinishForTest(
+    input: AgentToolInput,
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    finishesBeforeDrain: number;
+    lifecycleOrder: string[];
+  }> {
+    await this.prepareCompletedChildForRecoveryTest(input, runId);
+    this.events = [];
+    this.finishes = [];
+    this.lifecycleOrder = [];
+
+    const hooks = await this.reconcileAgentToolRunsForTest({
+      deferFinishHooks: true
+    });
+    const finishesBeforeDrain = this.finishes.length;
+    this.lifecycleOrder.push("after-on-start");
+    await this.runDeferredAgentToolFinishHooksForTest(hooks);
+
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      finishesBeforeDrain,
+      lifecycleOrder: this.lifecycleOrder
+    };
+  }
+
+  async reconcileCompletedChildWithReplayFailureForTest(
+    input: AgentToolInput,
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+  }> {
+    await this.prepareCompletedChildForRecoveryTest(input, runId);
+    this.events = [];
+    this.finishes = [];
+
+    type BroadcastStoredChunks = (
+      row: unknown,
+      sequence: number,
+      replay?: true,
+      connection?: unknown
+    ) => Promise<number>;
+    const self = this as unknown as {
+      _broadcastAgentToolStoredChunks: BroadcastStoredChunks;
+    };
+    const original = self._broadcastAgentToolStoredChunks.bind(
+      this
+    ) as BroadcastStoredChunks;
+    self._broadcastAgentToolStoredChunks = async () => {
+      throw new Error("test replay failure");
+    };
+    try {
+      await this.reconcileAgentToolRunsForTest();
+    } finally {
+      self._broadcastAgentToolStoredChunks = original;
+    }
+
+    return { events: this.events, finishes: this.finishes };
+  }
+
+  async reconcileTwoCompletedChildrenWithThrowingFinishForTest(): Promise<{
+    finishes: AgentToolFinishForTest[];
+    lifecycleOrder: string[];
+  }> {
+    const firstRunId = crypto.randomUUID();
+    const secondRunId = crypto.randomUUID();
+    await this.prepareCompletedChildForRecoveryTest(
+      { prompt: "first recovered child" },
+      firstRunId
+    );
+    await this.prepareCompletedChildForRecoveryTest(
+      { prompt: "second recovered child" },
+      secondRunId
+    );
+
+    this.events = [];
+    this.finishes = [];
+    this.lifecycleOrder = [];
+    this.finishRunIdsToThrow = new Set([firstRunId]);
+    const hooks = await this.reconcileAgentToolRunsForTest({
+      deferFinishHooks: true
+    });
+    await this.runDeferredAgentToolFinishHooksForTest(hooks);
+    this.finishRunIdsToThrow.clear();
+
+    return { finishes: this.finishes, lifecycleOrder: this.lifecycleOrder };
   }
 
   async inspectChild(runId: string): Promise<AgentToolRunInspection | null> {

@@ -52,6 +52,55 @@ type ParentStub = DurableObjectStub & {
     finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
     inspection: AgentToolRunInspection;
   }>;
+  reconcileRunningChildForTest(
+    input: {
+      prompt: string;
+      delayMs?: number;
+      chunkDelayMs?: number;
+      structured?: boolean;
+      streamError?: string;
+    },
+    runId?: string
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
+  }>;
+  reconcileMissingChildForTest(runId?: string): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
+  }>;
+  reconcileCompletedChildWithDeferredFinishForTest(
+    input: {
+      prompt: string;
+      delayMs?: number;
+      chunkDelayMs?: number;
+      structured?: boolean;
+      streamError?: string;
+    },
+    runId?: string
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
+    finishesBeforeDrain: number;
+    lifecycleOrder: string[];
+  }>;
+  reconcileCompletedChildWithReplayFailureForTest(
+    input: {
+      prompt: string;
+      delayMs?: number;
+      chunkDelayMs?: number;
+      structured?: boolean;
+      streamError?: string;
+    },
+    runId?: string
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
+  }>;
+  reconcileTwoCompletedChildrenWithThrowingFinishForTest(): Promise<{
+    finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
+    lifecycleOrder: string[];
+  }>;
   inspectChild(runId: string): Promise<AgentToolRunInspection | null>;
   getChildChunks(
     runId: string,
@@ -181,6 +230,137 @@ describe("AIChatAgent as an agent-tool child", () => {
         summary: "AIChat child handled: recover completed child"
       }
     });
+  });
+
+  it("marks still-running recovered children interrupted and emits lifecycle events", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    const { events, finishes } = await parent.reconcileRunningChildForTest(
+      { prompt: "still running child" },
+      runId
+    );
+
+    expect(finishes).toEqual([
+      {
+        run: expect.objectContaining({
+          runId,
+          parentToolCallId: "test-tool-call",
+          agentType: "AIChatAgentToolChild",
+          status: "interrupted",
+          inputPreview: "still running child"
+        }),
+        result: expect.objectContaining({
+          status: "interrupted",
+          error:
+            "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
+        })
+      }
+    ]);
+    expect(events.at(-1)).toMatchObject({
+      parentToolCallId: "test-tool-call",
+      event: {
+        kind: "interrupted",
+        runId,
+        error:
+          "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
+      }
+    });
+  });
+
+  it("marks uninspectable recovered children interrupted and emits lifecycle events", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    const { events, finishes } =
+      await parent.reconcileMissingChildForTest(runId);
+
+    expect(finishes).toEqual([
+      {
+        run: expect.objectContaining({
+          runId,
+          parentToolCallId: "test-tool-call",
+          agentType: "MissingAgentToolChild",
+          status: "interrupted",
+          inputPreview: "missing child"
+        }),
+        result: expect.objectContaining({
+          status: "interrupted",
+          error: "Agent tool run could not be inspected during parent recovery."
+        })
+      }
+    ]);
+    expect(events.at(-1)).toMatchObject({
+      parentToolCallId: "test-tool-call",
+      event: {
+        kind: "interrupted",
+        runId,
+        error: "Agent tool run could not be inspected during parent recovery."
+      }
+    });
+  });
+
+  it("defers recovered finish hooks until after startup work", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    const { events, finishes, finishesBeforeDrain, lifecycleOrder } =
+      await parent.reconcileCompletedChildWithDeferredFinishForTest(
+        { prompt: "deferred finish child" },
+        runId
+      );
+
+    expect(finishesBeforeDrain).toBe(0);
+    expect(events.at(-1)).toMatchObject({
+      event: { kind: "finished", runId }
+    });
+    expect(finishes).toHaveLength(1);
+    expect(lifecycleOrder).toEqual(["after-on-start", `finish:${runId}`]);
+  });
+
+  it("still finalizes recovery when stored chunk replay fails", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    const { events, finishes } =
+      await parent.reconcileCompletedChildWithReplayFailureForTest(
+        { prompt: "replay failure child" },
+        runId
+      );
+
+    expect(finishes).toEqual([
+      {
+        run: expect.objectContaining({
+          runId,
+          status: "completed",
+          inputPreview: "replay failure child"
+        }),
+        result: expect.objectContaining({
+          status: "completed",
+          summary: "AIChat child handled: replay failure child"
+        })
+      }
+    ]);
+    expect(events.map((event) => event.event.kind)).toEqual(["finished"]);
+    expect(events.at(-1)).toMatchObject({
+      event: {
+        kind: "finished",
+        runId,
+        summary: "AIChat child handled: replay failure child"
+      }
+    });
+  });
+
+  it("continues draining recovered finish hooks when one hook throws", async () => {
+    const parent = await getParent();
+
+    const { finishes, lifecycleOrder } =
+      await parent.reconcileTwoCompletedChildrenWithThrowingFinishForTest();
+
+    expect(finishes).toHaveLength(2);
+    expect(lifecycleOrder).toEqual(
+      finishes.map(({ run }) => `finish:${run.runId}`)
+    );
   });
 
   it("returns the retained parent registry result without re-running the child", async () => {

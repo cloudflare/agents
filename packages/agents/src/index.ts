@@ -566,6 +566,8 @@ type AgentToolRunStorageRow = {
   completed_at: number | null;
 };
 
+type DeferredAgentToolFinish = () => Promise<void>;
+
 export type ScheduleCriteria = {
   id?: string;
   type?: "scheduled" | "delayed" | "cron" | "interval";
@@ -1994,15 +1996,23 @@ export class Agent<
 
             this._checkOrphanedWorkflows();
             await this._checkRunFibers();
-            await this._reconcileAgentToolRuns();
+            const recoveredAgentToolFinishes =
+              await this._reconcileAgentToolRuns({
+                deferFinishHooks: true
+              });
 
             this._insideOnStart = true;
             this._warnedScheduleInOnStart.clear();
+            let result: Awaited<ReturnType<typeof _onStart>>;
             try {
-              return await _onStart(props);
+              result = await _onStart(props);
             } finally {
               this._insideOnStart = false;
             }
+            await this._runDeferredAgentToolFinishHooks(
+              recoveredAgentToolFinishes
+            );
+            return result;
           });
         }
       );
@@ -6096,8 +6106,12 @@ export class Agent<
   private async _finishAgentToolRun<Output>(
     run: AgentToolRunInfo,
     result: RunAgentToolResult<Output>,
-    options?: { sequence?: number; completedAt?: number }
-  ): Promise<void> {
+    options?: {
+      sequence?: number;
+      completedAt?: number;
+      deferFinishHook?: boolean;
+    }
+  ): Promise<DeferredAgentToolFinish | undefined> {
     const completedAt = options?.completedAt ?? Date.now();
     this._updateAgentToolTerminal(run.runId, result, completedAt);
     if (options?.sequence !== undefined) {
@@ -6107,10 +6121,31 @@ export class Agent<
         result
       );
     }
-    await this.onAgentToolFinish(
-      { ...run, status: result.status, completedAt },
-      result
-    );
+    const finish = () =>
+      this.onAgentToolFinish(
+        { ...run, status: result.status, completedAt },
+        result
+      );
+    if (options?.deferFinishHook) return finish;
+    await finish();
+    return undefined;
+  }
+
+  private async _runDeferredAgentToolFinishHooks(
+    hooks: DeferredAgentToolFinish[]
+  ): Promise<void> {
+    for (const hook of hooks) {
+      try {
+        await hook();
+      } catch (error) {
+        try {
+          await this.onError(error);
+        } catch {
+          // Recovery hooks are best-effort; one failed mirror write should not
+          // prevent the agent from starting or other recovered runs finalizing.
+        }
+      }
+    }
   }
 
   private _updateAgentToolTerminal<Output>(
@@ -6486,7 +6521,10 @@ export class Agent<
     }
   }
 
-  private async _reconcileAgentToolRuns(): Promise<void> {
+  private async _reconcileAgentToolRuns(options?: {
+    deferFinishHooks?: boolean;
+  }): Promise<DeferredAgentToolFinish[]> {
+    const deferredFinishes: DeferredAgentToolFinish[] = [];
     const rows = this.sql<AgentToolRunStorageRow>`
       SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
              summary, output_json, error_message, display_metadata, display_order,
@@ -6538,15 +6576,20 @@ export class Agent<
           error: "Agent tool run could not be inspected during parent recovery."
         };
       }
-      await this._finishAgentToolRun(
+      const deferredFinish = await this._finishAgentToolRun(
         this._agentToolRunInfoFromRow(row),
         result,
         {
           sequence,
-          completedAt
+          completedAt,
+          deferFinishHook: options?.deferFinishHooks
         }
       );
+      if (deferredFinish) {
+        deferredFinishes.push(deferredFinish);
+      }
     }
+    return deferredFinishes;
   }
 
   /**
