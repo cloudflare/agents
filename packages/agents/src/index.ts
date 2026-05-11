@@ -33,6 +33,7 @@ import {
   type Connection,
   type ConnectionContext,
   type PartyServerOptions,
+  type RoutingRetryOptions,
   Server,
   type WSMessage,
   getServerByName,
@@ -104,7 +105,12 @@ export type {
   RunAgentToolResult
 } from "./agent-tool-types";
 
-export type { Connection, ConnectionContext, WSMessage } from "partyserver";
+export type {
+  Connection,
+  ConnectionContext,
+  RoutingRetryOptions,
+  WSMessage
+} from "partyserver";
 export { MessageType } from "./types";
 
 /**
@@ -8609,6 +8615,14 @@ export type AgentContext = DurableObjectState;
  */
 export type AgentOptions<Env> = PartyServerOptions<Env>;
 
+export type AgentGetOptions<
+  Env,
+  Props extends Record<string, unknown> = Record<string, unknown>
+> = Pick<
+  PartyServerOptions<Env, Props>,
+  "jurisdiction" | "locationHint" | "props" | "routingRetry"
+>;
+
 /**
  * Route a request to the appropriate Agent
  * @param request Request to route
@@ -8806,11 +8820,7 @@ export async function getAgentByName<
 >(
   namespace: DurableObjectNamespace<T>,
   name: string,
-  options?: {
-    jurisdiction?: DurableObjectJurisdiction;
-    locationHint?: DurableObjectLocationHint;
-    props?: Props;
-  }
+  options?: AgentGetOptions<Env, Props>
 ) {
   return getServerByName<Env, T>(namespace, name, options);
 }
