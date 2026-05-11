@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VoiceClient } from "../voice-client";
-import type { VoiceTransport } from "../types";
+import type { VoiceAudioInput, VoiceTransport } from "../types";
 
 class MockTransport implements VoiceTransport {
   sentJSON: Record<string, unknown>[] = [];
@@ -77,6 +77,21 @@ class FakeAudioContext {
   }
 }
 
+class FakeAudioInput implements VoiceAudioInput {
+  onAudioLevel: ((rms: number) => void) | null = null;
+  onAudioData: ((pcm: ArrayBuffer) => void) | null = null;
+  started = false;
+  stopped = false;
+
+  async start(): Promise<void> {
+    this.started = true;
+  }
+
+  stop(): void {
+    this.stopped = true;
+  }
+}
+
 let originalAudioContext: typeof AudioContext | undefined;
 let audioContext: FakeAudioContext;
 
@@ -141,6 +156,37 @@ describe("VoiceClient playback interrupt", () => {
 
     expect(audioContext.pendingDecode).toBeDefined();
     transport.receive(JSON.stringify({ type: "playback_interrupt" }));
+    audioContext.pendingDecode?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(audioContext.source).toBeNull();
+  });
+
+  it("does not start playback if client-side interrupt fires while audio is decoding", async () => {
+    const transport = new MockTransport();
+    const audioInput = new FakeAudioInput();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput,
+      interruptThreshold: 0.1,
+      interruptChunks: 1
+    });
+    audioContext.deferDecode = true;
+
+    client.connect();
+    transport.receive(JSON.stringify({ type: "audio_config", format: "mp3" }));
+    await client.startCall();
+    expect(audioInput.started).toBe(true);
+
+    transport.receive(new ArrayBuffer(4));
+    await Promise.resolve();
+
+    expect(audioContext.pendingDecode).toBeDefined();
+    audioInput.onAudioLevel?.(0.2);
+    expect(transport.sentJSON).toContainEqual({ type: "interrupt" });
+
     audioContext.pendingDecode?.();
     await Promise.resolve();
     await Promise.resolve();

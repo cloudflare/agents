@@ -860,10 +860,7 @@ export class VoiceClient {
     if (this.#isPlaying && rms > this.#interruptThreshold) {
       this.#interruptChunkCount++;
       if (this.#interruptChunkCount >= this.#interruptChunks) {
-        this.#activeSource?.stop();
-        this.#activeSource = null;
-        this.#playbackQueue = [];
-        this.#isPlaying = false;
+        this.#stopPlayback();
         this.#interruptChunkCount = 0;
         if (this.#transport?.connected) {
           this.#transport.sendJSON({ type: "interrupt" });
