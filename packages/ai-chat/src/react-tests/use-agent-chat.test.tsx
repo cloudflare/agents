@@ -4452,7 +4452,7 @@ describe("useAgentChat tool approval continuations (issue #1108)", () => {
   });
 });
 
-describe("useAgentChat durable cancellation", () => {
+describe("useAgentChat client abort cancellation", () => {
   function createAgentWithTarget({ name, url }: { name: string; url: string }) {
     const target = new EventTarget();
     const sentMessages: string[] = [];
@@ -4467,13 +4467,13 @@ describe("useAgentChat durable cancellation", () => {
     (agent as unknown as Record<string, unknown>).removeEventListener =
       target.removeEventListener.bind(target);
 
-    return { agent, sentMessages };
+    return { agent, target, sentMessages };
   }
 
-  it("durable mode keeps explicit stop() as server cancellation", async () => {
+  it("keeps explicit stop() as server cancellation by default", async () => {
     const { agent, sentMessages } = createAgentWithTarget({
-      name: "durable-explicit-stop",
-      url: "ws://localhost:3000/agents/chat/durable-explicit-stop?_pk=abc"
+      name: "explicit-stop",
+      url: "ws://localhost:3000/agents/chat/explicit-stop?_pk=abc"
     });
 
     let chatInstance: ReturnType<typeof useAgentChat> | null = null;
@@ -4481,10 +4481,8 @@ describe("useAgentChat durable cancellation", () => {
     const TestComponent = () => {
       const chat = useAgentChat({
         agent,
-        durable: true,
         getInitialMessages: null,
-        messages: [] as UIMessage[],
-        resume: false
+        messages: [] as UIMessage[]
       });
       chatInstance = chat;
       return <div data-testid="status">{chat.status}</div>;

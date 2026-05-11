@@ -10,9 +10,7 @@ When you use `AIChatAgent` with `useAgentChat`:
 2. **On disconnect**: The stream continues server-side, buffering chunks
 3. **On reconnect**: Client requests a resume, receives all buffered chunks, and continues streaming
 
-No extra code is needed -- it just works.
-
-If your app treats the browser as a reconnectable observer of a long-running turn, set `durable: true` on `useAgentChat`. This keeps generic client stream abort/cleanup local to the browser while preserving explicit `stop()` as server-side cancellation.
+No extra code is needed -- it just works. Generic client stream abort/cleanup is local-only by default, so browser navigation or React cleanup does not stop the server turn. An explicit `stop()` still cancels the server turn.
 
 ## Example
 
@@ -51,10 +49,10 @@ function Chat() {
   });
 
   const { messages, sendMessage, status } = useAgentChat({
-    agent,
-    durable: true
+    agent
     // resume: true is the default - streams automatically resume on reconnect
-    // durable: true means browser cleanup does not cancel the server turn
+    // cancelOnClientAbort: false is the default - browser cleanup does not
+    // cancel the server turn
   });
 
   // ... render your chat UI
@@ -86,16 +84,25 @@ Replayed chunks include `replay: true` to distinguish them from live chunks. The
 
 ## Durable client cleanup
 
-`resume: true` controls whether the client tries to reconnect to an active stream. `durable: true` controls cancellation semantics: generic client stream abort/cleanup is local-only, while explicit `stop()` still cancels the server turn.
+`resume: true` controls whether the client tries to reconnect to an active stream. `cancelOnClientAbort: false` is the default cancellation behavior: generic client stream abort/cleanup is local-only, while explicit `stop()` still cancels the server turn.
 
 ```tsx
 const { messages, stop } = useAgentChat({
-  agent,
-  durable: true
+  agent
 });
 ```
 
-Advanced clients can set `serverTurnCancellation: "explicit-only"` directly. The default remains `"on-client-abort"` for backward compatibility.
+If your app intentionally wants client lifecycle to own server lifecycle, opt in:
+
+```tsx
+const { messages } = useAgentChat({
+  agent,
+  cancelOnClientAbort: true
+});
+```
+
+Use this for request-lifetime or token-saving flows. Explicit `stop()` is always
+server-side cancellation regardless of `cancelOnClientAbort`.
 
 ## Disabling Resume
 

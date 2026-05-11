@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import type { UIMessage as ChatMessage, UIMessageChunk } from "ai";
 import { connectChatWS } from "./test-utils";
 import { WebSocketChatTransport } from "../ws-chat-transport";
+import { MessageType, type OutgoingMessage } from "../types";
 
 function connectSlowStream(room: string) {
   return connectChatWS(`/agents/slow-stream-agent/${room}`);
@@ -134,7 +135,7 @@ describe("WebSocketChatTransport abort", () => {
     }
   });
 
-  it("stream.cancel() sends cancel to server and terminates", async () => {
+  it("stream.cancel() terminates the local stream", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
     await new Promise((r) => setTimeout(r, 50));
@@ -159,15 +160,15 @@ describe("WebSocketChatTransport abort", () => {
       // Let a few chunks arrive
       await new Promise((r) => setTimeout(r, 200));
 
-      // cancel() should not hang — it sends CF_AGENT_CHAT_REQUEST_CANCEL
-      // and terminates the stream
+      // cancel() should not hang — generic stream cleanup is local-only by
+      // default, but it still terminates the client stream.
       await expect(withTimeout(stream.cancel(), 2000)).resolves.toBeUndefined();
     } finally {
       ws.close(1000);
     }
   });
 
-  it("keeps requestId in activeRequestIds after abort until server sends done", async () => {
+  it("leaves the server stream resumable after default client abort", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
     await new Promise((r) => setTimeout(r, 50));
@@ -177,6 +178,60 @@ describe("WebSocketChatTransport abort", () => {
       const transport = new WebSocketChatTransport<ChatMessage>({
         agent: ws,
         activeRequestIds
+      });
+      ws.addEventListener("message", (event) => {
+        const data = JSON.parse(
+          event.data as string
+        ) as OutgoingMessage<ChatMessage>;
+        if (data.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+          transport.handleStreamResuming(data);
+        } else if (data.type === MessageType.CF_AGENT_STREAM_RESUME_NONE) {
+          transport.handleStreamResumeNone();
+        }
+      });
+
+      const abortController = new AbortController();
+      const stream = await transport.sendMessages({
+        chatId: "chat",
+        messages: [userMessage],
+        abortSignal: abortController.signal,
+        trigger: "submit-message",
+        body: {
+          format: "plaintext",
+          chunkCount: 20,
+          chunkDelayMs: 50
+        }
+      });
+
+      const reader = stream.getReader();
+      await new Promise((r) => setTimeout(r, 200));
+      abortController.abort();
+      await readUntilDoneOrAbort(reader, 5000);
+
+      expect(activeRequestIds.size).toBe(0);
+
+      const resumed = await transport.reconnectToStream({ chatId: "chat" });
+      expect(resumed).not.toBeNull();
+      if (!resumed) throw new Error("Expected stream to resume");
+
+      const chunks = await collectChunks(resumed, 5000);
+      expect(chunks.length).toBeGreaterThan(0);
+    } finally {
+      ws.close(1000);
+    }
+  });
+
+  it("keeps requestId in activeRequestIds after abort when cancelOnClientAbort is true", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectSlowStream(room);
+    await new Promise((r) => setTimeout(r, 50));
+
+    try {
+      const activeRequestIds = new Set<string>();
+      const transport = new WebSocketChatTransport<ChatMessage>({
+        agent: ws,
+        activeRequestIds,
+        cancelOnClientAbort: true
       });
       const abortController = new AbortController();
 
@@ -204,8 +259,8 @@ describe("WebSocketChatTransport abort", () => {
       // Abort mid-stream
       abortController.abort();
 
-      // After abort, requestId must still be in activeRequestIds so that
-      // onAgentMessage skips in-flight server chunks (issue #1100).
+      // After server cancellation, requestId must still be in activeRequestIds
+      // so that onAgentMessage skips in-flight server chunks (issue #1100).
       expect(activeRequestIds.has(requestId)).toBe(true);
 
       // Drain the stream (it errors with AbortError)

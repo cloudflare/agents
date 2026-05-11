@@ -2,4 +2,4 @@
 "@cloudflare/ai-chat": minor
 ---
 
-Add `durable` and `serverTurnCancellation` options to `useAgentChat`. `durable: true` treats browser/client stream cleanup as local-only while preserving explicit `stop()` as server-side turn cancellation.
+Add `cancelOnClientAbort` to `useAgentChat`. Generic browser/client stream cleanup is now local-only by default so server turns can continue and resume; explicit `stop()` still cancels the server turn. Set `cancelOnClientAbort: true` to make generic client aborts cancel the server turn.

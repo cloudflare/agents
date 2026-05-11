@@ -184,6 +184,47 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
     expect(activeRequestIds.has("req-tracked")).toBe(true);
   });
 
+  it("cancelActiveServerTurn cancels a resumed stream", async () => {
+    const promise = transport.reconnectToStream({ chatId: "chat-1" });
+
+    transport.handleStreamResuming({ id: "req-resumed-stop" });
+    const stream = (await promise) as ReadableStream<UIMessageChunk>;
+    const reader = stream.getReader();
+
+    expect(transport.cancelActiveServerTurn()).toBe(true);
+
+    expect(agent.sent).toHaveLength(3);
+    expect(JSON.parse(agent.sent[2])).toEqual({
+      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+      id: "req-resumed-stop"
+    });
+    expect(activeRequestIds.has("req-resumed-stop")).toBe(true);
+    await expect(reader.read()).rejects.toMatchObject({
+      name: "AbortError"
+    });
+  });
+
+  it("can opt in to server cancellation when a resumed stream is cancelled", async () => {
+    transport = new WebSocketChatTransport<ChatMessage>({
+      agent,
+      activeRequestIds,
+      cancelOnClientAbort: true
+    });
+    const promise = transport.reconnectToStream({ chatId: "chat-1" });
+
+    transport.handleStreamResuming({ id: "req-resumed-client-cancel" });
+    const stream = (await promise) as ReadableStream<UIMessageChunk>;
+
+    await expect(stream.cancel()).resolves.toBeUndefined();
+
+    expect(agent.sent).toHaveLength(3);
+    expect(JSON.parse(agent.sent[2])).toEqual({
+      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+      id: "req-resumed-client-cancel"
+    });
+    expect(activeRequestIds.has("req-resumed-client-cancel")).toBe(true);
+  });
+
   // ── handleStreamResumeNone basics ────────────────────────────────────
 
   it("handleStreamResumeNone returns false when no reconnectToStream is pending", () => {

@@ -14,8 +14,7 @@ import { MessageType } from "./types";
 import { broadcastTransition, type BroadcastStreamState } from "agents/chat";
 import {
   WebSocketChatTransport,
-  type AgentConnection,
-  type ServerTurnCancellationPolicy
+  type AgentConnection
 } from "./ws-chat-transport";
 
 /**
@@ -462,24 +461,14 @@ type UseAgentChatOptions<
    */
   resume?: boolean;
   /**
-   * Treat the browser as a reconnectable observer of a durable server turn.
-   * Generic client-side stream abort/cleanup becomes local-only, while
-   * explicit stop() still cancels the server turn.
-   *
-   * This is an intent-level alias for
-   * serverTurnCancellation: "explicit-only".
+   * Whether generic client-side stream abort/cleanup should cancel the server
+   * turn. By default, client cleanup is local-only so the server turn can
+   * continue and be resumed on reconnect. Explicit stop() always cancels the
+   * server turn.
    *
    * @default false
    */
-  durable?: boolean;
-  /**
-   * Controls whether generic client-side abort/cancel lifecycle propagates
-   * to the durable server turn. Use "explicit-only" when the browser should
-   * be able to detach and later resume without stopping server work.
-   *
-   * @default "on-client-abort"
-   */
-  serverTurnCancellation?: ServerTurnCancellationPolicy;
+  cancelOnClientAbort?: boolean;
   /**
    * Custom data to include in every chat request body.
    * Accepts a static object or a function that returns one (for dynamic values).
@@ -635,16 +624,11 @@ export function useAgentChat<
     autoContinueAfterToolResult = true, // Server auto-continues after tool results/approvals
     autoSendAfterAllConfirmationsResolved = true, // Legacy option for client-side batching
     resume = true, // Enable stream resumption by default
-    durable = false,
-    serverTurnCancellation: serverTurnCancellationOption,
+    cancelOnClientAbort = false,
     body: bodyOption,
     prepareSendMessagesRequest,
     ...rest
   } = options;
-
-  const serverTurnCancellation: ServerTurnCancellationPolicy =
-    serverTurnCancellationOption ??
-    (durable ? "explicit-only" : "on-client-abort");
 
   // Emit deprecation warnings for deprecated options (once per session)
   if (manualToolsRequiringConfirmation) {
@@ -913,7 +897,7 @@ export function useAgentChat<
     customTransportRef.current = new WebSocketChatTransport<ChatMessage>({
       agent: agentRef.current,
       activeRequestIds: localRequestIdsRef.current,
-      serverTurnCancellation,
+      cancelOnClientAbort,
       prepareBody: async ({ messages: msgs, trigger, messageId }) => {
         // Start with the top-level body option (static or dynamic)
         let extraBody: Record<string, unknown> = {};
@@ -955,7 +939,7 @@ export function useAgentChat<
   // Always point the transport at the latest socket so sends/listeners
   // go through the current connection after _pk changes.
   customTransportRef.current.agent = agentRef.current;
-  customTransportRef.current.setServerTurnCancellation(serverTurnCancellation);
+  customTransportRef.current.setCancelOnClientAbort(cancelOnClientAbort);
   const customTransport = customTransportRef.current;
 
   // Use a stable Chat ID that doesn't change when _pk changes.
@@ -1751,6 +1735,7 @@ export function useAgentChat<
             streamId: data.id,
             messageId: nanoid()
           }).state;
+          customTransport.observeServerTurn(data.id);
           setIsServerStreaming(true);
           agentRef.current.send(
             JSON.stringify({
@@ -1793,6 +1778,7 @@ export function useAgentChat<
             }
 
             if (data.done) {
+              customTransport.handleServerTurnCompleted(data.id);
               restoreProtectedStreamingAssistant(localResponseIds.get(data.id));
               localResponseIds.delete(data.id);
               localRequestIdsRef.current.delete(data.id);
@@ -1848,6 +1834,9 @@ export function useAgentChat<
           }
           if (data.done || data.replayComplete) {
             pendingReplayResumeRequestIdsRef.current.delete(data.id);
+          }
+          if (data.done) {
+            customTransport.handleServerTurnCompleted(data.id);
           }
 
           const result = broadcastTransition(streamStateRef.current, {
