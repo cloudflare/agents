@@ -2569,7 +2569,10 @@ export class Think<
         this._continuation.activeConnectionId !== null &&
         this._continuation.activeConnectionId !== connection.id
       ) {
-        connection.send(JSON.stringify({ type: MSG_STREAM_RESUME_NONE }));
+        sendIfOpen(
+          connection,
+          JSON.stringify({ type: MSG_STREAM_RESUME_NONE })
+        );
       } else {
         this._notifyStreamResuming(connection);
       }
@@ -2579,7 +2582,7 @@ export class Think<
     ) {
       this._continuation.awaitingConnections.set(connection.id, connection);
     } else {
-      connection.send(JSON.stringify({ type: MSG_STREAM_RESUME_NONE }));
+      sendIfOpen(connection, JSON.stringify({ type: MSG_STREAM_RESUME_NONE }));
     }
   }
 
@@ -3553,13 +3556,16 @@ export class Think<
 
   private _notifyStreamResuming(connection: Connection): void {
     if (!this._resumableStream.hasActiveStream()) return;
-    this._pendingResumeConnections.add(connection.id);
-    connection.send(
+    const sent = sendIfOpen(
+      connection,
       JSON.stringify({
         type: MSG_STREAM_RESUMING,
         id: this._resumableStream.activeRequestId
       })
     );
+    if (sent) {
+      this._pendingResumeConnections.add(connection.id);
+    }
   }
 
   private _persistOrphanedStream(streamId: string): void {

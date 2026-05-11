@@ -3,4 +3,4 @@
 "@cloudflare/ai-chat": patch
 ---
 
-Avoid throwing when chat stream resume/replay races with a closed WebSocket connection.
+Avoid throwing when chat stream resume negotiation/replay races with a closed WebSocket connection.

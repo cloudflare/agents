@@ -15,6 +15,26 @@ import type { ClientToolSchema } from "./client-tools";
 
 const MSG_STREAM_RESUME_NONE = CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE;
 
+function sendIfOpen(
+  connection: ContinuationConnection,
+  message: string
+): boolean {
+  try {
+    connection.send(message);
+    return true;
+  } catch (error) {
+    if (isWebSocketClosedSendError(error)) return false;
+    throw error;
+  }
+}
+
+function isWebSocketClosedSendError(error: unknown): boolean {
+  return (
+    error instanceof TypeError &&
+    error.message.includes("WebSocket send() after close")
+  );
+}
+
 /**
  * Minimal connection interface for sending WebSocket messages.
  * Matches the Connection type from agents without importing it.
@@ -77,7 +97,7 @@ export class ContinuationState {
   sendResumeNone(): void {
     const msg = JSON.stringify({ type: MSG_STREAM_RESUME_NONE });
     for (const connection of this.awaitingConnections.values()) {
-      connection.send(msg);
+      sendIfOpen(connection, msg);
     }
     this.awaitingConnections.clear();
   }

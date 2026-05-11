@@ -132,6 +132,41 @@ describe("ContinuationState", () => {
     expect(state.awaitingConnections.size).toBe(0);
   });
 
+  it("sendResumeNone ignores connections closed during resume negotiation", () => {
+    const state = new ContinuationState();
+    const conn1 = makeConnection("c1");
+    const conn2: ContinuationConnection = {
+      id: "c2",
+      send: vi.fn(() => {
+        throw new TypeError("WebSocket send() after close");
+      })
+    };
+    state.awaitingConnections.set("c1", conn1);
+    state.awaitingConnections.set("c2", conn2);
+
+    expect(() => state.sendResumeNone()).not.toThrow();
+
+    const expected = JSON.stringify({
+      type: "cf_agent_stream_resume_none"
+    });
+    expect(conn1.send).toHaveBeenCalledWith(expected);
+    expect(conn2.send).toHaveBeenCalledWith(expected);
+    expect(state.awaitingConnections.size).toBe(0);
+  });
+
+  it("sendResumeNone rethrows non-closed WebSocket send errors", () => {
+    const state = new ContinuationState();
+    const conn: ContinuationConnection = {
+      id: "c1",
+      send: vi.fn(() => {
+        throw new TypeError("unexpected send failure");
+      })
+    };
+    state.awaitingConnections.set("c1", conn);
+
+    expect(() => state.sendResumeNone()).toThrow("unexpected send failure");
+  });
+
   it("sendResumeNone is a no-op when no connections are waiting", () => {
     const state = new ContinuationState();
     state.sendResumeNone();

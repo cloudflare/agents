@@ -844,7 +844,8 @@ export class AIChatAgent<
               this._continuation.activeConnectionId !== null &&
               this._continuation.activeConnectionId !== connection.id
             ) {
-              connection.send(
+              sendIfOpen(
+                connection,
                 JSON.stringify({
                   type: MessageType.CF_AGENT_STREAM_RESUME_NONE
                 })
@@ -861,7 +862,8 @@ export class AIChatAgent<
               connection
             );
           } else {
-            connection.send(
+            sendIfOpen(
+              connection,
               JSON.stringify({
                 type: MessageType.CF_AGENT_STREAM_RESUME_NONE
               })
@@ -1119,17 +1121,19 @@ export class AIChatAgent<
       return;
     }
 
-    // Add connection to pending set - they'll be excluded from live broadcasts
-    // until they send ACK to receive the full stream replay
-    this._pendingResumeConnections.add(connection.id);
-
     // Notify client - they will send ACK when ready
-    connection.send(
+    const sent = sendIfOpen(
+      connection,
       JSON.stringify({
         type: MessageType.CF_AGENT_STREAM_RESUMING,
         id: this._resumableStream.activeRequestId
       })
     );
+    if (sent) {
+      // Add connection to pending set - they'll be excluded from live broadcasts
+      // until they send ACK to receive the full stream replay
+      this._pendingResumeConnections.add(connection.id);
+    }
   }
 
   // ── Delegate methods for backward compatibility with tests ─────────
