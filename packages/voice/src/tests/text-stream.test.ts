@@ -95,4 +95,101 @@ describe("SSE parsing resilience", () => {
     const chunks = await collect(iterateText(stream));
     expect(chunks).toEqual(["hi"]);
   });
+
+  it("handles data lines without a space after the colon", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data:{"response":"hi"}\n'));
+        controller.enqueue(encoder.encode("data:[DONE]\n"));
+        controller.enqueue(encoder.encode('data:{"response":"ignored"}\n'));
+        controller.close();
+      }
+    });
+
+    const chunks = await collect(iterateText(stream));
+    expect(chunks).toEqual(["hi"]);
+  });
+});
+
+describe("NDJSON parsing resilience", () => {
+  it("parses raw newline-delimited JSON response chunks", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('{"response":"hello"}\n'));
+        controller.enqueue(encoder.encode('{"response":" world"}\n'));
+        controller.close();
+      }
+    });
+
+    const chunks = await collect(iterateText(stream));
+    expect(chunks).toEqual(["hello", " world"]);
+  });
+
+  it("parses raw OpenAI-style newline-delimited JSON chunks", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            '{"choices":[{"delta":{"role":"assistant","content":"hello"}}]}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            '{"choices":[{"delta":{"role":"assistant","content":" world"}}]}\n'
+          )
+        );
+        controller.close();
+      }
+    });
+
+    const chunks = await collect(iterateText(stream));
+    expect(chunks).toEqual(["hello", " world"]);
+  });
+
+  it("survives malformed raw JSON lines without crashing", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('{"response":"hello"}\n'));
+        controller.enqueue(encoder.encode("{malformed json}\n"));
+        controller.enqueue(encoder.encode('{"response":" world"}\n'));
+        controller.close();
+      }
+    });
+
+    const chunks = await collect(iterateText(stream));
+    expect(chunks).toEqual(["hello", " world"]);
+  });
+
+  it("buffers raw JSON split across byte chunks", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('{"response":"hel'));
+        controller.enqueue(encoder.encode('lo"}\n{"response":" wor'));
+        controller.enqueue(encoder.encode('ld"}\n'));
+        controller.close();
+      }
+    });
+
+    const chunks = await collect(iterateText(stream));
+    expect(chunks).toEqual(["hello", " world"]);
+  });
+
+  it("parses the final raw JSON line without a trailing newline", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('{"response":"hello"}\n'));
+        controller.enqueue(encoder.encode('{"response":" world"}'));
+        controller.close();
+      }
+    });
+
+    const chunks = await collect(iterateText(stream));
+    expect(chunks).toEqual(["hello", " world"]);
+  });
 });

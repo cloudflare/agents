@@ -177,8 +177,8 @@ function parseLine(line: string): Record<string, unknown> | "DONE" | null {
   const trimmed = line.trim();
   if (!trimmed) return null;
 
-  if (trimmed.startsWith("data: ")) {
-    const json = trimmed.slice(6).trim();
+  if (trimmed.startsWith("data:")) {
+    const json = trimmed.slice(5).trim();
     if (json === "[DONE]") return "DONE";
     try {
       return JSON.parse(json) as Record<string, unknown>;
@@ -188,5 +188,22 @@ function parseLine(line: string): Record<string, unknown> | "DONE" | null {
     }
   }
 
-  return null;
+  if (trimmed === "[DONE]") return "DONE";
+
+  // Ignore SSE metadata/comment lines. Only `data:` carries payload.
+  if (
+    trimmed.startsWith(":") ||
+    trimmed.startsWith("event:") ||
+    trimmed.startsWith("id:") ||
+    trimmed.startsWith("retry:")
+  ) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    console.warn("[voice] Skipping malformed NDJSON line:", trimmed);
+    return null;
+  }
 }
