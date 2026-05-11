@@ -1,8 +1,15 @@
-# Telnyx Voice Agent
+# Telnyx Phone Voice Agent
 
-A small starter that uses Telnyx STT and TTS with `@cloudflare/voice` and a Workers AI LLM.
+A phone/PSTN voice agent that uses a browser-side Telnyx WebRTC bridge to route a live phone call through a Cloudflare Agent.
 
-Browser microphone audio flows to a Cloudflare Agent, Telnyx transcribes it, Workers AI generates a response, and Telnyx synthesizes the response back to browser audio.
+**Flow:** phone call → Telnyx WebRTC bridge in the browser → Cloudflare Agent → Telnyx STT → Workers AI → Telnyx TTS → audio injected back into the phone call.
+
+## Prerequisites
+
+1. A Telnyx account
+2. A Telnyx API key
+3. A Telnyx SIP Credential Connection
+4. A Telnyx phone number assigned to that SIP connection
 
 ## Setup
 
@@ -15,13 +22,15 @@ Edit `.env` and set:
 
 ```bash
 TELNYX_API_KEY=...
+TELNYX_CREDENTIAL_CONNECTION_ID=...
 ```
 
-For deployed Workers, store the API key as a secret:
+For deployed Workers, store both values as secrets:
 
 ```bash
 cd examples/telnyx-voice-agent
 wrangler secret put TELNYX_API_KEY
+wrangler secret put TELNYX_CREDENTIAL_CONNECTION_ID
 ```
 
 ## Run locally
@@ -30,7 +39,9 @@ wrangler secret put TELNYX_API_KEY
 npm run start -w @cloudflare/agents-telnyx-voice-agent
 ```
 
-Open the local URL, click **Start talking**, and speak into your microphone.
+Open the local URL and click **Connect phone bridge**. The browser fetches a short-lived Telnyx WebRTC token, opens a WebSocket to the Cloudflare Agent, then waits for an inbound phone call. Call the phone number assigned to your Telnyx SIP connection; inbound calls are auto-answered and routed through the AI agent.
+
+The browser acts as a control panel and bridge. Audio comes from the phone call and returns to the phone call — it does not use the browser microphone or speakers.
 
 ## Deploy
 
@@ -38,14 +49,40 @@ Open the local URL, click **Start talking**, and speak into your microphone.
 npm run deploy -w @cloudflare/agents-telnyx-voice-agent
 ```
 
-## Optional telephony
+## Key pattern
 
-This starter includes a `/api/telnyx-token` route placeholder for browser-side Telnyx WebRTC/PSTN experiments, but the default UI only demonstrates STT/TTS. The JWT helper intentionally requires you to configure authentication before it will create Telnyx credentials.
+The Worker exposes a JWT endpoint that creates browser Telnyx credentials without exposing the API key:
 
-To use the telephony helpers from `@cloudflare/voice-telnyx/telephony`, also set:
-
-```bash
-TELNYX_CREDENTIAL_CONNECTION_ID=...
+```ts
+if (url.pathname === "/api/telnyx-token") {
+  const endpoint = new TelnyxJWTEndpoint({
+    apiKey: env.TELNYX_API_KEY,
+    credentialConnectionId: env.TELNYX_CREDENTIAL_CONNECTION_ID,
+    allowUnauthenticated: true // local demo only
+  });
+  return endpoint.handleRequest(request);
+}
 ```
 
-When routing server audio to a Telnyx phone call, configure your server voice agent with `withVoice(Agent, { audioFormat: "pcm16" })` and create the client with `preferredFormat: "pcm16"`, because phone playback expects 16 kHz mono PCM16 audio.
+The browser creates the Telnyx bridge and gives it to `TelnyxPhoneClient`:
+
+```ts
+const telnyx = await createTelnyxVoiceConfig({
+  jwtEndpoint: "/api/telnyx-token",
+  autoAnswer: true
+});
+
+const phoneClient = new TelnyxPhoneClient({
+  transport: new WebSocketVoiceTransport({ agent: "my-voice-agent" }),
+  bridge: telnyx.bridge
+});
+
+phoneClient.connect();
+```
+
+For production, replace `allowUnauthenticated: true` with an `authorize()` callback before exposing browser-created Telnyx credentials.
+
+## Related examples
+
+- `examples/voice-agent` — browser microphone/speaker voice agent
+- `examples/voice-input` — reusable voice input component

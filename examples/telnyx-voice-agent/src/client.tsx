@@ -1,6 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { useVoiceAgent, type VoiceStatus } from "@cloudflare/voice/react";
+import { WebSocketVoiceTransport } from "@cloudflare/voice/client";
+import type {
+  TranscriptMessage,
+  VoicePipelineMetrics,
+  VoiceStatus
+} from "@cloudflare/voice/client";
+import {
+  createTelnyxVoiceConfig,
+  TelnyxPhoneClient
+} from "@cloudflare/voice-telnyx/telephony";
 import {
   Badge,
   Button,
@@ -26,7 +35,7 @@ import {
 import "./styles.css";
 
 function getSessionId(): string {
-  const key = "telnyx-voice-agent-session-id";
+  const key = "telnyx-phone-voice-agent-session-id";
   let id = localStorage.getItem(key);
   if (!id) {
     id = crypto.randomUUID();
@@ -68,7 +77,7 @@ function ConnectionIndicator({ connected }: { connected: boolean }) {
       />
       <Icon size={16} className="text-kumo-secondary" />
       <Text size="sm" variant="secondary">
-        {connected ? "Connected" : "Disconnected"}
+        {connected ? "Worker connected" : "Worker disconnected"}
       </Text>
     </div>
   );
@@ -77,13 +86,13 @@ function ConnectionIndicator({ connected }: { connected: boolean }) {
 function statusLabel(status: VoiceStatus): string {
   switch (status) {
     case "idle":
-      return "Ready";
+      return "Waiting";
     case "listening":
-      return "Listening";
+      return "Listening to phone";
     case "thinking":
       return "Thinking";
     case "speaking":
-      return "Speaking";
+      return "Speaking into call";
   }
 }
 
@@ -102,32 +111,139 @@ function statusIcon(status: VoiceStatus) {
 
 function App() {
   const sessionId = useRef(getSessionId()).current;
-  const [text, setText] = useState("");
+  const phoneClientRef = useRef<TelnyxPhoneClient | null>(null);
+  const cleanupRef = useRef<(() => Promise<void>) | null>(null);
+  const callStartedRef = useRef(false);
 
-  const {
-    status,
-    transcript,
-    interimTranscript,
-    metrics,
-    audioLevel,
-    isMuted,
-    connected,
-    error,
-    startCall,
-    endCall,
-    toggleMute,
-    sendText
-  } = useVoiceAgent({
-    agent: "my-voice-agent",
-    name: sessionId
-  });
+  const [connected, setConnected] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>("idle");
+  const [bridgeStatus, setBridgeStatus] = useState(
+    "Connect the bridge, then call your Telnyx number."
+  );
+  const [sipUsername, setSipUsername] = useState<string | null>(null);
+  const [transcript, setTranscript] = useState<TranscriptMessage[]>([]);
+  const [interimTranscript, setInterimTranscript] = useState<string | null>(
+    null
+  );
+  const [metrics, setMetrics] = useState<VoicePipelineMetrics | null>(null);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const [isMuted, setIsMuted] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [text, setText] = useState("");
 
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [transcript, interimTranscript]);
 
-  const inCall = status !== "idle";
+  useEffect(() => {
+    return () => {
+      phoneClientRef.current?.disconnect();
+      void cleanupRef.current?.();
+    };
+  }, []);
+
+  async function connectBridge() {
+    setConnecting(true);
+    setError(null);
+    setBridgeStatus("Fetching a Telnyx WebRTC token...");
+
+    try {
+      const telnyx = await createTelnyxVoiceConfig({
+        jwtEndpoint: "/api/telnyx-token",
+        autoAnswer: true,
+        debug: true
+      });
+
+      cleanupRef.current = telnyx.cleanup;
+      setSipUsername(telnyx.sipUsername || null);
+      setBridgeStatus("Opening the Worker voice WebSocket...");
+
+      const phoneClient = new TelnyxPhoneClient({
+        transport: new WebSocketVoiceTransport({
+          agent: "my-voice-agent",
+          name: sessionId
+        }),
+        bridge: telnyx.bridge
+      });
+
+      phoneClient.addEventListener("statuschange", setVoiceStatus);
+      phoneClient.addEventListener("transcriptchange", setTranscript);
+      phoneClient.addEventListener("interimtranscript", setInterimTranscript);
+      phoneClient.addEventListener("metricschange", setMetrics);
+      phoneClient.addEventListener("audiolevelchange", setAudioLevel);
+      phoneClient.addEventListener("mutechange", setIsMuted);
+      phoneClient.addEventListener("error", setError);
+      phoneClient.addEventListener("connectionchange", (isConnected) => {
+        setConnected(isConnected);
+        if (!isConnected) {
+          setBridgeStatus("Worker connection dropped; reconnecting...");
+          return;
+        }
+
+        setConnecting(false);
+
+        if (callStartedRef.current) {
+          setBridgeStatus("Worker reconnected. Phone bridge is still active.");
+          return;
+        }
+
+        callStartedRef.current = true;
+        setBridgeStatus("Connecting to Telnyx and waiting for a phone call...");
+        phoneClient.startCall().then(
+          () => {
+            setBridgeStatus(
+              "Bridge ready. Call your Telnyx number; inbound calls are auto-answered."
+            );
+          },
+          (err: unknown) => {
+            callStartedRef.current = false;
+            const message = err instanceof Error ? err.message : String(err);
+            setError(message);
+            setBridgeStatus("Failed to start the Telnyx phone bridge.");
+          }
+        );
+      });
+
+      phoneClientRef.current = phoneClient;
+      phoneClient.connect();
+    } catch (err) {
+      await cleanupRef.current?.();
+      cleanupRef.current = null;
+
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+      setBridgeStatus("Setup failed.");
+      setConnecting(false);
+      callStartedRef.current = false;
+    }
+  }
+
+  async function disconnectBridge() {
+    phoneClientRef.current?.disconnect();
+    phoneClientRef.current = null;
+    await cleanupRef.current?.();
+    cleanupRef.current = null;
+
+    setConnected(false);
+    setConnecting(false);
+    callStartedRef.current = false;
+    setVoiceStatus("idle");
+    setBridgeStatus("Disconnected. Connect again to create a fresh bridge.");
+    setSipUsername(null);
+    setInterimTranscript(null);
+    setMetrics(null);
+    setAudioLevel(0);
+    setIsMuted(false);
+  }
+
+  function toggleMute() {
+    phoneClientRef.current?.toggleMute();
+  }
+
+  const canSendText = connected && phoneClientRef.current !== null;
+  const bridgeActive = connected || connecting;
 
   return (
     <main className="min-h-screen bg-kumo-base text-kumo-default">
@@ -135,11 +251,11 @@ function App() {
         <header className="flex items-center justify-between gap-3">
           <div>
             <Text size="lg" bold>
-              Telnyx Voice Agent
+              Telnyx Phone Voice Agent
             </Text>
             <span className="block">
               <Text size="sm" variant="secondary">
-                Cloudflare Agents + Telnyx STT/TTS + Workers AI
+                Cloudflare Agents + Telnyx PSTN/WebRTC bridge + Workers AI
               </Text>
             </span>
           </div>
@@ -155,36 +271,52 @@ function App() {
             />
             <div>
               <Text size="sm" bold>
-                Browser voice starter
+                Phone/PSTN bridge demo
               </Text>
               <span className="mt-1 block">
                 <Text size="xs" variant="secondary">
-                  Click Start talking, speak into your microphone, and hear a
-                  Workers AI assistant respond using Telnyx text-to-speech.
-                  Telephony helpers are included in the provider package but are
-                  optional for this starter UI.
+                  This browser is a control panel and WebRTC bridge. Caller
+                  audio comes from a Telnyx phone call, streams to a Cloudflare
+                  Agent for STT → LLM → TTS, then plays back into the same phone
+                  call — not through the browser microphone or speakers.
                 </Text>
               </span>
             </div>
           </div>
         </Surface>
 
-        <div className="grid flex-1 gap-4 lg:grid-cols-[0.8fr_1.2fr]">
+        <div className="grid flex-1 gap-4 lg:grid-cols-[0.85fr_1.15fr]">
           <Surface className="rounded-2xl p-5 ring ring-kumo-line">
             <div className="flex h-full flex-col gap-5">
               <div className="flex items-center justify-between gap-3">
                 <ConnectionIndicator connected={connected} />
                 <Badge>
                   <span className="inline-flex items-center gap-1.5">
-                    {statusIcon(status)}
-                    {statusLabel(status)}
+                    {statusIcon(voiceStatus)}
+                    {statusLabel(voiceStatus)}
                   </span>
                 </Badge>
               </div>
 
+              <Surface className="rounded-xl p-4 ring ring-kumo-line">
+                <Text size="sm" bold>
+                  Bridge status
+                </Text>
+                <span className="mt-2 block">
+                  <Text size="sm" variant="secondary">
+                    {bridgeStatus}
+                  </Text>
+                </span>
+                {sipUsername ? (
+                  <span className="mt-3 block rounded-lg bg-kumo-subtle p-3 font-mono text-sm">
+                    sip:{sipUsername}@sip.telnyx.com
+                  </span>
+                ) : null}
+              </Surface>
+
               <div>
                 <Text size="sm" bold>
-                  Microphone level
+                  Phone audio level
                 </Text>
                 <div className="mt-2 h-2 overflow-hidden rounded-full bg-kumo-line">
                   <div
@@ -195,25 +327,25 @@ function App() {
               </div>
 
               <div className="flex flex-wrap gap-2">
-                {!inCall ? (
+                {!bridgeActive ? (
                   <Button
-                    onClick={startCall}
-                    icon={<MicrophoneIcon size={16} />}
+                    onClick={connectBridge}
+                    icon={<PhoneIcon size={16} />}
                   >
-                    Start talking
+                    Connect phone bridge
                   </Button>
                 ) : (
                   <Button
                     variant="secondary"
-                    onClick={endCall}
+                    onClick={disconnectBridge}
                     icon={<PhoneDisconnectIcon size={16} />}
                   >
-                    End call
+                    Disconnect
                   </Button>
                 )}
                 <Button
                   variant="ghost"
-                  disabled={!inCall}
+                  disabled={!connected}
                   onClick={toggleMute}
                   icon={
                     isMuted ? (
@@ -223,7 +355,7 @@ function App() {
                     )
                   }
                 >
-                  {isMuted ? "Unmute" : "Mute"}
+                  {isMuted ? "Unmute bridge" : "Mute bridge"}
                 </Button>
               </div>
 
@@ -253,7 +385,7 @@ function App() {
             <div className="mb-4 flex items-center gap-2">
               <ChatCircleDotsIcon size={20} className="text-kumo-accent" />
               <Text size="lg" bold>
-                Transcript
+                Phone call transcript
               </Text>
             </div>
 
@@ -261,7 +393,9 @@ function App() {
               {transcript.length === 0 && !interimTranscript ? (
                 <Surface className="rounded-xl p-4 ring ring-kumo-line">
                   <Text size="sm" variant="secondary">
-                    Start a call and say hello, or type a message below.
+                    Connect the bridge, call your Telnyx number, and speak to
+                    the agent over the phone. You can also send a text turn once
+                    connected.
                   </Text>
                 </Surface>
               ) : null}
@@ -279,7 +413,7 @@ function App() {
                     }`}
                   >
                     <Text size="xs" bold>
-                      {message.role === "user" ? "You" : "Assistant"}
+                      {message.role === "user" ? "Caller" : "Assistant"}
                     </Text>
                     <span className="mt-1 block">
                       <Text size="sm">{message.text}</Text>
@@ -292,7 +426,7 @@ function App() {
                 <div className="flex justify-end opacity-70">
                   <Surface className="max-w-[82%] rounded-2xl bg-kumo-accent p-3 ring ring-kumo-line">
                     <Text size="xs" bold>
-                      You
+                      Caller
                     </Text>
                     <span className="mt-1 block">
                       <Text size="sm">{interimTranscript}</Text>
@@ -308,18 +442,23 @@ function App() {
               onSubmit={(event) => {
                 event.preventDefault();
                 const value = text.trim();
-                if (!value) return;
-                sendText(value);
+                if (!value || !canSendText) return;
+                phoneClientRef.current?.sendText(value);
                 setText("");
               }}
             >
               <input
-                className="min-w-0 flex-1 rounded-full border border-kumo-line bg-kumo-surface px-4 py-2 text-kumo-default outline-none focus:border-kumo-accent"
+                className="min-w-0 flex-1 rounded-full border border-kumo-line bg-kumo-surface px-4 py-2 text-kumo-default outline-none focus:border-kumo-accent disabled:opacity-60"
                 value={text}
                 onChange={(event) => setText(event.target.value)}
-                placeholder="Or type a message..."
+                placeholder="Send a text turn to the same agent..."
+                disabled={!canSendText}
               />
-              <Button type="submit" icon={<PaperPlaneRightIcon size={16} />}>
+              <Button
+                type="submit"
+                disabled={!canSendText}
+                icon={<PaperPlaneRightIcon size={16} />}
+              >
                 Send
               </Button>
             </form>

@@ -1,16 +1,13 @@
 import { Agent, routeAgentRequest } from "agents";
 import { withVoice, type VoiceTurnContext } from "@cloudflare/voice";
-import {
-  TelnyxJWTEndpoint,
-  TelnyxSTT,
-  TelnyxTTS
-} from "@cloudflare/voice-telnyx";
+import { TelnyxSTT, TelnyxTTS } from "@cloudflare/voice-telnyx";
+import { TelnyxJWTEndpoint } from "@cloudflare/voice-telnyx/telephony";
 import { streamText } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 
 const VoiceAgent = withVoice(Agent);
 
-const SYSTEM_PROMPT = `You are a friendly voice assistant powered by Cloudflare Workers and Telnyx. Keep responses concise, conversational, and suitable for spoken audio.`;
+const SYSTEM_PROMPT = `You are a friendly phone voice assistant powered by Cloudflare Workers and Telnyx. Keep responses concise, conversational, and suitable for a live phone call.`;
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
   transcriber = new TelnyxSTT({
@@ -59,7 +56,10 @@ export default {
 
       const endpoint = new TelnyxJWTEndpoint({
         apiKey: env.TELNYX_API_KEY,
-        credentialConnectionId: env.TELNYX_CREDENTIAL_CONNECTION_ID
+        credentialConnectionId: env.TELNYX_CREDENTIAL_CONNECTION_ID,
+        // Local example only: production apps should provide an authorize()
+        // callback before exposing browser-created Telnyx credentials.
+        allowUnauthenticated: true
       });
       return endpoint.handleRequest(request);
     }
