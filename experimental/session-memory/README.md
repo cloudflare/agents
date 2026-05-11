@@ -235,7 +235,7 @@ You can pass any function to `onCompaction()`. It receives the full message hist
 
 ## Read-Time Truncation
 
-`truncateOlderMessages` truncates tool outputs and long text in older messages before sending to the LLM. Does not mutate the stored messages.
+`truncateOlderMessages` truncates tool outputs and long text in older messages before sending to the LLM. Does not mutate the stored messages. Structured tool outputs keep their container shape, with large nested fields truncated in place.
 
 ```typescript
 import { truncateOlderMessages } from "agents/experimental/memory/utils";

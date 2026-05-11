@@ -7,6 +7,7 @@
  */
 
 import type { ProviderMetadata, ReasoningUIPart, UIMessage } from "ai";
+import { truncateToolOutput } from "./tool-output-truncation";
 
 const textEncoder = new TextEncoder();
 
@@ -117,7 +118,7 @@ function stripOpenAIMetadata<T extends UIMessage["parts"][number]>(
  * when a serialized message exceeds the safety threshold (1.8MB).
  *
  * Compaction strategy:
- * 1. Compact tool outputs over 1KB (replace with summary)
+ * 1. Compact tool outputs over 1KB while preserving structured output shape
  * 2. If still too big, truncate text parts from oldest to newest
  */
 export function enforceRowSizeLimit(message: UIMessage): UIMessage {
@@ -136,15 +137,12 @@ export function enforceRowSizeLimit(message: UIMessage): UIMessage {
       "state" in part &&
       part.state === "output-available"
     ) {
-      const outputJson = JSON.stringify((part as { output: unknown }).output);
-      if (outputJson.length > 1000) {
+      const output = (part as { output: unknown }).output;
+      const truncated = truncateToolOutput(output, 1000);
+      if (truncated.truncated) {
         return {
           ...part,
-          output:
-            "This tool output was too large to persist in storage " +
-            `(${outputJson.length} bytes). ` +
-            "If the user asks about this data, suggest re-running the tool. " +
-            `Preview: ${outputJson.slice(0, 500)}...`
+          output: truncated.output
         };
       }
     }

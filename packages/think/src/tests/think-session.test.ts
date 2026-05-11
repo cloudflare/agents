@@ -819,7 +819,7 @@ describe("Think — row size enforcement", () => {
     const toolPart = result.parts[0] as Record<string, unknown>;
     const output = toolPart.output as string;
 
-    expect(output).toContain("too large to persist");
+    expect(output).toContain("[truncated");
     expect(output.length).toBeLessThan(hugeOutput.length);
   });
 
@@ -844,6 +844,107 @@ describe("Think — row size enforcement", () => {
 // ── Model message conversion ─────────────────────────────────────
 
 describe("Think — model message conversion", () => {
+  it("replays truncated workspace text read outputs as text", async () => {
+    const agent = await freshAgent("model-conversion-truncated-read");
+    const largeContent = "read-output ".repeat(100);
+
+    await agent.persistTestMessage({
+      id: "u-read-text",
+      role: "user",
+      parts: [{ type: "text", text: "Read /large.txt" }]
+    });
+    await agent.persistTestMessage({
+      id: "a-read-text",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-read",
+          toolCallId: "tc-read-text",
+          state: "output-available",
+          input: { path: "/large.txt" },
+          output: {
+            path: "/large.txt",
+            content: largeContent,
+            totalLines: 1
+          }
+        } as UIMessage["parts"][number]
+      ]
+    });
+    for (let i = 0; i < 4; i++) {
+      await agent.persistTestMessage({
+        id: `recent-${i}`,
+        role: "user",
+        parts: [{ type: "text", text: `recent ${i}` }]
+      });
+    }
+
+    const result = await agent.testChat("follow up");
+
+    expect(result.error).toBeUndefined();
+    const messagesJson = await agent.getLastBeforeTurnMessagesJson();
+    expect(messagesJson).not.toBeNull();
+    const messages = JSON.parse(messagesJson!) as Array<{
+      role: string;
+      content?: Array<{
+        output?: {
+          type: string;
+          value?: string;
+        };
+      }>;
+    }>;
+    const toolOutput = messages
+      .find((message) => message.role === "tool")
+      ?.content?.find((part) => part.output?.type === "text")?.output;
+
+    expect(toolOutput?.value).toContain("[truncated");
+    expect(toolOutput?.value).toContain("read-output");
+  });
+
+  it("replays legacy raw-string workspace read outputs as text", async () => {
+    const agent = await freshAgent("model-conversion-string-read");
+    const legacyOutput =
+      "This read output was truncated by an older SDK version.";
+
+    await agent.persistTestMessage({
+      id: "u-read-legacy",
+      role: "user",
+      parts: [{ type: "text", text: "Read /legacy.txt" }]
+    });
+    await agent.persistTestMessage({
+      id: "a-read-legacy",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-read",
+          toolCallId: "tc-read-legacy",
+          state: "output-available",
+          input: { path: "/legacy.txt" },
+          output: legacyOutput
+        } as UIMessage["parts"][number]
+      ]
+    });
+
+    const result = await agent.testChat("follow up");
+
+    expect(result.error).toBeUndefined();
+    const messagesJson = await agent.getLastBeforeTurnMessagesJson();
+    expect(messagesJson).not.toBeNull();
+    const messages = JSON.parse(messagesJson!) as Array<{
+      role: string;
+      content?: Array<{
+        output?: {
+          type: string;
+          value?: string;
+        };
+      }>;
+    }>;
+    const toolOutput = messages
+      .find((message) => message.role === "tool")
+      ?.content?.find((part) => part.output?.type === "text")?.output;
+
+    expect(toolOutput?.value).toBe(legacyOutput);
+  });
+
   it("rehydrates compact workspace image read outputs during replay", async () => {
     const agent = await freshAgent("model-conversion-image-read");
     const imageBytes = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];

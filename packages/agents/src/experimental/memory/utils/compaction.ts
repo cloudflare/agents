@@ -2,9 +2,12 @@
  * Read-time context truncation.
  *
  * Truncates older tool outputs and long text before sending to the LLM.
+ * Structured tool outputs keep their container shape so tool-specific
+ * `toModelOutput` handlers can safely replay older results.
  * Does NOT mutate stored messages — operates on a copy.
  */
 
+import { truncateToolOutput } from "../../../chat/tool-output-truncation";
 import type { SessionMessage } from "../session/types";
 
 export interface TruncateOptions {
@@ -21,7 +24,8 @@ export interface TruncateOptions {
  * Returns a new array — input messages are not mutated.
  *
  * Recent messages (last `keepRecent`) are left intact.
- * Older messages get tool outputs and long text truncated.
+ * Older messages get tool outputs and long text truncated. Structured tool
+ * outputs are truncated in place instead of being replaced by raw strings.
  *
  * Use in assembleContext() before sending to the LLM:
  * ```typescript
@@ -62,13 +66,12 @@ export function truncateOlderMessages(
       ) {
         const output = (part as { output?: unknown }).output;
         if (output !== undefined) {
-          const str =
-            typeof output === "string" ? output : JSON.stringify(output);
-          if (str.length > maxToolOutput) {
+          const truncated = truncateToolOutput(output, maxToolOutput);
+          if (truncated.truncated) {
             changed = true;
             return {
               ...part,
-              output: `${str.slice(0, maxToolOutput)}... [truncated ${str.length} chars]`
+              output: truncated.output
             };
           }
         }

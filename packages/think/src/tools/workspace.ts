@@ -1,4 +1,5 @@
 import type { Workspace, FileInfo } from "@cloudflare/shell";
+import type { JSONValue } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
 
@@ -205,6 +206,12 @@ type ReadToolOutput =
   | BinaryReadToolOutput
   | ReadToolError;
 
+type ReadToolInput = {
+  path: string;
+  offset?: number;
+  limit?: number;
+};
+
 export interface ReadToolOptions {
   ops: ReadOperations;
 }
@@ -232,7 +239,11 @@ export function createReadTool(options: ReadToolOptions) {
         .optional()
         .describe("Number of lines to read")
     }),
-    execute: async ({ path, offset, limit }): Promise<ReadToolOutput> => {
+    execute: async ({
+      path,
+      offset,
+      limit
+    }: ReadToolInput): Promise<ReadToolOutput> => {
       const stat = await ops.stat(path);
       if (!stat) {
         return { error: `File not found: ${path}` };
@@ -276,19 +287,45 @@ export function createReadTool(options: ReadToolOptions) {
 
       return readTextWithLineNumbers({ ops, path, offset, limit });
     },
-    toModelOutput: async ({ input, output }) => {
-      if ("error" in output) {
-        return { type: "error-text", value: output.error };
+    toModelOutput: async ({
+      input,
+      output
+    }: {
+      input: unknown;
+      output: unknown;
+    }) => {
+      const replayOutput: unknown = output;
+
+      if (!isRecord(replayOutput)) {
+        return { type: "text", value: String(replayOutput) };
       }
 
-      if ("content" in output) {
-        return { type: "text", value: output.content };
+      if (typeof replayOutput.error === "string") {
+        return { type: "error-text", value: replayOutput.error };
       }
 
-      if (output.kind === "binary") {
+      if (typeof replayOutput.content === "string") {
+        return { type: "text", value: replayOutput.content };
+      }
+
+      if (replayOutput.kind === "binary") {
         return {
           type: "json",
-          value: output
+          value: toJSONValue(replayOutput)
+        };
+      }
+
+      if (!isModelFileReadOutput(replayOutput)) {
+        return {
+          type: "json",
+          value: toJSONValue(replayOutput)
+        };
+      }
+
+      if (!isReadToolInput(input)) {
+        return {
+          type: "json",
+          value: toJSONValue(replayOutput)
         };
       }
 
@@ -303,20 +340,20 @@ export function createReadTool(options: ReadToolOptions) {
         return {
           type: "error-text",
           value:
-            `Read ${output.path} (${output.mediaType}, ${formatSize(bytes.byteLength)}), ` +
+            `Read ${replayOutput.path} (${replayOutput.mediaType}, ${formatSize(bytes.byteLength)}), ` +
             `but it exceeds the ${formatSize(MAX_MODEL_FILE_BYTES)} inline model output limit.`
         };
       }
 
       const data = uint8ArrayToBase64(bytes);
-      const note = `Read ${output.path} (${output.mediaType}, ${formatSize(bytes.byteLength)}).`;
+      const note = `Read ${replayOutput.path} (${replayOutput.mediaType}, ${formatSize(bytes.byteLength)}).`;
 
-      if (output.kind === "image") {
+      if (replayOutput.kind === "image") {
         return {
           type: "content",
           value: [
             { type: "text", text: note },
-            { type: "image-data", data, mediaType: output.mediaType }
+            { type: "image-data", data, mediaType: replayOutput.mediaType }
           ]
         };
       }
@@ -328,13 +365,41 @@ export function createReadTool(options: ReadToolOptions) {
           {
             type: "file-data",
             data,
-            mediaType: output.mediaType,
-            filename: output.name
+            mediaType: replayOutput.mediaType,
+            filename: replayOutput.name
           }
         ]
       };
     }
   });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isModelFileReadOutput(
+  value: Record<string, unknown>
+): value is ImageReadToolOutput | FileReadToolOutput {
+  return (
+    (value.kind === "image" || value.kind === "file") &&
+    typeof value.path === "string" &&
+    typeof value.name === "string" &&
+    typeof value.mediaType === "string"
+  );
+}
+
+function isReadToolInput(value: unknown): value is ReadToolInput {
+  return isRecord(value) && typeof value.path === "string";
+}
+
+function toJSONValue(value: unknown): JSONValue {
+  try {
+    const json = JSON.stringify(value);
+    return json === undefined ? null : (JSON.parse(json) as JSONValue);
+  } catch {
+    return String(value);
+  }
 }
 
 function readTextWithLineNumbers({
