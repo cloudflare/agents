@@ -2142,6 +2142,40 @@ export class AIChatAgentToolParent extends Agent<Env> {
     };
   }
 
+  async reconcileCompletedChildWithFailedStartupForTest(
+    input: AgentToolInput,
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    deferredHookCount: number;
+    lifecycleOrder: string[];
+  }> {
+    await this.prepareCompletedChildForRecoveryTest(input, runId);
+    this.events = [];
+    this.finishes = [];
+    this.lifecycleOrder = [];
+
+    const hooks = await this.reconcileAgentToolRunsForTest({
+      deferFinishHooks: true
+    });
+
+    try {
+      this.lifecycleOrder.push("on-start-error");
+      throw new Error("test startup failure");
+    } catch {
+      // Mirrors the Agent startup contract: recovered finish hooks are only
+      // drained after successful user startup.
+    }
+
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      deferredHookCount: hooks.length,
+      lifecycleOrder: this.lifecycleOrder
+    };
+  }
+
   async reconcileCompletedChildWithReplayFailureForTest(
     input: AgentToolInput,
     runId = crypto.randomUUID()

@@ -84,6 +84,21 @@ type ParentStub = DurableObjectStub & {
     finishesBeforeDrain: number;
     lifecycleOrder: string[];
   }>;
+  reconcileCompletedChildWithFailedStartupForTest(
+    input: {
+      prompt: string;
+      delayMs?: number;
+      chunkDelayMs?: number;
+      structured?: boolean;
+      streamError?: string;
+    },
+    runId?: string
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
+    deferredHookCount: number;
+    lifecycleOrder: string[];
+  }>;
   reconcileCompletedChildWithReplayFailureForTest(
     input: {
       prompt: string;
@@ -316,6 +331,28 @@ describe("AIChatAgent as an agent-tool child", () => {
     });
     expect(finishes).toHaveLength(1);
     expect(lifecycleOrder).toEqual(["after-on-start", `finish:${runId}`]);
+  });
+
+  it("skips recovered finish hooks when startup fails after internal recovery", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    const { events, finishes, deferredHookCount, lifecycleOrder } =
+      await parent.reconcileCompletedChildWithFailedStartupForTest(
+        { prompt: "failed startup child" },
+        runId
+      );
+
+    expect(deferredHookCount).toBe(1);
+    expect(finishes).toHaveLength(0);
+    expect(lifecycleOrder).toEqual(["on-start-error"]);
+    expect(events.at(-1)).toMatchObject({
+      event: {
+        kind: "finished",
+        runId,
+        summary: "AIChat child handled: failed startup child"
+      }
+    });
   });
 
   it("still finalizes recovery when stored chunk replay fails", async () => {

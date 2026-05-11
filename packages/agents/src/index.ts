@@ -2009,6 +2009,9 @@ export class Agent<
             } finally {
               this._insideOnStart = false;
             }
+            // Recovered finish hooks run only after successful user startup.
+            // If onStart fails, durable recovery state is already finalized,
+            // but user hook side effects may depend on startup-initialized mirrors.
             await this._runDeferredAgentToolFinishHooks(
               recoveredAgentToolFinishes
             );
