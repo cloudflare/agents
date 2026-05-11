@@ -321,6 +321,47 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
     });
   });
 
+  it("tool continuation stream cancel is local-only by default", async () => {
+    transport.expectToolContinuation();
+
+    const stream = (await transport.reconnectToStream({
+      chatId: "chat-1"
+    })) as ReadableStream<UIMessageChunk>;
+
+    expect(
+      transport.handleStreamResuming({ id: "req-tool-local-cancel" })
+    ).toBe(true);
+    await expect(stream.cancel()).resolves.toBeUndefined();
+
+    expect(agent.sent).toHaveLength(2);
+    expect(activeRequestIds.has("req-tool-local-cancel")).toBe(false);
+  });
+
+  it("tool continuation stream cancel sends server cancel when cancelOnClientAbort is true", async () => {
+    transport = new WebSocketChatTransport<ChatMessage>({
+      agent,
+      activeRequestIds,
+      cancelOnClientAbort: true
+    });
+    transport.expectToolContinuation();
+
+    const stream = (await transport.reconnectToStream({
+      chatId: "chat-1"
+    })) as ReadableStream<UIMessageChunk>;
+
+    expect(
+      transport.handleStreamResuming({ id: "req-tool-client-cancel" })
+    ).toBe(true);
+    await expect(stream.cancel()).resolves.toBeUndefined();
+
+    expect(agent.sent).toHaveLength(3);
+    expect(JSON.parse(agent.sent[2])).toEqual({
+      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+      id: "req-tool-client-cancel"
+    });
+    expect(activeRequestIds.has("req-tool-client-cancel")).toBe(true);
+  });
+
   it("abortActiveToolContinuation keeps requestId in activeIds for server cleanup", async () => {
     transport.expectToolContinuation();
 

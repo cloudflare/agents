@@ -668,7 +668,12 @@ export class WebSocketChatTransport<
         }
       },
       cancel() {
-        finish(() => {});
+        if (requestId && transport.cancelOnClientAbort) {
+          transport.sendCancelFrame(requestId);
+          finish(() => {}, onResumeRef, onResumeNoneRef, true);
+        } else {
+          finish(() => {}, onResumeRef, onResumeNoneRef);
+        }
       }
     });
   }
