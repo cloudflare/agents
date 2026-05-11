@@ -340,7 +340,7 @@ const {
 });
 ```
 
-Use `enabled: false` when the app must wait for async connection prerequisites, such as a user-scoped capability token. While disabled, the hook does not create or connect a `VoiceClient` and returns the idle/disconnected state. When `enabled` changes to `true`, the hook connects with the current options.
+Use `enabled: false` when the app must wait for async connection prerequisites, such as a user-scoped capability token. While disabled, the hook does not create or connect a `VoiceClient`, returns the idle/disconnected state, and action callbacks such as `startCall()`, `sendText()`, and `sendJSON()` are safe no-ops. When `enabled` changes to `true`, the hook connects with the current options. The first enable is treated as an initial connection, so `onReconnect` only fires for later connection identity changes while the hook remains enabled.
 
 #### Tuning Options
 

@@ -15,6 +15,14 @@ function sleep(ms: number) {
 // --- Mock plumbing ---
 
 // The mock PartySocket instance (set synchronously during construction)
+type MockPartySocketOptions = {
+  party?: string;
+  room?: string;
+  host?: string;
+  prefix?: string;
+  query?: Record<string, string | null | undefined>;
+};
+
 let socketInstance: {
   readyState: number;
   send: ReturnType<typeof vi.fn>;
@@ -28,9 +36,10 @@ let socketInstance: {
 let socketSend: ReturnType<typeof vi.fn>;
 let socketReadyState: number;
 let socketClose: ReturnType<typeof vi.fn>;
+let socketOptions: MockPartySocketOptions | null = null;
 
 vi.mock("partysocket", () => ({
-  PartySocket: vi.fn(function () {
+  PartySocket: vi.fn(function (options: MockPartySocketOptions) {
     const instance = {
       get readyState() {
         return socketReadyState;
@@ -43,6 +52,7 @@ vi.mock("partysocket", () => ({
       onmessage: null as ((event: MessageEvent) => void) | null
     };
     socketInstance = instance;
+    socketOptions = options;
     queueMicrotask(() => {
       instance.onopen?.();
     });
@@ -229,6 +239,7 @@ beforeEach(() => {
   socketClose = vi.fn();
   socketReadyState = WebSocket.OPEN;
   socketInstance = null;
+  socketOptions = null;
   setupAudioMocks();
 });
 
@@ -361,6 +372,68 @@ describe("useVoiceAgent", () => {
       await vi.waitFor(() => {
         expect(getLatestResult().connected).toBe(true);
       });
+    });
+
+    it("should connect with the latest query when enabled flips false to true", async () => {
+      const screen = await render(
+        <TestVoiceComponent
+          options={{
+            agent: "voice-agent",
+            enabled: false,
+            query: { capability: undefined }
+          }}
+          onResult={vi.fn()}
+        />
+      );
+      await sleep(10);
+
+      expect(vi.mocked(PartySocket)).not.toHaveBeenCalled();
+
+      await act(async () => {
+        screen.rerender(
+          <TestVoiceComponent
+            options={{
+              agent: "voice-agent",
+              enabled: true,
+              query: { capability: "ready-token" }
+            }}
+            onResult={vi.fn()}
+          />
+        );
+        await sleep(10);
+      });
+
+      expect(vi.mocked(PartySocket)).toHaveBeenCalledTimes(1);
+      expect(socketOptions?.query).toEqual({ capability: "ready-token" });
+    });
+
+    it("should fire onReconnect when connection identity changes while enabled", async () => {
+      const onReconnect = vi.fn();
+      const screen = await render(
+        <TestVoiceComponent
+          options={{ agent: "voice-agent", name: "first", onReconnect }}
+          onResult={vi.fn()}
+        />
+      );
+      await sleep(10);
+
+      expect(vi.mocked(PartySocket)).toHaveBeenCalledTimes(1);
+      expect(onReconnect).not.toHaveBeenCalled();
+
+      await act(async () => {
+        screen.rerender(
+          <TestVoiceComponent
+            options={{ agent: "voice-agent", name: "second", onReconnect }}
+            onResult={vi.fn()}
+          />
+        );
+        await sleep(10);
+      });
+
+      expect(socketClose).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(PartySocket)).toHaveBeenCalledTimes(2);
+      expect(socketOptions?.room).toBe("second");
+      expect(onReconnect).toHaveBeenCalledTimes(1);
     });
 
     it("should disconnect and reset state when enabled flips true to false", async () => {

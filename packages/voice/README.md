@@ -143,6 +143,8 @@ function App() {
 }
 ```
 
+When `enabled` is `false`, the hook does not create or connect a `VoiceClient`, returns the idle/disconnected state, and action callbacks such as `startCall()`, `sendText()`, and `sendJSON()` are safe no-ops. The first change from disabled to enabled connects with the current options without firing `onReconnect`; later connection identity changes while enabled do fire `onReconnect`.
+
 For voice input only:
 
 ```tsx
