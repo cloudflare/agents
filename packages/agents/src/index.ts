@@ -4304,7 +4304,7 @@ export class Agent<
   async _cf_dispatchScheduledCallback(
     ownerPath: ReadonlyArray<AgentPathStep>,
     row: ScheduleStorageRow
-  ): Promise<void> {
+  ): Promise<boolean> {
     const selfPath = this.selfPath;
     if (!this._isSameAgentPathPrefix(selfPath, ownerPath)) {
       throw new Error(
@@ -4314,14 +4314,23 @@ export class Agent<
 
     if (selfPath.length === ownerPath.length) {
       await this._executeScheduleCallback(row);
-      return;
+      return true;
     }
 
     const next = ownerPath[selfPath.length];
     if (!this.hasSubAgent(next.className, next.name)) {
-      throw new Error(
-        `Scheduled sub-agent ${next.className} "${next.name}" no longer exists.`
-      );
+      // The target facet was deleted or its registry entry was lost. Since
+      // this schedule can no longer be dispatched through the public registry,
+      // prune root-side bookkeeping for the stale sub-tree instead of
+      // repeatedly re-arming the same impossible alarm.
+      const stalePath = ownerPath.slice(0, selfPath.length + 1);
+      if (this._isFacet) {
+        const root = await this._rootAlarmOwner();
+        await root._cf_cleanupFacetPrefix(stalePath);
+      } else {
+        await this._cf_cleanupFacetPrefix(stalePath);
+      }
+      return false;
     }
 
     const stub = await this._cf_resolveSubAgent(next.className, next.name);
@@ -4329,9 +4338,9 @@ export class Agent<
       _cf_dispatchScheduledCallback(
         ownerPath: ReadonlyArray<AgentPathStep>,
         row: ScheduleStorageRow
-      ): Promise<void>;
+      ): Promise<boolean>;
     };
-    await handle._cf_dispatchScheduledCallback(ownerPath, row);
+    return handle._cf_dispatchScheduledCallback(ownerPath, row);
   }
 
   /**
@@ -4680,7 +4689,7 @@ export class Agent<
         if (row.owner_path) {
           try {
             const ownerPath = JSON.parse(row.owner_path) as AgentPathStep[];
-            await this._cf_dispatchScheduledCallback(ownerPath, row);
+            executed = await this._cf_dispatchScheduledCallback(ownerPath, row);
           } catch (e) {
             console.error(
               `error dispatching scheduled callback "${row.callback}"`,
@@ -4710,8 +4719,8 @@ export class Agent<
           }
         } else {
           await this._executeScheduleCallback(row);
+          executed = true;
         }
-        executed = true;
 
         if (this._destroyed) return;
         if (!executed) continue;

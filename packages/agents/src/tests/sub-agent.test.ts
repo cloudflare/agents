@@ -476,7 +476,7 @@ describe("SubAgent", () => {
     ).resolves.toMatch(/getSchedules\(\) is synchronous/);
   });
 
-  it("should keep a schedule row when facet dispatch fails", async () => {
+  it("should prune a stale sub-agent schedule when the registry entry is gone", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
@@ -491,7 +491,7 @@ describe("SubAgent", () => {
     await runDurableObjectAlarm(agent);
 
     const rows = await agent.rootScheduleRows();
-    expect(rows.some((r) => r.id === scheduleId)).toBe(true);
+    expect(rows.some((r) => r.id === scheduleId)).toBe(false);
     expect(await agent.subAgentScheduleLog("missing-registry-child")).toEqual(
       []
     );
@@ -880,7 +880,7 @@ describe("SubAgent", () => {
     expect(parentCancel).toHaveLength(0);
   });
 
-  it("resets running=0 on interval rows when facet dispatch fails", async () => {
+  it("prunes stale interval rows when facet dispatch cannot reach the owner", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
@@ -896,13 +896,9 @@ describe("SubAgent", () => {
 
     await runDurableObjectAlarm(agent);
 
-    // The row must still be there...
     const rows = await agent.rootScheduleRows();
     const row = rows.find((r) => r.id === intervalId);
-    expect(row).toBeDefined();
-    // ...and `running` must be back to 0 so the next alarm cycle
-    // actually retries instead of skipping the in-flight row.
-    expect(row?.running).toBe(0);
+    expect(row).toBeUndefined();
   });
 
   it("keepAlive() delegates heartbeat refs from a sub-agent to the root", async () => {
