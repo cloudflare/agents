@@ -1,8 +1,10 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   type MessageExtraInfo,
   type RequestInfo,
   isJSONRPCErrorResponse,
+  isJSONRPCNotification,
   isJSONRPCRequest,
   isJSONRPCResultResponse,
   type JSONRPCMessage,
@@ -81,6 +83,10 @@ export interface StreamableHTTPServerTransportOptions {
   eventStore?: EventStore;
 }
 
+type ConnectionSource = {
+  getConnections<TState = unknown>(): Iterable<Connection<TState>>;
+};
+
 /**
  * Adapted from: https://github.com/modelcontextprotocol/typescript-sdk/blob/main/src/client/streamableHttp.ts
  * - Validation and initialization are removed as they're handled in `McpAgent.serve()` handler.
@@ -98,6 +104,7 @@ export class StreamableHTTPServerTransport implements Transport {
   // I's fine that we don't persist this since it's only for backwards compatibility as clients
   // should no longer batch requests, per the spec.
   private _requestResponseMap: Map<RequestId, JSONRPCMessage> = new Map();
+  private _activeRequestId = new AsyncLocalStorage<RequestId>();
 
   sessionId: string;
   onclose?: () => void;
@@ -113,6 +120,30 @@ export class StreamableHTTPServerTransport implements Transport {
     message: JSONRPCMessage,
     extra?: MessageExtraInfo
   ) => Promise<boolean>;
+
+  private getStandaloneSseConnection(
+    agent: ConnectionSource
+  ): Connection | undefined {
+    for (const conn of agent.getConnections<{ _standaloneSse?: boolean }>()) {
+      if (conn.state?._standaloneSse) return conn;
+    }
+    return undefined;
+  }
+
+  private getOnlyActiveRequestId(
+    agent: ConnectionSource
+  ): RequestId | undefined {
+    const requestIds = new Set<RequestId>();
+
+    for (const conn of agent.getConnections<{ requestIds?: RequestId[] }>()) {
+      for (const id of conn.state?.requestIds ?? []) {
+        requestIds.add(id);
+        if (requestIds.size > 1) return undefined;
+      }
+    }
+
+    return requestIds.values().next().value;
+  }
 
   constructor(options: StreamableHTTPServerTransportOptions) {
     const { agent } = getCurrentAgent<McpAgent>();
@@ -242,20 +273,32 @@ export class StreamableHTTPServerTransport implements Transport {
     // check if it contains requests
     const hasRequests = messages.some(isJSONRPCRequest);
 
+    const dispatchMessage = async (message: JSONRPCMessage): Promise<void> => {
+      // check if message should be intercepted (i.e. elicitation responses)
+      if (this.messageInterceptor) {
+        const handled = await this.messageInterceptor(message, {
+          authInfo,
+          requestInfo
+        });
+        if (handled) {
+          return; // msg was handled by interceptor, skip onmessage
+        }
+      }
+
+      if (isJSONRPCRequest(message)) {
+        this._activeRequestId.run(message.id, () => {
+          this.onmessage?.(message, { authInfo, requestInfo });
+        });
+        return;
+      }
+
+      this.onmessage?.(message, { authInfo, requestInfo });
+    };
+
     if (!hasRequests) {
       // We process without sending anything
       for (const message of messages) {
-        // check if message should be intercepted (i.e. elicitation responses)
-        if (this.messageInterceptor) {
-          const handled = await this.messageInterceptor(message, {
-            authInfo,
-            requestInfo
-          });
-          if (handled) {
-            continue; // msg was handled by interceptor, skip onmessage
-          }
-        }
-        this.onmessage?.(message, { authInfo, requestInfo });
+        await dispatchMessage(message);
       }
     } else if (hasRequests) {
       const { connection } = getCurrentAgent();
@@ -273,16 +316,7 @@ export class StreamableHTTPServerTransport implements Transport {
 
       // handle each message
       for (const message of messages) {
-        if (this.messageInterceptor) {
-          const handled = await this.messageInterceptor(message, {
-            authInfo,
-            requestInfo
-          });
-          if (handled) {
-            continue; // Message was handled by interceptor, skip onmessage
-          }
-        }
-        this.onmessage?.(message, { authInfo, requestInfo });
+        await dispatchMessage(message);
       }
       // The server SHOULD NOT close the SSE stream before sending all JSON-RPC responses
       // This will be handled by the send() method when responses are ready
@@ -307,10 +341,30 @@ export class StreamableHTTPServerTransport implements Transport {
     const { agent } = getCurrentAgent();
     if (!agent) throw new Error("Agent was not found in send");
 
+    const contextRequestId = this._activeRequestId.getStore();
     let requestId = options?.relatedRequestId;
     if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
       // If the message is a response, use the request ID from the message
       requestId = message.id;
+    }
+
+    let standaloneConnection: Connection | undefined;
+    if (requestId === undefined) {
+      standaloneConnection = this.getStandaloneSseConnection(agent);
+
+      if (standaloneConnection === undefined) {
+        if (
+          contextRequestId !== undefined &&
+          (isJSONRPCRequest(message) || isJSONRPCNotification(message))
+        ) {
+          requestId = contextRequestId;
+        } else if (
+          isJSONRPCRequest(message) ||
+          isJSONRPCNotification(message)
+        ) {
+          requestId = this.getOnlyActiveRequestId(agent);
+        }
+      }
     }
 
     // Check if this message should be sent on the standalone SSE stream (no request ID)
@@ -324,13 +378,15 @@ export class StreamableHTTPServerTransport implements Transport {
         );
       }
 
-      let standaloneConnection: Connection | undefined;
-      for (const conn of agent.getConnections<{ _standaloneSse?: boolean }>()) {
-        if (conn.state?._standaloneSse) standaloneConnection = conn;
-      }
-
       if (standaloneConnection === undefined) {
-        // The spec says the server MAY send messages on the stream, so it's ok to discard if no stream
+        if (isJSONRPCRequest(message)) {
+          throw new Error(
+            "No connection established for server-to-client request"
+          );
+        }
+
+        // The spec says the server MAY send notifications on the stream,
+        // so it's ok to discard notifications if no stream is available.
         return;
       }
 
@@ -351,8 +407,8 @@ export class StreamableHTTPServerTransport implements Transport {
 
     // Get the response for this request
     const connection = Array.from(
-      agent.getConnections<{ requestIds?: number[] }>()
-    ).find((conn) => conn.state?.requestIds?.includes(requestId as number));
+      agent.getConnections<{ requestIds?: RequestId[] }>()
+    ).find((conn) => conn.state?.requestIds?.includes(requestId));
     if (!connection) {
       throw new Error(
         `No connection established for request ID: ${String(requestId)}`
@@ -378,6 +434,7 @@ export class StreamableHTTPServerTransport implements Transport {
         for (const id of relatedIds) {
           this._requestResponseMap.delete(id);
         }
+        connection.setState({ requestIds: [] });
       }
     }
     this.writeSSEEvent(connection, message, eventId, shouldClose);

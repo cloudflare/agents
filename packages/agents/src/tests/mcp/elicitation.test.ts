@@ -111,6 +111,200 @@ describe("McpAgent.elicitInput() in-memory resolver", () => {
       await standaloneReader.cancel();
     });
 
+    it("should route McpAgent.elicitInput through the originating POST stream without standalone SSE", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+
+      const toolCallMsg: JSONRPCMessage = {
+        id: "custom-elicit-post-1",
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "elicitNameCustom", arguments: {} }
+      };
+
+      const toolResponse = await sendPostRequest(
+        ctx,
+        baseUrl,
+        toolCallMsg,
+        sessionId
+      );
+      expect(toolResponse.status).toBe(200);
+
+      const reader = toolResponse.body?.getReader();
+      expect(reader).toBeTruthy();
+      if (!reader) throw new Error("No reader available for POST stream");
+
+      const elicitFrame = await readOneFrame(reader);
+      const elicitRequest = parseSSEData(elicitFrame) as JSONRPCRequest;
+
+      expect(elicitRequest.method).toBe("elicitation/create");
+      expect(String(elicitRequest.id).startsWith("elicit_")).toBe(true);
+
+      const elicitResponse: JSONRPCMessage = {
+        jsonrpc: "2.0",
+        id: elicitRequest.id,
+        result: {
+          action: "accept",
+          content: { name: "Alice" }
+        }
+      } as unknown as JSONRPCMessage;
+
+      const responsePost = await sendPostRequest(
+        ctx,
+        baseUrl,
+        elicitResponse,
+        sessionId
+      );
+      expect(responsePost.status).toBe(202);
+
+      const toolResultFrame = await readOneFrame(reader);
+      const toolResult = parseSSEData(toolResultFrame) as JSONRPCResultResponse;
+
+      expect(toolResult.id).toBe("custom-elicit-post-1");
+      const result = toolResult.result as CallToolResult;
+      expect(result.content).toEqual([
+        { type: "text", text: "Custom elicit: Alice" }
+      ]);
+    });
+
+    it("should route SDK Server.elicitInput through the originating POST stream without standalone SSE", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+
+      const toolCallMsg: JSONRPCMessage = {
+        id: "sdk-elicit-post-1",
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "elicitName", arguments: {} }
+      };
+
+      const toolResponse = await sendPostRequest(
+        ctx,
+        baseUrl,
+        toolCallMsg,
+        sessionId
+      );
+      expect(toolResponse.status).toBe(200);
+
+      const reader = toolResponse.body?.getReader();
+      expect(reader).toBeTruthy();
+      if (!reader) throw new Error("No reader available for POST stream");
+
+      const elicitFrame = await readOneFrame(reader);
+      const elicitRequest = parseSSEData(elicitFrame) as JSONRPCRequest;
+
+      expect(elicitRequest.method).toBe("elicitation/create");
+
+      const elicitResponse: JSONRPCMessage = {
+        jsonrpc: "2.0",
+        id: elicitRequest.id,
+        result: {
+          action: "accept",
+          content: { name: "Alice" }
+        }
+      } as unknown as JSONRPCMessage;
+
+      const responsePost = await sendPostRequest(
+        ctx,
+        baseUrl,
+        elicitResponse,
+        sessionId
+      );
+      expect(responsePost.status).toBe(202);
+
+      const toolResultFrame = await readOneFrame(reader);
+      const toolResult = parseSSEData(toolResultFrame) as JSONRPCResultResponse;
+
+      expect(toolResult.id).toBe("sdk-elicit-post-1");
+      const result = toolResult.result as CallToolResult;
+      expect(result.content).toEqual([
+        { type: "text", text: "You said your name is: Alice" }
+      ]);
+    });
+
+    it("should keep concurrent elicitation requests on their own POST streams", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+
+      const firstToolCall: JSONRPCMessage = {
+        id: "custom-elicit-concurrent-1",
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "elicitNameCustom", arguments: {} }
+      };
+      const secondToolCall: JSONRPCMessage = {
+        id: "custom-elicit-concurrent-2",
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "elicitNameCustom", arguments: {} }
+      };
+
+      const [firstResponse, secondResponse] = await Promise.all([
+        sendPostRequest(ctx, baseUrl, firstToolCall, sessionId),
+        sendPostRequest(ctx, baseUrl, secondToolCall, sessionId)
+      ]);
+
+      expect(firstResponse.status).toBe(200);
+      expect(secondResponse.status).toBe(200);
+
+      const firstReader = firstResponse.body?.getReader();
+      const secondReader = secondResponse.body?.getReader();
+      expect(firstReader).toBeTruthy();
+      expect(secondReader).toBeTruthy();
+      if (!firstReader || !secondReader) {
+        throw new Error("No reader available for POST stream");
+      }
+
+      const [firstElicitFrame, secondElicitFrame] = await Promise.all([
+        readOneFrame(firstReader),
+        readOneFrame(secondReader)
+      ]);
+      const firstElicit = parseSSEData(firstElicitFrame) as JSONRPCRequest;
+      const secondElicit = parseSSEData(secondElicitFrame) as JSONRPCRequest;
+
+      expect(firstElicit.method).toBe("elicitation/create");
+      expect(secondElicit.method).toBe("elicitation/create");
+      expect(firstElicit.id).not.toBe(secondElicit.id);
+
+      const secondElicitResponse: JSONRPCMessage = {
+        jsonrpc: "2.0",
+        id: secondElicit.id,
+        result: {
+          action: "accept",
+          content: { name: "Second" }
+        }
+      } as unknown as JSONRPCMessage;
+      await sendPostRequest(ctx, baseUrl, secondElicitResponse, sessionId);
+
+      const secondToolResultFrame = await readOneFrame(secondReader);
+      const secondToolResult = parseSSEData(
+        secondToolResultFrame
+      ) as JSONRPCResultResponse;
+      expect(secondToolResult.id).toBe("custom-elicit-concurrent-2");
+      expect((secondToolResult.result as CallToolResult).content).toEqual([
+        { type: "text", text: "Custom elicit: Second" }
+      ]);
+
+      const firstElicitResponse: JSONRPCMessage = {
+        jsonrpc: "2.0",
+        id: firstElicit.id,
+        result: {
+          action: "accept",
+          content: { name: "First" }
+        }
+      } as unknown as JSONRPCMessage;
+      await sendPostRequest(ctx, baseUrl, firstElicitResponse, sessionId);
+
+      const firstToolResultFrame = await readOneFrame(firstReader);
+      const firstToolResult = parseSSEData(
+        firstToolResultFrame
+      ) as JSONRPCResultResponse;
+      expect(firstToolResult.id).toBe("custom-elicit-concurrent-1");
+      expect((firstToolResult.result as CallToolResult).content).toEqual([
+        { type: "text", text: "Custom elicit: First" }
+      ]);
+    });
+
     it("should handle elicitation cancel response", async () => {
       const ctx = createExecutionContext();
       const sessionId = await initializeStreamableHTTPServer(ctx);

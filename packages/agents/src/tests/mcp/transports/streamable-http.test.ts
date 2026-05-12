@@ -8,6 +8,10 @@ import type {
   JSONRPCResultResponse
 } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
+import type { Connection } from "../../../index";
+import { __DO_NOT_USE_WILL_BREAK__agentContext as agentContext } from "../../../internal_context";
+import type { McpAgent } from "../../../mcp";
+import { StreamableHTTPServerTransport } from "../../../mcp/transport";
 import worker from "../../worker";
 import {
   TEST_MESSAGES,
@@ -493,6 +497,184 @@ describe("Streamable HTTP Transport", () => {
       expect(silent).toBeNull();
 
       await standaloneReader.cancel();
+    });
+
+    it("should deliver request-scoped logging/message on the originating POST stream without standalone SSE", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+
+      const emitLogMsg = {
+        id: "emit-log-post-1",
+        jsonrpc: "2.0" as const,
+        method: "tools/call",
+        params: {
+          name: "emitLog",
+          arguments: { level: "info", message: "hello-post" }
+        }
+      };
+
+      const postRes = await sendPostRequest(
+        ctx,
+        baseUrl,
+        emitLogMsg,
+        sessionId
+      );
+      expect(postRes.status).toBe(200);
+
+      const reader = postRes.body?.getReader();
+      expect(reader).toBeTruthy();
+      if (!reader) throw new Error("No reader available for POST stream");
+
+      const pushFrame = await readOneFrame(reader);
+      const pushJson = parseSSEData(pushFrame) as JSONRPCNotification;
+      expect(pushJson).toMatchObject({
+        jsonrpc: "2.0",
+        method: "notifications/message",
+        params: expect.objectContaining({
+          level: "info",
+          data: "hello-post"
+        })
+      });
+
+      const postFrame = await readOneFrame(reader);
+      const postJson = parseSSEData(postFrame) as JSONRPCResultResponse;
+      expect(postJson.id).toBe("emit-log-post-1");
+      const result = postJson.result as CallToolResult;
+      expect(
+        result.content?.[0]?.type === "text" &&
+          result.content?.[0]?.text === "logged:info"
+      ).toBe(true);
+    });
+
+    it("should route server messages to the only active POST stream when async context is unavailable", async () => {
+      const sentMessages: string[] = [];
+      const connection = {
+        id: "post-stream-1",
+        state: { requestIds: ["req-1"] },
+        send(message: string) {
+          sentMessages.push(message);
+        }
+      } as unknown as Connection;
+      const agent = {
+        getSessionId() {
+          return "test-session";
+        },
+        getConnections() {
+          return [connection];
+        }
+      } as unknown as McpAgent;
+
+      await agentContext.run(
+        { agent, connection: undefined, request: undefined, email: undefined },
+        async () => {
+          const transport = new StreamableHTTPServerTransport({});
+          const notification: JSONRPCMessage = {
+            jsonrpc: "2.0",
+            method: "notifications/message",
+            params: { level: "info", data: "hello-fallback" }
+          };
+
+          await transport.send(notification);
+        }
+      );
+
+      expect(sentMessages).toHaveLength(1);
+      const forwarded = JSON.parse(sentMessages[0]) as {
+        event: string;
+        close?: boolean;
+      };
+      const fallbackJson = parseSSEData(forwarded.event) as JSONRPCNotification;
+      expect(forwarded.close).toBe(false);
+      expect(fallbackJson).toMatchObject({
+        jsonrpc: "2.0",
+        method: "notifications/message",
+        params: expect.objectContaining({
+          level: "info",
+          data: "hello-fallback"
+        })
+      });
+    });
+
+    it("should clear request ids when a POST stream receives all final responses", async () => {
+      const sentMessages: string[] = [];
+      const connectionState = { requestIds: ["req-1"] };
+      const connection = {
+        id: "post-stream-1",
+        state: connectionState,
+        setState(nextState: typeof connectionState) {
+          connectionState.requestIds = nextState.requestIds;
+        },
+        send(message: string) {
+          sentMessages.push(message);
+        }
+      } as unknown as Connection;
+      const agent = {
+        getSessionId() {
+          return "test-session";
+        },
+        getConnections() {
+          return [connection];
+        }
+      } as unknown as McpAgent;
+
+      await agentContext.run(
+        { agent, connection: undefined, request: undefined, email: undefined },
+        async () => {
+          const transport = new StreamableHTTPServerTransport({});
+          const response: JSONRPCMessage = {
+            id: "req-1",
+            jsonrpc: "2.0",
+            result: { content: [] }
+          };
+
+          await transport.send(response);
+        }
+      );
+
+      expect(connectionState.requestIds).toEqual([]);
+      expect(sentMessages).toHaveLength(1);
+      const forwarded = JSON.parse(sentMessages[0]) as {
+        close?: boolean;
+      };
+      expect(forwarded.close).toBe(true);
+    });
+
+    it("should reject unroutable server-to-client requests instead of silently dropping them", async () => {
+      const firstConnection = {
+        id: "post-stream-1",
+        state: { requestIds: ["req-1"] },
+        send(_message: string) {}
+      } as unknown as Connection;
+      const secondConnection = {
+        id: "post-stream-2",
+        state: { requestIds: ["req-2"] },
+        send(_message: string) {}
+      } as unknown as Connection;
+      const agent = {
+        getSessionId() {
+          return "test-session";
+        },
+        getConnections() {
+          return [firstConnection, secondConnection];
+        }
+      } as unknown as McpAgent;
+
+      await agentContext.run(
+        { agent, connection: undefined, request: undefined, email: undefined },
+        async () => {
+          const transport = new StreamableHTTPServerTransport({});
+          const request: JSONRPCMessage = {
+            id: "server-request-1",
+            jsonrpc: "2.0",
+            method: "elicitation/create",
+            params: { message: "Approve?" }
+          };
+
+          await expect(transport.send(request)).rejects.toThrow(
+            /No connection established for server-to-client request/
+          );
+        }
+      );
     });
 
     it("should emit tools list_changed on install/uninstall and reflect in tools/list", async () => {
