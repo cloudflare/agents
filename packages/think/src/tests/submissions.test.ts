@@ -12,6 +12,8 @@ type ThinkSubmissionTestStub = {
   setDelayedChunkResponse(chunks: string[], delayMs: number): Promise<void>;
   clearDelayedChunkResponse(): Promise<void>;
   setThrowingStreamError(message: string | null): Promise<void>;
+  getProgrammaticStreamErrorCountForTest(): Promise<number>;
+  runNonSubmissionStreamFailureForTest(requestId: string): Promise<void>;
   setSubmissionStatusDelayForTest(delayMs: number): Promise<void>;
   testSubmitMessages(
     text: string,
@@ -596,6 +598,18 @@ describe("Think durable submissions", () => {
     );
 
     expect(failed.error).toBe("boom");
+  });
+
+  it("does not retain stream error records for non-submission callers", async () => {
+    const agent = await freshAgent();
+
+    await agent.runNonSubmissionStreamFailureForTest(
+      "non-submission-stream-failure"
+    );
+
+    await expect(agent.getProgrammaticStreamErrorCountForTest()).resolves.toBe(
+      0
+    );
   });
 
   it("lists and deletes terminal submissions", async () => {

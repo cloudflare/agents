@@ -2774,6 +2774,7 @@ export class Think<
         messages,
         {
           signal: controller.signal,
+          captureProgrammaticStreamError: true,
           onMessagesApplied: () => {
             this.sql`
               UPDATE cf_think_submissions
@@ -3074,7 +3075,10 @@ export class Think<
     messages:
       | UIMessage[]
       | ((currentMessages: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>),
-    options?: SaveMessagesOptions & { onMessagesApplied?: () => void }
+    options?: SaveMessagesOptions & {
+      onMessagesApplied?: () => void;
+      captureProgrammaticStreamError?: boolean;
+    }
   ): Promise<SaveMessagesResult> {
     const clientTools = this._lastClientTools;
     const body = this._lastBody;
@@ -3133,7 +3137,10 @@ export class Think<
             );
 
             if (result) {
-              await this._streamResult(requestId, result, abortSignal);
+              await this._streamResult(requestId, result, abortSignal, {
+                captureProgrammaticStreamError:
+                  options?.captureProgrammaticStreamError
+              });
             }
           };
 
@@ -3813,7 +3820,11 @@ export class Think<
     requestId: string,
     result: StreamableResult,
     abortSignal?: AbortSignal,
-    options?: { continuation?: boolean; parentId?: string }
+    options?: {
+      continuation?: boolean;
+      parentId?: string;
+      captureProgrammaticStreamError?: boolean;
+    }
   ) {
     const clearGen = this._turnQueue.generation;
     const streamId = this._resumableStream.start(requestId);
@@ -3883,7 +3894,9 @@ export class Think<
       doneSent = true;
     } catch (error) {
       streamError = error instanceof Error ? error.message : "Stream error";
-      this._programmaticStreamErrors.set(requestId, streamError);
+      if (options?.captureProgrammaticStreamError) {
+        this._programmaticStreamErrors.set(requestId, streamError);
+      }
       this._resumableStream.markError(streamId);
       this._pendingResumeConnections.clear();
       if (!doneSent) {

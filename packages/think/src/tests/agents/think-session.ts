@@ -1387,6 +1387,36 @@ export class ThinkProgrammaticTestAgent extends Think {
     this._throwBeforeTurnError = message;
   }
 
+  async getProgrammaticStreamErrorCountForTest(): Promise<number> {
+    return (
+      this as unknown as { _programmaticStreamErrors: Map<string, string> }
+    )._programmaticStreamErrors.size;
+  }
+
+  async runNonSubmissionStreamFailureForTest(requestId: string): Promise<void> {
+    const result: StreamableResult = {
+      toUIMessageStream() {
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              async next() {
+                throw new SimulatedChatError("non-submission stream failed");
+              }
+            };
+          }
+        };
+      }
+    };
+    await (
+      this as unknown as {
+        _streamResult: (
+          requestId: string,
+          result: StreamableResult
+        ) => Promise<void>;
+      }
+    )._streamResult(requestId, result);
+  }
+
   async setSubmissionStatusDelayForTest(delayMs: number): Promise<void> {
     this._submissionStatusDelayMs = delayMs;
   }
