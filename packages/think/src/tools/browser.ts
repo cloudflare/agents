@@ -1,11 +1,17 @@
 import type { ToolSet } from "ai";
 import {
   createBrowserToolHandlers,
+  hasReusableBrowserSession,
   SEARCH_DESCRIPTION,
-  EXECUTE_DESCRIPTION
+  SESSION_INFO_DESCRIPTION,
+  CLOSE_SESSION_DESCRIPTION,
+  RESET_SESSION_DESCRIPTION,
+  EXECUTE_DESCRIPTION,
+  type BrowserToolsOptions
 } from "agents/browser";
 import { tool } from "ai";
 import { z } from "zod";
+import { withThinkSessionDefaults } from "./browser-session";
 
 export interface CreateBrowserToolsOptions {
   /**
@@ -44,6 +50,13 @@ export interface CreateBrowserToolsOptions {
    * Execution timeout in milliseconds. Defaults to 30000 (30s).
    */
   timeout?: number;
+
+  /**
+   * Browser session lifecycle. Defaults to one fresh browser session per
+   * browser_execute call. Set `{ mode: "reuse" }` to keep one Browser Run
+   * session for this Think agent/chat across tool calls.
+   */
+  session?: BrowserToolsOptions["session"];
 }
 
 /**
@@ -86,15 +99,10 @@ export interface CreateBrowserToolsOptions {
 export function createBrowserTools(
   options: CreateBrowserToolsOptions
 ): ToolSet {
-  const handlers = createBrowserToolHandlers({
-    browser: options.browser,
-    cdpUrl: options.cdpUrl,
-    cdpHeaders: options.cdpHeaders,
-    loader: options.loader,
-    timeout: options.timeout
-  });
+  const browserOptions = withThinkSessionDefaults(options);
+  const handlers = createBrowserToolHandlers(browserOptions);
 
-  return {
+  const browserTools: ToolSet = {
     browser_search: tool({
       description: SEARCH_DESCRIPTION,
       inputSchema: z.object({
@@ -127,4 +135,44 @@ export function createBrowserTools(
       }
     })
   };
+
+  if (hasReusableBrowserSession(browserOptions)) {
+    browserTools.browser_session_info = tool({
+      description: SESSION_INFO_DESCRIPTION,
+      inputSchema: z.object({}),
+      execute: async () => {
+        const result = await handlers.sessionInfo();
+        if (result.isError) {
+          throw new Error(result.text);
+        }
+        return result.text;
+      }
+    });
+
+    browserTools.browser_close_session = tool({
+      description: CLOSE_SESSION_DESCRIPTION,
+      inputSchema: z.object({}),
+      execute: async () => {
+        const result = await handlers.closeSession();
+        if (result.isError) {
+          throw new Error(result.text);
+        }
+        return result.text;
+      }
+    });
+
+    browserTools.browser_reset_session = tool({
+      description: RESET_SESSION_DESCRIPTION,
+      inputSchema: z.object({}),
+      execute: async () => {
+        const result = await handlers.resetSession();
+        if (result.isError) {
+          throw new Error(result.text);
+        }
+        return result.text;
+      }
+    });
+  }
+
+  return browserTools;
 }

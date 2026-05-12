@@ -3,7 +3,11 @@ import type { ServerTool } from "@tanstack/ai";
 import { z } from "zod";
 import {
   createBrowserToolHandlers,
+  hasReusableBrowserSession,
   SEARCH_DESCRIPTION,
+  SESSION_INFO_DESCRIPTION,
+  CLOSE_SESSION_DESCRIPTION,
+  RESET_SESSION_DESCRIPTION,
   EXECUTE_DESCRIPTION,
   type BrowserToolsOptions
 } from "./shared";
@@ -68,5 +72,45 @@ export function createBrowserTools(options: BrowserToolsOptions): ServerTool[] {
     return { text: result.text };
   });
 
-  return [search, execute];
+  if (!hasReusableBrowserSession(options)) {
+    return [search, execute];
+  }
+
+  const sessionInfo = toolDefinition({
+    name: "browser_session_info" as const,
+    description: SESSION_INFO_DESCRIPTION,
+    inputSchema: z.object({})
+  }).server(async () => {
+    const result = await handlers.sessionInfo();
+    if (result.isError) {
+      throw new Error(result.text);
+    }
+    return { text: result.text };
+  });
+
+  const closeSession = toolDefinition({
+    name: "browser_close_session" as const,
+    description: CLOSE_SESSION_DESCRIPTION,
+    inputSchema: z.object({})
+  }).server(async () => {
+    const result = await handlers.closeSession();
+    if (result.isError) {
+      throw new Error(result.text);
+    }
+    return { text: result.text };
+  });
+
+  const resetSession = toolDefinition({
+    name: "browser_reset_session" as const,
+    description: RESET_SESSION_DESCRIPTION,
+    inputSchema: z.object({})
+  }).server(async () => {
+    const result = await handlers.resetSession();
+    if (result.isError) {
+      throw new Error(result.text);
+    }
+    return { text: result.text };
+  });
+
+  return [search, execute, sessionInfo, closeSession, resetSession];
 }

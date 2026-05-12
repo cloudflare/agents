@@ -56,4 +56,19 @@ describe("createBrowserTools", () => {
     expect(tools).toHaveProperty("browser_search");
     expect(tools).toHaveProperty("browser_execute");
   });
+
+  it("adds lifecycle tools for reusable sessions", () => {
+    const tools = createBrowserTools({
+      browser: {} as Fetcher,
+      loader: {} as WorkerLoader,
+      session: { mode: "reuse" }
+    });
+
+    expect(tools).toHaveProperty("browser_search");
+    expect(tools).toHaveProperty("browser_execute");
+    expect(tools).toHaveProperty("browser_session_info");
+    expect(tools).toHaveProperty("browser_close_session");
+    expect(tools).toHaveProperty("browser_reset_session");
+    expect(Object.keys(tools)).toHaveLength(5);
+  });
 });
