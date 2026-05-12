@@ -180,7 +180,7 @@ export function tanstackTools(
   name?: string
 ): ToolProvider {
   const filtered = tools.filter(
-    (t) => !("needsApproval" in t && t.needsApproval != null)
+    (t) => t.needsApproval !== true && typeof t.needsApproval !== "function"
   );
 
   const toolRecord: SimpleToolRecord = {};

@@ -35,6 +35,9 @@ npm start     # from this directory
 
 Uses Workers AI through the `AI` binding.
 
+For security details and current browser iframe limitations, see
+[`docs/codemode.md`](../../docs/codemode.md#security-considerations).
+
 ## Try it
 
 - "Create a project called Alpha, add two tasks, then list all projects and tasks"

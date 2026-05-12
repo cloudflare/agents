@@ -64,6 +64,7 @@ ${runtimeScript}
 }
 
 function createToolResultMessage(
+  nonce: string,
   id: number,
   value: unknown,
   isError: boolean
@@ -71,11 +72,24 @@ function createToolResultMessage(
   if (isError) {
     return {
       type: "tool-result",
+      nonce,
       id,
       error: value instanceof Error ? value.message : String(value)
     };
   }
-  return { type: "tool-result", id, result: value };
+  return { type: "tool-result", nonce, id, result: value };
+}
+
+function createExecutionNonce(): string {
+  if (globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID();
+  }
+
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    ""
+  );
 }
 
 /**
@@ -137,27 +151,42 @@ export class IframeSandboxExecutor implements Executor {
     }
 
     const normalizedCode = normalizeCode(code);
-    const resolvedProviders = providers.map((provider) => {
+    const resolvedProviders: ResolvedProvider[] = [];
+    for (const provider of providers) {
       const sanitizedFns: Record<
         string,
         (...args: unknown[]) => Promise<unknown>
       > = {};
+      const sanitizedNames = new Map<string, string>();
       for (const [name, fn] of Object.entries(provider.fns)) {
-        sanitizedFns[sanitizeToolName(name)] = fn;
+        const sanitizedName = sanitizeToolName(name);
+        const existingName = sanitizedNames.get(sanitizedName);
+        if (existingName && existingName !== name) {
+          return {
+            result: undefined,
+            error:
+              `Tool names "${existingName}" and "${name}" both sanitize to ` +
+              `"${sanitizedName}" in provider "${provider.name}"`
+          };
+        }
+        sanitizedNames.set(sanitizedName, name);
+        sanitizedFns[sanitizedName] = fn;
       }
       const resolved: ResolvedProvider = {
         name: provider.name,
         fns: sanitizedFns
       };
       if (provider.positionalArgs) resolved.positionalArgs = true;
-      return resolved;
-    });
+      resolvedProviders.push(resolved);
+    }
     const providerMap = new Map(
       resolvedProviders.map((provider) => [provider.name, provider] as const)
     );
+    const nonce = createExecutionNonce();
 
     const executeRequest: ExecuteRequestMessage = {
       type: "execute-request",
+      nonce,
       code: normalizedCode,
       providers: resolvedProviders.map((provider) => {
         if (provider.positionalArgs) {
@@ -194,6 +223,7 @@ export class IframeSandboxExecutor implements Executor {
     return new Promise<ExecuteResult>((resolve) => {
       let settled = false;
       let ready = false;
+      const warnedInvalidNonceTypes = new Set<string>();
 
       const cleanup = () => {
         if (settled) return;
@@ -230,6 +260,14 @@ export class IframeSandboxExecutor implements Executor {
         }
       };
 
+      const warnInvalidNonce = (messageType: string) => {
+        if (warnedInvalidNonceTypes.has(messageType)) return;
+        warnedInvalidNonceTypes.add(messageType);
+        console.warn(
+          `[@cloudflare/codemode] Ignoring sandbox ${messageType} message with invalid execution nonce`
+        );
+      };
+
       const handler = async (event: MessageEvent) => {
         if (event.source !== iframe.contentWindow) return;
 
@@ -243,10 +281,15 @@ export class IframeSandboxExecutor implements Executor {
         }
 
         if (isToolCallMessage(data)) {
+          if (data.nonce !== nonce) {
+            warnInvalidNonce("tool-call");
+            return;
+          }
           const provider = providerMap.get(data.provider);
           if (!provider) {
             postToChild(
               createToolResultMessage(
+                nonce,
                 data.id,
                 `Provider "${data.provider}" not found`,
                 true
@@ -260,14 +303,18 @@ export class IframeSandboxExecutor implements Executor {
               data.args,
               data.name
             );
-            postToChild(createToolResultMessage(data.id, result, false));
+            postToChild(createToolResultMessage(nonce, data.id, result, false));
           } catch (err) {
-            postToChild(createToolResultMessage(data.id, err, true));
+            postToChild(createToolResultMessage(nonce, data.id, err, true));
           }
           return;
         }
 
         if (isExecutionResultMessage(data)) {
+          if (data.nonce !== nonce) {
+            warnInvalidNonce("execution-result");
+            return;
+          }
           cleanup();
           resolve(data.result);
         }

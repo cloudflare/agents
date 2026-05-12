@@ -4,7 +4,7 @@
  * These run in a real browser via @vitest/browser + Playwright.
  * No mocks — real iframes, real postMessage, real code execution.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { IframeSandboxExecutor } from "../iframe-executor";
 import type { ResolvedProvider } from "../executor-types";
 
@@ -22,6 +22,29 @@ describe("IframeSandboxExecutor", () => {
     ]);
     expect(result.result).toBe(42);
     expect(result.error).toBeUndefined();
+  });
+
+  it("should ignore forged execution-result messages from sandbox code", async () => {
+    const executor = new IframeSandboxExecutor();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await executor.execute(
+      `async () => {
+        parent.postMessage({
+          type: "execution-result",
+          nonce: "wrong",
+          result: { result: "forged", logs: [] }
+        }, "*");
+        return "real";
+      }`,
+      [codemodeProvider({})]
+    );
+
+    expect(result.result).toBe("real");
+    expect(result.error).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(
+      "[@cloudflare/codemode] Ignoring sandbox execution-result message with invalid execution nonce"
+    );
+    warn.mockRestore();
   });
 
   it("should return undefined for void code", async () => {
@@ -88,6 +111,18 @@ describe("IframeSandboxExecutor", () => {
     );
     expect(result.result).toEqual([{ id: 1, title: "bug" }]);
     expect(result.error).toBeUndefined();
+  });
+
+  it("should reject sanitized tool name collisions", async () => {
+    const executor = new IframeSandboxExecutor();
+    const result = await executor.execute("async () => 1", [
+      codemodeProvider({
+        "foo-bar": async () => "hyphen",
+        foo_bar: async () => "underscore"
+      })
+    ]);
+
+    expect(result.error).toContain("both sanitize to");
   });
 
   it("should handle multiple sequential tool calls", async () => {
@@ -418,6 +453,49 @@ describe("createBrowserCodeTool", () => {
     await expect(
       tool.execute({ code: "async () => await codemode.dangerousTool({})" })
     ).rejects.toThrow('Code execution failed: Tool "dangerousTool" not found');
+  });
+
+  it("should keep tools with needsApproval: false", async () => {
+    const { createBrowserCodeTool } = await import("../browser-tool");
+
+    const tool = createBrowserCodeTool({
+      tools: {
+        explicitlySafeTool: {
+          description: "Explicitly safe tool",
+          inputSchema: { type: "object" },
+          needsApproval: false,
+          execute: async () => ({ ok: true })
+        }
+      }
+    });
+
+    expect(tool.description).toContain("explicitlySafeTool");
+
+    const result = await tool.execute({
+      code: "async () => await codemode.explicitlySafeTool({})"
+    });
+    expect(result.result).toEqual({ ok: true });
+  });
+
+  it("should reject sanitized browser tool name collisions", async () => {
+    const { createBrowserCodeTool } = await import("../browser-tool");
+
+    expect(() =>
+      createBrowserCodeTool({
+        tools: {
+          "foo-bar": {
+            description: "Hyphen",
+            inputSchema: { type: "object" },
+            execute: async () => "hyphen"
+          },
+          foo_bar: {
+            description: "Underscore",
+            inputSchema: { type: "object" },
+            execute: async () => "underscore"
+          }
+        }
+      })
+    ).toThrow("both sanitize to");
   });
 
   it("should exclude approval-gated tools from array-form descriptions and execution", async () => {

@@ -121,7 +121,9 @@ function toRecord(
 }
 
 function hasNeedsApproval(tool: Record<string, unknown>): boolean {
-  return "needsApproval" in tool && tool.needsApproval != null;
+  return (
+    tool.needsApproval === true || typeof tool.needsApproval === "function"
+  );
 }
 
 /**
@@ -167,11 +169,18 @@ export function createBrowserCodeTool(
 
   // Extract execute functions, keyed by sanitized name
   const fns: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
+  const sanitizedNames = new Map<string, string>();
   for (const [name, tool] of Object.entries(toolMap)) {
     if (tool.execute) {
-      fns[sanitizeToolName(name)] = tool.execute as (
-        args: unknown
-      ) => Promise<unknown>;
+      const sanitizedName = sanitizeToolName(name);
+      const existingName = sanitizedNames.get(sanitizedName);
+      if (existingName && existingName !== name) {
+        throw new Error(
+          `Tool names "${existingName}" and "${name}" both sanitize to "${sanitizedName}"`
+        );
+      }
+      sanitizedNames.set(sanitizedName, name);
+      fns[sanitizedName] = tool.execute as (args: unknown) => Promise<unknown>;
     }
   }
   const resolvedProviders: ResolvedProvider[] = [{ name: "codemode", fns }];

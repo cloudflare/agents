@@ -18,6 +18,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export interface ToolCallMessage {
   type: "tool-call";
+  nonce: string;
   id: number;
   provider: string;
   name: string;
@@ -26,6 +27,7 @@ export interface ToolCallMessage {
 
 export interface ExecutionResultMessage {
   type: "execution-result";
+  nonce: string;
   result: ExecuteResult;
 }
 
@@ -37,18 +39,21 @@ export interface SandboxReadyMessage {
 
 export interface ToolResultSuccessMessage {
   type: "tool-result";
+  nonce: string;
   id: number;
   result: unknown;
 }
 
 export interface ToolResultErrorMessage {
   type: "tool-result";
+  nonce: string;
   id: number;
   error: string;
 }
 
 export interface ExecuteRequestMessage {
   type: "execute-request";
+  nonce: string;
   code: string;
   providers: { name: string; positionalArgs?: boolean }[];
 }
@@ -65,6 +70,7 @@ export function isToolCallMessage(data: unknown): data is ToolCallMessage {
   return (
     isRecord(data) &&
     data.type === "tool-call" &&
+    typeof data.nonce === "string" &&
     typeof data.id === "number" &&
     typeof data.provider === "string" &&
     typeof data.name === "string"
@@ -76,6 +82,7 @@ export function isExecutionResultMessage(
 ): data is ExecutionResultMessage {
   if (!isRecord(data)) return false;
   if (data.type !== "execution-result") return false;
+  if (typeof data.nonce !== "string") return false;
   if (typeof data.result !== "object" || data.result === null) return false;
   return true;
 }
@@ -86,6 +93,7 @@ export function isExecuteRequestMessageShape(
   return (
     isRecord(data) &&
     data.type === "execute-request" &&
+    typeof data.nonce === "string" &&
     typeof data.code === "string" &&
     Array.isArray(data.providers) &&
     data.providers.every(

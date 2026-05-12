@@ -59,6 +59,19 @@ describe("filterTools", () => {
     expect(Object.keys(filtered)).toEqual(["safe"]);
   });
 
+  it("should keep tools with needsApproval: false", () => {
+    const tools = {
+      safe: {
+        description: "Explicitly safe tool",
+        execute: async () => ({ ok: true }),
+        needsApproval: false
+      }
+    };
+
+    const filtered = filterTools(tools);
+    expect(Object.keys(filtered)).toEqual(["safe"]);
+  });
+
   it("should keep tools with needsApproval explicitly set to undefined in the shape but not actually present", () => {
     const tools: SimpleToolRecord = {
       tool: {

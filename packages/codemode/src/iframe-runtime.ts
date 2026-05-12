@@ -29,6 +29,7 @@ function iframeSandboxRuntimeMain(): void {
     { resolve: (value: unknown) => void; reject: (reason: Error) => void }
   > = {};
   let nextId = 0;
+  let activeNonce: string | undefined;
 
   function post(message: unknown) {
     parent.postMessage(message, "*");
@@ -51,10 +52,13 @@ function iframeSandboxRuntimeMain(): void {
     logs.push("[error] " + values.join(" "));
   };
 
-  function createProviderProxy(provider: {
-    name: string;
-    positionalArgs?: boolean;
-  }) {
+  function createProviderProxy(
+    nonce: string,
+    provider: {
+      name: string;
+      positionalArgs?: boolean;
+    }
+  ) {
     return new Proxy(
       {},
       {
@@ -66,6 +70,7 @@ function iframeSandboxRuntimeMain(): void {
                 pending[id] = { resolve, reject };
                 post({
                   type: "tool-call",
+                  nonce,
                   id,
                   provider: provider.name,
                   name: String(toolName),
@@ -81,6 +86,7 @@ function iframeSandboxRuntimeMain(): void {
               pending[id] = { resolve, reject };
               post({
                 type: "tool-call",
+                nonce,
                 id,
                 provider: provider.name,
                 name: String(toolName),
@@ -95,17 +101,23 @@ function iframeSandboxRuntimeMain(): void {
 
   function isToolResultMessage(message: unknown): message is {
     type: "tool-result";
+    nonce: string;
     id: number;
     result?: unknown;
     error?: string;
   } {
     if (typeof message !== "object" || message === null) return false;
     const candidate = message as Record<string, unknown>;
-    return candidate.type === "tool-result" && typeof candidate.id === "number";
+    return (
+      candidate.type === "tool-result" &&
+      typeof candidate.nonce === "string" &&
+      typeof candidate.id === "number"
+    );
   }
 
   function isExecuteRequestMessage(message: unknown): message is {
     type: "execute-request";
+    nonce: string;
     code: string;
     providers: { name: string; positionalArgs?: boolean }[];
   } {
@@ -113,6 +125,7 @@ function iframeSandboxRuntimeMain(): void {
     const candidate = message as Record<string, unknown>;
     return (
       candidate.type === "execute-request" &&
+      typeof candidate.nonce === "string" &&
       typeof candidate.code === "string" &&
       Array.isArray(candidate.providers) &&
       candidate.providers.every(
@@ -129,15 +142,17 @@ function iframeSandboxRuntimeMain(): void {
   }
 
   function executeCode(
+    nonce: string,
     code: string,
     providers: { name: string; positionalArgs?: boolean }[]
   ) {
     try {
+      activeNonce = nonce;
       const providerNames: string[] = [];
       const providerProxies: unknown[] = [];
       for (const provider of providers) {
         providerNames.push(provider.name);
-        providerProxies.push(createProviderProxy(provider));
+        providerProxies.push(createProviderProxy(nonce, provider));
       }
 
       const fn = new Function(...providerNames, "return (" + code + ")")(
@@ -145,11 +160,12 @@ function iframeSandboxRuntimeMain(): void {
       );
       Promise.resolve(fn())
         .then((result: unknown) => {
-          post({ type: "execution-result", result: { result, logs } });
+          post({ type: "execution-result", nonce, result: { result, logs } });
         })
         .catch((err: Error) => {
           post({
             type: "execution-result",
+            nonce,
             result: {
               result: undefined,
               error: err.message || String(err),
@@ -160,6 +176,7 @@ function iframeSandboxRuntimeMain(): void {
     } catch (err) {
       post({
         type: "execution-result",
+        nonce,
         result: {
           result: undefined,
           error: err instanceof Error ? err.message : String(err),
@@ -175,6 +192,7 @@ function iframeSandboxRuntimeMain(): void {
     const message = event.data;
 
     if (isToolResultMessage(message)) {
+      if (message.nonce !== activeNonce) return;
       const request = pending[message.id];
       if (!request) return;
 
@@ -186,7 +204,7 @@ function iframeSandboxRuntimeMain(): void {
     }
 
     if (isExecuteRequestMessage(message)) {
-      executeCode(message.code, message.providers);
+      executeCode(message.nonce, message.code, message.providers);
     }
   });
 

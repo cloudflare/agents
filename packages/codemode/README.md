@@ -237,10 +237,16 @@ The `Executor` interface is deliberately minimal — implement it to run code in
 interface Executor {
   execute(
     code: string,
-    providers:
+    providersOrFns:
       | ResolvedProvider[]
       | Record<string, (...args: unknown[]) => Promise<unknown>>
   ): Promise<ExecuteResult>;
+}
+
+interface ResolvedProvider {
+  name: string;
+  fns: Record<string, (...args: unknown[]) => Promise<unknown>>;
+  positionalArgs?: boolean;
 }
 
 interface ExecuteResult {
@@ -287,6 +293,16 @@ class NodeVMExecutor implements Executor {
 | `timeout`        | `number`                 | `30000`  | Execution timeout in ms                                      |
 | `globalOutbound` | `Fetcher \| null`        | `null`   | Network access control. `null` = blocked, `Fetcher` = routed |
 | `modules`        | `Record<string, string>` | `{}`     | Extra modules importable in the sandbox                      |
+
+### IframeSandboxExecutor options
+
+Import from `@cloudflare/codemode/browser` when code should run in the browser
+against browser-owned tools.
+
+| Option    | Type     | Default                                                         | Description                                                              |
+| --------- | -------- | --------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `timeout` | `number` | `30000`                                                         | Execution timeout in ms. Cannot preempt tight synchronous browser loops. |
+| `csp`     | `string` | `default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval';` | Content Security Policy applied to the sandbox iframe document.          |
 
 ### createCodeTool options
 
@@ -428,16 +444,19 @@ const types = generateTypes(myAiSdkTools);
 | `@cloudflare/codemode`             | None                  | `sanitizeToolName`, `normalizeCode`, `generateTypesFromJsonSchema`, `jsonSchemaToType`, `DynamicWorkerExecutor`, `ToolDispatcher`, `ToolProvider`, `resolveProvider` |
 | `@cloudflare/codemode/ai`          | `ai`, `zod`           | `createCodeTool`, `generateTypes`, `aiTools`, `resolveProvider`, `ToolDescriptor`, `ToolDescriptors`                                                                 |
 | `@cloudflare/codemode/tanstack-ai` | `@tanstack/ai`, `zod` | `createCodeTool`, `generateTypes`, `tanstackTools`, `resolveProvider`                                                                                                |
+| `@cloudflare/codemode/browser`     | None                  | `createBrowserCodeTool`, `IframeSandboxExecutor`, `Executor`, `ExecuteResult`, `ResolvedProvider`, JSON Schema tool descriptor types                                 |
 
 ## Limitations
 
-- **Tool approval (`needsApproval`) is not supported yet.** Tools with `needsApproval: true` execute immediately inside the sandbox without pausing for approval. Support for approval flows within codemode is planned. For now, do not pass approval-required tools to `createCodeTool` — use them through standard AI SDK tool calling instead.
+- **Tool approval (`needsApproval`) is not supported yet.** Tools with `needsApproval: true` or a `needsApproval` function are excluded from codemode instead of pausing execution for approval. Support for approval flows within codemode is planned. For now, use approval-required tools through standard AI SDK tool calling instead.
+- Browser iframe execution uses nonce-scoped internal messages, but its timeout cannot preempt tight synchronous loops like `while (true) {}` because those block the browser event loop.
 - Requires Cloudflare Workers environment for `DynamicWorkerExecutor`
 - Limited to JavaScript execution
 
 ## Examples
 
 - [`examples/codemode/`](../../examples/codemode/) — Full working example with task management tools
+- [`examples/codemode-browser/`](../../examples/codemode-browser/) — Browser iframe executor example with dynamic client tools
 
 ## License
 

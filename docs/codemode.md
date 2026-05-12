@@ -330,8 +330,16 @@ The `Executor` interface is deliberately minimal — implement it to run code in
 interface Executor {
   execute(
     code: string,
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>
+    providersOrFns:
+      | ResolvedProvider[]
+      | Record<string, (...args: unknown[]) => Promise<unknown>>
   ): Promise<ExecuteResult>;
+}
+
+interface ResolvedProvider {
+  name: string;
+  fns: Record<string, (...args: unknown[]) => Promise<unknown>>;
+  positionalArgs?: boolean;
 }
 
 interface ExecuteResult {
@@ -365,6 +373,16 @@ Executes code in an isolated Cloudflare Worker via `WorkerLoader`.
 | `timeout`        | `number`          | `30000`  | Execution timeout in ms                                      |
 | `globalOutbound` | `Fetcher \| null` | `null`   | Network access control. `null` = blocked, `Fetcher` = routed |
 
+### `IframeSandboxExecutor`
+
+Executes code in a sandboxed browser iframe. Import it from
+`@cloudflare/codemode/browser`.
+
+| Option    | Type     | Default                                                         | Description                                                              |
+| --------- | -------- | --------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `timeout` | `number` | `30000`                                                         | Execution timeout in ms. Cannot preempt tight synchronous browser loops. |
+| `csp`     | `string` | `default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval';` | Content Security Policy applied to the sandbox iframe document.          |
+
 ### `generateTypes(tools)`
 
 Generates TypeScript type definitions from your tools. Used internally by `createCodeTool` but exported for custom use (e.g., displaying types in a frontend).
@@ -397,10 +415,18 @@ sanitizeToolName("delete"); // "delete_"
 - Tool calls are dispatched via Workers RPC, not network requests
 - Execution has a configurable **timeout** (default 30 seconds)
 - Console output is captured separately and does not leak to the host
+- Browser iframe execution runs in a sandboxed iframe with a restrictive CSP by
+  default. It uses nonce-scoped internal messages, but its timeout cannot preempt
+  tight synchronous loops like `while (true) {}` because those block the browser
+  event loop.
 
 ## Current limitations
 
-- **Tool approval (`needsApproval`) is not supported yet.** Tools with `needsApproval: true` execute immediately inside the sandbox without pausing for approval. Support for approval flows within codemode is planned. For now, do not pass approval-required tools to `createCodeTool` — use them through standard AI SDK tool calling instead.
+- **Tool approval (`needsApproval`) is not supported yet.** Tools with
+  `needsApproval: true` or a `needsApproval` function are excluded from codemode
+  instead of pausing execution for approval. Support for approval flows within
+  codemode is planned. For now, use approval-required tools through standard AI
+  SDK tool calling instead.
 - Requires Cloudflare Workers environment for `DynamicWorkerExecutor`
 - Limited to JavaScript execution
 - The `zod-to-ts` dependency bundles the TypeScript compiler, which increases Worker size
@@ -409,3 +435,6 @@ sanitizeToolName("delete"); // "delete_"
 ## Example
 
 See [`examples/codemode/`](../examples/codemode/) for a full working example — a project management assistant that uses codemode to orchestrate tasks, sprints, and comments via SQLite.
+
+See [`examples/codemode-browser/`](../examples/codemode-browser/) for a browser
+iframe executor example with dynamic client tools.

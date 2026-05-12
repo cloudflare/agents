@@ -14,7 +14,7 @@ import type {
 } from "./executor";
 
 function hasNeedsApproval(t: Record<string, unknown>): boolean {
-  return "needsApproval" in t && t.needsApproval != null;
+  return t.needsApproval === true || typeof t.needsApproval === "function";
 }
 
 /**

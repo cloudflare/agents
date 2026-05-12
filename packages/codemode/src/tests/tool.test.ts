@@ -243,6 +243,37 @@ describe("createCodeTool", () => {
     expect(capturedFnNames).not.toContain("approvalFnTool");
   });
 
+  it("should keep tools with needsApproval: false", async () => {
+    const testTools = {
+      explicitlySafeTool: {
+        description: "Explicitly safe",
+        inputSchema: z.object({}),
+        execute: async () => ({ ok: true }),
+        needsApproval: false
+      }
+    };
+
+    let capturedFnNames: string[] = [];
+    const executor: Executor = {
+      execute: vi.fn(async (_code: string, p: unknown) => {
+        const providers = p as ResolvedProvider[];
+        capturedFnNames = providers.flatMap((pr) => Object.keys(pr.fns));
+        return { result: null };
+      })
+    };
+
+    const codeTool = createCodeTool({ tools: testTools, executor });
+
+    expect(codeTool.description).toContain("explicitlySafeTool");
+
+    await codeTool.execute?.(
+      { code: "async () => null" },
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+    );
+
+    expect(capturedFnNames).toContain("explicitlySafeTool");
+  });
+
   it("should return { code, result } on success", async () => {
     const { executor } = createMockExecutor({ result: { answer: 42 } });
     const codeTool = createCodeTool({ tools, executor });
