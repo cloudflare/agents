@@ -193,7 +193,9 @@ On startup, `_recoverSubmissionsOnStart()` reconciles `running` rows:
 
 Fresh recovery evidence comes from `runFiber` rows or active stream metadata.
 The freshness window prevents old, abandoned evidence from keeping a submission
-`running` forever.
+`running` forever. The default window is 15 minutes. Subclasses with legitimate
+longer-running turns can override `protected static submissionRecoveryStaleMs`
+instead of disabling the stale-evidence safety net entirely.
 
 Failure boundaries:
 

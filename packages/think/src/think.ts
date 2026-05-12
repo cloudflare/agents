@@ -770,7 +770,7 @@ export class Think<
   private _drainingSubmissions = false;
   private _submissionAbortControllers = new Map<string, AbortController>();
   private _programmaticStreamErrors = new Map<string, string>();
-  private static SUBMISSION_RECOVERY_STALE_MS = 15 * 60 * 1000;
+  protected static submissionRecoveryStaleMs = 15 * 60 * 1000;
 
   override broadcast(
     msg: string | ArrayBuffer | ArrayBufferView,
@@ -2981,8 +2981,7 @@ export class Think<
   private _hasFreshRecoverableSubmissionEvidence(row: ThinkSubmissionRow) {
     if (!row.request_id) return false;
     const cutoff =
-      Date.now() -
-      (this.constructor as typeof Think).SUBMISSION_RECOVERY_STALE_MS;
+      Date.now() - (this.constructor as typeof Think).submissionRecoveryStaleMs;
 
     const fiberRows = this.sql<{ created_at: number }>`
       SELECT created_at FROM cf_agents_runs

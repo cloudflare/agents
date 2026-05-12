@@ -1327,6 +1327,8 @@ export class ThinkToolsTestAgent extends Think {
 // Tests saveMessages, continueLastTurn, and body persistence.
 
 export class ThinkProgrammaticTestAgent extends Think {
+  protected static override submissionRecoveryStaleMs = 15 * 60 * 1000;
+
   private _responseLog: ChatResponseResult[] = [];
   private _submissionLog: ThinkSubmissionInspection[] = [];
   private _capturedTurnContexts: Array<{
@@ -1433,6 +1435,12 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async setSubmissionStatusDelayForTest(delayMs: number): Promise<void> {
     this._submissionStatusDelayMs = delayMs;
+  }
+
+  async setSubmissionRecoveryStaleMsForTest(ms: number): Promise<void> {
+    (
+      this.constructor as typeof ThinkProgrammaticTestAgent
+    ).submissionRecoveryStaleMs = ms;
   }
 
   async testSaveMessages(msgs: UIMessage[]): Promise<SaveMessagesResult> {
@@ -1635,6 +1643,21 @@ export class ThinkProgrammaticTestAgent extends Think {
       VALUES (
         ${options.submissionId}, NULL, ${requestId}, NULL, 'running',
         '{', NULL, NULL, ${now}, NULL, ${now}, NULL
+      )
+    `;
+  }
+
+  async insertRecoverableFiberForTest(
+    requestId: string,
+    createdAt: number
+  ): Promise<void> {
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (
+        ${`fiber-${requestId}`},
+        ${(this.constructor as typeof Think).CHAT_FIBER_NAME + ":" + requestId},
+        NULL,
+        ${createdAt}
       )
     `;
   }

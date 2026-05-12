@@ -19,6 +19,7 @@ type ThinkSubmissionTestStub = {
   ): Promise<ThinkSubmissionStatus>;
   runNonSubmissionStreamFailureForTest(requestId: string): Promise<void>;
   setSubmissionStatusDelayForTest(delayMs: number): Promise<void>;
+  setSubmissionRecoveryStaleMsForTest(ms: number): Promise<void>;
   testSubmitMessages(
     text: string,
     options?: {
@@ -73,6 +74,10 @@ type ThinkSubmissionTestStub = {
     submissionId: string;
     requestId?: string;
   }): Promise<void>;
+  insertRecoverableFiberForTest(
+    requestId: string,
+    createdAt: number
+  ): Promise<void>;
   getStoredMessages(): Promise<
     Array<{ id: string; role: string; parts?: unknown[] }>
   >;
@@ -444,6 +449,35 @@ describe("Think durable submissions", () => {
       error: "Submission was interrupted after messages were applied."
     });
     await expect(agent.getStoredMessages()).resolves.toHaveLength(0);
+  });
+
+  it("uses the subclass submission recovery stale window", async () => {
+    const agent = await freshAgent();
+    const now = Date.now();
+    try {
+      await agent.setSubmissionRecoveryStaleMsForTest(60 * 60 * 1000);
+      await agent.insertSubmissionForTest({
+        submissionId: "sub-custom-stale-window",
+        requestId: "sub-custom-stale-window",
+        status: "running",
+        messagesAppliedAt: now,
+        createdAt: now - 30 * 60 * 1000
+      });
+      await agent.insertRecoverableFiberForTest(
+        "sub-custom-stale-window",
+        now - 30 * 60 * 1000
+      );
+
+      await agent.recoverSubmissionsForTest();
+
+      await expect(
+        agent.inspectSubmissionForTest("sub-custom-stale-window")
+      ).resolves.toMatchObject({
+        status: "running"
+      });
+    } finally {
+      await agent.setSubmissionRecoveryStaleMsForTest(15 * 60 * 1000);
+    }
   });
 
   it("completes recovered chat fiber submissions through scheduled continuation", async () => {
