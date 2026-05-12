@@ -1393,6 +1393,20 @@ export class ThinkProgrammaticTestAgent extends Think {
     )._programmaticStreamErrors.size;
   }
 
+  async getSubmissionFinalStatusForTest(
+    resultStatus: SaveMessagesResult["status"],
+    streamError?: string
+  ): Promise<ThinkSubmissionStatus> {
+    return (
+      this as unknown as {
+        _getSubmissionFinalStatus: (
+          resultStatus: SaveMessagesResult["status"],
+          streamError: string | undefined
+        ) => ThinkSubmissionStatus;
+      }
+    )._getSubmissionFinalStatus(resultStatus, streamError);
+  }
+
   async runNonSubmissionStreamFailureForTest(requestId: string): Promise<void> {
     const result: StreamableResult = {
       toUIMessageStream() {

@@ -2792,15 +2792,16 @@ export class Think<
           .find((metadata) => metadata.request_id === result.requestId)?.id ??
         null;
       const streamError = this._programmaticStreamErrors.get(result.requestId);
-      const finalStatus: ThinkSubmissionStatus = streamError
-        ? "error"
-        : result.status;
+      const finalStatus = this._getSubmissionFinalStatus(
+        result.status,
+        streamError
+      );
       this.sql`
         UPDATE cf_think_submissions
         SET status = ${finalStatus},
             request_id = ${result.requestId},
             stream_id = ${streamId},
-            error_message = ${streamError ?? null},
+            error_message = ${finalStatus === "error" ? (streamError ?? null) : null},
             completed_at = ${Date.now()}
         WHERE submission_id = ${row.submission_id}
           AND status = 'running'
@@ -2822,6 +2823,13 @@ export class Think<
         await this._emitSubmissionStatus(updated);
       }
     }
+  }
+
+  private _getSubmissionFinalStatus(
+    resultStatus: SaveMessagesResult["status"],
+    streamError: string | undefined
+  ): ThinkSubmissionStatus {
+    return resultStatus === "completed" && streamError ? "error" : resultStatus;
   }
 
   private _markPendingSubmissionsSkipped(): ThinkSubmissionRow[] {

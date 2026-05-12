@@ -13,6 +13,10 @@ type ThinkSubmissionTestStub = {
   clearDelayedChunkResponse(): Promise<void>;
   setThrowingStreamError(message: string | null): Promise<void>;
   getProgrammaticStreamErrorCountForTest(): Promise<number>;
+  getSubmissionFinalStatusForTest(
+    resultStatus: "completed" | "skipped" | "aborted",
+    streamError?: string
+  ): Promise<ThinkSubmissionStatus>;
   runNonSubmissionStreamFailureForTest(requestId: string): Promise<void>;
   setSubmissionStatusDelayForTest(delayMs: number): Promise<void>;
   testSubmitMessages(
@@ -610,6 +614,20 @@ describe("Think durable submissions", () => {
     await expect(agent.getProgrammaticStreamErrorCountForTest()).resolves.toBe(
       0
     );
+  });
+
+  it("does not let stream errors override aborted or skipped submission results", async () => {
+    const agent = await freshAgent();
+
+    await expect(
+      agent.getSubmissionFinalStatusForTest("completed", "stream failed")
+    ).resolves.toBe("error");
+    await expect(
+      agent.getSubmissionFinalStatusForTest("aborted", "abort surfaced")
+    ).resolves.toBe("aborted");
+    await expect(
+      agent.getSubmissionFinalStatusForTest("skipped", "reset surfaced")
+    ).resolves.toBe("skipped");
   });
 
   it("lists and deletes terminal submissions", async () => {
