@@ -409,6 +409,22 @@ describe("Multiple providers (namespaces)", () => {
     expect(result.error).toContain("Duplicate");
   });
 
+  it("rejects sanitized tool name collisions", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute("async () => 1", [
+      {
+        name: "codemode",
+        fns: {
+          "foo-bar": async () => "hyphen",
+          foo_bar: async () => "underscore"
+        }
+      }
+    ]);
+
+    expect(result.error).toContain("both sanitize to");
+  });
+
   it("rejects reserved provider names", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 

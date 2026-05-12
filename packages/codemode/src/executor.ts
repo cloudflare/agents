@@ -288,8 +288,20 @@ export class DynamicWorkerExecutor implements Executor {
         string,
         (...args: unknown[]) => Promise<unknown>
       > = {};
+      const sanitizedNames = new Map<string, string>();
       for (const [name, fn] of Object.entries(provider.fns)) {
-        sanitizedFns[sanitizeToolName(name)] = fn;
+        const sanitizedName = sanitizeToolName(name);
+        const existingName = sanitizedNames.get(sanitizedName);
+        if (existingName && existingName !== name) {
+          return {
+            result: undefined,
+            error:
+              `Tool names "${existingName}" and "${name}" both sanitize to ` +
+              `"${sanitizedName}" in provider "${provider.name}"`
+          };
+        }
+        sanitizedNames.set(sanitizedName, name);
+        sanitizedFns[sanitizedName] = fn;
       }
       dispatchers[provider.name] = new ToolDispatcher(
         sanitizedFns,
