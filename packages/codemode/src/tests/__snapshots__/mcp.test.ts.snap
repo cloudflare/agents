@@ -105,10 +105,6 @@ interface OpenApiSpec {
   tags?: Array<{ name: string; description?: string }>;
 }
 
-declare const codemode: {
-  spec(): Promise<OpenApiSpec>;
-};
-
 
 declare const codemode: {
   spec(): Promise<OpenApiSpec>;
@@ -125,7 +121,7 @@ async () => {
 `;
 
 exports[`openApiMcpServer > search tool description should match snapshot 1`] = `
-"Search the OpenAPI spec. All $refs are pre-resolved inline.
+"Search the OpenAPI spec. codemode.spec() returns $refs resolved inline.
 
 Types:
 

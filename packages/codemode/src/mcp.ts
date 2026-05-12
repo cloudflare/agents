@@ -17,6 +17,9 @@ import type { JSONSchema7 } from "json-schema";
 const CHARS_PER_TOKEN = 4;
 const MAX_TOKENS = 6000;
 const MAX_CHARS = MAX_TOKENS * CHARS_PER_TOKEN;
+const TRUNCATION_MARKER = "--- TRUNCATED ---";
+const TRUNCATION_FOOTER_PREFIX = `\n\n${TRUNCATION_MARKER}\nResponse was ~`;
+const MAX_SANDBOX_TRUNCATED_CHARS = MAX_CHARS + 512;
 
 function truncateResponse(content: unknown): string {
   const text =
@@ -31,7 +34,18 @@ function truncateResponse(content: unknown): string {
   const truncated = text.slice(0, MAX_CHARS);
   const estimatedTokens = Math.ceil(text.length / CHARS_PER_TOKEN);
 
-  return `${truncated}\n\n--- TRUNCATED ---\nResponse was ~${estimatedTokens.toLocaleString()} tokens (limit: ${MAX_TOKENS.toLocaleString()}). Use more specific queries to reduce response size.`;
+  return `${truncated}\n\n${TRUNCATION_MARKER}\nResponse was ~${estimatedTokens.toLocaleString()} tokens (limit: ${MAX_TOKENS.toLocaleString()}). Use more specific queries to reduce response size.`;
+}
+
+function sandboxResponseText(content: unknown): string {
+  if (
+    typeof content === "string" &&
+    content.length <= MAX_SANDBOX_TRUNCATED_CHARS &&
+    content.slice(MAX_CHARS).startsWith(TRUNCATION_FOOTER_PREFIX)
+  ) {
+    return content;
+  }
+  return truncateResponse(content);
 }
 
 function formatError(error: unknown): string {
@@ -299,7 +313,9 @@ interface OpenApiSpec {
   components?: Record<string, unknown>;
   tags?: Array<{ name: string; description?: string }>;
 }
+`;
 
+const SEARCH_TYPES = `${SPEC_TYPES}
 declare const codemode: {
   spec(): Promise<OpenApiSpec>;
 };
@@ -336,6 +352,8 @@ function createOpenApiSandboxCode(
 
   return `async () => {
 const __rawSpec = ${specJson};
+const __refCache = new Map();
+const __cloneResolvedRef = (value) => structuredClone(value);
 const __resolveRefs = (obj, root, seen = new Set()) => {
   if (obj === null || obj === undefined) return obj;
   if (typeof obj !== "object") return obj;
@@ -345,6 +363,7 @@ const __resolveRefs = (obj, root, seen = new Set()) => {
     const ref = obj.$ref;
     if (seen.has(ref)) return { $circular: ref };
     if (!ref.startsWith("#/")) return obj;
+    if (__refCache.has(ref)) return __cloneResolvedRef(__refCache.get(ref));
     seen.add(ref);
 
     const parts = ref
@@ -355,7 +374,8 @@ const __resolveRefs = (obj, root, seen = new Set()) => {
     for (const part of parts) resolved = resolved?.[part];
     const result = __resolveRefs(resolved, root, seen);
     seen.delete(ref);
-    return result;
+    __refCache.set(ref, result);
+    return __cloneResolvedRef(result);
   }
 
   const result = {};
@@ -368,7 +388,7 @@ const __truncateResponse = (content) => {
   if (text.length <= ${MAX_CHARS}) return text;
   const truncated = text.slice(0, ${MAX_CHARS});
   const estimatedTokens = Math.ceil(text.length / ${CHARS_PER_TOKEN});
-  return truncated + "\\n\\n--- TRUNCATED ---\\nResponse was ~" + estimatedTokens.toLocaleString() + " tokens (limit: ${MAX_TOKENS.toLocaleString()}). Use more specific queries to reduce response size.";
+  return truncated + "\\n\\n${TRUNCATION_MARKER}\\nResponse was ~" + estimatedTokens.toLocaleString() + " tokens (limit: ${MAX_TOKENS.toLocaleString()}). Use more specific queries to reduce response size.";
 };
 const codemode = {
   spec: async () => (__resolvedSpec ??= __resolveRefs(__rawSpec, __rawSpec))${requestFn ? `,\n  ${requestFn}` : ""}
@@ -401,10 +421,10 @@ export function openApiMcpServer(options: OpenApiMcpServerOptions): McpServer {
   server.registerTool(
     "search",
     {
-      description: `Search the OpenAPI spec. All $refs are pre-resolved inline.
+      description: `Search the OpenAPI spec. codemode.spec() returns $refs resolved inline.
 
 Types:
-${SPEC_TYPES}
+${SEARCH_TYPES}
 
 Your code must be an async arrow function that returns the result.
 
@@ -451,7 +471,7 @@ async () => {
         }
         return {
           content: [
-            { type: "text" as const, text: truncateResponse(result.result) }
+            { type: "text" as const, text: sandboxResponseText(result.result) }
           ]
         };
       } catch (error) {
@@ -509,7 +529,7 @@ async () => {
         }
         return {
           content: [
-            { type: "text" as const, text: truncateResponse(result.result) }
+            { type: "text" as const, text: sandboxResponseText(result.result) }
           ]
         };
       } catch (error) {

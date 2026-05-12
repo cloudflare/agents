@@ -596,7 +596,7 @@ describe("openApiMcpServer", () => {
     await client.close();
   });
 
-  it("should resolve $refs before injecting spec", async () => {
+  it("should resolve $refs inside the sandbox", async () => {
     const specWithRefs = {
       openapi: "3.0.0",
       paths: {
@@ -643,6 +643,272 @@ describe("openApiMcpServer", () => {
     expect(JSON.parse(callText(result))).toEqual({
       type: "array",
       items: { type: "object", properties: { id: { type: "string" } } }
+    });
+
+    await client.close();
+  });
+
+  it("search should preserve sandbox truncation metadata", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const server = openApiMcpServer({
+      spec: sampleSpec,
+      executor,
+      request: async () => ({})
+    });
+    const client = await connectClient(server);
+
+    const result = await client.callTool({
+      name: "search",
+      arguments: {
+        code: "async () => 'x'.repeat(25000)"
+      }
+    });
+
+    const text = callText(result);
+    expect(text).toContain("--- TRUNCATED ---");
+    expect(text).toContain("Response was ~6,250 tokens");
+
+    await client.close();
+  });
+
+  it("search should truncate oversized string results from custom executors on the host", async () => {
+    const executor = {
+      execute: async () => ({ result: "x".repeat(25000) })
+    };
+    const server = openApiMcpServer({
+      spec: sampleSpec,
+      executor,
+      request: async () => ({})
+    });
+    const client = await connectClient(server);
+
+    const result = await client.callTool({
+      name: "search",
+      arguments: {
+        code: "async () => 'ignored'"
+      }
+    });
+
+    const text = callText(result);
+    expect(text).toContain("--- TRUNCATED ---");
+    expect(text).toContain("Response was ~6,250 tokens");
+
+    await client.close();
+  });
+
+  it("search should not trust arbitrary truncation markers from custom executors", async () => {
+    const executor = {
+      execute: async () => ({
+        result: "--- TRUNCATED ---\n" + "x".repeat(25000)
+      })
+    };
+    const server = openApiMcpServer({
+      spec: sampleSpec,
+      executor,
+      request: async () => ({})
+    });
+    const client = await connectClient(server);
+
+    const result = await client.callTool({
+      name: "search",
+      arguments: {
+        code: "async () => 'ignored'"
+      }
+    });
+
+    const text = callText(result);
+    expect(text).toContain("--- TRUNCATED ---");
+    expect(text).toContain("Response was ~6,255 tokens");
+
+    await client.close();
+  });
+
+  it("should preserve external refs and surface missing internal refs as undefined", async () => {
+    const specWithRefs = {
+      openapi: "3.0.0",
+      info: { title: "Refs", version: "1" },
+      paths: {
+        "/external": {
+          get: {
+            responses: {
+              "200": {
+                content: {
+                  "application/json": {
+                    schema: { $ref: "schemas/external.json#/Thing" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "/missing": {
+          get: {
+            responses: {
+              "200": {
+                content: {
+                  "application/json": {
+                    schema: { $ref: "#/components/schemas/Missing" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      components: { schemas: {} }
+    };
+
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const server = openApiMcpServer({
+      spec: specWithRefs,
+      executor,
+      request: async () => ({})
+    });
+    const client = await connectClient(server);
+
+    const result = await client.callTool({
+      name: "search",
+      arguments: {
+        code: `async () => {
+          const spec = await codemode.spec();
+          return {
+            external: spec.paths["/external"].get.responses["200"].content["application/json"].schema,
+            missing: String(spec.paths["/missing"].get.responses["200"].content["application/json"].schema)
+          };
+        }`
+      }
+    });
+
+    expect(JSON.parse(callText(result))).toEqual({
+      external: { $ref: "schemas/external.json#/Thing" },
+      missing: "undefined"
+    });
+
+    await client.close();
+  });
+
+  it("should mark circular refs without recursing forever", async () => {
+    const specWithCycle = {
+      openapi: "3.0.0",
+      info: { title: "Cycle", version: "1" },
+      paths: {
+        "/nodes": {
+          get: {
+            responses: {
+              "200": {
+                content: {
+                  "application/json": {
+                    schema: { $ref: "#/components/schemas/Node" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      components: {
+        schemas: {
+          Node: {
+            type: "object",
+            properties: {
+              child: { $ref: "#/components/schemas/Node" }
+            }
+          }
+        }
+      }
+    };
+
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const server = openApiMcpServer({
+      spec: specWithCycle,
+      executor,
+      request: async () => ({})
+    });
+    const client = await connectClient(server);
+
+    const result = await client.callTool({
+      name: "search",
+      arguments: {
+        code: `async () => {
+          const spec = await codemode.spec();
+          return spec.paths["/nodes"].get.responses["200"].content["application/json"].schema.properties.child;
+        }`
+      }
+    });
+
+    expect(JSON.parse(callText(result))).toEqual({
+      $circular: "#/components/schemas/Node"
+    });
+
+    await client.close();
+  });
+
+  it("should reuse ref resolution work without sharing mutable objects", async () => {
+    const specWithSharedRef = {
+      openapi: "3.0.0",
+      info: { title: "Shared", version: "1" },
+      paths: {
+        "/a": {
+          get: {
+            responses: {
+              "200": {
+                content: {
+                  "application/json": {
+                    schema: { $ref: "#/components/schemas/Shared" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "/b": {
+          get: {
+            responses: {
+              "200": {
+                content: {
+                  "application/json": {
+                    schema: { $ref: "#/components/schemas/Shared" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      components: {
+        schemas: {
+          Shared: {
+            type: "object",
+            properties: { id: { type: "string" } }
+          }
+        }
+      }
+    };
+
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const server = openApiMcpServer({
+      spec: specWithSharedRef,
+      executor,
+      request: async () => ({})
+    });
+    const client = await connectClient(server);
+
+    const result = await client.callTool({
+      name: "search",
+      arguments: {
+        code: `async () => {
+          const spec = await codemode.spec();
+          const a = spec.paths["/a"].get.responses["200"].content["application/json"].schema;
+          const b = spec.paths["/b"].get.responses["200"].content["application/json"].schema;
+          a.properties.id.type = "number";
+          return { sameObject: a === b, bType: b.properties.id.type };
+        }`
+      }
+    });
+
+    expect(JSON.parse(callText(result))).toEqual({
+      sameObject: false,
+      bType: "string"
     });
 
     await client.close();
