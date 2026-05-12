@@ -39,6 +39,7 @@ Agents excel at real-time communication and state management, while Workflows ex
 | Chat/messaging                | Agent only                     |
 | Quick API calls               | Agent only                     |
 | Background processing (< 30s) | Agent `queue()`                |
+| One durable Think chat turn   | Think `submitMessages()`       |
 | Long-running tasks (> 30s)    | Agent + Workflow               |
 | Multi-step pipelines          | Workflow                       |
 | Human approval flows          | Agent + Workflow               |

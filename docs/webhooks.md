@@ -439,6 +439,21 @@ async processWebhook(payload: WebhookPayload) {
 }
 ```
 
+If the asynchronous work is a single Think chat turn, use
+`submitMessages()` instead. It returns a durable submission ID immediately and
+lets retries use an idempotency key instead of duplicating the message turn:
+
+```typescript
+const submission = await this.submitMessages(messages, {
+  idempotencyKey: payload.id
+});
+
+return Response.json(
+  { submissionId: submission.submissionId },
+  { status: 202 }
+);
+```
+
 ### Multi-Provider Routing
 
 Handle webhooks from multiple services in one worker:

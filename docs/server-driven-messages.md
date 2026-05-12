@@ -11,6 +11,7 @@ The key primitives:
 | Primitive           | Role                                                                               |
 | ------------------- | ---------------------------------------------------------------------------------- |
 | `saveMessages`      | Inject a message and trigger the LLM — the server-side equivalent of `sendMessage` |
+| `submitMessages`    | Durably accept a Think turn for async execution and inspect it later               |
 | `persistMessages`   | Store messages without triggering a response — for injecting context silently      |
 | `onChatResponse`    | React when any response completes, including ones you did not initiate             |
 | `isServerStreaming` | Client-side flag: `true` when a server-initiated stream is active                  |
@@ -20,6 +21,35 @@ The key primitives:
 `saveMessages` persists messages to SQLite **and** triggers `onChatMessage` for a new LLM response. It is awaitable — after it returns, the LLM has responded and the message is persisted.
 
 `persistMessages` stores messages and broadcasts them to connected clients, but does **not** trigger a model turn. Use it when you want to inject context (for example, a system message or background data) into the conversation without starting a response.
+
+### `saveMessages` vs `submitMessages`
+
+Use `saveMessages()` when the caller can wait for the model turn to finish.
+
+Use `submitMessages()` when the caller needs a fast durable receipt, idempotent retry, and later status inspection. This is useful for webhook handlers, RPC callers, and parent Workers with strict timeout limits:
+
+```typescript
+const submission = await this.submitMessages(
+  [
+    {
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [
+        { type: "text", text: `Webhook event: ${JSON.stringify(payload)}` }
+      ]
+    }
+  ],
+  { idempotencyKey: payload.id }
+);
+
+return Response.json({
+  submissionId: submission.submissionId,
+  status: submission.status,
+  accepted: submission.accepted
+});
+```
+
+`submitMessages()` stores pending work first and appends the messages to the conversation `Session` only when the submission starts executing. It accepts serializable `UIMessage[]` values, not the function form supported by `saveMessages((messages) => ...)`.
 
 ### When to use `saveMessages` vs `onChatResponse`
 
@@ -379,14 +409,15 @@ The `messageConcurrency` setting on `AIChatAgent` controls how overlapping user 
 
 ## Combining with other Agent primitives
 
-| Primitive          | How to combine                                                                                |
-| ------------------ | --------------------------------------------------------------------------------------------- |
-| `schedule()`       | Schedule a callback that calls `saveMessages` — see the cron example above                    |
-| `queue()`          | Queue a method that calls `saveMessages` for deferred processing                              |
-| `runWorkflow()`    | Start a Workflow; use `AgentWorkflow.agent` RPC to call a method that triggers `saveMessages` |
-| `onEmail()`        | Convert email content to a chat message and call `saveMessages`                               |
-| `onRequest()`      | Handle webhooks and call `saveMessages`                                                       |
-| `this.broadcast()` | Broadcast custom state from `onChatResponse`                                                  |
+| Primitive          | How to combine                                                                                                    |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `schedule()`       | Schedule a callback that calls `saveMessages` — see the cron example above                                        |
+| `submitMessages()` | Durably accept a Think turn when the caller cannot wait for `saveMessages()` to finish                            |
+| `queue()`          | Queue a method that calls `saveMessages` for deferred processing                                                  |
+| `runWorkflow()`    | Start a Workflow; use `AgentWorkflow.agent` RPC to call a method that triggers `saveMessages` or `submitMessages` |
+| `onEmail()`        | Convert email content to a chat message and call `saveMessages`                                                   |
+| `onRequest()`      | Handle webhooks and call `saveMessages`                                                                           |
+| `this.broadcast()` | Broadcast custom state from `onChatResponse`                                                                      |
 
 ## Cancelling a server-driven turn
 
@@ -424,7 +455,9 @@ This is the integration point for agent-tool orchestration where the parent's AI
 ## Important notes
 
 - **`saveMessages` is awaitable.** After it returns, the LLM has responded and the message is persisted. Use this when you control the trigger.
+- **`submitMessages` is durable admission.** It returns after the turn is accepted, not after the LLM responds. Use it when timeout ambiguity would make retries unsafe.
 - **Use the function form of `saveMessages`.** `saveMessages((messages) => [...messages, newMsg])` reads the latest persisted messages at execution time, avoiding stale baselines when multiple calls queue up.
+- **`submitMessages` accepts serializable messages.** It takes `UIMessage[]` so accepted work can be stored durably before execution.
 - **`persistMessages` does not trigger a response.** Use it to inject context or system messages silently.
 - **`onChatResponse` is for reacting to turns you did not initiate.** Use it for user-initiated messages, auto-continuations, or any turn where you did not call `saveMessages` yourself.
 - **`onChatResponse` does not nest.** When `saveMessages` is called from inside `onChatResponse`, the inner turn completes and `onChatResponse` fires again sequentially — not recursively.

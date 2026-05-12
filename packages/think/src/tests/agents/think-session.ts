@@ -8,6 +8,9 @@ import type {
   SaveMessagesResult,
   ChatRecoveryContext,
   ChatRecoveryOptions,
+  ThinkSubmissionInspection,
+  ThinkSubmissionStatus,
+  SubmitMessagesResult,
   TurnContext,
   TurnConfig,
   PrepareStepContext,
@@ -1325,11 +1328,14 @@ export class ThinkToolsTestAgent extends Think {
 
 export class ThinkProgrammaticTestAgent extends Think {
   private _responseLog: ChatResponseResult[] = [];
+  private _submissionLog: ThinkSubmissionInspection[] = [];
   private _capturedTurnContexts: Array<{
     continuation?: boolean;
     body?: RpcJsonObject;
   }> = [];
   private _delayedChunks: { chunks: string[]; delayMs: number } | null = null;
+  private _throwBeforeTurnError: string | null = null;
+  private _submissionStatusDelayMs = 0;
 
   override getModel(): LanguageModel {
     if (this._delayedChunks) {
@@ -1345,7 +1351,21 @@ export class ThinkProgrammaticTestAgent extends Think {
     this._responseLog.push(result);
   }
 
+  override async onSubmissionStatus(
+    result: ThinkSubmissionInspection
+  ): Promise<void> {
+    if (this._submissionStatusDelayMs > 0) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, this._submissionStatusDelayMs)
+      );
+    }
+    this._submissionLog.push(result);
+  }
+
   override beforeTurn(ctx: TurnContext): void {
+    if (this._throwBeforeTurnError) {
+      throw new Error(this._throwBeforeTurnError);
+    }
     this._capturedTurnContexts.push({
       continuation: ctx.continuation,
       body: ctx.body as RpcJsonObject | undefined
@@ -1363,8 +1383,216 @@ export class ThinkProgrammaticTestAgent extends Think {
     this._delayedChunks = null;
   }
 
+  async setThrowingStreamError(message: string | null): Promise<void> {
+    this._throwBeforeTurnError = message;
+  }
+
+  async setSubmissionStatusDelayForTest(delayMs: number): Promise<void> {
+    this._submissionStatusDelayMs = delayMs;
+  }
+
   async testSaveMessages(msgs: UIMessage[]): Promise<SaveMessagesResult> {
     return this.saveMessages(msgs);
+  }
+
+  async testSubmitMessages(
+    text: string,
+    options?: {
+      submissionId?: string;
+      idempotencyKey?: string;
+      metadata?: Record<string, unknown>;
+    }
+  ): Promise<SubmitMessagesResult> {
+    return this.submitMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user" as const,
+          parts: [{ type: "text" as const, text }]
+        }
+      ],
+      options
+    );
+  }
+
+  async testSubmitMessagesError(
+    text: string,
+    options?: {
+      submissionId?: string;
+      idempotencyKey?: string;
+      metadata?: Record<string, unknown>;
+    }
+  ): Promise<string> {
+    try {
+      await this.submitMessages(
+        [
+          {
+            id: crypto.randomUUID(),
+            role: "user" as const,
+            parts: [{ type: "text" as const, text }]
+          }
+        ],
+        options
+      );
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async testSubmitMessagesEmptyError(): Promise<string> {
+    try {
+      await this.submitMessages([]);
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async inspectSubmissionForTest(
+    submissionId: string
+  ): Promise<ThinkSubmissionInspection | null> {
+    return this.inspectSubmission(submissionId);
+  }
+
+  async listSubmissionsForTest(options?: {
+    status?: ThinkSubmissionStatus | ThinkSubmissionStatus[];
+    limit?: number;
+  }): Promise<ThinkSubmissionInspection[]> {
+    return this.listSubmissions(options);
+  }
+
+  async cancelSubmissionForTest(
+    submissionId: string,
+    reason?: string
+  ): Promise<void> {
+    await this.cancelSubmission(submissionId, reason);
+  }
+
+  async deleteSubmissionForTest(submissionId: string): Promise<boolean> {
+    return this.deleteSubmission(submissionId);
+  }
+
+  async deleteSubmissionsForTest(options?: {
+    status?: ThinkSubmissionStatus | ThinkSubmissionStatus[];
+    completedBefore?: Date;
+    limit?: number;
+  }): Promise<number> {
+    return this.deleteSubmissions(options);
+  }
+
+  async drainSubmissionsForTest(): Promise<void> {
+    await this._drainThinkSubmissions();
+  }
+
+  async recoverSubmissionsForTest(): Promise<void> {
+    await (
+      this as unknown as { _recoverSubmissionsOnStart: () => Promise<void> }
+    )._recoverSubmissionsOnStart();
+  }
+
+  async resetTurnStateForTest(): Promise<void> {
+    this.resetTurnState();
+  }
+
+  async recoverChatFiberForTest(requestId: string): Promise<void> {
+    await this._handleInternalFiberRecovery({
+      id: `fiber-${requestId}`,
+      name: `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
+      snapshot: null,
+      createdAt: Date.now()
+    });
+  }
+
+  async continueRecoveredChatForTest(requestId: string): Promise<void> {
+    await this._chatRecoveryContinue({ recoveredRequestId: requestId });
+  }
+
+  async cancelDuringRecoveredContinuationForTest(
+    requestId: string,
+    delayMs: number
+  ): Promise<void> {
+    const continuation = this._chatRecoveryContinue({
+      recoveredRequestId: requestId
+    });
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    await this.cancelSubmission(requestId, "stop during recovery");
+    await continuation.catch(() => {});
+  }
+
+  async scheduleRecoveredContinuationForTest(requestId: string): Promise<void> {
+    await this.schedule(
+      60,
+      "_chatRecoveryContinue",
+      { recoveredRequestId: requestId },
+      { idempotent: true }
+    );
+  }
+
+  async insertSubmissionForTest(options: {
+    submissionId: string;
+    status?: ThinkSubmissionStatus;
+    requestId?: string;
+    messagesAppliedAt?: number | null;
+    completedAt?: number | null;
+    createdAt?: number;
+    messageIds?: string[];
+  }): Promise<void> {
+    (
+      this as unknown as { _ensureSubmissionTable: () => void }
+    )._ensureSubmissionTable();
+    const now = options.createdAt ?? Date.now();
+    const requestId = options.requestId ?? options.submissionId;
+    const status = options.status ?? "pending";
+    const messagesAppliedAt =
+      options.messagesAppliedAt === undefined
+        ? null
+        : options.messagesAppliedAt;
+    const startedAt = status === "running" ? now : null;
+    const completedAt =
+      options.completedAt === undefined ? null : options.completedAt;
+    const messageIds = options.messageIds ?? [crypto.randomUUID()];
+    const messagesJson = JSON.stringify(
+      messageIds.map((id) => ({
+        id,
+        role: "user",
+        parts: [{ type: "text", text: `Inserted ${options.submissionId}` }]
+      }))
+    );
+    this.sql`
+      INSERT INTO cf_think_submissions (
+        submission_id, idempotency_key, request_id, stream_id, status,
+        messages_json, metadata_json, error_message, created_at,
+        messages_applied_at, started_at, completed_at
+      )
+      VALUES (
+        ${options.submissionId}, NULL, ${requestId}, NULL, ${status},
+        ${messagesJson}, NULL, NULL, ${now}, ${messagesAppliedAt},
+        ${startedAt}, ${completedAt}
+      )
+    `;
+  }
+
+  async insertMalformedSubmissionForTest(options: {
+    submissionId: string;
+    requestId?: string;
+  }): Promise<void> {
+    (
+      this as unknown as { _ensureSubmissionTable: () => void }
+    )._ensureSubmissionTable();
+    const now = Date.now();
+    const requestId = options.requestId ?? options.submissionId;
+    this.sql`
+      INSERT INTO cf_think_submissions (
+        submission_id, idempotency_key, request_id, stream_id, status,
+        messages_json, metadata_json, error_message, created_at,
+        messages_applied_at, started_at, completed_at
+      )
+      VALUES (
+        ${options.submissionId}, NULL, ${requestId}, NULL, 'running',
+        '{', NULL, NULL, ${now}, NULL, ${now}, NULL
+      )
+    `;
   }
 
   async testSaveMessagesWithFn(text: string): Promise<SaveMessagesResult> {
@@ -1515,6 +1743,10 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async getResponseLog(): Promise<ChatResponseResult[]> {
     return this._responseLog;
+  }
+
+  async getSubmissionLog(): Promise<ThinkSubmissionInspection[]> {
+    return this._submissionLog;
   }
 
   async clearResponseLog(): Promise<void> {

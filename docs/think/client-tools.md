@@ -148,7 +148,7 @@ export class MyAgent extends Think<Env> {
 | `"drop"`                                        | Ignore overlapping submits entirely. Messages are not persisted.                                                                     |
 | `{ strategy: "debounce", debounceMs?: number }` | Trailing-edge latest with a quiet window (default 750ms).                                                                            |
 
-Concurrency strategies only apply to `submit-message` requests. Regenerations, tool continuations, approvals, clears, `saveMessages`, and `continueLastTurn` keep their serialized behavior.
+Concurrency strategies only apply to `submit-message` requests. Regenerations, tool continuations, approvals, clears, `saveMessages`, durable `submitMessages` submissions, and `continueLastTurn` keep their serialized behavior.
 
 ### Examples
 

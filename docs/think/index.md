@@ -110,7 +110,7 @@ Both Think and [`AIChatAgent`](../chat-agents.md) extend `Agent` and speak the s
 | **Regeneration**       | Destructive (old response deleted)                               | Non-destructive branching (old responses preserved)                 |
 | **Context management** | Manual                                                           | Context blocks with LLM-writable persistent memory                  |
 | **Sub-agent RPC**      | Not built in                                                     | `chat()` with `StreamCallback`                                      |
-| **Programmatic turns** | `saveMessages()`                                                 | `saveMessages()` + `continueLastTurn()`                             |
+| **Programmatic turns** | `saveMessages()`                                                 | `saveMessages()`, `submitMessages()`, `continueLastTurn()`          |
 | **Compaction**         | `maxPersistedMessages` (deletes oldest)                          | Non-destructive summaries via overlays                              |
 | **Search**             | Not available                                                    | FTS5 full-text search per-session and cross-session                 |
 
@@ -129,6 +129,7 @@ Both Think and [`AIChatAgent`](../chat-agents.md) extend `Agent` and speak the s
 - You need conversation search (FTS5)
 - You are building a sub-agent system (parent-child RPC with streaming)
 - You need proactive agents (programmatic turns from scheduled tasks or webhooks)
+- You need durable async submission for webhook/RPC callers — see [Programmatic submissions](./programmatic-submissions.md)
 
 ## Configuration Overrides
 

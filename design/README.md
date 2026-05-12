@@ -9,6 +9,7 @@ The goal is to give contributors (and future-us) a quick way to understand _why_
 | File                                                                             | Scope                                                                         |
 | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | [think.md](./think.md)                                                           | Think — chat agent base class, sessions, streaming, tools, execution ladder   |
+| [think-durable-submissions.md](./think-durable-submissions.md)                   | Think durable submissions — async programmatic turns, recovery, idempotency   |
 | [visuals.md](./visuals.md)                                                       | UI component library choice, Kumo usage, custom patterns                      |
 | [readonly-connections.md](./readonly-connections.md)                             | Readonly connection enforcement, storage, tradeoffs, and caveats              |
 | [workspace.md](./workspace.md)                                                   | Workspace — hybrid SQLite+R2 filesystem, bash, symlinks                       |

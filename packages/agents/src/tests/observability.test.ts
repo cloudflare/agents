@@ -213,7 +213,7 @@ describe("channel routing", () => {
     unsub();
   });
 
-  it("should route message:* to the message channel", () => {
+  it("should route message:*, tool:*, and submission:* to the message channel", () => {
     const received: ObservabilityEvent[] = [];
     const unsub = subscribe("message", (event) => received.push(event));
 
@@ -224,9 +224,21 @@ describe("channel routing", () => {
       payload: {},
       timestamp: Date.now()
     });
+    genericObservability.emit({
+      type: "submission:status",
+      agent: "test-agent",
+      name: "inst-1",
+      payload: {
+        submissionId: "sub-1",
+        requestId: "req-1",
+        status: "completed"
+      },
+      timestamp: Date.now()
+    });
 
-    expect(received).toHaveLength(1);
+    expect(received).toHaveLength(2);
     expect(received[0].type).toBe("message:request");
+    expect(received[1].type).toBe("submission:status");
 
     unsub();
   });

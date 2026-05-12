@@ -245,6 +245,62 @@ type AgentToolStoredChunk = {
   body: string;
 };
 
+export type ThinkSubmissionStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "aborted"
+  | "skipped"
+  | "error";
+
+export type SubmitMessagesOptions = {
+  submissionId?: string;
+  idempotencyKey?: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type ThinkSubmissionInspection = {
+  submissionId: string;
+  idempotencyKey?: string;
+  requestId?: string;
+  status: ThinkSubmissionStatus;
+  error?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: number;
+  startedAt?: number;
+  completedAt?: number;
+};
+
+export type SubmitMessagesResult = ThinkSubmissionInspection & {
+  accepted: boolean;
+};
+
+export type ListSubmissionsOptions = {
+  status?: ThinkSubmissionStatus | ThinkSubmissionStatus[];
+  limit?: number;
+};
+
+export type DeleteSubmissionsOptions = {
+  status?: ThinkSubmissionStatus | ThinkSubmissionStatus[];
+  completedBefore?: Date;
+  limit?: number;
+};
+
+type ThinkSubmissionRow = {
+  submission_id: string;
+  idempotency_key: string | null;
+  request_id: string | null;
+  stream_id: string | null;
+  status: ThinkSubmissionStatus;
+  messages_json: string;
+  metadata_json: string | null;
+  error_message: string | null;
+  created_at: number;
+  messages_applied_at: number | null;
+  started_at: number | null;
+  completed_at: number | null;
+};
+
 // Lifecycle / result types are shared with `@cloudflare/ai-chat` via
 // `agents/chat`. Re-exported from Think so subclasses can import them
 // from `@cloudflare/think` directly.
@@ -670,6 +726,11 @@ export class Think<
 
       // 8. User's onStart
       await _onStart();
+
+      // 9. Durable submissions may run user-defined model/hooks, so start them
+      // after subclass initialization has completed.
+      await this._recoverSubmissionsOnStart();
+      this._startSubmissionDrain();
     };
   }
 
@@ -705,6 +766,11 @@ export class Think<
   private _agentToolLastErrors = new Map<string, string>();
   private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
   private _agentToolLiveSequences = new Map<string, number>();
+  private _submissionTableEnsured = false;
+  private _drainingSubmissions = false;
+  private _submissionAbortControllers = new Map<string, AbortController>();
+  private _programmaticStreamErrors = new Map<string, string>();
+  private static SUBMISSION_RECOVERY_STALE_MS = 15 * 60 * 1000;
 
   override broadcast(
     msg: string | ArrayBuffer | ArrayBufferView,
@@ -1903,6 +1969,7 @@ export class Think<
 
   /** Clear all messages from storage. */
   clearMessages(): void {
+    this.resetTurnState();
     this.session.clearMessages();
   }
 
@@ -2211,6 +2278,742 @@ export class Think<
     return null;
   }
 
+  // ── Durable programmatic submissions ───────────────────────────
+
+  private _ensureSubmissionTable(): void {
+    if (this._submissionTableEnsured) return;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_think_submissions (
+        submission_id TEXT PRIMARY KEY,
+        idempotency_key TEXT UNIQUE,
+        request_id TEXT,
+        stream_id TEXT,
+        status TEXT NOT NULL,
+        messages_json TEXT NOT NULL,
+        metadata_json TEXT,
+        error_message TEXT,
+        created_at INTEGER NOT NULL,
+        messages_applied_at INTEGER,
+        started_at INTEGER,
+        completed_at INTEGER
+      )
+    `;
+    this.sql`
+      CREATE INDEX IF NOT EXISTS cf_think_submissions_status_created_idx
+      ON cf_think_submissions (status, created_at, submission_id)
+    `;
+    this.sql`
+      CREATE INDEX IF NOT EXISTS cf_think_submissions_request_status_idx
+      ON cf_think_submissions (request_id, status)
+    `;
+    this.sql`
+      CREATE INDEX IF NOT EXISTS cf_think_submissions_status_completed_idx
+      ON cf_think_submissions (status, completed_at, created_at)
+    `;
+    this._submissionTableEnsured = true;
+  }
+
+  private _readSubmission(submissionId: string): ThinkSubmissionRow | null {
+    this._ensureSubmissionTable();
+    const rows = this.sql<ThinkSubmissionRow>`
+      SELECT submission_id, idempotency_key, request_id, stream_id, status,
+             messages_json, metadata_json, error_message, created_at,
+             messages_applied_at, started_at, completed_at
+      FROM cf_think_submissions
+      WHERE submission_id = ${submissionId}
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  }
+
+  private _readSubmissionByIdempotencyKey(
+    idempotencyKey: string
+  ): ThinkSubmissionRow | null {
+    this._ensureSubmissionTable();
+    const rows = this.sql<ThinkSubmissionRow>`
+      SELECT submission_id, idempotency_key, request_id, stream_id, status,
+             messages_json, metadata_json, error_message, created_at,
+             messages_applied_at, started_at, completed_at
+      FROM cf_think_submissions
+      WHERE idempotency_key = ${idempotencyKey}
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  }
+
+  private _normalizeStatusFilter(
+    status?: ThinkSubmissionStatus | ThinkSubmissionStatus[]
+  ): Set<ThinkSubmissionStatus> | null {
+    if (!status) return null;
+    return new Set(Array.isArray(status) ? status : [status]);
+  }
+
+  private _listSubmissionRows(
+    options?: ListSubmissionsOptions
+  ): ThinkSubmissionRow[] {
+    this._ensureSubmissionTable();
+    const limit = Math.min(Math.max(options?.limit ?? 50, 1), 100);
+    const statuses = this._normalizeStatusFilter(options?.status);
+    if (statuses) {
+      return [...statuses]
+        .flatMap((status) => this._listSubmissionRowsByStatus(status, limit))
+        .sort((a, b) =>
+          b.created_at === a.created_at
+            ? b.submission_id.localeCompare(a.submission_id)
+            : b.created_at - a.created_at
+        )
+        .slice(0, limit);
+    }
+
+    const rows = this.sql<ThinkSubmissionRow>`
+      SELECT submission_id, idempotency_key, request_id, stream_id, status,
+             messages_json, metadata_json, error_message, created_at,
+             messages_applied_at, started_at, completed_at
+      FROM cf_think_submissions
+      ORDER BY created_at DESC, submission_id DESC
+      LIMIT ${limit}
+    `;
+    return rows;
+  }
+
+  private _listSubmissionRowsByStatus(
+    status: ThinkSubmissionStatus,
+    limit: number
+  ): ThinkSubmissionRow[] {
+    return this.sql<ThinkSubmissionRow>`
+      SELECT submission_id, idempotency_key, request_id, stream_id, status,
+             messages_json, metadata_json, error_message, created_at,
+             messages_applied_at, started_at, completed_at
+      FROM cf_think_submissions
+      WHERE status = ${status}
+      ORDER BY created_at DESC, submission_id DESC
+      LIMIT ${limit}
+    `;
+  }
+
+  private _inspectionFromSubmissionRow(
+    row: ThinkSubmissionRow
+  ): ThinkSubmissionInspection {
+    const metadata = this._parseJsonObject(row.metadata_json);
+    return {
+      submissionId: row.submission_id,
+      idempotencyKey: row.idempotency_key ?? undefined,
+      requestId: row.request_id ?? undefined,
+      status: row.status,
+      error: row.error_message ?? undefined,
+      metadata: metadata ?? undefined,
+      createdAt: row.created_at,
+      startedAt: row.started_at ?? undefined,
+      completedAt: row.completed_at ?? undefined
+    };
+  }
+
+  private _parseJsonObject(
+    value: string | null
+  ): Record<string, unknown> | null {
+    if (value === null) return null;
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (
+        parsed !== null &&
+        typeof parsed === "object" &&
+        !Array.isArray(parsed)
+      ) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Invalid metadata should not prevent inspection.
+    }
+    return null;
+  }
+
+  private _parseSubmissionMessages(value: string): UIMessage[] {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) {
+      throw new Error("Stored submission messages are invalid");
+    }
+    return parsed as UIMessage[];
+  }
+
+  private _serializeSubmissionMessages(messages: UIMessage[]): string {
+    return JSON.stringify(
+      messages.map((message) => enforceRowSizeLimit(sanitizeMessage(message)))
+    );
+  }
+
+  private _serializeMetadata(
+    metadata: Record<string, unknown> | undefined
+  ): string | null {
+    return metadata === undefined ? null : JSON.stringify(metadata);
+  }
+
+  private async _emitSubmissionStatus(row: ThinkSubmissionRow): Promise<void> {
+    const inspection = this._inspectionFromSubmissionRow(row);
+    this._emit("submission:status", {
+      submissionId: inspection.submissionId,
+      requestId: inspection.requestId,
+      status: inspection.status
+    });
+    if (inspection.status === "error" && inspection.error) {
+      this._emit("submission:error", {
+        submissionId: inspection.submissionId,
+        requestId: inspection.requestId,
+        error: inspection.error
+      });
+    }
+    await this.keepAliveWhile(async () => {
+      try {
+        await this.onSubmissionStatus(inspection);
+      } catch (error) {
+        console.error("[Think] onSubmissionStatus failed", error);
+      }
+    });
+  }
+
+  protected onSubmissionStatus(
+    _submission: ThinkSubmissionInspection
+  ): void | Promise<void> {}
+
+  async inspectSubmission(
+    submissionId: string
+  ): Promise<ThinkSubmissionInspection | null> {
+    const row = this._readSubmission(submissionId);
+    return row ? this._inspectionFromSubmissionRow(row) : null;
+  }
+
+  async listSubmissions(
+    options?: ListSubmissionsOptions
+  ): Promise<ThinkSubmissionInspection[]> {
+    return this._listSubmissionRows(options).map((row) =>
+      this._inspectionFromSubmissionRow(row)
+    );
+  }
+
+  async deleteSubmission(submissionId: string): Promise<boolean> {
+    const row = this._readSubmission(submissionId);
+    if (!row || !this._isTerminalSubmissionStatus(row.status)) return false;
+    this.sql`
+      DELETE FROM cf_think_submissions
+      WHERE submission_id = ${submissionId}
+        AND status IN ('completed', 'aborted', 'skipped', 'error')
+    `;
+    return true;
+  }
+
+  async deleteSubmissions(options?: DeleteSubmissionsOptions): Promise<number> {
+    this._ensureSubmissionTable();
+    const statuses =
+      this._normalizeStatusFilter(options?.status) ??
+      new Set<ThinkSubmissionStatus>([
+        "completed",
+        "aborted",
+        "skipped",
+        "error"
+      ]);
+    const limit = Math.min(Math.max(options?.limit ?? 100, 1), 500);
+    const completedBefore = options?.completedBefore?.getTime();
+    const rows = [...statuses]
+      .flatMap((status) =>
+        this._listTerminalSubmissionRowsForDelete(
+          status,
+          limit,
+          completedBefore
+        )
+      )
+      .sort((a, b) =>
+        (a.completed_at ?? a.created_at) === (b.completed_at ?? b.created_at)
+          ? a.created_at - b.created_at
+          : (a.completed_at ?? a.created_at) - (b.completed_at ?? b.created_at)
+      )
+      .slice(0, limit);
+
+    let deleted = 0;
+    for (const row of rows) {
+      if (!this._isTerminalSubmissionStatus(row.status)) continue;
+      this.sql`
+        DELETE FROM cf_think_submissions
+        WHERE submission_id = ${row.submission_id}
+          AND status IN ('completed', 'aborted', 'skipped', 'error')
+      `;
+      deleted++;
+    }
+    return deleted;
+  }
+
+  private _listTerminalSubmissionRowsForDelete(
+    status: ThinkSubmissionStatus,
+    limit: number,
+    completedBefore: number | undefined
+  ): ThinkSubmissionRow[] {
+    if (completedBefore === undefined) {
+      return this.sql<ThinkSubmissionRow>`
+        SELECT submission_id, idempotency_key, request_id, stream_id, status,
+               messages_json, metadata_json, error_message, created_at,
+               messages_applied_at, started_at, completed_at
+        FROM cf_think_submissions
+        WHERE status = ${status}
+        ORDER BY completed_at ASC, created_at ASC
+        LIMIT ${limit}
+      `;
+    }
+
+    return this.sql<ThinkSubmissionRow>`
+      SELECT submission_id, idempotency_key, request_id, stream_id, status,
+             messages_json, metadata_json, error_message, created_at,
+             messages_applied_at, started_at, completed_at
+      FROM cf_think_submissions
+      WHERE status = ${status}
+        AND completed_at IS NOT NULL
+        AND completed_at < ${completedBefore}
+      ORDER BY completed_at ASC, created_at ASC
+      LIMIT ${limit}
+    `;
+  }
+
+  private _isTerminalSubmissionStatus(status: ThinkSubmissionStatus): boolean {
+    return (
+      status === "completed" ||
+      status === "aborted" ||
+      status === "skipped" ||
+      status === "error"
+    );
+  }
+
+  async cancelSubmission(
+    submissionId: string,
+    reason?: unknown
+  ): Promise<void> {
+    const row = this._readSubmission(submissionId);
+    if (!row || this._isTerminalSubmissionStatus(row.status)) return;
+
+    const completedAt = Date.now();
+    const errorMessage =
+      reason === undefined
+        ? null
+        : reason instanceof Error
+          ? reason.message
+          : String(reason);
+    this._submissionAbortControllers.get(submissionId)?.abort(reason);
+    if (row.request_id) {
+      this.abortRequest(row.request_id, reason);
+    }
+
+    this.sql`
+      UPDATE cf_think_submissions
+      SET status = 'aborted',
+          error_message = ${errorMessage},
+          completed_at = ${completedAt}
+      WHERE submission_id = ${submissionId}
+        AND status IN ('pending', 'running')
+    `;
+
+    const updated = this._readSubmission(submissionId);
+    if (updated?.status === "aborted") {
+      await this._emitSubmissionStatus(updated);
+    }
+  }
+
+  async submitMessages(
+    messages: UIMessage[],
+    options?: SubmitMessagesOptions
+  ): Promise<SubmitMessagesResult> {
+    this._ensureSubmissionTable();
+    if (messages.length === 0) {
+      throw new Error("submitMessages requires at least one message");
+    }
+
+    const existingById = options?.submissionId
+      ? this._readSubmission(options.submissionId)
+      : null;
+    const existingByKey = options?.idempotencyKey
+      ? this._readSubmissionByIdempotencyKey(options.idempotencyKey)
+      : null;
+
+    if (
+      existingById &&
+      existingByKey &&
+      existingById.submission_id !== existingByKey.submission_id
+    ) {
+      throw new Error(
+        "submissionId and idempotencyKey refer to different submissions"
+      );
+    }
+    if (
+      existingByKey &&
+      options?.submissionId &&
+      existingByKey.submission_id !== options.submissionId
+    ) {
+      throw new Error(
+        "submissionId and idempotencyKey refer to different submissions"
+      );
+    }
+    if (
+      existingById &&
+      options?.idempotencyKey &&
+      existingById.idempotency_key !== null &&
+      existingById.idempotency_key !== options.idempotencyKey
+    ) {
+      throw new Error(
+        "submissionId and idempotencyKey refer to different submissions"
+      );
+    }
+
+    const existing = existingById ?? existingByKey;
+    if (existing) {
+      if (existing.status === "pending") {
+        await this._scheduleSubmissionDrain();
+        this._startSubmissionDrain();
+      }
+      return {
+        ...this._inspectionFromSubmissionRow(existing),
+        accepted: false
+      };
+    }
+
+    const submissionId = options?.submissionId ?? crypto.randomUUID();
+    const requestId = submissionId;
+    const now = Date.now();
+    const messagesJson = this._serializeSubmissionMessages(messages);
+    const metadataJson = this._serializeMetadata(options?.metadata);
+
+    this.sql`
+      INSERT INTO cf_think_submissions (
+        submission_id, idempotency_key, request_id, stream_id, status,
+        messages_json, metadata_json, error_message, created_at,
+        messages_applied_at, started_at, completed_at
+      )
+      VALUES (
+        ${submissionId}, ${options?.idempotencyKey ?? null}, ${requestId},
+        NULL, 'pending', ${messagesJson}, ${metadataJson}, NULL, ${now},
+        NULL, NULL, NULL
+      )
+    `;
+
+    const row = this._readSubmission(submissionId);
+    if (!row) {
+      throw new Error("Failed to persist submission");
+    }
+
+    this._emit("submission:create", {
+      submissionId: row.submission_id,
+      requestId: row.request_id ?? undefined,
+      idempotencyKey: row.idempotency_key ?? undefined
+    });
+    await this._emitSubmissionStatus(row);
+    await this._scheduleSubmissionDrain();
+    this._startSubmissionDrain();
+
+    return {
+      ...this._inspectionFromSubmissionRow(row),
+      accepted: true
+    };
+  }
+
+  private async _scheduleSubmissionDrain(): Promise<void> {
+    await this.schedule(0, "_drainThinkSubmissions", undefined, {
+      idempotent: true
+    });
+  }
+
+  private _startSubmissionDrain(): void {
+    void this.keepAliveWhile(() => this._drainSubmissions()).catch((error) => {
+      console.error("[Think] Failed to drain submissions", error);
+    });
+  }
+
+  async _drainThinkSubmissions(): Promise<void> {
+    await this._drainSubmissions();
+  }
+
+  private async _drainSubmissions(): Promise<void> {
+    this._ensureSubmissionTable();
+    if (this._drainingSubmissions) return;
+    this._drainingSubmissions = true;
+    try {
+      while (true) {
+        const rows = this.sql<ThinkSubmissionRow>`
+          SELECT submission_id, idempotency_key, request_id, stream_id, status,
+                 messages_json, metadata_json, error_message, created_at,
+                 messages_applied_at, started_at, completed_at
+          FROM cf_think_submissions
+          WHERE status = 'pending'
+          ORDER BY created_at ASC, submission_id ASC
+          LIMIT 1
+        `;
+        const row = rows[0];
+        if (!row) break;
+        await this._runSubmission(row);
+      }
+    } finally {
+      this._drainingSubmissions = false;
+    }
+  }
+
+  private async _runSubmission(row: ThinkSubmissionRow): Promise<void> {
+    const requestId = row.request_id ?? row.submission_id;
+    const startedAt = Date.now();
+    this.sql`
+      UPDATE cf_think_submissions
+      SET status = 'running',
+          request_id = ${requestId},
+          started_at = ${startedAt}
+      WHERE submission_id = ${row.submission_id}
+        AND status = 'pending'
+    `;
+
+    const claimed = this._readSubmission(row.submission_id);
+    if (!claimed || claimed.status !== "running") return;
+    await this._emitSubmissionStatus(claimed);
+
+    const controller = new AbortController();
+    this._submissionAbortControllers.set(row.submission_id, controller);
+    try {
+      const messages = this._parseSubmissionMessages(row.messages_json);
+      const result = await this._runProgrammaticMessagesTurn(
+        requestId,
+        messages,
+        {
+          signal: controller.signal,
+          onMessagesApplied: () => {
+            this.sql`
+              UPDATE cf_think_submissions
+              SET messages_applied_at = ${Date.now()}
+              WHERE submission_id = ${row.submission_id}
+                AND status = 'running'
+                AND messages_applied_at IS NULL
+            `;
+          }
+        }
+      );
+      const streamId =
+        this._resumableStream
+          .getAllStreamMetadata()
+          .find((metadata) => metadata.request_id === result.requestId)?.id ??
+        null;
+      const streamError = this._programmaticStreamErrors.get(result.requestId);
+      const finalStatus: ThinkSubmissionStatus = streamError
+        ? "error"
+        : result.status;
+      this.sql`
+        UPDATE cf_think_submissions
+        SET status = ${finalStatus},
+            request_id = ${result.requestId},
+            stream_id = ${streamId},
+            error_message = ${streamError ?? null},
+            completed_at = ${Date.now()}
+        WHERE submission_id = ${row.submission_id}
+          AND status = 'running'
+      `;
+    } catch (error) {
+      this.sql`
+        UPDATE cf_think_submissions
+        SET status = 'error',
+            error_message = ${error instanceof Error ? error.message : String(error)},
+            completed_at = ${Date.now()}
+        WHERE submission_id = ${row.submission_id}
+          AND status = 'running'
+      `;
+    } finally {
+      this._programmaticStreamErrors.delete(requestId);
+      this._submissionAbortControllers.delete(row.submission_id);
+      const updated = this._readSubmission(row.submission_id);
+      if (updated && this._isTerminalSubmissionStatus(updated.status)) {
+        await this._emitSubmissionStatus(updated);
+      }
+    }
+  }
+
+  private _markPendingSubmissionsSkipped(): ThinkSubmissionRow[] {
+    this._ensureSubmissionTable();
+    const pending = this.sql<ThinkSubmissionRow>`
+      SELECT submission_id, idempotency_key, request_id, stream_id, status,
+             messages_json, metadata_json, error_message, created_at,
+             messages_applied_at, started_at, completed_at
+      FROM cf_think_submissions
+      WHERE status = 'pending'
+    `;
+    this.sql`
+      UPDATE cf_think_submissions
+      SET status = 'skipped',
+          error_message = 'Submission was skipped by turn reset.',
+          completed_at = ${Date.now()}
+      WHERE status = 'pending'
+    `;
+    return pending;
+  }
+
+  private async _emitSkippedSubmissions(
+    skipped: ThinkSubmissionRow[]
+  ): Promise<void> {
+    for (const row of skipped) {
+      const updated = this._readSubmission(row.submission_id);
+      if (updated?.status === "skipped") {
+        await this._emitSubmissionStatus(updated);
+      }
+    }
+  }
+
+  private async _recoverSubmissionsOnStart(): Promise<void> {
+    this._ensureSubmissionTable();
+
+    const running = this.sql<ThinkSubmissionRow>`
+      SELECT submission_id, idempotency_key, request_id, stream_id, status,
+             messages_json, metadata_json, error_message, created_at,
+             messages_applied_at, started_at, completed_at
+      FROM cf_think_submissions
+      WHERE status = 'running'
+    `;
+
+    for (const row of running) {
+      if (row.messages_applied_at === null) {
+        let appliedState: "none" | "partial" | "all";
+        try {
+          appliedState = this._getSubmissionMessagesAppliedState(row);
+        } catch (error) {
+          this.sql`
+            UPDATE cf_think_submissions
+            SET status = 'error',
+                error_message = ${error instanceof Error ? error.message : String(error)},
+                completed_at = ${Date.now()}
+            WHERE submission_id = ${row.submission_id}
+              AND status = 'running'
+          `;
+          const updated = this._readSubmission(row.submission_id);
+          if (updated?.status === "error") {
+            await this._emitSubmissionStatus(updated);
+          }
+          continue;
+        }
+        if (appliedState !== "none") {
+          this.sql`
+            UPDATE cf_think_submissions
+            SET status = 'error',
+                error_message = ${appliedState === "all" ? "Submission was interrupted after messages were applied." : "Submission was interrupted after messages were partially applied."},
+                completed_at = ${Date.now()}
+            WHERE submission_id = ${row.submission_id}
+              AND status = 'running'
+          `;
+          const updated = this._readSubmission(row.submission_id);
+          if (updated?.status === "error") {
+            await this._emitSubmissionStatus(updated);
+          }
+          continue;
+        }
+        this.sql`
+          UPDATE cf_think_submissions
+          SET status = 'pending',
+              started_at = NULL
+          WHERE submission_id = ${row.submission_id}
+            AND status = 'running'
+        `;
+        const updated = this._readSubmission(row.submission_id);
+        if (updated?.status === "pending") {
+          await this._emitSubmissionStatus(updated);
+        }
+        continue;
+      }
+
+      if (
+        row.request_id &&
+        ((this._hasRecoverableChatTurn(row.request_id) &&
+          this._hasFreshRecoverableSubmissionEvidence(row)) ||
+          this._hasScheduledRecoveredContinuation(row.request_id))
+      ) {
+        continue;
+      }
+
+      this.sql`
+        UPDATE cf_think_submissions
+        SET status = 'error',
+            error_message = 'Submission was interrupted after messages were applied.',
+            completed_at = ${Date.now()}
+        WHERE submission_id = ${row.submission_id}
+          AND status = 'running'
+      `;
+      const updated = this._readSubmission(row.submission_id);
+      if (updated?.status === "error") {
+        await this._emitSubmissionStatus(updated);
+      }
+    }
+  }
+
+  private _getSubmissionMessagesAppliedState(
+    row: ThinkSubmissionRow
+  ): "none" | "partial" | "all" {
+    const messages = this._parseSubmissionMessages(row.messages_json);
+    if (messages.length === 0) return "all";
+
+    let applied = 0;
+    for (const message of messages) {
+      if (this.session.getMessage(message.id)) applied++;
+    }
+
+    if (applied === 0) return "none";
+    return applied === messages.length ? "all" : "partial";
+  }
+
+  private _hasRecoverableChatTurn(requestId: string): boolean {
+    const fiberRows = this.sql<{ id: string }>`
+      SELECT id FROM cf_agents_runs
+      WHERE name = ${(this.constructor as typeof Think).CHAT_FIBER_NAME + ":" + requestId}
+      LIMIT 1
+    `;
+    if (fiberRows.length > 0) return true;
+
+    const streamRows = this.sql<{ id: string }>`
+      SELECT id FROM cf_ai_chat_stream_metadata
+      WHERE request_id = ${requestId}
+        AND status = 'streaming'
+      LIMIT 1
+    `;
+    return streamRows.length > 0;
+  }
+
+  private _hasFreshRecoverableSubmissionEvidence(row: ThinkSubmissionRow) {
+    if (!row.request_id) return false;
+    const cutoff =
+      Date.now() -
+      (this.constructor as typeof Think).SUBMISSION_RECOVERY_STALE_MS;
+
+    const fiberRows = this.sql<{ created_at: number }>`
+      SELECT created_at FROM cf_agents_runs
+      WHERE name = ${(this.constructor as typeof Think).CHAT_FIBER_NAME + ":" + row.request_id}
+      LIMIT 1
+    `;
+    if (fiberRows[0] && fiberRows[0].created_at >= cutoff) return true;
+
+    const streamRows = this.sql<{ created_at: number }>`
+      SELECT created_at FROM cf_ai_chat_stream_metadata
+      WHERE request_id = ${row.request_id}
+        AND status = 'streaming'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `;
+    return streamRows[0] ? streamRows[0].created_at >= cutoff : false;
+  }
+
+  private _hasScheduledRecoveredContinuation(requestId: string): boolean {
+    const rows = this.sql<{ payload: string | null }>`
+      SELECT payload FROM cf_agents_schedules
+      WHERE callback = '_chatRecoveryContinue'
+    `;
+    return rows.some((row) => {
+      if (!row.payload) return false;
+      try {
+        const payload = JSON.parse(row.payload) as unknown;
+        return (
+          payload !== null &&
+          typeof payload === "object" &&
+          "recoveredRequestId" in payload &&
+          (payload as { recoveredRequestId?: unknown }).recoveredRequestId ===
+            requestId
+        );
+      } catch {
+        return false;
+      }
+    });
+  }
+
   // ── Programmatic API ───────────────────────────────────────────
 
   /**
@@ -2263,6 +3066,16 @@ export class Think<
     options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
     const requestId = crypto.randomUUID();
+    return this._runProgrammaticMessagesTurn(requestId, messages, options);
+  }
+
+  private async _runProgrammaticMessagesTurn(
+    requestId: string,
+    messages:
+      | UIMessage[]
+      | ((currentMessages: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>),
+    options?: SaveMessagesOptions & { onMessagesApplied?: () => void }
+  ): Promise<SaveMessagesResult> {
     const clientTools = this._lastClientTools;
     const body = this._lastBody;
     const epoch = this._turnQueue.generation;
@@ -2284,6 +3097,7 @@ export class Think<
         for (const msg of resolved) {
           await this.session.appendMessage(msg);
         }
+        options?.onMessagesApplied?.();
         this._broadcastMessages();
 
         if (this._turnQueue.generation !== epoch) {
@@ -2917,6 +3731,16 @@ export class Think<
   protected resetTurnState(): void {
     this._turnQueue.reset();
     this._aborts.destroyAll();
+    for (const controller of this._submissionAbortControllers.values()) {
+      controller.abort(new Error("Turn state reset"));
+    }
+    this._submissionAbortControllers.clear();
+    const skippedSubmissions = this._markPendingSubmissionsSkipped();
+    void this.keepAliveWhile(() =>
+      this._emitSkippedSubmissions(skippedSubmissions)
+    ).catch((error) => {
+      console.error("[Think] Failed to skip pending submissions", error);
+    });
     if (this._continuationTimer) {
       clearTimeout(this._continuationTimer);
       this._continuationTimer = null;
@@ -3059,6 +3883,7 @@ export class Think<
       doneSent = true;
     } catch (error) {
       streamError = error instanceof Error ? error.message : "Stream error";
+      this._programmaticStreamErrors.set(requestId, streamError);
       this._resumableStream.markError(streamId);
       this._pendingResumeConnections.clear();
       if (!doneSent) {
@@ -3377,18 +4202,117 @@ export class Think<
       this._resumableStream.complete(streamId);
     }
 
+    const recoveredRequestId =
+      options.continue !== false && this._hasRunningSubmission(requestId)
+        ? requestId
+        : undefined;
+
     if (options.continue !== false) {
       const lastLeaf = this.session.getLatestLeaf();
       const targetId = lastLeaf?.role === "assistant" ? lastLeaf.id : undefined;
       await this.schedule(
         0,
         "_chatRecoveryContinue",
-        targetId ? { targetAssistantId: targetId } : undefined,
+        {
+          ...(targetId ? { targetAssistantId: targetId } : {}),
+          ...(recoveredRequestId ? { recoveredRequestId } : {})
+        },
         { idempotent: true }
+      );
+    } else {
+      await this._markRecoveredSubmissionInterrupted(
+        requestId,
+        "Submission was interrupted and chat recovery was disabled."
       );
     }
 
     return true;
+  }
+
+  private _hasRunningSubmission(requestId: string): boolean {
+    return this._readRunningSubmissionByRequestId(requestId) !== null;
+  }
+
+  private _readRunningSubmissionByRequestId(
+    requestId: string
+  ): ThinkSubmissionRow | null {
+    this._ensureSubmissionTable();
+    const rows = this.sql<ThinkSubmissionRow>`
+      SELECT submission_id, idempotency_key, request_id, stream_id, status,
+             messages_json, metadata_json, error_message, created_at,
+             messages_applied_at, started_at, completed_at
+      FROM cf_think_submissions
+      WHERE request_id = ${requestId}
+        AND status = 'running'
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  }
+
+  private async _markRecoveredSubmissionInterrupted(
+    requestId: string,
+    message: string
+  ): Promise<void> {
+    this._ensureSubmissionTable();
+    const rows = this.sql<ThinkSubmissionRow>`
+      SELECT submission_id, idempotency_key, request_id, stream_id, status,
+             messages_json, metadata_json, error_message, created_at,
+             messages_applied_at, started_at, completed_at
+      FROM cf_think_submissions
+      WHERE request_id = ${requestId}
+        AND status = 'running'
+      LIMIT 1
+    `;
+    const row = rows[0];
+    if (!row) return;
+    this.sql`
+      UPDATE cf_think_submissions
+      SET status = 'error',
+          error_message = ${message},
+          completed_at = ${Date.now()}
+      WHERE submission_id = ${row.submission_id}
+        AND status = 'running'
+    `;
+    const updated = this._readSubmission(row.submission_id);
+    if (updated) await this._emitSubmissionStatus(updated);
+  }
+
+  private async _completeRecoveredSubmission(
+    originalRequestId: string,
+    status: ThinkSubmissionStatus,
+    requestId: string | null,
+    errorMessage: string | null
+  ): Promise<void> {
+    this._ensureSubmissionTable();
+    const completedAt = Date.now();
+    const streamId = requestId
+      ? (this._resumableStream
+          .getAllStreamMetadata()
+          .find((metadata) => metadata.request_id === requestId)?.id ?? null)
+      : null;
+    this.sql`
+      UPDATE cf_think_submissions
+      SET status = ${status},
+          request_id = COALESCE(${requestId}, request_id),
+          stream_id = COALESCE(${streamId}, stream_id),
+          error_message = ${errorMessage},
+          completed_at = ${completedAt}
+      WHERE request_id = ${originalRequestId}
+        AND status = 'running'
+    `;
+    const rows = this.sql<ThinkSubmissionRow>`
+      SELECT submission_id, idempotency_key, request_id, stream_id, status,
+             messages_json, metadata_json, error_message, created_at,
+             messages_applied_at, started_at, completed_at
+      FROM cf_think_submissions
+      WHERE request_id = COALESCE(${requestId}, ${originalRequestId})
+      ORDER BY completed_at DESC
+      LIMIT 1
+    `;
+    const updated = rows[0];
+    if (updated && this._isTerminalSubmissionStatus(updated.status)) {
+      await this._emitSubmissionStatus(updated);
+    }
   }
 
   protected async onChatRecovery(
@@ -3399,22 +4323,83 @@ export class Think<
 
   async _chatRecoveryContinue(data?: {
     targetAssistantId?: string;
+    recoveredRequestId?: string;
   }): Promise<void> {
-    const ready = await this.waitUntilStable({ timeout: 10_000 });
-    if (!ready) {
-      console.warn(
-        "[Think] _chatRecoveryContinue timed out waiting for stable state, skipping continuation"
+    const recoveredSubmission = data?.recoveredRequestId
+      ? this._readRunningSubmissionByRequestId(data.recoveredRequestId)
+      : null;
+    if (data?.recoveredRequestId && !recoveredSubmission) {
+      return;
+    }
+
+    const controller = recoveredSubmission ? new AbortController() : null;
+    if (recoveredSubmission && controller) {
+      this._submissionAbortControllers.set(
+        recoveredSubmission.submission_id,
+        controller
       );
-      return;
     }
 
-    const targetId = data?.targetAssistantId;
-    const lastLeaf = this.session.getLatestLeaf();
-    if (targetId && lastLeaf?.id !== targetId) {
-      return;
-    }
+    try {
+      const ready = await this.waitUntilStable({ timeout: 10_000 });
+      if (!ready) {
+        console.warn(
+          "[Think] _chatRecoveryContinue timed out waiting for stable state, skipping continuation"
+        );
+        if (data?.recoveredRequestId) {
+          await this._completeRecoveredSubmission(
+            data.recoveredRequestId,
+            "error",
+            null,
+            "Recovered chat continuation timed out waiting for stable state."
+          );
+        }
+        return;
+      }
 
-    await this.continueLastTurn();
+      const targetId = data?.targetAssistantId;
+      const lastLeaf = this.session.getLatestLeaf();
+      if (targetId && lastLeaf?.id !== targetId) {
+        if (data?.recoveredRequestId) {
+          await this._completeRecoveredSubmission(
+            data.recoveredRequestId,
+            "error",
+            null,
+            "Recovered chat continuation was skipped because the conversation changed."
+          );
+        }
+        return;
+      }
+
+      const result = await this.continueLastTurn(
+        undefined,
+        controller ? { signal: controller.signal } : undefined
+      );
+      if (data?.recoveredRequestId) {
+        await this._completeRecoveredSubmission(
+          data.recoveredRequestId,
+          result.status,
+          result.requestId || null,
+          result.status === "completed" ? null : `Recovery ${result.status}.`
+        );
+      }
+    } catch (error) {
+      if (data?.recoveredRequestId) {
+        await this._completeRecoveredSubmission(
+          data.recoveredRequestId,
+          "error",
+          null,
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+      throw error;
+    } finally {
+      if (recoveredSubmission) {
+        this._submissionAbortControllers.delete(
+          recoveredSubmission.submission_id
+        );
+      }
+    }
   }
 
   private _getPartialStreamText(streamId: string): {

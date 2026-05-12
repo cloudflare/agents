@@ -56,7 +56,11 @@ function getChannel(type: string): Channel {
   if (type.startsWith("workflow:")) return channels.workflow;
   if (type.startsWith("schedule:") || type.startsWith("queue:"))
     return channels.schedule;
-  if (type.startsWith("message:") || type.startsWith("tool:"))
+  if (
+    type.startsWith("message:") ||
+    type.startsWith("tool:") ||
+    type.startsWith("submission:")
+  )
     return channels.message;
   if (type === "rpc" || type.startsWith("rpc:")) return channels.rpc;
   if (type.startsWith("state:")) return channels.state;
@@ -85,7 +89,7 @@ export type ChannelEventMap = {
   rpc: Extract<ObservabilityEvent, { type: "rpc" | `rpc:${string}` }>;
   message: Extract<
     ObservabilityEvent,
-    { type: `message:${string}` | `tool:${string}` }
+    { type: `message:${string}` | `tool:${string}` | `submission:${string}` }
   >;
   schedule: Extract<
     ObservabilityEvent,

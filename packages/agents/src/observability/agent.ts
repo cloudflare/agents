@@ -39,6 +39,18 @@ export type AgentObservabilityEvent =
       "queue:error",
       { callback: string; id: string; error: string; attempts: number }
     >
+  | BaseEvent<
+      "submission:create",
+      { submissionId: string; requestId?: string; idempotencyKey?: string }
+    >
+  | BaseEvent<
+      "submission:status",
+      { submissionId: string; requestId?: string; status: string }
+    >
+  | BaseEvent<
+      "submission:error",
+      { submissionId: string; requestId?: string; error: string }
+    >
   | BaseEvent<"destroy">
   | BaseEvent<"connect", { connectionId: string }>
   | BaseEvent<
