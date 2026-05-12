@@ -379,6 +379,89 @@ describe("continueLastTurn", () => {
     );
   });
 
+  it("should preserve orphaned continuation reasoning as a new part after completed reasoning", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Approve this" }]
+      },
+      {
+        id: "assistant-orphan-reasoning",
+        role: "assistant",
+        parts: [
+          {
+            type: "reasoning",
+            text: "Initial completed thinking.",
+            state: "done"
+          },
+          {
+            type: "tool-changeBackgroundColor",
+            toolCallId: "call-orphan-reasoning",
+            state: "output-available",
+            input: { color: "blue" },
+            output: { success: true }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ] as ChatMessage[]);
+
+    await agentStub.insertInterruptedStream("orphan-reasoning", "orphan-req", [
+      { body: JSON.stringify({ type: "start" }), index: 0 },
+      { body: JSON.stringify({ type: "reasoning-start" }), index: 1 },
+      {
+        body: JSON.stringify({
+          type: "reasoning-delta",
+          delta: "Recovered continuation thinking."
+        }),
+        index: 2
+      },
+      { body: JSON.stringify({ type: "reasoning-end" }), index: 3 },
+      { body: JSON.stringify({ type: "text-start" }), index: 4 },
+      {
+        body: JSON.stringify({
+          type: "text-delta",
+          delta: "Recovered continuation answer."
+        }),
+        index: 5
+      },
+      { body: JSON.stringify({ type: "text-end" }), index: 6 },
+      { body: JSON.stringify({ type: "finish" }), index: 7 }
+    ]);
+    await agentStub.triggerInterruptedStreamCheck();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistant = messages.find(
+      (m: ChatMessage) => m.id === "assistant-orphan-reasoning"
+    )!;
+
+    const reasoningParts = assistant.parts.filter(
+      (p: ChatMessage["parts"][number]) => p.type === "reasoning"
+    );
+    expect(reasoningParts).toHaveLength(2);
+    expect(reasoningParts[0]).toMatchObject({
+      text: "Initial completed thinking.",
+      state: "done"
+    });
+    expect(reasoningParts[1]).toMatchObject({
+      text: "Recovered continuation thinking.",
+      state: "done"
+    });
+
+    const textParts = assistant.parts.filter(
+      (p: ChatMessage["parts"][number]) => p.type === "text"
+    );
+    expect(textParts).toHaveLength(1);
+    expect(textParts[0]).toMatchObject({
+      text: "Recovered continuation answer.",
+      state: "done"
+    });
+  });
+
   it("should wrap continuation in a fiber when chatRecovery is true", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);

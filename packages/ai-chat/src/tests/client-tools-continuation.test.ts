@@ -669,6 +669,112 @@ describe("Client tools continuation", () => {
     }
   });
 
+  it("persists reasoning during tool-result continuation without delayed chunks", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+    try {
+      const userMessage: ChatMessage = {
+        id: "msg-tool-result-reasoning",
+        role: "user",
+        parts: [{ type: "text", text: "Hello" }]
+      };
+
+      let resolveInitialDone: (value: boolean) => void;
+      const initialDonePromise = new Promise<boolean>((res) => {
+        resolveInitialDone = res;
+      });
+      const initialTimeout = setTimeout(() => resolveInitialDone(false), 3000);
+
+      ws.addEventListener("message", function initialHandler(e: MessageEvent) {
+        const data = JSON.parse(e.data as string);
+        if (data.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE && data.done) {
+          clearTimeout(initialTimeout);
+          resolveInitialDone(true);
+          ws.removeEventListener("message", initialHandler);
+        }
+      });
+
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+          id: "req-tool-result-reasoning-initial",
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [userMessage],
+              reasoningContinuation: true
+            })
+          }
+        })
+      );
+      expect(await initialDonePromise).toBe(true);
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+      await agentStub.persistMessages([
+        userMessage,
+        {
+          id: "assistant-tool-result-reasoning",
+          role: "assistant",
+          parts: [
+            {
+              type: "reasoning",
+              text: "initial reasoning",
+              state: "done"
+            },
+            {
+              type: "tool-changeBackgroundColor",
+              toolCallId: "call_tool_result_reasoning",
+              state: "input-available",
+              input: { color: "blue" }
+            }
+          ] as ChatMessage["parts"]
+        }
+      ]);
+
+      const receivedMessages = collectMessages(ws);
+
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_RESULT,
+          toolCallId: "call_tool_result_reasoning",
+          toolName: "changeBackgroundColor",
+          output: { success: true },
+          autoContinue: true
+        })
+      );
+
+      const done = await waitForMessage(
+        receivedMessages,
+        (message) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.done === true
+      );
+      expect(done).toBeDefined();
+
+      const persistedMessages =
+        (await agentStub.getPersistedMessages()) as ChatMessage[];
+      const storedAssistant = persistedMessages.find(
+        (message) => message.id === "assistant-tool-result-reasoning"
+      );
+      expect(storedAssistant).toBeDefined();
+      const storedReasoningParts = storedAssistant!.parts.filter(
+        (part) => part.type === "reasoning"
+      );
+      expect(storedReasoningParts).toHaveLength(2);
+      expect(storedReasoningParts[0]).toMatchObject({
+        text: "initial reasoning",
+        state: "done"
+      });
+      expect(storedReasoningParts[1]).toMatchObject({
+        text: "continuation reasoning",
+        state: "done"
+      });
+    } finally {
+      ws.close(1000);
+    }
+  });
+
   it("should send resume-none when an auto-continuation returns no body", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
