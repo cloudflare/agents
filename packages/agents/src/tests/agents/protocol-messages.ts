@@ -18,6 +18,11 @@ export class TestProtocolMessagesAgent extends Agent<
   Cloudflare.Env,
   { count: number }
 > {
+  // Capture the DEFAULT_STATE sentinel reference for cache reset in tests.
+  // Child field initializers run after super(), at which point _state is DEFAULT_STATE.
+  // @ts-expect-error - accessing private field for testing
+  private _stateSentinel: { count: number } = this._state;
+
   initialState = { count: 0 };
   static options = { hibernate: true };
 
@@ -46,6 +51,13 @@ export class TestProtocolMessagesAgent extends Agent<
   @callable()
   async getState() {
     return this.state;
+  }
+
+  @callable()
+  async resetStateForLazyInitTest() {
+    this.sql`DELETE FROM cf_agents_state WHERE id = ${"cf_state_row_id"}`;
+    // @ts-expect-error - accessing private field for testing
+    this._state = this._stateSentinel;
   }
 
   @callable()

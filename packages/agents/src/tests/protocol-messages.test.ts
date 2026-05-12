@@ -163,6 +163,57 @@ describe("Protocol Messages", () => {
       expect(types).toContain(MessageType.CF_AGENT_MCP_SERVERS);
     }, 10000);
 
+    it("should send exactly one initial state message to protocol-enabled connections", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectWS(`${BASE}/${room}`);
+
+      const messages = await collectMessages(ws, 1000);
+      ws.close();
+
+      const stateMessages = messages.filter(
+        (m): m is StateMessage =>
+          typeof m === "object" &&
+          m !== null &&
+          "type" in m &&
+          (m as StateMessage).type === MessageType.CF_AGENT_STATE
+      );
+
+      expect(stateMessages).toHaveLength(1);
+      expect(stateMessages[0].state.count).toBe(0);
+    }, 10000);
+
+    it("should still broadcast lazy initial state to existing protocol connections", async () => {
+      const room = crypto.randomUUID();
+      const { ws: existing } = await connectProtocol(room);
+
+      const resetMsg = await sendRpc(existing, "resetStateForLazyInitTest");
+      expect(resetMsg.success).toBe(true);
+
+      const existingStatePromise = waitForMessage<StateMessage>(
+        existing,
+        (d) => d.type === MessageType.CF_AGENT_STATE && d.state.count === 0
+      );
+
+      const { ws: connecting } = await connectWS(`${BASE}/${room}`);
+
+      const existingStateMsg = await existingStatePromise;
+      expect(existingStateMsg.state.count).toBe(0);
+
+      const connectingMessages = await collectMessages(connecting, 1000);
+      const connectingStateMessages = connectingMessages.filter(
+        (m): m is StateMessage =>
+          typeof m === "object" &&
+          m !== null &&
+          "type" in m &&
+          (m as StateMessage).type === MessageType.CF_AGENT_STATE
+      );
+      expect(connectingStateMessages).toHaveLength(1);
+      expect(connectingStateMessages[0].state.count).toBe(0);
+
+      existing.close();
+      connecting.close();
+    }, 10000);
+
     it("should NOT send any protocol messages to no-protocol connections", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectNoProtocol(room);

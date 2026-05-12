@@ -1134,6 +1134,7 @@ export class Agent<
    * parent-owned WebSocket handles during this window.
    */
   private _suppressProtocolBroadcasts = false;
+  private _protocolBroadcastExcludeIds = new Set<string>();
   private _cf_currentSubAgentBridge?: SubAgentConnectionBridgeLike;
   private _cf_virtualSubAgentConnections = new Map<
     string,
@@ -1908,10 +1909,22 @@ export class Agent<
               );
             }
 
-            if (this.state) {
+            const wasExcludedFromStateInitBroadcast =
+              this._protocolBroadcastExcludeIds.has(connection.id);
+            let currentState: State | undefined;
+            this._protocolBroadcastExcludeIds.add(connection.id);
+            try {
+              currentState = this.state;
+            } finally {
+              if (!wasExcludedFromStateInitBroadcast) {
+                this._protocolBroadcastExcludeIds.delete(connection.id);
+              }
+            }
+
+            if (currentState !== undefined) {
               connection.send(
                 JSON.stringify({
-                  state: this.state,
+                  state: currentState,
                   type: MessageType.CF_AGENT_STATE
                 })
               );
@@ -2088,7 +2101,7 @@ export class Agent<
   private _broadcastProtocol(msg: string, excludeIds: string[] = []) {
     if (this._suppressProtocolBroadcasts) return;
 
-    const exclude = [...excludeIds];
+    const exclude = [...excludeIds, ...this._protocolBroadcastExcludeIds];
     for (const conn of this.getConnections()) {
       if (!this.isConnectionProtocolEnabled(conn)) {
         exclude.push(conn.id);
