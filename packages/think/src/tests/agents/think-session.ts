@@ -435,6 +435,10 @@ export class ThinkTestAgent extends Think {
     this._beforeStepAsyncDelayMs = ms;
   }
 
+  async resetTurnStateForTest(): Promise<void> {
+    this.resetTurnState();
+  }
+
   override onStepFinish(ctx: StepContext): void {
     // Capture a few fields from the full StepResult to confirm the
     // AI SDK shape is reaching the hook (text, finishReason, real usage,

@@ -2042,14 +2042,18 @@ export class Think<
         const output = this.getAgentToolOutput(options.runId);
         const summary = this.getAgentToolSummary(options.runId, output);
         const streamError = this._agentToolLastErrors.get(options.runId);
+        const skipped = result.status === "skipped";
         const status: AgentToolChildRunStatus =
           result.status === "aborted"
             ? "aborted"
-            : streamError
+            : skipped || streamError
               ? "error"
               : "completed";
         const error: string | null =
-          status === "error" ? (streamError ?? "Agent tool run failed.") : null;
+          status === "error"
+            ? (streamError ??
+              "Agent tool run was skipped before the child could finish.")
+            : null;
         this.sql`
           UPDATE cf_agent_tool_child_runs
           SET request_id = ${result.requestId},

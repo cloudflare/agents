@@ -3968,6 +3968,36 @@ describe("useAgentChat isServerStreaming / isStreaming (issue #1226)", () => {
         type: "cf_agent_use_chat_response",
         id: "fallback-to-transport-1",
         body: "",
+        done: false,
+        replay: true,
+        replayComplete: true
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("true");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "fallback-to-transport-1",
+        body: '{"type":"text-delta","id":"t1","delta":"live"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("true");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "fallback-to-transport-1",
+        body: "",
         done: true
       });
       await sleep(10);

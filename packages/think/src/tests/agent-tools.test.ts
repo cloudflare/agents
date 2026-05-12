@@ -13,6 +13,8 @@ type ThinkAgentToolTestStub = {
   setAgentToolOutputForTest(runId: string, output: unknown): Promise<void>;
   clearAgentToolOutputForTest(runId: string): Promise<void>;
   setStripTextResponseForTest(strip: boolean): Promise<void>;
+  setBeforeStepAsyncDelay(ms: number): Promise<void>;
+  resetTurnStateForTest(): Promise<void>;
   startAgentToolRun(
     input: unknown,
     options: { runId: string }
@@ -107,6 +109,24 @@ describe("Think agent tools", () => {
       status: "completed",
       output: { ok: true, value: "workflow-result" },
       summary: '{"ok":true,"value":"workflow-result"}'
+    });
+  });
+
+  it("marks skipped agent-tool turns as errors", async () => {
+    const agent = await freshAgent();
+    const runId = crypto.randomUUID();
+
+    await agent.setBeforeStepAsyncDelay(50);
+    await agent.startAgentToolRun("skipped probe", { runId });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await agent.resetTurnStateForTest();
+
+    const inspection = await waitForAgentToolRun(agent, runId);
+
+    expect(inspection).toMatchObject({
+      runId,
+      status: "error",
+      error: "Agent tool run was skipped before the child could finish."
     });
   });
 

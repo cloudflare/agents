@@ -39,7 +39,10 @@ children can complete without text chunks and can expose durable structured
 output through `getAgentToolOutput()` plus an optional `getAgentToolSummary()`
 override. This keeps execution, observation, and result synthesis separate:
 finishing the turn determines terminal status, child chunks are retained for UI
-observation, and output/summary hooks determine what the parent receives.
+observation, and output/summary hooks determine what the parent receives. The
+output hook is evaluated immediately after the child turn resolves, so workflow
+children should commit durable output before the turn finishes and keep summaries
+small enough for display.
 
 ## Tradeoffs
 

@@ -95,6 +95,10 @@ For `Think` children that do workflow-style work without user-facing assistant
 text, override `getAgentToolOutput()` and, if needed, `getAgentToolSummary()`.
 Assistant text remains the default summary when present, but a Think agent-tool
 run can complete successfully without emitting text chunks.
+Persist any structured output before the child turn finishes, because
+`getAgentToolOutput()` is read as soon as `saveMessages()` resolves. Keep
+`getAgentToolSummary()` concise for display; the full structured value is stored
+separately as the tool output.
 
 ```ts
 export class Extractor extends Think<Env> {
