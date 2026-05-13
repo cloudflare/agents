@@ -1360,7 +1360,10 @@ export class MCPClientManager {
     extensions?: MCPClientExtensions
   ): void {
     if (extensions) {
-      this._clientExtensions.set(serverId, extensions);
+      this._clientExtensions.set(serverId, {
+        instructions: extensions.instructions,
+        tools: extensions.tools
+      });
     }
   }
 
@@ -1564,10 +1567,8 @@ export class MCPClientManager {
           throw new Error("client.callTool expects MCP callTool params.");
         }
         return this.callTool({
-          ...params,
-          serverId,
-          name: String(params.name),
-          arguments: isRecord(params.arguments) ? params.arguments : {}
+          ...(params as CallToolRequest["params"]),
+          serverId
         });
       },
       listTools: async () => this.getProxyCapabilities(serverId).tools
