@@ -50,7 +50,8 @@ function sandboxResponseText(content: unknown): string {
 }
 
 function formatError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/^Code execution failed: /, "");
 }
 
 type CallToolResult = Awaited<ReturnType<Client["callTool"]>>;

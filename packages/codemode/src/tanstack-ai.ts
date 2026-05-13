@@ -51,10 +51,6 @@ export type { CreateCodeToolOptions, CodeInput, CodeOutput } from "./shared";
 export { DEFAULT_DESCRIPTION, normalizeProviders } from "./shared";
 export { resolveProvider } from "./resolve";
 
-function formatError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 const codeSchema = z.object({
   code: z
     .string()
@@ -271,11 +267,7 @@ export function createCodeTool(options: CreateCodeToolOptions): ServerTool {
   });
 
   return def.server(async ({ code }) => {
-    try {
-      return await runCode({ code, executor, providers: resolvedProviders });
-    } catch (error) {
-      throw new Error(`Code execution failed: ${formatError(error)}`);
-    }
+    return runCode({ code, executor, providers: resolvedProviders });
   });
 }
 

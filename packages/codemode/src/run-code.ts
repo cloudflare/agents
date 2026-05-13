@@ -23,7 +23,7 @@ export async function runCode(options: RunCodeOptions): Promise<RunCodeOutput> {
     const logCtx = executeResult.logs?.length
       ? `\n\nConsole output:\n${executeResult.logs.join("\n")}`
       : "";
-    throw new Error(`${executeResult.error}${logCtx}`);
+    throw new Error(`Code execution failed: ${executeResult.error}${logCtx}`);
   }
 
   const output: RunCodeOutput = {

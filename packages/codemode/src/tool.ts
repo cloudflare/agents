@@ -19,10 +19,6 @@ import {
 export type { CreateCodeToolOptions, CodeInput, CodeOutput } from "./shared";
 export { DEFAULT_DESCRIPTION, normalizeProviders } from "./shared";
 
-function formatError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 const codeSchema = z.object({
   code: z.string().describe("JavaScript async arrow function to execute")
 });
@@ -124,11 +120,7 @@ export function createCodeTool(
     description,
     inputSchema: codeSchema,
     execute: async ({ code }) => {
-      try {
-        return await runCode({ code, executor, providers: resolvedProviders });
-      } catch (error) {
-        throw new Error(`Code execution failed: ${formatError(error)}`);
-      }
+      return runCode({ code, executor, providers: resolvedProviders });
     }
   });
 }

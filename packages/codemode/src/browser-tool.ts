@@ -31,10 +31,6 @@ export type JsonSchemaExecutableToolDescriptors = Record<
   JsonSchemaExecutableToolDescriptor
 >;
 
-function formatError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 interface ApprovalAwareJsonSchemaExecutableToolDescriptor extends JsonSchemaExecutableToolDescriptor {
   needsApproval?: boolean | ((...args: unknown[]) => unknown);
 }
@@ -221,11 +217,7 @@ export function createBrowserCodeTool(
       required: ["code", "result"]
     },
     execute: async ({ code }) => {
-      try {
-        return await runCode({ code, executor, providers: resolvedProviders });
-      } catch (error) {
-        throw new Error(`Code execution failed: ${formatError(error)}`);
-      }
+      return runCode({ code, executor, providers: resolvedProviders });
     }
   };
 }
