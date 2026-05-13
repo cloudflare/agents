@@ -1,5 +1,25 @@
 # @cloudflare/agents
 
+## 0.12.4
+
+### Patch Changes
+
+- [#1376](https://github.com/cloudflare/agents/pull/1376) [`6561a3f`](https://github.com/cloudflare/agents/commit/6561a3fb6ba7e1833c902457a015d47045a4e4a7) Thanks [@hrushikeshdeshpande](https://github.com/hrushikeshdeshpande)! - Avoid throwing when chat stream resume negotiation/replay races with a closed WebSocket connection.
+
+- [#1509](https://github.com/cloudflare/agents/pull/1509) [`4aa4176`](https://github.com/cloudflare/agents/commit/4aa4176d1a9c7d6011e89f792b20c676863f3722) Thanks [@threepointone](https://github.com/threepointone)! - Prevent duplicate initial state frames during Agent WebSocket connection setup so client-originated state updates are not overwritten by stale initial state messages.
+
+- [#1476](https://github.com/cloudflare/agents/pull/1476) [`3c48858`](https://github.com/cloudflare/agents/commit/3c48858d97c09b1dba6879e6689515e8c09a3a93) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fixed a bug that could cause client state to drift from internal Durable Object state when agent tool calls spanned a Durable Object restart. Recovery now defers user finish hooks until after agent startup and isolates hook failures so one failed mirror write does not block other recovered runs from finalizing.
+
+- [#1514](https://github.com/cloudflare/agents/pull/1514) [`0371a6f`](https://github.com/cloudflare/agents/commit/0371a6f12282d9e192cd9ea841a2a0ba3f1e1f60) Thanks [@threepointone](https://github.com/threepointone)! - Route streamable HTTP server-to-client requests through the originating POST stream when no standalone SSE stream is available.
+
+- [#1500](https://github.com/cloudflare/agents/pull/1500) [`7090e9e`](https://github.com/cloudflare/agents/commit/7090e9eec337ae1496afce1a544044d9c765a021) Thanks [@threepointone](https://github.com/threepointone)! - Preserve structured tool output shapes when truncating older messages or oversized persisted rows, preventing custom `toModelOutput` handlers from crashing or mis-replaying compacted results.
+
+  Also harden Think's workspace `read` tool so legacy raw-string read outputs replay as text instead of stalling subsequent turns.
+
+- [#1504](https://github.com/cloudflare/agents/pull/1504) [`5d27b71`](https://github.com/cloudflare/agents/commit/5d27b71078cfe88107cc8d2dd5eab6a310503c62) Thanks [@threepointone](https://github.com/threepointone)! - Prune stale sub-agent schedule rows when their owning facet registry entry no longer exists.
+
+- [#1503](https://github.com/cloudflare/agents/pull/1503) [`7b8ab51`](https://github.com/cloudflare/agents/commit/7b8ab51524598a355f66f0efbf80af0c6ff7d4a3) Thanks [@threepointone](https://github.com/threepointone)! - Bump PartyServer to pick up transient Durable Object routing retries and expose `routingRetry` configuration through `getAgentByName`.
+
 ## 0.12.3
 
 ### Patch Changes
