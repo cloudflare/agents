@@ -21,7 +21,7 @@ export type {
   ResolvedProvider
 } from "./executor-types";
 
-const BINARY_TAG = "__cloudflare_codemode_binary_v1__";
+const BINARY_TAG = "__codemode_binary_v1__";
 
 type EncodedBinary = {
   [BINARY_TAG]: "Uint8Array" | "ArrayBuffer" | "ArrayBufferView";
@@ -95,7 +95,7 @@ function parseForCodemode(json: string): unknown {
 }
 
 const SANDBOX_CODEC = String.raw`
-    const __CODEMODE_BINARY_TAG = "__cloudflare_codemode_binary_v1__";
+    const __CODEMODE_BINARY_TAG = "__codemode_binary_v1__";
     function __bytesToBase64(bytes) {
       let binary = "";
       const chunkSize = 0x8000;

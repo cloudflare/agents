@@ -79,7 +79,7 @@ describe("ToolDispatcher", () => {
     const data = JSON.parse(resJson);
 
     expect(data.result).toEqual({
-      __cloudflare_codemode_binary_v1__: "Uint8Array",
+      __codemode_binary_v1__: "Uint8Array",
       data: "AQID"
     });
   });
