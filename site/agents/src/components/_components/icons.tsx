@@ -25,7 +25,6 @@ export function WorkersLogo({ width = 28 }) {
   return (
     <svg
       aria-label="Cloudflare Workers"
-      role="img"
       xmlns="http://www.w3.org/2000/svg"
       viewBox="0 0 16 16"
       aria-hidden="false"

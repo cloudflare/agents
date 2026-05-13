@@ -9,7 +9,7 @@
     "tools"
   ],
   "type": "module",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "license": "MIT",
   "repository": {
     "directory": "packages/think",
@@ -22,13 +22,13 @@
   },
   "devDependencies": {
     "@cloudflare/shell": "*",
-    "ai": "^6.0.174",
-    "zod": "^4.4.2"
+    "ai": "^6.0.180",
+    "zod": "^4.4.3"
   },
   "peerDependencies": {
     "@cloudflare/codemode": ">=0.3.4 <1.0.0",
     "@cloudflare/shell": ">=0.3.4 <1.0.0",
-    "agents": ">=0.12.1 <1.0.0",
+    "agents": ">=0.12.4 <1.0.0",
     "ai": "^6.0.0",
     "zod": "^4.0.0"
   },

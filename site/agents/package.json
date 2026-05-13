@@ -9,30 +9,30 @@
     "deploy": "astro build && wrangler deploy"
   },
   "dependencies": {
-    "@astrojs/cloudflare": "^13.3.0",
+    "@astrojs/cloudflare": "^13.5.0",
     "@astrojs/react": "^5.0.4",
-    "@chonkiejs/core": "^0.0.9",
+    "@chonkiejs/core": "^0.0.10",
     "@gsap/react": "^2.1.2",
     "@orama/orama": "^3.1.18",
     "@use-it/interval": "^1.0.0",
-    "astro": "^6.2.1",
+    "astro": "^6.3.1",
     "clsx": "^2.1.1",
     "effect": "^3.21.2",
     "framer-motion": "^12.38.0",
     "gsap": "^3.15.0",
-    "react": "^19.2.5",
-    "react-dom": "^19.2.5",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
     "react-wrap-balancer": "^1.1.1",
     "shiki": "^4.0.2",
-    "tailwindcss": "^4.2.4"
+    "tailwindcss": "^4.3.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@tailwindcss/vite": "^4",
-    "@types/node": "^25.6.0",
+    "@types/node": "^25.7.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "wrangler": "^4.87.0"
+    "wrangler": "^4.90.1"
   },
   "optionalDependencies": {
     "lightningcss-darwin-arm64": "1.32.0",

@@ -269,9 +269,8 @@ function CategorySection({
       </button>
 
       {isOpen && (
-        <div
+        <section
           id={`nav-category-${category.label.toLowerCase().replace(/\s+/g, "-")}`}
-          role="region"
           aria-label={`${category.label} navigation`}
           className="ml-5 mt-1 space-y-0.5"
         >
@@ -292,7 +291,7 @@ function CategorySection({
               {item.label}
             </NavLink>
           ))}
-        </div>
+        </section>
       )}
     </div>
   );

@@ -1,5 +1,23 @@
 # @cloudflare/ai-chat
 
+## 0.7.0
+
+### Minor Changes
+
+- [#1484](https://github.com/cloudflare/agents/pull/1484) [`364a45d`](https://github.com/cloudflare/agents/commit/364a45da3efb7418ecf1dd0da1c21cb3d4059b27) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Add `cancelOnClientAbort` to `useAgentChat`. Generic browser/client stream cleanup is now local-only by default so server turns can continue and resume; explicit `stop()` still cancels the server turn. Set `cancelOnClientAbort: true` to make generic client aborts cancel the server turn.
+
+### Patch Changes
+
+- [#1376](https://github.com/cloudflare/agents/pull/1376) [`6561a3f`](https://github.com/cloudflare/agents/commit/6561a3fb6ba7e1833c902457a015d47045a4e4a7) Thanks [@hrushikeshdeshpande](https://github.com/hrushikeshdeshpande)! - Avoid throwing when chat stream resume negotiation/replay races with a closed WebSocket connection.
+
+- [#1487](https://github.com/cloudflare/agents/pull/1487) [`752e25a`](https://github.com/cloudflare/agents/commit/752e25ab0a6d7dba3ac4829443e2dd4dca9481c0) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Close the original WebSocket chat transport stream when the socket disconnects before a terminal response, preventing recovered chat continuations from leaving `useAgentChat` stuck in streaming state.
+
+- [#1481](https://github.com/cloudflare/agents/pull/1481) [`12365dd`](https://github.com/cloudflare/agents/commit/12365dd622283ad06bae3dacf80db6ca9886ef72) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fixed approval auto-continuation streams so reasoning chunks keep a valid `reasoning-start` before `reasoning-delta` sequence when continuing from an assistant message that already has reasoning, and preserve the continuation reasoning in the final persisted message.
+
+- [#1483](https://github.com/cloudflare/agents/pull/1483) [`5373f5c`](https://github.com/cloudflare/agents/commit/5373f5ca246e756c8c36df915380fbc5319c5162) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Allow Think agent-tool children to complete without emitting assistant text. Non-chat tool-step agents can now provide structured output through `getAgentToolOutput`, with summaries derived from assistant text, string output, structured output, or an empty string.
+
+  Fix `useAgentChat().isServerStreaming` cleanup when a resumed stream first enters the fallback observer path and later becomes transport-owned.
+
 ## 0.6.2
 
 ### Patch Changes

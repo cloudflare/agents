@@ -1,5 +1,42 @@
 # @cloudflare/think
 
+## 0.6.0
+
+### Minor Changes
+
+- [#1456](https://github.com/cloudflare/agents/pull/1456) [`787e73d`](https://github.com/cloudflare/agents/commit/787e73dbc6bdee3aee5f44099a1bc64f119c934f) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Stop applying `pruneMessages({ toolCalls: "before-last-2-messages" })` to the model context by default. The previous default silently stripped client-side tool results (no `execute`, output supplied via `addToolOutput`) from any turn beyond the second, breaking multi-turn flows where the user's choices live in those tool results (see [#1455](https://github.com/cloudflare/agents/issues/1455)). `truncateOlderMessages` still runs as before, so context cost stays bounded.
+
+  This is a behavior change. Subclasses that relied on the old aggressive pruning can opt back in from `beforeTurn`:
+
+  ```typescript
+  import { pruneMessages } from "ai";
+
+  beforeTurn(ctx) {
+    return {
+      messages: pruneMessages({
+        messages: ctx.messages,
+        toolCalls: "before-last-2-messages"
+      })
+    };
+  }
+  ```
+
+- [#1517](https://github.com/cloudflare/agents/pull/1517) [`449b421`](https://github.com/cloudflare/agents/commit/449b4216038e57ef3dcfd4a27e5f617deebcf6f3) Thanks [@threepointone](https://github.com/threepointone)! - Wrap `Think.chat()` RPC turns in chat recovery fibers and persist their stream chunks so interrupted sub-agent turns can recover partial output. `ChatOptions.tools` has been removed from the TypeScript API; runtime `options.tools` values passed by legacy callers are ignored with a warning. Define durable tools on the child agent or use agent tools for orchestration.
+
+- [#1511](https://github.com/cloudflare/agents/pull/1511) [`bf3860c`](https://github.com/cloudflare/agents/commit/bf3860c20412b70a4c5c3d514d9ad62f41bb4e80) Thanks [@threepointone](https://github.com/threepointone)! - Add durable programmatic submissions for Think. `submitMessages()` now provides fast durable acceptance, idempotent retries, status inspection, cancellation, and cleanup for server-driven turns that should continue after the caller returns.
+
+### Patch Changes
+
+- [#1500](https://github.com/cloudflare/agents/pull/1500) [`7090e9e`](https://github.com/cloudflare/agents/commit/7090e9eec337ae1496afce1a544044d9c765a021) Thanks [@threepointone](https://github.com/threepointone)! - Preserve structured tool output shapes when truncating older messages or oversized persisted rows, preventing custom `toModelOutput` handlers from crashing or mis-replaying compacted results.
+
+  Also harden Think's workspace `read` tool so legacy raw-string read outputs replay as text instead of stalling subsequent turns.
+
+- [#1483](https://github.com/cloudflare/agents/pull/1483) [`5373f5c`](https://github.com/cloudflare/agents/commit/5373f5ca246e756c8c36df915380fbc5319c5162) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Allow Think agent-tool children to complete without emitting assistant text. Non-chat tool-step agents can now provide structured output through `getAgentToolOutput`, with summaries derived from assistant text, string output, structured output, or an empty string.
+
+  Fix `useAgentChat().isServerStreaming` cleanup when a resumed stream first enters the fallback observer path and later becomes transport-owned.
+
+- [#1463](https://github.com/cloudflare/agents/pull/1463) [`ab2b1db`](https://github.com/cloudflare/agents/commit/ab2b1db31971ac2d2ddab9d962986f208c69a422) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Avoid throwing when chat stream resume negotiation/replay races with a closed WebSocket connection. Resume protocol sends and the `_handleStreamResumeAck` fallback now go through `sendIfOpen` helpers that swallow the `TypeError: WebSocket send() after close` race instead of letting it propagate up through `onMessage`.
+
 ## 0.5.3
 
 ### Patch Changes

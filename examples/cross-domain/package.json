@@ -13,18 +13,18 @@
   "version": "0.0.0",
   "dependencies": {
     "agents": "*",
-    "react": "^19.2.5",
-    "react-dom": "^19.2.5"
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260501.1",
-    "@types/node": "^25.6.0",
+    "@cloudflare/workers-types": "^4.20260511.1",
+    "@types/node": "^25.7.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
     "concurrently": "^9.2.1",
     "typescript": "^6.0.3",
-    "vite": "^8.0.10",
-    "wrangler": "^4.87.0"
+    "vite": "^8.0.12",
+    "wrangler": "^4.90.1"
   }
 }

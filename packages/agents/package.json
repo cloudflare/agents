@@ -9,7 +9,7 @@
     "durable objects"
   ],
   "type": "module",
-  "version": "0.12.3",
+  "version": "0.12.4",
   "license": "MIT",
   "repository": {
     "directory": "packages/agents",
@@ -36,17 +36,17 @@
     "yargs": "^18.0.0"
   },
   "devDependencies": {
-    "@ai-sdk/react": "^3.0.176",
-    "@tanstack/ai": "^0.14.0",
+    "@ai-sdk/react": "^3.0.182",
+    "@tanstack/ai": "^0.16.0",
     "@types/react": "^19.2.14",
     "@types/yargs": "^17.0.35",
-    "@vitest/browser-playwright": "^4.1.5",
+    "@vitest/browser-playwright": "^4.1.6",
     "@x402/core": "^2.11.0",
     "@x402/evm": "^2.11.0",
-    "ai": "^6.0.174",
-    "react": "^19.2.5",
+    "ai": "^6.0.180",
+    "react": "^19.2.6",
     "vitest-browser-react": "^2.2.0",
-    "zod": "^4.4.2"
+    "zod": "^4.4.3"
   },
   "peerDependencies": {
     "@cloudflare/ai-chat": ">=0.6.1 <1.0.0",
