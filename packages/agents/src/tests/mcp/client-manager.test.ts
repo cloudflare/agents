@@ -4091,7 +4091,7 @@ describe("MCPClientManager OAuth Integration", () => {
                 properties: { repo: { type: "string" } },
                 required: ["repo"]
               },
-              code: `async ({ repo }) => server.callTool("list_pull_requests", { repo, state: "open" })`
+              code: `async ({ repo }) => server.callTool({ name: "list_pull_requests", arguments: { repo, state: "open" } })`
             }
           }
         }
@@ -4113,7 +4113,7 @@ describe("MCPClientManager OAuth Integration", () => {
               properties: { repo: { type: "string" } },
               required: ["repo"]
             },
-            code: `async ({ repo }) => server.callTool("list_pull_requests", { repo, state: "open" })`
+            code: `async ({ repo }) => server.callTool({ name: "list_pull_requests", arguments: { repo, state: "open" } })`
           }
         }
       });
@@ -4141,7 +4141,7 @@ describe("MCPClientManager OAuth Integration", () => {
               required: ["owner", "repo"]
             },
             code: `async ({ owner, repo }) => {
-              return await server.callTool("list_pull_requests", { owner, repo, state: "open" });
+              return await server.callTool({ name: "list_pull_requests", arguments: { owner, repo, state: "open" } });
             }`
           }
         }
@@ -4220,10 +4220,13 @@ Parameters:
       executor.execute.mockImplementation(async (_code: string, providers) => {
         const serverProvider = providers[0];
         return {
-          result: await serverProvider.fns.callTool("list_pull_requests", {
-            owner: "cloudflare",
-            repo: "agents",
-            state: "open"
+          result: await serverProvider.fns.callTool({
+            name: "list_pull_requests",
+            arguments: {
+              owner: "cloudflare",
+              repo: "agents",
+              state: "open"
+            }
           })
         };
       });
@@ -4232,7 +4235,7 @@ Parameters:
         proxy.execute?.(
           {
             tool: "github_list_open_prs",
-            args: { owner: "cloudflare", repo: "agents" }
+            arguments: { owner: "cloudflare", repo: "agents" }
           },
           {} as ToolCallOptions
         )

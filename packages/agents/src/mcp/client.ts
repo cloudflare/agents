@@ -1,3 +1,5 @@
+import type { Executor, ToolProvider } from "@cloudflare/codemode";
+import { createCodeTool } from "@cloudflare/codemode/ai";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
@@ -303,16 +305,7 @@ export class MCPClientManager {
   private _isRestored = false;
   private _pendingConnections = new Map<string, Promise<void>>();
   private _clientExtensions = new Map<string, MCPClientExtensionOptions>();
-  private _codeExecutor?: {
-    execute(
-      code: string,
-      providers: Array<{
-        name: string;
-        fns: Record<string, (...args: unknown[]) => Promise<unknown>>;
-        positionalArgs?: boolean;
-      }>
-    ): Promise<{ result: unknown; error?: string }>;
-  };
+  private _codeExecutor?: Executor;
 
   /** @internal Protected for testing purposes. */
   protected readonly _onObservabilityEvent =
@@ -1362,9 +1355,7 @@ export class MCPClientManager {
     return this._oauthCallbackConfig;
   }
 
-  setCodeExecutor(
-    executor: NonNullable<MCPClientManager["_codeExecutor"]>
-  ): void {
+  setCodeExecutor(executor: Executor): void {
     this._codeExecutor = executor;
   }
 
@@ -1550,23 +1541,46 @@ export class MCPClientManager {
           `Add a \`worker_loaders\` binding named \`LOADER\` to your Worker config.`
       );
     }
-    const result = await this._codeExecutor.execute(tool.code, [
-      {
-        name: "server",
-        positionalArgs: true,
-        fns: {
-          callTool: async (name: unknown, toolArgs: unknown) =>
-            this.callTool({
-              serverId: tool.serverId,
-              name: String(name),
-              arguments: isRecord(toolArgs) ? toolArgs : {}
-            }),
-          listTools: async () => this.getProxyCapabilities(tool.serverId).tools
+    const codeTool = createCodeTool({
+      executor: this._codeExecutor,
+      tools: [this.createClientToolServerProvider(tool.serverId)]
+    });
+    const result = await codeTool.execute?.(
+      { code: tool.code },
+      {} as Parameters<NonNullable<typeof codeTool.execute>>[1]
+    );
+    if (result && Symbol.asyncIterator in Object(result)) {
+      throw new Error(
+        "Client-side MCP tools must return a non-streaming result."
+      );
+    }
+    return (result as { result?: unknown } | undefined)?.result;
+  }
+
+  private createClientToolServerProvider(serverId: string): ToolProvider {
+    return {
+      name: "server",
+      tools: {
+        callTool: {
+          description: "Call a tool on this MCP server.",
+          execute: async (params: unknown) => {
+            if (!isRecord(params)) {
+              throw new Error("server.callTool expects MCP callTool params.");
+            }
+            return this.callTool({
+              ...params,
+              serverId,
+              name: String(params.name),
+              arguments: isRecord(params.arguments) ? params.arguments : {}
+            });
+          }
+        },
+        listTools: {
+          description: "List tools available on this MCP server.",
+          execute: async () => this.getProxyCapabilities(serverId).tools
         }
       }
-    ]);
-    if (result.error) throw new Error(result.error);
-    return result.result;
+    };
   }
 
   private describeProxyTool(visibleName: string): string {

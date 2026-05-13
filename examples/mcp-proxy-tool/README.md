@@ -17,7 +17,7 @@ mcp({ search: "pull request" });
 mcp({ describe: "github_list_open_prs" });
 mcp({
   tool: "github_list_open_prs",
-  args: { owner: "cloudflare", repo: "agents" }
+  arguments: { owner: "cloudflare", repo: "agents" }
 });
 ```
 
@@ -49,10 +49,13 @@ await this.addMcpServer("github", this.env.GitHubLikeMCP, {
         required: ["owner", "repo"]
       },
       code: `async ({ owner, repo }) => {
-        return await server.callTool("list_pull_requests", {
-          owner,
-          repo,
-          state: "open"
+        return await server.callTool({
+          name: "list_pull_requests",
+          arguments: {
+            owner,
+            repo,
+            state: "open"
+          }
         });
       }`
     }
@@ -114,7 +117,7 @@ Parameters:
 ```ts
 await mcp({
   tool: "github_list_open_prs",
-  args: { owner: "cloudflare", repo: "agents" }
+  arguments: { owner: "cloudflare", repo: "agents" }
 });
 ```
 
