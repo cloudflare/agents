@@ -10,6 +10,11 @@
     "enable_nodejs_v8_module",
     "enable_nodejs_process_v2"
   ],
+  "worker_loaders": [
+    {
+      "binding": "LOADER"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {

@@ -1555,7 +1555,10 @@ export class MCPClientManager {
       );
     }
     const result = await executeCode({
-      code: tool.code,
+      code: `async () => {
+        const tool = (${tool.code});
+        return await tool(${JSON.stringify(args)});
+      }`,
       executor: this._codeExecutor,
       globals: { client: this.createClientToolMcpClient(tool.serverId) }
     });

@@ -102,6 +102,36 @@ describe("addMcpServer with RPC binding", () => {
     expect(result.result!.content[0].text).toBe("survives-hibernation");
   });
 
+  it("should restore RPC proxy client tools after simulated hibernation", async () => {
+    const agentStub = await getAgentByName(
+      env.TestRpcMcpClientAgent,
+      "test-rpc-proxy-client-tool-hibernate"
+    );
+    const result =
+      (await agentStub.testRpcProxyClientToolSurvivesHibernation()) as unknown as {
+        success: boolean;
+        idBefore?: string;
+        idAfter?: string;
+        describeBefore?: string;
+        describeAfter?: string;
+        executeAfter?: { content: Array<{ type: string; text: string }> };
+        error?: string;
+      };
+
+    if (!result.success) {
+      throw new Error(`Test failed: ${result.error}`);
+    }
+
+    expect(result.idAfter).toBe(result.idBefore);
+    expect(result.describeBefore).toContain(
+      "rpc_proxy_client_tool_greet_excited"
+    );
+    expect(result.describeAfter).toContain(
+      "rpc_proxy_client_tool_greet_excited"
+    );
+    expect(result.executeAfter!.content[0].text).toBe("Hello, Ada!!");
+  });
+
   it("should deduplicate repeated addMcpServer calls for the same server", async () => {
     const agentStub = await getAgentByName(
       env.TestRpcMcpClientAgent,

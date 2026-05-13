@@ -6,6 +6,7 @@ import type {
   ServerNotification,
   ServerRequest
 } from "@modelcontextprotocol/sdk/types.js";
+import type { ToolCallOptions } from "ai";
 import { z } from "zod";
 import { McpAgent } from "../../mcp/index.ts";
 import {
@@ -475,6 +476,85 @@ export class TestRpcMcpClientAgent extends Agent {
         arguments: {}
       });
       return { success: true, result };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async testRpcProxyClientToolSurvivesHibernation() {
+    try {
+      const { id: idBefore } = await this.addMcpServer(
+        "rpc-proxy-client-tool",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          props: { testValue: "proxy-client-tool" },
+          instructions: "Use this RPC test server for proxy client tools.",
+          tools: {
+            greet_excited: {
+              description: "Greet someone with an exclamation mark.",
+              inputSchema: {
+                type: "object",
+                properties: { name: { type: "string" } },
+                required: ["name"]
+              },
+              code: `async ({ name }) => {
+                const result = await client.callTool({
+                  name: "greet",
+                  arguments: { name }
+                });
+                return {
+                  ...result,
+                  content: result.content.map((item) =>
+                    item.type === "text" ? { ...item, text: item.text + "!" } : item
+                  )
+                };
+              }`
+            }
+          }
+        }
+      );
+
+      const proxyBefore = this.mcp.unstable_getProxyTool();
+      const describeBefore = await proxyBefore.execute?.(
+        { describe: "rpc_proxy_client_tool_greet_excited" },
+        {} as ToolCallOptions
+      );
+
+      for (const connId of Object.keys(this.mcp.mcpConnections)) {
+        try {
+          await this.mcp.mcpConnections[connId].client.close();
+        } catch (_) {}
+        delete this.mcp.mcpConnections[connId];
+      }
+      this.mcp.restoreClientExtensionsFromStorage();
+      await this.mcp.restoreConnectionsFromStorage(this.name);
+      // @ts-expect-error - accessing private method for testing
+      await this._restoreRpcMcpServers();
+
+      const proxyAfter = this.mcp.unstable_getProxyTool();
+      const describeAfter = await proxyAfter.execute?.(
+        { describe: "rpc_proxy_client_tool_greet_excited" },
+        {} as ToolCallOptions
+      );
+      const executeAfter = await proxyAfter.execute?.(
+        {
+          tool: "rpc_proxy_client_tool_greet_excited",
+          args: { name: "Ada" }
+        },
+        {} as ToolCallOptions
+      );
+
+      return {
+        success: true,
+        idBefore,
+        idAfter: Object.keys(this.mcp.mcpConnections)[0],
+        describeBefore,
+        describeAfter,
+        executeAfter
+      };
     } catch (error) {
       return {
         success: false,
