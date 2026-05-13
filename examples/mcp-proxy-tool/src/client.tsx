@@ -221,7 +221,7 @@ function App() {
                 <Surface
                   className={`max-w-md px-4 py-2.5 rounded-xl ${
                     message.role === "user"
-                      ? "bg-kumo-accent text-kumo-base"
+                      ? "bg-kumo-accent text-black"
                       : "ring ring-kumo-line"
                   }`}
                 >
