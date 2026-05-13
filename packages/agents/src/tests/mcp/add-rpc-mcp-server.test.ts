@@ -102,6 +102,47 @@ describe("addMcpServer with RPC binding", () => {
     expect(result.result!.content[0].text).toBe("survives-hibernation");
   });
 
+  it("should support the full proxy discovery and execution flow for RPC client tools", async () => {
+    const agentStub = await getAgentByName(
+      env.TestRpcMcpClientAgent,
+      "test-rpc-proxy-client-tool-full-flow"
+    );
+    const result =
+      (await agentStub.testRpcProxyClientToolFullFlow()) as unknown as {
+        success: boolean;
+        status?: string;
+        server?: string;
+        search?: string;
+        describe?: string;
+        execute?: { content: Array<{ type: string; text: string }> };
+        error?: string;
+      };
+
+    if (!result.success) {
+      throw new Error(`Test failed: ${result.error}`);
+    }
+
+    expect(result.status).toContain("✓ rpc-proxy-full-flow (9 tools)");
+    expect(result.server).toContain(
+      "Instructions: Use this RPC test server for proxy client tools."
+    );
+    expect(result.server).toContain(
+      "- rpc_proxy_full_flow_greet — A simple greeting tool"
+    );
+    expect(result.server).toContain(
+      "- rpc_proxy_full_flow_getPropsTestValue — Get the test value"
+    );
+    expect(result.server).toContain(
+      "- rpc_proxy_full_flow_greet_excited — Greet someone with an exclamation mark."
+    );
+    expect(result.search).toContain(
+      "rpc_proxy_full_flow_greet_excited — Greet someone with an exclamation mark."
+    );
+    expect(result.describe).toContain("rpc_proxy_full_flow_greet_excited");
+    expect(result.describe).toContain("name (string) *required*");
+    expect(result.execute!.content[0].text).toBe("Hello, Ada!!");
+  });
+
   it("should restore RPC proxy client tools after simulated hibernation", async () => {
     const agentStub = await getAgentByName(
       env.TestRpcMcpClientAgent,

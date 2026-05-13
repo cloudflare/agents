@@ -484,6 +484,70 @@ export class TestRpcMcpClientAgent extends Agent {
     }
   }
 
+  async testRpcProxyClientToolFullFlow() {
+    try {
+      await this.addMcpServer(
+        "rpc-proxy-full-flow",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          props: { testValue: "full-flow" },
+          instructions: "Use this RPC test server for proxy client tools.",
+          tools: {
+            greet_excited: {
+              description: "Greet someone with an exclamation mark.",
+              inputSchema: {
+                type: "object",
+                properties: { name: { type: "string" } },
+                required: ["name"]
+              },
+              code: `async ({ name }) => {
+                const result = await client.callTool({
+                  name: "greet",
+                  arguments: { name }
+                });
+                return {
+                  ...result,
+                  content: result.content.map((item) =>
+                    item.type === "text" ? { ...item, text: item.text + "!" } : item
+                  )
+                };
+              }`
+            }
+          }
+        }
+      );
+
+      const proxy = this.mcp.unstable_getProxyTool();
+      const status = await proxy.execute?.({}, {} as ToolCallOptions);
+      const server = await proxy.execute?.(
+        { server: "rpc-proxy-full-flow" },
+        {} as ToolCallOptions
+      );
+      const search = await proxy.execute?.(
+        { search: "exclamation" },
+        {} as ToolCallOptions
+      );
+      const describe = await proxy.execute?.(
+        { describe: "rpc_proxy_full_flow_greet_excited" },
+        {} as ToolCallOptions
+      );
+      const execute = await proxy.execute?.(
+        {
+          tool: "rpc_proxy_full_flow_greet_excited",
+          args: { name: "Ada" }
+        },
+        {} as ToolCallOptions
+      );
+
+      return { success: true, status, server, search, describe, execute };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
   async testRpcProxyClientToolSurvivesHibernation() {
     try {
       const { id: idBefore } = await this.addMcpServer(
