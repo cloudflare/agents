@@ -206,12 +206,14 @@ describe("AIChatAgent chat turn serialization", () => {
       chunkDelayMs: 40
     });
 
-    await delay(120);
-
+    await waitUntil(
+      async () => (await agentStub.isChatTurnActiveForTest()) === true
+    );
+    const donePromise = waitForDone(ws, "req-abort-turn");
     expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
     expect(await agentStub.abortActiveTurnForTest()).toBe(true);
 
-    await waitForDone(ws, "req-abort-turn");
+    await donePromise;
     await agentStub.waitForIdleForTest();
 
     expect(await agentStub.getAbortControllerCount()).toBe(0);

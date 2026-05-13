@@ -63,10 +63,10 @@ function ConnectionIndicator({ status }: { status: ConnectionStatus }) {
         ? "Connecting..."
         : "Disconnected";
   return (
-    <div className="flex items-center gap-2" role="status">
+    <output className="flex items-center gap-2">
       <span className={`size-2 rounded-full ${dot}`} />
       <span className="text-xs text-kumo-subtle">{label}</span>
-    </div>
+    </output>
   );
 }
 

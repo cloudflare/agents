@@ -84,7 +84,6 @@ export {
 // circular dependencies.
 
 import type {
-  TestMcpAgent,
   TestRpcMcpClientAgent,
   TestEmailAgent,
   TestCaseSensitiveAgent,

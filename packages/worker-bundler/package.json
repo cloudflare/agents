@@ -37,7 +37,7 @@
     "es-module-lexer": "^2.1.0",
     "esbuild-wasm": "0.28.0",
     "resolve.exports": "^2.0.3",
-    "semver": "^7.7.4",
+    "semver": "^7.8.0",
     "smol-toml": "^1.6.1",
     "sucrase": "^3.35.1",
     "typescript": "^6.0.3"

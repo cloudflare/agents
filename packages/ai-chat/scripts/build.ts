@@ -1,5 +1,5 @@
-import { execSync } from "node:child_process";
 import { build } from "tsdown";
+import { formatDeclarationFiles } from "../../../scripts/format-declarations";
 
 async function main() {
   await build({
@@ -21,7 +21,7 @@ async function main() {
   });
 
   // then run oxfmt on the generated .d.ts files
-  execSync("oxfmt --write ./dist/*.d.ts");
+  formatDeclarationFiles();
 
   process.exit(0);
 }

@@ -1,7 +1,7 @@
-import { execSync } from "node:child_process";
 import { build } from "tsdown";
 import { globSync } from "glob";
 import { existsSync } from "node:fs";
+import { formatDeclarationFiles } from "../../../scripts/format-declarations";
 
 const entries = [
   "src/*.ts",
@@ -53,7 +53,7 @@ async function main() {
   });
 
   // then run oxfmt on the generated .d.ts files
-  execSync("oxfmt --write ./dist/*.d.ts");
+  formatDeclarationFiles();
 
   process.exit(0);
 }

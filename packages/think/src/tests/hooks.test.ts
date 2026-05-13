@@ -120,7 +120,9 @@ describe("Think — beforeTurn hook", () => {
 
     const log = await agent.getBeforeTurnLog();
     expect(log).toHaveLength(1);
-    expect(log[0].system).toBe("You are a helpful assistant.");
+    expect(log[0].system).toContain("You are a careful, capable assistant");
+    expect(log[0].system).toContain("You are running inside a Think agent.");
+    expect(log[0].system).toContain("agent workspace");
     expect(log[0].continuation).toBe(false);
     expect(log[0].toolNames).toContain("read");
     expect(log[0].toolNames).toContain("write");
@@ -798,7 +800,8 @@ describe("Think — beforeTurn config overrides", () => {
     await agent.testChat("With override");
 
     const log = await agent.getBeforeTurnLog();
-    expect(log[0].system).toBe("You are a helpful assistant.");
+    expect(log[0].system).toContain("You are a careful, capable assistant");
+    expect(log[0].system).toContain("You are running inside a Think agent.");
   });
 
   it("activeTools override limits tool availability", async () => {

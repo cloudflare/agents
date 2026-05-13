@@ -34,7 +34,6 @@ import {
   type Connection,
   type ConnectionContext,
   type PartyServerOptions,
-  type RoutingRetryOptions,
   Server,
   type WSMessage,
   getServerByName,
@@ -2461,7 +2460,7 @@ export class Agent<
    * IMPORTANT: This hook must be synchronous.
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-  validateStateChange(nextState: State, source: Connection | "server") {
+  validateStateChange(_nextState: State, _source: Connection | "server") {
     // override this to validate state updates
   }
 
@@ -2474,7 +2473,7 @@ export class Agent<
    * @param source Source of the state update ("server" or a client connection)
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-  onStateChanged(state: State | undefined, source: Connection | "server") {
+  onStateChanged(_state: State | undefined, _source: Connection | "server") {
     // override this to handle state updates after persist + broadcast
   }
 
@@ -2490,7 +2489,7 @@ export class Agent<
    * @param source Source of the state update ("server" or a client connection)
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-  onStateUpdate(state: State | undefined, source: Connection | "server") {
+  onStateUpdate(_state: State | undefined, _source: Connection | "server") {
     // override this to handle state updates (deprecated — use onStateChanged)
   }
 

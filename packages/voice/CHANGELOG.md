@@ -1,5 +1,19 @@
 # @cloudflare/voice
 
+## 0.2.0
+
+### Minor Changes
+
+- [#1478](https://github.com/cloudflare/agents/pull/1478) [`2c7d91b`](https://github.com/cloudflare/agents/commit/2c7d91b7dd2aed73b1871f72b79e6e59b89e2ce8) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Add an `enabled` option to `useVoiceAgent` so React apps can delay creating and connecting a `VoiceClient` until async prerequisites such as capability tokens are ready.
+
+### Patch Changes
+
+- [#1458](https://github.com/cloudflare/agents/pull/1458) [`84cb429`](https://github.com/cloudflare/agents/commit/84cb429f7f41becc5e6ff0592f0308c52a5134f1) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fix Workers AI STT session edge cases for Flux and Nova 3.
+
+  Flux now preserves the latest non-empty turn transcript from turn lifecycle events so an `EndOfTurn` event with an empty `transcript` can still emit the completed utterance. Flux `StartOfTurn` also drives server-side barge-in so model-detected user speech aborts active LLM/TTS playback promptly. Nova 3 now defensively normalizes finalized segment state before reading it to avoid stale teardown messages throwing during abnormal close paths.
+
+- [#1462](https://github.com/cloudflare/agents/pull/1462) [`5f6214d`](https://github.com/cloudflare/agents/commit/5f6214dccfe3ba9bf243ec15d291b37b9659a54c) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fix `withVoice` text streaming for AI SDK `textStream` responses so TTS audio is produced when `onTurn()` returns `streamText(...).textStream` directly.
+
 ## 0.1.3
 
 ### Patch Changes

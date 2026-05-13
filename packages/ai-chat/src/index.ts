@@ -39,7 +39,6 @@ import {
 } from "agents/chat";
 import { ResumableStream } from "agents/chat";
 import {
-  createToolsFromClientSchemas,
   ContinuationState,
   AbortRegistry,
   type ContinuationConnection,
@@ -2102,9 +2101,9 @@ export class AIChatAgent<
    */
   async onChatMessage(
     // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-    onFinish: StreamTextOnFinishCallback<ToolSet>,
+    _onFinish: StreamTextOnFinishCallback<ToolSet>,
     // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-    options?: OnChatMessageOptions
+    _options?: OnChatMessageOptions
   ): Promise<Response | undefined> {
     throw new Error(
       "received a chat message, override onChatMessage and return a Response to send to the client"

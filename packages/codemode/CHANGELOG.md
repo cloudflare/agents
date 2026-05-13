@@ -1,5 +1,17 @@
 # @cloudflare/codemode
 
+## 0.3.5
+
+### Patch Changes
+
+- [#1468](https://github.com/cloudflare/agents/pull/1468) [`186a2a4`](https://github.com/cloudflare/agents/commit/186a2a45700fbd9680b69e8b72ea062fd325d077) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add a browser-safe codemode export with an iframe sandbox executor and browser
+  tool helper. Harden iframe message handling with nonce-scoped messages, reject
+  sanitized tool name collisions, and keep tools with `needsApproval: false`.
+
+- [#1470](https://github.com/cloudflare/agents/pull/1470) [`1033fa2`](https://github.com/cloudflare/agents/commit/1033fa28786d1e70a55a0455a6092a4a604be03c) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Resolve OpenAPI specs inside the codemode sandbox to avoid Worker Loader RPC size limits for heavily-referenced specs.
+
+- [#1508](https://github.com/cloudflare/agents/pull/1508) [`13acffe`](https://github.com/cloudflare/agents/commit/13acffee172fcd0d40ecfcd3ba9c5088b474286e) Thanks [@threepointone](https://github.com/threepointone)! - fix(codemode): harden OpenAPI sandbox ref handling
+
 ## 0.3.4
 
 ### Patch Changes

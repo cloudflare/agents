@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/ai-chat",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "Cloudflare Agents (x) AI SDK Chat",
   "keywords": [
     "cloudflare",
@@ -22,16 +22,16 @@
     "nanoid": "^5.1.11"
   },
   "devDependencies": {
-    "@playwright/test": "^1.59.1",
+    "@playwright/test": "^1.60.0",
     "@types/react": "^19.2.14",
-    "ai": "^6.0.174",
-    "react": "^19.2.5",
+    "ai": "^6.0.180",
+    "react": "^19.2.6",
     "vitest-browser-react": "^2.2.0",
-    "zod": "^4.4.2"
+    "zod": "^4.4.3"
   },
   "peerDependencies": {
     "@ai-sdk/react": "^3.0.0",
-    "agents": ">=0.12.1 <1.0.0",
+    "agents": ">=0.12.4 <1.0.0",
     "ai": "^6.0.0",
     "react": "^19.0.0",
     "zod": "^4.0.0"

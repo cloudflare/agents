@@ -1,8 +1,8 @@
 import { copyFileSync, existsSync } from "node:fs";
-import { execSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "tsdown";
+import { formatDeclarationFiles } from "../../../scripts/format-declarations";
 import {
   bundleTypeScriptForWorkers,
   removeBundledTypeScript
@@ -52,7 +52,7 @@ async function main() {
     console.log("Copied esbuild.wasm to dist/");
 
     // then run oxfmt on the generated .d.ts files
-    execSync("oxfmt --write ./dist/*.d.ts");
+    formatDeclarationFiles();
   } finally {
     removeBundledTypeScript(packageRoot);
   }

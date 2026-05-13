@@ -495,8 +495,7 @@ describe("Think — context blocks", () => {
     // System prompt assembly should fall back to getSystemPrompt().
     const systemPrompt = await agent.getAssembledSystemPrompt();
 
-    // Default getSystemPrompt() returns "You are a helpful assistant."
-    expect(systemPrompt).toBe("You are a helpful assistant.");
+    expect(systemPrompt).toContain("You are a careful, capable assistant");
   });
 });
 
