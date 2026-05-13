@@ -11,7 +11,7 @@ import {
   type JsonSchemaToolDescriptor,
   type JsonSchemaToolDescriptors
 } from "./json-schema-types";
-import { normalizeCode } from "./normalize";
+import { runCode } from "./run-code";
 import { sanitizeToolName } from "./utils";
 import type { Executor, ResolvedProvider } from "./executor-types";
 import { IframeSandboxExecutor } from "./iframe-executor";
@@ -30,6 +30,10 @@ export type JsonSchemaExecutableToolDescriptors = Record<
   string,
   JsonSchemaExecutableToolDescriptor
 >;
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 interface ApprovalAwareJsonSchemaExecutableToolDescriptor extends JsonSchemaExecutableToolDescriptor {
   needsApproval?: boolean | ((...args: unknown[]) => unknown);
@@ -217,27 +221,11 @@ export function createBrowserCodeTool(
       required: ["code", "result"]
     },
     execute: async ({ code }) => {
-      const normalizedCode = normalizeCode(code);
-      const executeResult = await executor.execute(
-        normalizedCode,
-        resolvedProviders
-      );
-
-      if (executeResult.error) {
-        const logCtx = executeResult.logs?.length
-          ? `\n\nConsole output:\n${executeResult.logs.join("\n")}`
-          : "";
-        throw new Error(
-          `Code execution failed: ${executeResult.error}${logCtx}`
-        );
+      try {
+        return await runCode({ code, executor, providers: resolvedProviders });
+      } catch (error) {
+        throw new Error(`Code execution failed: ${formatError(error)}`);
       }
-
-      const output: { code: string; result: unknown; logs?: string[] } = {
-        code,
-        result: executeResult.result
-      };
-      if (executeResult.logs) output.logs = executeResult.logs;
-      return output;
     }
   };
 }

@@ -1,4 +1,4 @@
-import { executeCode, type Executor } from "@cloudflare/codemode";
+import { runCode, type Executor } from "@cloudflare/codemode";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
@@ -1554,29 +1554,29 @@ export class MCPClientManager {
           `Add a \`worker_loaders\` binding named \`LOADER\` to your Worker config.`
       );
     }
-    const result = await executeCode({
-      code: `async () => {
-        const tool = (${tool.code});
-        return await tool(${JSON.stringify(args)});
-      }`,
+    const result = await runCode({
+      code: codeCallingClientTool(tool.code, args),
       executor: this._codeExecutor,
-      globals: { client: this.createClientToolMcpClient(tool.serverId) }
+      providers: [this.createClientToolMcpClientProvider(tool.serverId)]
     });
     return result.result;
   }
 
-  private createClientToolMcpClient(serverId: string) {
+  private createClientToolMcpClientProvider(serverId: string) {
     return {
-      callTool: async (params: unknown) => {
-        if (!isRecord(params)) {
-          throw new Error("client.callTool expects MCP callTool params.");
-        }
-        return this.callTool({
-          ...(params as CallToolRequest["params"]),
-          serverId
-        });
-      },
-      listTools: async () => this.getProxyCapabilities(serverId).tools
+      name: "client",
+      fns: {
+        callTool: async (params: unknown) => {
+          if (!isRecord(params)) {
+            throw new Error("client.callTool expects MCP callTool params.");
+          }
+          return this.callTool({
+            ...(params as CallToolRequest["params"]),
+            serverId
+          });
+        },
+        listTools: async () => this.getProxyCapabilities(serverId).tools
+      }
     };
   }
 
@@ -1963,6 +1963,16 @@ type ProxyVisibleTool = {
   source: "remote" | "client";
   code?: string;
 };
+
+function codeCallingClientTool(
+  code: string,
+  args: Record<string, unknown>
+): string {
+  return `async () => {
+    const tool = (${code});
+    return await tool(${JSON.stringify(args)});
+  }`;
+}
 
 function serializableClientTools(
   tools?: MCPClientToolRecord

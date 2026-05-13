@@ -7,6 +7,7 @@ import {
   type JsonSchemaToolDescriptors
 } from "./json-schema-types";
 import { normalizeCode } from "./normalize";
+import { runCode } from "./run-code";
 import { sanitizeToolName } from "./utils";
 import type { Executor } from "./executor";
 
@@ -212,17 +213,11 @@ export async function codeMcpServer(
     },
     async ({ code }) => {
       try {
-        const result = await executor.execute(code, [
-          { name: "codemode", fns }
-        ]);
-        if (result.error) {
-          return {
-            content: [
-              { type: "text" as const, text: `Error: ${result.error}` }
-            ],
-            isError: true
-          };
-        }
+        const result = await runCode({
+          code,
+          executor,
+          providers: [{ name: "codemode", fns }]
+        });
         return {
           content: [
             { type: "text" as const, text: truncateResponse(result.result) }
@@ -457,18 +452,10 @@ async () => {
     },
     async ({ code }) => {
       try {
-        const result = await executor.execute(
-          createOpenApiSandboxCode(code, spec, false),
-          []
-        );
-        if (result.error) {
-          return {
-            content: [
-              { type: "text" as const, text: `Error: ${result.error}` }
-            ],
-            isError: true
-          };
-        }
+        const result = await runCode({
+          code: createOpenApiSandboxCode(code, spec, false),
+          executor
+        });
         return {
           content: [
             { type: "text" as const, text: sandboxResponseText(result.result) }
@@ -508,25 +495,19 @@ async () => {
     },
     async ({ code }) => {
       try {
-        const result = await executor.execute(
-          createOpenApiSandboxCode(code, spec, true),
-          [
+        const result = await runCode({
+          code: createOpenApiSandboxCode(code, spec, true),
+          executor,
+          providers: [
             {
               name: "__openapiHost",
               fns: {
-                request: (args: unknown) => requestFn(args as RequestOptions)
+                request: async (args: unknown) =>
+                  await requestFn(args as RequestOptions)
               }
             }
           ]
-        );
-        if (result.error) {
-          return {
-            content: [
-              { type: "text" as const, text: `Error: ${result.error}` }
-            ],
-            isError: true
-          };
-        }
+        });
         return {
           content: [
             { type: "text" as const, text: sandboxResponseText(result.result) }

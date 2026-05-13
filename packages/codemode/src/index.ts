@@ -1,9 +1,4 @@
-export {
-  executeCode,
-  type CodeGlobals,
-  type ExecuteCodeOptions,
-  type ExecuteCodeOutput
-} from "./execute-code";
+export { runCode, type RunCodeOptions, type RunCodeOutput } from "./run-code";
 export {
   DynamicWorkerExecutor,
   ToolDispatcher,
