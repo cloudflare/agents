@@ -183,11 +183,6 @@ export type MCPCapabilityCache = {
   capabilities?: unknown;
 };
 
-type MCPClientExtensions = {
-  instructions?: string;
-  tools?: MCPClientToolRecord;
-};
-
 export type MCPServerOptions = {
   client?: ConstructorParameters<typeof Client>[1];
   transport?: {
@@ -303,7 +298,10 @@ export class MCPClientManager {
   ) => AgentMcpOAuthProvider;
   private _isRestored = false;
   private _pendingConnections = new Map<string, Promise<void>>();
-  private _clientExtensions = new Map<string, MCPClientExtensions>();
+  private _clientExtensions = new Map<
+    string,
+    { instructions?: string; tools?: MCPClientToolRecord }
+  >();
   private _codeExecutor?: Executor;
 
   /** @internal Protected for testing purposes. */
@@ -531,7 +529,11 @@ export class MCPClientManager {
     name: string,
     normalizedName: string,
     bindingName: string,
-    options?: MCPClientExtensions & { props?: Record<string, unknown> }
+    options?: {
+      props?: Record<string, unknown>;
+      instructions?: string;
+      tools?: MCPClientToolRecord;
+    }
   ): void {
     this.saveServerToStorage({
       id,
@@ -547,7 +549,12 @@ export class MCPClientManager {
         tools: serializableClientTools(options?.tools)
       })
     });
-    this.registerClientExtensions(id, options);
+    if (options?.instructions || options?.tools) {
+      this._clientExtensions.set(id, {
+        instructions: options.instructions,
+        tools: options.tools
+      });
+    }
   }
 
   /**
@@ -949,7 +956,12 @@ export class MCPClientManager {
       }
     });
 
-    this.registerClientExtensions(id, options);
+    if (options.instructions || options.tools) {
+      this._clientExtensions.set(id, {
+        instructions: options.instructions,
+        tools: options.tools
+      });
+    }
 
     // Save to storage (exclude authProvider since it's recreated during restore)
     const { authProvider: _, ...transportWithoutAuth } =
@@ -1355,27 +1367,17 @@ export class MCPClientManager {
     this._codeExecutor = executor;
   }
 
-  private registerClientExtensions(
-    serverId: string,
-    extensions?: MCPClientExtensions
-  ): void {
-    if (extensions) {
-      this._clientExtensions.set(serverId, {
-        instructions: extensions.instructions,
-        tools: extensions.tools
-      });
-    }
-  }
-
   restoreClientExtensionsFromStorage(): void {
     for (const server of this.getServersFromStorage()) {
       const opts = server.server_options
         ? (JSON.parse(server.server_options) as MCPServerOptions)
         : {};
-      this.registerClientExtensions(server.id, {
-        instructions: opts.instructions,
-        tools: opts.tools
-      });
+      if (opts.instructions || opts.tools) {
+        this._clientExtensions.set(server.id, {
+          instructions: opts.instructions,
+          tools: opts.tools
+        });
+      }
     }
   }
 
