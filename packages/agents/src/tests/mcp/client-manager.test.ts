@@ -2014,6 +2014,43 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(waited).toBe(true);
     });
 
+    it("should remove client extensions when removing a server", async () => {
+      const id = "remove-server-extensions";
+      await manager.registerServer(id, {
+        url: "http://example.com/mcp",
+        name: "github",
+        transport: { type: "auto" },
+        tools: {
+          list_open_prs: {
+            description: "List open pull requests.",
+            code: `async () => "ok"`
+          }
+        }
+      });
+
+      manager.mcpConnections[id].connectionState =
+        "ready" as MCPConnectionState;
+
+      await expect(
+        manager
+          .unstable_getProxyTool()
+          .execute?.({ server: "github" }, {} as ToolCallOptions)
+      ).resolves.toContain("github_list_open_prs");
+
+      await manager.removeServer(id);
+
+      await expect(
+        manager
+          .unstable_getProxyTool()
+          .execute?.(
+            { describe: "github_list_open_prs" },
+            {} as ToolCallOptions
+          )
+      ).resolves.toBe(
+        'Tool "github_list_open_prs" not found. Use mcp({ search: "..." }) to search.'
+      );
+    });
+
     it("should fire onServerStateChanged when removing a server", async () => {
       const id = "remove-server";
       const onStateChangedSpy = vi.fn();

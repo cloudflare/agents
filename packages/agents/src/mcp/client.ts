@@ -1839,6 +1839,7 @@ export class MCPClientManager {
       }
     }
     this.removeServerFromStorage(serverId);
+    this._clientExtensions.delete(serverId);
     this._onServerStateChanged.fire();
   }
 
