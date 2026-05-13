@@ -34,7 +34,7 @@ Think hasn't shipped yet. There are no backward compatibility constraints.
 
 **Phase 5 delivered:** `messageConcurrency` strategies (queue/latest/merge/drop/debounce) matching AIChatAgent's feature set. Think's merge is non-destructive — all individual user messages stay in the Session tree, the model sees them all in one turn. `resetTurnState()` extracted as a protected method for subclasses. Drop check happens before `session.appendMessage` so dropped messages never touch the tree.
 
-**Phase 4 delivered:** `chatRecovery` flag wraps all 4 chat turn paths (WebSocket, auto-continuation, `saveMessages`, `continueLastTurn`) in `runFiber()` for durable execution. `_handleInternalFiberRecovery` override detects interrupted chat fibers. `onChatRecovery(ctx)` hook provides `ChatRecoveryContext` with partial text, stream chunks, recovery data (from `stash()`), and current messages. `_chatRecoveryContinue` scheduler waits for stable state then calls `continueLastTurn()`. `hasPendingInteraction()` and `waitUntilStable()` for quiescence detection. `_pendingInteractionPromise` for efficient wait-on-resolve.
+**Phase 4 delivered:** `chatRecovery` flag wraps every turn entry path (WebSocket, sub-agent `chat()` RPC, auto-continuation, `saveMessages`, durable `submitMessages` execution, `continueLastTurn`) in `runFiber()` for durable execution. `_handleInternalFiberRecovery` override detects interrupted chat fibers. `onChatRecovery(ctx)` hook provides `ChatRecoveryContext` with partial text, stream chunks, recovery data (from `stash()`), and current messages. `_chatRecoveryContinue` scheduler waits for stable state then calls `continueLastTurn()`. `hasPendingInteraction()` and `waitUntilStable()` for quiescence detection. `_pendingInteractionPromise` for efficient wait-on-resolve.
 
 **All phases complete.** Think now has full feature parity with AIChatAgent plus Session-backed advantages (tree-structured messages, non-destructive regeneration, context blocks, compaction, FTS5 search).
 
@@ -379,7 +379,7 @@ See [chat-improvements.md §Shared Code Extraction](./chat-improvements.md#share
    - `onChatMessage` destructures result, passes `system` and `messages` to `streamText`
 
 6. **Tool auto-merge:**
-   - `onChatMessage` merges `getTools()` + `clientTools` + `session.tools()` + `options.tools`
+   - `onChatMessage` merges `getTools()` + `clientTools` + `session.tools()`
    - Context tools (`set_context`, `load_context`, `search_context`) auto-included when context blocks configured
 
 7. **Clear:**

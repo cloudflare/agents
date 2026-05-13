@@ -4,6 +4,9 @@ Think works as both a top-level agent (WebSocket to browser) and a sub-agent (RP
 
 This page focuses on Think's `chat()` RPC surface and programmatic turns. For the generic framework primitives underneath (`subAgent`, `onBeforeSubAgent`, `useAgent({ sub })`, `parentAgent`, `hasSubAgent`, `listSubAgents`, routing shape), see [Sub-agents](../sub-agents.md).
 
+For a quick comparison of `chat()`, `saveMessages()`, `submitMessages()`, and
+agent tools, see [Choosing a turn API](./index.md#choosing-a-turn-api).
+
 ## Sub-agent via chat()
 
 When used as a sub-agent, the `chat()` method runs a full turn (persist user message, run agentic loop, persist assistant response) and streams events via a callback.
@@ -37,14 +40,14 @@ interface StreamCallback {
 ```typescript
 interface ChatOptions {
   signal?: AbortSignal;
-  tools?: ToolSet;
 }
 ```
 
-| Field    | Description                                                 |
-| -------- | ----------------------------------------------------------- |
-| `signal` | `AbortSignal` to cancel the turn mid-stream                 |
-| `tools`  | Extra tools to merge for this turn (highest merge priority) |
+| Field    | Description                                 |
+| -------- | ------------------------------------------- |
+| `signal` | `AbortSignal` to cancel the turn mid-stream |
+
+Tools belong to the child agent. Define durable capabilities with the child's `getTools()`, extensions, MCP tools, or client tool schemas. Legacy callers that pass `options.tools` to `chat()` get a warning and the value is ignored.
 
 ### Example: Parent agent calling a child
 
@@ -104,22 +107,6 @@ await child.chat(
   },
   callback
 );
-```
-
-### Passing extra tools
-
-The `tools` option adds tools for this turn only, with the highest merge priority:
-
-```typescript
-await child.chat("Summarize the report", callback, {
-  tools: {
-    fetchReport: tool({
-      description: "Fetch the report data",
-      inputSchema: z.object({}),
-      execute: async () => this.getReportData()
-    })
-  }
-});
 ```
 
 ### Aborting a sub-agent turn
@@ -303,6 +290,10 @@ protected async continueLastTurn(
 
 Returns `{ requestId, status: "skipped" }` if the last message is not an assistant message.
 
+Most applications do not call this directly. Treat `continueLastTurn()` as an
+advanced subclass and recovery primitive; user-facing, server-triggered turns
+usually use `saveMessages()` or `submitMessages()` instead.
+
 The optional `body` parameter overrides the stored body for this continuation. If omitted, the last body from the previous turn is used. The optional `options.signal` accepts an external `AbortSignal` for cancellation, matching the `saveMessages` contract.
 
 ---
@@ -339,7 +330,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-When `chatRecovery` is `true`, all four turn paths (WebSocket, sub-agent `chat()` RPC, auto-continuation, `saveMessages`, `continueLastTurn`) are wrapped in `runFiber`.
+When `chatRecovery` is `true`, every turn entry path is wrapped in `runFiber`: WebSocket chat, sub-agent `chat()` RPC, auto-continuation, `saveMessages()`, `submitMessages()` execution, and `continueLastTurn()`.
 
 ### onChatRecovery
 

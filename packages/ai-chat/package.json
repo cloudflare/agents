@@ -18,6 +18,9 @@
   "bugs": {
     "url": "https://github.com/cloudflare/agents/issues"
   },
+  "dependencies": {
+    "nanoid": "^5.1.11"
+  },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
     "@types/react": "^19.2.14",

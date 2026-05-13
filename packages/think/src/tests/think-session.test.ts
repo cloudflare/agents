@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { getServerByName } from "partyserver";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { UIMessage } from "ai";
 import type {
   ThinkTestAgent,
@@ -170,6 +170,25 @@ describe("Think — core", () => {
     const textParts = assistantMsg.parts.filter((p) => p.type === "text");
     const fullText = textParts.map((p) => p.text ?? "").join("");
     expect(fullText).toBe("Custom response text");
+  });
+
+  it("should ignore runtime tools passed to chat()", async () => {
+    const agent = await freshAgent("chat-ignore-runtime-tools");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      const result = await agent.testChatWithIgnoredRuntimeTools("Hello");
+      expect(result.done).toBe(true);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("chat() no longer accepts options.tools")
+      );
+    } finally {
+      warn.mockRestore();
+    }
+
+    const turnLog = await agent.getBeforeTurnLog();
+    expect(turnLog).toHaveLength(1);
+    expect(turnLog[0].toolNames).not.toContain("ignoredRuntimeTool");
   });
 
   it("should forward turn telemetry to the AI SDK", async () => {
@@ -1425,6 +1444,33 @@ describe("Think — chatRecovery", () => {
     expect(fibers).toHaveLength(0);
   });
 
+  it("stash() is callable during a durable chat() turn", async () => {
+    const agent = await freshRecoveryAgent("stash-chat");
+
+    await agent.setStashData({ responseId: "resp-chat", provider: "test" });
+    await agent.testChat("Hello via durable chat");
+
+    const stashResult = await agent.getStashResult();
+    expect(stashResult).not.toBeNull();
+    expect(stashResult!.success).toBe(true);
+
+    const fibers = await agent.getActiveFibers();
+    expect(fibers).toHaveLength(0);
+  });
+
+  it("chat() records stream chunks for recovery lookup", async () => {
+    const agent = await freshRecoveryAgent("chat-stream-metadata");
+
+    const result = await agent.testChat("Record the stream");
+    expect(result.done).toBe(true);
+
+    const snapshot = await agent.getLatestStreamSnapshot();
+    expect(snapshot).not.toBeNull();
+    expect(snapshot!.status).toBe("completed");
+    expect(snapshot!.chunkCount).toBeGreaterThan(0);
+    expect(snapshot!.text).toBe("Continued response.");
+  });
+
   it("saveMessages with recovery wraps in fiber and cleans up", async () => {
     const agent = await freshRecoveryAgent("save-fiber");
 
@@ -1557,6 +1603,105 @@ describe("Think — onChatRecovery", () => {
     await agent.triggerFiberRecovery();
 
     expect(await agent.getTurnCallCount()).toBe(0);
+  });
+
+  it("does not continue a recovered chat fiber whose stream already completed", async () => {
+    const agent = await freshRecoveryAgent("completed-stream-recovery");
+
+    await agent.insertInterruptedStream(
+      "stream-completed",
+      "req-completed",
+      [
+        {
+          body: JSON.stringify({
+            type: "start",
+            messageId: "a-completed"
+          }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({
+            type: "text-delta",
+            delta: "Already done"
+          }),
+          index: 2
+        },
+        { body: JSON.stringify({ type: "text-end" }), index: 3 },
+        { body: JSON.stringify({ type: "finish" }), index: 4 }
+      ],
+      "completed"
+    );
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-completed");
+
+    await agent.triggerFiberRecovery();
+
+    expect(await agent.getTurnCallCount()).toBe(0);
+    expect(await agent.getScheduledChatRecoveryCountForTest()).toBe(0);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe("assistant");
+    expect(
+      messages[0].parts
+        .filter((part): part is { type: "text"; text: string } => {
+          return part.type === "text" && "text" in part;
+        })
+        .map((part) => part.text)
+        .join("")
+    ).toBe("Already done");
+  });
+
+  it("does not duplicate an already-persisted completed stream on recovery", async () => {
+    const agent = await freshRecoveryAgent("completed-stream-existing-message");
+
+    await agent.persistTestMessage({
+      id: "a-existing-completed",
+      role: "assistant",
+      parts: [{ type: "text", text: "Already persisted" }]
+    });
+    await agent.insertInterruptedStream(
+      "stream-existing-completed",
+      "req-existing-completed",
+      [
+        {
+          body: JSON.stringify({
+            type: "start",
+            messageId: "a-existing-completed"
+          }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({
+            type: "text-delta",
+            delta: "Already persisted"
+          }),
+          index: 2
+        },
+        { body: JSON.stringify({ type: "text-end" }), index: 3 },
+        { body: JSON.stringify({ type: "finish" }), index: 4 }
+      ],
+      "completed"
+    );
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-existing-completed"
+    );
+
+    await agent.triggerFiberRecovery();
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(1);
+    expect(messages[0].id).toBe("a-existing-completed");
+    expect(messages[0].role).toBe("assistant");
+    expect(
+      messages[0].parts
+        .filter((part): part is { type: "text"; text: string } => {
+          return part.type === "text" && "text" in part;
+        })
+        .map((part) => part.text)
+        .join("")
+    ).toBe("Already persisted");
   });
 
   it("{ persist: false, continue: false } skips both", async () => {

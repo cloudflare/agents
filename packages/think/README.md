@@ -113,10 +113,11 @@ export class MyAgent extends Think<Env> {
 | `configureSession()` | identity                         | Add context blocks, compaction, search, skills  |
 | `getExtensions()`    | `[]`                             | Sandboxed extension declarations (load order)   |
 | `extensionLoader`    | `undefined`                      | `WorkerLoader` binding — enables extensions     |
+| `chatRecovery`       | `true`                           | Wrap turns in `runFiber` for durable execution  |
 
 ### Lifecycle hooks
 
-Think owns the `streamText` call. Hooks fire on every turn regardless of entry path (WebSocket, `chat()`, `saveMessages`, auto-continuation).
+Think owns the `streamText` call. Hooks fire on every turn regardless of entry path (WebSocket, `chat()`, `saveMessages()`, durable `submitMessages()` execution, `continueLastTurn()`, auto-continuation).
 
 | Hook                     | When it fires                               | Return                         |
 | ------------------------ | ------------------------------------------- | ------------------------------ |
@@ -340,6 +341,22 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
+### Choosing a turn API
+
+Use browser chat through `useAgentChat` when a user drives the conversation. Use
+`saveMessages()` when server code controls the trigger and can wait for the
+model response. Use `submitMessages()` when a caller needs fast durable
+acceptance, idempotent retries, cancellation, and later status inspection.
+
+Use `subAgent(...).chat()` for direct streaming RPC to a specific child when
+your code owns forwarding and replay policy. Use `agentTool()` or
+`runAgentTool()` when a parent agent delegates work to a retained child and you
+want event replay, abort bridging, and UI drill-in.
+
+See [Choosing a turn API](../../docs/think/index.md#choosing-a-turn-api) and
+[Programmatic Submissions](../../docs/think/programmatic-submissions.md) for the
+full API comparison.
+
 ### Sub-agent streaming via RPC
 
 When used as a sub-agent (via `this.subAgent()`), the `chat()` method runs a full turn and streams events via a callback:
@@ -353,10 +370,12 @@ interface StreamCallback {
 
 const agent = await this.subAgent(MyAgent, "thread-1");
 await agent.chat("Summarize the project", relay, {
-  tools: extraTools,
   signal: abortController.signal
 });
 ```
+
+Tools belong to the child agent; define them with `getTools()` or use
+`agentTool()` / `runAgentTool()` for parent-child orchestration.
 
 ### Dynamic configuration
 
@@ -382,6 +401,7 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 - **Lifecycle hooks** — `beforeTurn`, `beforeStep`, `onStepFinish`, `onChunk`, `onChatResponse` fire on every turn
 - **Stream resumption** — page refresh replays buffered chunks via `ResumableStream`
 - **Client tools** — accept tool schemas from clients, handle results and approvals
+- **Durable submissions** — accept webhook/RPC-triggered turns with idempotent retry and status inspection
 - **Auto-continuation** — debounce-based continuation after tool results
 - **MCP integration** — MCP tools auto-merged, wait for connections before inference
 - **Abort/cancel** — pass an `AbortSignal` or send a cancel message

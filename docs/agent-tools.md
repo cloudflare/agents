@@ -12,6 +12,12 @@ use server-side tools. Browser-provided client tools are not available during an
 agent-tool turn unless you model that interaction as server-side state or a
 separate parent-mediated workflow.
 
+For Think children, prefer agent tools when the parent model or workflow
+delegates work and you want retained child runs, event replay, abort bridging,
+and UI drill-in. Use raw `subAgent(...).chat()` only for lower-level streaming
+RPC where your code owns forwarding, cancellation, and replay policy. For the
+full comparison, see [Choosing a turn API](./think/index.md#choosing-a-turn-api).
+
 ## Use an Agent as an AI SDK tool
 
 Use `agentTool()` when the parent model should decide when to call the helper.

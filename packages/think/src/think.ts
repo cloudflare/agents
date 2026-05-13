@@ -206,7 +206,6 @@ export interface StreamableResult {
  */
 export interface ChatOptions {
   signal?: AbortSignal;
-  tools?: ToolSet;
 }
 
 type AgentToolChildRunStatus =
@@ -330,8 +329,6 @@ import type {
  */
 export interface TurnInput {
   signal?: AbortSignal;
-  /** Extra tools from the caller (e.g. chat() options) — highest merge priority. */
-  callerTools?: ToolSet;
   /** Client-provided tool schemas for dynamic tool registration. */
   clientTools?: ClientToolSchema[];
   /** Custom body fields from the client request. */
@@ -1258,8 +1255,7 @@ export class Think<
       ...extensionTools,
       ...contextTools,
       ...(this.mcp?.getAITools?.() ?? {}),
-      ...clientToolSet,
-      ...input.callerTools
+      ...clientToolSet
     };
 
     const frozenPrompt = await this.session.freezeSystemPrompt();
@@ -1863,100 +1859,86 @@ export class Think<
     options?: ChatOptions
   ): Promise<void> {
     const requestId = crypto.randomUUID();
+    const ignoredTools = (options as { tools?: unknown } | undefined)?.tools;
+    if (
+      ignoredTools != null &&
+      typeof ignoredTools === "object" &&
+      Object.keys(ignoredTools).length > 0
+    ) {
+      console.warn(
+        "[Think] chat() no longer accepts options.tools. Define durable tools on the child agent with getTools(), or use runAgentTool()/agentTool() for parent-child orchestration."
+      );
+    }
 
-    await this._turnQueue.enqueue(requestId, async () => {
-      const userMsg: UIMessage =
-        typeof userMessage === "string"
-          ? {
-              id: crypto.randomUUID(),
-              role: "user",
-              parts: [{ type: "text", text: userMessage }]
-            }
-          : userMessage;
+    await this.keepAliveWhile(async () => {
+      await this._turnQueue.enqueue(requestId, async () => {
+        const userMsg: UIMessage =
+          typeof userMessage === "string"
+            ? {
+                id: crypto.randomUUID(),
+                role: "user",
+                parts: [{ type: "text", text: userMessage }]
+              }
+            : userMessage;
 
-      await this.session.appendMessage(userMsg);
+        await this.session.appendMessage(userMsg);
 
-      const accumulator = new StreamAccumulator({
-        messageId: crypto.randomUUID()
-      });
-
-      try {
-        const result = await agentContext.run(
-          {
-            agent: this,
-            connection: undefined,
-            request: undefined,
-            email: undefined
-          },
-          () =>
-            this._runInferenceLoop({
-              signal: options?.signal,
-              callerTools: options?.tools,
-              continuation: false
-            })
+        const abortSignal = this._aborts.getSignal(requestId);
+        const detachExternal = this._aborts.linkExternal(
+          requestId,
+          options?.signal
         );
-
-        this._insideInferenceLoop = true;
-        let aborted = false;
         try {
-          for await (const chunk of result.toUIMessageStream()) {
-            if (options?.signal?.aborted) {
-              aborted = true;
-              break;
+          const chatBody = async () => {
+            let result: StreamableResult;
+            try {
+              result = await agentContext.run(
+                {
+                  agent: this,
+                  connection: undefined,
+                  request: undefined,
+                  email: undefined
+                },
+                () =>
+                  this._runInferenceLoop({
+                    signal: abortSignal,
+                    continuation: false
+                  })
+              );
+            } catch (error) {
+              const wrapped = this.onChatError(error);
+              const errorMessage =
+                wrapped instanceof Error ? wrapped.message : String(wrapped);
+              if (callback.onError) {
+                await callback.onError(errorMessage);
+                return;
+              }
+              throw wrapped;
             }
-            accumulator.applyChunk(chunk as unknown as StreamChunkData);
-            await callback.onEvent(JSON.stringify(chunk));
+
+            await this._streamResultToRpcCallback(
+              requestId,
+              result,
+              callback,
+              abortSignal
+            );
+          };
+
+          if (this.chatRecovery) {
+            await this.runFiber(
+              `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
+              async () => {
+                await chatBody();
+              }
+            );
+          } else {
+            await chatBody();
           }
         } finally {
-          this._insideInferenceLoop = false;
+          detachExternal();
+          this._aborts.remove(requestId);
         }
-
-        const assistantMsg = accumulator.toMessage();
-        this._persistAssistantMessage(assistantMsg);
-
-        if (!aborted) {
-          await callback.onDone();
-          await this._fireResponseHook({
-            message: assistantMsg,
-            requestId,
-            continuation: false,
-            status: "completed"
-          });
-        } else {
-          await this._fireResponseHook({
-            message: assistantMsg,
-            requestId,
-            continuation: false,
-            status: "aborted"
-          });
-        }
-      } catch (error) {
-        const assistantMsg =
-          accumulator.parts.length > 0 ? accumulator.toMessage() : null;
-        if (assistantMsg) {
-          this._persistAssistantMessage(assistantMsg);
-        }
-
-        const wrapped = this.onChatError(error);
-        const errorMessage =
-          wrapped instanceof Error ? wrapped.message : String(wrapped);
-
-        if (assistantMsg) {
-          await this._fireResponseHook({
-            message: assistantMsg,
-            requestId,
-            continuation: false,
-            status: "error",
-            error: errorMessage
-          });
-        }
-
-        if (callback.onError) {
-          await callback.onError(errorMessage);
-        } else {
-          throw wrapped;
-        }
-      }
+      });
     });
   }
 
@@ -3823,6 +3805,129 @@ export class Think<
     );
   }
 
+  private async _streamResultToRpcCallback(
+    requestId: string,
+    result: StreamableResult,
+    callback: StreamCallback,
+    abortSignal?: AbortSignal
+  ): Promise<void> {
+    const streamId = this._resumableStream.start(requestId);
+    const accumulator = new StreamAccumulator({
+      messageId: crypto.randomUUID()
+    });
+
+    let streamFinalized = false;
+    let assistantMsg: UIMessage | null = null;
+    let aborted = false;
+
+    try {
+      this._insideInferenceLoop = true;
+      let chunksSinceFlush = 0;
+      let hasFlushedContent = false;
+      try {
+        for await (const chunk of result.toUIMessageStream()) {
+          if (abortSignal?.aborted) {
+            aborted = true;
+            break;
+          }
+
+          // RPC callbacks receive serialized UIMessage chunks directly; unlike
+          // the WebSocket protocol, there is no wrapper frame to rewrite for
+          // accumulator actions such as `error`.
+          const streamChunk = chunk as unknown as StreamChunkData;
+          accumulator.applyChunk(streamChunk);
+          const chunkBody = JSON.stringify(chunk);
+          this._resumableStream.storeChunk(streamId, chunkBody);
+          chunksSinceFlush++;
+          if (
+            this._shouldFlushRpcStreamChunk(
+              streamChunk,
+              chunksSinceFlush,
+              hasFlushedContent
+            )
+          ) {
+            this._resumableStream.flushBuffer();
+            chunksSinceFlush = 0;
+            hasFlushedContent = true;
+          }
+          await callback.onEvent(chunkBody);
+        }
+      } finally {
+        this._insideInferenceLoop = false;
+      }
+
+      this._resumableStream.complete(streamId);
+      streamFinalized = true;
+
+      assistantMsg = accumulator.toMessage();
+      this._persistAssistantMessage(assistantMsg);
+
+      if (!aborted) {
+        await callback.onDone();
+        await this._fireResponseHook({
+          message: assistantMsg,
+          requestId,
+          continuation: false,
+          status: "completed"
+        });
+      } else {
+        await this._fireResponseHook({
+          message: assistantMsg,
+          requestId,
+          continuation: false,
+          status: "aborted"
+        });
+      }
+    } catch (error) {
+      if (!streamFinalized) {
+        this._resumableStream.markError(streamId);
+        streamFinalized = true;
+      }
+
+      if (!assistantMsg && accumulator.parts.length > 0) {
+        assistantMsg = accumulator.toMessage();
+        this._persistAssistantMessage(assistantMsg);
+      }
+
+      const wrapped = this.onChatError(error);
+      const errorMessage =
+        wrapped instanceof Error ? wrapped.message : String(wrapped);
+
+      if (assistantMsg) {
+        await this._fireResponseHook({
+          message: assistantMsg,
+          requestId,
+          continuation: false,
+          status: "error",
+          error: errorMessage
+        });
+      }
+
+      if (callback.onError) {
+        await callback.onError(errorMessage);
+      } else {
+        throw wrapped;
+      }
+    }
+  }
+
+  private _shouldFlushRpcStreamChunk(
+    chunk: StreamChunkData,
+    chunksSinceFlush: number,
+    hasFlushedContent: boolean
+  ): boolean {
+    const isRecoverableContent =
+      chunk.type === "text-delta" ||
+      chunk.type === "reasoning-delta" ||
+      chunk.type === "tool-input-available" ||
+      chunk.type === "tool-output-available" ||
+      chunk.type === "tool-output-error";
+
+    return (
+      isRecoverableContent && (!hasFlushedContent || chunksSinceFlush >= 10)
+    );
+  }
+
   private async _streamResult(
     requestId: string,
     result: StreamableResult,
@@ -4179,18 +4284,24 @@ export class Think<
     const requestId = ctx.name.slice(chatPrefix.length);
 
     let streamId = "";
+    let streamStatus: "streaming" | "completed" | "error" | undefined;
     if (requestId) {
-      const rows = this.sql<{ id: string }>`
-        SELECT id FROM cf_ai_chat_stream_metadata
+      const rows = this.sql<{
+        id: string;
+        status: "streaming" | "completed" | "error";
+      }>`
+        SELECT id, status FROM cf_ai_chat_stream_metadata
         WHERE request_id = ${requestId}
         ORDER BY created_at DESC LIMIT 1
       `;
       if (rows.length > 0) {
         streamId = rows[0].id;
+        streamStatus = rows[0].status;
       }
     }
     if (!streamId && this._resumableStream.hasActiveStream()) {
       streamId = this._resumableStream.activeStreamId ?? "";
+      streamStatus = "streaming";
     }
 
     const partial = streamId
@@ -4214,7 +4325,10 @@ export class Think<
       this._resumableStream.hasActiveStream() &&
       this._resumableStream.activeStreamId === streamId;
 
-    if (options.persist !== false && streamStillActive) {
+    const streamIsTerminal =
+      streamStatus === "completed" || streamStatus === "error";
+
+    if (options.persist !== false && (streamStillActive || streamIsTerminal)) {
       this._persistOrphanedStream(streamId);
     }
 
@@ -4222,12 +4336,24 @@ export class Think<
       this._resumableStream.complete(streamId);
     }
 
-    const recoveredRequestId =
-      options.continue !== false && this._hasRunningSubmission(requestId)
-        ? requestId
-        : undefined;
+    const canContinue = options.continue !== false && !streamIsTerminal;
+    const hasRunningSubmission = this._hasRunningSubmission(requestId);
 
-    if (options.continue !== false) {
+    if (streamIsTerminal && hasRunningSubmission) {
+      await this._completeRecoveredSubmission(
+        requestId,
+        streamStatus === "completed" ? "completed" : "error",
+        requestId,
+        streamStatus === "completed"
+          ? null
+          : "Recovered chat stream had already errored."
+      );
+    }
+
+    const recoveredRequestId =
+      canContinue && hasRunningSubmission ? requestId : undefined;
+
+    if (canContinue) {
       const lastLeaf = this.session.getLatestLeaf();
       const targetId = lastLeaf?.role === "assistant" ? lastLeaf.id : undefined;
       await this.schedule(
@@ -4239,7 +4365,7 @@ export class Think<
         },
         { idempotent: true }
       );
-    } else {
+    } else if (options.continue === false && !streamIsTerminal) {
       await this._markRecoveredSubmissionInterrupted(
         requestId,
         "Submission was interrupted and chat recovery was disabled."

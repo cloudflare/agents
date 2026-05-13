@@ -344,14 +344,10 @@ describe("Think chat recovery e2e", () => {
     wrangler = startWrangler();
     await waitForReady();
 
-    await callHelperParent("startHelperTurn", [
+    await callHelperParent("startHelperChatTurn", [
       HELPER_NAME,
       "Tell me a helper story"
     ]);
-
-    // Wait long enough for buffered helper chunks to flush to SQLite before
-    // the simulated eviction.
-    await sleep(6000);
 
     const hasFibers = (await callHelperParent("helperHasFiberRows", [
       HELPER_NAME

@@ -51,6 +51,9 @@ return Response.json({
 
 `submitMessages()` stores pending work first and appends the messages to the conversation `Session` only when the submission starts executing. It accepts serializable `UIMessage[]` values, not the function form supported by `saveMessages((messages) => ...)`.
 
+For Think-specific guidance that also compares raw child `chat()` calls with
+agent tools, see [Choosing a turn API](./think/index.md#choosing-a-turn-api).
+
 ### When to use `saveMessages` vs `onChatResponse`
 
 **Use `saveMessages` when you control the trigger** — schedule callbacks, webhooks, email handlers, or any method where you decide when to inject a message.

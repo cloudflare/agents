@@ -5,9 +5,14 @@
  */
 import { createWorkersAI } from "workers-ai-provider";
 import { Agent, callable, routeAgentRequest } from "agents";
+import { RpcTarget } from "cloudflare:workers";
 import type { LanguageModel, UIMessage } from "ai";
 import { Think, Workspace } from "../think";
-import type { ChatRecoveryContext, ChatRecoveryOptions } from "../think";
+import type {
+  ChatRecoveryContext,
+  ChatRecoveryOptions,
+  StreamCallback
+} from "../think";
 
 type Env = {
   TestAssistant: DurableObjectNamespace<TestAssistant>;
@@ -142,27 +147,64 @@ export class ThinkRecoveryE2EAgent extends Think<Env> {
   }
 }
 
-export class ThinkRecoveryHelperAgent extends ThinkRecoveryE2EAgent {
-  async startSlowTurn(prompt: string): Promise<string> {
-    void this.saveMessages([
-      {
-        id: crypto.randomUUID(),
-        role: "user",
-        parts: [{ type: "text", text: prompt }]
-      }
-    ]).catch(console.error);
-
-    return "started";
-  }
-}
+export class ThinkRecoveryHelperAgent extends ThinkRecoveryE2EAgent {}
 
 export class ThinkRecoveryHelperParent extends Agent<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
 
   @callable()
-  async startHelperTurn(helperName: string, prompt: string): Promise<string> {
+  async startHelperChatTurn(
+    helperName: string,
+    prompt: string
+  ): Promise<string> {
     const helper = await this.subAgent(ThinkRecoveryHelperAgent, helperName);
-    return helper.startSlowTurn(prompt);
+
+    let markReady: () => void = () => {};
+    const ready = new Promise<void>((resolve) => {
+      markReady = resolve;
+    });
+
+    class HelperChatCallback extends RpcTarget implements StreamCallback {
+      onEvent(json: string): void {
+        try {
+          const chunk = JSON.parse(json) as { type?: string; delta?: string };
+          if (chunk.type === "text-delta" && chunk.delta) {
+            markReady();
+          }
+        } catch {
+          // Ignore malformed test chunks.
+        }
+      }
+
+      onDone(): void {
+        markReady();
+      }
+
+      onError(error: string): void {
+        markReady();
+        console.error("[test] helper chat callback error:", error);
+      }
+    }
+
+    const callback = new HelperChatCallback();
+    void helper.chat(prompt, callback).catch(console.error);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race<void>([
+        ready,
+        new Promise<void>((_resolve, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error("Timed out waiting for helper chat chunk")),
+            5_000
+          );
+        })
+      ]);
+    } finally {
+      if (timeout !== undefined) {
+        clearTimeout(timeout);
+      }
+    }
+    return "started";
   }
 
   @callable()
