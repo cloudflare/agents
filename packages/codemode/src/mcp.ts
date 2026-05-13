@@ -225,9 +225,7 @@ export async function codeMcpServer(
         };
       } catch (error) {
         return {
-          content: [
-            { type: "text" as const, text: `Error: ${formatError(error)}` }
-          ],
+          content: [{ type: "text" as const, text: formatError(error) }],
           isError: true
         };
       }
@@ -463,9 +461,7 @@ async () => {
         };
       } catch (error) {
         return {
-          content: [
-            { type: "text" as const, text: `Error: ${formatError(error)}` }
-          ],
+          content: [{ type: "text" as const, text: formatError(error) }],
           isError: true
         };
       }
@@ -515,9 +511,7 @@ async () => {
         };
       } catch (error) {
         return {
-          content: [
-            { type: "text" as const, text: `Error: ${formatError(error)}` }
-          ],
+          content: [{ type: "text" as const, text: formatError(error) }],
           isError: true
         };
       }

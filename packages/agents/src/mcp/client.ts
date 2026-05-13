@@ -1,4 +1,8 @@
-import { runCode, type Executor } from "@cloudflare/codemode";
+import {
+  runCode,
+  type Executor,
+  type ResolvedProvider
+} from "@cloudflare/codemode";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
@@ -1555,14 +1559,16 @@ export class MCPClientManager {
       );
     }
     const result = await runCode({
-      code: codeCallingClientTool(tool.code, args),
+      code: invokeClientToolCode(tool.code, args),
       executor: this._codeExecutor,
       providers: [this.createClientToolMcpClientProvider(tool.serverId)]
     });
     return result.result;
   }
 
-  private createClientToolMcpClientProvider(serverId: string) {
+  private createClientToolMcpClientProvider(
+    serverId: string
+  ): ResolvedProvider {
     return {
       name: "client",
       fns: {
@@ -1964,7 +1970,7 @@ type ProxyVisibleTool = {
   code?: string;
 };
 
-function codeCallingClientTool(
+function invokeClientToolCode(
   code: string,
   args: Record<string, unknown>
 ): string {
