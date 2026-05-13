@@ -1652,6 +1652,58 @@ describe("Think — onChatRecovery", () => {
     ).toBe("Already done");
   });
 
+  it("does not duplicate an already-persisted completed stream on recovery", async () => {
+    const agent = await freshRecoveryAgent("completed-stream-existing-message");
+
+    await agent.persistTestMessage({
+      id: "a-existing-completed",
+      role: "assistant",
+      parts: [{ type: "text", text: "Already persisted" }]
+    });
+    await agent.insertInterruptedStream(
+      "stream-existing-completed",
+      "req-existing-completed",
+      [
+        {
+          body: JSON.stringify({
+            type: "start",
+            messageId: "a-existing-completed"
+          }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({
+            type: "text-delta",
+            delta: "Already persisted"
+          }),
+          index: 2
+        },
+        { body: JSON.stringify({ type: "text-end" }), index: 3 },
+        { body: JSON.stringify({ type: "finish" }), index: 4 }
+      ],
+      "completed"
+    );
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-existing-completed"
+    );
+
+    await agent.triggerFiberRecovery();
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(1);
+    expect(messages[0].id).toBe("a-existing-completed");
+    expect(messages[0].role).toBe("assistant");
+    expect(
+      messages[0].parts
+        .filter((part): part is { type: "text"; text: string } => {
+          return part.type === "text" && "text" in part;
+        })
+        .map((part) => part.text)
+        .join("")
+    ).toBe("Already persisted");
+  });
+
   it("{ persist: false, continue: false } skips both", async () => {
     const agent = await freshRecoveryAgent("skip-both");
 

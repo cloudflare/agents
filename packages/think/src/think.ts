@@ -3856,11 +3856,11 @@ export class Think<
         this._insideInferenceLoop = false;
       }
 
-      assistantMsg = accumulator.toMessage();
-      this._persistAssistantMessage(assistantMsg);
-
       this._resumableStream.complete(streamId);
       streamFinalized = true;
+
+      assistantMsg = accumulator.toMessage();
+      this._persistAssistantMessage(assistantMsg);
 
       if (!aborted) {
         await callback.onDone();
