@@ -69,6 +69,20 @@ describe("ToolDispatcher", () => {
     expect(data.result).toBe("ok");
     expect(noArgs).toHaveBeenCalledWith({});
   });
+
+  it("should preserve Uint8Array results", async () => {
+    const dispatcher = new ToolDispatcher({
+      bytes: async () => new Uint8Array([1, 2, 3])
+    });
+
+    const resJson = await dispatcher.call("bytes", "{}");
+    const data = JSON.parse(resJson);
+
+    expect(data.result).toEqual({
+      __cloudflare_codemode_binary_v1__: "Uint8Array",
+      data: "AQID"
+    });
+  });
 });
 
 describe("DynamicWorkerExecutor", () => {
@@ -96,6 +110,26 @@ describe("DynamicWorkerExecutor", () => {
 
     expect(result.result).toBe(7);
     expect(add).toHaveBeenCalledWith({ a: 3, b: 4 });
+  });
+
+  it("should preserve Uint8Array tool arguments and results", async () => {
+    const accept = vi.fn(async (...args: unknown[]) => {
+      const input = args[0] as { bytes: Uint8Array };
+      expect(input.bytes).toBeInstanceOf(Uint8Array);
+      return input.bytes;
+    });
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute(
+      `async () => {
+        const bytes = await codemode.accept({ bytes: new Uint8Array([1, 2, 3]) });
+        return { isBytes: bytes instanceof Uint8Array, values: Array.from(bytes) };
+      }`,
+      [codemodeProvider({ accept })]
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toEqual({ isBytes: true, values: [1, 2, 3] });
   });
 
   it("should handle multiple sequential tool calls", async () => {

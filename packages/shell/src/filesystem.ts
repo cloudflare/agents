@@ -618,7 +618,7 @@ export class Workspace {
     if (normalized === "/")
       throw new Error("EISDIR: cannot write to root directory");
 
-    const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
+    const bytes = normalizeBytes(data);
     const size = bytes.byteLength;
     const parentPath = getParent(normalized);
     const name = getBasename(normalized);
@@ -1541,6 +1541,12 @@ export class Workspace {
 }
 
 // ── Base64 helpers ───────────────────────────────────────────────────
+
+function normalizeBytes(data: Uint8Array | ArrayBuffer): Uint8Array {
+  if (data instanceof Uint8Array) return data;
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  throw new TypeError("writeFileBytes expected Uint8Array or ArrayBuffer");
+}
 
 function bytesToBase64(bytes: Uint8Array): string {
   const CHUNK = 8192;

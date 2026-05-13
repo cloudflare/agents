@@ -85,6 +85,26 @@ describe("stateTools", () => {
     );
   });
 
+  it("supports binary file writes and reads inside the sandbox", async () => {
+    const backend = createMemoryStateBackend();
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute(
+      `async () => {
+        await state.writeFileBytes("/codemode.bin", new Uint8Array([1, 2, 3, 4, 5]));
+        const bytes = await state.readFileBytes("/codemode.bin");
+        return { isBytes: bytes instanceof Uint8Array, values: Array.from(bytes) };
+      }`,
+      stateProviders(backend)
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toEqual({ isBytes: true, values: [1, 2, 3, 4, 5] });
+    await expect(backend.readFileBytes("/codemode.bin")).resolves.toEqual(
+      new Uint8Array([1, 2, 3, 4, 5])
+    );
+  });
+
   it("supports search and replace helpers inside the sandbox", async () => {
     const backend = createMemoryStateBackend({
       files: {

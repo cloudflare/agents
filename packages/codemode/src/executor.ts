@@ -21,6 +21,123 @@ export type {
   ResolvedProvider
 } from "./executor-types";
 
+const BINARY_TAG = "__cloudflare_codemode_binary_v1__";
+
+type EncodedBinary = {
+  [BINARY_TAG]: "Uint8Array" | "ArrayBuffer" | "ArrayBufferView";
+  data: string;
+};
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.byteLength; i += chunkSize) {
+    binary += String.fromCharCode(
+      ...bytes.subarray(i, Math.min(i + chunkSize, bytes.byteLength))
+    );
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function encodeCodemodeValue(value: unknown): unknown {
+  if (value instanceof Uint8Array) {
+    return { [BINARY_TAG]: "Uint8Array", data: bytesToBase64(value) };
+  }
+  if (value instanceof ArrayBuffer) {
+    return {
+      [BINARY_TAG]: "ArrayBuffer",
+      data: bytesToBase64(new Uint8Array(value))
+    };
+  }
+  if (ArrayBuffer.isView(value)) {
+    const view = value as ArrayBufferView;
+    return {
+      [BINARY_TAG]: "ArrayBufferView",
+      data: bytesToBase64(
+        new Uint8Array(view.buffer, view.byteOffset, view.byteLength)
+      )
+    };
+  }
+  return value;
+}
+
+function decodeCodemodeValue(value: unknown): unknown {
+  if (!value || typeof value !== "object" || !(BINARY_TAG in value)) {
+    return value;
+  }
+  const encoded = value as EncodedBinary;
+  if (typeof encoded.data !== "string") return value;
+  const bytes = base64ToBytes(encoded.data);
+  if (encoded[BINARY_TAG] === "ArrayBuffer") {
+    return bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength
+    );
+  }
+  return bytes;
+}
+
+function stringifyForCodemode(value: unknown): string {
+  return JSON.stringify(value, (_key, nested) => encodeCodemodeValue(nested));
+}
+
+function parseForCodemode(json: string): unknown {
+  return JSON.parse(json, (_key, nested) => decodeCodemodeValue(nested));
+}
+
+const SANDBOX_CODEC = String.raw`
+    const __CODEMODE_BINARY_TAG = "__cloudflare_codemode_binary_v1__";
+    function __bytesToBase64(bytes) {
+      let binary = "";
+      const chunkSize = 0x8000;
+      for (let i = 0; i < bytes.byteLength; i += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + chunkSize, bytes.byteLength)));
+      }
+      return btoa(binary);
+    }
+    function __base64ToBytes(b64) {
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    }
+    function __encodeCodemodeValue(value) {
+      if (value instanceof Uint8Array) {
+        return { [__CODEMODE_BINARY_TAG]: "Uint8Array", data: __bytesToBase64(value) };
+      }
+      if (value instanceof ArrayBuffer) {
+        return { [__CODEMODE_BINARY_TAG]: "ArrayBuffer", data: __bytesToBase64(new Uint8Array(value)) };
+      }
+      if (ArrayBuffer.isView(value)) {
+        return { [__CODEMODE_BINARY_TAG]: "ArrayBufferView", data: __bytesToBase64(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) };
+      }
+      return value;
+    }
+    function __decodeCodemodeValue(value) {
+      if (!value || typeof value !== "object" || !(__CODEMODE_BINARY_TAG in value) || typeof value.data !== "string") return value;
+      const bytes = __base64ToBytes(value.data);
+      if (value[__CODEMODE_BINARY_TAG] === "ArrayBuffer") {
+        return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      }
+      return bytes;
+    }
+    function __stringifyForCodemode(value) {
+      return JSON.stringify(value, (_key, nested) => __encodeCodemodeValue(nested));
+    }
+    function __parseForCodemode(json) {
+      return JSON.parse(json, (_key, nested) => __decodeCodemodeValue(nested));
+    }
+`;
+
 // ── ToolProvider ──────────────────────────────────────────────────────
 
 /**
@@ -100,19 +217,19 @@ export class ToolDispatcher extends RpcTarget {
   async call(name: string, argsJson: string): Promise<string> {
     const fn = this.#fns[name];
     if (!fn) {
-      return JSON.stringify({ error: `Tool "${name}" not found` });
+      return stringifyForCodemode({ error: `Tool "${name}" not found` });
     }
     try {
       if (this.#positionalArgs) {
-        const args = argsJson ? JSON.parse(argsJson) : [];
+        const args = argsJson ? parseForCodemode(argsJson) : [];
         const result = await fn(...(Array.isArray(args) ? args : [args]));
-        return JSON.stringify({ result });
+        return stringifyForCodemode({ result });
       }
-      const args = argsJson ? JSON.parse(argsJson) : {};
+      const args = argsJson ? parseForCodemode(argsJson) : {};
       const result = await fn(args);
-      return JSON.stringify({ result });
+      return stringifyForCodemode({ result });
     } catch (err) {
-      return JSON.stringify({
+      return stringifyForCodemode({
         error: err instanceof Error ? err.message : String(err)
       });
     }
@@ -228,8 +345,8 @@ export class DynamicWorkerExecutor implements Executor {
         return (
           `    const ${p.name} = new Proxy({}, {\n` +
           `      get: (_, toolName) => async (...args) => {\n` +
-          `        const resJson = await __dispatchers.${p.name}.call(String(toolName), JSON.stringify(args));\n` +
-          `        const data = JSON.parse(resJson);\n` +
+          `        const resJson = await __dispatchers.${p.name}.call(String(toolName), __stringifyForCodemode(args));\n` +
+          `        const data = __parseForCodemode(resJson);\n` +
           `        if (data.error) throw new Error(data.error);\n` +
           `        return data.result;\n` +
           `      }\n` +
@@ -239,8 +356,8 @@ export class DynamicWorkerExecutor implements Executor {
       return (
         `    const ${p.name} = new Proxy({}, {\n` +
         `      get: (_, toolName) => async (args) => {\n` +
-        `        const resJson = await __dispatchers.${p.name}.call(String(toolName), JSON.stringify(args ?? {}));\n` +
-        `        const data = JSON.parse(resJson);\n` +
+        `        const resJson = await __dispatchers.${p.name}.call(String(toolName), __stringifyForCodemode(args ?? {}));\n` +
+        `        const data = __parseForCodemode(resJson);\n` +
         `        if (data.error) throw new Error(data.error);\n` +
         `        return data.result;\n` +
         `      }\n` +
@@ -257,6 +374,7 @@ export class DynamicWorkerExecutor implements Executor {
       '    console.log = (...a) => { __logs.push(a.map(String).join(" ")); };',
       '    console.warn = (...a) => { __logs.push("[warn] " + a.map(String).join(" ")); };',
       '    console.error = (...a) => { __logs.push("[error] " + a.map(String).join(" ")); };',
+      SANDBOX_CODEC,
       ...proxyInits,
       "",
       "    try {",
