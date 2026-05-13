@@ -228,6 +228,18 @@ describe("DynamicWorkerExecutor", () => {
     expect(searchWeb).toHaveBeenCalledTimes(1);
   });
 
+  it("should return a clear error for provider names reserved by the sandbox codec", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute("async () => 42", [
+      { name: "__stringifyForCodemode", fns: {} }
+    ]);
+
+    expect(result.error).toBe(
+      'Provider name "__stringifyForCodemode" is reserved'
+    );
+  });
+
   it("should return error when code throws", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 

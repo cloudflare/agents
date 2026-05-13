@@ -314,7 +314,17 @@ export class DynamicWorkerExecutor implements Executor {
     const timeoutMs = this.#timeout;
 
     // Validate provider names.
-    const RESERVED_NAMES = new Set(["__dispatchers", "__logs"]);
+    const RESERVED_NAMES = new Set([
+      "__dispatchers",
+      "__logs",
+      "__CODEMODE_BINARY_TAG",
+      "__bytesToBase64",
+      "__base64ToBytes",
+      "__encodeCodemodeValue",
+      "__decodeCodemodeValue",
+      "__stringifyForCodemode",
+      "__parseForCodemode"
+    ]);
     const VALID_IDENT = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
     const seenNames = new Set<string>();
     for (const provider of providers) {
