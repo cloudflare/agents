@@ -4037,6 +4037,51 @@ describe("MCPClientManager OAuth Integration", () => {
     });
   });
   describe("unstable_getProxyTool", () => {
+    it("persists RPC client extensions in the same server_options shape as HTTP servers", () => {
+      manager.saveRpcServerToStorage(
+        "rpc-id",
+        "github",
+        "github",
+        "GitHubMCP",
+        {
+          props: { installationId: "123" },
+          instructions: "Use for GitHub pull requests.",
+          tools: {
+            list_open_prs: {
+              description: "List open pull requests.",
+              inputSchema: {
+                type: "object",
+                properties: { repo: { type: "string" } },
+                required: ["repo"]
+              },
+              code: `async ({ repo }) => server.callTool("list_pull_requests", { repo, state: "open" })`
+            }
+          }
+        }
+      );
+
+      const saved = manager
+        .listServers()
+        .find((server) => server.id === "rpc-id");
+      expect(saved).toBeDefined();
+      expect(JSON.parse(saved?.server_options ?? "{}")).toEqual({
+        bindingName: "GitHubMCP",
+        props: { installationId: "123" },
+        instructions: "Use for GitHub pull requests.",
+        tools: {
+          list_open_prs: {
+            description: "List open pull requests.",
+            inputSchema: {
+              type: "object",
+              properties: { repo: { type: "string" } },
+              required: ["repo"]
+            },
+            code: `async ({ repo }) => server.callTool("list_pull_requests", { repo, state: "open" })`
+          }
+        }
+      });
+    });
+
     it("documents exact proxy output for status, server, search, describe, and tool execution", async () => {
       const id = "github-id";
       const executor = { execute: vi.fn() };

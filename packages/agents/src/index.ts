@@ -8331,7 +8331,7 @@ export class Agent<
           serverName,
           normalizedName,
           bindingName,
-          rpcOpts?.props
+          rpcOpts
         );
       }
       this.mcp.registerClientExtensions(id, rpcOpts);
