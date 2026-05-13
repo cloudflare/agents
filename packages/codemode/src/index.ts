@@ -1,5 +1,6 @@
 export {
   executeCode,
+  type CodeGlobals,
   type ExecuteCodeOptions,
   type ExecuteCodeOutput
 } from "./execute-code";

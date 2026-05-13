@@ -87,7 +87,7 @@ export class Chat extends AIChatAgent<Env> {
             required: ["owner", "repo"]
           },
           code: `async ({ owner, repo }) => {
-            return await server.callTool({
+            return await client.callTool({
               name: "list_pull_requests",
               arguments: {
                 owner,

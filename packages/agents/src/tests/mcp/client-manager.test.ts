@@ -4091,7 +4091,7 @@ describe("MCPClientManager OAuth Integration", () => {
                 properties: { repo: { type: "string" } },
                 required: ["repo"]
               },
-              code: `async ({ repo }) => server.callTool({ name: "list_pull_requests", arguments: { repo, state: "open" } })`
+              code: `async ({ repo }) => client.callTool({ name: "list_pull_requests", arguments: { repo, state: "open" } })`
             }
           }
         }
@@ -4113,7 +4113,7 @@ describe("MCPClientManager OAuth Integration", () => {
               properties: { repo: { type: "string" } },
               required: ["repo"]
             },
-            code: `async ({ repo }) => server.callTool({ name: "list_pull_requests", arguments: { repo, state: "open" } })`
+            code: `async ({ repo }) => client.callTool({ name: "list_pull_requests", arguments: { repo, state: "open" } })`
           }
         }
       });
@@ -4141,7 +4141,7 @@ describe("MCPClientManager OAuth Integration", () => {
               required: ["owner", "repo"]
             },
             code: `async ({ owner, repo }) => {
-              return await server.callTool({ name: "list_pull_requests", arguments: { owner, repo, state: "open" } });
+              return await client.callTool({ name: "list_pull_requests", arguments: { owner, repo, state: "open" } });
             }`
           }
         }
@@ -4241,7 +4241,7 @@ Parameters:
         )
       ).resolves.toEqual({ toolResult: { ok: true } });
       expect(executor.execute).toHaveBeenCalledWith(
-        expect.stringContaining("server.callTool"),
+        expect.stringContaining("client.callTool"),
         expect.any(Array)
       );
       expect(callTool).toHaveBeenCalledWith({

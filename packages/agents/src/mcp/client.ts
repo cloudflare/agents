@@ -1,8 +1,4 @@
-import {
-  executeCode,
-  type Executor,
-  type ToolProvider
-} from "@cloudflare/codemode";
+import { executeCode, type Executor } from "@cloudflare/codemode";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
@@ -1559,34 +1555,25 @@ export class MCPClientManager {
     const result = await executeCode({
       code: tool.code,
       executor: this._codeExecutor,
-      tools: [this.createClientToolServerProvider(tool.serverId)]
+      globals: { client: this.createClientToolMcpClient(tool.serverId) }
     });
     return result.result;
   }
 
-  private createClientToolServerProvider(serverId: string): ToolProvider {
+  private createClientToolMcpClient(serverId: string) {
     return {
-      name: "server",
-      tools: {
-        callTool: {
-          description: "Call a tool on this MCP server.",
-          execute: async (params: unknown) => {
-            if (!isRecord(params)) {
-              throw new Error("server.callTool expects MCP callTool params.");
-            }
-            return this.callTool({
-              ...params,
-              serverId,
-              name: String(params.name),
-              arguments: isRecord(params.arguments) ? params.arguments : {}
-            });
-          }
-        },
-        listTools: {
-          description: "List tools available on this MCP server.",
-          execute: async () => this.getProxyCapabilities(serverId).tools
+      callTool: async (params: unknown) => {
+        if (!isRecord(params)) {
+          throw new Error("client.callTool expects MCP callTool params.");
         }
-      }
+        return this.callTool({
+          ...params,
+          serverId,
+          name: String(params.name),
+          arguments: isRecord(params.arguments) ? params.arguments : {}
+        });
+      },
+      listTools: async () => this.getProxyCapabilities(serverId).tools
     };
   }
 
