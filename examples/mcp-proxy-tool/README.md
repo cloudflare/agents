@@ -4,18 +4,21 @@ This example shows how to expose MCP server capabilities through one model-facin
 
 ```ts
 tools: {
-  mcp: this.mcp.unstable_getProxyTool()
+  mcp: this.mcp.unstable_getProxyTool();
 }
 ```
 
 The proxy supports progressive discovery without putting every MCP tool in the model context:
 
 ```ts
-mcp({})
-mcp({ server: "github" })
-mcp({ search: "pull request" })
-mcp({ describe: "github_list_open_prs" })
-mcp({ tool: "github_list_open_prs", args: { owner: "cloudflare", repo: "agents" } })
+mcp({});
+mcp({ server: "github" });
+mcp({ search: "pull request" });
+mcp({ describe: "github_list_open_prs" });
+mcp({
+  tool: "github_list_open_prs",
+  args: { owner: "cloudflare", repo: "agents" }
+});
 ```
 
 ## What this example demonstrates

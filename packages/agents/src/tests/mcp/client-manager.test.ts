@@ -4134,7 +4134,7 @@ Parameters:
 
       const callTool = vi
         .spyOn(manager, "callTool")
-        .mockResolvedValue({ ok: true });
+        .mockResolvedValue({ toolResult: { ok: true } });
       executor.execute.mockImplementation(async (_code: string, providers) => {
         const serverProvider = providers[0];
         return {
@@ -4154,7 +4154,7 @@ Parameters:
           },
           {} as ToolCallOptions
         )
-      ).resolves.toEqual({ ok: true });
+      ).resolves.toEqual({ toolResult: { ok: true } });
       expect(executor.execute).toHaveBeenCalledWith(
         expect.stringContaining("server.callTool"),
         expect.any(Array)

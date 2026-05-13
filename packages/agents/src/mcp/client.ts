@@ -13,7 +13,7 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 import { type RetryOptions, tryN } from "../retries";
-import type { ToolSet, ToolCallOptions } from "ai";
+import type { ToolSet } from "ai";
 import { z } from "zod";
 import { nanoid } from "nanoid";
 import { Emitter, type Event, DisposableStore } from "../core/events";
@@ -197,6 +197,7 @@ export type MCPServerOptions = {
   /** Retry options for connection and reconnection attempts */
   retry?: RetryOptions;
   instructions?: string;
+  tools?: MCPClientToolRecord;
   capabilityCache?: MCPCapabilityCache;
 };
 

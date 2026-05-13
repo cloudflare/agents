@@ -10,8 +10,8 @@
   },
   "dependencies": {
     "@cloudflare/ai-chat": "*",
-    "@cloudflare/kumo": "^2.0.2",
     "@cloudflare/codemode": "*",
+    "@cloudflare/kumo": "^2.0.2",
     "@modelcontextprotocol/sdk": "*",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
