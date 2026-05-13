@@ -928,12 +928,90 @@ export class Think<
    * Used as fallback when no context blocks are configured via `configureSession`.
    */
   getSystemPrompt(): string {
-    return "You are a helpful assistant.";
+    return [
+      "You are a careful, capable assistant helping the user complete their task.",
+      "Use available tools when they materially improve accuracy or let you act on the user's request. Before changing code, understand the relevant context: existing patterns, dependencies, tests, and nearby conventions.",
+      "Keep changes focused on the user's request. Prefer small, idiomatic edits over broad rewrites or new abstractions. Do not introduce new dependencies, secrets, destructive actions, or persistent side effects unless the user clearly asks or approves.",
+      "When the task is complex, briefly state your approach and keep the user informed with concise progress updates. If you modify code, verify with the smallest relevant test, build, typecheck, lint, or runtime check available, and report any checks you could not run.",
+      "Be direct and useful in your final response: summarize the outcome, mention important files or commands, and call out real blockers or risks."
+    ].join("\n\n");
   }
 
   /** Return the tools available to the assistant. */
   getTools(): ToolSet {
     return {};
+  }
+
+  private _systemPromptForTurn(baseSystem: string, tools: ToolSet): string {
+    if (baseSystem.includes("You are running inside a Think agent.")) {
+      return baseSystem;
+    }
+
+    return `${baseSystem.trimEnd()}\n\n${this._buildThinkCapabilityBlock(tools)}`;
+  }
+
+  private _buildThinkCapabilityBlock(tools: ToolSet): string {
+    const toolNames = new Set(Object.keys(tools));
+    const hasTools = toolNames.size > 0;
+    const hasWorkspaceTools = [
+      "read",
+      "write",
+      "edit",
+      "list",
+      "find",
+      "grep",
+      "delete"
+    ].some((toolName) => toolNames.has(toolName));
+    const hasContextTools =
+      toolNames.has("load_context") || toolNames.has("unload_context");
+    const hasExtensionTools =
+      toolNames.has("load_extension") || toolNames.has("list_extensions");
+    const hasExecuteTool = toolNames.has("execute");
+
+    const lines = [
+      "You are running inside a Think agent.",
+      "",
+      "Capabilities available in this turn:"
+    ];
+
+    if (hasWorkspaceTools) {
+      lines.push(
+        "- You can inspect and edit the agent workspace using the available file tools."
+      );
+    }
+
+    if (hasTools) {
+      lines.push(
+        "- Use the tools exposed in this turn when they materially improve accuracy or let you act on the user's request. Treat tool descriptions and schemas as the source of truth."
+      );
+      lines.push(
+        "- Some tools may call server code, browser/client code, MCP servers, extensions, or delegated agents. Use them according to their descriptions."
+      );
+    }
+
+    if (hasContextTools) {
+      lines.push(
+        "- If context-loading tools are available, use them to load relevant memory, skills, or project context before acting on incomplete information."
+      );
+    }
+
+    if (hasExtensionTools) {
+      lines.push(
+        "- If extension tools are available, use them only when loading or inspecting extensions directly helps with the task."
+      );
+    }
+
+    if (hasExecuteTool) {
+      lines.push(
+        "- If sandboxed execution is available, prefer it for safe, bounded checks or coordinated multi-step operations."
+      );
+    }
+
+    lines.push(
+      "- Do not claim access to capabilities that are not exposed as tools in this turn."
+    );
+
+    return lines.join("\n");
   }
 
   /** Maximum number of tool-call steps per turn. Override via property or per-turn via TurnConfig. */
@@ -1252,7 +1330,8 @@ export class Think<
     };
 
     const frozenPrompt = await this.session.freezeSystemPrompt();
-    const system = frozenPrompt || this.getSystemPrompt();
+    const baseSystem = frozenPrompt || this.getSystemPrompt();
+    const system = this._systemPromptForTurn(baseSystem, tools);
 
     const history = this.session.getHistory();
     const truncated = truncateOlderMessages(history) as UIMessage[];
@@ -1279,7 +1358,12 @@ export class Think<
     const config = await this._pipelineExtensionBeforeTurn(ctx, subclassConfig);
 
     const finalModel = config.model ?? model;
-    const finalSystem = config.system ?? system;
+    const finalSystem =
+      config.system ??
+      this._systemPromptForTurn(
+        baseSystem,
+        config.tools ? { ...tools, ...config.tools } : tools
+      );
     const finalMessages = config.messages ?? messages;
     const mergedTools: ToolSet = config.tools
       ? { ...tools, ...config.tools }

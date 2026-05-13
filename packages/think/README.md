@@ -103,17 +103,19 @@ export class MyAgent extends Think<Env> {
 
 ### Configuration
 
-| Method / Property    | Default                          | Description                                     |
-| -------------------- | -------------------------------- | ----------------------------------------------- |
-| `getModel()`         | throws                           | Return the `LanguageModel` to use               |
-| `getSystemPrompt()`  | `"You are a helpful assistant."` | System prompt (fallback when no context blocks) |
-| `getTools()`         | `{}`                             | AI SDK `ToolSet` for the agentic loop           |
-| `maxSteps`           | `10`                             | Max tool-call rounds per turn (property)        |
-| `sendReasoning`      | `true`                           | Send reasoning chunks to chat clients           |
-| `configureSession()` | identity                         | Add context blocks, compaction, search, skills  |
-| `getExtensions()`    | `[]`                             | Sandboxed extension declarations (load order)   |
-| `extensionLoader`    | `undefined`                      | `WorkerLoader` binding — enables extensions     |
-| `chatRecovery`       | `true`                           | Wrap turns in `runFiber` for durable execution  |
+| Method / Property    | Default                            | Description                                     |
+| -------------------- | ---------------------------------- | ----------------------------------------------- |
+| `getModel()`         | throws                             | Return the `LanguageModel` to use               |
+| `getSystemPrompt()`  | careful assistant operating prompt | System prompt (fallback when no context blocks) |
+| `getTools()`         | `{}`                               | AI SDK `ToolSet` for the agentic loop           |
+| `maxSteps`           | `10`                               | Max tool-call rounds per turn (property)        |
+| `sendReasoning`      | `true`                             | Send reasoning chunks to chat clients           |
+| `configureSession()` | identity                           | Add context blocks, compaction, search, skills  |
+| `getExtensions()`    | `[]`                               | Sandboxed extension declarations (load order)   |
+| `extensionLoader`    | `undefined`                        | `WorkerLoader` binding — enables extensions     |
+| `chatRecovery`       | `true`                             | Wrap turns in `runFiber` for durable execution  |
+
+On each turn, Think appends a small capability block to the assembled system prompt. The block is based on the tools available for that turn, so models learn about workspace tools, context-loading tools, extension tools, sandboxed execution, MCP/client tools, and delegated-agent tools only when they are actually exposed.
 
 ### Lifecycle hooks
 
