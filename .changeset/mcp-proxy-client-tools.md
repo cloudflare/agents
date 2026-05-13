@@ -1,6 +1,6 @@
 ---
 "agents": patch
-"@cloudflare/codemode": minor
+"@cloudflare/codemode": patch
 ---
 
 Add an MCP proxy tool for progressive server/tool discovery and execution, including persisted client-side MCP code tools for Agents.
