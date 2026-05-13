@@ -1,4 +1,9 @@
 export {
+  executeCode,
+  type ExecuteCodeOptions,
+  type ExecuteCodeOutput
+} from "./execute-code";
+export {
   DynamicWorkerExecutor,
   ToolDispatcher,
   type DynamicWorkerExecutorOptions,

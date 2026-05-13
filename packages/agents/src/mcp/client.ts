@@ -1,5 +1,8 @@
-import type { Executor, ToolProvider } from "@cloudflare/codemode";
-import { createCodeTool } from "@cloudflare/codemode/ai";
+import {
+  executeCode,
+  type Executor,
+  type ToolProvider
+} from "@cloudflare/codemode";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
@@ -1541,20 +1544,12 @@ export class MCPClientManager {
           `Add a \`worker_loaders\` binding named \`LOADER\` to your Worker config.`
       );
     }
-    const codeTool = createCodeTool({
+    const result = await executeCode({
+      code: tool.code,
       executor: this._codeExecutor,
       tools: [this.createClientToolServerProvider(tool.serverId)]
     });
-    const result = await codeTool.execute?.(
-      { code: tool.code },
-      {} as Parameters<NonNullable<typeof codeTool.execute>>[1]
-    );
-    if (result && Symbol.asyncIterator in Object(result)) {
-      throw new Error(
-        "Client-side MCP tools must return a non-streaming result."
-      );
-    }
-    return (result as { result?: unknown } | undefined)?.result;
+    return result.result;
   }
 
   private createClientToolServerProvider(serverId: string): ToolProvider {
