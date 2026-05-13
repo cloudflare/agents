@@ -132,6 +132,77 @@ describe("DynamicWorkerExecutor", () => {
     expect(result.result).toEqual({ isBytes: true, values: [1, 2, 3] });
   });
 
+  it("should preserve Uint8Array positional tool arguments and results", async () => {
+    const accept = vi.fn(async (...args: unknown[]) => {
+      const [path, bytes] = args as [string, Uint8Array];
+      expect(path).toBe("/x.bin");
+      expect(bytes).toBeInstanceOf(Uint8Array);
+      expect(Array.from(bytes)).toEqual([1, 2, 3]);
+      return bytes;
+    });
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute(
+      `async () => {
+        const bytes = await state.accept("/x.bin", new Uint8Array([1, 2, 3]));
+        return { isBytes: bytes instanceof Uint8Array, values: Array.from(bytes) };
+      }`,
+      [{ name: "state", fns: { accept }, positionalArgs: true }]
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toEqual({ isBytes: true, values: [1, 2, 3] });
+  });
+
+  it("should preserve ArrayBuffer tool arguments and results", async () => {
+    const accept = vi.fn(async (...args: unknown[]) => {
+      const input = args[0] as { buffer: ArrayBuffer };
+      expect(input.buffer).toBeInstanceOf(ArrayBuffer);
+      expect(Array.from(new Uint8Array(input.buffer))).toEqual([4, 5, 6]);
+      return input.buffer;
+    });
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute(
+      `async () => {
+        const buffer = await codemode.accept({
+          buffer: new Uint8Array([4, 5, 6]).buffer
+        });
+        return {
+          isBuffer: buffer instanceof ArrayBuffer,
+          values: Array.from(new Uint8Array(buffer))
+        };
+      }`,
+      [codemodeProvider({ accept })]
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toEqual({ isBuffer: true, values: [4, 5, 6] });
+  });
+
+  it("should preserve only visible bytes from ArrayBuffer views", async () => {
+    const accept = vi.fn(async (...args: unknown[]) => {
+      const input = args[0] as { bytes: Uint8Array };
+      expect(input.bytes).toBeInstanceOf(Uint8Array);
+      expect(Array.from(input.bytes)).toEqual([20, 30]);
+      return input.bytes;
+    });
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute(
+      `async () => {
+        const source = new Uint8Array([10, 20, 30, 40]);
+        const view = source.subarray(1, 3);
+        const bytes = await codemode.accept({ bytes: view });
+        return Array.from(bytes);
+      }`,
+      [codemodeProvider({ accept })]
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toEqual([20, 30]);
+  });
+
   it("should handle multiple sequential tool calls", async () => {
     const getWeather = vi.fn(async () => ({ temp: 72 }));
     const searchWeb = vi.fn(async (...args: unknown[]) => {
