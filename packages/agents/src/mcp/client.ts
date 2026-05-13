@@ -175,17 +175,17 @@ export type MCPClientTool = {
 
 export type MCPClientToolRecord = Record<string, MCPClientTool>;
 
-export type MCPClientExtensionOptions = {
-  instructions?: string;
-  tools?: MCPClientToolRecord;
-};
-
 export type MCPCapabilityCache = {
   version: 1;
   cachedAt: number;
   tools: Tool[];
   instructions?: string;
   capabilities?: unknown;
+};
+
+type MCPClientExtensions = {
+  instructions?: string;
+  tools?: MCPClientToolRecord;
 };
 
 export type MCPServerOptions = {
@@ -303,7 +303,7 @@ export class MCPClientManager {
   ) => AgentMcpOAuthProvider;
   private _isRestored = false;
   private _pendingConnections = new Map<string, Promise<void>>();
-  private _clientExtensions = new Map<string, MCPClientExtensionOptions>();
+  private _clientExtensions = new Map<string, MCPClientExtensions>();
   private _codeExecutor?: Executor;
 
   /** @internal Protected for testing purposes. */
@@ -531,7 +531,7 @@ export class MCPClientManager {
     name: string,
     normalizedName: string,
     bindingName: string,
-    options?: MCPClientExtensionOptions & { props?: Record<string, unknown> }
+    options?: MCPClientExtensions & { props?: Record<string, unknown> }
   ): void {
     this.saveServerToStorage({
       id,
@@ -540,15 +540,14 @@ export class MCPClientManager {
       client_id: null,
       auth_url: null,
       callback_url: "",
-      server_options: JSON.stringify(
-        serializableServerOptions({
-          bindingName,
-          props: options?.props,
-          instructions: options?.instructions,
-          tools: options?.tools
-        })
-      )
+      server_options: JSON.stringify({
+        bindingName,
+        props: options?.props,
+        instructions: options?.instructions,
+        tools: serializableClientTools(options?.tools)
+      })
     });
+    this.registerClientExtensions(id, options);
   }
 
   /**
@@ -962,15 +961,13 @@ export class MCPClientManager {
       callback_url: options.callbackUrl ?? "",
       client_id: options.clientId ?? null,
       auth_url: options.authUrl ?? null,
-      server_options: JSON.stringify(
-        serializableServerOptions({
-          client: options.client,
-          transport: transportWithoutAuth,
-          retry: options.retry,
-          instructions: options.instructions,
-          tools: options.tools
-        })
-      )
+      server_options: JSON.stringify({
+        client: options.client,
+        transport: transportWithoutAuth,
+        retry: options.retry,
+        instructions: options.instructions,
+        tools: serializableClientTools(options.tools)
+      })
     });
 
     this._onServerStateChanged.fire();
@@ -1358,9 +1355,9 @@ export class MCPClientManager {
     this._codeExecutor = executor;
   }
 
-  registerClientExtensions(
+  private registerClientExtensions(
     serverId: string,
-    extensions?: MCPClientExtensionOptions
+    extensions?: MCPClientExtensions
   ): void {
     if (extensions) {
       this._clientExtensions.set(serverId, extensions);
@@ -1960,15 +1957,6 @@ type ProxyVisibleTool = {
   source: "remote" | "client";
   code?: string;
 };
-
-function serializableServerOptions<T extends Record<string, unknown>>(
-  options: T & MCPClientExtensionOptions
-): T & MCPClientExtensionOptions {
-  return {
-    ...options,
-    tools: serializableClientTools(options.tools)
-  };
-}
 
 function serializableClientTools(
   tools?: MCPClientToolRecord

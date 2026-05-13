@@ -49,8 +49,8 @@ import {
 } from "./retries";
 import {
   MCPClientManager,
-  type MCPClientExtensionOptions,
-  type MCPClientOAuthResult
+  type MCPClientOAuthResult,
+  type MCPClientToolRecord
 } from "./mcp/client";
 import type {
   WorkflowCallback,
@@ -779,7 +779,7 @@ export type AddMcpServerOptions = {
   /** Additional developer instructions shown by the MCP proxy tool. */
   instructions?: string;
   /** Developer-provided client-side tools shown by the MCP proxy tool. */
-  tools?: MCPClientExtensionOptions["tools"];
+  tools?: MCPClientToolRecord;
 };
 
 /**
@@ -791,7 +791,7 @@ export type AddRpcMcpServerOptions = {
   /** Additional developer instructions shown by the MCP proxy tool. */
   instructions?: string;
   /** Developer-provided client-side tools shown by the MCP proxy tool. */
-  tools?: MCPClientExtensionOptions["tools"];
+  tools?: MCPClientToolRecord;
 };
 
 const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
@@ -8319,8 +8319,6 @@ export class Agent<
           rpcOpts
         );
       }
-      this.mcp.registerClientExtensions(id, rpcOpts);
-
       return { id, state: MCPConnectionState.READY };
     }
 
@@ -8341,7 +8339,7 @@ export class Agent<
           };
           retry?: RetryOptions;
           instructions?: string;
-          tools?: MCPClientExtensionOptions["tools"];
+          tools?: MCPClientToolRecord;
         }
       | undefined;
 

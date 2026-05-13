@@ -1,7 +1,5 @@
 import type { Executor, ResolvedProvider } from "./executor";
 import { normalizeCode } from "./normalize";
-import { normalizeProviders, type CreateCodeToolOptions } from "./shared";
-import { resolveProvider } from "./tool";
 
 export type CodeGlobals = Record<
   string,
@@ -11,7 +9,6 @@ export type CodeGlobals = Record<
 export type ExecuteCodeOptions = {
   code: string;
   executor: Executor;
-  tools?: CreateCodeToolOptions["tools"];
   globals?: CodeGlobals;
 };
 
@@ -24,18 +21,12 @@ export type ExecuteCodeOutput = {
 export async function executeCode({
   code,
   executor,
-  tools,
   globals
 }: ExecuteCodeOptions): Promise<ExecuteCodeOutput> {
-  const providers: ResolvedProvider[] = [];
-  if (tools) {
-    providers.push(...normalizeProviders(tools).map(resolveProvider));
-  }
-  if (globals) {
-    providers.push(...globalsToProviders(globals));
-  }
-
-  const executeResult = await executor.execute(normalizeCode(code), providers);
+  const executeResult = await executor.execute(
+    normalizeCode(code),
+    globals ? globalsToProviders(globals) : []
+  );
 
   if (executeResult.error) {
     const logCtx = executeResult.logs?.length
