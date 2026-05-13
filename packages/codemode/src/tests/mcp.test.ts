@@ -182,7 +182,7 @@ describe("codeMcpServer", () => {
       }
     });
 
-    expect(callText(result)).toBe("Error: test error");
+    expect(callText(result)).toBe("Error: Code execution failed: test error");
 
     await client.close();
   });
@@ -280,7 +280,9 @@ describe("codeMcpServer", () => {
       }
     });
 
-    expect(callText(result)).toBe("Error: something went wrong");
+    expect(callText(result)).toBe(
+      "Error: Code execution failed: something went wrong"
+    );
     expect(result.isError).toBe(true);
 
     await client.close();
@@ -399,7 +401,9 @@ describe("codeMcpServer", () => {
       }
     });
 
-    expect(callText(result)).toBe('Error: Tool "nonexistent" not found');
+    expect(callText(result)).toBe(
+      'Error: Code execution failed: Tool "nonexistent" not found'
+    );
 
     await client.close();
   });
@@ -591,7 +595,7 @@ describe("openApiMcpServer", () => {
       }
     });
 
-    expect(callText(result)).toBe("Error: unauthorized");
+    expect(callText(result)).toBe("Error: Code execution failed: unauthorized");
 
     await client.close();
   });
