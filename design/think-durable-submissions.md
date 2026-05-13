@@ -3,7 +3,7 @@
 Durable programmatic chat turns for `Think`, exposed through
 `submitMessages()`.
 
-**Status:** implemented on the durable submissions branch.
+**Status:** implemented.
 
 Related:
 

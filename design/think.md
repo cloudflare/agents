@@ -105,7 +105,7 @@ The body contains `{ messages: UIMessage[], clientTools?: ClientToolSchema[] }`.
 **RPC path** (`chat()`):
 
 ```typescript
-await session.chat("Summarize the project", callback, { signal, tools });
+await session.chat("Summarize the project", callback, { signal });
 ```
 
 The parent agent calls `chat()` directly with a string or `UIMessage`.
@@ -125,13 +125,13 @@ streamText({
   model: this.getModel(),
   system: this.getSystemPrompt(),
   messages: await this.assembleContext(),
-  tools: { ...this.getTools(), ...clientToolSet, ...options?.tools },
+  tools: { ...this.getTools(), ...clientToolSet },
   stopWhen: stepCountIs(this.getMaxSteps()),
   abortSignal: options?.signal
 });
 ```
 
-Client tool schemas (from the browser) are merged into the tool set via `createToolsFromClientSchemas()`. RPC-provided tools are also merged.
+Client tool schemas (from the browser) are merged into the tool set via `createToolsFromClientSchemas()`. Tools for sub-agent turns are owned by the child agent through `getTools()`, extensions, MCP tools, session tools, or client tool schemas. Parent-child tool orchestration uses `agentTool()` / `runAgentTool()` rather than `chat()` options.
 
 The agentic loop runs until:
 

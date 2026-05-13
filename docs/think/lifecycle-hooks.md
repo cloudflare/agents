@@ -1,6 +1,6 @@
 # Lifecycle Hooks
 
-Think owns the `streamText` call and provides hooks at each stage of the chat turn. Hooks fire on every turn regardless of entry path — WebSocket chat, sub-agent `chat()`, `saveMessages`, and auto-continuation after tool results.
+Think owns the `streamText` call and provides hooks at each stage of the chat turn. Hooks fire on every turn regardless of entry path — WebSocket chat, sub-agent `chat()`, `saveMessages()`, durable `submitMessages()` execution, `continueLastTurn()`, and auto-continuation after tool results.
 
 ## Hook Summary
 
@@ -629,7 +629,7 @@ onChunk(ctx: ChunkContext) {
 
 Called after a chat turn completes and the assistant message has been persisted. The turn lock is released before this hook runs, so it is safe to call `saveMessages` or other methods from inside.
 
-Fires for all turn completion paths: WebSocket, sub-agent RPC, `saveMessages`, and auto-continuation.
+Fires for all turn completion paths that persist an assistant message: WebSocket, sub-agent RPC, `saveMessages()`, durable `submitMessages()` execution, `continueLastTurn()`, and auto-continuation.
 
 ```typescript
 onChatResponse(result: ChatResponseResult): void | Promise<void>

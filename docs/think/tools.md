@@ -12,7 +12,10 @@ On every turn, Think merges tools from multiple sources. Later sources override 
 4. **Extension tools** — tools from loaded extensions (prefixed by extension name)
 5. **MCP tools** — from connected MCP servers
 6. **Client tools** — from the browser (see [Client Tools](./client-tools.md))
-7. **Caller tools** — from `chat()` options when used as a sub-agent
+
+Tools belong to the agent running the turn. For parent-child orchestration,
+use [Agent Tools](../agent-tools.md) instead of passing one-off tools through
+`chat()`.
 
 ## Built-in Workspace Tools
 

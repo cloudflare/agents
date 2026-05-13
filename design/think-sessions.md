@@ -407,7 +407,7 @@ async onChatMessage(options?: ChatMessageOptions): Promise<StreamableResult> {
   const baseTools = this.getTools();
   const clientToolSet = createToolsFromClientSchemas(options?.clientTools);
   const contextTools = await this.session.tools();
-  const tools = { ...baseTools, ...clientToolSet, ...contextTools, ...options?.tools };
+  const tools = { ...baseTools, ...clientToolSet, ...contextTools };
 
   const { system, messages } = await this.assembleContext();
 

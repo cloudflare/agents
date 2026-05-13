@@ -6,6 +6,9 @@ quickly, retry safely, and inspect the result later.
 `saveMessages()` waits for the turn to finish. `submitMessages()` durably accepts
 the turn and returns a submission record before inference runs.
 
+For a broader comparison with `chat()`, `saveMessages()`, and agent tools, see
+[Choosing a turn API](./index.md#choosing-a-turn-api).
+
 ## Why this exists
 
 Webhook handlers, RPC callers, and parent Workers often have strict timeout

@@ -4,6 +4,7 @@ import { Think } from "../../think";
 import type {
   StreamCallback,
   StreamableResult,
+  ChatOptions,
   ChatResponseResult,
   SaveMessagesResult,
   ChatRecoveryContext,
@@ -607,6 +608,26 @@ export class ThinkTestAgent extends Think {
   async testChatWithUIMessage(msg: UIMessage): Promise<TestChatResult> {
     const cb = new TestCollectingCallback();
     await this.chat(msg, cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage
+    };
+  }
+
+  async testChatWithIgnoredRuntimeTools(
+    message: string
+  ): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb, {
+      tools: {
+        ignoredRuntimeTool: tool({
+          description: "Should not be merged into chat() turns.",
+          inputSchema: z.object({}),
+          execute: () => "ignored"
+        })
+      }
+    } as unknown as ChatOptions);
     return {
       events: cb.events,
       done: cb.doneCalled,
@@ -1975,6 +1996,54 @@ export class ThinkRecoveryTestAgent extends Think {
     return this._stashResult;
   }
 
+  async getLatestStreamSnapshot(): Promise<{
+    requestId: string;
+    status: "streaming" | "completed" | "error";
+    chunkCount: number;
+    text: string;
+  } | null> {
+    const streams = this.sql<{
+      id: string;
+      request_id: string;
+      status: "streaming" | "completed" | "error";
+    }>`
+      SELECT id, request_id, status
+      FROM cf_ai_chat_stream_metadata
+      ORDER BY created_at DESC
+      LIMIT 1
+    `;
+    const stream = streams[0];
+    if (!stream) return null;
+
+    const chunks = this.sql<{ body: string }>`
+      SELECT body
+      FROM cf_ai_chat_stream_chunks
+      WHERE stream_id = ${stream.id}
+      ORDER BY chunk_index ASC
+    `;
+
+    const text = chunks
+      .map((chunk) => {
+        try {
+          const parsed = JSON.parse(chunk.body) as {
+            type?: string;
+            delta?: string;
+          };
+          return parsed.type === "text-delta" ? (parsed.delta ?? "") : "";
+        } catch {
+          return "";
+        }
+      })
+      .join("");
+
+    return {
+      requestId: stream.request_id,
+      status: stream.status,
+      chunkCount: chunks.length,
+      text
+    };
+  }
+
   async testSaveMessages(text: string): Promise<SaveMessagesResult> {
     return this.saveMessages([
       {
@@ -1992,12 +2061,13 @@ export class ThinkRecoveryTestAgent extends Think {
   async insertInterruptedStream(
     streamId: string,
     requestId: string,
-    chunks: Array<{ body: string; index: number }>
+    chunks: Array<{ body: string; index: number }>,
+    status: "streaming" | "completed" | "error" = "streaming"
   ): Promise<void> {
     const now = Date.now();
     this.sql`
       INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      VALUES (${streamId}, ${requestId}, 'active', ${now})
+      VALUES (${streamId}, ${requestId}, ${status}, ${now})
     `;
     for (const chunk of chunks) {
       const chunkId = `${streamId}-${chunk.index}`;
@@ -2006,6 +2076,15 @@ export class ThinkRecoveryTestAgent extends Think {
         VALUES (${chunkId}, ${streamId}, ${chunk.index}, ${chunk.body}, ${now})
       `;
     }
+  }
+
+  async getScheduledChatRecoveryCountForTest(): Promise<number> {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count
+      FROM cf_agents_schedules
+      WHERE callback = '_chatRecoveryContinue'
+    `;
+    return rows[0]?.count ?? 0;
   }
 
   async insertInterruptedFiber(

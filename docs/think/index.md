@@ -131,6 +131,32 @@ Both Think and [`AIChatAgent`](../chat-agents.md) extend `Agent` and speak the s
 - You need proactive agents (programmatic turns from scheduled tasks or webhooks)
 - You need durable async submission for webhook/RPC callers — see [Programmatic submissions](./programmatic-submissions.md)
 
+## Choosing a Turn API
+
+Think has several ways to start or continue a turn. Choose based on who is
+driving the work and what the caller needs back.
+
+| Use case                                                       | API                                             |
+| -------------------------------------------------------------- | ----------------------------------------------- |
+| A browser user sends chat messages                             | `useAgentChat` over the WebSocket chat protocol |
+| Server code can wait for the model response                    | `saveMessages()`                                |
+| Server code needs fast durable acceptance and later status     | `submitMessages()`                              |
+| Parent code needs direct streaming RPC to a specific child     | `subAgent(...).chat()`                          |
+| A parent agent delegates work to a retained child agent        | `agentTool()` or `runAgentTool()`               |
+| Add context or messages without starting a model turn          | `persistMessages()`                             |
+| Advanced subclass or recovery code continues an assistant turn | `continueLastTurn()`                            |
+
+Use [`saveMessages()`](./sub-agents.md#programmatic-turns-with-savemessages)
+when the caller owns the trigger and can wait for the turn to finish. Use
+[`submitMessages()`](./programmatic-submissions.md) when timeout ambiguity would
+make retries unsafe.
+
+Use [`chat()`](./sub-agents.md#sub-agent-via-chat) for low-level parent-to-child
+streaming when your code owns forwarding, cancellation, and replay policy. Use
+[Agent Tools](../agent-tools.md) when a parent model or workflow delegates to a
+child agent and you want retained child runs, event replay, abort bridging, and
+UI drill-in.
+
 ## Configuration Overrides
 
 | Method / Property       | Default                          | Description                                                                     |
@@ -243,3 +269,4 @@ Think's `this.messages` getter reads directly from Session's tree-structured sto
 - [Tools](./tools.md) — Workspace tools, code execution, extensions
 - [Client Tools](./client-tools.md) — Browser-side tools, approvals, and concurrency
 - [Sub-agents and Programmatic Turns](./sub-agents.md) — RPC streaming, `saveMessages`, recovery
+- [Programmatic Submissions](./programmatic-submissions.md) — durable acceptance, idempotent retry, cancellation, and status inspection
