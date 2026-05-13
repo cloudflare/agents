@@ -50,8 +50,7 @@ import {
 import {
   MCPClientManager,
   type MCPClientExtensionOptions,
-  type MCPClientOAuthResult,
-  type MCPServerOptions
+  type MCPClientOAuthResult
 } from "./mcp/client";
 import type {
   WorkflowCallback,
@@ -2041,7 +2040,7 @@ export class Agent<
           await this._tryCatch(async () => {
             await this.mcp.restoreConnectionsFromStorage(this.name);
             await this._restoreRpcMcpServers();
-            this._restoreMcpClientTools();
+            this.mcp.restoreClientExtensionsFromStorage();
             this.broadcastMcpServers();
 
             this._checkOrphanedWorkflows();
@@ -7931,20 +7930,6 @@ export class Agent<
       }
     }
     return undefined;
-  }
-
-  private _restoreMcpClientTools(): void {
-    for (const server of this.mcp.listServers()) {
-      const opts = server.server_options
-        ? (JSON.parse(server.server_options) as MCPServerOptions)
-        : {};
-      if (opts.instructions || opts.tools) {
-        this.mcp.registerClientExtensions(server.id, {
-          instructions: opts.instructions,
-          tools: opts.tools
-        });
-      }
-    }
   }
 
   private async _restoreRpcMcpServers(): Promise<void> {

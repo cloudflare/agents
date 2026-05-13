@@ -1371,6 +1371,18 @@ export class MCPClientManager {
     }
   }
 
+  restoreClientExtensionsFromStorage(): void {
+    for (const server of this.getServersFromStorage()) {
+      const opts = server.server_options
+        ? (JSON.parse(server.server_options) as MCPServerOptions)
+        : {};
+      this.registerClientExtensions(server.id, {
+        instructions: opts.instructions,
+        tools: opts.tools
+      });
+    }
+  }
+
   private updateCapabilityCache(serverId: string): void {
     const conn = this.mcpConnections[serverId];
     if (!conn) return;
