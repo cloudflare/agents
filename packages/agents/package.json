@@ -26,6 +26,7 @@
   "dependencies": {
     "@babel/plugin-proposal-decorators": "^7.29.0",
     "@cfworker/json-schema": "^4.1.1",
+    "@cloudflare/codemode": "0.3.4",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@rolldown/plugin-babel": "^0.2.3",
     "cron-schedule": "^6.0.0",
@@ -50,7 +51,6 @@
   },
   "peerDependencies": {
     "@cloudflare/ai-chat": ">=0.6.1 <1.0.0",
-    "@cloudflare/codemode": ">=0.3.4 <1.0.0",
     "@tanstack/ai": ">=0.10.2 <1.0.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",
@@ -61,9 +61,6 @@
   },
   "peerDependenciesMeta": {
     "@cloudflare/ai-chat": {
-      "optional": true
-    },
-    "@cloudflare/codemode": {
       "optional": true
     },
     "@tanstack/ai": {
@@ -223,8 +220,7 @@
   ],
   "nx": {
     "implicitDependencies": [
-      "!@cloudflare/ai-chat",
-      "!@cloudflare/codemode"
+      "!@cloudflare/ai-chat"
     ]
   },
   "scripts": {

@@ -4036,4 +4036,189 @@ describe("MCPClientManager OAuth Integration", () => {
       );
     });
   });
+  describe("unstable_getProxyTool", () => {
+    it("documents exact proxy output for status, server, search, describe, and tool execution", async () => {
+      const id = "github-id";
+      const executor = { execute: vi.fn() };
+      manager.setCodeExecutor(executor);
+
+      await manager.registerServer(id, {
+        url: "https://example.com/mcp",
+        name: "github",
+        transport: { type: "auto" },
+        instructions: "Use for GitHub repositories and pull requests.",
+        tools: {
+          list_open_prs: {
+            description: "List open pull requests for a repository.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                owner: { type: "string" },
+                repo: { type: "string" }
+              },
+              required: ["owner", "repo"]
+            },
+            code: `async ({ owner, repo }) => {
+              return await server.callTool("list_pull_requests", { owner, repo, state: "open" });
+            }`
+          }
+        }
+      });
+
+      manager.mcpConnections[id].instructions =
+        "Server says prefer precise repository names.";
+      manager.mcpConnections[id].tools = [
+        {
+          name: "list_pull_requests",
+          description: "List pull requests.",
+          inputSchema: {
+            type: "object",
+            properties: { state: { type: "string" } }
+          }
+        } as Tool
+      ];
+      manager.mcpConnections[id].connectionState =
+        "ready" as MCPConnectionState;
+
+      const proxy = manager.unstable_getProxyTool();
+
+      await expect(proxy.execute?.({}, {} as ToolCallOptions)).resolves.toBe(
+        `MCP: 1 server, 2 tools
+
+✓ github (2 tools)
+
+Use mcp({ server: "name" }) to list tools, mcp({ search: "..." }) to search.`
+      );
+
+      await expect(
+        proxy.execute?.({ server: "github" }, {} as ToolCallOptions)
+      ).resolves.toBe(
+        `github
+State: ready
+Tools: 2
+
+Instructions: Server says prefer precise repository names.
+
+Use for GitHub repositories and pull requests.
+
+Tools:
+- github_list_pull_requests — List pull requests.
+- github_list_open_prs — List open pull requests for a repository.`
+      );
+
+      await expect(
+        proxy.execute?.({ search: "open pull requests" }, {} as ToolCallOptions)
+      ).resolves.toBe(
+        `Found 1 tool matching "open pull requests":
+
+github_list_open_prs — List open pull requests for a repository.
+  owner (string) *required*
+  repo (string) *required*`
+      );
+
+      await expect(
+        proxy.execute?.(
+          { describe: "github_list_open_prs" },
+          {} as ToolCallOptions
+        )
+      ).resolves.toBe(
+        `github_list_open_prs
+Server: github
+
+List open pull requests for a repository.
+
+Parameters:
+  owner (string) *required*
+  repo (string) *required*`
+      );
+
+      const callTool = vi
+        .spyOn(manager, "callTool")
+        .mockResolvedValue({ ok: true });
+      executor.execute.mockImplementation(async (_code: string, providers) => {
+        const serverProvider = providers[0];
+        return {
+          result: await serverProvider.fns.callTool("list_pull_requests", {
+            owner: "cloudflare",
+            repo: "agents",
+            state: "open"
+          })
+        };
+      });
+
+      await expect(
+        proxy.execute?.(
+          {
+            tool: "github_list_open_prs",
+            args: { owner: "cloudflare", repo: "agents" }
+          },
+          {} as ToolCallOptions
+        )
+      ).resolves.toEqual({ ok: true });
+      expect(executor.execute).toHaveBeenCalledWith(
+        expect.stringContaining("server.callTool"),
+        expect.any(Array)
+      );
+      expect(callTool).toHaveBeenCalledWith({
+        serverId: id,
+        name: "list_pull_requests",
+        arguments: { owner: "cloudflare", repo: "agents", state: "open" }
+      });
+      callTool.mockRestore();
+    });
+
+    it("documents exact proxy output when only cached MCP capabilities are available", async () => {
+      const id = "cached-github";
+      saveServerToMock({
+        id,
+        name: "github",
+        server_url: "https://example.com/mcp",
+        client_id: null,
+        auth_url: null,
+        callback_url: "",
+        server_options: JSON.stringify({
+          capabilityCache: {
+            version: 1,
+            cachedAt: Date.now(),
+            instructions: "Cached server instructions.",
+            tools: [
+              {
+                name: "search_issues",
+                description: "Search issues and pull requests.",
+                inputSchema: {
+                  type: "object",
+                  properties: { query: { type: "string" } },
+                  required: ["query"]
+                }
+              }
+            ]
+          }
+        })
+      });
+
+      const proxy = manager.unstable_getProxyTool();
+      await expect(proxy.execute?.({}, {} as ToolCallOptions)).resolves.toBe(
+        `MCP: 1 server, 1 tool
+
+○ github (1 tools, cached)
+
+Use mcp({ server: "name" }) to list tools, mcp({ search: "..." }) to search.`
+      );
+
+      await expect(
+        proxy.execute?.(
+          { describe: "github_search_issues" },
+          {} as ToolCallOptions
+        )
+      ).resolves.toBe(
+        `github_search_issues
+Server: github
+
+Search issues and pull requests.
+
+Parameters:
+  query (string) *required*`
+      );
+    });
+  });
 });

@@ -527,6 +527,9 @@ export {
 export type {
   MCPClientOAuthResult,
   MCPClientOAuthCallbackConfig,
+  MCPClientExtensionOptions,
+  MCPClientTool,
+  MCPClientToolRecord,
   MCPServerOptions,
   MCPConnectionResult,
   MCPDiscoverResult

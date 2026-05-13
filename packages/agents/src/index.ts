@@ -29,6 +29,7 @@ import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
 import { EmailMessage } from "cloudflare:email";
 import { RpcTarget } from "cloudflare:workers";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import {
   type Connection,
   type ConnectionContext,
@@ -46,7 +47,12 @@ import {
   isErrorRetryable,
   validateRetryOptions
 } from "./retries";
-import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
+import {
+  MCPClientManager,
+  type MCPClientExtensionOptions,
+  type MCPClientOAuthResult,
+  type MCPServerOptions
+} from "./mcp/client";
 import type {
   WorkflowCallback,
   WorkflowTrackingRow,
@@ -695,6 +701,15 @@ function getNextCronTime(cron: string) {
   return interval.getNextDate();
 }
 
+function isWorkerLoader(value: unknown): value is WorkerLoader {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "get" in value &&
+    typeof (value as { get?: unknown }).get === "function"
+  );
+}
+
 export type { TransportType } from "./mcp/types";
 export type { RetryOptions } from "./retries";
 export {
@@ -762,6 +777,10 @@ export type AddMcpServerOptions = {
   };
   /** Retry options for connection and reconnection attempts */
   retry?: RetryOptions;
+  /** Additional developer instructions shown by the MCP proxy tool. */
+  instructions?: string;
+  /** Developer-provided client-side tools shown by the MCP proxy tool. */
+  tools?: MCPClientExtensionOptions["tools"];
 };
 
 /**
@@ -770,6 +789,10 @@ export type AddMcpServerOptions = {
 export type AddRpcMcpServerOptions = {
   /** Props to pass to the McpAgent instance */
   props?: Record<string, unknown>;
+  /** Additional developer instructions shown by the MCP proxy tool. */
+  instructions?: string;
+  /** Developer-provided client-side tools shown by the MCP proxy tool. */
+  tools?: MCPClientExtensionOptions["tools"];
 };
 
 const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
@@ -1999,6 +2022,13 @@ export class Agent<
           if (isValidParentPath(storedParentPath)) {
             this._parentPath = storedParentPath;
           }
+          const mcpCodeLoader = (this.env as Record<string, unknown>).LOADER;
+          if (isWorkerLoader(mcpCodeLoader)) {
+            this.mcp.setCodeExecutor(
+              new DynamicWorkerExecutor({ loader: mcpCodeLoader })
+            );
+          }
+
           try {
             await this._cf_hydrateSubAgentConnectionsFromRoot();
           } catch (error) {
@@ -2011,6 +2041,7 @@ export class Agent<
           await this._tryCatch(async () => {
             await this.mcp.restoreConnectionsFromStorage(this.name);
             await this._restoreRpcMcpServers();
+            this._restoreMcpClientTools();
             this.broadcastMcpServers();
 
             this._checkOrphanedWorkflows();
@@ -7902,6 +7933,20 @@ export class Agent<
     return undefined;
   }
 
+  private _restoreMcpClientTools(): void {
+    for (const server of this.mcp.listServers()) {
+      const opts = server.server_options
+        ? (JSON.parse(server.server_options) as MCPServerOptions)
+        : {};
+      if (opts.instructions || opts.tools) {
+        this.mcp.registerClientExtensions(server.id, {
+          instructions: opts.instructions,
+          tools: opts.tools
+        });
+      }
+    }
+  }
+
   private async _restoreRpcMcpServers(): Promise<void> {
     const rpcServers = this.mcp.getRpcServersFromStorage();
     for (const server of rpcServers) {
@@ -8289,6 +8334,7 @@ export class Agent<
           rpcOpts?.props
         );
       }
+      this.mcp.registerClientExtensions(id, rpcOpts);
 
       return { id, state: MCPConnectionState.READY };
     }
@@ -8309,6 +8355,8 @@ export class Agent<
             type?: TransportType;
           };
           retry?: RetryOptions;
+          instructions?: string;
+          tools?: MCPClientExtensionOptions["tools"];
         }
       | undefined;
 
@@ -8321,7 +8369,9 @@ export class Agent<
       resolvedOptions = {
         client: httpOptions.client,
         transport: httpOptions.transport,
-        retry: httpOptions.retry
+        retry: httpOptions.retry,
+        instructions: httpOptions.instructions,
+        tools: httpOptions.tools
       };
     } else {
       resolvedCallbackHost = httpOptions;
@@ -8407,7 +8457,9 @@ export class Agent<
         authProvider,
         type: transportType
       },
-      retry: resolvedOptions?.retry
+      retry: resolvedOptions?.retry,
+      instructions: resolvedOptions?.instructions,
+      tools: resolvedOptions?.tools
     });
 
     const result = await this.mcp.connectToServer(id);

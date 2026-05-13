@@ -13,7 +13,7 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 import { type RetryOptions, tryN } from "../retries";
-import type { ToolSet } from "ai";
+import type { ToolSet, ToolCallOptions } from "ai";
 import { z } from "zod";
 import { nanoid } from "nanoid";
 import { Emitter, type Event, DisposableStore } from "../core/events";
@@ -164,6 +164,29 @@ function isBlockedUrl(url: string): boolean {
  * Options that can be stored in the server_options column
  * This is what gets JSON.stringify'd and stored in the database
  */
+export type MCPClientTool = {
+  description?: string;
+  inputSchema?: unknown;
+  outputSchema?: unknown;
+  /** JavaScript async arrow function executed in a codemode sandbox. */
+  code: string;
+};
+
+export type MCPClientToolRecord = Record<string, MCPClientTool>;
+
+export type MCPClientExtensionOptions = {
+  instructions?: string;
+  tools?: MCPClientToolRecord;
+};
+
+export type MCPCapabilityCache = {
+  version: 1;
+  cachedAt: number;
+  tools: Tool[];
+  instructions?: string;
+  capabilities?: unknown;
+};
+
 export type MCPServerOptions = {
   client?: ConstructorParameters<typeof Client>[1];
   transport?: {
@@ -173,6 +196,8 @@ export type MCPServerOptions = {
   };
   /** Retry options for connection and reconnection attempts */
   retry?: RetryOptions;
+  instructions?: string;
+  capabilityCache?: MCPCapabilityCache;
 };
 
 /**
@@ -195,6 +220,8 @@ export type RegisterServerOptions = {
   clientId?: string;
   /** Retry options for connection and reconnection attempts */
   retry?: RetryOptions;
+  instructions?: string;
+  tools?: MCPClientToolRecord;
 };
 
 /**
@@ -274,6 +301,17 @@ export class MCPClientManager {
   ) => AgentMcpOAuthProvider;
   private _isRestored = false;
   private _pendingConnections = new Map<string, Promise<void>>();
+  private _clientExtensions = new Map<string, MCPClientExtensionOptions>();
+  private _codeExecutor?: {
+    execute(
+      code: string,
+      providers: Array<{
+        name: string;
+        fns: Record<string, (...args: unknown[]) => Promise<unknown>>;
+        positionalArgs?: boolean;
+      }>
+    ): Promise<{ result: unknown; error?: string }>;
+  };
 
   /** @internal Protected for testing purposes. */
   protected readonly _onObservabilityEvent =
@@ -386,14 +424,17 @@ export class MCPClientManager {
   /**
    * Get the retry options for a server from stored server_options
    */
-  private getServerRetryOptions(serverId: string): RetryOptions | undefined {
+  private getStoredServerOptions(serverId: string): MCPServerOptions {
     const rows = this.sql<MCPServerRow>(
       "SELECT server_options FROM cf_agents_mcp_servers WHERE id = ?",
       serverId
     );
-    if (!rows.length || !rows[0].server_options) return undefined;
-    const parsed: MCPServerOptions = JSON.parse(rows[0].server_options);
-    return parsed.retry;
+    if (!rows.length || !rows[0].server_options) return {};
+    return JSON.parse(rows[0].server_options) as MCPServerOptions;
+  }
+
+  private getServerRetryOptions(serverId: string): RetryOptions | undefined {
+    return this.getStoredServerOptions(serverId).retry;
   }
 
   private clearServerAuthUrl(serverId: string): void {
@@ -909,6 +950,8 @@ export class MCPClientManager {
       }
     });
 
+    this.registerClientExtensions(id, options);
+
     // Save to storage (exclude authProvider since it's recreated during restore)
     const { authProvider: _, ...transportWithoutAuth } =
       options.transport ?? {};
@@ -922,7 +965,9 @@ export class MCPClientManager {
       server_options: JSON.stringify({
         client: options.client,
         transport: transportWithoutAuth,
-        retry: options.retry
+        retry: options.retry,
+        instructions: options.instructions,
+        tools: serializableClientTools(options.tools)
       })
     });
 
@@ -1212,6 +1257,9 @@ export class MCPClientManager {
 
     // Delegate to connection's discover method which handles cancellation and timeout
     const result = await conn.discover(options);
+    if (result.success) {
+      this.updateCapabilityCache(serverId);
+    }
     this._onServerStateChanged.fire();
 
     return {
@@ -1302,6 +1350,300 @@ export class MCPClientManager {
    */
   getOAuthCallbackConfig(): MCPClientOAuthCallbackConfig | undefined {
     return this._oauthCallbackConfig;
+  }
+
+  setCodeExecutor(
+    executor: NonNullable<MCPClientManager["_codeExecutor"]>
+  ): void {
+    this._codeExecutor = executor;
+  }
+
+  registerClientExtensions(
+    serverId: string,
+    extensions?: MCPClientExtensionOptions
+  ): void {
+    if (extensions) {
+      this._clientExtensions.set(serverId, extensions);
+    }
+  }
+
+  private updateCapabilityCache(serverId: string): void {
+    const conn = this.mcpConnections[serverId];
+    if (!conn) return;
+    const server = this.getServersFromStorage().find((s) => s.id === serverId);
+    if (!server) return;
+    const parsedOptions: MCPServerOptions = server.server_options
+      ? JSON.parse(server.server_options)
+      : {};
+    this.saveServerToStorage({
+      ...server,
+      server_options: JSON.stringify({
+        ...parsedOptions,
+        capabilityCache: {
+          version: 1,
+          cachedAt: Date.now(),
+          tools: conn.tools,
+          instructions: conn.instructions,
+          capabilities: conn.serverCapabilities
+        } satisfies MCPCapabilityCache
+      })
+    });
+  }
+
+  unstable_getProxyTool(): ToolSet[string] {
+    return {
+      description: `MCP proxy - discover connected MCP servers and their tools without loading every MCP tool into the model context.\n\nUsage:\n  mcp({})                         → Show server status\n  mcp({ server: "github" })       → List one server's tools and instructions\n  mcp({ search: "pull request" }) → Search remote and client-side tools\n  mcp({ describe: "github_tool" })→ Show one tool's description and parameters`,
+      inputSchema: z.object({
+        server: z.string().optional(),
+        search: z.string().optional(),
+        describe: z.string().optional(),
+        regex: z.boolean().optional(),
+        includeSchemas: z.boolean().optional(),
+        tool: z.string().optional(),
+        args: z.record(z.string(), z.unknown()).optional()
+      }),
+      execute: async (input) => this.executeProxyTool(input)
+    };
+  }
+
+  private async executeProxyTool(input: {
+    server?: string;
+    search?: string;
+    describe?: string;
+    regex?: boolean;
+    includeSchemas?: boolean;
+    tool?: string;
+    args?: Record<string, unknown>;
+  }): Promise<unknown> {
+    if (input.tool)
+      return this.executeProxyVisibleTool(input.tool, input.args ?? {});
+    if (input.describe) return this.describeProxyTool(input.describe);
+    if (input.search) {
+      return this.searchProxyTools(input.search, {
+        regex: input.regex,
+        includeSchemas: input.includeSchemas !== false
+      });
+    }
+    if (input.server) return this.describeProxyServer(input.server);
+    return this.proxyStatus();
+  }
+
+  private proxyStatus(): string {
+    const servers = this.getServersFromStorage();
+    const rows = servers.map((server) => {
+      const caps = this.getProxyCapabilities(server.id);
+      const state = this.mcpConnections[server.id]?.connectionState;
+      const marker = state === MCPConnectionState.READY ? "✓" : "○";
+      const suffix = caps.source === "cache" ? ", cached" : "";
+      return `${marker} ${server.name} (${this.getProxyVisibleTools(server.id).length} tools${suffix})`;
+    });
+    const totalTools = servers.reduce(
+      (sum, server) => sum + this.getProxyVisibleTools(server.id).length,
+      0
+    );
+    return [
+      `MCP: ${servers.length} server${servers.length === 1 ? "" : "s"}, ${totalTools} tool${totalTools === 1 ? "" : "s"}`,
+      "",
+      ...rows,
+      "",
+      `Use mcp({ server: "name" }) to list tools, mcp({ search: "..." }) to search.`
+    ]
+      .filter((line, index, arr) => line !== "" || arr[index - 1] !== "")
+      .join("\n")
+      .trim();
+  }
+
+  private describeProxyServer(serverNameOrId: string): string {
+    const server = this.findServerForProxy(serverNameOrId);
+    if (!server) return `Server "${serverNameOrId}" not found.`;
+    const caps = this.getProxyCapabilities(server.id);
+    const parsed = this.getStoredServerOptions(server.id);
+    const tools = this.getProxyVisibleTools(server.id);
+    const lines = [
+      server.name,
+      `State: ${this.mcpConnections[server.id]?.connectionState ?? "not-connected"}${caps.source === "cache" ? " (cached capabilities)" : ""}`,
+      `Tools: ${tools.length}`
+    ];
+    const instructions = [caps.instructions, parsed.instructions]
+      .filter(Boolean)
+      .join("\n\n");
+    if (instructions) lines.push("", `Instructions: ${instructions}`);
+    lines.push("", "Tools:");
+    lines.push(
+      ...tools.map(
+        (tool) =>
+          `- ${tool.visibleName}${tool.description ? ` — ${tool.description}` : ""}`
+      )
+    );
+    return lines.join("\n").trim();
+  }
+
+  private searchProxyTools(
+    query: string,
+    options: { regex?: boolean; includeSchemas: boolean }
+  ): string {
+    let pattern: RegExp;
+    try {
+      pattern = options.regex
+        ? new RegExp(query, "i")
+        : new RegExp(escapeRegExp(query), "i");
+    } catch {
+      return `Invalid search pattern: ${query}`;
+    }
+    const matches = this.getProxyVisibleTools().filter((tool) =>
+      [tool.visibleName, tool.name, tool.description ?? ""].some((value) =>
+        pattern.test(value)
+      )
+    );
+    if (matches.length === 0) return `No tools matching "${query}".`;
+    const lines = [
+      `Found ${matches.length} tool${matches.length === 1 ? "" : "s"} matching "${query}":`,
+      ""
+    ];
+    for (const tool of matches) {
+      lines.push(
+        `${tool.visibleName}${tool.description ? ` — ${tool.description}` : ""}`
+      );
+      if (options.includeSchemas && tool.inputSchema) {
+        lines.push(formatProxySchema(tool.inputSchema, "  "));
+      }
+      lines.push("");
+    }
+    return lines.join("\n").trim();
+  }
+
+  private async executeProxyVisibleTool(
+    visibleName: string,
+    args: Record<string, unknown>
+  ): Promise<unknown> {
+    const tool = this.getProxyVisibleTools().find((candidate) =>
+      proxyToolNameMatches(candidate.visibleName, visibleName)
+    );
+    if (!tool) {
+      throw new Error(
+        `Tool "${visibleName}" not found. Use mcp({ search: "..." }) to search.`
+      );
+    }
+    if (tool.source === "remote") {
+      return this.callTool({
+        serverId: tool.serverId,
+        name: tool.name,
+        arguments: args
+      });
+    }
+    if (!tool.code) {
+      throw new Error(`Client-side tool "${visibleName}" has no code.`);
+    }
+    if (!this._codeExecutor) {
+      throw new Error(
+        `Client-side tool "${visibleName}" requires a Worker Loader binding. ` +
+          `Add a \`worker_loaders\` binding named \`LOADER\` to your Worker config.`
+      );
+    }
+    const result = await this._codeExecutor.execute(tool.code, [
+      {
+        name: "server",
+        positionalArgs: true,
+        fns: {
+          callTool: async (name: unknown, toolArgs: unknown) =>
+            this.callTool({
+              serverId: tool.serverId,
+              name: String(name),
+              arguments: isRecord(toolArgs) ? toolArgs : {}
+            }),
+          listTools: async () => this.getProxyCapabilities(tool.serverId).tools
+        }
+      }
+    ]);
+    if (result.error) throw new Error(result.error);
+    return result.result;
+  }
+
+  private describeProxyTool(visibleName: string): string {
+    const tool = this.getProxyVisibleTools().find((candidate) =>
+      proxyToolNameMatches(candidate.visibleName, visibleName)
+    );
+    if (!tool)
+      return `Tool "${visibleName}" not found. Use mcp({ search: "..." }) to search.`;
+    const lines = [tool.visibleName, `Server: ${tool.serverName}`, ""];
+    if (tool.description) lines.push(tool.description, "");
+    lines.push("Parameters:", formatProxySchema(tool.inputSchema, "  "));
+    if (tool.outputSchema) {
+      lines.push("", "Output:", formatProxySchema(tool.outputSchema, "  "));
+    }
+    return lines.join("\n").trim();
+  }
+
+  private getProxyVisibleTools(serverId?: string): ProxyVisibleTool[] {
+    const servers = this.getServersFromStorage().filter(
+      (server) => !serverId || server.id === serverId
+    );
+    return servers.flatMap((server) => {
+      const caps = this.getProxyCapabilities(server.id);
+      const remoteTools = caps.tools.map((tool) => ({
+        visibleName: formatProxyToolName(server.name, tool.name),
+        name: tool.name,
+        serverId: server.id,
+        serverName: server.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+        outputSchema: tool.outputSchema,
+        source: "remote" as const
+      }));
+      const extensionTools = this.getClientExtensionTools(server).map(
+        ([name, tool]) => ({
+          visibleName: formatProxyToolName(server.name, name),
+          name,
+          serverId: server.id,
+          serverName: server.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema,
+          outputSchema: tool.outputSchema,
+          source: "client" as const,
+          code: tool.code
+        })
+      );
+      return [...remoteTools, ...extensionTools];
+    });
+  }
+
+  private getClientExtensionTools(
+    server: MCPServerRow
+  ): [string, MCPClientTool][] {
+    return Object.entries(this._clientExtensions.get(server.id)?.tools ?? {});
+  }
+
+  private getProxyCapabilities(serverId: string): {
+    source: "live" | "cache" | "none";
+    tools: Tool[];
+    instructions?: string;
+  } {
+    const conn = this.mcpConnections[serverId];
+    if (conn?.tools.length) {
+      return {
+        source: "live",
+        tools: conn.tools,
+        instructions: conn.instructions
+      };
+    }
+    const cache = this.getStoredServerOptions(serverId).capabilityCache;
+    if (cache) {
+      return {
+        source: "cache",
+        tools: cache.tools,
+        instructions: cache.instructions
+      };
+    }
+    return { source: "none", tools: [] };
+  }
+
+  private findServerForProxy(serverNameOrId: string): MCPServerRow | undefined {
+    return this.getServersFromStorage().find(
+      (server) =>
+        server.id === serverNameOrId ||
+        server.name === serverNameOrId ||
+        sanitizeProxyName(server.name) === sanitizeProxyName(serverNameOrId)
+    );
   }
 
   /**
@@ -1586,6 +1928,99 @@ export class MCPClientManager {
       options
     );
   }
+}
+
+type ProxyVisibleTool = {
+  visibleName: string;
+  name: string;
+  serverId: string;
+  serverName: string;
+  description?: string;
+  inputSchema?: unknown;
+  outputSchema?: unknown;
+  source: "remote" | "client";
+  code?: string;
+};
+
+function serializableClientTools(
+  tools?: MCPClientToolRecord
+): MCPClientToolRecord | undefined {
+  if (!tools) return undefined;
+  return Object.fromEntries(
+    Object.entries(tools).map(([name, tool]) => [
+      name,
+      {
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+        outputSchema: tool.outputSchema,
+        code: tool.code
+      }
+    ])
+  );
+}
+
+function sanitizeProxyName(name: string): string {
+  const sanitized = name.replace(/[-.\s]/g, "_").replace(/[^a-zA-Z0-9_$]/g, "");
+  if (!sanitized) return "_";
+  return /^[0-9]/.test(sanitized) ? `_${sanitized}` : sanitized;
+}
+
+function formatProxyToolName(serverName: string, toolName: string): string {
+  return `${sanitizeProxyName(serverName)}_${sanitizeProxyName(toolName)}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function proxyToolNameMatches(a: string, b: string): boolean {
+  const normalize = (value: string) => value.replace(/-/g, "_");
+  return normalize(a) === normalize(b);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function formatProxySchema(schema: unknown, indent = "  "): string {
+  if (!schema || typeof schema !== "object") return `${indent}(no schema)`;
+  const s = schema as Record<string, unknown>;
+  if (s.type === "object" && s.properties && typeof s.properties === "object") {
+    const props = s.properties as Record<string, unknown>;
+    const required = Array.isArray(s.required) ? (s.required as string[]) : [];
+    const entries = Object.entries(props);
+    if (entries.length === 0) return `${indent}(no parameters)`;
+    return entries
+      .map(([name, prop]) =>
+        formatProxyProperty(name, prop, required.includes(name), indent)
+      )
+      .join("\n");
+  }
+  if (s.type) return `${indent}(${String(s.type)})`;
+  return `${indent}(complex schema)`;
+}
+
+function formatProxyProperty(
+  name: string,
+  schema: unknown,
+  required: boolean,
+  indent: string
+): string {
+  if (!schema || typeof schema !== "object") {
+    return `${indent}${name}${required ? " *required*" : ""}`;
+  }
+  const s = schema as Record<string, unknown>;
+  const parts = [`${indent}${name}`];
+  if (Array.isArray(s.enum)) {
+    parts.push(`(enum: ${s.enum.map((v) => JSON.stringify(v)).join(", ")})`);
+  } else if (s.type) {
+    parts.push(
+      `(${Array.isArray(s.type) ? s.type.join(" | ") : String(s.type)})`
+    );
+  }
+  if (required) parts.push("*required*");
+  if (typeof s.description === "string") parts.push(`- ${s.description}`);
+  return parts.join(" ");
 }
 
 type NamespacedData = {
