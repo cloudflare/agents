@@ -179,14 +179,6 @@ export type MCPClientTool = {
 
 export type MCPClientToolRecord = Record<string, MCPClientTool>;
 
-export type MCPCapabilityCache = {
-  version: 1;
-  cachedAt: number;
-  tools: Tool[];
-  instructions?: string;
-  capabilities?: unknown;
-};
-
 export type MCPServerOptions = {
   client?: ConstructorParameters<typeof Client>[1];
   transport?: {
@@ -198,7 +190,6 @@ export type MCPServerOptions = {
   retry?: RetryOptions;
   instructions?: string;
   tools?: MCPClientToolRecord;
-  capabilityCache?: MCPCapabilityCache;
 };
 
 /**
@@ -1272,9 +1263,6 @@ export class MCPClientManager {
 
     // Delegate to connection's discover method which handles cancellation and timeout
     const result = await conn.discover(options);
-    if (result.success) {
-      this.updateCapabilityCache(serverId);
-    }
     this._onServerStateChanged.fire();
 
     return {
@@ -1385,29 +1373,6 @@ export class MCPClientManager {
     }
   }
 
-  private updateCapabilityCache(serverId: string): void {
-    const conn = this.mcpConnections[serverId];
-    if (!conn) return;
-    const server = this.getServersFromStorage().find((s) => s.id === serverId);
-    if (!server) return;
-    const parsedOptions: MCPServerOptions = server.server_options
-      ? JSON.parse(server.server_options)
-      : {};
-    this.saveServerToStorage({
-      ...server,
-      server_options: JSON.stringify({
-        ...parsedOptions,
-        capabilityCache: {
-          version: 1,
-          cachedAt: Date.now(),
-          tools: conn.tools,
-          instructions: conn.instructions,
-          capabilities: conn.serverCapabilities
-        } satisfies MCPCapabilityCache
-      })
-    });
-  }
-
   unstable_getProxyTool(): ToolSet[string] {
     return {
       description: `MCP proxy - discover connected MCP servers and their tools without loading every MCP tool into the model context.\n\nUsage:\n  mcp({})                         → Show server status\n  mcp({ server: "github" })       → List one server's tools and instructions\n  mcp({ search: "pull request" }) → Search remote and client-side tools\n  mcp({ describe: "github_tool" })→ Show one tool's description and parameters`,
@@ -1449,11 +1414,9 @@ export class MCPClientManager {
   private proxyStatus(): string {
     const servers = this.getServersFromStorage();
     const rows = servers.map((server) => {
-      const caps = this.getProxyCapabilities(server.id);
       const state = this.mcpConnections[server.id]?.connectionState;
       const marker = state === MCPConnectionState.READY ? "✓" : "○";
-      const suffix = caps.source === "cache" ? ", cached" : "";
-      return `${marker} ${server.name} (${this.getProxyVisibleTools(server.id).length} tools${suffix})`;
+      return `${marker} ${server.name} (${this.getProxyVisibleTools(server.id).length} tools)`;
     });
     const totalTools = servers.reduce(
       (sum, server) => sum + this.getProxyVisibleTools(server.id).length,
@@ -1479,7 +1442,7 @@ export class MCPClientManager {
     const tools = this.getProxyVisibleTools(server.id);
     const lines = [
       server.name,
-      `State: ${this.mcpConnections[server.id]?.connectionState ?? "not-connected"}${caps.source === "cache" ? " (cached capabilities)" : ""}`,
+      `State: ${this.mcpConnections[server.id]?.connectionState ?? "not-connected"}`,
       `Tools: ${tools.length}`
     ];
     const instructions = [caps.instructions, parsed.instructions]
@@ -1641,7 +1604,7 @@ export class MCPClientManager {
   }
 
   private getProxyCapabilities(serverId: string): {
-    source: "live" | "cache" | "none";
+    source: "live" | "none";
     tools: Tool[];
     instructions?: string;
   } {
@@ -1651,14 +1614,6 @@ export class MCPClientManager {
         source: "live",
         tools: conn.tools,
         instructions: conn.instructions
-      };
-    }
-    const cache = this.getStoredServerOptions(serverId).capabilityCache;
-    if (cache) {
-      return {
-        source: "cache",
-        tools: cache.tools,
-        instructions: cache.instructions
       };
     }
     return { source: "none", tools: [] };

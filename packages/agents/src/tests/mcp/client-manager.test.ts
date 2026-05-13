@@ -4251,59 +4251,5 @@ Parameters:
       });
       callTool.mockRestore();
     });
-
-    it("documents exact proxy output when only cached MCP capabilities are available", async () => {
-      const id = "cached-github";
-      saveServerToMock({
-        id,
-        name: "github",
-        server_url: "https://example.com/mcp",
-        client_id: null,
-        auth_url: null,
-        callback_url: "",
-        server_options: JSON.stringify({
-          capabilityCache: {
-            version: 1,
-            cachedAt: Date.now(),
-            instructions: "Cached server instructions.",
-            tools: [
-              {
-                name: "search_issues",
-                description: "Search issues and pull requests.",
-                inputSchema: {
-                  type: "object",
-                  properties: { query: { type: "string" } },
-                  required: ["query"]
-                }
-              }
-            ]
-          }
-        })
-      });
-
-      const proxy = manager.unstable_getProxyTool();
-      await expect(proxy.execute?.({}, {} as ToolCallOptions)).resolves.toBe(
-        `MCP: 1 server, 1 tool
-
-○ github (1 tools, cached)
-
-Use mcp({ server: "name" }) to list tools, mcp({ search: "..." }) to search.`
-      );
-
-      await expect(
-        proxy.execute?.(
-          { describe: "github_search_issues" },
-          {} as ToolCallOptions
-        )
-      ).resolves.toBe(
-        `github_search_issues
-Server: github
-
-Search issues and pull requests.
-
-Parameters:
-  query (string) *required*`
-      );
-    });
   });
 });
