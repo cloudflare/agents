@@ -389,7 +389,7 @@ describe("createBrowserCodeTool", () => {
     });
 
     expect(result.result).toEqual({ sum: 42 });
-    expect(result.logs).toBeUndefined();
+    expect(result.logs).toEqual([]);
   });
 
   it("should accept tools as an array", async () => {
