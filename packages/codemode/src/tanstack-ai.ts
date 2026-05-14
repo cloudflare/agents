@@ -36,7 +36,7 @@ import type {
   ResolvedProvider,
   SimpleToolRecord
 } from "./executor";
-import { normalizeCode } from "./normalize";
+import { runCode } from "./run-code";
 import { filterTools, extractFns } from "./resolve";
 import {
   DEFAULT_DESCRIPTION,
@@ -266,23 +266,9 @@ export function createCodeTool(options: CreateCodeToolOptions): ServerTool {
     inputSchema: codeSchema
   });
 
-  return def.server(async ({ code }) => {
-    const normalizedCode = normalizeCode(code);
-
-    const executeResult = await executor.execute(
-      normalizedCode,
-      resolvedProviders
-    );
-
-    if (executeResult.error) {
-      const logCtx = executeResult.logs?.length
-        ? `\n\nConsole output:\n${executeResult.logs.join("\n")}`
-        : "";
-      throw new Error(`Code execution failed: ${executeResult.error}${logCtx}`);
-    }
-
-    return { result: executeResult.result, logs: executeResult.logs };
-  });
+  return def.server(async ({ code }) =>
+    runCode({ code, executor, providers: resolvedProviders })
+  );
 }
 
 /**
