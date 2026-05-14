@@ -382,16 +382,14 @@ describe("createBrowserCodeTool", () => {
     expect(tool.description).toContain("AddNumbersInput");
     expect(tool.description).toContain("declare const codemode");
     expect(tool.inputSchema.required).toEqual(["code"]);
-    expect(tool.outputSchema.required).toEqual(["code", "result"]);
+    expect(tool.outputSchema.required).toEqual(["result"]);
 
     const result = await tool.execute({
       code: "async () => await codemode.addNumbers({ a: 17, b: 25 })"
     });
 
     expect(result.result).toEqual({ sum: 42 });
-    expect(result.code).toBe(
-      "async () => await codemode.addNumbers({ a: 17, b: 25 })"
-    );
+    expect(result.logs).toBeUndefined();
   });
 
   it("should accept tools as an array", async () => {
