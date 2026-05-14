@@ -41,7 +41,6 @@ import { filterTools, extractFns } from "./resolve";
 import {
   DEFAULT_DESCRIPTION,
   type CreateCodeToolOptions,
-  type CodeOutput,
   normalizeProviders
 } from "./shared";
 import { jsonSchemaToType } from "./json-schema-types";
