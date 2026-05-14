@@ -1,0 +1,29 @@
+packages/think/CHANGELOG.md
+  25ed65e41240ca56 101
+packages/voice/src/tests/agents/voice.ts
+  25ed65e41240ca56 96
+.changeset/bright-voices-stream.md
+  25ed65e41240ca56 1-5
+packages/codemode/CHANGELOG.md
+  25ed65e41240ca56 64,70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "1fc511a952205944342e5a4209431289d20a1e5a",
+  "prompts": {
+    "25ed65e41240ca56": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_1d822d6e7ffeZ9r0mSvGfNSOOX",
+        "model": "openai/ember-alpha"
+      },
+      "human_author": "whoiskatrin",
+      "messages": [],
+      "total_additions": 9,
+      "total_deletions": 112,
+      "accepted_lines": 9,
+      "overriden_lines": 0
+    }
+  }
+}
