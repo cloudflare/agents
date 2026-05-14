@@ -11,9 +11,10 @@ import {
   type JsonSchemaToolDescriptor,
   type JsonSchemaToolDescriptors
 } from "./json-schema-types";
-import { normalizeCode } from "./normalize";
+import { runCode } from "./run-code";
 import { sanitizeToolName } from "./utils";
 import type { Executor, ResolvedProvider } from "./executor-types";
+import type { CodeInput, CodeOutput } from "./shared";
 import { IframeSandboxExecutor } from "./iframe-executor";
 
 // -- Types --
@@ -53,7 +54,6 @@ export interface BrowserCodeToolDescriptor {
   outputSchema: {
     type: "object";
     properties: {
-      code: { type: "string"; description: string };
       result: { description: string };
       logs: {
         type: "array";
@@ -61,11 +61,9 @@ export interface BrowserCodeToolDescriptor {
         description: string;
       };
     };
-    required: ["code", "result"];
+    required: ["result"];
   };
-  execute: (args: {
-    code: string;
-  }) => Promise<{ code: string; result: unknown; logs?: string[] }>;
+  execute: (args: CodeInput) => Promise<CodeOutput>;
 }
 
 export interface CreateBrowserCodeToolOptions {
@@ -201,10 +199,6 @@ export function createBrowserCodeTool(
     outputSchema: {
       type: "object",
       properties: {
-        code: {
-          type: "string",
-          description: "The original code that was executed"
-        },
         result: {
           description: "The return value of the executed code"
         },
@@ -214,30 +208,9 @@ export function createBrowserCodeTool(
           description: "Console output captured during execution"
         }
       },
-      required: ["code", "result"]
+      required: ["result"]
     },
-    execute: async ({ code }) => {
-      const normalizedCode = normalizeCode(code);
-      const executeResult = await executor.execute(
-        normalizedCode,
-        resolvedProviders
-      );
-
-      if (executeResult.error) {
-        const logCtx = executeResult.logs?.length
-          ? `\n\nConsole output:\n${executeResult.logs.join("\n")}`
-          : "";
-        throw new Error(
-          `Code execution failed: ${executeResult.error}${logCtx}`
-        );
-      }
-
-      const output: { code: string; result: unknown; logs?: string[] } = {
-        code,
-        result: executeResult.result
-      };
-      if (executeResult.logs) output.logs = executeResult.logs;
-      return output;
-    }
+    execute: async ({ code }) =>
+      runCode({ code, executor, providers: resolvedProviders })
   };
 }
