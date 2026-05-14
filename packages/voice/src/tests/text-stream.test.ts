@@ -149,6 +149,26 @@ describe("NDJSON parsing resilience", () => {
     expect(chunks).toEqual(["hello", " world"]);
   });
 
+  it("keeps parsing OpenAI-style assistant content after role is omitted", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            '{"choices":[{"delta":{"role":"assistant","content":"before tool"}}]}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode('{"choices":[{"delta":{"content":" after tool"}}]}\n')
+        );
+        controller.close();
+      }
+    });
+
+    const chunks = await collect(iterateText(stream));
+    expect(chunks).toEqual(["before tool", " after tool"]);
+  });
+
   it("survives malformed raw JSON lines without crashing", async () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({

@@ -86,13 +86,19 @@ export async function* iterateText(source: TextSource): AsyncGenerator<string> {
         }
       });
 
+      let openAIAssistantDelta = false;
+
       for await (const chunk of parseNDJSON(combined.getReader())) {
         const ai = chunk as AIStreamChunk;
         if (ai.response) {
           yield ai.response;
         } else if (ai.choices && ai.choices.length > 0) {
           const choice = ai.choices[0];
-          if (choice.delta?.content && choice.delta?.role === "assistant") {
+          const role = choice.delta?.role;
+          if (role) {
+            openAIAssistantDelta = role === "assistant";
+          }
+          if (choice.delta?.content && openAIAssistantDelta) {
             yield choice.delta.content;
           }
         }

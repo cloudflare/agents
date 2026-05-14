@@ -1,5 +1,6 @@
 import { Agent, type Connection, type WSMessage } from "agents";
 import { withVoice, type VoiceTurnContext } from "../../voice";
+import type { TextSource } from "../../text-stream";
 import type {
   TTSProvider,
   Transcriber,
@@ -70,6 +71,14 @@ class TestTranscriber implements Transcriber {
   }
 }
 
+async function* streamAroundToolCallPause(): AsyncGenerator<string> {
+  yield "Some intro text. ";
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  yield "Here is what the first tool found. ";
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  yield "Here is the conclusion.";
+}
+
 // --- Test agents ---
 
 const VoiceBase = withVoice(Agent);
@@ -93,7 +102,11 @@ export class TestVoiceAgent extends VoiceBase {
   async onTurn(
     transcript: string,
     _context: VoiceTurnContext
-  ): Promise<string> {
+  ): Promise<TextSource> {
+    if (transcript === "stream around tool calls") {
+      return streamAroundToolCallPause();
+    }
+
     if (this.#turnDelayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, this.#turnDelayMs));
     }
