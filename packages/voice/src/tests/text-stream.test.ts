@@ -211,6 +211,67 @@ describe("NDJSON parsing resilience", () => {
     ]);
   });
 
+  it("keeps AI SDK UI message text deltas flowing around tool parts", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode('data: {"type":"text-start","id":"t1"}\n')
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"text-delta","id":"t1","delta":"Some intro text. "}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"tool-input-start","toolCallId":"tool-1","toolName":"first_tool"}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"tool-input-available","toolCallId":"tool-1","toolName":"first_tool","input":{}}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode('data: {"type":"text-start","id":"t2"}\n')
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"text-delta","id":"t2","delta":"Here is what the first tool found. "}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"tool-input-start","toolCallId":"tool-2","toolName":"second_tool"}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"tool-input-available","toolCallId":"tool-2","toolName":"second_tool","input":{}}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode('data: {"type":"text-start","id":"t3"}\n')
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"text-delta","id":"t3","delta":"Here is the conclusion."}\n'
+          )
+        );
+        controller.enqueue(encoder.encode("data: [DONE]\n"));
+        controller.close();
+      }
+    });
+
+    const chunks = await collect(iterateText(stream));
+    expect(chunks).toEqual([
+      "Some intro text. ",
+      "Here is what the first tool found. ",
+      "Here is the conclusion."
+    ]);
+  });
+
   it("survives malformed raw JSON lines without crashing", async () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({

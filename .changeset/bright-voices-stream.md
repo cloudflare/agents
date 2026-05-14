@@ -2,4 +2,4 @@
 "@cloudflare/voice": patch
 ---
 
-Preserve OpenAI/OpenRouter-style assistant text chunks across tool-call deltas when later streamed chunks omit the repeated assistant role.
+Preserve assistant text chunks across streamed tool-call gaps for OpenAI/OpenRouter-compatible SSE and AI SDK UI message streams.

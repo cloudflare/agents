@@ -21,6 +21,9 @@ export type TextSource =
 /** Shape of a parsed NDJSON/SSE chunk from common AI APIs. */
 interface AIStreamChunk {
   response?: string;
+  type?: string;
+  delta?: unknown;
+  text?: unknown;
   choices?: {
     delta?: { content?: string; role?: string };
   }[];
@@ -92,6 +95,14 @@ export async function* iterateText(source: TextSource): AsyncGenerator<string> {
         const ai = chunk as AIStreamChunk;
         if (ai.response) {
           yield ai.response;
+        } else if (ai.type === "text-delta") {
+          const delta =
+            typeof ai.delta === "string"
+              ? ai.delta
+              : typeof ai.text === "string"
+                ? ai.text
+                : undefined;
+          if (delta) yield delta;
         } else if (ai.choices && ai.choices.length > 0) {
           const choice = ai.choices[0];
           const role = choice.delta?.role;
