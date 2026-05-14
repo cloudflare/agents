@@ -1,5 +1,13 @@
 # @cloudflare/codemode
 
+## 0.3.6
+
+### Patch Changes
+
+- [#1521](https://github.com/cloudflare/agents/pull/1521) [`2911bae`](https://github.com/cloudflare/agents/commit/2911bae6c7a0e331de9cb8471ab877aee2a385d2) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Preserve binary values across codemode tool calls so `Uint8Array` arguments and results survive the sandbox boundary. This fixes `state.writeFileBytes()` from codemode with byte arrays and keeps `readFileBytes()` results as `Uint8Array` values.
+
+- [#1523](https://github.com/cloudflare/agents/pull/1523) [`5f1376f`](https://github.com/cloudflare/agents/commit/5f1376fed1b9ff47dda4b98c5369a4e060ce796d) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Remove the echoed source `code` field from codemode tool results. Successful sandbox executions now return only the execution `result` and any captured `logs`.
+
 ## 0.3.5
 
 ### Patch Changes
@@ -53,19 +61,20 @@
   ```typescript
   import {
     createCodeTool,
-    tanstackTools
+    tanstackTools,
   } from "@cloudflare/codemode/tanstack-ai";
   import { chat } from "@tanstack/ai";
 
   const codeTool = createCodeTool({
     tools: [tanstackTools(myServerTools)],
-    executor
+    executor,
   });
 
   const stream = chat({ adapter, tools: [codeTool], messages });
   ```
 
   **Exports:**
+
   - `createCodeTool` — returns a TanStack AI `ServerTool` (via `toolDefinition().server()`)
   - `tanstackTools` — converts a `TanStackTool[]` into a `ToolProvider` with pre-generated types
   - `generateTypes` — generates TypeScript type definitions from TanStack AI tools
@@ -84,6 +93,7 @@
 ### Patch Changes
 
 - [#1114](https://github.com/cloudflare/agents/pull/1114) [`5d88b81`](https://github.com/cloudflare/agents/commit/5d88b810cda4edc4f55ea6bc619a376efa9b8f4d) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add `@cloudflare/codemode/mcp` barrel export with two functions:
+
   - `codeMcpServer({ server, executor })` — wraps an MCP server with a single `code` tool where each upstream tool becomes a typed `codemode.*` method
   - `openApiMcpServer({ spec, executor, request })` — creates `search` + `execute` MCP tools from an OpenAPI spec with host-side request proxying and automatic `$ref` resolution
 
@@ -106,6 +116,7 @@
   ```
 
   The main entry point (`@cloudflare/codemode`) no longer requires the `ai` or `zod` peer dependencies. It now exports:
+
   - `sanitizeToolName` — sanitize tool names into valid JS identifiers
   - `normalizeCode` — normalize LLM-generated code into async arrow functions
   - `generateTypesFromJsonSchema` — generate TypeScript type definitions from plain JSON Schema (no AI SDK needed)
@@ -138,6 +149,7 @@
 - [#973](https://github.com/cloudflare/agents/pull/973) [`969fbff`](https://github.com/cloudflare/agents/commit/969fbff702d5702c1f0ea6faaecb3dfd0431a01b) Thanks [@threepointone](https://github.com/threepointone)! - Update dependencies
 
 - [#960](https://github.com/cloudflare/agents/pull/960) [`179b8cb`](https://github.com/cloudflare/agents/commit/179b8cbc60bc9e6ac0d2ee26c430d842950f5f08) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Harden JSON Schema to TypeScript converter for production use
+
   - Add depth and circular reference guards to prevent stack overflows on recursive or deeply nested schemas
   - Add `$ref` resolution for internal JSON Pointers (`#/definitions/...`, `#/$defs/...`, `#`)
   - Add tuple support (`prefixItems` for JSON Schema 2020-12, array `items` for draft-07)

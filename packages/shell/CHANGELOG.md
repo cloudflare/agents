@@ -1,5 +1,11 @@
 # @cloudflare/shell
 
+## 0.3.7
+
+### Patch Changes
+
+- [#1521](https://github.com/cloudflare/agents/pull/1521) [`2911bae`](https://github.com/cloudflare/agents/commit/2911bae6c7a0e331de9cb8471ab877aee2a385d2) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Preserve binary values across codemode tool calls so `Uint8Array` arguments and results survive the sandbox boundary. This fixes `state.writeFileBytes()` from codemode with byte arrays and keeps `readFileBytes()` results as `Uint8Array` values.
+
 ## 0.3.6
 
 ### Patch Changes
