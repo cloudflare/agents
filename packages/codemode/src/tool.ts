@@ -136,9 +136,7 @@ export function createCodeTool(
         );
       }
 
-      const output: CodeOutput = { result: executeResult.result };
-      if (executeResult.logs) output.logs = executeResult.logs;
-      return output;
+      return { result: executeResult.result, logs: executeResult.logs };
     }
   });
 }
