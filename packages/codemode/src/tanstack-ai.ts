@@ -281,7 +281,7 @@ export function createCodeTool(options: CreateCodeToolOptions): ServerTool {
       throw new Error(`Code execution failed: ${executeResult.error}${logCtx}`);
     }
 
-    const output: CodeOutput = { code, result: executeResult.result };
+    const output: CodeOutput = { result: executeResult.result };
     if (executeResult.logs) output.logs = executeResult.logs;
     return output;
   });

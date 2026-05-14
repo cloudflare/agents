@@ -28,7 +28,7 @@ export interface CreateCodeToolOptions {
 }
 
 export type CodeInput = { code: string };
-export type CodeOutput = { code: string; result: unknown; logs?: string[] };
+export type CodeOutput = { result: unknown; logs?: string[] };
 
 /**
  * Check if the tools option is an array of ToolProviders.

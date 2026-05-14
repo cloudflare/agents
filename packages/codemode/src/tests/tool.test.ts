@@ -274,7 +274,7 @@ describe("createCodeTool", () => {
     expect(capturedFnNames).toContain("explicitlySafeTool");
   });
 
-  it("should return { code, result } on success", async () => {
+  it("should return { result } on success", async () => {
     const { executor } = createMockExecutor({ result: { answer: 42 } });
     const codeTool = createCodeTool({ tools, executor });
 
@@ -284,7 +284,6 @@ describe("createCodeTool", () => {
     );
 
     expect(output).toEqual({
-      code: "async () => 42",
       result: { answer: 42 }
     });
   });
