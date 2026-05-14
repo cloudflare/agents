@@ -28,7 +28,7 @@ type Result = {
 
 async function checkProject(tsconfig: string): Promise<Result> {
   try {
-    await execAsync(`tsc -p ${tsconfig}`);
+    await execAsync(`tsgo -p ${tsconfig}`);
     return { tsconfig, success: true, output: "" };
   } catch (rawError: unknown) {
     const error = rawError as { stdout?: string; stderr?: string };

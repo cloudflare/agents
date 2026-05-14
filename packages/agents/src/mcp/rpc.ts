@@ -68,9 +68,11 @@ export class RPCClientTransport implements Transport {
     }
 
     const doName = `${RPC_DO_PREFIX}${this._name}`;
-    this._stub = await getServerByName(this._namespace, doName, {
-      props: this._props
-    });
+    this._stub = await getServerByName<Cloudflare.Env, McpAgent>(
+      this._namespace,
+      doName,
+      { props: this._props }
+    );
 
     this._started = true;
   }
