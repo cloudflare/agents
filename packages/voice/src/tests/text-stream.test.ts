@@ -169,6 +169,48 @@ describe("NDJSON parsing resilience", () => {
     expect(chunks).toEqual(["before tool", " after tool"]);
   });
 
+  it("keeps OpenRouter-style text flowing around two tool calls", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"role":"assistant","content":"Some intro text. "}}]}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tool-1","type":"function","function":{"name":"first_tool","arguments":"{}"}}]}}]}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"content":"Here is what the first tool found. "}}]}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tool-2","type":"function","function":{"name":"second_tool","arguments":"{}"}}]}}]}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"content":"Here is the conclusion."}}]}\n'
+          )
+        );
+        controller.enqueue(encoder.encode("data: [DONE]\n"));
+        controller.close();
+      }
+    });
+
+    const chunks = await collect(iterateText(stream));
+    expect(chunks).toEqual([
+      "Some intro text. ",
+      "Here is what the first tool found. ",
+      "Here is the conclusion."
+    ]);
+  });
+
   it("survives malformed raw JSON lines without crashing", async () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
