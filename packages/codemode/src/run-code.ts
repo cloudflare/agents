@@ -20,5 +20,7 @@ export async function runCode({
     throw new Error(`Code execution failed: ${executeResult.error}${logCtx}`);
   }
 
-  return { result: executeResult.result, logs: executeResult.logs };
+  return executeResult.logs?.length
+    ? { result: executeResult.result, logs: executeResult.logs }
+    : { result: executeResult.result };
 }
