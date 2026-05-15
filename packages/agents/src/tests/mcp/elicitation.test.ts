@@ -11,8 +11,6 @@ import worker from "../worker";
 import {
   initializeStreamableHTTPServer,
   sendPostRequest,
-  openStandaloneSSE,
-  readSSEEvent,
   parseSSEData,
   establishSSEConnection,
   establishRPCConnection
@@ -42,9 +40,10 @@ describe("McpAgent.elicitInput() in-memory resolver", () => {
     it("should complete elicitation accept round-trip", async () => {
       const ctx = createExecutionContext();
       const sessionId = await initializeStreamableHTTPServer(ctx);
-      const standaloneReader = await openStandaloneSSE(ctx, sessionId, baseUrl);
 
-      // Call the custom elicitation tool (uses McpAgent.elicitInput)
+      // Call the custom elicitation tool (uses McpAgent.elicitInput).
+      // The tool passes { relatedRequestId: extra.requestId } so the elicit
+      // routes through the originating POST response stream per spec.
       const toolCallMsg: JSONRPCMessage = {
         id: "custom-elicit-1",
         jsonrpc: "2.0",
@@ -52,15 +51,18 @@ describe("McpAgent.elicitInput() in-memory resolver", () => {
         params: { name: "elicitNameCustom", arguments: {} }
       };
 
-      const toolResponsePromise = sendPostRequest(
+      const toolResponse = await sendPostRequest(
         ctx,
         baseUrl,
         toolCallMsg,
         sessionId
       );
+      expect(toolResponse.status).toBe(200);
 
-      // Read the elicitation request from the standalone SSE stream
-      const elicitFrame = await readOneFrame(standaloneReader);
+      const reader = toolResponse.body?.getReader();
+      if (!reader) throw new Error("No reader available for POST stream");
+
+      const elicitFrame = await readOneFrame(reader);
       const elicitRequest = parseSSEData(elicitFrame) as JSONRPCRequest;
 
       expect(elicitRequest.method).toBe("elicitation/create");
@@ -96,19 +98,72 @@ describe("McpAgent.elicitInput() in-memory resolver", () => {
       );
       expect(responsePost.status).toBe(202);
 
-      // Read the tool call result
-      const toolResponse = await toolResponsePromise;
-      expect(toolResponse.status).toBe(200);
-      const toolSseText = await readSSEEvent(toolResponse);
-      const toolResult = parseSSEData(toolSseText) as JSONRPCResultResponse;
+      const toolResultFrame = await readOneFrame(reader);
+      const toolResult = parseSSEData(toolResultFrame) as JSONRPCResultResponse;
 
       expect(toolResult.id).toBe("custom-elicit-1");
       const result = toolResult.result as CallToolResult;
       expect(result.content).toEqual([
         { type: "text", text: "Custom elicit: Alice" }
       ]);
+    });
 
-      await standaloneReader.cancel();
+    it("should route McpAgent.elicitInput via explicit relatedRequestId to the originating POST stream", async () => {
+      // The elicitNameCustom tool now passes `{ relatedRequestId: extra.requestId }`
+      // to this.elicitInput(...). This test asserts that the elicit JSON-RPC arrives
+      // on the originating POST stream because of that explicit option — not because
+      // of any transport-side request-id inference.
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+
+      const toolCallMsg: JSONRPCMessage = {
+        id: "custom-elicit-explicit-related-1",
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "elicitNameCustom", arguments: {} }
+      };
+
+      const toolResponse = await sendPostRequest(
+        ctx,
+        baseUrl,
+        toolCallMsg,
+        sessionId
+      );
+      expect(toolResponse.status).toBe(200);
+
+      const reader = toolResponse.body?.getReader();
+      if (!reader) throw new Error("No reader available for POST stream");
+
+      const elicitFrame = await readOneFrame(reader);
+      const elicitRequest = parseSSEData(elicitFrame) as JSONRPCRequest;
+
+      expect(elicitRequest.method).toBe("elicitation/create");
+
+      const elicitResponse: JSONRPCMessage = {
+        jsonrpc: "2.0",
+        id: elicitRequest.id,
+        result: {
+          action: "accept",
+          content: { name: "Bob" }
+        }
+      } as unknown as JSONRPCMessage;
+
+      const responsePost = await sendPostRequest(
+        ctx,
+        baseUrl,
+        elicitResponse,
+        sessionId
+      );
+      expect(responsePost.status).toBe(202);
+
+      const toolResultFrame = await readOneFrame(reader);
+      const toolResult = parseSSEData(toolResultFrame) as JSONRPCResultResponse;
+
+      expect(toolResult.id).toBe("custom-elicit-explicit-related-1");
+      const result = toolResult.result as CallToolResult;
+      expect(result.content).toEqual([
+        { type: "text", text: "Custom elicit: Bob" }
+      ]);
     });
 
     it("should route McpAgent.elicitInput through the originating POST stream without standalone SSE", async () => {
@@ -308,7 +363,6 @@ describe("McpAgent.elicitInput() in-memory resolver", () => {
     it("should handle elicitation cancel response", async () => {
       const ctx = createExecutionContext();
       const sessionId = await initializeStreamableHTTPServer(ctx);
-      const standaloneReader = await openStandaloneSSE(ctx, sessionId, baseUrl);
 
       const toolCallMsg: JSONRPCMessage = {
         id: "custom-cancel-1",
@@ -317,14 +371,18 @@ describe("McpAgent.elicitInput() in-memory resolver", () => {
         params: { name: "elicitNameCustom", arguments: {} }
       };
 
-      const toolResponsePromise = sendPostRequest(
+      const toolResponse = await sendPostRequest(
         ctx,
         baseUrl,
         toolCallMsg,
         sessionId
       );
+      expect(toolResponse.status).toBe(200);
 
-      const elicitFrame = await readOneFrame(standaloneReader);
+      const reader = toolResponse.body?.getReader();
+      if (!reader) throw new Error("No reader available for POST stream");
+
+      const elicitFrame = await readOneFrame(reader);
       const elicitRequest = parseSSEData(elicitFrame) as JSONRPCRequest;
 
       // Send cancel
@@ -339,24 +397,19 @@ describe("McpAgent.elicitInput() in-memory resolver", () => {
 
       await sendPostRequest(ctx, baseUrl, cancelResponse, sessionId);
 
-      const toolResponse = await toolResponsePromise;
-      expect(toolResponse.status).toBe(200);
-      const toolSseText = await readSSEEvent(toolResponse);
-      const toolResult = parseSSEData(toolSseText) as JSONRPCResultResponse;
+      const toolResultFrame = await readOneFrame(reader);
+      const toolResult = parseSSEData(toolResultFrame) as JSONRPCResultResponse;
 
       expect(toolResult.id).toBe("custom-cancel-1");
       const result = toolResult.result as CallToolResult;
       expect(result.content).toEqual([
         { type: "text", text: "Custom elicit cancelled" }
       ]);
-
-      await standaloneReader.cancel();
     });
 
     it("should handle elicitation error response", async () => {
       const ctx = createExecutionContext();
       const sessionId = await initializeStreamableHTTPServer(ctx);
-      const standaloneReader = await openStandaloneSSE(ctx, sessionId, baseUrl);
 
       const toolCallMsg: JSONRPCMessage = {
         id: "custom-error-1",
@@ -365,14 +418,18 @@ describe("McpAgent.elicitInput() in-memory resolver", () => {
         params: { name: "elicitNameCustom", arguments: {} }
       };
 
-      const toolResponsePromise = sendPostRequest(
+      const toolResponse = await sendPostRequest(
         ctx,
         baseUrl,
         toolCallMsg,
         sessionId
       );
+      expect(toolResponse.status).toBe(200);
 
-      const elicitFrame = await readOneFrame(standaloneReader);
+      const reader = toolResponse.body?.getReader();
+      if (!reader) throw new Error("No reader available for POST stream");
+
+      const elicitFrame = await readOneFrame(reader);
       const elicitRequest = parseSSEData(elicitFrame) as JSONRPCRequest;
 
       // Send JSON-RPC error response — our code converts this to cancel
@@ -387,10 +444,8 @@ describe("McpAgent.elicitInput() in-memory resolver", () => {
 
       await sendPostRequest(ctx, baseUrl, errorResponse, sessionId);
 
-      const toolResponse = await toolResponsePromise;
-      expect(toolResponse.status).toBe(200);
-      const toolSseText = await readSSEEvent(toolResponse);
-      const toolResult = parseSSEData(toolSseText) as JSONRPCResultResponse;
+      const toolResultFrame = await readOneFrame(reader);
+      const toolResult = parseSSEData(toolResultFrame) as JSONRPCResultResponse;
 
       expect(toolResult.id).toBe("custom-error-1");
       const result = toolResult.result as CallToolResult;
@@ -398,8 +453,6 @@ describe("McpAgent.elicitInput() in-memory resolver", () => {
       expect(result.content).toEqual([
         { type: "text", text: "Custom elicit cancelled" }
       ]);
-
-      await standaloneReader.cancel();
     });
   });
 

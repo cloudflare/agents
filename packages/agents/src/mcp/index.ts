@@ -3,7 +3,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type {
   JSONRPCMessage,
-  MessageExtraInfo
+  MessageExtraInfo,
+  RequestId
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   JSONRPCMessageSchema,
@@ -275,10 +276,13 @@ export abstract class McpAgent<
   }
 
   /** Elicit user input with a message and schema */
-  async elicitInput(params: {
-    message: string;
-    requestedSchema: unknown;
-  }): Promise<ElicitResult> {
+  async elicitInput(
+    params: {
+      message: string;
+      requestedSchema: unknown;
+    },
+    options?: { relatedRequestId?: RequestId }
+  ): Promise<ElicitResult> {
     const requestId = `elicit_${Math.random().toString(36).substring(2, 11)}`;
 
     const elicitRequest = {
@@ -326,7 +330,7 @@ export abstract class McpAgent<
       // Send through MCP transport
       if (this._transport) {
         try {
-          await this._transport.send(elicitRequest);
+          await this._transport.send(elicitRequest, options);
         } catch (error) {
           cleanup();
           throw error;

@@ -138,20 +138,23 @@ export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
       "elicitNameCustom",
       "Test tool that elicits user input using McpAgent.elicitInput()",
       {},
-      async () => {
-        const result = await this.elicitInput({
-          message: "What is your name?",
-          requestedSchema: {
-            type: "object",
-            properties: {
-              name: {
-                type: "string",
-                description: "Your name"
-              }
-            },
-            required: ["name"]
-          }
-        });
+      async (_args, extra) => {
+        const result = await this.elicitInput(
+          {
+            message: "What is your name?",
+            requestedSchema: {
+              type: "object",
+              properties: {
+                name: {
+                  type: "string",
+                  description: "Your name"
+                }
+              },
+              required: ["name"]
+            }
+          },
+          { relatedRequestId: extra.requestId }
+        );
 
         if (result.action === "accept" && result.content?.name) {
           return {
