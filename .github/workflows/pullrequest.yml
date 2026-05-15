@@ -25,10 +25,7 @@ jobs:
           fetch-depth: 0
           filter: tree:0
 
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: "npm"
+      - uses: ./.github/actions/install
 
       - uses: nrwl/nx-set-shas@v5
 
@@ -41,7 +38,6 @@ jobs:
             ${{ runner.os }}-nx-${{ hashFiles('package-lock.json') }}-
             ${{ runner.os }}-nx-
 
-      - run: npm ci
       - run: npm run build
       - run: npm run check
 
