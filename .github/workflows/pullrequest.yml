@@ -61,4 +61,5 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - run: CI=true npx nx affected -t test
+
       - run: npx pkg-pr-new publish --peerDeps ./packages/*
