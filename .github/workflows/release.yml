@@ -20,7 +20,7 @@ jobs:
       pull-requests: write
 
     if: ${{ github.repository_owner == 'cloudflare' }}
-    timeout-minutes: 5
+    timeout-minutes: 20
     runs-on: ubuntu-24.04
 
     steps:
@@ -36,6 +36,24 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+      - run: npm run check
+
+      - name: Get Playwright version
+        id: playwright-version
+        run: echo "version=$(jq -r '.packages["node_modules/playwright"].version' package-lock.json)" >> $GITHUB_OUTPUT
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v5
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - run: CI=true npx nx run-many -t test
 
       - id: changesets
         uses: changesets/action@v1.7.0

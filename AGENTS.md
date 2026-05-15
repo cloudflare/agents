@@ -149,7 +149,7 @@ Examples, guides, and sites don't need changesets.
 
 ### Pull request process
 
-CI runs on every PR (`npm ci && npm run build && npm run check && npx nx affected -t test`) and on push to `main` (with `nx run-many -t test` instead, as a safety net against under-reported affected projects). All checks must pass. The workflow is in `.github/workflows/pullrequest.yml`.
+CI runs on every PR (`npm ci && npm run build && npm run check && npx nx affected -t test`); the workflow is in `.github/workflows/pullrequest.yml`. On push to `main` the Release workflow (`.github/workflows/release.yml`) runs the same steps but uses `nx run-many -t test` as a safety net against under-reported affected projects, then publishes via changesets. All checks must pass.
 
 ### Generated files
 
