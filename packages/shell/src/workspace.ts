@@ -160,6 +160,92 @@ export class WorkspaceFileSystem implements FileSystem {
   }
 }
 
+export type WorkspaceSourceEntryKind = "source" | "asset";
+
+export interface WorkspaceSourceEntry {
+  path: string;
+  type?: "file" | "directory";
+  kind?: WorkspaceSourceEntryKind;
+  assetPath?: string;
+  mimeType?: string;
+  size?: number;
+}
+
+export interface WorkspaceSourceProvider {
+  list(patterns?: string[]): Promise<WorkspaceSourceEntry[]>;
+  readText(path: string): Promise<string | null>;
+  readBytes(path: string): Promise<Uint8Array | ArrayBuffer | null>;
+}
+
+export interface WorkspaceSourceProviderOptions {
+  sources?: string[];
+  assets?: string[];
+  exclude?: string[];
+}
+
+export interface WorkspaceSourceLike {
+  glob(pattern: string): Promise<
+    Array<{
+      path: string;
+      type: string;
+      mimeType?: string;
+      size?: number;
+    }>
+  >;
+  readFile(path: string): Promise<string | null>;
+  readFileBytes(path: string): Promise<Uint8Array | null>;
+}
+
+export function createWorkspaceSourceProvider(
+  workspace: WorkspaceSourceLike,
+  options: WorkspaceSourceProviderOptions = {}
+): WorkspaceSourceProvider {
+  const sourcePatterns = options.sources ?? ["/**"];
+  const assetPatterns = options.assets ?? [];
+  const excludePatterns = options.exclude ?? [];
+
+  return {
+    async list(patterns?: string[]) {
+      const requested = patterns ?? [...sourcePatterns, ...assetPatterns];
+      const excluded = await collectExcludedPaths(workspace, excludePatterns);
+      const sourcePaths = await collectMatchedPaths(workspace, sourcePatterns);
+      const assetPaths = await collectMatchedPaths(workspace, assetPatterns);
+      const results = new Map<string, WorkspaceSourceEntry>();
+
+      for (const pattern of requested) {
+        const entries = await workspace.glob(pattern);
+        for (const entry of entries) {
+          if (excluded.has(entry.path)) continue;
+          if (entry.type !== "file") continue;
+          const kind = assetPaths.has(entry.path) ? "asset" : "source";
+          if (kind === "source" && !sourcePaths.has(entry.path)) continue;
+          const previous = results.get(entry.path);
+          if (previous?.kind === "asset") continue;
+          results.set(entry.path, {
+            path: entry.path,
+            type: entry.type,
+            kind,
+            assetPath:
+              kind === "asset"
+                ? workspacePathToAssetPath(entry.path)
+                : undefined,
+            mimeType: entry.mimeType,
+            size: entry.size
+          });
+        }
+      }
+
+      return [...results.values()].sort((a, b) => a.path.localeCompare(b.path));
+    },
+    readText(path) {
+      return workspace.readFile(path);
+    },
+    readBytes(path) {
+      return workspace.readFileBytes(path);
+    }
+  };
+}
+
 // ── Factory ───────────────────────────────────────────────────────────
 
 /**
@@ -179,6 +265,34 @@ export function createWorkspaceStateBackend(
 export const WorkspaceStateBackend = FileSystemStateBackend;
 
 // ── Private helpers ───────────────────────────────────────────────────
+
+async function collectExcludedPaths(
+  workspace: WorkspaceSourceLike,
+  patterns: string[]
+): Promise<Set<string>> {
+  return collectMatchedPaths(workspace, patterns);
+}
+
+async function collectMatchedPaths(
+  workspace: WorkspaceSourceLike,
+  patterns: string[]
+): Promise<Set<string>> {
+  const matched = new Set<string>();
+  for (const pattern of patterns) {
+    for (const entry of await workspace.glob(pattern)) {
+      matched.add(entry.path);
+    }
+  }
+  return matched;
+}
+
+function workspacePathToAssetPath(path: string): string {
+  const normalized = normalizePath(path);
+  if (normalized.startsWith("/public/")) {
+    return normalized.slice("/public".length);
+  }
+  return normalized;
+}
 
 function fromWorkspaceStat(stat: {
   type: string;

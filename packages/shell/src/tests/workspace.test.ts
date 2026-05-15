@@ -3,7 +3,11 @@ import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import type { FileInfo, FileStat, WorkspaceFsLike } from "../filesystem";
 import { StateBatchOperationError } from "../index";
-import { createWorkspaceStateBackend, WorkspaceFileSystem } from "../workspace";
+import {
+  createWorkspaceSourceProvider,
+  createWorkspaceStateBackend,
+  WorkspaceFileSystem
+} from "../workspace";
 
 // ═══════════════════════════════════════════════════════════════════
 // SqlBackend / detection / name — DO-backed tests
@@ -261,6 +265,96 @@ function createWorkspaceLike(
     }
   };
 }
+
+describe("createWorkspaceSourceProvider", () => {
+  it("lists source files and maps public files to assets", async () => {
+    const workspace = createWorkspaceLike(
+      new Map([
+        ["/src/index.ts", "export default 1"],
+        ["/public/logo.svg", "<svg />"],
+        ["/README.md", "docs"]
+      ])
+    );
+    const provider = createWorkspaceSourceProvider(workspace, {
+      sources: ["/src/**", "/README.md"],
+      assets: ["/public/**"]
+    });
+
+    const entries = await provider.list();
+
+    expect(entries.map((entry) => entry.path).sort()).toEqual([
+      "/README.md",
+      "/public/logo.svg",
+      "/src/index.ts"
+    ]);
+    expect(entries.find((entry) => entry.path === "/public/logo.svg")).toEqual(
+      expect.objectContaining({
+        kind: "asset",
+        assetPath: "/logo.svg"
+      })
+    );
+    expect(await provider.readText("/src/index.ts")).toBe("export default 1");
+    expect(await provider.readBytes("/public/logo.svg")).toEqual(
+      new TextEncoder().encode("<svg />")
+    );
+  });
+
+  it("excludes matching files", async () => {
+    const workspace = createWorkspaceLike(
+      new Map([
+        ["/src/index.ts", "index"],
+        ["/src/generated.ts", "generated"]
+      ])
+    );
+    const provider = createWorkspaceSourceProvider(workspace, {
+      sources: ["/src/**"],
+      exclude: ["/src/generated.ts"]
+    });
+
+    const entries = await provider.list();
+
+    expect(entries.map((entry) => entry.path)).toEqual(["/src/index.ts"]);
+  });
+
+  it("keeps public files as assets when list patterns are narrowed", async () => {
+    const workspace = createWorkspaceLike(
+      new Map([
+        ["/public/logo.svg", "<svg />"],
+        ["/src/index.ts", "index"]
+      ])
+    );
+    const provider = createWorkspaceSourceProvider(workspace, {
+      sources: ["/src/**"],
+      assets: ["/public/**"]
+    });
+
+    const entries = await provider.list(["/public/logo.svg"]);
+
+    expect(entries).toEqual([
+      expect.objectContaining({
+        path: "/public/logo.svg",
+        kind: "asset",
+        assetPath: "/logo.svg"
+      })
+    ]);
+  });
+
+  it("does not let explicit list patterns escape configured source scopes", async () => {
+    const workspace = createWorkspaceLike(
+      new Map([
+        ["/src/index.ts", "index"],
+        ["/secret.txt", "secret"]
+      ])
+    );
+    const provider = createWorkspaceSourceProvider(workspace, {
+      sources: ["/src/**"]
+    });
+
+    const entries = await provider.list(["/secret.txt"]);
+
+    expect(entries).toEqual([]);
+  });
+});
 
 // ═══════════════════════════════════════════════════════════════════
 // WorkspaceStateBackend — mock-based unit tests

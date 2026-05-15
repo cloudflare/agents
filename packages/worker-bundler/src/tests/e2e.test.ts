@@ -7,6 +7,7 @@ import { DEFAULT_ENTRY_POINTS, detectEntryPoint } from "../utils";
 import { runInDurableObject } from "cloudflare:test";
 import { InMemoryFileSystem, DurableObjectKVFileSystem } from "../file-system";
 import type { CreateWorkerOptions } from "../types";
+import type { SourceProvider } from "../source-provider";
 import { createTypescriptLanguageService } from "../typescript";
 
 let testId = 0;
@@ -78,6 +79,86 @@ describe("createWorker e2e (build + load + fetch)", () => {
     });
 
     expect(await response.text()).toBe("Hello, world!");
+  });
+
+  it("bundles a worker from an async source provider", async () => {
+    const source: SourceProvider = {
+      async list() {
+        return [
+          { path: "/src/index.ts", type: "file", kind: "source" },
+          { path: "/src/message.ts", type: "file", kind: "source" }
+        ];
+      },
+      async readText(path) {
+        if (path === "/src/index.ts") {
+          return "import { message } from './message'; export default { fetch() { return new Response(message); } };";
+        }
+        if (path === "/src/message.ts") {
+          return "export const message = 'from source';";
+        }
+        return null;
+      }
+    };
+
+    const response = await buildAndFetch({
+      source,
+      entryPoint: "src/index.ts"
+    });
+
+    expect(await response.text()).toBe("from source");
+  });
+
+  it("warns when createWorker receives SourceProvider assets", async () => {
+    const source: SourceProvider = {
+      async list() {
+        return [
+          { path: "/src/index.ts", type: "file", kind: "source" },
+          { path: "/public/logo.svg", type: "file", kind: "asset" }
+        ];
+      },
+      async readText(path) {
+        if (path === "/src/index.ts") {
+          return "export default { fetch() { return new Response('ok'); } };";
+        }
+        if (path === "/public/logo.svg") {
+          return "<svg></svg>";
+        }
+        return null;
+      }
+    };
+
+    const result = await createWorker({
+      source,
+      entryPoint: "src/index.ts"
+    });
+
+    expect(result.warnings).toContain(
+      "createWorker ignored 1 SourceProvider asset because Worker bundles do not include host-served assets. Use createApp() for full-stack apps with static assets."
+    );
+  });
+
+  it("rejects ambiguous files and source inputs", async () => {
+    const source: SourceProvider = {
+      async list() {
+        return [];
+      },
+      async readText() {
+        return null;
+      }
+    };
+
+    await expect(
+      createWorker({
+        files: {
+          "src/index.ts":
+            "export default { fetch() { return new Response('files'); } };"
+        },
+        source,
+        entryPoint: "src/index.ts"
+      })
+    ).rejects.toThrow(
+      "createWorker accepts either `files` or `source`, not both."
+    );
   });
 
   it("respects explicit entryPoint option", async () => {

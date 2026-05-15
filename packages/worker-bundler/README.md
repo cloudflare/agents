@@ -58,8 +58,7 @@ Use `createApp` to bundle a server Worker, client-side JavaScript, and static as
 ```ts
 import {
   createApp,
-  handleAssetRequest,
-  createMemoryStorage
+  serveGeneratedAppPreview
 } from "@cloudflare/worker-bundler";
 
 const result = await createApp({
@@ -87,25 +86,105 @@ const result = await createApp({
   }
 });
 
-const worker = env.LOADER.get("my-app", () => ({
-  mainModule: result.mainModule,
-  modules: result.modules,
-  compatibilityDate: "2026-01-01"
-}));
-
-// Serve assets on the host, forward the rest to the isolate
-const storage = createMemoryStorage(result.assets);
-const assetResponse = await handleAssetRequest(
-  request,
-  result.assetManifest,
-  storage,
-  result.assetConfig
-);
-if (assetResponse) return assetResponse;
-return worker.getEntrypoint().fetch(request);
+return serveGeneratedAppPreview(request, {
+  result,
+  loader: env.LOADER,
+  loaderName: "my-app",
+  previewVersion: buildNumber
+});
 ```
 
 Static assets are served with proper content types, ETags, and caching. Requests that don't match an asset fall through to your server code.
+For rebuildable previews, pass a unique `previewVersion` for each build so the
+Worker Loader receives a fresh name for changed code.
+
+### Create A Generated App
+
+Generated apps often live in async storage such as a durable Workspace. Use
+`createGeneratedApp()` when you want one object to own source materialization,
+virtual overlays, workspace seeding, rebuild state, preview versions, and
+asset-first serving:
+
+```ts
+const app = createGeneratedApp({
+  workspace,
+  seed: {
+    files: {
+      "/package.json": "{}",
+      "/src/index.ts": initialSource
+    }
+  },
+  source: () => workspaceSourceProvider,
+  virtualFiles: () => ({
+    "src/registry.ts": makeRegistry()
+  }),
+  virtualAssets: async () => ({
+    "/index.html": "<!doctype html><div id='root'></div>"
+  }),
+  build: {
+    server: "src/server.ts",
+    client: "src/client.tsx"
+  },
+  preview: {
+    loader: env.LOADER,
+    name: "my-generated-app"
+  }
+});
+
+await app.seed();
+await app.requestRebuild("workspace edit");
+return app.serve(request);
+```
+
+Source entries marked as `kind: "asset"` become host-served static assets.
+Entries under `/public/**` map to URL paths by stripping `/public`.
+
+### Low-level Source Providers And Rebuilders
+
+`createApp()` and `createWorker()` also accept a `SourceProvider` directly.
+Worker Bundler materializes the provider internally before invoking the
+synchronous bundling pipeline:
+
+```ts
+const result = await createApp({
+  source: workspaceSourceProvider,
+  sourceOptions: {
+    virtualFiles: {
+      "src/registry.ts": "export const routes = [];"
+    },
+    virtualAssets: {
+      "/index.html": "<!doctype html><div id='root'></div>"
+    }
+  },
+  server: "src/server.ts",
+  client: "src/client.tsx"
+});
+```
+
+SourceProvider assets are consumed by `createApp()` because full-stack apps have
+a host-side asset serving path. `createWorker()` only returns Worker modules, so
+assets from a SourceProvider are ignored with a warning. Use `createApp()` when
+you need `/public/**` files, generated HTML, CSS, images, or other static
+assets.
+
+Use `createGeneratedAppRebuilder()` when workspace mutations can happen in
+bursts, such as after agent tool calls:
+
+```ts
+const rebuilder = createGeneratedAppRebuilder({
+  debounceMs: 250,
+  initialPreviewVersion,
+  build: () => createApp(appOptions),
+  onPreviewVersionChange: (version) => storage.put("previewVersion", version)
+});
+
+await workspace.writeFile("/src/slides/001-title.tsx", source);
+const state = await rebuilder.requestRebuild("saveSlide");
+```
+
+The rebuilder keeps the last successful `CreateAppResult`, increments
+`previewVersion` after successful builds, and reports an error state without
+discarding the previous preview result.
 
 ## API
 
@@ -113,22 +192,24 @@ Static assets are served with proper content types, ETags, and caching. Requests
 
 Bundles source files into a Worker.
 
-| Option                                                   | Type                                       | Default                        | Description                                                                                                                                                        |
-| -------------------------------------------------------- | ------------------------------------------ | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `files`                                                  | `Record<string, string> \| FileSystem`     | _required_                     | Input files — plain object or any `FileSystem` implementation                                                                                                      |
-| `entryPoint`                                             | `string`                                   | auto-detected                  | Entry point file path                                                                                                                                              |
-| `bundle`                                                 | `boolean`                                  | `true`                         | Bundle all dependencies into one file                                                                                                                              |
-| `externals`                                              | `string[]`                                 | `[]`                           | Modules to exclude from bundling (`cloudflare:*` always external)                                                                                                  |
-| `target`                                                 | `string`                                   | `'es2022'`                     | Target environment                                                                                                                                                 |
-| `minify`                                                 | `boolean`                                  | `false`                        | Minify output                                                                                                                                                      |
-| `sourcemap`                                              | `boolean`                                  | `false`                        | Generate inline source maps                                                                                                                                        |
-| `registry`                                               | `string`                                   | `'https://registry.npmjs.org'` | npm registry URL                                                                                                                                                   |
-| `jsx`                                                    | `"transform" \| "preserve" \| "automatic"` | esbuild default                | JSX transform mode                                                                                                                                                 |
-| `jsxImportSource`                                        | `string`                                   | esbuild default                | JSX runtime import source (e.g. `"react"`, `"preact"`)                                                                                                             |
-| `define`                                                 | `Record<string, string>`                   | `{}`                           | Constant replacements applied at bundle time                                                                                                                       |
-| `loader`                                                 | `Record<string, BundlerLoader>`            | `{}`                           | Per-extension loader overrides (e.g. `{ ".svg": "text", ".wasm": "binary" }`). See [Advanced bundler options](#advanced-bundler-options) for the supported set.    |
-| `conditions`                                             | `string[]`                                 | esbuild default                | Package export conditions to honour during resolution                                                                                                              |
-| `__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired` | `unknown[]`                                | `[]`                           | Escape hatch: extra esbuild plugins, run before the internal virtual-fs plugin. Not covered by semver — see [Advanced bundler options](#advanced-bundler-options). |
+| Option                                                   | Type                                       | Default                        | Description                                                                                                                                                          |
+| -------------------------------------------------------- | ------------------------------------------ | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `files`                                                  | `Record<string, string> \| FileSystem`     | —                              | Input files — plain object or any `FileSystem` implementation. Pass either `files` or `source`.                                                                      |
+| `source`                                                 | `SourceProvider`                           | —                              | Async source provider for generated or durable app sources. Pass either `files` or `source`. Assets are ignored with a warning; use `createApp()` for static assets. |
+| `sourceOptions`                                          | `SourceProviderMaterializeOptions`         | —                              | Virtual files and materialization options for `source`; virtual assets are ignored by `createWorker()`.                                                              |
+| `entryPoint`                                             | `string`                                   | auto-detected                  | Entry point file path                                                                                                                                                |
+| `bundle`                                                 | `boolean`                                  | `true`                         | Bundle all dependencies into one file                                                                                                                                |
+| `externals`                                              | `string[]`                                 | `[]`                           | Modules to exclude from bundling (`cloudflare:*` always external)                                                                                                    |
+| `target`                                                 | `string`                                   | `'es2022'`                     | Target environment                                                                                                                                                   |
+| `minify`                                                 | `boolean`                                  | `false`                        | Minify output                                                                                                                                                        |
+| `sourcemap`                                              | `boolean`                                  | `false`                        | Generate inline source maps                                                                                                                                          |
+| `registry`                                               | `string`                                   | `'https://registry.npmjs.org'` | npm registry URL                                                                                                                                                     |
+| `jsx`                                                    | `"transform" \| "preserve" \| "automatic"` | esbuild default                | JSX transform mode                                                                                                                                                   |
+| `jsxImportSource`                                        | `string`                                   | esbuild default                | JSX runtime import source (e.g. `"react"`, `"preact"`)                                                                                                               |
+| `define`                                                 | `Record<string, string>`                   | `{}`                           | Constant replacements applied at bundle time                                                                                                                         |
+| `loader`                                                 | `Record<string, BundlerLoader>`            | `{}`                           | Per-extension loader overrides (e.g. `{ ".svg": "text", ".wasm": "binary" }`). See [Advanced bundler options](#advanced-bundler-options) for the supported set.      |
+| `conditions`                                             | `string[]`                                 | esbuild default                | Package export conditions to honour during resolution                                                                                                                |
+| `__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired` | `unknown[]`                                | `[]`                           | Escape hatch: extra esbuild plugins, run before the internal virtual-fs plugin. Not covered by semver — see [Advanced bundler options](#advanced-bundler-options).   |
 
 Returns:
 
@@ -147,7 +228,9 @@ Builds a full-stack app: server Worker + client bundle + static assets.
 
 | Option                                                   | Type                                       | Default         | Description                                                                                                                                  |
 | -------------------------------------------------------- | ------------------------------------------ | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `files`                                                  | `Record<string, string> \| FileSystem`     | _required_      | All source files — plain object or any `FileSystem`                                                                                          |
+| `files`                                                  | `Record<string, string> \| FileSystem`     | —               | All source files — plain object or any `FileSystem`. Pass either `files` or `source`.                                                        |
+| `source`                                                 | `SourceProvider`                           | —               | Async source provider for generated or durable app sources. Pass either `files` or `source`; asset entries become host-served static assets. |
+| `sourceOptions`                                          | `SourceProviderMaterializeOptions`         | —               | Virtual files/assets and materialization options for `source`; virtual assets are merged into the host-served asset set.                     |
 | `server`                                                 | `string`                                   | auto-detected   | Server entry point (Worker fetch handler)                                                                                                    |
 | `client`                                                 | `string \| string[]`                       | —               | Client entry point(s) to bundle for the browser                                                                                              |
 | `assets`                                                 | `Record<string, string \| ArrayBuffer>`    | —               | Static assets (pathname → content)                                                                                                           |

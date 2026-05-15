@@ -25,6 +25,11 @@ import {
   type FileSystem
 } from "./file-system";
 import {
+  materializeSourceProvider,
+  type SourceProvider,
+  type SourceProviderMaterializeOptions
+} from "./source-provider";
+import {
   DEFAULT_ENTRY_POINTS,
   detectEntryPoint,
   formatFileListForError
@@ -39,8 +44,23 @@ export interface CreateAppOptions {
    * Input files — keys are paths relative to project root, values are file contents.
    * Accepts a plain object (which is wrapped in an InMemoryFileSystem automatically)
    * or any FileSystem implementation for custom storage backends.
+   *
+   * Pass either `files` or `source`.
    */
-  files: Files | FileSystem;
+  files?: Files | FileSystem;
+
+  /**
+   * Async source provider for generated or durable app sources.
+   *
+   * Worker Bundler materializes this provider before invoking the internal
+   * synchronous bundling pipeline.
+   */
+  source?: SourceProvider;
+
+  /**
+   * Materialization options for `source`.
+   */
+  sourceOptions?: SourceProviderMaterializeOptions;
 
   /**
    * Server entry point (the Worker fetch handler).
@@ -198,6 +218,8 @@ export async function createApp(
   showExperimentalWarning("createApp");
   const {
     files,
+    source,
+    sourceOptions,
     bundle = true,
     externals: rawExternals = [],
     target = "es2022",
@@ -212,9 +234,25 @@ export async function createApp(
     __dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired: plugins
   } = options;
 
-  const fileSystem: FileSystem = isFileSystem(files)
-    ? files
-    : new InMemoryFileSystem(files);
+  let fileSystem: FileSystem;
+  let sourceAssets: Record<string, string | ArrayBuffer> = {};
+  let sourceWarnings: string[] = [];
+  if (files && source) {
+    throw new Error("createApp accepts either `files` or `source`, not both.");
+  }
+  if (source) {
+    const materialized = await materializeSourceProvider(source, sourceOptions);
+    fileSystem = materialized.fileSystem;
+    sourceAssets = materialized.assets;
+    sourceWarnings = materialized.warnings;
+  } else if (files && isFileSystem(files)) {
+    fileSystem = files;
+  } else if (files) {
+    fileSystem = new InMemoryFileSystem(files);
+  } else {
+    throw new Error("createApp requires either `files` or `source`.");
+  }
+  const inputDescription = source ? "input sources" : "`files`";
 
   // Always treat cloudflare:* as external
   const externals = ["cloudflare:", ...rawExternals];
@@ -246,7 +284,7 @@ export async function createApp(
   for (const clientEntry of clientEntries) {
     if (fileSystem.read(clientEntry) === null) {
       throw new Error(
-        `Client entry point "${clientEntry}" was not found in \`files\`. Available files: ${formatFileListForError(fileSystem)}.`
+        `Client entry point "${clientEntry}" was not found in ${inputDescription}. Available files: ${formatFileListForError(fileSystem)}.`
       );
     }
 
@@ -280,6 +318,10 @@ export async function createApp(
   // ── Step 2: Collect all assets ────────────────────────────────────
   const allAssets: Record<string, string | ArrayBuffer> = {};
 
+  for (const [pathname, content] of Object.entries(sourceAssets)) {
+    allAssets[pathname] = content;
+  }
+
   if (options.assets) {
     for (const [pathname, content] of Object.entries(options.assets)) {
       const normalizedPath = pathname.startsWith("/")
@@ -307,7 +349,7 @@ export async function createApp(
 
   if (fileSystem.read(serverEntry) === null) {
     throw new Error(
-      `Server entry point "${serverEntry}" was not found in \`files\`. Available files: ${formatFileListForError(fileSystem)}.`
+      `Server entry point "${serverEntry}" was not found in ${inputDescription}. Available files: ${formatFileListForError(fileSystem)}.`
     );
   }
 
@@ -363,10 +405,13 @@ export async function createApp(
     result.wranglerConfig = wranglerConfig;
   }
 
-  if (installWarnings.length > 0) {
-    result.warnings = [...(serverResult.warnings ?? []), ...installWarnings];
-  } else if (serverResult.warnings) {
-    result.warnings = serverResult.warnings;
+  const allWarnings = [
+    ...(serverResult.warnings ?? []),
+    ...sourceWarnings,
+    ...installWarnings
+  ];
+  if (allWarnings.length > 0) {
+    result.warnings = allWarnings;
   }
 
   return result;

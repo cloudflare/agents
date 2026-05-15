@@ -12,6 +12,8 @@ Instead of parsing shell syntax, `@cloudflare/shell` runs JavaScript inside an i
 - A `FileSystem` interface with two implementations: `InMemoryFs` (ephemeral) and `WorkspaceFileSystem` (durable)
 - `FileSystemStateBackend` — a single adapter wrapping any `FileSystem` into a `StateBackend`
 - `Workspace` — durable file storage backed by SQLite + optional R2
+- `createWorkspaceSourceProvider(workspace)` — adapts a Workspace into the
+  async source-provider shape used by generated app builders
 - `stateTools(workspace)` — a `ToolProvider` for `@cloudflare/codemode` that exposes `state.*` in sandboxed executions
 - `createGit(filesystem)` — pure-JS git operations via isomorphic-git, backed by the virtual filesystem
 - `gitTools(workspace)` — a `ToolProvider` for `@cloudflare/codemode` that exposes `git.*` in sandboxed executions with auto-injected auth
@@ -69,6 +71,43 @@ class MyAgent extends Agent<Env> {
   }
 }
 ```
+
+## Example — generated app source provider
+
+```ts
+import { createWorkspaceSourceProvider } from "@cloudflare/shell";
+import { createApp } from "@cloudflare/worker-bundler";
+
+const source = createWorkspaceSourceProvider(workspace, {
+  sources: ["/package.json", "/src/**"],
+  assets: ["/public/**"],
+  exclude: ["/src/styles.css"]
+});
+
+const result = await createApp({
+  source,
+  sourceOptions: {
+    virtualFiles: {
+      "src/registry.ts": generatedRegistry
+    },
+    virtualAssets: {
+      "/index.html": indexHtml,
+      "/styles.css": css
+    }
+  },
+  server: "src/server.ts",
+  client: "src/client.tsx"
+});
+```
+
+Files matched by `assets` are exposed as static assets. `/public/logo.svg`
+becomes `/logo.svg`, while source paths are normalized to project-relative
+bundle paths such as `src/server.ts`.
+
+For large workspaces, keep `sources`, `assets`, and `exclude` patterns narrow.
+The current provider classifies explicit `list()` requests by globbing the
+configured source and asset scopes, which favors correctness over incremental
+metadata caching.
 
 ## Example — git operations
 

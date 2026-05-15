@@ -20,6 +20,7 @@ import {
   isFileSystem,
   type FileSystem
 } from "./file-system";
+import { materializeSourceProvider } from "./source-provider";
 
 // Re-export types
 export type {
@@ -31,10 +32,36 @@ export type {
   Modules,
   WranglerConfig
 } from "./types";
+export { isSourceProvider, materializeSourceProvider } from "./source-provider";
+export type {
+  MaterializedSource,
+  SourceEntry,
+  SourceEntryKind,
+  SourceProvider,
+  SourceProviderMaterializeOptions
+} from "./source-provider";
 
 // Re-export app bundler
 export { createApp } from "./app";
 export type { CreateAppOptions, CreateAppResult } from "./app";
+export {
+  buildGeneratedApp,
+  createGeneratedApp,
+  createGeneratedAppRebuilder,
+  seedGeneratedAppWorkspace,
+  serveGeneratedAppPreview
+} from "./generated-app";
+export type {
+  GeneratedApp,
+  GeneratedAppBuildState,
+  GeneratedAppBuildStatus,
+  GeneratedAppOptions,
+  GeneratedAppPreviewOptions,
+  GeneratedAppRebuilder,
+  GeneratedAppRebuilderOptions,
+  GeneratedAppSeed,
+  GeneratedAppWorkspaceLike
+} from "./generated-app";
 
 // Re-export asset handler
 export {
@@ -88,6 +115,8 @@ export async function createWorker(
   showExperimentalWarning("createWorker");
   let {
     files,
+    source,
+    sourceOptions,
     bundle = true,
     externals = [],
     target = "es2022",
@@ -103,11 +132,30 @@ export async function createWorker(
   } = options;
 
   let fileSystem: FileSystem;
-  if (isFileSystem(files)) {
-    fileSystem = files;
-  } else {
-    fileSystem = new InMemoryFileSystem(files);
+  let sourceWarnings: string[] = [];
+  if (files && source) {
+    throw new Error(
+      "createWorker accepts either `files` or `source`, not both."
+    );
   }
+  if (source) {
+    const materialized = await materializeSourceProvider(source, sourceOptions);
+    fileSystem = materialized.fileSystem;
+    sourceWarnings = materialized.warnings;
+    const assetPaths = Object.keys(materialized.assets);
+    if (assetPaths.length > 0) {
+      sourceWarnings.push(
+        `createWorker ignored ${assetPaths.length} SourceProvider asset${assetPaths.length === 1 ? "" : "s"} because Worker bundles do not include host-served assets. Use createApp() for full-stack apps with static assets.`
+      );
+    }
+  } else if (files && isFileSystem(files)) {
+    fileSystem = files;
+  } else if (files) {
+    fileSystem = new InMemoryFileSystem(files);
+  } else {
+    throw new Error("createWorker requires either `files` or `source`.");
+  }
+  const inputDescription = source ? "input sources" : "`files`";
 
   // Always treat cloudflare:* modules as external (runtime-provided)
   externals = ["cloudflare:", ...externals];
@@ -138,7 +186,7 @@ export async function createWorker(
 
   if (fileSystem.read(entryPoint) === null) {
     throw new Error(
-      `Entry point "${entryPoint}" was not found in \`files\`. Available files: ${formatFileListForError(fileSystem)}.`
+      `Entry point "${entryPoint}" was not found in ${inputDescription}. Available files: ${formatFileListForError(fileSystem)}.`
     );
   }
 
@@ -166,8 +214,9 @@ export async function createWorker(
     }
 
     // Add install warnings to result
-    if (installWarnings.length > 0) {
-      result.warnings = [...(result.warnings ?? []), ...installWarnings];
+    const extraWarnings = [...sourceWarnings, ...installWarnings];
+    if (extraWarnings.length > 0) {
+      result.warnings = [...(result.warnings ?? []), ...extraWarnings];
     }
 
     return result;
@@ -194,6 +243,7 @@ export async function createWorker(
 
     // Add install warnings to result
     const extraWarnings = [
+      ...sourceWarnings,
       ...installWarnings,
       ...(bundlerOnly ? [bundlerOnly] : [])
     ];

@@ -8,6 +8,11 @@ import {
   DurableObjectRawFileSystem,
   createFileSystemSnapshot
 } from "../file-system";
+import {
+  isSourceProvider,
+  materializeSourceProvider,
+  type SourceProvider
+} from "../source-provider";
 
 // ── InMemoryFileSystem ───────────────────────────────────────────────
 
@@ -508,5 +513,103 @@ describe("createFileSystemSnapshot", () => {
 
     expect(fs.read("index.ts")).toBe("v2");
     expect(fs.list()).toEqual(["index.ts"]);
+  });
+});
+
+describe("materializeSourceProvider", () => {
+  it("materializes source files and public assets", async () => {
+    const provider: SourceProvider = {
+      async list() {
+        return [
+          { path: "/src/index.ts", type: "file", kind: "source" },
+          { path: "/public/logo.svg", type: "file", kind: "asset" }
+        ];
+      },
+      async readText(path) {
+        if (path === "/src/index.ts") return "export default 1;";
+        if (path === "/public/logo.svg") return "<svg />";
+        return null;
+      }
+    };
+
+    const result = await materializeSourceProvider(provider);
+
+    expect(result.fileSystem.read("src/index.ts")).toBe("export default 1;");
+    expect(result.files).toEqual({ "src/index.ts": "export default 1;" });
+    expect(result.assets).toEqual({ "/logo.svg": "<svg />" });
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("uses readBytes for binary assets and includes virtual files", async () => {
+    const bytes = new Uint8Array([1, 2, 3]);
+    const provider: SourceProvider = {
+      async list() {
+        return [{ path: "/public/image.png", type: "file", kind: "asset" }];
+      },
+      async readText() {
+        return null;
+      },
+      async readBytes(path) {
+        return path === "/public/image.png" ? bytes : null;
+      }
+    };
+
+    const result = await materializeSourceProvider(provider, {
+      virtualFiles: { "src/virtual.ts": "export const virtual = true;" }
+    });
+
+    expect(result.fileSystem.read("src/virtual.ts")).toBe(
+      "export const virtual = true;"
+    );
+    expect(result.assets["/image.png"]).toBeInstanceOf(ArrayBuffer);
+    expect(new Uint8Array(result.assets["/image.png"] as ArrayBuffer)).toEqual(
+      bytes
+    );
+  });
+
+  it("lets virtual files and assets override provider entries with warnings", async () => {
+    const provider: SourceProvider = {
+      async list() {
+        return [
+          { path: "/src/server.ts", type: "file", kind: "source" },
+          {
+            path: "/public/index.html",
+            type: "file",
+            kind: "asset",
+            assetPath: "/index.html"
+          }
+        ];
+      },
+      async readText(path) {
+        if (path === "/src/server.ts")
+          return "export const value = 'provider';";
+        if (path === "/public/index.html") return "<h1>Provider</h1>";
+        return null;
+      }
+    };
+
+    const result = await materializeSourceProvider(provider, {
+      virtualFiles: { "src/server.ts": "export const value = 'virtual';" },
+      virtualAssets: { "/index.html": "<h1>Virtual</h1>" }
+    });
+
+    expect(result.fileSystem.read("src/server.ts")).toBe(
+      "export const value = 'virtual';"
+    );
+    expect(result.assets["/index.html"]).toBe("<h1>Virtual</h1>");
+    expect(result.warnings).toEqual([
+      'Virtual source file "src/server.ts" replaced a provider file with the same path.',
+      'Virtual asset "/index.html" replaced a provider asset with the same path.'
+    ]);
+  });
+
+  it("detects source providers structurally", () => {
+    expect(
+      isSourceProvider({
+        list: async () => [],
+        readText: async () => null
+      })
+    ).toBe(true);
+    expect(isSourceProvider({ list: async () => [] })).toBe(false);
   });
 });

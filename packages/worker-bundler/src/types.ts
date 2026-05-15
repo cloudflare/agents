@@ -1,4 +1,8 @@
 import type { FileSystem } from "./file-system";
+import type {
+  SourceProvider,
+  SourceProviderMaterializeOptions
+} from "./source-provider";
 
 /**
  * Input files for the bundler
@@ -63,8 +67,25 @@ export type JsxMode = "transform" | "preserve" | "automatic";
 export interface CreateWorkerOptions {
   /**
    * Input files - keys are paths relative to project root, values are file contents
+   *
+   * Pass either `files` or `source`.
    */
-  files: Files | FileSystem;
+  files?: Files | FileSystem;
+
+  /**
+   * Async source provider for generated or durable app sources.
+   *
+   * Worker Bundler materializes this provider before invoking the internal
+   * synchronous bundling pipeline. SourceProvider assets are ignored by
+   * createWorker because Worker bundles do not include host-served assets; use
+   * createApp for full-stack apps with static assets.
+   */
+  source?: SourceProvider;
+
+  /**
+   * Materialization options for `source`.
+   */
+  sourceOptions?: SourceProviderMaterializeOptions;
 
   /**
    * Entry point file path (relative to project root)

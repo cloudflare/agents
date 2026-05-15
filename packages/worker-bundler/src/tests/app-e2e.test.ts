@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import { createApp } from "../app";
 import type { CreateAppOptions } from "../app";
 import { handleAssetRequest, createMemoryStorage } from "../asset-handler";
+import type { SourceProvider } from "../source-provider";
 import { DEFAULT_ENTRY_POINTS } from "../utils";
 
 let testId = 0;
@@ -103,6 +104,63 @@ describe("createApp e2e — static assets", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("body { color: red; }");
     expect(res.headers.get("Content-Type")).toBe("text/css; charset=utf-8");
+  });
+});
+
+describe("createApp e2e — source providers", () => {
+  it("builds from an async source provider with virtual files and assets", async () => {
+    const source: SourceProvider = {
+      async list() {
+        return [
+          { path: "/src/index.ts", type: "file", kind: "source" },
+          { path: "/public/index.html", type: "file", kind: "asset" }
+        ];
+      },
+      async readText(path) {
+        if (path === "/src/index.ts") {
+          return "import { message } from './message'; export default { fetch() { return new Response(message); } };";
+        }
+        if (path === "/public/index.html") {
+          return "<!doctype html><h1>From provider</h1>";
+        }
+        return null;
+      }
+    };
+
+    const res = await buildAppAndFetch({
+      source,
+      sourceOptions: {
+        virtualFiles: { "src/message.ts": "export const message = 'ok';" }
+      },
+      server: "src/index.ts"
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("<!doctype html><h1>From provider</h1>");
+  });
+
+  it("rejects ambiguous files and source inputs", async () => {
+    const source: SourceProvider = {
+      async list() {
+        return [];
+      },
+      async readText() {
+        return null;
+      }
+    };
+
+    await expect(
+      createApp({
+        files: {
+          "src/index.ts":
+            "export default { fetch() { return new Response('files'); } };"
+        },
+        source,
+        server: "src/index.ts"
+      })
+    ).rejects.toThrow(
+      "createApp accepts either `files` or `source`, not both."
+    );
   });
 });
 
