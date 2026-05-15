@@ -8,6 +8,9 @@ import { execSync } from "node:child_process";
 execSync("npx changeset version", {
   stdio: "inherit"
 });
+execSync("npx oxfmt --write .", {
+  stdio: "inherit"
+});
 execSync("npm install", {
   stdio: "inherit"
 });
