@@ -9,11 +9,11 @@ Tracked issues from the examples audit. See `AGENTS.md` in this folder for the c
 
 ## Add frontend + Vite plugin
 
-All examples must be full-stack (frontend + backend). These worker-only examples need a frontend, `index.html`, `vite.config.ts`, and `src/client.tsx` added:
+Most examples should be full-stack (frontend + backend). Focused server-only MCP examples stay minimal when the server setup is the point:
 
 - [x] `email-agent/` — added a full-stack Email Service demo UI
-- [x] `mcp-elicitation/` — added landing page with connection instructions
-- [x] ~~`mcp-server/`~~ — removed (redundant with `mcp-worker/`)
+- [x] `mcp-elicitation/` — restored server-only elicitation example for MCP clients
+- [x] `mcp-server/` — restored raw transport server-only example
 - [x] `mcp-worker/` — added MCP tool tester frontend
 - [x] `mcp-worker-authenticated/` — added info page with endpoint docs
 - [x] `x402/` — added React+Kumo frontend with "Fetch & Pay" UI
@@ -61,6 +61,6 @@ Migrate examples to use Kumo components and Tailwind.
 - [x] `mcp-client/` — migrated from custom CSS to Kumo, replaced agentFetch with @callable
 - [x] `mcp-worker/` — added Kumo frontend
 - [x] `mcp-worker-authenticated/` — added Kumo frontend
-- [x] `mcp-elicitation/` — added Kumo landing page
+- [x] `mcp-elicitation/` — intentionally server-only; elicitation requires an MCP client
 - [x] `x402/` — migrated from worker-only to Kumo frontend
 - [x] `x402-mcp/` — migrated from inline HTML to React+Kumo, replaced raw WebSocket with useAgent

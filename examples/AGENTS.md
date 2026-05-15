@@ -4,15 +4,17 @@ Self-contained demo apps that show how to use the Agents SDK. These are user-fac
 
 Each example should focus on **one feature or concept** (e.g., MCP servers, email routing, workflows). The exception is `playground/`, which is the kitchen-sink showcase covering the full spread of SDK features in a single app.
 
-## All examples are full-stack
+## Example shape
 
-Every example has both a frontend and a backend. This makes them immediately runnable and visually demonstrable — users can `npm start` and see the feature in action, not just read server logs.
+Most examples have both a frontend and a backend. This makes them immediately runnable and visually demonstrable — users can `npm start` and see the feature in action, not just read server logs.
 
-All examples use the [Cloudflare Vite plugin](https://developers.cloudflare.com/workers/vite-plugin/) for development and builds.
+Focused protocol examples can be server-only when a frontend would obscure the concept. Keep MCP server examples minimal when they demonstrate Cloudflare Workers setup, raw transports, or elicitation behavior that must be exercised from an MCP client.
+
+Full-stack examples use the [Cloudflare Vite plugin](https://developers.cloudflare.com/workers/vite-plugin/) for development and builds. Server-only examples use Wrangler directly.
 
 ## Required structure
 
-Every example must have:
+Full-stack examples must have:
 
 ```
 example-name/
@@ -30,17 +32,41 @@ example-name/
     styles.css          # Kumo + Tailwind imports
 ```
 
+Server-only examples must have:
+
+```
+example-name/
+  package.json          # name, dependencies, scripts
+  wrangler.jsonc        # Workers config (not .toml)
+  tsconfig.json
+  README.md             # What this example demonstrates, how to run it
+  src/
+    index.ts            # Worker entry point
+```
+
 ## Conventions
 
 ### Scripts
 
-Use `start` (not `dev`) for the development server:
+Full-stack examples use `start` (not `dev`) for the development server:
 
 ```json
 {
   "scripts": {
     "start": "vite dev",
     "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  }
+}
+```
+
+Server-only examples can use Wrangler directly:
+
+```json
+{
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false"
   }
 }
@@ -57,7 +83,7 @@ Use `start` (not `dev`) for the development server:
 
 ### vite.config.ts
 
-Every example must use the React, Cloudflare, and Tailwind Vite plugins. Examples that use `@callable()` or other decorators must also include the `agents()` plugin from `agents/vite`:
+Full-stack examples must use the React, Cloudflare, and Tailwind Vite plugins. Examples that use `@callable()` or other decorators must also include the `agents()` plugin from `agents/vite`:
 
 ```ts
 import { cloudflare } from "@cloudflare/vite-plugin";
@@ -127,7 +153,7 @@ Never commit actual secrets. Use `.env` / `.env.example` (not `.dev.vars` / `.de
 
 ### UI — Kumo
 
-All examples use [Kumo](https://kumo-ui.com/) (`@cloudflare/kumo`) for components, with Kumo's default theme (no custom overrides).
+Full-stack examples use [Kumo](https://kumo-ui.com/) (`@cloudflare/kumo`) for components, with Kumo's default theme (no custom overrides).
 
 #### Kumo basics
 
@@ -147,7 +173,7 @@ All examples use [Kumo](https://kumo-ui.com/) (`@cloudflare/kumo`) for component
 
 #### Required UI patterns
 
-Every example should include:
+Every full-stack example should include:
 
 - **`PoweredByCloudflare`** (from `@cloudflare/kumo`) — footer attribution badge (**required in every example**)
 - **A dark mode toggle** — inline a simple `ModeToggle` component using `useState`/`useEffect` + `localStorage` + Kumo `Button` with sun/moon icons
@@ -210,7 +236,7 @@ const result = await agent.call("doSomething", ["hello"]);
 Every example needs one. Keep it short:
 
 1. One sentence: what this example demonstrates
-2. How to run it (`npm install && npm start`)
+2. How to run it (`npm install && npm start` for full-stack examples, `npm install && npm run dev` for server-only examples)
 3. Any required env vars
 4. Code snippets showing the key pattern
 5. Links to related examples

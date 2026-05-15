@@ -1,14 +1,15 @@
 {
+  "name": "@cloudflare/agents-mcp-server",
+  "description": "zero config stateless MCP Server on Cloudflare",
   "author": "Matt Carey <mcarey@cloudflare.com>",
-  "keywords": [],
-  "name": "@cloudflare/agents-mcp-elicitation",
+  "version": "0.0.1",
   "private": true,
+  "type": "module",
   "scripts": {
-    "deploy": "wrangler deploy",
     "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false"
   },
-  "type": "module",
   "dependencies": {
     "agents": "*"
   }
