@@ -149,7 +149,7 @@ Examples, guides, and sites don't need changesets.
 
 ### Pull request process
 
-CI runs on every PR (`npm ci && npm run build && npm run check && npm run test`). All checks must pass. The workflow is in `.github/workflows/pullrequest.yml`.
+CI runs on every PR (`npm ci && npm run build && npm run check && npx nx affected -t test`) and on push to `main` (with `nx run-many -t test` instead, as a safety net against under-reported affected projects). All checks must pass. The workflow is in `.github/workflows/pullrequest.yml`.
 
 ### Generated files
 

@@ -7,9 +7,17 @@ on:
       - "design/**"
       - "*.md"
       - ".changeset/**"
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "docs/**"
+      - "design/**"
+      - "*.md"
+      - ".changeset/**"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -60,6 +68,13 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
 
-      - run: CI=true npx nx affected -t test
+      - name: Test (affected — pull_request)
+        if: github.event_name == 'pull_request'
+        run: CI=true npx nx affected -t test
 
-      - run: npx pkg-pr-new publish --peerDeps ./packages/*
+      - name: Test (run-many — push to main)
+        if: github.event_name == 'push'
+        run: CI=true npx nx run-many -t test
+
+      - if: github.event_name == 'pull_request'
+        run: npx pkg-pr-new publish --peerDeps ./packages/*
