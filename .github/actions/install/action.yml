@@ -1,5 +1,5 @@
 name: Install
-description: Set up Node and install dependencies, skipping `npm ci` on a node_modules cache hit.
+description: Set up Node and install dependencies, skipping `npm ci` on a node_modules cache hit (keyed on package-lock.json + patches/**).
 
 inputs:
   registry-url:
