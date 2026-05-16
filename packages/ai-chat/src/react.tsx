@@ -722,8 +722,10 @@ export function useAgentChat<
   //
   //   1. The origin+pathname of the socket URL can transition from
   //      `null` → resolved on the second render when `useAgent()`
-  //      finishes its handshake. The client-side fallback id gets
-  //      upgraded to the URL-resolved key at that point (one-time).
+  //      finishes its handshake. The Chat id must stay on its
+  //      first-render fallback through that transition; upgrading to
+  //      the URL-resolved key would recreate Chat and drop optimistic
+  //      messages sent immediately after mount.
   //
   //   2. `agent.name` can transition from the client-side fallback
   //      ("default") to a server-assigned value when
@@ -755,16 +757,6 @@ export function useAgentChat<
     // sub-agent address changed on a `useAgent` object — genuine chat switch.
     // Recompute from current values.
     stableChatIdRef.current = resolvedInitialMessagesCacheKey ?? fallbackChatId;
-  } else if (
-    resolvedInitialMessagesCacheKey &&
-    stableChatIdRef.current === fallbackChatId
-  ) {
-    // URL-arrival upgrade on the same agent: we started on the
-    // identity-only fallback because the socket URL wasn't known yet.
-    // Replace with the resolved key now that the handshake has produced
-    // a real URL — but only on this one-shot transition, never on a
-    // subsequent `agent.name` mutation.
-    stableChatIdRef.current = resolvedInitialMessagesCacheKey;
   }
 
   previousAgentRef.current = agent;
