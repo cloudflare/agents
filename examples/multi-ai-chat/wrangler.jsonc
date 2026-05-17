@@ -18,7 +18,7 @@
   "main": "src/server.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["Inbox", "Chat"],
+      "new_sqlite_classes": ["Inbox"],
       "tag": "v1"
     }
   ],

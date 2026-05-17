@@ -86,6 +86,12 @@ this.parentPath;
 `parentPath` is **root-first**, so the direct parent is always the **last**
 entry, not the first.
 
+The SDK also passes an explicit `id` to `ctx.facets.get()` so PartyServer can
+resolve `this.name` from `ctx.id.name` inside the facet. That ID is derived from
+the top-level root/supervisor namespace, not the immediate parent, because the
+immediate parent may itself be a facet and is not expected to expose namespace
+helpers such as `idFromName`.
+
 ## `parentAgent(Cls)`
 
 `Agent#parentAgent(Cls)` is the one-hop inverse of `subAgent(Cls, name)`:

@@ -265,21 +265,15 @@ export class SqlError extends Error {
 interface FacetCapableCtx {
   facets: DurableObjectFacets;
   /**
-   * Worker exports keyed by class export name. workerd's runtime
-   * contract: any class registered via `migrations.new_sqlite_classes`
-   * (or `migrations.new_classes`) — including facet-only classes
-   * that have NO entry in `durable_objects.bindings` — is exposed
-   * here as BOTH a `DurableObjectClass` (usable as
-   * `FacetStartupOptions.class`) AND a `DurableObjectNamespace`
-   * (usable for `idFromName`/`getByName`). The intersection is what
-   * makes `ctx.exports[OuterSubAgent].idFromName(...)` work from
-   * inside a nested facet bootstrap, even though `OuterSubAgent`
-   * isn't bound. Runtime lookups can still return `undefined` for
-   * unregistered class names; callers must null-check.
+   * Worker exports keyed by class export name. For facet creation, the
+   * runtime only needs the exported Durable Object class. Top-level
+   * Durable Object bindings may also expose namespace helpers here, but
+   * facet-only classes do not need to.
    */
   exports: Record<
     string,
-    (DurableObjectClass & DurableObjectNamespace) | undefined
+    | (DurableObjectClass & Partial<Pick<DurableObjectNamespace, "idFromName">>)
+    | undefined
   >;
 }
 
@@ -5548,11 +5542,11 @@ export class Agent<
    *
    * The facet's name (and `this.name` getter) is handled entirely by
    * partyserver via `ctx.id.name`, which is populated because the
-   * parent passed an explicit `id: parentNs.idFromName(name)` to
+   * parent passed an explicit named Durable Object id to
    * `ctx.facets.get()` — see {@link _cf_resolveSubAgent}. No
    * `setName()` call or `__ps_name` storage write is needed; the
-   * facet's name survives cold wake automatically because the
-   * factory re-runs and `idFromName` is deterministic.
+   * facet's name survives cold wake automatically because the factory
+   * re-runs and `idFromName` is deterministic.
    *
    * @internal Called by {@link subAgent}.
    */
@@ -5561,9 +5555,9 @@ export class Agent<
     parentPath: ReadonlyArray<{ className: string; name: string }> = []
   ): Promise<void> {
     // Defense in depth: the parent is supposed to construct the
-    // facet with `id: parentNs.idFromName(name)` via
-    // `_cf_resolveSubAgent`, which makes `this.name` resolve to
-    // `name` automatically through partyserver's `ctx.id.name`. If
+    // facet with a named Durable Object id via `_cf_resolveSubAgent`,
+    // which makes `this.name` resolve to `name` automatically
+    // through partyserver's `ctx.id.name`. If
     // it didn't (e.g. someone bypassed `_cf_resolveSubAgent`, or
     // the parent's id construction has a bug), `this.name` would
     // silently report the parent's name instead of the facet's
@@ -6672,23 +6666,23 @@ export class Agent<
     // Composite key: class name + NUL + facet name, so two different
     // classes can share the same user-facing name.
     const facetKey = `${className}\0${name}`;
-    // Pass an explicit `id` in FacetStartupOptions so the facet has
-    // its own `ctx.id.name === name` (not the parent's name).
-    // Without this, facets inherit the parent DO's `ctx.id` and
-    // `this.name` on the facet would silently return the parent's
-    // name. See:
+    // Pass an explicit named `id` in FacetStartupOptions so the
+    // facet has its own `ctx.id.name === name` (not the parent's
+    // name). Without this, facets inherit the parent DO's `ctx.id`
+    // and `this.name` on the facet would silently return the
+    // parent's name. See:
     // https://developers.cloudflare.com/dynamic-workers/usage/durable-object-facets/
     //
-    // The id is constructed from the parent's own bound namespace,
-    // which is always present in `ctx.exports` because the parent
-    // Agent class is bound as a DO. Any bound DurableObjectNamespace
-    // would work — the id is opaque + a name; nothing routes
-    // through the namespace at runtime for facets. We use the
-    // parent's because it's guaranteed available without extra
-    // env-binding lookups.
-    const parentClassName = (this.constructor as { name: string }).name;
-    const parentNs = ctx.exports[parentClassName];
-    if (!parentNs?.idFromName) {
+    // For nested facets, the immediate parent is itself facet-only
+    // and is not expected to expose namespace helpers. Use the root
+    // supervisor namespace instead; the id is opaque for facet
+    // routing, but `idFromName(name)` gives PartyServer a stable
+    // `ctx.id.name`.
+    const rootClassName =
+      this._parentPath[0]?.className ??
+      (this.constructor as { name: string }).name;
+    const rootNs = ctx.exports[rootClassName];
+    if (!rootNs?.idFromName) {
       // Minification is the most common cause of this error in
       // production builds: aggressive bundlers rewrite class
       // identifiers to short ids, so `this.constructor.name`
@@ -6701,15 +6695,15 @@ export class Agent<
       // `_a`, `_ab`, `_a1`, `__a`). Real class names like
       // `MyAgent` or `_UnboundParent` start with an uppercase
       // letter and won't match.
-      const looksMinified = /^_*[a-z][a-z0-9]{0,2}$/.test(parentClassName);
+      const looksMinified = /^_*[a-z][a-z0-9]{0,2}$/.test(rootClassName);
       const minificationHint = looksMinified
-        ? ` The class name "${parentClassName}" looks minified — make sure your bundler preserves class names (e.g. esbuild's \`keepNames: true\`).`
+        ? ` The class name "${rootClassName}" looks minified — make sure your bundler preserves class names (e.g. esbuild's \`keepNames: true\`).`
         : "";
       throw new Error(
-        `Sub-agent bootstrap requires the parent class "${parentClassName}" to be bound as a Durable Object namespace, but ctx.exports["${parentClassName}"] is missing or doesn't expose idFromName.${minificationHint} Make sure the parent agent class is registered in your wrangler.jsonc durable_objects.bindings under its class name.`
+        `Sub-agent bootstrap requires the root agent class "${rootClassName}" to be available as a Durable Object namespace, but ctx.exports["${rootClassName}"] is missing or doesn't expose idFromName.${minificationHint} Make sure the root agent class is exported under that class name and registered in your wrangler.jsonc durable_objects.bindings.`
       );
     }
-    const facetId = parentNs.idFromName(name);
+    const facetId = rootNs.idFromName(name);
     const stub = ctx.facets.get(facetKey, () => ({
       class: Cls as DurableObjectClass,
       id: facetId

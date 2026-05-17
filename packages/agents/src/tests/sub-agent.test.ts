@@ -165,31 +165,28 @@ describe("SubAgent", () => {
     expect(error).toMatch(/not found in worker exports/);
   });
 
-  it("should throw descriptive error when the parent class is exported under a different name than its declaration", async () => {
-    // The parent's class identifier is `_UnboundParent` but it's
-    // exported as `TestUnboundParentAgent`. So `this.constructor.name`
-    // inside an instance is `_UnboundParent`, but `ctx.exports` is
-    // keyed by the export name (`TestUnboundParentAgent`). The
-    // ctx.exports[parentClassName] lookup fails, and we expect a
-    // helpful error pointing at the binding requirement.
+  it("should throw descriptive error when the root class is exported under a different name than its declaration", async () => {
+    // Top-level roots still need a namespace for named facet IDs. If
+    // the root class identifier and export/binding name differ, the
+    // framework cannot find that namespace by constructor name.
     const parentName = uniqueName();
     const childName = uniqueName();
     const agent = await getAgentByName(env.TestUnboundParentAgent, parentName);
 
     const error = await agent.tryToSpawn(childName);
     expect(error).toMatch(
-      /Sub-agent bootstrap requires the parent class "_UnboundParent" to be bound/
+      /Sub-agent bootstrap requires the root agent class "_UnboundParent" to be available/
     );
     expect(error).toMatch(/wrangler\.jsonc durable_objects\.bindings/);
     // Class identifier doesn't look minified — no minification hint.
     expect(error).not.toMatch(/looks minified/);
   });
 
-  it("should hint at minification when the parent class name looks minified", async () => {
-    // Same scenario, but the parent's class identifier is `_a` —
-    // matches the minification heuristic. The error message should
-    // include the bundler hint so users with minified production
-    // builds get a helpful pointer.
+  it("should hint at minification when the root class name looks minified", async () => {
+    // Same scenario, but the root class identifier is `_a` — matches
+    // the minification heuristic. The error message should include
+    // the bundler hint so users with minified production builds get a
+    // helpful pointer.
     const parentName = uniqueName();
     const childName = uniqueName();
     const agent = await getAgentByName(
@@ -198,7 +195,7 @@ describe("SubAgent", () => {
     );
 
     const error = await agent.tryToSpawn(childName);
-    expect(error).toMatch(/parent class "_a" to be bound/);
+    expect(error).toMatch(/root agent class "_a" to be available/);
     expect(error).toMatch(/looks minified/);
     expect(error).toMatch(/keepNames/);
   });
@@ -342,6 +339,18 @@ describe("SubAgent", () => {
 
       const result = await agent.nestedPing("outer-1");
       expect(result).toBe("outer-pong");
+    });
+
+    it("should not require the immediate facet parent to expose namespace helpers", async () => {
+      const name = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+      const error = await agent.nestedSpawnWithFacetParentNamespaceHidden(
+        "outer-1",
+        "inner-1"
+      );
+
+      expect(error).toBe("");
     });
   });
 
