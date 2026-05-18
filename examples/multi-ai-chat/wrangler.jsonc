@@ -9,9 +9,9 @@
   },
   "durable_objects": {
     "bindings": [
-      // Only `Inbox` is bound top-level. `Chat` is addressed as a
-      // facet of an Inbox (`/agents/inbox/{user}/sub/chat/{chatId}`)
-      // and doesn't need its own binding.
+      // Only `Inbox` is bound top-level. `Chat` is a facet of Inbox,
+      // and `Researcher` is a nested facet of Chat; neither needs its
+      // own top-level binding.
       { "class_name": "Inbox", "name": "Inbox" }
     ]
   },

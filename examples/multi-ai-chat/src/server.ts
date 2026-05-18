@@ -5,6 +5,7 @@
  *
  *     Inbox (demo-user)                     ◄── top-level DO
  *       ├─ Chat (chat-abc)  [facet]         ◄── sub-agents, one per chat
+ *       │   └─ Researcher (default) [facet] ◄── nested helper facet
  *       ├─ Chat (chat-def)  [facet]
  *       └─ Chat (chat-ghi)  [facet]
  *
@@ -29,6 +30,8 @@
  *   child names get a 404 before any facet is woken.
  * - A `Chat` reaches its parent via `this.parentAgent(Inbox)` — no
  *   hardcoded user IDs, no separate binding lookup.
+ * - A nested `Researcher` helper reaches its direct parent via
+ *   `this.parentAgent(Chat)`, even though `Chat` is itself a facet.
  *
  * This is exactly the shape the proposed `Chats` base class in
  * `design/rfc-think-multi-session.md` will codify as sugar. Once
@@ -41,7 +44,13 @@
 
 import { Agent, callable, routeAgentRequest } from "agents";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
-import { convertToModelMessages, stepCountIs, streamText, tool } from "ai";
+import {
+  convertToModelMessages,
+  generateText,
+  stepCountIs,
+  streamText,
+  tool
+} from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { nanoid } from "nanoid";
 import { z } from "zod";
@@ -62,6 +71,12 @@ export interface ChatSummary {
 
 export interface InboxState {
   chats: ChatSummary[];
+}
+
+export interface ResearchContext {
+  chatId: string;
+  messageCount: number;
+  recentMessages: Array<{ role: string; text: string }>;
 }
 
 // ── Inbox — the parent / directory ─────────────────────────────────
@@ -254,6 +269,23 @@ export class Chat extends AIChatAgent<Env> {
     return this.parentAgent(Inbox);
   }
 
+  async getResearchContext(): Promise<ResearchContext> {
+    return {
+      chatId: this.name,
+      messageCount: this.messages.length,
+      recentMessages: this.messages.slice(-6).map((message) => ({
+        role: message.role,
+        text: message.parts
+          .filter((part): part is { type: "text"; text: string } => {
+            return part.type === "text";
+          })
+          .map((part) => part.text)
+          .join("")
+          .slice(0, 500)
+      }))
+    };
+  }
+
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     // Read shared user memory from the Inbox. Fails soft — if the
     // parent is unreachable for any reason, the chat still works.
@@ -270,7 +302,7 @@ export class Chat extends AIChatAgent<Env> {
       sharedMemory
         ? `Things you already know about this user:\n${sharedMemory}`
         : null,
-      "You have three tools available:",
+      "You have four tools available:",
       "- `rememberFact`: save a fact about the user to their shared memory. " +
         "EVERY chat (this one plus every other chat in the sidebar) will " +
         "see this fact in future turns. Use it when the user shares a " +
@@ -279,7 +311,10 @@ export class Chat extends AIChatAgent<Env> {
       "- `recallMemory`: re-read the full shared memory. Useful to double-" +
         "check what you know before answering a question about the user.",
       "- `getCurrentTime`: returns the server's current time in ISO-8601. " +
-        "Use only when the user asks about the time."
+        "Use only when the user asks about the time.",
+      "- `askResearcher`: delegate a focused research question to a nested " +
+        "Researcher sub-agent. Use it when the user asks for a more careful " +
+        "second pass, tradeoff analysis, or summary grounded in this chat."
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -341,6 +376,22 @@ export class Chat extends AIChatAgent<Env> {
             now: new Date().toISOString(),
             tz: "UTC"
           })
+        }),
+
+        askResearcher: tool({
+          description:
+            "Ask a nested Researcher sub-agent for a concise second-pass analysis.",
+          inputSchema: z.object({
+            topic: z
+              .string()
+              .describe(
+                "The focused question or topic the Researcher should analyze."
+              )
+          }),
+          execute: async ({ topic }) => {
+            const researcher = await this.subAgent(Researcher, "default");
+            return researcher.investigate(topic);
+          }
         })
       }
     });
@@ -365,6 +416,48 @@ export class Chat extends AIChatAgent<Env> {
     } catch (err) {
       console.warn("[Chat] Failed to update inbox preview:", err);
     }
+  }
+}
+
+// ── Researcher — a nested helper facet of Chat ──────────────────────
+
+export class Researcher extends Agent<Env> {
+  async investigate(topic: string): Promise<{
+    chatId: string;
+    finding: string;
+    messageCount: number;
+  }> {
+    // This is the nested-facet path:
+    //
+    //   Inbox (top-level) -> Chat (facet) -> Researcher (facet)
+    //
+    // `Chat` has no top-level Durable Object binding, but it is still
+    // the Researcher's direct parent, so `parentAgent(Chat)` should
+    // resolve through the recorded facet path.
+    const chat = await this.parentAgent(Chat);
+    const context = await chat.getResearchContext();
+    const workersai = createWorkersAI({ binding: this.env.AI });
+
+    const { text } = await generateText({
+      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      system:
+        "You are a concise research helper. Use only the provided chat context. " +
+        "Return a short, practical answer with any uncertainty called out.",
+      prompt: [
+        `Research topic: ${topic}`,
+        `Chat id: ${context.chatId}`,
+        `Recent messages (${context.recentMessages.length}):`,
+        ...context.recentMessages.map((message) => {
+          return `${message.role}: ${message.text || "(no text)"}`;
+        })
+      ].join("\n")
+    });
+
+    return {
+      chatId: context.chatId,
+      finding: text,
+      messageCount: context.messageCount
+    };
   }
 }
 
