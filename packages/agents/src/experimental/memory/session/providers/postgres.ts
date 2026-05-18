@@ -223,7 +223,10 @@ export class PostgresSessionProvider implements SessionProvider {
       summary: r.summary as string,
       fromMessageId: r.from_message_id as string,
       toMessageId: r.to_message_id as string,
-      createdAt: r.created_at as string
+      createdAt:
+        r.created_at instanceof Date
+          ? r.created_at.toISOString()
+          : String(r.created_at)
     }));
   }
 

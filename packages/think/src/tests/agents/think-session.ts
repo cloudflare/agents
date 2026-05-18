@@ -797,6 +797,10 @@ export class ThinkTestAgent extends Think {
     await this.session.appendMessage(msg);
   }
 
+  async updateSessionMessageForTest(msg: UIMessage): Promise<void> {
+    await this.session.updateMessage(msg);
+  }
+
   async getResponseLog(): Promise<ChatResponseResult[]> {
     return this._responseLog;
   }

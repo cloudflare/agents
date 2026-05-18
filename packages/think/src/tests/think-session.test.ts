@@ -495,6 +495,26 @@ describe("Think — Session integration", () => {
     expect(messages[0].id).toBe("direct-session-user");
   });
 
+  it("does not append missing messages to cache on direct session updateMessage calls", async () => {
+    const agent = await freshAgent("session-direct-update-missing");
+    await agent.appendSessionMessageForTest({
+      id: "cached-user",
+      role: "user",
+      parts: [{ type: "text", text: "Cached message" }]
+    });
+
+    await agent.updateSessionMessageForTest({
+      id: "missing-from-cache",
+      role: "user",
+      parts: [{ type: "text", text: "Should not enter model context" }]
+    });
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(1);
+    expect(messages[0].id).toBe("cached-user");
+    expect(JSON.stringify(messages)).not.toContain("Should not enter");
+  });
+
   it("should clear messages via Session", async () => {
     const agent = await freshAgent("session-clear");
 

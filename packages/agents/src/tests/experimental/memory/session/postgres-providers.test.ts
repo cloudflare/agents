@@ -467,6 +467,30 @@ describe("PostgresSessionProvider", () => {
     expect(all).toHaveLength(1);
     expect(all[0].summary).toBe("summary");
   });
+
+  it("normalizes compaction timestamps returned as Date objects", async () => {
+    const createdAt = new Date("2026-05-18T15:42:29.000Z");
+    const dateConn: PostgresConnection = {
+      async execute() {
+        return {
+          rows: [
+            {
+              id: "compaction-date",
+              summary: "summary",
+              from_message_id: "m1",
+              to_message_id: "m5",
+              created_at: createdAt
+            }
+          ]
+        };
+      }
+    };
+    const dateProvider = new PostgresSessionProvider(dateConn, "session-1");
+
+    const [compaction] = await dateProvider.getCompactions();
+
+    expect(compaction.createdAt).toBe("2026-05-18T15:42:29.000Z");
+  });
 });
 
 describe("PostgresContextProvider", () => {

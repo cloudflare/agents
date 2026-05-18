@@ -716,7 +716,7 @@ export class Think<
             }
             break;
           case "update":
-            this._upsertCachedMessage(event.message as UIMessage);
+            this._patchCachedMessage(event.message as UIMessage);
             break;
           case "clear":
             this._replaceCachedMessages([]);
@@ -788,6 +788,14 @@ export class Think<
     if (index === -1) {
       this._cachedMessages.push(message);
     } else {
+      this._cachedMessages[index] = message;
+    }
+  }
+
+  /** Patch a message that is already present in the live cache. */
+  private _patchCachedMessage(message: UIMessage): void {
+    const index = this._cachedMessages.findIndex((m) => m.id === message.id);
+    if (index !== -1) {
       this._cachedMessages[index] = message;
     }
   }
