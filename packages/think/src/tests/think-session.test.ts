@@ -424,6 +424,77 @@ describe("Think — Session integration", () => {
     expect(messages).toHaveLength(4);
   });
 
+  it("keeps cache aligned when storage ignores a duplicate message id", async () => {
+    const agent = await freshAgent("session-duplicate-cache");
+    const msg: UIMessage = {
+      id: "dup-cache-1",
+      role: "user",
+      parts: [{ type: "text", text: "Original content" }]
+    };
+
+    await agent.testChatWithUIMessage(msg);
+    await agent.testChatWithUIMessage({
+      ...msg,
+      parts: [{ type: "text", text: "Rejected duplicate content" }]
+    });
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    const text = JSON.stringify(messages);
+    expect(text).toContain("Original content");
+    expect(text).not.toContain("Rejected duplicate content");
+  });
+
+  it("refreshes cached messages when an append triggers compaction", async () => {
+    const agent = await freshAgent("session-compaction-cache");
+    await agent.enableCompactionForTest();
+
+    const result = await agent.testChat("Trigger compaction");
+
+    expect(result.done).toBe(true);
+    const publicMessages = (await agent.getStoredMessages()) as UIMessage[];
+    const storageMessages =
+      (await agent.getSessionHistoryForTest()) as UIMessage[];
+    expect(publicMessages.map((m) => ({ id: m.id, parts: m.parts }))).toEqual(
+      storageMessages.map((m) => ({ id: m.id, parts: m.parts }))
+    );
+    expect(JSON.stringify(publicMessages)).toContain("compacted-summary");
+  });
+
+  it("returns a copy from getMessages", async () => {
+    const agent = await freshAgent("session-get-messages-copy");
+    await agent.testChat("Hello!");
+
+    expect(await agent.mutatingGetMessagesResultChangesCacheForTest()).toBe(
+      false
+    );
+  });
+
+  it("provides a cache-aware append helper for subclasses", async () => {
+    const agent = await freshAgent("session-history-helper");
+    await agent.appendHistoryMessageForTest({
+      id: "history-helper-user",
+      role: "user",
+      parts: [{ type: "text", text: "Via helper" }]
+    });
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(1);
+    expect(messages[0].id).toBe("history-helper-user");
+  });
+
+  it("keeps cache aligned for direct session appendMessage calls", async () => {
+    const agent = await freshAgent("session-direct-append");
+    await agent.appendSessionMessageForTest({
+      id: "direct-session-user",
+      role: "user",
+      parts: [{ type: "text", text: "Direct session append" }]
+    });
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(1);
+    expect(messages[0].id).toBe("direct-session-user");
+  });
+
   it("should clear messages via Session", async () => {
     const agent = await freshAgent("session-clear");
 

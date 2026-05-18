@@ -1,21 +1,21 @@
-# Postgres Session Example
+# PlanetScale Postgres Session Example
 
 Agent with session history stored in an external Postgres database via [Cloudflare Hyperdrive](https://developers.cloudflare.com/hyperdrive/) instead of Durable Object SQLite.
 
 ## Why external Postgres?
 
-DO SQLite is great for per-user state, but sessions live and die with the DO. An external database gives you:
+DO SQLite is great for per-user state and persists across hibernation and eviction. An external database is useful when you need access outside one Durable Object's local storage:
 
 - **Cross-DO queries** — search across all conversations from any Worker
 - **Analytics** — run SQL against your conversation data directly
-- **Decoupled lifecycle** — session data survives DO eviction, migration, and resets
+- **Decoupled ownership** — session data can be managed outside a single DO identity
 - **Shared state** — multiple DOs or services can read/write the same session tables
 
 ## Setup
 
 ### 1. Create a Postgres database
 
-Use any Postgres provider (Neon, Supabase, PlanetScale, etc.) and copy the connection string.
+Use PlanetScale Postgres or another Postgres provider (Neon, Supabase, etc.) and copy the connection string.
 
 ### 2. Create a Hyperdrive config
 

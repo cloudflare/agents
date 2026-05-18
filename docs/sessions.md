@@ -73,7 +73,7 @@ const session = new Session(new AgentSessionProvider(this), {
 
 ### Builder Methods
 
-All builder methods return `this` for chaining. Order doesn't matter — providers are resolved lazily on first use.
+All builder methods return `this` for chaining. Order does not matter — providers are resolved lazily on first use.
 
 | Method                          | Description                                                                                                                                                   |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -130,23 +130,23 @@ Messages form a tree. When you `appendMessage` with a `parentId` that already ha
 
 ```typescript
 // Get all child messages that branch from messageId (e.g. multiple responses to a user message)
-const branches = session.getBranches(messageId);
+const branches = await session.getBranches(messageId);
 ```
 
 This powers features like response regeneration — pass the user message ID to get both the original and regenerated responses. `getHistory(leafId)` walks the chosen path.
 
 ### Search
 
-Full-text search over the conversation history using SQLite FTS5:
+Full-text search over the conversation history. SQLite-backed sessions use FTS5; Postgres-backed sessions use the provider's Postgres full-text index.
 
 ```typescript
-const results = session.search("deployment Friday", { limit: 10 });
+const results = await session.search("deployment Friday", { limit: 10 });
 // Returns: Array<{ id, role, content, createdAt? }>
 ```
 
 Uses porter stemming and unicode tokenization. The search covers all messages in the session.
 
-> **Note:** `search()` throws if the session provider doesn't support search. The built-in `AgentSessionProvider` supports it.
+> **Note:** `search()` throws if the session provider does not support search. The built-in `AgentSessionProvider` and `PostgresSessionProvider` support it.
 
 ### WebSocket Broadcasts
 
@@ -278,7 +278,7 @@ const prompt = await session.freezeSystemPrompt();
 const updated = await session.refreshSystemPrompt();
 ```
 
-The frozen prompt survives DO hibernation and eviction when `withCachedPrompt()` is enabled. After eviction, the next `freezeSystemPrompt()` call loads from SQLite rather than re-rendering.
+The frozen prompt survives DO hibernation and eviction when `withCachedPrompt()` is enabled. After eviction, the next `freezeSystemPrompt()` call loads from the configured prompt store rather than re-rendering.
 
 ### Skills (Load/Unload)
 
@@ -286,15 +286,15 @@ Skills are on-demand documents stored in a `SkillProvider` (e.g. R2). The model 
 
 ```typescript
 // Unload a skill to free context space (rewrites the tool result in history)
-session.unloadSkill("skills", "api-reference");
+await session.unloadSkill("skills", "api-reference");
 
 // Check what's currently loaded
-const loaded = session.getLoadedSkillKeys(); // Set<"skills:api-reference">
+const loaded = await session.getLoadedSkillKeys(); // Set<"skills:api-reference">
 ```
 
 After hibernation/eviction, loaded skills are reconstructed by scanning conversation history for `load_context` tool results. This means skill state survives restarts without additional storage.
 
-> **Weird:** The skill restoration scans the entire conversation history looking for `load_context` tool invocations in assistant messages with `state: "output-available"`. When you unload a skill, it doesn't delete the tool result — it rewrites the `output` field to `"[skill unloaded: key]"` in-place. This means the original loaded content is permanently lost from history after unload.
+> **Gotcha:** Skill restoration scans the entire conversation history looking for `load_context` tool invocations in assistant messages with `state: "output-available"`. When you unload a skill, it does not delete the tool result — it rewrites the `output` field to `"[skill unloaded: key]"` in-place. This means the original loaded content is permanently lost from history after unload.
 
 ---
 
@@ -357,7 +357,7 @@ Use `{ ...sessionTools, ...manager.tools() }` to give the model both per-session
 
 ## Compaction
 
-Compaction summarizes older messages to keep conversations within token limits. Original messages are preserved in SQLite — the summary is a non-destructive overlay applied at read time.
+Compaction summarizes older messages to keep conversations within token limits. Original messages are preserved in the underlying message store — the summary is a non-destructive overlay applied at read time.
 
 ### Setup
 
@@ -396,8 +396,8 @@ When `getHistory()` is called, compaction overlays are applied transparently —
 const result = await session.compact();
 
 // Or manage overlays directly
-session.addCompaction("Summary of messages 1-50", "msg-1", "msg-50");
-const overlays = session.getCompactions();
+await session.addCompaction("Summary of messages 1-50", "msg-1", "msg-50");
+const overlays = await session.getCompactions();
 ```
 
 ### Auto-Compaction
@@ -406,7 +406,7 @@ When `.compactAfter(threshold)` is set, `appendMessage()` checks the estimated t
 
 > **Note:** Token estimation is heuristic (not tiktoken). It uses `max(chars/4, words*1.3)` with 4 tokens per-message overhead. This is intentional — tiktoken would add 80-120MB heap overhead, which exceeds Cloudflare Workers' 128MB limit.
 
-> **Weird:** Compaction is iterative but single-overlay. Each new compaction extends from the earliest existing compaction's `fromMessageId` to the new end. So you always have at most one active compaction overlay per session, and it keeps growing. The previous compaction rows remain in the database but are superseded by the latest one (which covers a wider range). `getCompactions()` returns all of them, but `getHistory()` applies the latest one.
+> **Gotcha:** Compaction is iterative but single-overlay. Each new compaction extends from the earliest existing compaction's `fromMessageId` to the new end. So you always have at most one active compaction overlay per session, and it keeps growing. The previous compaction rows remain in the database but are superseded by the latest one (which covers a wider range). `getCompactions()` returns all of them, but `getHistory()` applies the latest one.
 
 ---
 
@@ -465,7 +465,7 @@ const sessions = manager.list();
 manager.rename(sessionId, "New Name");
 
 // Delete (clears messages too)
-manager.delete(sessionId);
+await manager.delete(sessionId);
 ```
 
 ### Accessing Sessions
@@ -491,16 +491,16 @@ await manager.upsert(sessionId, message, parentId?);
 await manager.appendAll(sessionId, messages, parentId?);
 
 // Read history
-const history = manager.getHistory(sessionId, leafId?);
+const history = await manager.getHistory(sessionId, leafId?);
 
 // Message count
-const count = manager.getMessageCount(sessionId);
+const count = await manager.getMessageCount(sessionId);
 
 // Clear messages
-manager.clearMessages(sessionId);
+await manager.clearMessages(sessionId);
 
 // Delete specific messages
-manager.deleteMessages(sessionId, ["msg-1"]);
+await manager.deleteMessages(sessionId, ["msg-1"]);
 ```
 
 ### Forking
@@ -512,16 +512,16 @@ const forked = await manager.fork(sessionId, atMessageId, "Forked Chat");
 // forked.parent_session_id === sessionId
 ```
 
-> **Weird:** Fork copies messages with new UUIDs, not the original IDs. This means message IDs in the forked session won't match the original. The fork also doesn't copy compaction overlays — the forked session starts clean with the materialized history.
+> **Gotcha:** Fork copies messages with new UUIDs, not the original IDs. This means message IDs in the forked session will not match the original. The fork also does not copy compaction overlays — the forked session starts clean with the materialized history.
 
 ### Compaction
 
 ```typescript
 // Add a compaction overlay
-manager.addCompaction(sessionId, summary, fromId, toId);
+await manager.addCompaction(sessionId, summary, fromId, toId);
 
 // Get overlays
-const compactions = manager.getCompactions(sessionId);
+const compactions = await manager.getCompactions(sessionId);
 
 // Compact and split — marks old session as ended, creates a continuation
 const continuation = await manager.compactAndSplit(
@@ -555,13 +555,13 @@ const tools = manager.tools();
 
 > **Note:** `manager.search()` uses a separate FTS5 index (`assistant_fts`) from per-session search. Messages are indexed into this table by the `AgentSessionProvider` when appended. The `session_search` tool limits results to 10.
 
-> **Weird:** `manager.search()` silently returns an empty array on FTS5 query errors (malformed queries, etc.) rather than throwing.
+> **Gotcha:** `manager.search()` silently returns an empty array on FTS5 query errors (malformed queries, etc.) rather than throwing.
 
 ---
 
 ## Storage
 
-All storage is in Durable Object SQLite. Tables are created lazily on first use.
+By default, storage is in Durable Object SQLite and tables are created lazily on first use. Postgres-backed sessions use the external tables shown in the Postgres section below.
 
 ### Tables
 
@@ -668,7 +668,7 @@ const myStorage: SessionProvider = {
 
 ## Postgres (External Database)
 
-The built-in providers use Durable Object SQLite. If you need session data in an external Postgres database — for cross-DO queries, analytics, or shared state — use `PostgresSessionProvider` and `PostgresContextProvider`.
+The default providers use Durable Object SQLite. If you need session data in an external Postgres database — for cross-DO queries, analytics, or shared state — use `PostgresSessionProvider`, `PostgresContextProvider`, and `PostgresSearchProvider`.
 
 These work with any Postgres-compatible database (Neon, Supabase, PlanetScale, etc.) via [Cloudflare Hyperdrive](https://developers.cloudflare.com/hyperdrive/) for connection pooling.
 
@@ -689,7 +689,7 @@ Copy the returned Hyperdrive ID.
 
 #### 3. Create the tables
 
-The Postgres user typically won't have `CREATE TABLE` permissions. Run this once in your database console:
+The Postgres user might not have `CREATE TABLE` permissions. Run this once in your database console:
 
 ```sql
 CREATE TABLE IF NOT EXISTS assistant_messages (
@@ -962,7 +962,7 @@ import {
 
 Things that might surprise you:
 
-1. **Lazy initialization.** Sessions created with the builder don't initialize until first use. The first call to any method (e.g. `getHistory()`) triggers `_ensureReady()`, which creates SQLite tables, resolves providers, loads context blocks, and restores skill state from history. This means the first operation is slower than subsequent ones.
+1. **Lazy initialization.** Sessions created with the builder do not initialize until first use. The first call to any method (e.g. `getHistory()`) triggers `_ensureReady()`, which creates SQLite tables or initializes the configured provider, resolves providers, loads context blocks, and restores skill state from history. This means the first operation is slower than subsequent ones.
 
 2. **Snapshot freezing is sticky.** `freezeSystemPrompt()` caches the result. Writing to a context block does NOT update the cached snapshot — you must explicitly call `refreshSystemPrompt()`. This is deliberate (LLM prefix cache optimization), but easy to miss.
 
@@ -972,13 +972,13 @@ Things that might surprise you:
 
 5. **Compaction overlays are superseding, not stacking.** Each compaction extends from the earliest existing `fromMessageId`. So you always have one effective overlay that keeps growing. Old compaction rows remain in the database but are unused. `getCompactions()` returns all rows, which can be confusing.
 
-6. **Search is silently absent.** `session.search()` throws if the provider doesn't support search, but `manager.search()` swallows FTS5 errors and returns `[]`. The `searchMessages` method on `SessionProvider` is optional (`searchMessages?`).
+6. **Search is silently absent.** `session.search()` throws if the provider does not support search, but `manager.search()` swallows FTS5 errors and returns `[]`. The `searchMessages` method on `SessionProvider` is optional (`searchMessages?`).
 
-7. **Fork copies with new IDs.** When forking via `SessionManager.fork()`, all messages get new UUIDs. If you're storing message IDs externally (e.g. for bookmarks), they won't survive a fork.
+7. **Fork copies with new IDs.** When forking via `SessionManager.fork()`, all messages get new UUIDs. If you are storing message IDs externally (e.g. for bookmarks), they will not survive a fork.
 
-8. **`removeContext` doesn't fire skill unload callbacks.** If you remove a context block that had loaded skills, the skill tracking is cleaned up but the conversation history is NOT rewritten. The tool results from those skills remain in history with their full content.
+8. **`removeContext` does not fire skill unload callbacks.** If you remove a context block that had loaded skills, the skill tracking is cleaned up but the conversation history is NOT rewritten. The tool results from those skills remain in history with their full content.
 
-9. **FTS5 query sanitization.** Both `AgentSearchProvider.search()` and `SessionManager.search()` quote individual words to prevent FTS5 syntax injection. This means you can't use FTS5 operators like `OR`, `NOT`, or `NEAR` — they'll be treated as literal search terms.
+9. **FTS5 query sanitization.** Both `AgentSearchProvider.search()` and `SessionManager.search()` quote individual words to prevent FTS5 syntax injection. This means you cannot use FTS5 operators like `OR`, `NOT`, or `NEAR` — they will be treated as literal search terms.
 
 10. **Auto-compaction failure is silent.** When `compactAfter` triggers and the compaction function throws, the error is emitted via WebSocket broadcast but the `appendMessage` call still succeeds. The message is saved; only the compaction is skipped.
 

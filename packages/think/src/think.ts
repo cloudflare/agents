@@ -643,7 +643,13 @@ export class Think<
 
   static readonly CHAT_FIBER_NAME = "__cf_internal_chat_turn";
 
-  /** The conversation session — messages, context, compaction, search. */
+  /**
+   * The conversation session — messages, context, compaction, search.
+   *
+   * Direct message writes are observed and mirrored into Think's live cache.
+   * Prefer the history helpers below when writing UI messages from subclasses;
+   * they sanitize content and enforce row-size limits before delegating here.
+   */
   session!: Session;
 
   /** Cached messages — kept in sync with session storage. */
@@ -700,6 +706,27 @@ export class Think<
       // 2. Session configuration (builder phase — context blocks, compaction, skills)
       const baseSession = Session.create(this);
       this.session = await this.configureSession(baseSession);
+      this.session.internal_onMessagesChanged(async (event) => {
+        switch (event.type) {
+          case "append":
+            if (!event.inserted || event.parentId !== undefined) {
+              await this._syncMessages();
+            } else {
+              this._upsertCachedMessage(event.message as UIMessage);
+            }
+            break;
+          case "update":
+            this._upsertCachedMessage(event.message as UIMessage);
+            break;
+          case "clear":
+            this._replaceCachedMessages([]);
+            break;
+          case "delete":
+          case "compact":
+            await this._syncMessages();
+            break;
+        }
+      });
 
       // Force Session to initialize its tables (assistant_messages,
       // assistant_compactions, assistant_config, etc.) so that subsequent
@@ -728,17 +755,94 @@ export class Think<
   }
 
   /**
-   * Conversation history. Computed from the active session.
-   * Always fresh — reads from Session's tree-structured storage.
+   * Conversation history as Think's live in-memory view.
+   *
+   * Storage remains the durable source of truth, but runtime logic should read
+   * through this cache so in-flight turns, tool updates, and recovery state all
+   * observe the same message list. Use `_syncMessages()` only at safe
+   * boundaries where a full storage reread cannot drop in-flight state.
    */
   get messages(): UIMessage[] {
     return this._cachedMessages;
   }
 
-  /** Refresh the cached messages from session storage. */
-  private async _syncMessages(): Promise<UIMessage[]> {
-    this._cachedMessages = (await this.session.getHistory()) as UIMessage[];
+  /** Read the durable message path from session storage. */
+  private async _readMessagesFromStorage(): Promise<UIMessage[]> {
+    return (await this.session.getHistory()) as UIMessage[];
+  }
+
+  /** Replace the live cache with a durable storage snapshot. */
+  private _replaceCachedMessages(messages: UIMessage[]): UIMessage[] {
+    this._cachedMessages = messages;
     return this._cachedMessages;
+  }
+
+  /** Refresh the live cache from durable storage at a safe boundary. */
+  private async _syncMessages(): Promise<UIMessage[]> {
+    return this._replaceCachedMessages(await this._readMessagesFromStorage());
+  }
+
+  /** Patch or append one message in the live cache after a durable write. */
+  private _upsertCachedMessage(message: UIMessage): void {
+    const index = this._cachedMessages.findIndex((m) => m.id === message.id);
+    if (index === -1) {
+      this._cachedMessages.push(message);
+    } else {
+      this._cachedMessages[index] = message;
+    }
+  }
+
+  private async _appendMessageToHistory(
+    message: UIMessage,
+    parentId?: string | null
+  ): Promise<UIMessage> {
+    const safe = enforceRowSizeLimit(sanitizeMessage(message));
+    await this.session.appendMessage(safe, parentId);
+    return safe;
+  }
+
+  private async _updateMessageInHistory(
+    message: UIMessage
+  ): Promise<UIMessage> {
+    const safe = enforceRowSizeLimit(sanitizeMessage(message));
+    await this.session.updateMessage(safe);
+    return safe;
+  }
+
+  private async _upsertMessageInHistory(
+    message: UIMessage,
+    parentId?: string | null
+  ): Promise<UIMessage> {
+    const safe = enforceRowSizeLimit(sanitizeMessage(message));
+    const existing = await this.session.getMessage(safe.id);
+    if (existing) {
+      await this.session.updateMessage(safe);
+    } else {
+      await this.session.appendMessage(safe, parentId);
+    }
+    return safe;
+  }
+
+  private async _clearHistory(): Promise<void> {
+    await this.session.clearMessages();
+  }
+
+  /** Append a message while keeping Think's live message cache coherent. */
+  protected appendMessageToHistory(
+    message: UIMessage,
+    parentId?: string | null
+  ): Promise<UIMessage> {
+    return this._appendMessageToHistory(message, parentId);
+  }
+
+  /** Update a message while keeping Think's live message cache coherent. */
+  protected updateMessageInHistory(message: UIMessage): Promise<UIMessage> {
+    return this._updateMessageInHistory(message);
+  }
+
+  /** Refresh Think's live message cache from the durable session path. */
+  protected async syncMessagesFromStorage(): Promise<UIMessage[]> {
+    return (await this._syncMessages()).slice();
   }
 
   private _aborts = new AbortRegistry();
@@ -1342,7 +1446,7 @@ export class Think<
     const baseSystem = frozenPrompt || this.getSystemPrompt();
     const system = this._systemPromptForTurn(baseSystem, tools);
 
-    const history = await this.session.getHistory();
+    const history = this.messages;
     const truncated = truncateOlderMessages(history) as UIMessage[];
     const messages = await convertToModelMessages(truncated, { tools });
 
@@ -1889,7 +1993,7 @@ export class Think<
   async _hostGetMessages(
     limit?: number
   ): Promise<Array<{ id: string; role: string; content: string }>> {
-    const history = await this.session.getHistory();
+    const history = this.messages;
     const sliced =
       limit !== undefined && limit !== null
         ? limit <= 0
@@ -1917,14 +2021,14 @@ export class Think<
     // called during an active turn (tool execution → host.sendMessage
     // → saveMessages → TurnQueue.enqueue → awaits current turn → deadlock).
     // The injected message is visible in the next turn's history.
-    await this.session.appendMessage(msg);
+    await this._appendMessageToHistory(msg);
   }
 
   async _hostGetSessionInfo(): Promise<{
     messageCount: number;
   }> {
     return {
-      messageCount: (await this.session.getHistory()).length
+      messageCount: this.messages.length
     };
   }
 
@@ -1967,8 +2071,7 @@ export class Think<
               }
             : userMessage;
 
-        await this.session.appendMessage(userMsg);
-        await this._syncMessages();
+        await this._appendMessageToHistory(userMsg);
 
         const abortSignal = this._aborts.getSignal(requestId);
         const detachExternal = this._aborts.linkExternal(
@@ -2033,14 +2136,13 @@ export class Think<
 
   /** Get the conversation history as UIMessage[]. */
   async getMessages(): Promise<UIMessage[]> {
-    return (await this.session.getHistory()) as UIMessage[];
+    return this.messages.slice();
   }
 
   /** Clear all messages from storage. */
   async clearMessages(): Promise<void> {
     this.resetTurnState();
-    await this.session.clearMessages();
-    this._cachedMessages = [];
+    await this._clearHistory();
   }
 
   private _ensureAgentToolChildRunTable(): void {
@@ -3176,9 +3278,8 @@ export class Think<
         }
 
         for (const msg of resolved) {
-          await this.session.appendMessage(msg);
+          await this._appendMessageToHistory(msg);
         }
-        await this._syncMessages();
         options?.onMessagesApplied?.();
         this._broadcastMessages();
 
@@ -3662,7 +3763,7 @@ export class Think<
       const clientToolsForTurn = this._lastClientTools;
       const bodyForTurn = this._lastBody;
 
-      const serverMessages = (await this.session.getHistory()) as UIMessage[];
+      const serverMessages = await this._readMessagesFromStorage();
       const reconciled = reconcileMessages(
         incomingMessages,
         serverMessages,
@@ -3888,8 +3989,7 @@ export class Think<
     this._persistClientTools();
     this._lastBody = undefined;
     this._persistBody();
-    await this.session.clearMessages();
-    this._cachedMessages = [];
+    await this._clearHistory();
     this._broadcast(
       { type: MSG_CHAT_CLEAR },
       connection ? [connection.id] : undefined
@@ -3952,7 +4052,6 @@ export class Think<
 
       assistantMsg = accumulator.toMessage();
       await this._persistAssistantMessage(assistantMsg);
-      await this._syncMessages();
 
       if (!aborted) {
         await callback.onDone();
@@ -3979,7 +4078,6 @@ export class Think<
       if (!assistantMsg && accumulator.parts.length > 0) {
         assistantMsg = accumulator.toMessage();
         await this._persistAssistantMessage(assistantMsg);
-        await this._syncMessages();
       }
 
       const wrapped = this.onChatError(error);
@@ -4134,7 +4232,6 @@ export class Think<
       try {
         const assistantMsg = accumulator.toMessage();
         await this._persistAssistantMessage(assistantMsg, parentId);
-        await this._syncMessages();
         this._broadcastMessages();
 
         await this._fireResponseHook({
@@ -4160,15 +4257,7 @@ export class Think<
     msg: UIMessage,
     parentId?: string
   ): Promise<void> {
-    const sanitized = sanitizeMessage(msg);
-    const safe = enforceRowSizeLimit(sanitized);
-
-    const existing = await this.session.getMessage(safe.id);
-    if (existing) {
-      await this.session.updateMessage(safe);
-    } else {
-      await this.session.appendMessage(safe, parentId);
-    }
+    await this._upsertMessageInHistory(msg, parentId);
   }
 
   /**
@@ -4183,16 +4272,7 @@ export class Think<
   ): Promise<void> {
     const resolved =
       msg.role === "assistant" ? resolveToolMergeId(msg, serverMessages) : msg;
-    const sanitized = sanitizeMessage(resolved);
-    const safe = enforceRowSizeLimit(sanitized);
-
-    const existing = await this.session.getMessage(safe.id);
-    if (existing) {
-      await this.session.updateMessage(safe);
-      return;
-    }
-
-    await this.session.appendMessage(safe);
+    await this._upsertMessageInHistory(resolved);
   }
 
   private _persistClientTools(): void {
@@ -4263,7 +4343,7 @@ export class Think<
     matchStates: string[];
     apply: (part: Record<string, unknown>) => Record<string, unknown>;
   }): Promise<void> {
-    const history = (await this.session.getHistory()) as UIMessage[];
+    const history = await this._readMessagesFromStorage();
     for (let i = 0; i < history.length; i++) {
       const msg = history[i];
       const result = applyToolUpdate(
@@ -4275,20 +4355,15 @@ export class Think<
           ...msg,
           parts: result.parts as UIMessage["parts"]
         };
-        const safe = enforceRowSizeLimit(sanitizeMessage(updatedMsg));
-        await this.session.updateMessage(safe);
-        // Patch _cachedMessages in place so the `messages` getter stays
-        // coherent with storage without a full `_syncMessages()` round-trip.
+        const safe = await this._updateMessageInHistory(updatedMsg);
+        // Patch the live cache in place instead of doing a full
+        // `_syncMessages()` round-trip.
         // A full re-read during a streaming turn drops in-flight messages
         // whose parent chain hasn't been persisted yet (see commits
         // 3f615a24 "revert _syncMessages in _applyToolUpdateToMessages"
         // and 6e76bd49 "update cached messages in-place"). The cache is
         // the source of truth during a turn; we only reconcile it here to
         // reflect the tool update that was just written to storage.
-        const cacheIdx = this._cachedMessages.findIndex(
-          (m) => m.id === safe.id
-        );
-        if (cacheIdx !== -1) this._cachedMessages[cacheIdx] = safe as UIMessage;
         this._broadcast({ type: MSG_MESSAGE_UPDATED, message: safe });
         return;
       }
@@ -4886,7 +4961,6 @@ export class Think<
 
     if (accumulator.parts.length > 0) {
       await this._persistAssistantMessage(accumulator.toMessage());
-      await this._syncMessages();
       this._broadcastMessages();
     }
   }

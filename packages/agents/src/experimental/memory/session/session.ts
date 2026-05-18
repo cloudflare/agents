@@ -19,6 +19,18 @@ import { MessageType } from "../../../types";
 
 export type SessionContextOptions = Omit<ContextConfig, "label">;
 
+type InternalMessageChangeEvent =
+  | {
+      type: "append";
+      message: SessionMessage;
+      parentId?: string | null;
+      inserted: boolean;
+    }
+  | { type: "update"; message: SessionMessage }
+  | { type: "delete"; messageIds: string[] }
+  | { type: "clear" }
+  | { type: "compact" };
+
 // Raw builder entry — provider resolved at init time so chain order doesn't matter
 interface PendingContext {
   label: string;
@@ -65,6 +77,9 @@ export class Session {
   // skill-state — guarantees loaded-skill tracking is rehydrated after
   // hibernation, even for async SessionProviders.
   private _restorePromise?: Promise<void>;
+  private _messageChangeListener?: (
+    event: InternalMessageChangeEvent
+  ) => void | Promise<void>;
 
   constructor(storage: SessionProvider, options?: SessionOptions) {
     this.storage = storage;
@@ -157,6 +172,20 @@ export class Session {
     return this;
   }
 
+  /**
+   * @internal
+   * Framework hook for cache-owning callers that need to mirror message
+   * storage changes. Application code should use the normal Session methods.
+   */
+  internal_onMessagesChanged(
+    listener:
+      | ((event: InternalMessageChangeEvent) => void | Promise<void>)
+      | null
+  ): this {
+    this._messageChangeListener = listener ?? undefined;
+    return this;
+  }
+
   // ── Lazy init ───────────────────────────────────────────────────
 
   private _ensureReady(): void {
@@ -223,6 +252,12 @@ export class Session {
   private async _ensureRestored(): Promise<void> {
     this._ensureReady();
     if (this._restorePromise) await this._restorePromise;
+  }
+
+  private async _notifyMessagesChanged(
+    event: InternalMessageChangeEvent
+  ): Promise<void> {
+    await this._messageChangeListener?.(event);
   }
 
   /**
@@ -315,7 +350,7 @@ export class Session {
       });
 
       if (changed) {
-        await this.storage.updateMessage({
+        await this.updateMessage({
           ...msg,
           parts: newParts as SessionMessage["parts"]
         });
@@ -382,10 +417,31 @@ export class Session {
     message: SessionMessage,
     parentId?: string | null
   ): Promise<void> {
+    await this._appendMessage(message, parentId);
+  }
+
+  private async _appendMessage(
+    message: SessionMessage,
+    parentId?: string | null
+  ): Promise<void> {
     await this._ensureRestored();
+
+    const existing = await this.storage.getMessage(message.id);
+    if (existing) {
+      await this._emitStatus("idle");
+      await this._notifyMessagesChanged({
+        type: "append",
+        message,
+        parentId,
+        inserted: false
+      });
+      return;
+    }
+
     await this.storage.appendMessage(message, parentId);
 
     const tokenEstimate = await this._emitStatus("idle");
+    let compacted = false;
 
     if (
       this._tokenThreshold != null &&
@@ -393,10 +449,19 @@ export class Session {
       tokenEstimate > this._tokenThreshold
     ) {
       try {
-        await this.compact();
+        compacted = Boolean(await this.compact());
       } catch {
         // Auto-compact failure is non-fatal — message is already appended
       }
+    }
+
+    if (!compacted) {
+      await this._notifyMessagesChanged({
+        type: "append",
+        message,
+        parentId,
+        inserted: true
+      });
     }
   }
 
@@ -404,12 +469,14 @@ export class Session {
     await this._ensureRestored();
     await this.storage.updateMessage(message);
     await this._emitStatus("idle");
+    await this._notifyMessagesChanged({ type: "update", message });
   }
 
   async deleteMessages(messageIds: string[]): Promise<void> {
     await this._ensureRestored();
     await this.storage.deleteMessages(messageIds);
     await this._emitStatus("idle");
+    await this._notifyMessagesChanged({ type: "delete", messageIds });
   }
 
   async clearMessages(): Promise<void> {
@@ -418,6 +485,7 @@ export class Session {
     this.context.clearSkillState();
     await this.context.refreshSystemPrompt();
     await this._emitStatus("idle");
+    await this._notifyMessagesChanged({ type: "clear" });
   }
 
   // ── Compaction ────────────────────────────────────────────────
@@ -481,6 +549,7 @@ export class Session {
     await this._emitStatus("idle", {
       compacted: { tokensBefore }
     });
+    await this._notifyMessagesChanged({ type: "compact" });
 
     return { ...result, fromMessageId: fromId };
   }
