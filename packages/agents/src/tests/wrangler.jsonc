@@ -166,6 +166,10 @@
         "name": "TestSubAgentParent"
       },
       {
+        "class_name": "CustomBoundSubAgentParent",
+        "name": "CUSTOM_BOUND_SUB_AGENT_PARENT"
+      },
+      {
         "class_name": "TestMigrationAgent",
         "name": "TestMigrationAgent"
       },
@@ -270,9 +274,11 @@
         "TestMultiSessionAgent",
         "TestWaitConnectionsAgent",
         "TestSubAgentParent",
+        "CustomBoundSubAgentParent",
         "CounterSubAgent",
         "OuterSubAgent",
         "InnerSubAgent",
+        "LeafSubAgent",
         "CallbackSubAgent",
         "BroadcastSubAgent",
         "TestMigrationAgent",

@@ -84,7 +84,7 @@ Key things worth looking at in `src/server.ts`:
   `this.subAgent(Chat, id)` / `this.deleteSubAgent(Chat, id)` that
   insert / remove the matching meta row.
 - `Chat.getInbox()` uses the framework's `parentAgent(Inbox)`
-  helper — pass the parent's class, get back a typed RPC stub
+  helper — pass the parent's class, get back a typed parent stub
   with the right identity baked in. No hardcoded user id, no
   `getAgentByName` plumbing inside the facet.
 - Each `Chat` owns its own SQLite database, stream state, and recovery

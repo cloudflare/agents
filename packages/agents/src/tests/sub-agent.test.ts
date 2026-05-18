@@ -1119,6 +1119,23 @@ describe("SubAgent", () => {
       expect(observed).toBe(parentName);
     });
 
+    it("resolves a top-level parent whose binding name differs from the class name", async () => {
+      const parentName = uniqueName();
+      const parent = await getAgentByName(
+        env.CUSTOM_BOUND_SUB_AGENT_PARENT,
+        parentName
+      );
+
+      // `CustomBoundSubAgentParent` is registered under the
+      // `CUSTOM_BOUND_SUB_AGENT_PARENT` binding, so `env[Cls.name]`
+      // is absent. `parentAgent(CustomBoundSubAgentParent)` should
+      // still resolve via the worker `exports` namespace.
+      const observed = await parent.subAgentCallParentName(
+        "custom-binding-parent-probe"
+      );
+      expect(observed).toBe(parentName);
+    });
+
     it("throws a clear error when called on a non-facet (top-level agent)", async () => {
       const parentName = uniqueName();
       const parent = await getAgentByName(env.TestSubAgentParent, parentName);
@@ -1179,6 +1196,122 @@ describe("SubAgent", () => {
       expect(err).toMatch(/OuterSubAgent/);
       // And the class the caller (wrongly) passed is named too.
       expect(err).toMatch(/TestSubAgentParent/);
+    });
+
+    it("resolves a facet-only direct parent through the root bridge", async () => {
+      const rootName = uniqueName();
+      const outerName = uniqueName();
+      const innerName = uniqueName();
+      const root = await getAgentByName(env.TestSubAgentParent, rootName);
+
+      const observed = await root.subAgentNestedCallFacetParent(
+        outerName,
+        innerName
+      );
+
+      expect(observed).toBe(`outer:${outerName}`);
+    });
+
+    it("fetches through a facet-parent proxy", async () => {
+      const rootName = uniqueName();
+      const outerName = uniqueName();
+      const innerName = uniqueName();
+      const root = await getAgentByName(env.TestSubAgentParent, rootName);
+
+      const observed = await root.subAgentNestedFetchFacetParent(
+        outerName,
+        innerName,
+        "/parent-path?x=1"
+      );
+
+      expect(observed).toEqual({
+        agentName: outerName,
+        body: "hello from inner",
+        header: "yes",
+        method: "POST",
+        path: "/parent-path",
+        search: "?x=1"
+      });
+    });
+
+    it("fetches through a facet-parent proxy with a Request object", async () => {
+      const rootName = uniqueName();
+      const outerName = uniqueName();
+      const innerName = uniqueName();
+      const root = await getAgentByName(env.TestSubAgentParent, rootName);
+
+      const observed = await root.subAgentNestedFetchFacetParentWithRequest(
+        outerName,
+        innerName,
+        "/request-object?source=request"
+      );
+
+      expect(observed).toEqual({
+        agentName: outerName,
+        body: "hello from request",
+        header: "request",
+        method: "POST",
+        path: "/request-object",
+        search: "?source=request"
+      });
+    });
+
+    it("resolves a deeper facet-only parent through the recursive bridge", async () => {
+      const rootName = uniqueName();
+      const outerName = uniqueName();
+      const innerName = uniqueName();
+      const leafName = uniqueName();
+      const root = await getAgentByName(env.TestSubAgentParent, rootName);
+
+      const observed = await root.subAgentDeepCallFacetParent(
+        outerName,
+        innerName,
+        leafName
+      );
+
+      expect(observed).toBe(`inner:${innerName}`);
+    });
+
+    it("fetches through a deeper facet-parent proxy", async () => {
+      const rootName = uniqueName();
+      const outerName = uniqueName();
+      const innerName = uniqueName();
+      const leafName = uniqueName();
+      const root = await getAgentByName(env.TestSubAgentParent, rootName);
+
+      const observed = await root.subAgentDeepFetchFacetParent(
+        outerName,
+        innerName,
+        leafName,
+        "/deep-parent?mode=recursive"
+      );
+
+      expect(observed).toEqual({
+        agentName: innerName,
+        body: "hello from leaf",
+        header: "yes",
+        method: "POST",
+        path: "/deep-parent",
+        search: "?mode=recursive"
+      });
+    });
+
+    it("throws a clear error for facet-parent WebSocket upgrades", async () => {
+      const rootName = uniqueName();
+      const outerName = uniqueName();
+      const innerName = uniqueName();
+      const leafName = uniqueName();
+      const root = await getAgentByName(env.TestSubAgentParent, rootName);
+
+      const observed = await root.subAgentDeepTryFetchFacetParentWebSocket(
+        outerName,
+        innerName,
+        leafName
+      );
+
+      expect(observed).toMatch(/parentAgent\(InnerSubAgent\)\.fetch\(\)/);
+      expect(observed).toMatch(/WebSocket upgrade requests/i);
+      expect(observed).toMatch(/externally routed sub-agent URLs/i);
     });
   });
 

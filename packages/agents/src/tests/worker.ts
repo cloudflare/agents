@@ -48,9 +48,11 @@ export {
   TestMultiSessionAgent,
   TestWaitConnectionsAgent,
   TestSubAgentParent,
+  CustomBoundSubAgentParent,
   CounterSubAgent,
   OuterSubAgent,
   InnerSubAgent,
+  LeafSubAgent,
   CallbackSubAgent,
   BroadcastSubAgent,
   TestConnectionUriAgent,
@@ -121,6 +123,7 @@ import type {
   TestMultiSessionAgent,
   TestWaitConnectionsAgent,
   TestSubAgentParent,
+  CustomBoundSubAgentParent,
   TestConnectionUriAgent,
   SpikeSubParent,
   HookingSubAgentParent,
@@ -169,6 +172,7 @@ export type Env = {
   TestMultiSessionAgent: DurableObjectNamespace<TestMultiSessionAgent>;
   TestWaitConnectionsAgent: DurableObjectNamespace<TestWaitConnectionsAgent>;
   TestSubAgentParent: DurableObjectNamespace<TestSubAgentParent>;
+  CUSTOM_BOUND_SUB_AGENT_PARENT: DurableObjectNamespace<CustomBoundSubAgentParent>;
   TestUnboundParentAgent: DurableObjectNamespace<TestUnboundParentAgent>;
   TestMinifiedNameParentAgent: DurableObjectNamespace<TestMinifiedNameParentAgent>;
   SpikeSubParent: DurableObjectNamespace<SpikeSubParent>;

@@ -219,7 +219,7 @@ this.selfPath;
 
 ### `this.parentAgent(Cls)`
 
-Typed RPC stub to the **immediate** parent, resolved from `parentPath`. Symmetric with `subAgent(Cls, name)`: one opens a stub parent→child, the other opens a stub child→parent.
+Typed parent stub to the **immediate** parent, resolved from `parentPath`. Symmetric with `subAgent(Cls, name)`: one opens a stub parent→child, the other opens a stub child→parent.
 
 ```typescript
 const inbox = await this.parentAgent(Inbox);
@@ -229,11 +229,20 @@ await inbox.recordTurn(this.name, "...");
 The framework:
 
 1. Verifies `Cls.name` matches the recorded direct-parent class (catches the "wrong class" mistake early).
-2. Looks up the namespace in `env[Cls.name]` and opens a stub on the recorded parent name.
+2. If the direct parent is a top-level Durable Object, opens the namespace for the exported parent class and returns a stub for the recorded parent name.
+3. If the direct parent is itself a facet, returns a proxy that routes method calls through the top-level root and then down the recorded facet path.
 
-For grandparents and further ancestors, iterate `this.parentPath` and call `getAgentByName(env.X, this.parentPath[i].name)` directly. `parentAgent` is intentionally single-hop.
+For grandparents and further ancestors that are top-level Durable Objects, iterate `this.parentPath` and call `getAgentByName(env.X, this.parentPath[i].name)` directly. Facet ancestors do not have their own `env` namespace binding; `parentAgent` is intentionally single-hop and only resolves the direct parent.
 
-If the binding name does not match the class name (for example `{ class_name: "Inbox", name: "MY_INBOX" }` in `wrangler.jsonc`), skip the helper and call `getAgentByName(env.MY_INBOX, this.parentPath.at(-1)!.name)` directly.
+When `parentAgent()` returns a facet-parent proxy, RPC methods and normal HTTP `.fetch()` calls use the same internal bridge and do not run `onBeforeSubAgent`. WebSocket upgrade requests are not supported through `parentAgent().fetch()` yet because WebSocket handles cannot be serialized over RPC. Use externally routed sub-agent URLs for WebSocket connections.
+
+| Capability              | `parentAgent(Cls)`             | External `/sub/...` routing                  |
+| ----------------------- | ------------------------------ | -------------------------------------------- |
+| Use case                | Internal child-to-parent calls | Client or worker requests into a child facet |
+| RPC methods             | Yes                            | No                                           |
+| Normal HTTP `.fetch()`  | Yes                            | Yes                                          |
+| WebSocket upgrades      | No                             | Yes                                          |
+| Runs `onBeforeSubAgent` | No                             | Yes                                          |
 
 ## Client API
 
