@@ -48,9 +48,11 @@ export { TestWaitConnectionsAgent } from "./wait-connections";
 export { SpikeSubParent, SpikeSubChild } from "./spike-sub-agent-routing";
 export {
   TestSubAgentParent,
+  CustomBoundSubAgentParent,
   CounterSubAgent,
   OuterSubAgent,
   InnerSubAgent,
+  LeafSubAgent,
   CallbackSubAgent,
   BroadcastSubAgent,
   HookingSubAgentParent,

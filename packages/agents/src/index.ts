@@ -28,7 +28,7 @@ import type {
 import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
 import { EmailMessage } from "cloudflare:email";
-import { RpcTarget } from "cloudflare:workers";
+import { RpcTarget, exports as workerExports } from "cloudflare:workers";
 import {
   type Connection,
   type ConnectionContext,
@@ -38,7 +38,7 @@ import {
   getServerByName,
   routePartykitRequest
 } from "partyserver";
-import { camelCaseToKebabCase } from "./utils";
+import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
 import {
   type RetryOptions,
   tryN,
@@ -276,6 +276,14 @@ interface FacetCapableCtx {
     | undefined
   >;
 }
+
+type SubAgentPathInvokeEndpoint = {
+  _cf_invokeSubAgentPath(
+    path: ReadonlyArray<{ className: string; name: string }>,
+    method: string,
+    args: unknown[]
+  ): Promise<unknown>;
+};
 
 type SubAgentConnectionMeta = {
   id: string;
@@ -5507,6 +5515,64 @@ export class Agent<
     args: unknown[]
   ): Promise<unknown> {
     const stub = await this._cf_resolveSubAgent(className, name);
+    return await this._cf_invokeStubMethod(stub, className, method, args);
+  }
+
+  /**
+   * Bridge method used by `parentAgent()` when the requested parent is
+   * itself a facet (and therefore has no top-level env namespace).
+   * The root receives the full root-first target path, then each hop
+   * delegates to the next facet using that facet's own `ctx.facets`.
+   *
+   * @internal
+   */
+  async _cf_invokeSubAgentPath(
+    path: ReadonlyArray<{ className: string; name: string }>,
+    method: string,
+    args: unknown[]
+  ): Promise<unknown> {
+    const [self, next, ...rest] = path;
+    if (!self) {
+      throw new Error(`Sub-agent path invocation requires a non-empty path.`);
+    }
+
+    const ownClassName = (this.constructor as { name: string }).name;
+    if (self.className !== ownClassName || self.name !== this.name) {
+      throw new Error(
+        `Sub-agent path invocation reached ${ownClassName}("${this.name}") ` +
+          `but expected ${self.className}("${self.name}").`
+      );
+    }
+
+    if (!next) {
+      return await this._cf_invokeStubMethod(
+        this,
+        this.constructor.name,
+        method,
+        args
+      );
+    }
+
+    const child = await this._cf_resolveSubAgent(next.className, next.name);
+    if (rest.length === 0) {
+      return await this._cf_invokeStubMethod(
+        child,
+        next.className,
+        method,
+        args
+      );
+    }
+
+    const bridge = child as SubAgentPathInvokeEndpoint;
+    return await bridge._cf_invokeSubAgentPath([next, ...rest], method, args);
+  }
+
+  private async _cf_invokeStubMethod(
+    stub: unknown,
+    className: string,
+    method: string,
+    args: unknown[]
+  ): Promise<unknown> {
     // Must call `handle[method](...)` in one expression — extracting
     // via `const fn = handle[method]; fn.apply(handle, args)` breaks
     // the workerd RpcProperty binding. (Confirmed by the spike.)
@@ -5625,26 +5691,33 @@ export class Agent<
   }
 
   /**
-   * Resolve a typed RPC stub for this facet's **immediate** parent
+   * Resolve a typed parent stub for this facet's **immediate** parent
    * agent.
    *
    * Symmetric with `subAgent(Cls, name)`: while `subAgent` opens a
    * stub from parent to child, `parentAgent` opens one from child
    * to parent. Pass the direct parent's class reference — the
    * framework verifies it matches the last entry of
-   * `this.parentPath` at runtime, then looks up `env[Cls.name]` to
-   * find the namespace binding.
+   * `this.parentPath` at runtime. If the parent is a top-level
+   * Durable Object, the framework returns the normal namespace stub.
+   * If the parent is itself a facet, the framework returns a bridge
+   * proxy that routes method calls through the root/supervisor and
+   * then down the recorded facet path.
    *
    * `this.parentPath` is root-first, so the direct parent is the
    * **last** entry: `this.parentPath.at(-1)`. For grandparents and
    * further ancestors, iterate `this.parentPath` and use
    * `getAgentByName(env.X, this.parentPath[i].name)` directly.
    *
-   * Assumes the standard "binding name matches class name" convention.
-   * If your `wrangler.jsonc` binds the parent under a different name
-   * (e.g. `{ class_name: "Inbox", name: "MY_INBOX" }`), call
-   * `getAgentByName(env.MY_INBOX, this.parentPath.at(-1)!.name)`
-   * directly instead.
+   * For top-level parents, the framework first checks `env[Cls.name]`,
+   * then falls back to the Worker `exports` object. This supports
+   * custom binding names as long as the parent class is exported under
+   * its class name.
+   *
+   * Facet-parent stubs route normal HTTP `.fetch()` calls through the
+   * same root bridge as RPC methods. WebSocket upgrade requests are
+   * not supported yet because WebSocket handles cannot be serialized
+   * over RPC.
    *
    * @experimental The API surface may change before stabilizing.
    *
@@ -5652,7 +5725,8 @@ export class Agent<
    * @throws If `Cls.name` doesn't match the recorded direct-parent
    *         class (guards against accidentally reaching the wrong
    *         DO, especially in nested Root → Mid → Leaf chains).
-   * @throws If no env binding named `Cls.name` is found.
+   * @throws If no namespace is found for a top-level parent, or no
+   *         root namespace is available for a facet parent bridge.
    *
    * @example
    * ```ts
@@ -5687,18 +5761,115 @@ export class Agent<
           `whose constructor actually spawned this facet.`
       );
     }
-    const binding = (this.env as Record<string, unknown>)[cls.name] as
-      | DurableObjectNamespace<T>
-      | undefined;
+    if (this._parentPath.length > 1) {
+      return await this._cf_parentAgentFacetProxy<T>(
+        cls.name,
+        this._parentPath
+      );
+    }
+
+    const binding = this._cf_getTopLevelNamespaceByClassName<T>(cls.name);
     if (!binding) {
       throw new Error(
-        `parentAgent(${cls.name}): no top-level binding "${cls.name}" ` +
-          `found in env. If the parent is bound under a different name ` +
-          `(e.g. "MY_${cls.name.toUpperCase()}"), use ` +
-          `\`getAgentByName(env.MY_${cls.name.toUpperCase()}, this.parentPath.at(-1)!.name)\` directly.`
+        `parentAgent(${cls.name}): no top-level namespace for "${cls.name}" ` +
+          `was found in env or worker exports. Make sure the parent class is ` +
+          `exported under that class name and registered as a Durable Object binding.`
       );
     }
     return await getServerByName<Cloudflare.Env, T>(binding, parent.name);
+  }
+
+  private _cf_getTopLevelNamespaceByClassName<T extends Agent>(
+    className: string
+  ): DurableObjectNamespace<T> | undefined {
+    // Prefer explicit env bindings; fall back to worker exports so
+    // custom binding names still work when the class is exported under
+    // its constructor name.
+    return (
+      this._cf_asDurableObjectNamespace<T>(
+        (this.env as Record<string, unknown>)[className]
+      ) ??
+      this._cf_asDurableObjectNamespace<T>(
+        (workerExports as Record<string, unknown>)[className]
+      )
+    );
+  }
+
+  private _cf_asDurableObjectNamespace<T extends Agent>(
+    candidate: unknown
+  ): DurableObjectNamespace<T> | undefined {
+    const binding = candidate as DurableObjectNamespace<T> | undefined;
+    return binding?.idFromName ? binding : undefined;
+  }
+
+  private async _cf_parentAgentFacetProxy<T extends Agent>(
+    className: string,
+    parentPath: ReadonlyArray<{ className: string; name: string }>
+  ): Promise<DurableObjectStub<T>> {
+    const [root] = parentPath;
+    if (!root) {
+      throw new Error(`parentAgent(${className}): parent path is empty.`);
+    }
+
+    const rootBinding = this._cf_getTopLevelNamespaceByClassName<Agent>(
+      root.className
+    );
+    if (!rootBinding) {
+      throw new Error(
+        `parentAgent(${className}): direct parent is a facet, but no ` +
+          `top-level root namespace "${root.className}" was found in env ` +
+          `or worker exports to bridge the call.`
+      );
+    }
+
+    const rootStubPromise = getServerByName<Cloudflare.Env, Agent>(
+      rootBinding,
+      root.name
+    );
+    const targetPath = parentPath.map((step) => ({ ...step }));
+    const invokeBridge = async (method: string, args: unknown[]) => {
+      const rootStub = await rootStubPromise;
+      const bridge = rootStub as unknown as SubAgentPathInvokeEndpoint;
+      return await bridge._cf_invokeSubAgentPath(targetPath, method, args);
+    };
+    const owner = this;
+    return new Proxy(
+      {},
+      {
+        get(_target, prop) {
+          if (isInternalJsStubProp(prop)) return undefined;
+          if (typeof prop !== "string") return undefined;
+          if (prop === "fetch") {
+            return async (input: RequestInfo | URL, init?: RequestInit) => {
+              if (owner._cf_isWebSocketUpgradeRequest(input, init)) {
+                throw new Error(
+                  `parentAgent(${className}).fetch() does not support WebSocket upgrade requests yet. ` +
+                    `Use externally routed sub-agent URLs for WebSocket connections.`
+                );
+              }
+
+              return await invokeBridge(prop, [input, init]);
+            };
+          }
+          return async (...args: unknown[]) => {
+            return await invokeBridge(prop, args);
+          };
+        }
+      }
+    ) as DurableObjectStub<T>;
+  }
+
+  private _cf_isWebSocketUpgradeRequest(
+    input: RequestInfo | URL,
+    init?: RequestInit
+  ): boolean {
+    const initHeaders = init?.headers ? new Headers(init.headers) : undefined;
+    const requestHeaders =
+      input instanceof Request ? new Headers(input.headers) : undefined;
+    return (
+      initHeaders?.get("Upgrade")?.toLowerCase() === "websocket" ||
+      requestHeaders?.get("Upgrade")?.toLowerCase() === "websocket"
+    );
   }
 
   /**

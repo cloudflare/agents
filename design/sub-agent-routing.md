@@ -97,16 +97,27 @@ helpers such as `idFromName`.
 `Agent#parentAgent(Cls)` is the one-hop inverse of `subAgent(Cls, name)`:
 
 - child → direct parent
-- typed RPC stub
+- typed parent stub
 - runtime check that `Cls.name` matches the direct parent class
-- resolves the namespace binding from `env[Cls.name]`
+- resolves a top-level parent from `env[Cls.name]` or the Worker `exports`
+  namespace
+- resolves a facet parent through a root bridge that walks the recorded facet
+  path one hop at a time
 
-For grandparents and further ancestors, use `parentPath[i]` plus
-`getAgentByName(...)` directly.
+For grandparents and further ancestors that are top-level Durable Objects, use
+`parentPath[i]` plus `getAgentByName(...)` directly. Facet ancestors are not
+individually bound in `env`, and `parentAgent()` intentionally stays a one-hop
+direct-parent helper.
 
-This API intentionally assumes the common \"binding name matches class name\"
-convention. If a binding uses a different name in `wrangler.jsonc`, use
-`getAgentByName(env.MY_BINDING, this.parentPath.at(-1)!.name)` directly.
+Top-level parent resolution prefers `env[Cls.name]` and falls back to the
+Worker `exports` namespace. This supports custom Durable Object binding names
+as long as the parent class is exported under its class name.
+
+Facet-parent stubs expose normal HTTP `.fetch()` calls through the same root
+bridge as RPC methods. These internal calls do not run `onBeforeSubAgent`.
+WebSocket upgrade requests are not supported through `parentAgent().fetch()`
+yet because WebSocket handles cannot be serialized over RPC. Use externally
+routed sub-agent URLs for WebSocket connections.
 
 ## Broadcasts and state sync
 
