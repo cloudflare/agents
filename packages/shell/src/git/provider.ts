@@ -116,7 +116,7 @@ export function createGitToolProvider(
     tools[cmd] = {
       description: `git.${cmd}`,
       execute: (...args: unknown[]) => {
-        // positionalArgs mode: args may be [] (no args), [{}], or [{ url: ... }]
+        // Codemode dispatch always passes the sandbox call arguments positionally.
         let opts = (args[0] ?? {}) as Record<string, unknown>;
         if (AUTH_COMMANDS.has(cmd) && !hasExplicitAuth(opts)) {
           if (authOptions.auth) {
@@ -137,8 +137,7 @@ export function createGitToolProvider(
   return {
     name: "git",
     tools,
-    types: GIT_TYPES,
-    positionalArgs: true
+    types: GIT_TYPES
   };
 }
 

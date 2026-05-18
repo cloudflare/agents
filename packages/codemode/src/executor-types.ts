@@ -16,7 +16,6 @@ export interface ExecuteResult {
 export interface ResolvedProvider {
   name: string;
   fns: Record<string, (...args: unknown[]) => Promise<unknown>>;
-  positionalArgs?: boolean;
 }
 
 /**

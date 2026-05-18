@@ -64,6 +64,5 @@ export function resolveProvider(provider: ToolProvider): ResolvedProvider {
   const name = provider.name ?? "codemode";
   const filtered = filterTools(provider.tools);
   const resolved: ResolvedProvider = { name, fns: extractFns(filtered) };
-  if (provider.positionalArgs) resolved.positionalArgs = true;
   return resolved;
 }

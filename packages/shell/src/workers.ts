@@ -30,8 +30,7 @@ function createStateToolProvider(backend: StateBackend): ToolProvider {
   return {
     name: "state",
     tools,
-    types: STATE_TYPES,
-    positionalArgs: true
+    types: STATE_TYPES
   };
 }
 

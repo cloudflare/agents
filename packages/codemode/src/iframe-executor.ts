@@ -172,12 +172,10 @@ export class IframeSandboxExecutor implements Executor {
         sanitizedNames.set(sanitizedName, name);
         sanitizedFns[sanitizedName] = fn;
       }
-      const resolved: ResolvedProvider = {
+      resolvedProviders.push({
         name: provider.name,
         fns: sanitizedFns
-      };
-      if (provider.positionalArgs) resolved.positionalArgs = true;
-      resolvedProviders.push(resolved);
+      });
     }
     const providerMap = new Map(
       resolvedProviders.map((provider) => [provider.name, provider] as const)
@@ -188,12 +186,7 @@ export class IframeSandboxExecutor implements Executor {
       type: "execute-request",
       nonce,
       code: normalizedCode,
-      providers: resolvedProviders.map((provider) => {
-        if (provider.positionalArgs) {
-          return { name: provider.name, positionalArgs: true };
-        }
-        return { name: provider.name };
-      })
+      providers: resolvedProviders.map((provider) => ({ name: provider.name }))
     };
 
     const invokeProviderTool = async (
@@ -204,9 +197,6 @@ export class IframeSandboxExecutor implements Executor {
       const fn = provider.fns[name];
       if (!fn) {
         throw new Error(`Tool "${name}" not found`);
-      }
-      if (!provider.positionalArgs) {
-        return fn(args);
       }
       const positionalArgs = Array.isArray(args) ? args : [args];
       return fn(...positionalArgs);

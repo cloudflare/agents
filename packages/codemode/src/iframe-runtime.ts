@@ -52,35 +52,13 @@ function iframeSandboxRuntimeMain(): void {
     logs.push("[error] " + values.join(" "));
   };
 
-  function createProviderProxy(
-    nonce: string,
-    provider: {
-      name: string;
-      positionalArgs?: boolean;
-    }
-  ) {
+  function createProviderProxy(nonce: string, provider: { name: string }) {
     return new Proxy(
       {},
       {
-        get: (_, toolName) => {
-          if (provider.positionalArgs) {
-            return (...args: unknown[]) => {
-              const id = nextId++;
-              return new Promise((resolve, reject) => {
-                pending[id] = { resolve, reject };
-                post({
-                  type: "tool-call",
-                  nonce,
-                  id,
-                  provider: provider.name,
-                  name: String(toolName),
-                  args
-                });
-              });
-            };
-          }
-
-          return (args: unknown) => {
+        get:
+          (_, toolName) =>
+          (...args: unknown[]) => {
             const id = nextId++;
             return new Promise((resolve, reject) => {
               pending[id] = { resolve, reject };
@@ -90,11 +68,10 @@ function iframeSandboxRuntimeMain(): void {
                 id,
                 provider: provider.name,
                 name: String(toolName),
-                args: args ?? {}
+                args
               });
             });
-          };
-        }
+          }
       }
     );
   }
@@ -119,7 +96,7 @@ function iframeSandboxRuntimeMain(): void {
     type: "execute-request";
     nonce: string;
     code: string;
-    providers: { name: string; positionalArgs?: boolean }[];
+    providers: { name: string }[];
   } {
     if (typeof message !== "object" || message === null) return false;
     const candidate = message as Record<string, unknown>;
@@ -132,11 +109,7 @@ function iframeSandboxRuntimeMain(): void {
         (provider) =>
           typeof provider === "object" &&
           provider !== null &&
-          typeof (provider as { name?: unknown }).name === "string" &&
-          ((provider as { positionalArgs?: unknown }).positionalArgs ===
-            undefined ||
-            typeof (provider as { positionalArgs?: unknown }).positionalArgs ===
-              "boolean")
+          typeof (provider as { name?: unknown }).name === "string"
       )
     );
   }
@@ -144,7 +117,7 @@ function iframeSandboxRuntimeMain(): void {
   function executeCode(
     nonce: string,
     code: string,
-    providers: { name: string; positionalArgs?: boolean }[]
+    providers: { name: string }[]
   ) {
     try {
       activeNonce = nonce;

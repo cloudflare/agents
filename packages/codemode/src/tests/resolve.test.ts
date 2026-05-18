@@ -197,7 +197,7 @@ describe("resolveProvider", () => {
     expect(Object.keys(resolved.fns)).toEqual(["safe"]);
   });
 
-  it("should preserve positionalArgs flag", () => {
+  it("should resolve provider namespace and functions", () => {
     const provider: ToolProvider = {
       name: "state",
       tools: {
@@ -205,26 +205,12 @@ describe("resolveProvider", () => {
           description: "Read file",
           execute: async () => ""
         }
-      } as SimpleToolRecord,
-      positionalArgs: true
-    };
-
-    const resolved = resolveProvider(provider);
-    expect(resolved.positionalArgs).toBe(true);
-  });
-
-  it("should not set positionalArgs when not specified", () => {
-    const provider: ToolProvider = {
-      tools: {
-        tool: {
-          description: "Tool",
-          execute: async () => ({})
-        }
       } as SimpleToolRecord
     };
 
     const resolved = resolveProvider(provider);
-    expect(resolved.positionalArgs).toBeUndefined();
+    expect(resolved.name).toBe("state");
+    expect(Object.keys(resolved.fns)).toEqual(["readFile"]);
   });
 
   it("should produce working execute functions", async () => {

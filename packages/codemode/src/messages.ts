@@ -55,7 +55,7 @@ export interface ExecuteRequestMessage {
   type: "execute-request";
   nonce: string;
   code: string;
-  providers: { name: string; positionalArgs?: boolean }[];
+  providers: { name: string }[];
 }
 
 // -- Type guards --
@@ -97,11 +97,7 @@ export function isExecuteRequestMessageShape(
     typeof data.code === "string" &&
     Array.isArray(data.providers) &&
     data.providers.every(
-      (provider) =>
-        isRecord(provider) &&
-        typeof provider.name === "string" &&
-        (provider.positionalArgs === undefined ||
-          typeof provider.positionalArgs === "boolean")
+      (provider) => isRecord(provider) && typeof provider.name === "string"
     )
   );
 }

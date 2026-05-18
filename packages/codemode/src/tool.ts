@@ -83,7 +83,6 @@ export function resolveProvider(provider: ToolProvider): ResolvedProvider {
   const name = provider.name ?? "codemode";
   const filtered = filterTools(provider.tools);
   const resolved: ResolvedProvider = { name, fns: extractFns(filtered) };
-  if (provider.positionalArgs) resolved.positionalArgs = true;
   return resolved;
 }
 
@@ -102,9 +101,7 @@ export function createCodeTool(
     const types =
       provider.types ?? generateTypes(filtered as ToolDescriptors, name);
     typeBlocks.push(types);
-    const resolved: ResolvedProvider = { name, fns: extractFns(filtered) };
-    if (provider.positionalArgs) resolved.positionalArgs = true;
-    resolvedProviders.push(resolved);
+    resolvedProviders.push({ name, fns: extractFns(filtered) });
   }
 
   const typeBlock = typeBlocks.filter(Boolean).join("\n\n");

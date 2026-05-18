@@ -467,7 +467,7 @@ describe("createCodeTool", () => {
     });
   });
 
-  it("should forward positionalArgs from provider to resolved provider", async () => {
+  it("should resolve named providers without dispatch flags", async () => {
     const testTools: ToolDescriptors = {
       writeFile: {
         description: "Write a file",
@@ -485,7 +485,7 @@ describe("createCodeTool", () => {
     };
 
     const codeTool = createCodeTool({
-      tools: [{ tools: testTools, positionalArgs: true, name: "state" }],
+      tools: [{ tools: testTools, name: "state" }],
       executor
     });
 
@@ -494,27 +494,10 @@ describe("createCodeTool", () => {
       {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
     );
 
-    expect(capturedProviders[0].positionalArgs).toBe(true);
-    expect(capturedProviders[0].name).toBe("state");
-  });
-
-  it("should not set positionalArgs when provider omits it", async () => {
-    let capturedProviders: ResolvedProvider[] = [];
-    const executor: Executor = {
-      execute: vi.fn(async (_code: string, p: unknown) => {
-        capturedProviders = p as ResolvedProvider[];
-        return { result: null };
-      })
-    };
-
-    const codeTool = createCodeTool({ tools, executor });
-
-    await codeTool.execute?.(
-      { code: "async () => null" },
-      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
-    );
-
-    expect(capturedProviders[0].positionalArgs).toBeUndefined();
+    expect(capturedProviders[0]).toEqual({
+      name: "state",
+      fns: { writeFile: expect.any(Function) }
+    });
   });
 
   it("should preserve closure state across multiple calls", async () => {

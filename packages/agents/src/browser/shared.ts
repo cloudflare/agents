@@ -344,8 +344,7 @@ export function createBrowserToolHandlers(options: BrowserToolsOptions) {
             getDebugLog: async (limit: unknown) =>
               session!.getDebugLog(limit as number | undefined),
             clearDebugLog: async () => session!.clearDebugLog()
-          },
-          positionalArgs: true
+          }
         }
       ];
 

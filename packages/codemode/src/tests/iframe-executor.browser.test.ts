@@ -318,13 +318,13 @@ describe("IframeSandboxExecutor namespaces", () => {
     });
   });
 
-  it("supports positional argument providers", async () => {
+  it("supports positional tool arguments", async () => {
     const join = async (...args: unknown[]) => args.join("/");
     const executor = new IframeSandboxExecutor();
 
     const result = await executor.execute(
       'async () => await state.join("a", "b", "c")',
-      [{ name: "state", fns: { join }, positionalArgs: true }]
+      [{ name: "state", fns: { join } }]
     );
 
     expect(result.error).toBeUndefined();
