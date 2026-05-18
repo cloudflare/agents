@@ -140,17 +140,26 @@ export class PostgresSessionProvider implements SessionProvider {
     //   - explicit `null`       → create a root message with no parent
     // Using `??` here would collapse those two cases; `parentId !== undefined`
     // preserves the distinction.
-    const parent =
+    let parent =
       parentId !== undefined
         ? parentId
         : (((await this.latestLeafRow())?.id as string | undefined) ?? null);
+
+    if (parent) {
+      const { rows } = await this.conn.execute(
+        "SELECT id FROM assistant_messages WHERE id = ? AND session_id = ?",
+        [parent, this.sessionId]
+      );
+      if (rows.length === 0) parent = null;
+    }
+
     const json = JSON.stringify(message);
     const text = this.extractSearchableText(json);
 
     await this.conn.execute(
       `INSERT INTO assistant_messages (id, session_id, parent_id, role, content, text_content)
        VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT (id) DO NOTHING`,
+       ON CONFLICT (session_id, id) DO NOTHING`,
       [message.id, this.sessionId, parent, message.role, json, text]
     );
   }

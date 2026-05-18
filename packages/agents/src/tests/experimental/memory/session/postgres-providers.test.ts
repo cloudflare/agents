@@ -57,8 +57,13 @@ class InMemoryPostgres implements PostgresConnection {
 
     // Handle ON CONFLICT DO NOTHING
     if (q.includes("ON CONFLICT") && q.includes("DO NOTHING")) {
-      const pk = cols[0];
-      if (table.some((r) => r[pk] === row[pk])) return { rows: [] };
+      const conflictMatch = q.match(/ON CONFLICT \(([^)]+)\)/);
+      const keys = conflictMatch
+        ? conflictMatch[1].split(",").map((c) => c.trim())
+        : [cols[0]];
+      if (table.some((r) => keys.every((key) => r[key] === row[key]))) {
+        return { rows: [] };
+      }
     }
 
     // Handle ON CONFLICT DO UPDATE
@@ -174,14 +179,19 @@ class InMemoryPostgres implements PostgresConnection {
   private handleRecursiveSelect(q: string, params: unknown[]): { rows: Row[] } {
     const table = this.getTable("assistant_messages");
     const startId = params[0] as string;
+    const sessionId = params[1];
 
     // Walk parent chain
     const path: Row[] = [];
-    let current = table.find((r) => r.id === startId);
+    let current = table.find(
+      (r) => r.id === startId && r.session_id === sessionId
+    );
     while (current) {
       path.unshift(current);
       current = current.parent_id
-        ? table.find((r) => r.id === current!.parent_id)
+        ? table.find(
+            (r) => r.id === current!.parent_id && r.session_id === sessionId
+          )
         : undefined;
     }
 
@@ -417,6 +427,34 @@ describe("PostgresSessionProvider", () => {
     expect(h1[0].parts[0].text).toBe("session1");
     expect(h2).toHaveLength(1);
     expect(h2[0].parts[0].text).toBe("session2");
+  });
+
+  it("allows the same message id in different sessions", async () => {
+    const other = new PostgresSessionProvider(conn, "other-session");
+
+    await provider.appendMessage(makeMessage("same-id", "user", "session1"));
+    await other.appendMessage(makeMessage("same-id", "user", "session2"));
+
+    const h1 = await provider.getHistory();
+    const h2 = await other.getHistory();
+
+    expect(h1).toHaveLength(1);
+    expect(h1[0].parts[0].text).toBe("session1");
+    expect(h2).toHaveLength(1);
+    expect(h2[0].parts[0].text).toBe("session2");
+  });
+
+  it("falls back to root when explicit parent belongs to another session", async () => {
+    const other = new PostgresSessionProvider(conn, "other-session");
+
+    await other.appendMessage(makeMessage("foreign-parent", "user", "other"));
+    await provider.appendMessage(
+      makeMessage("child", "user", "local"),
+      "foreign-parent"
+    );
+
+    expect((await provider.getHistory()).map((m) => m.id)).toEqual(["child"]);
+    expect(await other.getBranches("foreign-parent")).toHaveLength(0);
   });
 
   it("adds and retrieves compactions", async () => {

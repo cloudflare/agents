@@ -1,6 +1,6 @@
 # Sessions (Experimental)
 
-The Session API provides persistent conversation storage for agents, with tree-structured messages, context blocks, compaction, full-text search, and AI-controllable tools. It runs entirely on Durable Object SQLite — no external database needed.
+The Session API provides persistent conversation storage for agents, with tree-structured messages, context blocks, compaction, full-text search, and AI-controllable tools. By default it uses Durable Object SQLite; external Postgres storage is also available for apps that need shared database access, analytics, or cross-DO queries.
 
 > **Experimental.** The Session API is under `agents/experimental/memory/session`. The API surface is stable but may evolve before graduating to the main package.
 
@@ -23,7 +23,7 @@ class MyAgent extends Agent {
 
   async onMessage(message) {
     await this.session.appendMessage(message);
-    const history = this.session.getHistory();
+    const history = await this.session.getHistory();
     const system = await this.session.freezeSystemPrompt();
     const tools = await this.session.tools();
     // Pass history, system prompt, and tools to your LLM
@@ -94,34 +94,34 @@ await session.appendMessage(message);
 await session.appendMessage(message, parentId);
 
 // Update an existing message (matched by message.id)
-session.updateMessage(message);
+await session.updateMessage(message);
 
 // Delete specific messages
-session.deleteMessages(["msg-1", "msg-2"]);
+await session.deleteMessages(["msg-1", "msg-2"]);
 
 // Clear all messages and skill state
-session.clearMessages();
+await session.clearMessages();
 ```
 
-> **Note:** `appendMessage()` is `async` because it may trigger auto-compaction. The underlying storage write is synchronous (SQLite), but the compaction step involves an LLM call. All other write methods (`updateMessage`, `deleteMessages`, `clearMessages`) are synchronous.
+> **Note:** Session methods are async. SQLite-backed sessions are usually fast, but external providers may perform network I/O, and `appendMessage()` may also trigger auto-compaction.
 
 #### Reading History
 
 ```typescript
 // Linear history from root to the latest leaf
-const messages = session.getHistory();
+const messages = await session.getHistory();
 
 // History to a specific leaf (for branching)
-const branch = session.getHistory(leafId);
+const branch = await session.getHistory(leafId);
 
 // Get a single message
-const msg = session.getMessage("msg-1");
+const msg = await session.getMessage("msg-1");
 
 // Get the newest message
-const latest = session.getLatestLeaf();
+const latest = await session.getLatestLeaf();
 
 // Count messages in path
-const count = session.getPathLength();
+const count = await session.getPathLength();
 ```
 
 #### Branching
@@ -313,10 +313,12 @@ const allTools = { ...tools, ...myTools };
 Generated when any writable block exists. Writes to regular blocks, skill blocks (keyed), or search blocks (keyed).
 
 - For regular blocks: `{ label, content, action: "replace" | "append" }`
-- For skill blocks: `{ label, key, content, description? }`
-- For search blocks: `{ label, key, content }`
+- For skill blocks: `{ label, content, metadata?: { title, description } }`
+- For search blocks: `{ label, content, metadata?: { title } }`
 
 Enforces `maxTokens` limits. Returns a usage string like `"Written to memory. Usage: 45% (495/1100 tokens)"`.
+
+For keyed blocks, `metadata.title` becomes the stable entry key. If title is omitted, the key is generated from the content plus a short deterministic hash to avoid silent collisions; provide a title when you want later writes to update the same entry.
 
 ### `load_context`
 
@@ -567,12 +569,14 @@ All storage is in Durable Object SQLite. Tables are created lazily on first use.
 
 | Column       | Type     | Notes                                                  |
 | ------------ | -------- | ------------------------------------------------------ |
-| `id`         | TEXT PK  | Message ID                                             |
+| `id`         | TEXT     | Message ID                                             |
 | `session_id` | TEXT     | Empty string for single-session; set for multi-session |
 | `parent_id`  | TEXT     | Parent message ID (null for roots)                     |
 | `role`       | TEXT     | `user`, `assistant`, `system`                          |
 | `content`    | TEXT     | JSON-serialized `SessionMessage`                       |
 | `created_at` | DATETIME | Auto-set                                               |
+
+For Postgres, messages use `PRIMARY KEY (session_id, id)` so caller-provided IDs only need to be unique within a session.
 
 **`assistant_compactions`** — Compaction overlays.
 
@@ -689,14 +693,15 @@ The Postgres user typically won't have `CREATE TABLE` permissions. Run this once
 
 ```sql
 CREATE TABLE IF NOT EXISTS assistant_messages (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL,
   session_id TEXT NOT NULL DEFAULT '',
   parent_id TEXT,
   role TEXT NOT NULL,
   content TEXT NOT NULL,
   text_content TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMPTZ DEFAULT NOW(),
-  content_tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', text_content)) STORED
+  content_tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', text_content)) STORED,
+  PRIMARY KEY (session_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_assistant_msg_parent ON assistant_messages (parent_id);
 CREATE INDEX IF NOT EXISTS idx_assistant_msg_session ON assistant_messages (session_id);
@@ -763,27 +768,17 @@ class MyAgent extends Agent<Env> {
   private _pgClient?: Client;
 
   /**
-   * Open a `pg.Client` against Hyperdrive once, and reuse it.
-   * The providers take the raw client directly — no wrapper needed.
+   * Initialize Hyperdrive and Session when the Durable Object starts.
+   * The providers take the raw pg.Client directly — no wrapper needed.
    */
-  private async getPgClient(): Promise<Client> {
-    if (this._pgClient) return this._pgClient;
+  async onStart(): Promise<void> {
     const client = new Client({
       connectionString: this.env.HYPERDRIVE.connectionString
     });
     await client.connect();
-    // Only cache after connect() resolves so a failed attempt doesn't
-    // permanently poison the instance.
     this._pgClient = client;
-    return client;
-  }
 
-  private async getSession(): Promise<Session> {
-    if (this._session) return this._session;
-
-    const client = await this.getPgClient();
     const sessionId = this.ctx.id.toString();
-
     this._session = Session.create(
       new PostgresSessionProvider(client, sessionId)
     )
@@ -804,8 +799,6 @@ class MyAgent extends Agent<Env> {
       .withCachedPrompt(
         new PostgresContextProvider(client, `_prompt_${sessionId}`)
       );
-
-    return this._session;
   }
 }
 ```
@@ -973,7 +966,7 @@ Things that might surprise you:
 
 2. **Snapshot freezing is sticky.** `freezeSystemPrompt()` caches the result. Writing to a context block does NOT update the cached snapshot — you must explicitly call `refreshSystemPrompt()`. This is deliberate (LLM prefix cache optimization), but easy to miss.
 
-3. **`appendMessage` is async, other writes are sync.** `appendMessage` is async only because it may trigger auto-compaction (which calls an LLM). The actual SQLite write is synchronous. `updateMessage`, `deleteMessages`, and `clearMessages` are all synchronous.
+3. **Session methods are async.** Always `await` reads and writes. SQLite-backed storage is local and fast, but external providers may perform network I/O, and `appendMessage` can trigger auto-compaction.
 
 4. **Skills survive hibernation via history scanning.** On initialization, the session scans the entire conversation history looking for `load_context` tool results to reconstruct which skills are loaded. This is clever but means initialization cost scales with conversation length.
 

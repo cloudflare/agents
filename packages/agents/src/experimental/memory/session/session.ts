@@ -79,7 +79,7 @@ export class Session {
    * Chainable session creation with auto-wired providers.
    *
    * Pass a `SqlProvider` (Agent with `sql` method) for auto-wired SQLite,
-   * or a `SessionProvider` directly for custom storage (PlanetScale, etc.).
+   * or a `SessionProvider` directly for custom storage (Postgres, etc.).
    *
    * @example
    * ```ts
@@ -96,13 +96,13 @@ export class Session {
    *   })
    *   .withCachedPrompt();
    *
-   * // Custom storage provider (PlanetScale, etc.)
-   * const session = Session.create(planetscaleProvider)
+   * // Custom storage provider (Postgres, etc.)
+   * const session = Session.create(postgresProvider)
    *   .withContext("memory", {
    *     maxTokens: 1100,
-   *     provider: new PlanetScaleContextProvider(conn, "memory")
+   *     provider: new PostgresContextProvider(conn, "memory")
    *   })
-   *   .withCachedPrompt(new PlanetScaleContextProvider(conn, "_prompt"));
+   *   .withCachedPrompt(new PostgresContextProvider(conn, "_prompt"));
    * ```
    */
   static create(provider: SqlProvider | SessionProvider): Session {

@@ -1,6 +1,5 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
-  "account_id": "543fbdef1eeaed8a02c251c8c4d9510b",
   "name": "agents-session-planetscale-example",
   "main": "src/server.ts",
   "compatibility_date": "2026-01-28",
@@ -9,14 +8,16 @@
     "binding": "AI"
   },
   "assets": {
-    "directory": "./public",
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/agents/*"]
   },
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE",
-      "id": "e9c4a010628841f2a23f30d7fdceb63d"
+      // Replace this with the Hyperdrive ID returned by:
+      // npx wrangler hyperdrive create my-session-db --connection-string="..."
+      // Keeping a placeholder here makes deploy fail until the example is configured.
+      "id": "<your-hyperdrive-id>"
     }
   ],
   "placement": {

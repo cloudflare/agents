@@ -397,6 +397,7 @@ describe("set_context tool", () => {
     const tool = tools.set_context as unknown as SetToolFn;
     const result = await tool.execute({ label: "skills", content: "no key" });
     expect(result).toContain("Indexed");
+    expect(result).toMatch(/Indexed "no-key-[a-z0-9]+"/);
   });
 
   it("rejects writes to readonly block", async () => {
@@ -444,15 +445,51 @@ describe("set_context tool", () => {
     const tools = await blocks.tools();
     const tool = tools.set_context as unknown as SetToolFn;
 
-    await tool.execute({
+    const result = await tool.execute({
       label: "skills",
       content: "Just content, no desc"
     });
 
-    // Key is auto-generated from content slug
-    expect(await provider.load("just-content-no-desc")).toBe(
-      "Just content, no desc"
-    );
+    // Omitted titles get a deterministic content hash to avoid collisions.
+    const key = result.match(/Indexed "([^"]+)"/)?.[1];
+    expect(key).toMatch(/^just-content-no-desc-[a-z0-9]+$/);
+    expect(await provider.load(key!)).toBe("Just content, no desc");
+  });
+
+  it("auto-generated keys avoid content prefix and non-Latin collisions", async () => {
+    const provider = new MemorySkillProvider();
+    const blocks = new ContextBlocks([{ label: "skills", provider }]);
+    await blocks.load();
+
+    const tools = await blocks.tools();
+    const tool = tools.set_context as unknown as SetToolFn;
+
+    const first = await tool.execute({
+      label: "skills",
+      content:
+        "The deployment process for production requires approval from security team"
+    });
+    const second = await tool.execute({
+      label: "skills",
+      content:
+        "The deployment process for production requires approval from management"
+    });
+    const nonLatin = await tool.execute({
+      label: "skills",
+      content: "用户喜欢咖啡"
+    });
+
+    const firstKey = first.match(/Indexed "([^"]+)"/)?.[1];
+    const secondKey = second.match(/Indexed "([^"]+)"/)?.[1];
+    const nonLatinKey = nonLatin.match(/Indexed "([^"]+)"/)?.[1];
+
+    expect(firstKey).toBeDefined();
+    expect(secondKey).toBeDefined();
+    expect(nonLatinKey).toMatch(/^entry-[a-z0-9]+$/);
+    expect(firstKey).not.toBe(secondKey);
+    expect(await provider.load(firstKey!)).toContain("security team");
+    expect(await provider.load(secondKey!)).toContain("management");
+    expect(await provider.load(nonLatinKey!)).toBe("用户喜欢咖啡");
   });
 
   it("multiple set_context calls accumulate skills in metadata", async () => {

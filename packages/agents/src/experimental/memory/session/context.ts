@@ -22,13 +22,30 @@ import { isSearchProvider, type SearchProvider } from "./search";
 import { isSkillProvider, type SkillProvider } from "./skills";
 
 function slugify(text: string): string {
-  return (
-    text
-      .slice(0, 60)
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "") || "entry"
-  );
+  return text
+    .slice(0, 60)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function stableHash(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function contextEntryKey(metadataTitle: string | undefined, content: string) {
+  if (metadataTitle?.trim()) {
+    const slug = slugify(metadataTitle);
+    return slug || `entry-${stableHash(metadataTitle)}`;
+  }
+
+  const slug = slugify(content) || "entry";
+  return `${slug}-${stableHash(content)}`;
 }
 
 /**
@@ -694,7 +711,7 @@ export class ContextBlocks {
             if (block.isSkill || block.isSearchable) {
               const title = metadata?.title;
               const description = metadata?.description;
-              const key = slugify(title ?? content);
+              const key = contextEntryKey(title, content);
               if (block.isSkill) {
                 await this.setSkill(label, key, content, description ?? title);
               } else {

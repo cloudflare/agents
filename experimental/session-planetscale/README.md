@@ -24,7 +24,7 @@ npx wrangler hyperdrive create my-session-db \
   --connection-string="postgresql://user:password@host:port/dbname"
 ```
 
-Update `wrangler.jsonc` with the returned Hyperdrive ID.
+Update `wrangler.jsonc` with the returned Hyperdrive ID. The checked-in config intentionally uses a placeholder so deploys fail until you configure your own database.
 
 ### 3. Create the tables
 
@@ -48,24 +48,24 @@ const session = Session.create(this)
   .withCachedPrompt();
 
 // Postgres: pass providers explicitly
-const conn = wrapPgClient(pgClient);
-
-const session = Session.create(new PostgresSessionProvider(conn, sessionId))
+const session = Session.create(new PostgresSessionProvider(pgClient, sessionId))
   .withContext("memory", {
     maxTokens: 1100,
-    provider: new PostgresContextProvider(conn, `memory_${sessionId}`)
+    provider: new PostgresContextProvider(pgClient, `memory_${sessionId}`)
   })
   .withContext("knowledge", {
-    provider: new PostgresSearchProvider(conn)
+    provider: new PostgresSearchProvider(pgClient)
   })
-  .withCachedPrompt(new PostgresContextProvider(conn, `_prompt_${sessionId}`));
+  .withCachedPrompt(
+    new PostgresContextProvider(pgClient, `_prompt_${sessionId}`)
+  );
 ```
 
 When `Session.create()` receives a `SessionProvider` (not a `SqlProvider`), it skips all SQLite auto-wiring. Context blocks and the prompt cache need explicit providers since there's no DO storage to fall back to.
 
 ## Connection interface
 
-The providers use `?` placeholders internally. This example wraps the `pg` driver to convert them to `$1, $2, ...`:
+The providers accept a raw `pg.Client` or any custom driver that implements `PostgresConnection`. When a `pg`-style client is passed, the provider adapter rewrites internal `?` placeholders to `$1, $2, ...` automatically:
 
 ```ts
 interface PostgresConnection {
@@ -76,4 +76,4 @@ interface PostgresConnection {
 }
 ```
 
-Any Postgres driver with a compatible `execute()` method works.
+Use `PostgresConnection` for tests or bespoke drivers; use raw `pg.Client` for Hyperdrive.

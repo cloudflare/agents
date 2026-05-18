@@ -22,26 +22,18 @@ export class ChatAgent extends Agent<Env> {
   private _pgClient?: Client;
 
   /**
-   * Open (or reuse) a connected pg.Client pointed at Hyperdrive.
-   * Assign to the instance field only once the connection succeeds so a
-   * failed attempt doesn't poison the instance for future calls.
+   * Initialize the Hyperdrive client and Session when the Durable Object starts.
+   * Keeping this out of request handlers avoids sharing a promise created under
+   * one request context with another request.
    */
-  private async getPgClient(): Promise<Client> {
-    if (this._pgClient) return this._pgClient;
+  async onStart(): Promise<void> {
     const client = new Client({
       connectionString: this.env.HYPERDRIVE.connectionString
     });
     await client.connect();
     this._pgClient = client;
-    return client;
-  }
 
-  private async getSession(): Promise<Session> {
-    if (this._session) return this._session;
-
-    const client = await this.getPgClient();
     const sessionId = this.ctx.id.toString();
-
     this._session = Session.create(
       new PostgresSessionProvider(client, sessionId)
     )
@@ -64,7 +56,12 @@ export class ChatAgent extends Agent<Env> {
       .withCachedPrompt(
         new PostgresContextProvider(client, `_prompt_${sessionId}`)
       );
+  }
 
+  private getSession(): Session {
+    if (!this._session) {
+      throw new Error("Session is not initialized yet");
+    }
     return this._session;
   }
 
@@ -76,7 +73,7 @@ export class ChatAgent extends Agent<Env> {
 
   @callable()
   async chat(message: string, messageId?: string): Promise<UIMessage> {
-    const session = await this.getSession();
+    const session = this.getSession();
 
     await session.appendMessage({
       id: messageId ?? `user-${crypto.randomUUID()}`,
@@ -129,27 +126,27 @@ export class ChatAgent extends Agent<Env> {
 
   @callable()
   async getMessages(): Promise<UIMessage[]> {
-    return (await (await this.getSession()).getHistory()) as UIMessage[];
+    return (await this.getSession().getHistory()) as UIMessage[];
   }
 
   @callable()
   async search(query: string) {
-    return (await this.getSession()).search(query);
+    return this.getSession().search(query);
   }
 
   @callable()
   async getSystemPrompt(): Promise<string> {
-    return (await this.getSession()).freezeSystemPrompt();
+    return this.getSession().freezeSystemPrompt();
   }
 
   @callable()
   async refreshSystemPrompt(): Promise<string> {
-    return (await this.getSession()).refreshSystemPrompt();
+    return this.getSession().refreshSystemPrompt();
   }
 
   @callable()
   async clearMessages(): Promise<void> {
-    await (await this.getSession()).clearMessages();
+    await this.getSession().clearMessages();
   }
 }
 
