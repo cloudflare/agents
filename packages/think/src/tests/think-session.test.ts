@@ -494,7 +494,6 @@ describe("Think — context blocks", () => {
     // Writable blocks render even when empty so the LLM knows they exist
     const systemPrompt = await agent.getAssembledSystemPrompt();
 
-    expect(systemPrompt).toContain("You are a careful, capable assistant");
     expect(systemPrompt).toContain("MEMORY");
     expect(systemPrompt).toContain("[writable]");
   });

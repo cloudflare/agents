@@ -1778,7 +1778,7 @@ export class ThinkProgrammaticTestAgent extends Think {
         : null;
     return {
       result,
-      persistedMessageCount: this.getMessages().length,
+      persistedMessageCount: (await this.getMessages()).length,
       lastResponseStatus: lastResponse?.status ?? null
     };
   }

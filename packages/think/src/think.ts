@@ -1343,7 +1343,7 @@ export class Think<
     const system = this._systemPromptForTurn(baseSystem, tools);
 
     const history = await this.session.getHistory();
-    const truncated = truncateOlderMessages(history as UIMessage[]);
+    const truncated = truncateOlderMessages(history) as UIMessage[];
     const messages = await convertToModelMessages(truncated, { tools });
 
     if (messages.length === 0) {
@@ -2947,7 +2947,7 @@ export class Think<
       if (row.messages_applied_at === null) {
         let appliedState: "none" | "partial" | "all";
         try {
-        appliedState = await this._getSubmissionMessagesAppliedState(row);
+          appliedState = await this._getSubmissionMessagesAppliedState(row);
         } catch (error) {
           this.sql`
             UPDATE cf_think_submissions
