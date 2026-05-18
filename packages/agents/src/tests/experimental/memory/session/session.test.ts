@@ -8,6 +8,8 @@ import {
   type ContextProvider,
   type WritableContextProvider
 } from "../../../../experimental/memory/session/context";
+import type { SearchProvider } from "../../../../experimental/memory/session/search";
+import type { SkillProvider } from "../../../../experimental/memory/session/skills";
 import type {
   SessionProvider,
   SearchResult,
@@ -52,6 +54,29 @@ class MemoryBlockProvider implements WritableContextProvider {
   async set(content: string) {
     this.value = content;
   }
+}
+
+class EmptySkillProvider implements SkillProvider {
+  async get() {
+    return null;
+  }
+  async load() {
+    return null;
+  }
+}
+
+class WritableSkillProvider extends EmptySkillProvider {
+  async set() {}
+}
+
+class WritableSearchProvider implements SearchProvider {
+  async get() {
+    return null;
+  }
+  async search() {
+    return null;
+  }
+  async set() {}
 }
 
 // ── Pure unit tests (no DO needed) ──────────────────────────────
@@ -161,6 +186,21 @@ describe("ContextBlocks — frozen system prompt", () => {
     expect(prompt).toContain("MEMORY");
     expect(prompt).not.toContain("<context_block");
   });
+
+  it("renders empty skill blocks so load_context stays discoverable", async () => {
+    const blocks = new ContextBlocks([
+      {
+        label: "skills",
+        description: "Project docs",
+        provider: new EmptySkillProvider()
+      }
+    ]);
+    await blocks.load();
+
+    const prompt = blocks.toSystemPrompt();
+    expect(prompt).toContain("SKILLS");
+    expect(prompt).toContain("[loadable]");
+  });
 });
 
 const stubProvider: SessionProvider = {
@@ -211,6 +251,40 @@ describe("Session — tools() without load", () => {
     expect(tool.description).toContain("memory");
     expect(tool.description).toContain("todos");
     expect(tool.description).not.toContain("soul");
+  });
+
+  it("tools() labels keyed writable blocks in set_context description", async () => {
+    const session = new Session(stubProvider, {
+      context: [
+        {
+          label: "memory",
+          description: "Learned facts",
+          provider: new MemoryBlockProvider("")
+        },
+        {
+          label: "skills",
+          description: "Loadable docs",
+          provider: new WritableSkillProvider()
+        },
+        {
+          label: "knowledge",
+          description: "Searchable docs",
+          provider: new WritableSearchProvider()
+        }
+      ]
+    });
+
+    const tools = await session.tools();
+    const tool = tools.set_context as { description: string };
+
+    expect(tool.description).toContain('- "memory" (writable): Learned facts');
+    expect(tool.description).toContain(
+      '- "skills" (skill collection, keyed entries): Loadable docs'
+    );
+    expect(tool.description).toContain(
+      '- "knowledge" (searchable, keyed entries): Searchable docs'
+    );
+    expect(tool.description).toContain("metadata: { title, description }");
   });
 
   it("tools() execute lazily loads and writes to provider", async () => {

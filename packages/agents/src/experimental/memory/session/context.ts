@@ -510,9 +510,15 @@ export class ContextBlocks {
     const sep = "═".repeat(46);
 
     for (const block of this.blocks.values()) {
-      // Skip empty readonly blocks — writable/searchable always render
-      // so the LLM knows they exist and can write to them
-      if (!block.content && !block.writable && !block.isSearchable) continue;
+      // Skip empty readonly blocks — writable/searchable/skill blocks always
+      // render so the LLM knows which tools can address them.
+      if (
+        !block.content &&
+        !block.writable &&
+        !block.isSearchable &&
+        !block.isSkill
+      )
+        continue;
 
       let header = block.label.toUpperCase();
       if (block.description) header += ` (${block.description})`;
@@ -630,9 +636,14 @@ export class ContextBlocks {
     // ── set_context ──────────────────────────────────────────────
 
     if (writable.length > 0) {
-      const blockDescriptions = writable.map(
-        (b) => `- "${b.label}": ${b.description ?? "no description"}`
-      );
+      const blockDescriptions = writable.map((b) => {
+        const kind = b.isSkill
+          ? "skill collection, keyed entries"
+          : b.isSearchable
+            ? "searchable, keyed entries"
+            : "writable";
+        return `- "${b.label}" (${kind}): ${b.description ?? "no description"}`;
+      });
       const keyedBlocks = writable.filter((b) => b.isSkill || b.isSearchable);
 
       const properties: Record<string, unknown> = {
