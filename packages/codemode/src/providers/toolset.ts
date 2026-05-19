@@ -18,7 +18,7 @@ export async function toolsetProvider(
   await addSnippets(provider, options.snippets, options.executor, descriptors);
   if (Object.keys(descriptors).length > 0) {
     provider.types = providerTypes(
-      provider.name,
+      provider.name ?? "codemode",
       descriptors,
       options.instructions
     );

@@ -1,6 +1,5 @@
 import { tool, type Tool } from "ai";
 import { z } from "zod";
-import { generateTypes, type ToolDescriptors } from "./tool-types";
 import type { Executor, ResolvedProvider, ToolProvider } from "./executor";
 import { filterTools, extractFns } from "./resolve";
 import { runCode } from "./run-code";
@@ -31,7 +30,7 @@ const proxySchema = z.object({
 function providerStatus(providers: ToolProvider[]): string {
   const rows = providers.map((provider) => {
     const tools = Object.keys(filterTools(provider.tools));
-    return `${provider.name} (${tools.length} method${tools.length === 1 ? "" : "s"})`;
+    return `${provider.name ?? "codemode"} (${tools.length} method${tools.length === 1 ? "" : "s"})`;
   });
   return [`Providers: ${providers.length}`, "", ...rows].join("\n").trim();
 }
@@ -50,7 +49,7 @@ function searchProviders(query: string, providers: ToolProvider[]): string {
         "description" in descriptor
           ? String((descriptor as { description?: unknown }).description ?? "")
           : "";
-      const fullName = `${provider.name}.${safeName}`;
+      const fullName = `${provider.name ?? "codemode"}.${safeName}`;
       if (![fullName, safeName, name, description].some((v) => pattern.test(v)))
         continue;
       lines.push(`${fullName}${description ? ` — ${description}` : ""}`);
@@ -78,9 +77,9 @@ function describeProviders(target: string, providers: ToolProvider[]): string {
   );
   if (provider && !maybeMethod) {
     return [
-      provider.name,
+      provider.name ?? "codemode",
       provider.types ?? "",
-      searchProviders(provider.name, [provider])
+      searchProviders(provider.name ?? "codemode", [provider])
     ]
       .filter(Boolean)
       .join("\n\n")
@@ -108,7 +107,7 @@ function describeProviders(target: string, providers: ToolProvider[]): string {
           ? (descriptor as { inputSchema?: unknown }).inputSchema
           : undefined;
       return [
-        `${candidate.name}.${safeName}`,
+        `${candidate.name ?? "codemode"}.${safeName}`,
         description,
         inputSchema
           ? `Parameters:\n${JSON.stringify(inputSchema, null, 2)}`
@@ -129,10 +128,9 @@ function resolveProviders(providers: ToolProvider[]): {
   for (const provider of providers) {
     const filtered = filterTools(provider.tools);
     const resolved: ResolvedProvider = {
-      name: provider.name,
+      name: provider.name ?? "codemode",
       fns: extractFns(filtered)
     };
-    if (provider.positionalArgs) resolved.positionalArgs = true;
     resolvedProviders.push(resolved);
   }
   return { resolvedProviders };

@@ -2,7 +2,7 @@ import type { JSONSchema7 } from "json-schema";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Tool as McpTool } from "@modelcontextprotocol/sdk/types.js";
 import type { JsonSchemaToolDescriptors } from "../json-schema-types";
-import type { ToolProvider } from "../executor";
+import type { SimpleToolRecord, ToolProvider } from "../executor";
 import { sanitizeToolName } from "../utils";
 import type { ProviderOptions } from "./types";
 import { addSnippets, providerTypes } from "./shared";
@@ -60,10 +60,8 @@ export async function mcpProvider(
       inputSchema: tool.inputSchema as JSONSchema7,
       outputSchema: tool.outputSchema as JSONSchema7 | undefined
     };
-    provider.tools[sdkName] = {
+    (provider.tools as SimpleToolRecord)[sdkName] = {
       description: tool.description,
-      inputSchema: tool.inputSchema,
-      outputSchema: tool.outputSchema,
       execute: async (args: unknown) =>
         unwrapMcpResult(
           await options.connection.client.callTool({

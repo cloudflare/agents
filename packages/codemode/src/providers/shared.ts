@@ -5,7 +5,12 @@ import {
 } from "../json-schema-types";
 import { runCode } from "../run-code";
 import { sanitizeToolName } from "../utils";
-import type { Executor, ResolvedProvider, ToolProvider } from "../executor";
+import type {
+  Executor,
+  ResolvedProvider,
+  SimpleToolRecord,
+  ToolProvider
+} from "../executor";
 import type { ProviderSnippetRecord } from "./types";
 
 export function providerTypes(
@@ -24,7 +29,7 @@ function resolvedProviderFromToolProvider(
   provider: ToolProvider
 ): ResolvedProvider {
   return {
-    name: provider.name,
+    name: provider.name ?? "codemode",
     fns: Object.fromEntries(
       Object.entries(provider.tools).flatMap(([name, tool]) => {
         const execute =
@@ -52,10 +57,8 @@ export async function addSnippets(
       inputSchema: snippet.inputSchema as JSONSchema7,
       outputSchema: snippet.outputSchema as JSONSchema7 | undefined
     };
-    provider.tools[sdkName] = {
+    (provider.tools as SimpleToolRecord)[sdkName] = {
       description: snippet.description,
-      inputSchema: snippet.inputSchema,
-      outputSchema: snippet.outputSchema,
       execute: async (args: unknown) => {
         if (!executor)
           throw new Error(`Snippet "${name}" requires an executor.`);

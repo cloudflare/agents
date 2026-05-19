@@ -4,9 +4,7 @@ This example shows how to expose MCP server capabilities through codemode-style 
 
 ```ts
 tools: {
-  search,
-  describe,
-  execute
+  (search, describe, execute);
 }
 ```
 
@@ -109,7 +107,7 @@ async ({ owner, repo }) => {
     repo,
     state: "open"
   });
-}
+};
 ```
 
 ## Run locally
