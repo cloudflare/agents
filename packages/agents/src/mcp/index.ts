@@ -420,9 +420,8 @@ export abstract class McpAgent<
       }
     }
 
-    const run = this._rpcMessageQueue.then(() =>
-      this._transport!.handle(message)
-    );
+    const transport = this._transport;
+    const run = this._rpcMessageQueue.then(() => transport.handle(message));
     this._rpcMessageQueue = run.then(
       () => undefined,
       () => undefined
