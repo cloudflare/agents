@@ -355,6 +355,10 @@ export class TestRunFiberAgent extends Agent {
     return this.deleteFibers();
   }
 
+  async deleteInterruptedManagedFibers(): Promise<number> {
+    return this.deleteFibers({ status: "interrupted" });
+  }
+
   async resolveManagedFiber(fiberId: string): Promise<boolean> {
     return this.resolveFiber(fiberId, {
       status: "completed",

@@ -201,10 +201,14 @@ const current = await this.inspectFiberByKey(`webhook:${webhookId}`);
 await this.cancelFiber(current.fiberId, "No longer needed");
 
 await this.deleteFibers({
-  status: ["completed", "error", "aborted", "interrupted"],
-  completedBefore: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+  status: ["completed", "error", "aborted"],
+  settledBefore: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
 });
 ```
+
+By default, `deleteFibers()` deletes settled `completed`, `error`, and
+`aborted` rows. It does not delete `interrupted` rows unless you pass that status
+explicitly, because interrupted rows often need inspection or manual resolution.
 
 Cancellation is cooperative. `cancelFiber()` records an aborted terminal state
 and aborts `ctx.signal` if the fiber is running in the current isolate. Your

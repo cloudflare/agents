@@ -665,7 +665,7 @@ export type FiberContext = {
   signal: AbortSignal;
   /** Checkpoint data during execution. Synchronous SQLite write. */
   stash(data: unknown): void;
-  /** Last checkpoint data (null on first run, populated on recovery re-invocation). */
+  /** Currently null during execution; recovered snapshots are passed to onFiberRecovered(). */
   snapshot: unknown | null;
 };
 
@@ -694,7 +694,7 @@ export type FiberInspection = {
   metadata?: Record<string, unknown>;
   createdAt: number;
   startedAt?: number;
-  completedAt?: number;
+  settledAt?: number;
 };
 
 export type StartFiberResult = FiberInspection & {
@@ -731,7 +731,7 @@ export type ListFibersOptions = {
 
 export type DeleteFibersOptions = {
   status?: FiberStatus | FiberStatus[];
-  completedBefore?: Date;
+  settledBefore?: Date;
   limit?: number;
 };
 
@@ -4388,7 +4388,7 @@ export class Agent<
       inspection.startedAt = row.started_at;
     }
     if (row.completed_at !== null) {
-      inspection.completedAt = row.completed_at;
+      inspection.settledAt = row.completed_at;
     }
 
     return inspection;
@@ -4557,7 +4557,7 @@ export class Agent<
   async deleteFibers(options?: DeleteFibersOptions): Promise<number> {
     const statuses =
       this._normalizeFiberStatusFilter(options?.status) ??
-      new Set<FiberStatus>(["completed", "aborted", "interrupted", "error"]);
+      new Set<FiberStatus>(["completed", "aborted", "error"]);
     const terminalStatuses = [...statuses].filter((status) =>
       this._isTerminalFiberStatus(status)
     );
@@ -4566,10 +4566,10 @@ export class Agent<
     }
 
     const limit = Math.min(Math.max(options?.limit ?? 100, 1), 500);
-    const completedBefore = options?.completedBefore?.getTime();
+    const settledBefore = options?.settledBefore?.getTime();
     const rows = terminalStatuses
       .flatMap((status) =>
-        this._listTerminalFiberRowsForDelete(status, limit, completedBefore)
+        this._listTerminalFiberRowsForDelete(status, limit, settledBefore)
       )
       .sort((a, b) =>
         a.completed_at === b.completed_at
@@ -4592,16 +4592,16 @@ export class Agent<
   private _listTerminalFiberRowsForDelete(
     status: FiberStatus,
     limit: number,
-    completedBefore?: number
+    settledBefore?: number
   ): FiberLedgerRow[] {
-    if (completedBefore !== undefined) {
+    if (settledBefore !== undefined) {
       return this.sql<FiberLedgerRow>`
         SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
                error_message, created_at, started_at, completed_at
         FROM cf_agents_fibers
         WHERE status = ${status}
           AND completed_at IS NOT NULL
-          AND completed_at < ${completedBefore}
+          AND completed_at < ${settledBefore}
         ORDER BY completed_at ASC, created_at ASC
         LIMIT ${limit}
       `;

@@ -554,6 +554,41 @@ describe("runFiber", () => {
       ).resolves.toBeNull();
     });
 
+    it("should preserve interrupted fibers during default cleanup", async () => {
+      const agent = await freshManagedAgent("managed-delete-default");
+
+      const completed = await agent.startManaged("delete-completed", {
+        idempotencyKey: "delete-completed-key"
+      });
+      await waitForFiberStatus(agent, completed.fiberId, "completed");
+      await agent.insertInterruptedManagedFiber(
+        "delete-interrupted",
+        "managed",
+        { step: 1 }
+      );
+      await agent.triggerRecoveryCheck();
+      await expect(
+        agent.inspectManagedFiber("delete-interrupted")
+      ).resolves.toMatchObject({
+        status: "interrupted"
+      });
+
+      await expect(agent.deleteManagedFibers()).resolves.toBe(1);
+      await expect(
+        agent.inspectManagedFiber(completed.fiberId)
+      ).resolves.toBeNull();
+      await expect(
+        agent.inspectManagedFiber("delete-interrupted")
+      ).resolves.toMatchObject({
+        status: "interrupted"
+      });
+
+      await expect(agent.deleteInterruptedManagedFibers()).resolves.toBe(1);
+      await expect(
+        agent.inspectManagedFiber("delete-interrupted")
+      ).resolves.toBeNull();
+    });
+
     it("should mark interrupted managed fibers during recovery", async () => {
       const agent = await freshManagedAgent("managed-recovery");
 
