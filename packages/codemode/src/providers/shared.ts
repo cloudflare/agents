@@ -22,10 +22,7 @@ function declarationsForProvider(
   );
 }
 
-export function renderProviderTypes(
-  providerName: string,
-  docs: ProviderDocs
-): string {
+function renderProviderTypes(providerName: string, docs: ProviderDocs): string {
   return [
     docs.instructions,
     declarationsForProvider(providerName, docs.descriptors)
