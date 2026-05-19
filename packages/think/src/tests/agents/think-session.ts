@@ -283,6 +283,11 @@ class TestCollectingCallback implements StreamCallback {
   events: string[] = [];
   doneCalled = false;
   errorMessage?: string;
+  requestId?: string;
+
+  onStart(event: { requestId: string }): void {
+    this.requestId = event.requestId;
+  }
 
   onEvent(json: string): void {
     this.events.push(json);
@@ -694,6 +699,37 @@ export class ThinkTestAgent extends Think {
     await this.chat(message, cb, { signal: controller.signal });
 
     return { events, done: doneCalled, doneCalled };
+  }
+
+  async testChatWithCancelChat(
+    message: string,
+    cancelAfterEvents: number
+  ): Promise<TestChatResult & { doneCalled: boolean; requestId?: string }> {
+    const events: string[] = [];
+    let doneCalled = false;
+    let requestId: string | undefined;
+
+    const cb: StreamCallback = {
+      onStart(event) {
+        requestId = event.requestId;
+      },
+      onEvent: async (json: string) => {
+        events.push(json);
+        if (requestId && events.length >= cancelAfterEvents) {
+          await this.cancelChat(requestId, "test cancel");
+        }
+      },
+      onDone() {
+        doneCalled = true;
+      },
+      onError(error: string) {
+        events.push(`ERROR:${error}`);
+      }
+    };
+
+    await this.chat(message, cb);
+
+    return { events, done: doneCalled, doneCalled, requestId };
   }
 
   async setResponse(response: string): Promise<void> {

@@ -2,15 +2,13 @@
 
 The first implementation is complete: Chat SDK owns messenger ingress,
 `ChatStateAgent` backs Chat SDK state, and `ConversationAgent extends Think`
-owns per-thread AI history with final-response posting.
+owns per-thread AI history with Think `chat()` streaming.
 
-## Streaming
+## Streaming Polish
 
-- Replace the current `saveMessages()` final-response path with Think's
-  `chat()` RPC streaming path.
-- Relay assistant text chunks through Chat SDK streaming or Telegram post/edit
-  updates.
-- Keep reasoning chunks hidden by default.
+- Improve partial-response and cancellation behavior for long turns.
+- Consider provider-specific streaming affordances beyond text deltas.
+- Keep reasoning chunks hidden by default unless a deliberate debug mode exists.
 - Decide how errors and partial responses should render in chat.
 
 ## Production Hardening

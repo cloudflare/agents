@@ -3,7 +3,7 @@
   "ai": { "binding": "AI", "remote": true },
   "name": "chat-sdk-messenger",
   "main": "src/index.ts",
-  "compatibility_date": "2026-01-28",
+  "compatibility_date": "2026-05-19",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
@@ -16,11 +16,7 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": [
-        "ChatIngressAgent",
-        "ChatStateAgent",
-        "ConversationAgent"
-      ]
+      "new_sqlite_classes": ["ChatIngressAgent"]
     }
   ],
   "observability": {

@@ -23,6 +23,7 @@ async chat(
 
 ```typescript
 interface StreamCallback {
+  onStart?(event: { requestId: string }): void | Promise<void>;
   onEvent(json: string): void | Promise<void>;
   onDone(): void | Promise<void>;
   onError?(error: string): void | Promise<void>;
@@ -31,6 +32,7 @@ interface StreamCallback {
 
 | Method           | When it fires                                                   |
 | ---------------- | --------------------------------------------------------------- |
+| `onStart(event)` | Before work starts; exposes the request id for cancellation     |
 | `onEvent(json)`  | For each streaming chunk (JSON-serialized UIMessageChunk)       |
 | `onDone()`       | After the turn completes and the assistant message is persisted |
 | `onError(error)` | On error during the turn (if not provided, the error is thrown) |
@@ -109,9 +111,39 @@ await child.chat(
 );
 ```
 
-### Aborting a sub-agent turn
+### Cancelling a sub-agent turn
 
-Pass an `AbortSignal` to cancel mid-stream:
+Use `onStart` and `cancelChat()` for RPC-safe cancellation across a
+sub-agent boundary:
+
+```typescript
+let requestId: string | undefined;
+
+const callback: StreamCallback = {
+  onStart(event) {
+    requestId = event.requestId;
+  },
+  onEvent(json) {
+    // Forward stream chunks.
+  },
+  onDone() {},
+  onError(error) {
+    console.error(error);
+  }
+};
+
+const turn = child.chat("Long analysis task", callback);
+
+// Later, from another RPC call or failure handler:
+if (requestId) {
+  await child.cancelChat(requestId, "client disconnected");
+}
+
+await turn;
+```
+
+If the caller and callee are not separated by Workers RPC, you can also pass an
+`AbortSignal` to cancel mid-stream:
 
 ```typescript
 const controller = new AbortController();

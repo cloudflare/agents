@@ -178,7 +178,12 @@ function isWebSocketClosedSendError(error: unknown): boolean {
  * Designed to work across the sub-agent RPC boundary — implement as
  * an RpcTarget in the parent agent and pass to `chat()`.
  */
+export interface ChatStartEvent {
+  requestId: string;
+}
+
 export interface StreamCallback {
+  onStart?(event: ChatStartEvent): void | Promise<void>;
   onEvent(json: string): void | Promise<void>;
   onDone(): void | Promise<void>;
   onError?(error: string): void | Promise<void>;
@@ -2057,6 +2062,11 @@ export class Think<
     options?: ChatOptions
   ): Promise<void> {
     const requestId = crypto.randomUUID();
+    const abortSignal = this._aborts.getSignal(requestId);
+    const detachExternal = this._aborts.linkExternal(
+      requestId,
+      options?.signal
+    );
     const ignoredTools = (options as { tools?: unknown } | undefined)?.tools;
     if (
       ignoredTools != null &&
@@ -2068,25 +2078,21 @@ export class Think<
       );
     }
 
-    await this.keepAliveWhile(async () => {
-      await this._turnQueue.enqueue(requestId, async () => {
-        const userMsg: UIMessage =
-          typeof userMessage === "string"
-            ? {
-                id: crypto.randomUUID(),
-                role: "user",
-                parts: [{ type: "text", text: userMessage }]
-              }
-            : userMessage;
+    try {
+      await callback.onStart?.({ requestId });
+      await this.keepAliveWhile(async () => {
+        await this._turnQueue.enqueue(requestId, async () => {
+          const userMsg: UIMessage =
+            typeof userMessage === "string"
+              ? {
+                  id: crypto.randomUUID(),
+                  role: "user",
+                  parts: [{ type: "text", text: userMessage }]
+                }
+              : userMessage;
 
-        await this._appendMessageToHistory(userMsg);
+          await this._appendMessageToHistory(userMsg);
 
-        const abortSignal = this._aborts.getSignal(requestId);
-        const detachExternal = this._aborts.linkExternal(
-          requestId,
-          options?.signal
-        );
-        try {
           const chatBody = async () => {
             let result: StreamableResult;
             try {
@@ -2132,12 +2138,12 @@ export class Think<
           } else {
             await chatBody();
           }
-        } finally {
-          detachExternal();
-          this._aborts.remove(requestId);
-        }
+        });
       });
-    });
+    } finally {
+      detachExternal();
+      this._aborts.remove(requestId);
+    }
   }
 
   // ── Message access ──────────────────────────────────────────────
@@ -3958,16 +3964,23 @@ export class Think<
    * No-op if no controller exists for `requestId` (the turn already
    * completed, was never started, or used a different id).
    *
-   * Most callers don't have the request id and want
-   * {@link abortAllRequests} instead. This method is here for
-   * symmetry with the WebSocket cancel surface and for callers that
-   * happen to know the id (e.g. via a stash from an earlier
-   * `saveMessages` return).
+   * `chat()` callers can read the request id from
+   * {@link StreamCallback.onStart} and later pass it here from another
+   * RPC call.
    *
    * Prefer {@link SaveMessagesOptions.signal} when driving a turn
    * programmatically — it threads the abort intent in from the start
    * without requiring the caller to know the id.
    */
+  cancelChat(requestId: string, reason?: string): void {
+    this._aborts.cancel(requestId, reason);
+  }
+
+  /** Abort every in-flight chat turn on this agent. */
+  cancelAllChats(): void {
+    this._aborts.destroyAll();
+  }
+
   protected abortRequest(requestId: string, reason?: unknown): void {
     this._aborts.cancel(requestId, reason);
   }

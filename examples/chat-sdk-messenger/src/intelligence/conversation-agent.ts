@@ -1,7 +1,6 @@
 import { Think } from "@cloudflare/think";
-import type { LanguageModel, ToolSet, UIMessage } from "ai";
+import type { LanguageModel, ToolSet } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
-import { extractLatestAssistantText } from "./messages";
 
 export class ConversationAgent extends Think {
   override getModel(): LanguageModel {
@@ -22,20 +21,6 @@ export class ConversationAgent extends Think {
 
   override getTools(): ToolSet {
     return {};
-  }
-
-  async respondToMessage(message: UIMessage): Promise<string> {
-    const result = await this.saveMessages([message]);
-    if (result.status !== "completed") {
-      throw new Error(`Think turn did not complete: ${result.status}`);
-    }
-
-    const text = extractLatestAssistantText(await this.getMessages());
-    if (!text) {
-      throw new Error("Think completed without a text assistant response");
-    }
-
-    return text;
   }
 
   async resetConversation(): Promise<void> {

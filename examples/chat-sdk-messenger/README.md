@@ -221,18 +221,23 @@ src/intelligence/
 AI history for one Chat SDK `thread.id`. Chat SDK history remains
 platform/event history and optional source material for later backfill.
 
-The first implementation uses `ConversationAgent.saveMessages()` and posts a
-single final assistant response back through Chat SDK:
+The response path uses Think's `chat()` RPC stream and relays text deltas into
+Chat SDK's streaming post API:
 
 ```ts
 const agent = await this.subAgent(ConversationAgent, thread.id);
-const response = await agent.respondToMessage(toThinkUserMessage(message));
-await thread.post({ markdown: response });
+const callback = new TextStreamCallback();
+const post = thread.post(callback.stream());
+
+await agent.chat(toThinkUserMessage(message), callback);
+await post;
 ```
 
 This keeps visible messenger writes under application control while still
-exercising Think's durable message ownership. Future iterations can use
-`chat()` for streaming, `submitMessages()` for durable async webhook
+exercising Think's durable message ownership and streaming turn API. The
+callback receives Think's request id in `onStart`, so the ingress agent can call
+`cancelChat()` on the conversation sub-agent if the messenger stream fails.
+Future iterations can use `submitMessages()` for durable async webhook
 acceptance, or Chat SDK `createChatTools` once there is an approval UX for
 model-driven writes.
 
@@ -273,8 +278,8 @@ ChatIngressAgent:tenant-b
 - Telegram callback data is limited to 64 bytes. Keep button action IDs short.
 - Telegram bots cannot fetch complete historical chat logs. Adapter history is
   limited to what the bot can see/cache.
-- The AI path currently posts final responses only; live Think-to-messenger
-  streaming is intentionally left for a later iteration.
+- The AI path streams assistant text only. Reasoning, tool calls, and tool
+  results are intentionally not rendered into the messenger yet.
 - The `default` parent Agent is intentionally simple; high-volume bots should
   consider routing to more specific parent Agent names.
 

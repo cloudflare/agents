@@ -301,6 +301,25 @@ describe("Think — abort", () => {
     expect(result.events.length).toBeLessThan(10);
   });
 
+  it("should expose chat request ids for cross-RPC cancellation", async () => {
+    const agent = await freshAgent("abort-cancel-chat");
+
+    await agent.setMultiChunkResponse([
+      "chunk1 ",
+      "chunk2 ",
+      "chunk3 ",
+      "chunk4 ",
+      "chunk5 "
+    ]);
+
+    const result = await agent.testChatWithCancelChat("Cancel me", 2);
+
+    expect(result.requestId).toBeTruthy();
+    expect(result.doneCalled).toBe(false);
+    expect(result.events.length).toBeGreaterThanOrEqual(2);
+    expect(result.events.length).toBeLessThan(10);
+  });
+
   it("should persist partial message on abort", async () => {
     const agent = await freshAgent("abort-persist");
 

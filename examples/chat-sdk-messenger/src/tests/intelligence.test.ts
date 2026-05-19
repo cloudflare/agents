@@ -11,6 +11,10 @@ import {
   shouldRouteToAi,
   toThinkUserMessage
 } from "../intelligence/messages";
+import {
+  TextStreamCallback,
+  textDeltaFromStreamChunk
+} from "../intelligence/stream-callback";
 
 function createMessage(
   text: string,
@@ -111,4 +115,54 @@ describe("Telegram intelligence helpers", () => {
 
     expect(extractLatestAssistantText(messages)).toBe("Hi there.");
   });
+
+  it("extracts text deltas from Think chat stream chunks", () => {
+    expect(
+      textDeltaFromStreamChunk(
+        JSON.stringify({ type: "text-delta", id: "t1", delta: "hello" })
+      )
+    ).toBe("hello");
+    expect(
+      textDeltaFromStreamChunk(JSON.stringify({ type: "text-start", id: "t1" }))
+    ).toBeNull();
+    expect(textDeltaFromStreamChunk("not json")).toBeNull();
+  });
+
+  it("tracks streamed text and closes cleanly", async () => {
+    const callback = new TextStreamCallback();
+    const chunks = collectText(callback.stream());
+
+    callback.onStart({ requestId: "request-1" });
+    callback.onEvent(
+      JSON.stringify({ type: "text-delta", id: "t1", delta: "hello" })
+    );
+    callback.onEvent(JSON.stringify({ type: "text-start", id: "t1" }));
+    callback.onEvent(
+      JSON.stringify({ type: "text-delta", id: "t1", delta: " world" })
+    );
+    callback.onDone();
+
+    await expect(chunks).resolves.toBe("hello world");
+    expect(callback.hasText()).toBe(true);
+    expect(callback.textSoFar()).toBe("hello world");
+    expect(callback.requestId()).toBe("request-1");
+  });
+
+  it("surfaces callback stream errors to consumers", async () => {
+    const callback = new TextStreamCallback();
+    const chunks = collectText(callback.stream());
+
+    callback.onError("model failed");
+
+    await expect(chunks).rejects.toThrow("model failed");
+    expect(callback.hasText()).toBe(false);
+  });
 });
+
+async function collectText(stream: AsyncIterable<string>): Promise<string> {
+  let text = "";
+  for await (const chunk of stream) {
+    text += chunk;
+  }
+  return text;
+}

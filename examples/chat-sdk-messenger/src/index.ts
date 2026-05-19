@@ -12,6 +12,7 @@ import {
   shouldRouteToAi,
   toThinkUserMessage
 } from "./intelligence/messages";
+import { TextStreamCallback } from "./intelligence/stream-callback";
 import {
   ASK_AGENT_ACTION_ID,
   DEMO_LOOKUP,
@@ -27,6 +28,8 @@ export { ChatStateAgent } from "./state";
 
 const WEBHOOK_PATH = "/webhooks/telegram";
 const DEFAULT_AGENT_NAME = "default";
+const EMPTY_AI_RESPONSE =
+  "I couldn't produce a text response. Please try again.";
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
@@ -197,14 +200,37 @@ export class ChatIngressAgent extends Agent {
     thread: Thread,
     message: Message
   ): Promise<void> {
+    const callback = new TextStreamCallback();
+    let agent: SubAgentStub<ConversationAgent> | undefined;
+    const post = thread
+      .post(callback.stream())
+      .catch(async (error: unknown) => {
+        callback.fail(error);
+        const requestId = callback.requestId();
+        if (agent && requestId) {
+          await agent
+            .cancelChat(requestId, toError(error).message)
+            .catch(() => undefined);
+        }
+        throw error;
+      });
+
     try {
       await thread.startTyping("Thinking...");
-      const agent = await this.getConversationAgent(thread);
-      const response = await agent.respondToMessage(
-        toThinkUserMessage(message)
-      );
-      await thread.post({ markdown: response });
+      agent = await this.getConversationAgent(thread);
+      await agent.chat(toThinkUserMessage(message), callback);
+      callback.close();
+      await post;
+      if (!callback.hasText()) {
+        await thread.post(EMPTY_AI_RESPONSE);
+      }
     } catch (error) {
+      callback.fail(error);
+      await post.catch(() => undefined);
+      if (callback.hasText()) {
+        return;
+      }
+
       const message = toError(error).message;
       await thread.post({
         markdown: `Sorry, I couldn't answer that right now.\n\n${message}`
