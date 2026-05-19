@@ -33,6 +33,8 @@ const proxySchema = z.object({
   execute: z.string().optional()
 });
 
+const SEARCH_RESULT_LIMIT = 50;
+
 function providerStatus(providers: NamedToolProvider[]): string {
   const rows = providers.map((provider) => {
     const tools = Object.keys(filterTools(provider.tools));
@@ -65,9 +67,20 @@ function searchProviders(
       lines.push(`${fullName}${description ? ` — ${description}` : ""}`);
     }
   }
-  return lines.length
-    ? lines.join("\n").trim()
-    : `No methods matching "${query}".`;
+  if (!lines.length) return `No methods matching "${query}".`;
+
+  const results = lines.slice(0, SEARCH_RESULT_LIMIT);
+  return [
+    `Search results for "${query}" (${lines.length} total)`,
+    "",
+    ...results,
+    lines.length > SEARCH_RESULT_LIMIT
+      ? `\nShowing the first ${SEARCH_RESULT_LIMIT} matches. Refine your search query to narrow the results.`
+      : ""
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .trim();
 }
 
 function describeProviders(
