@@ -73,6 +73,14 @@ describe("AgentChatStateAdapter", () => {
     ]);
   });
 
+  it("refreshes list TTLs for the whole logical list", async () => {
+    const host = await getHost();
+
+    await expect(
+      host.testListTtlRefresh("msg-history:telegram:list-ttl-refresh")
+    ).resolves.toEqual([]);
+  });
+
   it("routes known Chat SDK keys to stable state shards", async () => {
     const host = await getHost();
 

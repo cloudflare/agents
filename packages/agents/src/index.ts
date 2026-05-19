@@ -4408,6 +4408,7 @@ export class Agent<
     }
 
     await this._checkRunFibers();
+    await this._waitForManagedFiberTerminal(fiberId);
     return this.inspectFiber(fiberId);
   }
 

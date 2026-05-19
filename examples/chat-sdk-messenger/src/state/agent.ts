@@ -200,6 +200,8 @@ export class ChatStateAgent extends Agent {
       );
 
       if (expiresAt !== null) {
+        // Chat SDK history lists use a list-level TTL: any append refreshes the
+        // expiry for the whole logical list, not only the new row.
         this.ctx.storage.sql.exec(
           "UPDATE chat_state_lists SET expires_at = ? WHERE key = ?",
           expiresAt,

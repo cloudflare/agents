@@ -664,6 +664,54 @@ describe("runFiber", () => {
       });
     });
 
+    it("should wait for terminal status when recovery is already running", async () => {
+      const agent = await freshManagedAgent("managed-wait-recovery-running");
+
+      await agent.insertInterruptedManagedFiber(
+        "managed-recovery-blocker",
+        "managed-recovery-block",
+        { step: "block" }
+      );
+      await agent.insertManagedLedgerOnlyFiber(
+        "managed-waiting-recovery",
+        "managed-recovery-complete",
+        "running",
+        { step: "waiting" }
+      );
+
+      const recovery = agent.triggerRecoveryCheck();
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const recovered = await agent.getRecoveredFibers();
+        if (
+          recovered.some((fiber) => fiber.id === "managed-recovery-blocker")
+        ) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+
+      const waitResult = agent.startManagedAndWait(
+        "duplicate",
+        "key:managed-waiting-recovery"
+      );
+      const earlyResult = await Promise.race([
+        waitResult.then((result) => result.status),
+        new Promise<"still-waiting">((resolve) =>
+          setTimeout(() => resolve("still-waiting"), 50)
+        )
+      ]);
+      expect(earlyResult).toBe("still-waiting");
+
+      await agent.releaseBlockedRecovery();
+      await recovery;
+
+      await expect(waitResult).resolves.toMatchObject({
+        accepted: false,
+        status: "completed",
+        fiberId: "managed-waiting-recovery"
+      });
+    });
+
     it("should not recover terminal managed fibers with stale run rows", async () => {
       const agent = await freshManagedAgent("managed-terminal-recovery");
 

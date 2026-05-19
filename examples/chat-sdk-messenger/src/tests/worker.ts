@@ -130,6 +130,16 @@ export class TestHostAgent extends Agent {
     return [trimmed, expired];
   }
 
+  async testListTtlRefresh(key: string): Promise<unknown[]> {
+    const state = await this.createState();
+
+    await state.appendToList(key, "first", { ttlMs: 60_000 });
+    await state.appendToList(key, "second", { ttlMs: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    return state.getList(key);
+  }
+
   async testShardRouting(): Promise<Record<string, string | undefined>> {
     return {
       thread: defaultKeyShard("thread-state:telegram:123:456"),

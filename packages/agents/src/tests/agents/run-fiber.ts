@@ -18,11 +18,17 @@ export class TestRunFiberAgent extends Agent {
   private _releaseHeldManagedFiber?: () => void;
   private _releaseWaitedManagedFiber?: () => void;
   private _releaseIgnoredCancelManagedFiber?: () => void;
+  private _releaseBlockedRecovery?: () => void;
 
   override async onFiberRecovered(
     ctx: FiberRecoveryContext
   ): Promise<void | FiberRecoveryResult> {
     this.recoveredFibers.push(ctx);
+    if (ctx.name === "managed-recovery-block") {
+      await new Promise<void>((resolve) => {
+        this._releaseBlockedRecovery = resolve;
+      });
+    }
     if (ctx.name === "managed-recovery-complete") {
       return {
         status: "completed",
@@ -289,6 +295,12 @@ export class TestRunFiberAgent extends Agent {
   async releaseIgnoredCancelManagedFiber(): Promise<void> {
     const release = this._releaseIgnoredCancelManagedFiber;
     this._releaseIgnoredCancelManagedFiber = undefined;
+    release?.();
+  }
+
+  async releaseBlockedRecovery(): Promise<void> {
+    const release = this._releaseBlockedRecovery;
+    this._releaseBlockedRecovery = undefined;
     release?.();
   }
 
