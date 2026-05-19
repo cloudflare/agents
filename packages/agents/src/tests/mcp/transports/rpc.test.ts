@@ -518,6 +518,37 @@ describe("RPC Transport", () => {
       expect(response).toHaveProperty("result");
     });
 
+    it("should serialize overlapping handleMcpMessage calls", async () => {
+      const doName = `rpc:overlap-${crypto.randomUUID()}`;
+      const id = env.MCP_OBJECT.idFromName(doName);
+      const stub = env.MCP_OBJECT.get(id) as DurableObjectStub<McpAgent>;
+
+      await seedStorageForColdWake(stub, doName);
+      await stub.handleMcpMessage(TEST_MESSAGES.initialize);
+
+      const first = stub.handleMcpMessage({
+        jsonrpc: "2.0",
+        id: "overlap-1",
+        method: "tools/call",
+        params: { name: "greet", arguments: { name: "First" } }
+      });
+      const second = stub.handleMcpMessage({
+        jsonrpc: "2.0",
+        id: "overlap-2",
+        method: "tools/call",
+        params: { name: "greet", arguments: { name: "Second" } }
+      });
+
+      await expect(first).resolves.toMatchObject({
+        jsonrpc: "2.0",
+        id: "overlap-1"
+      });
+      await expect(second).resolves.toMatchObject({
+        jsonrpc: "2.0",
+        id: "overlap-2"
+      });
+    });
+
     it("should handle tool calls after cold wake via handleMcpMessage", async () => {
       const doName = "rpc:cold-wake-tools";
       const id = env.MCP_OBJECT.idFromName(doName);
