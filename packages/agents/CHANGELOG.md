@@ -1,5 +1,23 @@
 # @cloudflare/agents
 
+## 0.13.0
+
+### Minor Changes
+
+- [#1297](https://github.com/cloudflare/agents/pull/1297) [`d151e6d`](https://github.com/cloudflare/agents/commit/d151e6d6ccd37820c37d5fd4208a531fd8144950) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add experimental Postgres-backed session, context, and search providers for external session storage via Hyperdrive-compatible `pg` clients.
+
+  Session APIs now consistently return promises so callers can use the same surface with local SQLite or external storage providers. Think's session integration has been updated for the async session API, including cache-aware handling for idempotent appends and compaction overlays.
+
+### Patch Changes
+
+- [#1532](https://github.com/cloudflare/agents/pull/1532) [`0a2d6df`](https://github.com/cloudflare/agents/commit/0a2d6dfb73f9362f84ed5cd76f73f4696e10d3bd) Thanks [@threepointone](https://github.com/threepointone)! - Revert the Streamable HTTP server-to-client MCP routing change from PR [#1514](https://github.com/cloudflare/agents/issues/1514), which routed related messages such as elicitation requests over the originating POST response when no standalone SSE stream was open.
+
+- [#1546](https://github.com/cloudflare/agents/pull/1546) [`c935d7c`](https://github.com/cloudflare/agents/commit/c935d7cc4ad2da54257b7fd636b6b1665b2b5105) Thanks [@threepointone](https://github.com/threepointone)! - Fix nested sub-agent bootstrap so facet parents do not need to be bound as top-level Durable Object namespaces.
+
+- [#1533](https://github.com/cloudflare/agents/pull/1533) [`8f699fe`](https://github.com/cloudflare/agents/commit/8f699fe19df002a2695ef9c04cc407a890aca6bc) Thanks [@mattzcarey](https://github.com/mattzcarey)! - `McpAgent.elicitInput` now accepts an optional `options.relatedRequestId`, forwarded to the underlying transport so the elicitation request routes through the originating POST response stream per the Streamable HTTP spec. Callers should pass `{ relatedRequestId: extra.requestId }` from inside a tool handler.
+
+- [#1548](https://github.com/cloudflare/agents/pull/1548) [`ce2af34`](https://github.com/cloudflare/agents/commit/ce2af3487271b6e62e2c2a06ea6782c594b879da) Thanks [@threepointone](https://github.com/threepointone)! - Allow `parentAgent()` to resolve facet-only direct parents through a root RPC bridge.
+
 ## 0.12.4
 
 ### Patch Changes

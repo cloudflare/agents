@@ -321,6 +321,126 @@ describe("useAgentChat", () => {
     fetchSpy.mockRestore();
   });
 
+  it("should keep an immediate first send when the HTTP URL becomes ready", async () => {
+    let url = "";
+    const agent = createAgent({
+      name: "thread-first-send-before-url",
+      url
+    });
+    agent.getHttpUrl = () =>
+      url.replace("ws://", "http://").replace("wss://", "https://");
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+    const TestComponent = () => {
+      const chat = useAgentChat({ agent });
+      chatInstance = chat;
+      return <div data-testid="messages">{JSON.stringify(chat.messages)}</div>;
+    };
+
+    const screen = await act(async () =>
+      render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      })
+    );
+
+    await act(async () => {
+      void chatInstance!.sendMessage({ text: "First message" });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent("First message");
+
+    url =
+      "ws://localhost:3000/agents/chat/thread-first-send-before-url?_pk=abc";
+    await act(async () => {
+      screen.rerender(<TestComponent />);
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent("First message");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    fetchSpy.mockRestore();
+  });
+
+  it("should merge an immediate first send with late initial message hydration", async () => {
+    let url = "";
+    const agent = createAgent({
+      name: "thread-first-send-before-history",
+      url
+    });
+    agent.getHttpUrl = () =>
+      url.replace("ws://", "http://").replace("wss://", "https://");
+
+    const hydratedMessages = [
+      {
+        id: "persisted-history",
+        role: "assistant" as const,
+        parts: [{ type: "text" as const, text: "Persisted history" }]
+      }
+    ];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(hydratedMessages), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+    const TestComponent = () => {
+      const chat = useAgentChat({ agent });
+      chatInstance = chat;
+      return <div data-testid="messages">{JSON.stringify(chat.messages)}</div>;
+    };
+
+    const screen = await act(async () =>
+      render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      })
+    );
+
+    await act(async () => {
+      void chatInstance!.sendMessage({ text: "First message" });
+      await sleep(10);
+    });
+
+    url =
+      "ws://localhost:3000/agents/chat/thread-first-send-before-history?_pk=abc";
+    await act(async () => {
+      screen.rerender(<TestComponent />);
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent("Persisted history");
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent("First message");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    fetchSpy.mockRestore();
+  });
+
   it("should allow custom initial message loaders before the HTTP URL is ready", async () => {
     const agent = createAgent({
       name: "thread-custom-pending-url",

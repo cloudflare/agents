@@ -1,5 +1,13 @@
 # @cloudflare/think
 
+## 0.7.0
+
+### Minor Changes
+
+- [#1297](https://github.com/cloudflare/agents/pull/1297) [`d151e6d`](https://github.com/cloudflare/agents/commit/d151e6d6ccd37820c37d5fd4208a531fd8144950) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add experimental Postgres-backed session, context, and search providers for external session storage via Hyperdrive-compatible `pg` clients.
+
+  Session APIs now consistently return promises so callers can use the same surface with local SQLite or external storage providers. Think's session integration has been updated for the async session API, including cache-aware handling for idempotent appends and compaction overlays.
+
 ## 0.6.1
 
 ### Patch Changes

@@ -1,5 +1,11 @@
 # @cloudflare/ai-chat
 
+## 0.7.1
+
+### Patch Changes
+
+- [#1541](https://github.com/cloudflare/agents/pull/1541) [`bc2b1d3`](https://github.com/cloudflare/agents/commit/bc2b1d388fdb36d597bfc41716ff9fccfdff14a9) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Keep `useAgentChat`'s first optimistic send visible when the Agent HTTP URL becomes available immediately after mount.
+
 ## 0.7.0
 
 ### Minor Changes
