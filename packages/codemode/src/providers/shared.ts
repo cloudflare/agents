@@ -11,7 +11,10 @@ import type {
   SimpleToolRecord,
   ToolProvider
 } from "../executor";
-import type { ProviderSnippetRecord } from "./types";
+import type {
+  ProviderSnippetRecord,
+  ToolProviderWithDescriptors
+} from "./types";
 
 export function providerTypes(
   providerName: string,
@@ -23,6 +26,13 @@ export function providerTypes(
     `declare const ${sanitizeToolName(providerName)}`
   );
   return [instructions, types].filter(Boolean).join("\n\n");
+}
+
+export function attachProviderDescriptors(
+  provider: ToolProvider,
+  descriptors: JsonSchemaToolDescriptors
+): void {
+  (provider as ToolProviderWithDescriptors).descriptors = descriptors;
 }
 
 function resolvedProviderFromToolProvider(

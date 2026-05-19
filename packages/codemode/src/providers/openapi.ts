@@ -2,7 +2,11 @@ import type { JsonSchemaToolDescriptors } from "../json-schema-types";
 import type { SimpleToolRecord, ToolProvider } from "../executor";
 import { sanitizeToolName } from "../utils";
 import type { ProviderOptions } from "./types";
-import { addSnippets, providerTypes } from "./shared";
+import {
+  addSnippets,
+  attachProviderDescriptors,
+  providerTypes
+} from "./shared";
 
 export type OpenApiRequestOptions = {
   operationId: string;
@@ -90,6 +94,7 @@ export async function openApiProvider(
     tools
   };
   await addSnippets(provider, options.snippets, options.executor, descriptors);
+  attachProviderDescriptors(provider, descriptors);
   provider.types = providerTypes(
     providerName,
     descriptors,

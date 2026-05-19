@@ -4,7 +4,11 @@ import type { ToolProvider } from "../executor";
 import type { ToolDescriptors } from "../tool-types";
 import { sanitizeToolName } from "../utils";
 import type { ProviderOptions } from "./types";
-import { addSnippets, providerTypes } from "./shared";
+import {
+  addSnippets,
+  attachProviderDescriptors,
+  providerTypes
+} from "./shared";
 
 export async function toolsetProvider(
   options: ProviderOptions & { tools: ToolDescriptors | ToolSet }
@@ -17,6 +21,7 @@ export async function toolsetProvider(
   const descriptors: JsonSchemaToolDescriptors = {};
   await addSnippets(provider, options.snippets, options.executor, descriptors);
   if (Object.keys(descriptors).length > 0) {
+    attachProviderDescriptors(provider, descriptors);
     provider.types = providerTypes(
       provider.name ?? "codemode",
       descriptors,

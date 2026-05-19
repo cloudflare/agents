@@ -1,4 +1,5 @@
-import type { Executor } from "../executor";
+import type { JsonSchemaToolDescriptors } from "../json-schema-types";
+import type { Executor, ToolProvider } from "../executor";
 
 export type ProviderSnippet = {
   description?: string;
@@ -14,4 +15,8 @@ export type ProviderOptions = {
   instructions?: string;
   snippets?: ProviderSnippetRecord;
   executor?: Executor;
+};
+
+export type ToolProviderWithDescriptors = ToolProvider & {
+  descriptors?: JsonSchemaToolDescriptors;
 };

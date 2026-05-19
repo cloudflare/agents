@@ -1,6 +1,8 @@
 import { tool, type Tool } from "ai";
 import { z } from "zod";
+import { generateTypesFromJsonSchema } from "./json-schema-types";
 import type { Executor, ResolvedProvider, ToolProvider } from "./executor";
+import type { ToolProviderWithDescriptors } from "./providers/types";
 import { filterTools, extractFns } from "./resolve";
 import { runCode } from "./run-code";
 import type { CodeOutput } from "./shared";
@@ -35,6 +37,24 @@ function providerStatus(providers: ToolProvider[]): string {
   return [`Providers: ${providers.length}`, "", ...rows].join("\n").trim();
 }
 
+function providerDescriptors(provider: ToolProvider) {
+  return (provider as ToolProviderWithDescriptors).descriptors;
+}
+
+function providerTypeForMethod(
+  provider: ToolProvider,
+  methodName: string
+): string {
+  const descriptors = providerDescriptors(provider);
+  if (!descriptors?.[methodName]) return "";
+  return generateTypesFromJsonSchema({ [methodName]: descriptors[methodName] })
+    .replace(
+      "declare const codemode",
+      `declare const ${sanitizeToolName(provider.name ?? "codemode")}`
+    )
+    .trim();
+}
+
 function searchProviders(query: string, providers: ToolProvider[]): string {
   const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
   const lines: string[] = [];
@@ -43,24 +63,18 @@ function searchProviders(query: string, providers: ToolProvider[]): string {
       filterTools(provider.tools)
     )) {
       const safeName = sanitizeToolName(name);
+      const schemaDescriptor = providerDescriptors(provider)?.[safeName];
       const description =
-        descriptor &&
+        schemaDescriptor?.description ??
+        (descriptor &&
         typeof descriptor === "object" &&
         "description" in descriptor
           ? String((descriptor as { description?: unknown }).description ?? "")
-          : "";
+          : "");
       const fullName = `${provider.name ?? "codemode"}.${safeName}`;
       if (![fullName, safeName, name, description].some((v) => pattern.test(v)))
         continue;
       lines.push(`${fullName}${description ? ` — ${description}` : ""}`);
-      const inputSchema =
-        descriptor &&
-        typeof descriptor === "object" &&
-        "inputSchema" in descriptor
-          ? (descriptor as { inputSchema?: unknown }).inputSchema
-          : undefined;
-      if (inputSchema) lines.push(JSON.stringify(inputSchema, null, 2));
-      lines.push("");
     }
   }
   return lines.length
@@ -100,18 +114,11 @@ function describeProviders(target: string, providers: ToolProvider[]): string {
         "description" in descriptor
           ? String((descriptor as { description?: unknown }).description ?? "")
           : "";
-      const inputSchema =
-        descriptor &&
-        typeof descriptor === "object" &&
-        "inputSchema" in descriptor
-          ? (descriptor as { inputSchema?: unknown }).inputSchema
-          : undefined;
+      const methodTypes = providerTypeForMethod(candidate, safeName);
       return [
         `${candidate.name ?? "codemode"}.${safeName}`,
         description,
-        inputSchema
-          ? `Parameters:\n${JSON.stringify(inputSchema, null, 2)}`
-          : ""
+        methodTypes
       ]
         .filter(Boolean)
         .join("\n\n")
