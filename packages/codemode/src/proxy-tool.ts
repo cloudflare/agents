@@ -3,8 +3,9 @@ import { z } from "zod";
 import type { Executor, ResolvedProvider } from "./executor";
 import type { NamedToolProvider } from "./providers/types";
 import {
-  describeProvider as describeProviderTypes,
-  describeProviderMethod
+  getMethodDescription,
+  renderMethodDescription,
+  renderProviderDescription
 } from "./providers/shared";
 import { filterTools, extractFns } from "./resolve";
 import { runCode } from "./run-code";
@@ -52,11 +53,12 @@ function searchProviders(
     )) {
       const safeName = sanitizeToolName(name);
       const description =
-        descriptor &&
+        getMethodDescription(provider, safeName) ??
+        (descriptor &&
         typeof descriptor === "object" &&
         "description" in descriptor
           ? String((descriptor as { description?: unknown }).description ?? "")
-          : "";
+          : "");
       const fullName = `${provider.name}.${safeName}`;
       if (![fullName, safeName, name, description].some((v) => pattern.test(v)))
         continue;
@@ -80,7 +82,7 @@ function describeProviders(
   );
   if (provider && !maybeMethod) {
     return [
-      describeProviderTypes(provider),
+      renderProviderDescription(provider),
       searchProviders(provider.name, [provider])
     ]
       .filter(Boolean)
@@ -97,12 +99,13 @@ function describeProviders(
       const safeName = sanitizeToolName(name);
       if (safeName !== methodName && name !== methodName) continue;
       const description =
-        descriptor &&
+        getMethodDescription(candidate, safeName) ??
+        (descriptor &&
         typeof descriptor === "object" &&
         "description" in descriptor
           ? String((descriptor as { description?: unknown }).description ?? "")
-          : "";
-      const methodTypes = describeProviderMethod(candidate, safeName);
+          : "");
+      const methodTypes = renderMethodDescription(candidate, safeName);
       return [`${candidate.name}.${safeName}`, description, methodTypes]
         .filter(Boolean)
         .join("\n\n")

@@ -8,8 +8,8 @@ import { sanitizeToolName } from "../utils";
 import type { Executor, ResolvedProvider, SimpleToolRecord } from "../executor";
 import type {
   NamedToolProvider,
-  ProviderSnippetRecord,
-  ToolProviderWithDescriptors
+  ProviderDocs,
+  ProviderSnippetRecord
 } from "./types";
 
 function declarationsForProvider(
@@ -22,21 +22,35 @@ function declarationsForProvider(
   );
 }
 
-export function providerTypes(
+export function renderProviderTypes(
   providerName: string,
-  descriptors: JsonSchemaToolDescriptors,
-  instructions?: string
+  docs: ProviderDocs
 ): string {
-  return [instructions, declarationsForProvider(providerName, descriptors)]
+  return [
+    docs.instructions,
+    declarationsForProvider(providerName, docs.descriptors)
+  ]
     .filter(Boolean)
     .join("\n\n");
 }
 
-export function methodTypes(
-  descriptors: JsonSchemaToolDescriptors,
+export function renderProviderDescription(provider: NamedToolProvider): string {
+  return [
+    provider.name,
+    provider.docs
+      ? renderProviderTypes(provider.name, provider.docs)
+      : provider.types
+  ]
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+}
+
+export function renderMethodDescription(
+  provider: NamedToolProvider,
   methodName: string
 ): string {
-  const descriptor = descriptors[methodName];
+  const descriptor = provider.docs?.descriptors[methodName];
   if (!descriptor) return "";
   const generatedTypes = generateTypesFromJsonSchema({
     [methodName]: descriptor
@@ -46,30 +60,11 @@ export function methodTypes(
     .trim();
 }
 
-export function describeProvider(provider: NamedToolProvider): string {
-  const descriptors = (provider as ToolProviderWithDescriptors).descriptors;
-  return [
-    provider.name,
-    descriptors ? providerTypes(provider.name, descriptors) : provider.types
-  ]
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
-}
-
-export function describeProviderMethod(
+export function getMethodDescription(
   provider: NamedToolProvider,
   methodName: string
-): string {
-  const descriptors = (provider as ToolProviderWithDescriptors).descriptors;
-  return descriptors ? methodTypes(descriptors, methodName) : "";
-}
-
-export function attachProviderDescriptors(
-  provider: NamedToolProvider,
-  descriptors: JsonSchemaToolDescriptors
-): void {
-  (provider as ToolProviderWithDescriptors).descriptors = descriptors;
+): string | undefined {
+  return provider.docs?.descriptors[methodName]?.description;
 }
 
 function resolvedProviderFromToolProvider(

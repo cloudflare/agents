@@ -2,11 +2,7 @@ import type { JsonSchemaToolDescriptors } from "../json-schema-types";
 import type { SimpleToolRecord } from "../executor";
 import { sanitizeToolName } from "../utils";
 import type { NamedToolProvider, ProviderOptions } from "./types";
-import {
-  addSnippets,
-  attachProviderDescriptors,
-  providerTypes
-} from "./shared";
+import { addSnippets, renderProviderTypes } from "./shared";
 
 export type OpenApiRequestOptions = {
   operationId: string;
@@ -94,11 +90,10 @@ export async function openApiProvider(
     tools
   };
   await addSnippets(provider, options.snippets, options.executor, descriptors);
-  attachProviderDescriptors(provider, descriptors);
-  provider.types = providerTypes(
-    providerName,
+  provider.docs = {
     descriptors,
-    options.instructions
-  );
+    instructions: options.instructions
+  };
+  provider.types = renderProviderTypes(providerName, provider.docs);
   return provider;
 }

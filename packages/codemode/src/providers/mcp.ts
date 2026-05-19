@@ -5,11 +5,7 @@ import type { JsonSchemaToolDescriptors } from "../json-schema-types";
 import type { SimpleToolRecord } from "../executor";
 import { sanitizeToolName } from "../utils";
 import type { NamedToolProvider, ProviderOptions } from "./types";
-import {
-  addSnippets,
-  attachProviderDescriptors,
-  providerTypes
-} from "./shared";
+import { addSnippets, renderProviderTypes } from "./shared";
 
 type CallToolResult = Awaited<ReturnType<Client["callTool"]>>;
 
@@ -77,13 +73,12 @@ export async function mcpProvider(
   }
 
   await addSnippets(provider, options.snippets, options.executor, descriptors);
-  attachProviderDescriptors(provider, descriptors);
-  provider.types = providerTypes(
-    providerName,
+  provider.docs = {
     descriptors,
-    [options.connection.instructions, options.instructions]
+    instructions: [options.connection.instructions, options.instructions]
       .filter(Boolean)
       .join("\n\n")
-  );
+  };
+  provider.types = renderProviderTypes(providerName, provider.docs);
   return provider;
 }

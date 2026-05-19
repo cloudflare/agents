@@ -3,11 +3,7 @@ import type { JsonSchemaToolDescriptors } from "../json-schema-types";
 import type { ToolDescriptors } from "../tool-types";
 import { sanitizeToolName } from "../utils";
 import type { NamedToolProvider, ProviderOptions } from "./types";
-import {
-  addSnippets,
-  attachProviderDescriptors,
-  providerTypes
-} from "./shared";
+import { addSnippets, renderProviderTypes } from "./shared";
 
 export async function toolsetProvider(
   options: ProviderOptions & { tools: ToolDescriptors | ToolSet }
@@ -20,12 +16,11 @@ export async function toolsetProvider(
   const descriptors: JsonSchemaToolDescriptors = {};
   await addSnippets(provider, options.snippets, options.executor, descriptors);
   if (Object.keys(descriptors).length > 0) {
-    attachProviderDescriptors(provider, descriptors);
-    provider.types = providerTypes(
-      provider.name,
+    provider.docs = {
       descriptors,
-      options.instructions
-    );
+      instructions: options.instructions
+    };
+    provider.types = renderProviderTypes(provider.name, provider.docs);
   }
   return provider;
 }
