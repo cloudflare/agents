@@ -1,5 +1,11 @@
 # @cloudflare/shell
 
+## 0.3.8
+
+### Patch Changes
+
+- [`c4ed558`](https://github.com/cloudflare/agents/commit/c4ed558cd4337945c79778dc28ae5b1411985aea) Thanks [@threepointone](https://github.com/threepointone)! - udpate dependencies
+
 ## 0.3.7
 
 ### Patch Changes

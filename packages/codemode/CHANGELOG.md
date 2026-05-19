@@ -1,5 +1,11 @@
 # @cloudflare/codemode
 
+## 0.3.7
+
+### Patch Changes
+
+- [#1547](https://github.com/cloudflare/agents/pull/1547) [`f739ec9`](https://github.com/cloudflare/agents/commit/f739ec9cd74c73da6a2d68403ab05f20940e36af) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Dispatch all codemode tool calls positionally and remove provider-level `positionalArgs` configuration.
+
 ## 0.3.6
 
 ### Patch Changes
