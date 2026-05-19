@@ -10,28 +10,26 @@ import type {
   McpServer,
   RegisteredTool,
   ToolCallback
-} from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Client as MCPClient } from "@modelcontextprotocol/sdk/client/index.js";
+} from "@modelcontextprotocol/server";
+import type { Client as MCPClient } from "@modelcontextprotocol/client";
 import type {
-  CallToolResultSchema,
-  CompatibilityCallToolResultSchema,
   CallToolRequest,
   CallToolResult,
   ToolAnnotations
-} from "@modelcontextprotocol/sdk/types.js";
+} from "@modelcontextprotocol/server";
 import type { ZodRawShape } from "zod";
-import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type { RequestOptions } from "@modelcontextprotocol/server";
 
-// v2 imports from @x402/core
-import { x402ResourceServer, HTTPFacilitatorClient } from "@x402/core/server";
-import type { FacilitatorConfig, ResourceConfig } from "@x402/core/server";
-import { x402Client } from "@x402/core/client";
+// v2 imports from @x402/server
+import { x402ResourceServer, HTTPFacilitatorClient } from "@x402/server/server";
+import type { FacilitatorConfig, ResourceConfig } from "@x402/server/server";
+import { x402Client } from "@x402/server/client";
 import type {
   PaymentPayload,
   PaymentRequirements,
   PaymentRequired,
   Network
-} from "@x402/core/types";
+} from "@x402/server/types";
 
 // v2 imports from @x402/evm
 import { registerExactEvmScheme as registerServerEvmScheme } from "@x402/evm/exact/server";
@@ -43,8 +41,8 @@ export type {
   PaymentRequirements,
   PaymentRequired,
   Network
-} from "@x402/core/types";
-export type { FacilitatorConfig } from "@x402/core/server";
+} from "@x402/server/types";
+export type { FacilitatorConfig } from "@x402/server/server";
 export type { ClientEvmSigner } from "@x402/evm";
 
 /**
@@ -303,9 +301,6 @@ export interface X402AugmentedClient {
       | ((payment: PaymentRequirements[]) => Promise<boolean>)
       | null,
     params: CallToolRequest["params"],
-    resultSchema?:
-      | typeof CallToolResultSchema
-      | typeof CompatibilityCallToolResultSchema,
     options?: RequestOptions
   ): Promise<CallToolResult>;
 }
@@ -383,13 +378,10 @@ export function withX402Client<T extends MCPClient>(
       | ((payment: PaymentRequirements[]) => Promise<boolean>)
       | null,
     params: CallToolRequest["params"],
-    resultSchema?:
-      | typeof CallToolResultSchema
-      | typeof CompatibilityCallToolResultSchema,
     options?: RequestOptions
   ): ReturnType<typeof client.callTool> => {
     // Call the tool
-    const res = await _callTool(params, resultSchema, options);
+    const res = await _callTool(params, options);
 
     // Check for x402 payment required error in response metadata
     const maybeX402Error = res._meta?.["x402/error"] as

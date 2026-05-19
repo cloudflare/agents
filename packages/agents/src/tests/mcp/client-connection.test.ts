@@ -1,6 +1,6 @@
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { McpServer } from "@modelcontextprotocol/server";
+import type { ServerCapabilities } from "@modelcontextprotocol/server";
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { z } from "zod";
 import { MCPClientConnection } from "../../mcp/client-connection";
@@ -35,22 +35,31 @@ class MockMcpServer {
       "test-tool",
       {
         description: "A test tool",
-        inputSchema: { message: z.string().describe("Test message") }
+        inputSchema: z.object({ message: z.string().describe("Test message") })
       },
       async ({ message }) => {
         return { content: [{ text: `Test: ${message}`, type: "text" }] };
       }
     );
 
-    this.server.resource("test-resource", "test://resource", async (uri) => ({
-      contents: [{ text: "Test resource content", uri: uri.href }]
-    }));
+    this.server.registerResource(
+      "test-resource",
+      "test://resource",
+      {},
+      async (uri) => ({
+        contents: [{ text: "Test resource content", uri: uri.href }]
+      })
+    );
 
-    this.server.prompt("test-prompt", "A test prompt", async () => ({
-      messages: [
-        { role: "user", content: { type: "text", text: "Test prompt" } }
-      ]
-    }));
+    this.server.registerPrompt(
+      "test-prompt",
+      { description: "A test prompt" },
+      async () => ({
+        messages: [
+          { role: "user", content: { type: "text", text: "Test prompt" } }
+        ]
+      })
+    );
   }
 
   async startServer(port = 3000): Promise<string> {

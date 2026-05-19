@@ -1,10 +1,10 @@
-import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
+import type { OAuthClientProvider } from "@modelcontextprotocol/client";
 import type {
   OAuthClientInformation,
   OAuthClientInformationFull,
   OAuthClientMetadata,
   OAuthTokens
-} from "@modelcontextprotocol/sdk/shared/auth.js";
+} from "@modelcontextprotocol/client";
 import { nanoid } from "nanoid";
 
 const STATE_EXPIRATION_MS = 10 * 60 * 1000; // 10 minutes

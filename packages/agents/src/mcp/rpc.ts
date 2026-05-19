@@ -1,12 +1,12 @@
 import type {
   Transport,
   TransportSendOptions
-} from "@modelcontextprotocol/sdk/shared/transport.js";
+} from "@modelcontextprotocol/server";
 import type {
   JSONRPCMessage,
   MessageExtraInfo
-} from "@modelcontextprotocol/sdk/types.js";
-import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
+} from "@modelcontextprotocol/server";
+import { parseJSONRPCMessage } from "@modelcontextprotocol/server";
 import { getServerByName } from "partyserver";
 import type { McpAgent } from ".";
 
@@ -261,7 +261,7 @@ export class RPCServerTransport implements Transport {
     }
 
     try {
-      JSONRPCMessageSchema.parse(message);
+      parseJSONRPCMessage(message);
     } catch {
       const id =
         typeof message === "object" && message !== null && "id" in message

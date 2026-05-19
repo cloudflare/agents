@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Client as MCPClient } from "@modelcontextprotocol/sdk/client/index.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { Client as MCPClient } from "@modelcontextprotocol/client";
 
 // --- Mock setup for @x402 modules ---
 

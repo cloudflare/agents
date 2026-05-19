@@ -6,7 +6,7 @@ import {
 } from "../../mcp/client-connection";
 import type { MCPServerRow } from "../../mcp/client-storage";
 import type { ToolCallOptions } from "ai";
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/server";
 import type { MCPObservabilityEvent } from "../../observability/mcp";
 import { nanoid } from "nanoid";
 

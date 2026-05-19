@@ -1,11 +1,8 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import { McpServer } from "@modelcontextprotocol/server";
 import type {
   CallToolResult,
-  IsomorphicHeaders,
-  ServerNotification,
-  ServerRequest
-} from "@modelcontextprotocol/sdk/types.js";
+  ServerContext
+} from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { McpAgent } from "../../mcp/index.ts";
 import {
@@ -19,10 +16,10 @@ import {
   MCPConnectionState
 } from "../../mcp/client-connection.ts";
 
-type ToolExtraInfo = RequestHandlerExtra<ServerRequest, ServerNotification>;
+type ToolExtraInfo = ServerContext;
 
 type EchoResponseData = {
-  headers: IsomorphicHeaders;
+  headers: Headers;
   authInfo: ToolExtraInfo["authInfo"] | null;
   hasRequestInfo: boolean;
   hasAuthInfo: boolean;
@@ -56,7 +53,7 @@ export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
       "greet",
       {
         description: "A simple greeting tool",
-        inputSchema: { name: z.string().describe("Name to greet") }
+        inputSchema: z.object({ name: z.string().describe("Name to greet") })
       },
       async ({ name }) => {
         return { content: [{ text: `Hello, ${name}!`, type: "text" }] };
@@ -81,10 +78,10 @@ export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
       "emitLog",
       {
         description: "Emit a logging/message notification",
-        inputSchema: {
+        inputSchema: z.object({
           level: z.enum(["debug", "info", "warning", "error"]),
           message: z.string()
-        }
+        })
       },
       async ({ level, message }) => {
         // Force a logging message to be sent when the tool is called
@@ -98,10 +95,12 @@ export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
       }
     );
 
-    this.server.tool(
+    this.server.registerTool(
       "elicitName",
-      "Test tool that elicits user input for a name",
-      {},
+      {
+        description: "Test tool that elicits user input for a name",
+        inputSchema: z.object({})
+      },
       async () => {
         const result = await this.server.server.elicitInput({
           message: "What is your name?",
@@ -134,11 +133,14 @@ export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
       }
     );
 
-    this.server.tool(
+    this.server.registerTool(
       "elicitNameCustom",
-      "Test tool that elicits user input using McpAgent.elicitInput()",
-      {},
-      async (_args, extra) => {
+      {
+        description:
+          "Test tool that elicits user input using McpAgent.elicitInput()",
+        inputSchema: z.object({})
+      },
+      async (_args, ctx) => {
         const result = await this.elicitInput(
           {
             message: "What is your name?",
@@ -153,7 +155,7 @@ export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
               required: ["name"]
             }
           },
-          { relatedRequestId: extra.requestId }
+          { relatedRequestId: ctx.mcpReq.id }
         );
 
         if (result.action === "accept" && result.content?.name) {
@@ -179,7 +181,7 @@ export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
       "installTempTool",
       {
         description: "Register a temp tool",
-        inputSchema: {}
+        inputSchema: z.object({})
       },
       async () => {
         if (!this.tempToolHandle) {
@@ -187,7 +189,9 @@ export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
             "temp-echo",
             {
               description: "Echo text (temporary tool)",
-              inputSchema: { what: z.string().describe("Text to echo") }
+              inputSchema: z.object({
+                what: z.string().describe("Text to echo")
+              })
             },
             async ({ what }) => {
               return { content: [{ type: "text", text: `echo:${what}` }] };
@@ -219,17 +223,19 @@ export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
     );
 
     // Echo request info for testing header and auth passthrough
-    this.server.tool(
+    this.server.registerTool(
       "echoRequestInfo",
-      "Echo back request headers and auth info",
-      {},
-      async (_args, extra: ToolExtraInfo): Promise<CallToolResult> => {
+      {
+        description: "Echo back request headers and auth info",
+        inputSchema: z.object({})
+      },
+      async (_args, ctx: ToolExtraInfo): Promise<CallToolResult> => {
         // Extract headers from requestInfo, auth from authInfo
-        const headers: IsomorphicHeaders = extra.requestInfo?.headers ?? {};
-        const authInfo = extra.authInfo ?? null;
+        const headers: Headers = ctx.http?.req?.headers ?? {};
+        const authInfo = ctx.http?.authInfo ?? null;
 
-        // Track non-function properties available in extra
-        const extraRecord = extra as Record<string, unknown>;
+        // Track non-function properties available in ctx
+        const extraRecord = ctx as Record<string, unknown>;
         const extraKeys = Object.keys(extraRecord).filter(
           (key) => typeof extraRecord[key] !== "function"
         );
@@ -238,16 +244,16 @@ export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
         const responseData: EchoResponseData = {
           headers,
           authInfo,
-          hasRequestInfo: !!extra.requestInfo,
-          hasAuthInfo: !!extra.authInfo,
-          requestId: extra.requestId,
+          hasRequestInfo: !!ctx.http?.req,
+          hasAuthInfo: !!ctx.http?.authInfo,
+          requestId: ctx.mcpReq.id,
           // Include any sessionId if it exists
-          sessionId: extra.sessionId ?? null,
-          // List all available properties in extra
+          sessionId: ctx.sessionId ?? null,
+          // List all available properties in ctx
           availableExtraKeys: extraKeys
         };
 
-        // Add any other properties from extra that aren't already included
+        // Add any other properties from ctx that aren't already included
         extraKeys.forEach((key) => {
           if (
             !["requestInfo", "authInfo", "requestId", "sessionId"].includes(key)
@@ -281,7 +287,7 @@ export class TestMcpJurisdiction extends McpAgent {
       "test-tool",
       {
         description: "A test tool",
-        inputSchema: { message: z.string().describe("Test message") }
+        inputSchema: z.object({ message: z.string().describe("Test message") })
       },
       async ({ message }) => {
         return { content: [{ text: `Echo: ${message}`, type: "text" }] };

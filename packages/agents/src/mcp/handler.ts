@@ -1,6 +1,6 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import type { Server } from "@modelcontextprotocol/server";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { runWithAuthContext, type McpAuthContext } from "./auth-context";
 import type { CORSOptions } from "./types";
 import { corsHeaders, handleCORS } from "./utils";

@@ -220,7 +220,7 @@ describe("Auto Transport", () => {
       const response = await sendPostRequest(
         ctx,
         AUTO_BASE,
-        notification as unknown as import("@modelcontextprotocol/sdk/types.js").JSONRPCMessage,
+        notification as unknown as import("@modelcontextprotocol/server").JSONRPCMessage,
         sessionId
       );
 

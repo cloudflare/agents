@@ -1,14 +1,14 @@
-import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type { Server } from "@modelcontextprotocol/server";
+import type { McpServer } from "@modelcontextprotocol/server";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import type {
   ElicitRequestFormParams,
   ElicitRequestURLParams,
   ElicitResult,
-  JSONRPCMessage
-} from "@modelcontextprotocol/sdk/types.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+  JSONRPCMessage,
+  RequestOptions
+} from "@modelcontextprotocol/server";
+import { isInitializeRequest } from "@modelcontextprotocol/server";
 import { Agent, getAgentByName } from "../index";
 import type { MaybePromise, CORSOptions } from "./types";
 import { corsHeaders, handleCORS, isDurableObjectNamespace } from "./utils";
@@ -292,7 +292,7 @@ export {
   ElicitRequestSchema,
   type ElicitRequest,
   type ElicitResult
-} from "@modelcontextprotocol/sdk/types.js";
+} from "@modelcontextprotocol/server";
 
 export type {
   MCPClientOAuthResult,
@@ -312,7 +312,7 @@ export { getMcpAuthContext, type McpAuthContext } from "./auth-context";
 
 /**
  * @deprecated WorkerTransport has been removed. Use `WebStandardStreamableHTTPServerTransport`
- * from `@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js` directly, or use
+ * from `@modelcontextprotocol/server` directly, or use
  * `createMcpHandler` / `McpAgent` which handle transport creation for you.
  */
 export const WorkerTransport = WebStandardStreamableHTTPServerTransport;

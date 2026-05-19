@@ -5,7 +5,7 @@ import { RPCClientTransport, RPCServerTransport } from "../../../mcp/rpc";
 import type {
   JSONRPCMessage,
   JSONRPCRequest
-} from "@modelcontextprotocol/sdk/types.js";
+} from "@modelcontextprotocol/server";
 import {
   TEST_MESSAGES,
   establishRPCConnection,

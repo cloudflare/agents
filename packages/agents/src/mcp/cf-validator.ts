@@ -1,6 +1,6 @@
-import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
+import type { Server } from "@modelcontextprotocol/server";
+import type { McpServer } from "@modelcontextprotocol/server";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/server/validators/cf-worker";
 
 /**
  * Inject the Cloudflare Worker-compatible JSON Schema validator into an MCP

@@ -1,14 +1,13 @@
-import { env } from "cloudflare:workers";
-import { createExecutionContext } from "cloudflare:test";
+import { createExecutionContext, env } from "cloudflare:test";
 import type {
   CallToolResult,
   JSONRPCMessage,
   ListToolsResult,
   JSONRPCNotification,
   JSONRPCResultResponse
-} from "@modelcontextprotocol/sdk/types.js";
+} from "@modelcontextprotocol/server";
 import { describe, expect, it } from "vitest";
-import worker from "../../worker";
+import worker, { type Env } from "../../worker";
 import {
   TEST_MESSAGES,
   initializeStreamableHTTPServer,
@@ -20,6 +19,10 @@ import {
   parseSSEData,
   expectValidToolsList
 } from "../../shared/test-utils";
+
+declare module "cloudflare:test" {
+  interface ProvidedEnv extends Env {}
+}
 
 // small helper to read one full SSE frame from a reader
 async function readOneFrame(
@@ -50,10 +53,11 @@ describe("Streamable HTTP Transport", () => {
       expect(response.headers.get("mcp-session-id")).toBeDefined();
     });
 
-    it("should reject initialization request with session ID", async () => {
+    it("should accept initialization request with session ID (routes to matching DO)", async () => {
       const ctx = createExecutionContext();
 
-      // Send an initialization request with a session ID - this should fail
+      // In the DO-per-session architecture, sending an init with a session ID
+      // routes to the corresponding DO which handles it as a valid init.
       const initWithSessionMessage = {
         ...TEST_MESSAGES.initialize,
         id: "init-with-session"
@@ -66,13 +70,9 @@ describe("Streamable HTTP Transport", () => {
         "some-session-id"
       );
 
-      expect(response.status).toBe(400);
-      const errorData = await response.json();
-      expectErrorResponse(
-        errorData,
-        -32600,
-        /Initialization requests must not include a sessionId/
-      );
+      // The DO accepts the initialization and returns 200
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("text/event-stream");
     });
 
     it("should reject batch with multiple initialization requests", async () => {
@@ -117,9 +117,11 @@ describe("Streamable HTTP Transport", () => {
       expectErrorResponse(errorData, -32000, /Bad Request/);
     });
 
-    it("should reject invalid session ID", async () => {
+    it("should reject non-init request to uninitialized session", async () => {
       const ctx = createExecutionContext();
 
+      // Sending a non-init request with a session ID that hasn't been
+      // initialized routes to a fresh DO whose transport rejects it.
       const response = await sendPostRequest(
         ctx,
         baseUrl,
@@ -127,9 +129,9 @@ describe("Streamable HTTP Transport", () => {
         "invalid-session-id"
       );
 
-      expect(response.status).toBe(404);
+      expect(response.status).toBe(400);
       const errorData = await response.json();
-      expectErrorResponse(errorData, -32001, /Session not found/);
+      expectErrorResponse(errorData, -32000, /Bad Request/);
     });
   });
 
@@ -343,8 +345,6 @@ describe("Streamable HTTP Transport", () => {
       expect(combinedText).toContain('"tools"');
       expect(combinedText).toContain('"id":"req-2"');
       expect(combinedText).toContain("Hello, BatchUser");
-
-      await reader?.cancel();
     });
   });
 
@@ -387,9 +387,6 @@ describe("Streamable HTTP Transport", () => {
       const text2 = new TextDecoder().decode(value2);
       expect(text2).toContain('"id":"req-2"');
       expect(text2).toContain("Hello, Connection2");
-
-      await reader1?.cancel();
-      await reader2?.cancel();
     });
   });
 
@@ -407,8 +404,6 @@ describe("Streamable HTTP Transport", () => {
       // Control frame is internal and not forwarded, no events should be sent.
       const maybe = await readSSEEventWithTimeout(reader, 50);
       expect(maybe).toBeNull();
-
-      await reader.cancel();
     });
 
     it("should continue routing POST responses to their own SSE streams even when standalone SSE is open", async () => {
@@ -435,8 +430,6 @@ describe("Streamable HTTP Transport", () => {
       // Ensure the standalone stream did NOT get anything
       const maybe = await readSSEEventWithTimeout(standaloneReader, 50);
       expect(maybe).toBeNull();
-
-      await standaloneReader.cancel();
     });
 
     it("should deliver logging/message on the standalone SSE stream", async () => {
@@ -491,8 +484,6 @@ describe("Streamable HTTP Transport", () => {
       // Standalone stream remains open
       const silent = await readSSEEventWithTimeout(standaloneReader, 50);
       expect(silent).toBeNull();
-
-      await standaloneReader.cancel();
     });
 
     it("should emit tools list_changed on install/uninstall and reflect in tools/list", async () => {
@@ -604,8 +595,6 @@ describe("Streamable HTTP Transport", () => {
       listJson = parseSSEData(listFrame) as JSONRPCResultResponse;
       tools = (listJson.result?.tools ?? []) as ListToolsResult["tools"];
       expect(tools.some((t) => t.name === "temp-echo")).toBe(false);
-
-      await standaloneReader.cancel();
     });
   });
 
