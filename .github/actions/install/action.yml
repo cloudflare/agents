@@ -1,5 +1,5 @@
 name: Install
-description: Set up Node and install dependencies, skipping `npm ci` on a node_modules cache hit (keyed on package-lock.json + patches/**).
+description: Set up Node and install dependencies with npm's package cache.
 
 inputs:
   registry-url:
@@ -16,14 +16,6 @@ runs:
         registry-url: ${{ inputs.registry-url }}
         cache: npm
 
-    - name: Cache node_modules
-      id: cache-node-modules
-      uses: actions/cache@v5
-      with:
-        path: "**/node_modules"
-        key: ${{ runner.os }}-node-24-modules-${{ hashFiles('package-lock.json', 'patches/**') }}
-
     - name: Install dependencies
-      if: steps.cache-node-modules.outputs.cache-hit != 'true'
       shell: bash
       run: npm ci
