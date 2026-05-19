@@ -6,6 +6,12 @@
  * happens quickly in tests instead of waiting the default 30s.
  */
 import { Agent, callable, routeAgentRequest } from "agents";
+import type {
+  FiberInspection,
+  FiberRecoveryContext as RunFiberRecoveryContext,
+  FiberRecoveryResult,
+  StartFiberResult
+} from "agents";
 
 type Env = {
   RunFiberTestAgent: DurableObjectNamespace<RunFiberTestAgent>;
@@ -26,14 +32,14 @@ export type SlowFiberSnapshot = {
 
 // ── RunFiberTestAgent (uses Agent.runFiber directly, no mixin) ────────
 
-import type { FiberRecoveryContext as RunFiberRecoveryContext } from "agents";
-
 export class RunFiberTestAgent extends Agent<Record<string, unknown>> {
   static options = { keepAliveIntervalMs: 2_000 };
 
   recoveredFibers: RunFiberRecoveryContext[] = [];
 
-  override async onFiberRecovered(ctx: RunFiberRecoveryContext) {
+  override async onFiberRecovered(
+    ctx: RunFiberRecoveryContext
+  ): Promise<void | FiberRecoveryResult> {
     this.recoveredFibers.push(ctx);
     // Re-start the fiber from checkpoint
     if (ctx.name === "slowSteps") {
@@ -53,6 +59,18 @@ export class RunFiberTestAgent extends Agent<Record<string, unknown>> {
         }
       }).catch(console.error);
     }
+    if (ctx.name === "managedSlowComplete") {
+      return {
+        status: "completed",
+        snapshot: {
+          recovered: true,
+          checkpoint: ctx.snapshot
+        },
+        metadata: {
+          recoveredBy: "onFiberRecovered"
+        }
+      };
+    }
   }
 
   @callable()
@@ -68,6 +86,54 @@ export class RunFiberTestAgent extends Agent<Record<string, unknown>> {
     }).catch(console.error);
 
     return "started";
+  }
+
+  @callable()
+  async startManagedSlowFiber(
+    totalSteps: number,
+    idempotencyKey: string,
+    mode: "complete" | "interrupt"
+  ): Promise<StartFiberResult> {
+    const name = mode === "complete" ? "managedSlowComplete" : "managedSlow";
+    return this.startFiber(
+      name,
+      async (ctx) => {
+        const completedSteps: StepResult[] = [];
+        for (let i = 0; i < totalSteps; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          completedSteps.push({
+            index: i,
+            value: `managed-step-${i}-done`,
+            completedAt: Date.now()
+          });
+          ctx.stash({ completedSteps: [...completedSteps], totalSteps });
+        }
+      },
+      {
+        idempotencyKey,
+        metadata: { totalSteps, mode }
+      }
+    );
+  }
+
+  @callable()
+  async retryManagedSlowFiberAndWait(
+    totalSteps: number,
+    idempotencyKey: string,
+    mode: "complete" | "interrupt"
+  ): Promise<StartFiberResult> {
+    const name = mode === "complete" ? "managedSlowComplete" : "managedSlow";
+    return this.startFiber(
+      name,
+      async () => {
+        throw new Error("duplicate managed fiber callback should not run");
+      },
+      {
+        idempotencyKey,
+        metadata: { totalSteps, mode, duplicate: true },
+        waitForCompletion: true
+      }
+    );
   }
 
   @callable()
@@ -91,6 +157,29 @@ export class RunFiberTestAgent extends Agent<Record<string, unknown>> {
   @callable()
   getRecoveredFibers(): RunFiberRecoveryContext[] {
     return this.recoveredFibers;
+  }
+
+  @callable()
+  async getManagedFiberByKey(
+    idempotencyKey: string
+  ): Promise<FiberInspection | null> {
+    return this.inspectFiberByKey(idempotencyKey);
+  }
+
+  @callable()
+  async getManagedFiberStatus(idempotencyKey: string): Promise<{
+    runCount: number;
+    recoveredCount: number;
+    fiber: FiberInspection | null;
+  }> {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_runs
+    `;
+    return {
+      runCount: rows[0]?.count ?? 0,
+      recoveredCount: this.recoveredFibers.length,
+      fiber: await this.inspectFiberByKey(idempotencyKey)
+    };
   }
 
   @callable()
@@ -110,8 +199,19 @@ export class SubAgentFiberChild extends Agent<Record<string, unknown>> {
 
   recoveredFibers: RunFiberRecoveryContext[] = [];
 
-  override async onFiberRecovered(ctx: RunFiberRecoveryContext) {
+  override async onFiberRecovered(
+    ctx: RunFiberRecoveryContext
+  ): Promise<void | FiberRecoveryResult> {
     this.recoveredFibers.push(ctx);
+    if (ctx.name === "managedSubSlowComplete") {
+      return {
+        status: "completed",
+        snapshot: {
+          recovered: true,
+          checkpoint: ctx.snapshot
+        }
+      };
+    }
   }
 
   async startSlowFiber(totalSteps: number): Promise<string> {
@@ -126,6 +226,31 @@ export class SubAgentFiberChild extends Agent<Record<string, unknown>> {
     }).catch(console.error);
 
     return "started";
+  }
+
+  async startManagedSlowFiber(
+    totalSteps: number,
+    idempotencyKey: string
+  ): Promise<StartFiberResult> {
+    return this.startFiber(
+      "managedSubSlowComplete",
+      async (ctx) => {
+        const completedSteps: StepResult[] = [];
+        for (let i = 0; i < totalSteps; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          completedSteps.push({
+            index: i,
+            value: `managed-sub-step-${i}-done`,
+            completedAt: Date.now()
+          });
+          ctx.stash({ completedSteps: [...completedSteps], totalSteps });
+        }
+      },
+      {
+        idempotencyKey,
+        metadata: { totalSteps }
+      }
+    );
   }
 
   getFiberStatus(): {
@@ -147,6 +272,27 @@ export class SubAgentFiberChild extends Agent<Record<string, unknown>> {
 
   getRecoveredFibers(): RunFiberRecoveryContext[] {
     return this.recoveredFibers;
+  }
+
+  async getManagedFiberByKey(
+    idempotencyKey: string
+  ): Promise<FiberInspection | null> {
+    return this.inspectFiberByKey(idempotencyKey);
+  }
+
+  async getManagedFiberStatus(idempotencyKey: string): Promise<{
+    runCount: number;
+    recoveredCount: number;
+    fiber: FiberInspection | null;
+  }> {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_runs
+    `;
+    return {
+      runCount: rows[0]?.count ?? 0,
+      recoveredCount: this.recoveredFibers.length,
+      fiber: await this.inspectFiberByKey(idempotencyKey)
+    };
   }
 
   getRunningFiberSnapshot(): unknown {
@@ -168,6 +314,16 @@ export class SubAgentFiberParent extends Agent<Record<string, unknown>> {
   ): Promise<string> {
     const child = await this.subAgent(SubAgentFiberChild, childName);
     return child.startSlowFiber(totalSteps);
+  }
+
+  @callable()
+  async startChildManagedSlowFiber(
+    childName: string,
+    totalSteps: number,
+    idempotencyKey: string
+  ): Promise<StartFiberResult> {
+    const child = await this.subAgent(SubAgentFiberChild, childName);
+    return child.startManagedSlowFiber(totalSteps, idempotencyKey);
   }
 
   @callable()
@@ -193,6 +349,19 @@ export class SubAgentFiberParent extends Agent<Record<string, unknown>> {
   ): Promise<RunFiberRecoveryContext[]> {
     const child = await this.subAgent(SubAgentFiberChild, childName);
     return child.getRecoveredFibers();
+  }
+
+  @callable()
+  async getChildManagedFiberStatus(
+    childName: string,
+    idempotencyKey: string
+  ): Promise<{
+    runCount: number;
+    recoveredCount: number;
+    fiber: FiberInspection | null;
+  }> {
+    const child = await this.subAgent(SubAgentFiberChild, childName);
+    return child.getManagedFiberStatus(idempotencyKey);
   }
 }
 

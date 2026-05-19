@@ -113,12 +113,27 @@ Durable execution with checkpointing and recovery.
 ```typescript
 class Agent {
   runFiber<T>(name: string, fn: (ctx: FiberContext) => Promise<T>): Promise<T>;
+  startFiber(
+    name: string,
+    fn: (ctx: FiberContext) => Promise<void>,
+    options?: StartFiberOptions
+  ): Promise<StartFiberResult>;
+  inspectFiber(fiberId: string): Promise<FiberInspection | null>;
+  inspectFiberByKey(idempotencyKey: string): Promise<FiberInspection | null>;
+  listFibers(options?: ListFibersOptions): Promise<FiberInspection[]>;
+  cancelFiber(fiberId: string, reason?: string): Promise<boolean>;
+  cancelFiberByKey(idempotencyKey: string, reason?: string): Promise<boolean>;
+  deleteFibers(options?: DeleteFibersOptions): Promise<number>;
+  resolveFiber(fiberId: string, result: FiberRecoveryResult): Promise<boolean>;
   stash(data: unknown): void;
-  onFiberRecovered(ctx: FiberRecoveryContext): Promise<void>;
+  onFiberRecovered(
+    ctx: FiberRecoveryContext
+  ): Promise<void | FiberRecoveryResult>;
 }
 
 type FiberContext = {
   id: string;
+  signal: AbortSignal;
   stash(data: unknown): void;
   snapshot: unknown | null;
 };
@@ -126,10 +141,113 @@ type FiberContext = {
 type FiberRecoveryContext = {
   id: string;
   name: string;
+  status?: FiberStatus;
+  idempotencyKey?: string;
+  metadata?: Record<string, unknown> | null;
   snapshot: unknown | null;
   createdAt: number;
 };
 ```
+
+## `startFiber()`
+
+Use `startFiber()` when a caller needs to durably accept background work,
+return quickly, and safely dedupe retries. It stores a retained fiber record
+before the callback runs, then starts the callback in the background using the
+same keep-alive and recovery machinery as `runFiber()`.
+
+```typescript
+const receipt = await this.startFiber(
+  "reply-to-webhook",
+  async (ctx) => {
+    ctx.stash({ webhookId, threadId });
+    await postReply(threadId);
+  },
+  {
+    idempotencyKey: `webhook:${webhookId}`,
+    metadata: { threadId }
+  }
+);
+
+if (!receipt.accepted) {
+  // This webhook was already accepted by an earlier delivery.
+}
+```
+
+By default, `startFiber()` returns after the work is durably accepted. Pass
+`waitForCompletion: true` when the caller should remain open until the accepted
+fiber reaches a terminal status. Duplicate calls with the same idempotency key
+join an active in-memory execution when possible, then return the retained
+status with `accepted: false`.
+
+```typescript
+const result = await this.startFiber("reply-to-webhook", reply, {
+  idempotencyKey: `webhook:${webhookId}`,
+  waitForCompletion: true
+});
+
+if (result.status === "error") {
+  console.error(result.error);
+}
+```
+
+`startFiber()` is a durable acceptance API, not a value-return API. It returns
+the managed fiber status, but not the callback's result. Inspect status later
+with `inspectFiber()` or `inspectFiberByKey()`.
+
+```typescript
+const current = await this.inspectFiberByKey(`webhook:${webhookId}`);
+
+await this.cancelFiber(current.fiberId, "No longer needed");
+
+await this.deleteFibers({
+  status: ["completed", "error", "aborted", "interrupted"],
+  completedBefore: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+});
+```
+
+Cancellation is cooperative. `cancelFiber()` records an aborted terminal state
+and aborts `ctx.signal` if the fiber is running in the current isolate. Your
+callback should check `ctx.signal.aborted` around expensive work and before
+visible side effects. Callers using `waitForCompletion: true` return when the
+ledger reaches `aborted`, even if a non-cooperative callback keeps running in
+the current isolate.
+
+If the Durable Object is evicted mid-fiber, the retained record is marked
+`interrupted` and `onFiberRecovered()` receives the last checkpoint. The
+original closure cannot be replayed automatically; use `ctx.name`,
+`ctx.snapshot`, and metadata to decide whether to resume, compensate, or leave
+the record for inspection.
+
+Return a `FiberRecoveryResult` from `onFiberRecovered()` to record the policy
+decision:
+
+```typescript
+async onFiberRecovered(ctx: FiberRecoveryContext) {
+  if (ctx.name !== "reply-to-webhook") return;
+
+  const snapshot = ctx.snapshot as { webhookId: string; threadId: string };
+  await postRecoveryMessage(snapshot.threadId);
+
+  return {
+    status: "completed",
+    snapshot: { ...snapshot, recovered: true }
+  };
+}
+```
+
+Returning `undefined` keeps a managed fiber `interrupted`. Throwing leaves it
+`interrupted` and records the recovery error for inspection. Terminal managed
+fibers such as `aborted` are not recovered again if a stale run row remains.
+If a non-terminal managed ledger row loses its transient `cf_agents_runs` row
+before completion, housekeeping also marks it `interrupted` and runs the same
+recovery hook.
+
+If recovery is triggered by a later duplicate webhook instead of
+`onFiberRecovered()`, use `resolveFiber()` with the same result shape after your
+application-level recovery succeeds. `resolveFiber()` only updates managed
+fibers that are currently `interrupted`; it returns `false` for pending,
+running, or already-terminal rows.
 
 ### Lifecycle
 

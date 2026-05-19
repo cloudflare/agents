@@ -1,5 +1,9 @@
 import { Agent, getCurrentAgent } from "../../index.ts";
-import type { FiberRecoveryContext } from "../../index.ts";
+import type {
+  FiberInspection,
+  FiberRecoveryContext,
+  FiberRecoveryResult
+} from "../../index.ts";
 import { RpcTarget } from "cloudflare:workers";
 
 // ── SubAgent: Counter ───────────────────────────────────────────────
@@ -52,13 +56,18 @@ export class CounterSubAgent extends Agent {
     return true;
   }
 
-  override async onFiberRecovered(ctx: FiberRecoveryContext): Promise<void> {
+  override async onFiberRecovered(
+    ctx: FiberRecoveryContext
+  ): Promise<void | FiberRecoveryResult> {
     this.sql`
       INSERT OR REPLACE INTO fiber_recovery_log
         (id, name, snapshot, created_at)
       VALUES
         (${ctx.id}, ${ctx.name}, ${JSON.stringify(ctx.snapshot)}, ${ctx.createdAt})
     `;
+    if (ctx.name === "managed-recovery-complete") {
+      return { status: "completed", snapshot: { recovered: true } };
+    }
   }
 
   increment(id: string): number {
@@ -375,6 +384,31 @@ export class CounterSubAgent extends Agent {
     return id;
   }
 
+  async holdManagedFiber(value: string, key: string): Promise<string> {
+    const result = await this.startFiber(
+      "managed-held",
+      async (ctx) => {
+        ctx.stash({ value });
+        this.sql`
+          INSERT INTO schedule_log
+            (value, agent_name, current_agent_name, parent_class, schedule_id, callback)
+          VALUES
+            (${value}, ${this.name}, null, ${this.parentPath.at(-1)?.className ?? ""}, ${ctx.id}, ${"holdManagedFiber"})
+        `;
+        await new Promise<void>((resolve, reject) => {
+          this._releaseHeldFiber = resolve;
+          ctx.signal.addEventListener(
+            "abort",
+            () => reject(new Error("managed sub-agent cancelled")),
+            { once: true }
+          );
+        });
+      },
+      { idempotencyKey: key }
+    );
+    return result.fiberId;
+  }
+
   async releaseHeldFiber(): Promise<void> {
     const release = this._releaseHeldFiber;
     this._releaseHeldFiber = undefined;
@@ -390,6 +424,24 @@ export class CounterSubAgent extends Agent {
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
     `;
+  }
+
+  async insertInterruptedManagedFiber(
+    id: string,
+    name: string,
+    snapshot?: unknown
+  ): Promise<void> {
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_agents_fibers
+        (fiber_id, idempotency_key, name, status, snapshot, metadata_json,
+         error_message, created_at, started_at, completed_at)
+      VALUES
+        (${id}, ${`key:${id}`}, ${name}, 'running',
+         ${snapshot ? JSON.stringify(snapshot) : null},
+         NULL, NULL, ${now}, ${now}, NULL)
+    `;
+    await this.insertInterruptedFiber(id, name, snapshot);
   }
 
   getRecoveredFibers(): Array<{
@@ -422,6 +474,10 @@ export class CounterSubAgent extends Agent {
       SELECT COUNT(*) as count FROM cf_agents_runs
     `;
     return rows[0]?.count ?? 0;
+  }
+
+  async inspectManagedFiber(fiberId: string): Promise<FiberInspection | null> {
+    return this.inspectFiber(fiberId);
   }
 
   async tryCancelSchedule(): Promise<string> {
@@ -1564,9 +1620,26 @@ export class TestSubAgentParent extends Agent {
     return child.holdFiber(value);
   }
 
+  async subAgentHoldManagedFiber(
+    subAgentName: string,
+    value: string,
+    key: string
+  ): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.holdManagedFiber(value, key);
+  }
+
   async subAgentReleaseHeldFiber(subAgentName: string): Promise<void> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     await child.releaseHeldFiber();
+  }
+
+  async subAgentManagedFiber(
+    subAgentName: string,
+    fiberId: string
+  ): Promise<FiberInspection | null> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.inspectManagedFiber(fiberId);
   }
 
   async subAgentRunningFiberCount(subAgentName: string): Promise<number> {
@@ -1594,6 +1667,17 @@ export class TestSubAgentParent extends Agent {
   ): Promise<void> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     await child.insertInterruptedFiber(id, name, snapshot);
+    await this._cf_registerFacetRun(await child.getSelfPath(), id);
+  }
+
+  async insertSubAgentInterruptedManagedFiber(
+    subAgentName: string,
+    id: string,
+    name: string,
+    snapshot?: { value?: string }
+  ): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.insertInterruptedManagedFiber(id, name, snapshot);
     await this._cf_registerFacetRun(await child.getSelfPath(), id);
   }
 

@@ -1,5 +1,11 @@
 import { Agent } from "../../index.ts";
-import type { FiberRecoveryContext } from "../../index.ts";
+import type {
+  FiberInspection,
+  FiberRecoveryContext,
+  FiberRecoveryResult,
+  ListFibersOptions,
+  StartFiberResult
+} from "../../index.ts";
 
 export class TestRunFiberAgent extends Agent {
   static options = { keepAliveIntervalMs: 2_000 };
@@ -9,9 +15,24 @@ export class TestRunFiberAgent extends Agent {
 
   /** Resolves the in-flight `holdFiber` callback's pending promise. */
   private _releaseHeldFiber?: () => void;
+  private _releaseHeldManagedFiber?: () => void;
+  private _releaseWaitedManagedFiber?: () => void;
+  private _releaseIgnoredCancelManagedFiber?: () => void;
 
-  override async onFiberRecovered(ctx: FiberRecoveryContext) {
+  override async onFiberRecovered(
+    ctx: FiberRecoveryContext
+  ): Promise<void | FiberRecoveryResult> {
     this.recoveredFibers.push(ctx);
+    if (ctx.name === "managed-recovery-complete") {
+      return {
+        status: "completed",
+        snapshot: { recovered: true },
+        metadata: { recovered: true }
+      };
+    }
+    if (ctx.name === "managed-recovery-throws") {
+      throw new Error("Recovery failed");
+    }
   }
 
   // ── Test methods exposed via RPC ──────────────────────────────
@@ -76,6 +97,207 @@ export class TestRunFiberAgent extends Agent {
     return id;
   }
 
+  async startManaged(
+    value: string,
+    options?: { fiberId?: string; idempotencyKey?: string }
+  ): Promise<StartFiberResult> {
+    return this.startFiber(
+      "managed",
+      async (ctx) => {
+        ctx.stash({ value });
+        this.executionLog.push(`managed:${value}`);
+      },
+      {
+        fiberId: options?.fiberId,
+        idempotencyKey: options?.idempotencyKey,
+        metadata: { value }
+      }
+    );
+  }
+
+  async startManagedForError(
+    value: string,
+    options?: { fiberId?: string; idempotencyKey?: string }
+  ): Promise<string> {
+    try {
+      await this.startFiber(
+        "managed",
+        async (ctx) => {
+          ctx.stash({ value });
+        },
+        {
+          fiberId: options?.fiberId,
+          idempotencyKey: options?.idempotencyKey,
+          metadata: { value }
+        }
+      );
+      return "no-error";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async startManagedFailing(idempotencyKey: string): Promise<StartFiberResult> {
+    return this.startFiber(
+      "managed-failing",
+      async () => {
+        this.executionLog.push("managed-failing");
+        throw new Error("Managed failure");
+      },
+      { idempotencyKey }
+    );
+  }
+
+  async startManagedWithRunCollision(
+    fiberId: string
+  ): Promise<StartFiberResult> {
+    await this.insertInterruptedFiber(fiberId, "preexisting-run");
+    return this.startFiber(
+      "managed-setup-failure",
+      async () => {
+        this.executionLog.push("should-not-run");
+      },
+      { fiberId }
+    );
+  }
+
+  async holdManaged(value: string, idempotencyKey: string): Promise<string> {
+    const result = await this.startFiber(
+      "managed-held",
+      async (ctx) => {
+        ctx.stash({ value });
+        this.executionLog.push(`managed-held:${value}`);
+        await new Promise<void>((resolve, reject) => {
+          this._releaseHeldManagedFiber = resolve;
+          ctx.signal.addEventListener(
+            "abort",
+            () => reject(new Error("managed cancelled")),
+            { once: true }
+          );
+        });
+        this.executionLog.push(`managed-held-done:${value}`);
+      },
+      { idempotencyKey }
+    );
+    return result.fiberId;
+  }
+
+  async startManagedAndWait(
+    value: string,
+    idempotencyKey: string
+  ): Promise<{
+    accepted: boolean;
+    status: string;
+    fiberId: string;
+  }> {
+    const result = await this.startFiber(
+      "managed-wait",
+      async (ctx) => {
+        ctx.stash({ value });
+        this.executionLog.push(`managed-wait:${value}`);
+      },
+      { idempotencyKey, waitForCompletion: true }
+    );
+    return {
+      accepted: result.accepted,
+      status: result.status,
+      fiberId: result.fiberId
+    };
+  }
+
+  async holdManagedAndWait(
+    value: string,
+    idempotencyKey: string
+  ): Promise<{
+    accepted: boolean;
+    status: string;
+    fiberId: string;
+  }> {
+    const result = await this.startFiber(
+      "managed-wait-held",
+      async (ctx) => {
+        ctx.stash({ value });
+        this.executionLog.push(`managed-wait-held:${value}`);
+        await new Promise<void>((resolve) => {
+          this._releaseWaitedManagedFiber = resolve;
+        });
+      },
+      { idempotencyKey, waitForCompletion: true }
+    );
+    return {
+      accepted: result.accepted,
+      status: result.status,
+      fiberId: result.fiberId
+    };
+  }
+
+  async holdManagedIgnoringCancelAndWait(
+    value: string,
+    idempotencyKey: string
+  ): Promise<{
+    accepted: boolean;
+    status: string;
+    fiberId: string;
+  }> {
+    const result = await this.startFiber(
+      "managed-wait-ignore-cancel",
+      async (ctx) => {
+        ctx.stash({ value });
+        this.executionLog.push(`managed-wait-ignore-cancel:${value}`);
+        await new Promise<void>((resolve) => {
+          this._releaseIgnoredCancelManagedFiber = resolve;
+        });
+        this.executionLog.push(`managed-wait-ignore-cancel-done:${value}`);
+      },
+      { idempotencyKey, waitForCompletion: true }
+    );
+    return {
+      accepted: result.accepted,
+      status: result.status,
+      fiberId: result.fiberId
+    };
+  }
+
+  async startManagedFailingAndWait(idempotencyKey: string): Promise<{
+    accepted: boolean;
+    status: string;
+    fiberId: string;
+    error?: string;
+  }> {
+    const result = await this.startFiber(
+      "managed-wait-failing",
+      async () => {
+        this.executionLog.push("managed-wait-failing");
+        throw new Error("Managed wait failure");
+      },
+      { idempotencyKey, waitForCompletion: true }
+    );
+    return {
+      accepted: result.accepted,
+      status: result.status,
+      fiberId: result.fiberId,
+      error: result.error
+    };
+  }
+
+  async releaseWaitedManagedFiber(): Promise<void> {
+    const release = this._releaseWaitedManagedFiber;
+    this._releaseWaitedManagedFiber = undefined;
+    release?.();
+  }
+
+  async releaseIgnoredCancelManagedFiber(): Promise<void> {
+    const release = this._releaseIgnoredCancelManagedFiber;
+    this._releaseIgnoredCancelManagedFiber = undefined;
+    release?.();
+  }
+
+  async releaseManagedFiber(): Promise<void> {
+    const release = this._releaseHeldManagedFiber;
+    this._releaseHeldManagedFiber = undefined;
+    release?.();
+  }
+
   /**
    * Like `fireAndForget`, but the fiber's callback awaits an explicit
    * `releaseFiber()` signal instead of a wall-clock timer. Lets tests assert
@@ -100,6 +322,44 @@ export class TestRunFiberAgent extends Agent {
     const release = this._releaseHeldFiber;
     this._releaseHeldFiber = undefined;
     release?.();
+  }
+
+  async inspectManagedFiber(fiberId: string): Promise<FiberInspection | null> {
+    return this.inspectFiber(fiberId);
+  }
+
+  async inspectManagedFiberByKey(
+    idempotencyKey: string
+  ): Promise<FiberInspection | null> {
+    return this.inspectFiberByKey(idempotencyKey);
+  }
+
+  async listManagedFibers(
+    options?: ListFibersOptions
+  ): Promise<FiberInspection[]> {
+    return this.listFibers(options);
+  }
+
+  async cancelManagedFiber(fiberId: string, reason?: string): Promise<boolean> {
+    return this.cancelFiber(fiberId, reason);
+  }
+
+  async cancelManagedFiberByKey(
+    idempotencyKey: string,
+    reason?: string
+  ): Promise<boolean> {
+    return this.cancelFiberByKey(idempotencyKey, reason);
+  }
+
+  async deleteManagedFibers(): Promise<number> {
+    return this.deleteFibers();
+  }
+
+  async resolveManagedFiber(fiberId: string): Promise<boolean> {
+    return this.resolveFiber(fiberId, {
+      status: "completed",
+      snapshot: { resolved: true }
+    });
   }
 
   async runConcurrent(): Promise<void> {
@@ -175,6 +435,61 @@ export class TestRunFiberAgent extends Agent {
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
     `;
+  }
+
+  async insertInterruptedManagedFiber(
+    id: string,
+    name: string,
+    snapshot?: unknown
+  ): Promise<void> {
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_agents_fibers
+        (fiber_id, idempotency_key, name, status, snapshot, metadata_json,
+         error_message, created_at, started_at, completed_at)
+      VALUES
+        (${id}, ${`key:${id}`}, ${name}, 'running',
+         ${snapshot ? JSON.stringify(snapshot) : null},
+         ${JSON.stringify({ inserted: true })}, NULL, ${now}, ${now}, NULL)
+    `;
+    await this.insertInterruptedFiber(id, name, snapshot);
+  }
+
+  async insertManagedLedgerOnlyFiber(
+    id: string,
+    name: string,
+    status: "pending" | "running",
+    snapshot?: unknown
+  ): Promise<void> {
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_agents_fibers
+        (fiber_id, idempotency_key, name, status, snapshot, metadata_json,
+         error_message, created_at, started_at, completed_at)
+      VALUES
+        (${id}, ${`key:${id}`}, ${name}, ${status},
+         ${snapshot ? JSON.stringify(snapshot) : null},
+         ${JSON.stringify({ ledgerOnly: true })}, NULL, ${now},
+         ${status === "running" ? now : null}, NULL)
+    `;
+  }
+
+  async insertAbortedManagedFiberWithRun(
+    id: string,
+    name: string,
+    snapshot?: unknown
+  ): Promise<void> {
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_agents_fibers
+        (fiber_id, idempotency_key, name, status, snapshot, metadata_json,
+         error_message, created_at, started_at, completed_at)
+      VALUES
+        (${id}, ${`key:${id}`}, ${name}, 'aborted',
+         ${snapshot ? JSON.stringify(snapshot) : null},
+         ${JSON.stringify({ inserted: true })}, ${"cancelled"}, ${now}, ${now}, ${now})
+    `;
+    await this.insertInterruptedFiber(id, name, snapshot);
   }
 
   async triggerRecoveryCheck(): Promise<void> {

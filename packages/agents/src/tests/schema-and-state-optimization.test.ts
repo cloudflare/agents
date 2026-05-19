@@ -35,6 +35,18 @@ const EXPECTED_SCHEMA_DDL = [
           created_at INTEGER NOT NULL,
           PRIMARY KEY (owner_path_key, run_id)
         )`,
+  `CREATE TABLE cf_agents_fibers (
+          fiber_id TEXT PRIMARY KEY,
+          idempotency_key TEXT UNIQUE,
+          name TEXT NOT NULL,
+          status TEXT NOT NULL,
+          snapshot TEXT,
+          metadata_json TEXT,
+          error_message TEXT,
+          created_at INTEGER NOT NULL,
+          started_at INTEGER,
+          completed_at INTEGER
+        )`,
   `CREATE TABLE cf_agents_mcp_servers (
             id TEXT PRIMARY KEY NOT NULL,
             name TEXT NOT NULL,
@@ -94,7 +106,7 @@ const EXPECTED_SCHEMA_DDL = [
         )`
 ];
 
-const EXPECTED_SCHEMA_VERSION = 7;
+const EXPECTED_SCHEMA_VERSION = 8;
 
 describe("schema DDL snapshot", () => {
   it("should match the expected DDL for the current schema version", async () => {
@@ -132,6 +144,7 @@ describe("schema version gating", () => {
     expect(await agent.tableExists("cf_agents_workflows")).toBe(true);
     expect(await agent.tableExists("cf_agents_mcp_servers")).toBe(true);
     expect(await agent.tableExists("cf_agents_runs")).toBe(true);
+    expect(await agent.tableExists("cf_agents_fibers")).toBe(true);
     expect(await agent.tableExists("cf_agents_facet_runs")).toBe(true);
   });
 

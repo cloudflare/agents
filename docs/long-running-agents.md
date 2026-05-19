@@ -198,18 +198,29 @@ try {
 
 `keepAlive` is for work measured in minutes, not hours. For truly long-running operations, use a different strategy:
 
-| Duration         | Strategy                                                  |
-| ---------------- | --------------------------------------------------------- |
-| Seconds          | Normal request handling                                   |
-| Minutes          | `keepAlive()` / `keepAliveWhile()`                        |
-| Minutes to hours | [Workflows](./workflows.md)                               |
-| Hours to days    | Async pattern: start job → hibernate → wake on completion |
+| Duration                      | Strategy                                                  |
+| ----------------------------- | --------------------------------------------------------- |
+| Seconds                       | Normal request handling                                   |
+| Minutes                       | `keepAlive()` / `keepAliveWhile()`                        |
+| Minutes, retryable acceptance | `startFiber()` with an idempotency key                    |
+| Minutes to hours              | [Workflows](./workflows.md)                               |
+| Hours to days                 | Async pattern: start job → hibernate → wake on completion |
 
 ## Surviving crashes: fibers and recovery
 
 An agent can be evicted at any time — a deploy, a platform restart, or hitting resource limits. If the agent was mid-task, that work is lost unless it was checkpointed.
 
 [`runFiber()`](./durable-execution.md) provides crash-recoverable execution. It persists a row in SQLite for the duration of the work, and lets you `stash()` intermediate state. If the agent is evicted, the fiber row survives, and `onFiberRecovered()` is called on the next activation.
+
+Use `startFiber()` when the important boundary is durable acceptance. It adds an
+idempotency key, retained status records, inspection, cancellation, and cleanup
+on top of the same fiber machinery. By default it returns after acceptance; pass
+`waitForCompletion: true` when the request should stay open until the accepted
+job reaches a terminal status. This is a good fit for webhooks where the
+provider may retry delivery and the agent must avoid starting duplicate visible
+side effects. If recovery succeeds, return a recovery result from
+`onFiberRecovered()` so the retained row records whether the job was completed,
+aborted, failed, or intentionally left interrupted.
 
 ```typescript
 export class ProjectManager extends Agent<ProjectState> {

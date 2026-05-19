@@ -1,6 +1,11 @@
 import { createTelegramAdapter } from "@chat-adapter/telegram";
 import { Agent, getAgentByName } from "agents";
-import type { SubAgentStub } from "agents";
+import type {
+  FiberContext,
+  FiberRecoveryContext,
+  FiberRecoveryResult,
+  SubAgentStub
+} from "agents";
 import { Chat } from "chat";
 import type { Message, Thread } from "chat";
 import { APPROVE_ACTION_ID, REJECT_ACTION_ID } from "./demos";
@@ -28,11 +33,79 @@ export { ChatStateAgent } from "./state";
 
 const WEBHOOK_PATH = "/webhooks/telegram";
 const DEFAULT_AGENT_NAME = "default";
+const AI_REPLY_FIBER_NAME = "chat-sdk-messenger:ai-reply";
 const EMPTY_AI_RESPONSE =
   "I couldn't produce a text response. Please try again.";
+const INTERRUPTED_AI_RESPONSE =
+  "Sorry, my reply was interrupted. Please send your message again if you'd like me to retry.";
+
+export type AiReplyStage = "accepted" | "streaming" | "completed";
+
+export type AiReplySnapshot = {
+  type: typeof AI_REPLY_FIBER_NAME;
+  stage: AiReplyStage;
+  thread: unknown;
+  message: unknown;
+};
+
+export function aiReplyRecoveryMode(
+  snapshot: AiReplySnapshot
+): "answer" | "apologize" | null {
+  if (snapshot.stage === "accepted") {
+    return "answer";
+  }
+  if (snapshot.stage === "streaming") {
+    return "apologize";
+  }
+  return null;
+}
+
+export function aiReplyFailureMode(
+  hasStreamedText: boolean
+): "apologize" | "error" {
+  return hasStreamedText ? "apologize" : "error";
+}
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function parseAiReplySnapshot(snapshot: unknown): AiReplySnapshot | null {
+  if (snapshot === null || typeof snapshot !== "object") {
+    return null;
+  }
+
+  const candidate = snapshot as Partial<AiReplySnapshot>;
+  if (
+    candidate.type !== AI_REPLY_FIBER_NAME ||
+    (candidate.stage !== "accepted" &&
+      candidate.stage !== "streaming" &&
+      candidate.stage !== "completed") ||
+    candidate.thread === undefined ||
+    candidate.message === undefined
+  ) {
+    return null;
+  }
+
+  return {
+    type: AI_REPLY_FIBER_NAME,
+    stage: candidate.stage,
+    thread: candidate.thread,
+    message: candidate.message
+  };
+}
+
+function aiReplySnapshot(
+  stage: AiReplyStage,
+  thread: Thread,
+  message: Message
+): AiReplySnapshot {
+  return {
+    type: AI_REPLY_FIBER_NAME,
+    stage,
+    thread: thread.toJSON(),
+    message: message.toJSON()
+  };
 }
 
 function setupErrorResponse(error: Error): Response {
@@ -62,6 +135,43 @@ export class ChatIngressAgent extends Agent {
     } catch (error) {
       this.bot = undefined;
       this.botStartupError = toError(error);
+    }
+  }
+
+  override async onFiberRecovered(
+    ctx: FiberRecoveryContext
+  ): Promise<void | FiberRecoveryResult> {
+    if (ctx.name !== AI_REPLY_FIBER_NAME) {
+      return;
+    }
+
+    const snapshot = parseAiReplySnapshot(ctx.snapshot);
+    if (!snapshot) {
+      return;
+    }
+
+    await this.recoverAiReply(snapshot);
+    return { status: "completed" };
+  }
+
+  private async recoverAiReply(snapshot: AiReplySnapshot): Promise<void> {
+    const bot = this.getBot();
+    if (bot instanceof Error) {
+      throw bot;
+    }
+
+    const restored = JSON.parse(JSON.stringify(snapshot), bot.reviver()) as {
+      thread: Thread;
+      message: Message;
+    };
+    const mode = aiReplyRecoveryMode(snapshot);
+    if (mode === "answer") {
+      await this.answerWithConversationAgent(restored.thread, restored.message);
+      return;
+    }
+
+    if (mode === "apologize") {
+      await restored.thread.post(INTERRUPTED_AI_RESPONSE);
     }
   }
 
@@ -123,7 +233,7 @@ export class ChatIngressAgent extends Agent {
         return;
       }
 
-      await this.answerWithConversationAgent(thread, message);
+      await this.enqueueConversationReply(thread, message);
     });
 
     bot.onDirectMessage(async (thread, message) => {
@@ -137,7 +247,7 @@ export class ChatIngressAgent extends Agent {
         return;
       }
 
-      await this.answerWithConversationAgent(thread, message);
+      await this.enqueueConversationReply(thread, message);
     });
 
     bot.onSubscribedMessage(async (thread, message) => {
@@ -152,7 +262,7 @@ export class ChatIngressAgent extends Agent {
       }
 
       if (this.shouldUseAi(message, thread)) {
-        await this.answerWithConversationAgent(thread, message);
+        await this.enqueueConversationReply(thread, message);
       }
     });
 
@@ -193,15 +303,17 @@ export class ChatIngressAgent extends Agent {
       await thread.post(`Unknown action: ${event.actionId}`);
     });
 
-    return bot;
+    return bot.registerSingleton();
   }
 
   private async answerWithConversationAgent(
     thread: Thread,
-    message: Message
+    message: Message,
+    fiber?: FiberContext
   ): Promise<void> {
     const callback = new TextStreamCallback();
     let agent: SubAgentStub<ConversationAgent> | undefined;
+    fiber?.stash(aiReplySnapshot("streaming", thread, message));
     const post = thread
       .post(callback.stream())
       .catch(async (error: unknown) => {
@@ -224,17 +336,53 @@ export class ChatIngressAgent extends Agent {
       if (!callback.hasText()) {
         await thread.post(EMPTY_AI_RESPONSE);
       }
+      fiber?.stash(aiReplySnapshot("completed", thread, message));
     } catch (error) {
       callback.fail(error);
       await post.catch(() => undefined);
-      if (callback.hasText()) {
+      if (aiReplyFailureMode(callback.hasText()) === "apologize") {
+        await thread.post(INTERRUPTED_AI_RESPONSE).catch(() => undefined);
+        fiber?.stash(aiReplySnapshot("completed", thread, message));
         return;
       }
 
-      const message = toError(error).message;
+      const errorMessage = toError(error).message;
       await thread.post({
-        markdown: `Sorry, I couldn't answer that right now.\n\n${message}`
+        markdown: `Sorry, I couldn't answer that right now.\n\n${errorMessage}`
       });
+      fiber?.stash(aiReplySnapshot("completed", thread, message));
+    }
+  }
+
+  private async enqueueConversationReply(
+    thread: Thread,
+    message: Message
+  ): Promise<void> {
+    const result = await this.startFiber(
+      AI_REPLY_FIBER_NAME,
+      async (fiber: FiberContext) => {
+        fiber.stash(aiReplySnapshot("accepted", thread, message));
+        await this.answerWithConversationAgent(thread, message, fiber);
+      },
+      {
+        idempotencyKey: `ai-reply:${thread.id}:${message.id}`,
+        metadata: {
+          provider: "telegram",
+          threadId: thread.id,
+          messageId: message.id
+        },
+        waitForCompletion: true
+      }
+    );
+
+    if (result.accepted || result.status !== "interrupted") {
+      return;
+    }
+
+    const snapshot = parseAiReplySnapshot(result.snapshot);
+    if (snapshot) {
+      await this.recoverAiReply(snapshot);
+      await this.resolveFiber(result.fiberId, { status: "completed" });
     }
   }
 

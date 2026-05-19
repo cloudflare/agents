@@ -146,6 +146,11 @@ Use Workflows for multi-step orchestration: retries per step, long waits,
 external events, human approvals, or pipelines that may trigger Think as one
 part of a larger process.
 
+Use `startFiber()` when the durable unit is agent-owned side-effect work around
+a turn, such as accepting a webhook once, restoring a serialized chat thread,
+and posting a visible reply. `submitMessages()` owns Think's message/session
+admission; `startFiber()` owns the surrounding application job.
+
 Workflows can compose with this API:
 
 ```typescript

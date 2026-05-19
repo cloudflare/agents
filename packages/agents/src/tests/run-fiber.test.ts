@@ -1,7 +1,36 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
-import type { FiberRecoveryContext } from "..";
+import type { FiberInspection, FiberRecoveryContext } from "..";
+import type { TestRunFiberAgent } from "./agents/run-fiber";
+
+async function waitForFiberStatus(
+  agent: {
+    inspectManagedFiber(fiberId: string): Promise<FiberInspection | null>;
+  },
+  fiberId: string,
+  status: FiberInspection["status"]
+): Promise<FiberInspection> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const inspection = await agent.inspectManagedFiber(fiberId);
+    if (inspection?.status === status) {
+      return inspection;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  const latest = await agent.inspectManagedFiber(fiberId);
+  throw new Error(
+    `Timed out waiting for fiber ${fiberId} to become ${status}; latest=${latest?.status}`
+  );
+}
+
+async function freshManagedAgent(name: string): Promise<TestRunFiberAgent> {
+  return (await getAgentByName(
+    env.TestRunFiberAgent,
+    name
+  )) as unknown as TestRunFiberAgent;
+}
 
 describe("runFiber", () => {
   // ── Basic execution ───────────────────────────────────────────
@@ -265,6 +294,421 @@ describe("runFiber", () => {
 
       const result = (await agent.runFailing()) as unknown as string;
       expect(result).toBe("error:Intentional error");
+    });
+  });
+
+  describe("managed fibers", () => {
+    it("should accept and complete a managed fiber", async () => {
+      const agent = await freshManagedAgent("managed-basic");
+
+      const result = await agent.startManaged("hello", {
+        idempotencyKey: "managed-basic"
+      });
+
+      expect(result.accepted).toBe(true);
+      expect(result.status).toBe("pending");
+
+      const completed = await waitForFiberStatus(
+        agent,
+        result.fiberId,
+        "completed"
+      );
+      expect(completed.idempotencyKey).toBe("managed-basic");
+      expect(completed.metadata).toEqual({ value: "hello" });
+      expect(completed.snapshot).toEqual({ value: "hello" });
+
+      const log = (await agent.getExecutionLog()) as unknown as string[];
+      expect(log).toEqual(["managed:hello"]);
+    });
+
+    it("should dedupe managed fibers by idempotency key", async () => {
+      const agent = await freshManagedAgent("managed-key");
+
+      const first = await agent.startManaged("first", {
+        idempotencyKey: "same-key"
+      });
+      const second = await agent.startManaged("second", {
+        idempotencyKey: "same-key"
+      });
+
+      expect(first.accepted).toBe(true);
+      expect(second.accepted).toBe(false);
+      expect(second.fiberId).toBe(first.fiberId);
+
+      await waitForFiberStatus(agent, first.fiberId, "completed");
+      const log = (await agent.getExecutionLog()) as unknown as string[];
+      expect(log).toEqual(["managed:first"]);
+    });
+
+    it("should dedupe managed fibers by explicit fiber id", async () => {
+      const agent = await freshManagedAgent("managed-id");
+
+      const first = await agent.startManaged("first", {
+        fiberId: "explicit-fiber"
+      });
+      const second = await agent.startManaged("second", {
+        fiberId: "explicit-fiber"
+      });
+
+      expect(first.accepted).toBe(true);
+      expect(second.accepted).toBe(false);
+      expect(second.fiberId).toBe("explicit-fiber");
+      await waitForFiberStatus(agent, first.fiberId, "completed");
+    });
+
+    it("should reject blank managed fiber identifiers", async () => {
+      const agent = await freshManagedAgent("managed-blank-ids");
+
+      await expect(
+        agent.startManagedForError("blank-key", {
+          idempotencyKey: ""
+        })
+      ).resolves.toBe("idempotencyKey must not be blank");
+      await expect(
+        agent.startManagedForError("blank-fiber", {
+          fiberId: "  "
+        })
+      ).resolves.toBe("fiberId must not be blank");
+    });
+
+    it("should mark managed fiber errors", async () => {
+      const agent = await freshManagedAgent("managed-error");
+
+      const result = await agent.startManagedFailing("managed-error");
+      const failed = await waitForFiberStatus(agent, result.fiberId, "error");
+
+      expect(failed.error).toBe("Managed failure");
+      const log = (await agent.getExecutionLog()) as unknown as string[];
+      expect(log).toEqual(["managed-failing"]);
+    });
+
+    it("should mark setup failures before the callback as errors", async () => {
+      const agent = await freshManagedAgent("managed-setup-failure");
+
+      const result = await agent.startManagedWithRunCollision(
+        "managed-collides-with-run"
+      );
+      const failed = await waitForFiberStatus(agent, result.fiberId, "error");
+
+      expect(failed.error).toContain("UNIQUE constraint failed");
+      const log = (await agent.getExecutionLog()) as unknown as string[];
+      expect(log).not.toContain("should-not-run");
+    });
+
+    it("should wait for newly accepted managed fibers when requested", async () => {
+      const agent = await freshManagedAgent("managed-wait-complete");
+
+      const result = await agent.startManagedAndWait("wait", "wait-key");
+
+      expect(result.accepted).toBe(true);
+      expect(result.status).toBe("completed");
+      await expect(
+        agent.inspectManagedFiber(result.fiberId)
+      ).resolves.toMatchObject({
+        status: "completed",
+        snapshot: { value: "wait" }
+      });
+    });
+
+    it("should join active duplicate managed fibers when waiting", async () => {
+      const agent = await freshManagedAgent("managed-wait-join");
+
+      const first = agent.holdManagedAndWait("held", "join-key");
+      let active = await agent.inspectManagedFiberByKey("join-key");
+      for (
+        let attempt = 0;
+        attempt < 20 && active?.status !== "running";
+        attempt++
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        active = await agent.inspectManagedFiberByKey("join-key");
+      }
+      expect(active?.status).toBe("running");
+      const second = agent.startManagedAndWait("duplicate", "join-key");
+
+      await agent.releaseWaitedManagedFiber();
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+
+      expect(firstResult).toMatchObject({
+        accepted: true,
+        status: "completed"
+      });
+      expect(secondResult).toMatchObject({
+        accepted: false,
+        status: "completed",
+        fiberId: firstResult.fiberId
+      });
+      const log = (await agent.getExecutionLog()) as unknown as string[];
+      expect(log).toEqual(["managed-wait-held:held"]);
+    });
+
+    it("should resolve waiters when a managed fiber is cancelled", async () => {
+      const agent = await freshManagedAgent("managed-wait-cancel");
+
+      const wait = agent.holdManagedIgnoringCancelAndWait(
+        "ignore",
+        "ignore-cancel-key"
+      );
+      let active = await agent.inspectManagedFiberByKey("ignore-cancel-key");
+      for (
+        let attempt = 0;
+        attempt < 20 && active?.status !== "running";
+        attempt++
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        active = await agent.inspectManagedFiberByKey("ignore-cancel-key");
+      }
+      expect(active?.status).toBe("running");
+      if (!active) {
+        throw new Error("managed fiber was not accepted");
+      }
+
+      await expect(
+        agent.cancelManagedFiber(active.fiberId, "stop")
+      ).resolves.toBe(true);
+      await expect(
+        Promise.race([
+          wait,
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("wait did not resolve")), 500)
+          )
+        ])
+      ).resolves.toMatchObject({
+        accepted: true,
+        status: "aborted",
+        fiberId: active.fiberId
+      });
+
+      await agent.releaseIgnoredCancelManagedFiber();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await expect(
+        agent.inspectManagedFiber(active.fiberId)
+      ).resolves.toMatchObject({
+        status: "aborted",
+        error: "stop"
+      });
+      const log = (await agent.getExecutionLog()) as unknown as string[];
+      expect(log).toEqual([
+        "managed-wait-ignore-cancel:ignore",
+        "managed-wait-ignore-cancel-done:ignore"
+      ]);
+    });
+
+    it("should return terminal error status when waiting fails", async () => {
+      const agent = await freshManagedAgent("managed-wait-error");
+
+      const result = await agent.startManagedFailingAndWait("wait-error-key");
+
+      expect(result).toMatchObject({
+        accepted: true,
+        status: "error",
+        error: "Managed wait failure"
+      });
+    });
+
+    it("should cancel running managed fibers cooperatively", async () => {
+      const agent = await freshManagedAgent("managed-cancel");
+
+      const fiberId = await agent.holdManaged("cancel-me", "cancel-key");
+      await waitForFiberStatus(agent, fiberId, "running");
+
+      await expect(agent.cancelManagedFiber(fiberId, "stop")).resolves.toBe(
+        true
+      );
+      const aborted = await waitForFiberStatus(agent, fiberId, "aborted");
+      expect(aborted.error).toBe("stop");
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const stillAborted = await agent.inspectManagedFiber(fiberId);
+      expect(stillAborted?.status).toBe("aborted");
+    });
+
+    it("should inspect, list, and delete terminal managed fibers", async () => {
+      const agent = await freshManagedAgent("managed-list");
+
+      const result = await agent.startManaged("list", {
+        idempotencyKey: "list-key"
+      });
+      await waitForFiberStatus(agent, result.fiberId, "completed");
+
+      await expect(
+        agent.inspectManagedFiberByKey("list-key")
+      ).resolves.toMatchObject({
+        fiberId: result.fiberId,
+        status: "completed"
+      });
+
+      const listed = await agent.listManagedFibers({
+        status: "completed",
+        name: "managed"
+      });
+      expect(listed.some((fiber) => fiber.fiberId === result.fiberId)).toBe(
+        true
+      );
+
+      await expect(agent.deleteManagedFibers()).resolves.toBeGreaterThanOrEqual(
+        1
+      );
+      await expect(
+        agent.inspectManagedFiber(result.fiberId)
+      ).resolves.toBeNull();
+    });
+
+    it("should mark interrupted managed fibers during recovery", async () => {
+      const agent = await freshManagedAgent("managed-recovery");
+
+      await agent.insertInterruptedManagedFiber(
+        "managed-interrupted",
+        "managed",
+        {
+          step: 1
+        }
+      );
+      await agent.triggerRecoveryCheck();
+
+      const recovered =
+        (await agent.getRecoveredFibers()) as unknown as FiberRecoveryContext[];
+      expect(recovered).toHaveLength(1);
+      expect(recovered[0].id).toBe("managed-interrupted");
+      expect(recovered[0].idempotencyKey).toBe("key:managed-interrupted");
+      expect(recovered[0].metadata).toEqual({ inserted: true });
+      expect(recovered[0].status).toBe("interrupted");
+
+      const inspection = await agent.inspectManagedFiber("managed-interrupted");
+      expect(inspection).toMatchObject({
+        status: "interrupted",
+        snapshot: { step: 1 }
+      });
+    });
+
+    it("should recover pending managed ledger rows without run rows", async () => {
+      const agent = await freshManagedAgent("managed-ledger-pending");
+
+      await agent.insertManagedLedgerOnlyFiber(
+        "managed-ledger-pending",
+        "managed",
+        "pending",
+        { step: "pending" }
+      );
+      await agent.triggerRecoveryCheck();
+
+      const recovered =
+        (await agent.getRecoveredFibers()) as unknown as FiberRecoveryContext[];
+      expect(recovered).toHaveLength(1);
+      expect(recovered[0]).toMatchObject({
+        id: "managed-ledger-pending",
+        status: "interrupted",
+        idempotencyKey: "key:managed-ledger-pending",
+        metadata: { ledgerOnly: true },
+        snapshot: { step: "pending" }
+      });
+      await expect(
+        agent.inspectManagedFiber("managed-ledger-pending")
+      ).resolves.toMatchObject({
+        status: "interrupted",
+        snapshot: { step: "pending" }
+      });
+    });
+
+    it("should recover running managed ledger rows without run rows", async () => {
+      const agent = await freshManagedAgent("managed-ledger-running");
+
+      await agent.insertManagedLedgerOnlyFiber(
+        "managed-ledger-running",
+        "managed-recovery-complete",
+        "running",
+        { step: "running" }
+      );
+      await agent.triggerRecoveryCheck();
+
+      await expect(
+        agent.inspectManagedFiber("managed-ledger-running")
+      ).resolves.toMatchObject({
+        status: "completed",
+        snapshot: { recovered: true }
+      });
+    });
+
+    it("should not recover terminal managed fibers with stale run rows", async () => {
+      const agent = await freshManagedAgent("managed-terminal-recovery");
+
+      await agent.insertAbortedManagedFiberWithRun(
+        "managed-aborted",
+        "managed",
+        {
+          step: 1
+        }
+      );
+      await agent.triggerRecoveryCheck();
+
+      const recovered =
+        (await agent.getRecoveredFibers()) as unknown as FiberRecoveryContext[];
+      expect(recovered).toHaveLength(0);
+      await expect(
+        agent.inspectManagedFiber("managed-aborted")
+      ).resolves.toMatchObject({
+        status: "aborted",
+        error: "cancelled",
+        snapshot: { step: 1 }
+      });
+      await expect(agent.getRunningFiberCount()).resolves.toBe(0);
+    });
+
+    it("should apply successful managed recovery outcomes", async () => {
+      const agent = await freshManagedAgent("managed-recovery-complete");
+
+      await agent.insertInterruptedManagedFiber(
+        "managed-complete",
+        "managed-recovery-complete",
+        { step: 1 }
+      );
+      await agent.triggerRecoveryCheck();
+
+      await expect(
+        agent.inspectManagedFiber("managed-complete")
+      ).resolves.toMatchObject({
+        status: "completed",
+        snapshot: { recovered: true },
+        metadata: { recovered: true }
+      });
+    });
+
+    it("should resolve interrupted managed fibers outside recovery", async () => {
+      const agent = await freshManagedAgent("managed-resolve");
+
+      await agent.insertInterruptedManagedFiber("managed-resolve", "managed", {
+        step: 1
+      });
+      await agent.triggerRecoveryCheck();
+
+      await expect(agent.resolveManagedFiber("managed-resolve")).resolves.toBe(
+        true
+      );
+      await expect(
+        agent.inspectManagedFiber("managed-resolve")
+      ).resolves.toMatchObject({
+        status: "completed",
+        snapshot: { resolved: true }
+      });
+    });
+
+    it("should keep managed fibers interrupted when recovery throws", async () => {
+      const agent = await freshManagedAgent("managed-recovery-throws");
+
+      await agent.insertInterruptedManagedFiber(
+        "managed-throws",
+        "managed-recovery-throws",
+        { step: 1 }
+      );
+      await agent.triggerRecoveryCheck();
+
+      await expect(
+        agent.inspectManagedFiber("managed-throws")
+      ).resolves.toMatchObject({
+        status: "interrupted",
+        error: "Recovery failed",
+        snapshot: { step: 1 }
+      });
     });
   });
 });

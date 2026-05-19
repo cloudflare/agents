@@ -222,24 +222,58 @@ AI history for one Chat SDK `thread.id`. Chat SDK history remains
 platform/event history and optional source material for later backfill.
 
 The response path uses Think's `chat()` RPC stream and relays text deltas into
-Chat SDK's streaming post API:
+Chat SDK's streaming post API from a managed fiber:
 
 ```ts
-const agent = await this.subAgent(ConversationAgent, thread.id);
-const callback = new TextStreamCallback();
-const post = thread.post(callback.stream());
+await this.startFiber(
+  "chat-sdk-messenger:ai-reply",
+  async (fiber) => {
+    fiber.stash({
+      type: "chat-sdk-messenger:ai-reply",
+      stage: "accepted",
+      thread: thread.toJSON(),
+      message: message.toJSON()
+    });
+    await this.answerWithConversationAgent(thread, message, fiber);
+  },
+  {
+    idempotencyKey: `ai-reply:${thread.id}:${message.id}`,
+    waitForCompletion: true
+  }
+);
 
-await agent.chat(toThinkUserMessage(message), callback);
-await post;
+// Inside answerWithConversationAgent:
+// - start a Chat SDK streaming post
+// - call Think's chat() with a StreamCallback
+// - checkpoint completed state when the stream finishes
 ```
 
 This keeps visible messenger writes under application control while still
 exercising Think's durable message ownership and streaming turn API. The
 callback receives Think's request id in `onStart`, so the ingress agent can call
-`cancelChat()` on the conversation sub-agent if the messenger stream fails.
-Future iterations can use `submitMessages()` for durable async webhook
-acceptance, or Chat SDK `createChatTools` once there is an approval UX for
-model-driven writes.
+`cancelChat()` on the conversation sub-agent if the messenger stream fails. The
+managed fiber gives webhook retries a stable idempotency boundary.
+`waitForCompletion: true` keeps the Chat SDK handler open until the visible reply
+finishes, so Chat SDK's per-thread concurrency strategy still serializes user
+visible replies. The serialized Chat SDK thread/message snapshots give recovery
+code enough context to restore the reply target after a restart.
+
+Recovery has an explicit visible policy. If the fiber was interrupted before
+streaming began, `onFiberRecovered()` restores the Chat SDK thread/message and
+replays the AI reply, then returns `{ status: "completed" }` to settle the
+managed fiber. If the interruption happened after streaming began, the bot posts
+a concise interruption apology and also settles the fiber as completed. Duplicate
+webhooks for already completed replies are ignored; duplicates for interrupted
+replies trigger the same recovery policy once, then resolve the retained fiber.
+
+`waitForCompletion: true` preserves one visible AI reply at a time per Chat SDK
+thread by keeping the Chat SDK handler pending until the managed fiber reaches a
+terminal status. That keeps durable webhook acceptance from bypassing the Chat
+SDK burst/debounce UX and avoids overlapping Telegram placeholder or streaming
+messages.
+
+Future iterations can use Chat SDK `createChatTools` once there is an approval
+UX for model-driven writes.
 
 ## Telegram Behavior
 

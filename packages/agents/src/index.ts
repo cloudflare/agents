@@ -661,10 +661,91 @@ type RootFacetRpcSurface = {
 export type FiberContext = {
   /** Unique identifier for this fiber execution. */
   id: string;
+  /** Cooperative cancellation signal for managed fiber callers. */
+  signal: AbortSignal;
   /** Checkpoint data during execution. Synchronous SQLite write. */
   stash(data: unknown): void;
   /** Last checkpoint data (null on first run, populated on recovery re-invocation). */
   snapshot: unknown | null;
+};
+
+export type FiberStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "aborted"
+  | "interrupted"
+  | "error";
+
+export type StartFiberOptions = {
+  fiberId?: string;
+  idempotencyKey?: string;
+  metadata?: Record<string, unknown>;
+  waitForCompletion?: boolean;
+};
+
+export type FiberInspection = {
+  fiberId: string;
+  name: string;
+  idempotencyKey?: string;
+  status: FiberStatus;
+  snapshot?: unknown;
+  error?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: number;
+  startedAt?: number;
+  completedAt?: number;
+};
+
+export type StartFiberResult = FiberInspection & {
+  accepted: boolean;
+};
+
+export type FiberRecoveryResult =
+  | {
+      status: "completed";
+      snapshot?: unknown;
+      metadata?: Record<string, unknown>;
+    }
+  | {
+      status: "error";
+      error?: unknown;
+      snapshot?: unknown;
+    }
+  | {
+      status: "aborted";
+      reason?: string;
+      snapshot?: unknown;
+    }
+  | {
+      status: "interrupted";
+      reason?: string;
+      snapshot?: unknown;
+    };
+
+export type ListFibersOptions = {
+  status?: FiberStatus | FiberStatus[];
+  name?: string;
+  limit?: number;
+};
+
+export type DeleteFibersOptions = {
+  status?: FiberStatus | FiberStatus[];
+  completedBefore?: Date;
+  limit?: number;
+};
+
+type FiberLedgerRow = {
+  fiber_id: string;
+  idempotency_key: string | null;
+  name: string;
+  status: FiberStatus;
+  snapshot: string | null;
+  metadata_json: string | null;
+  error_message: string | null;
+  created_at: number;
+  started_at: number | null;
+  completed_at: number | null;
 };
 
 /**
@@ -676,6 +757,12 @@ export type FiberRecoveryContext = {
   id: string;
   /** Name passed to `runFiber`. */
   name: string;
+  /** Status for managed fibers recovered through the retained ledger. */
+  status?: FiberStatus;
+  /** Idempotency key for managed fibers, if one was supplied. */
+  idempotencyKey?: string;
+  /** Metadata for managed fibers, if one was supplied. */
+  metadata?: Record<string, unknown> | null;
   /** Last checkpoint data from `stash()`, or null if never stashed. */
   snapshot: unknown | null;
   /**
@@ -688,6 +775,7 @@ export type FiberRecoveryContext = {
 
 const _fiberALS = new AsyncLocalStorage<{
   id: string;
+  signal: AbortSignal;
   stash: (data: unknown) => void;
 }>();
 
@@ -781,7 +869,7 @@ const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
  * The constructor stores this as a row in cf_agents_state and checks it
  * on wake to skip DDL on established DOs.
  */
-const CURRENT_SCHEMA_VERSION = 7;
+const CURRENT_SCHEMA_VERSION = 8;
 
 const SCHEMA_VERSION_ROW_ID = "cf_schema_version";
 const STATE_ROW_ID = "cf_state_row_id";
@@ -1175,6 +1263,12 @@ export class Agent<
 
   /** @internal In-memory set of fiber IDs running in this process. */
   private _runFiberActiveFibers = new Set<string>();
+  /** @internal In-memory abort controllers for managed running fibers. */
+  private _managedFiberAbortControllers = new Map<string, AbortController>();
+  /** @internal In-memory executions for callers that want to await accepted work. */
+  private _managedFiberExecutions = new Map<string, Promise<void>>();
+  /** @internal In-memory waiters for managed fibers reaching terminal ledger state. */
+  private _managedFiberTerminalWaiters = new Map<string, Set<() => void>>();
   /** @internal Prevents re-entrant recovery from overlapping alarm ticks. */
   private _runFiberRecoveryInProgress = false;
 
@@ -1579,6 +1673,38 @@ export class Agent<
       this.sql`
         CREATE INDEX IF NOT EXISTS idx_facet_runs_owner_path_key
         ON cf_agents_facet_runs(owner_path_key)
+      `;
+
+      // v8: managed fiber job ledger for idempotent acceptance,
+      // inspection, cancellation, and terminal cleanup.
+      this.sql`
+        CREATE TABLE IF NOT EXISTS cf_agents_fibers (
+          fiber_id TEXT PRIMARY KEY,
+          idempotency_key TEXT UNIQUE,
+          name TEXT NOT NULL,
+          status TEXT NOT NULL,
+          snapshot TEXT,
+          metadata_json TEXT,
+          error_message TEXT,
+          created_at INTEGER NOT NULL,
+          started_at INTEGER,
+          completed_at INTEGER
+        )
+      `;
+
+      this.sql`
+        CREATE INDEX IF NOT EXISTS idx_fibers_status_created
+        ON cf_agents_fibers(status, created_at, fiber_id)
+      `;
+
+      this.sql`
+        CREATE INDEX IF NOT EXISTS idx_fibers_name_status_created
+        ON cf_agents_fibers(name, status, created_at, fiber_id)
+      `;
+
+      this.sql`
+        CREATE INDEX IF NOT EXISTS idx_fibers_status_completed
+        ON cf_agents_fibers(status, completed_at, created_at)
       `;
 
       this.sql`
@@ -4025,6 +4151,472 @@ export class Agent<
     }
   }
 
+  // ── Managed fibers: idempotent durable jobs ────────────────────────
+
+  private _isTerminalFiberStatus(status: FiberStatus): boolean {
+    return (
+      status === "completed" ||
+      status === "aborted" ||
+      status === "interrupted" ||
+      status === "error"
+    );
+  }
+
+  private _notifyManagedFiberTerminal(fiberId: string): void {
+    const row = this._readFiber(fiberId);
+    if (row && !this._isTerminalFiberStatus(row.status)) {
+      return;
+    }
+
+    const waiters = this._managedFiberTerminalWaiters.get(fiberId);
+    if (!waiters) {
+      return;
+    }
+
+    this._managedFiberTerminalWaiters.delete(fiberId);
+    for (const resolve of waiters) {
+      resolve();
+    }
+  }
+
+  private _waitForManagedFiberTerminal(fiberId: string): Promise<void> {
+    const row = this._readFiber(fiberId);
+    if (!row || this._isTerminalFiberStatus(row.status)) {
+      return Promise.resolve();
+    }
+
+    return new Promise<void>((resolve) => {
+      let waiters = this._managedFiberTerminalWaiters.get(fiberId);
+      if (!waiters) {
+        waiters = new Set();
+        this._managedFiberTerminalWaiters.set(fiberId, waiters);
+      }
+      waiters.add(resolve);
+    });
+  }
+
+  private _normalizeFiberStatusFilter(
+    status?: FiberStatus | FiberStatus[]
+  ): Set<FiberStatus> | null {
+    if (!status) return null;
+    return new Set(Array.isArray(status) ? status : [status]);
+  }
+
+  private _parseFiberJsonObject(
+    value: string | null
+  ): Record<string, unknown> | null {
+    if (value === null) return null;
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (
+        parsed !== null &&
+        typeof parsed === "object" &&
+        !Array.isArray(parsed)
+      ) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Invalid metadata should not prevent inspection.
+    }
+    return null;
+  }
+
+  private _parseFiberSnapshot(value: string | null): unknown | undefined {
+    if (value === null) return undefined;
+    try {
+      return JSON.parse(value) as unknown;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private _fiberErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  private _stringifyFiberSnapshot(snapshot: unknown): string | null {
+    return snapshot === undefined ? null : JSON.stringify(snapshot);
+  }
+
+  private _fiberRecoveryErrorMessage(
+    result: FiberRecoveryResult
+  ): string | null {
+    if (result.status === "error") {
+      return result.error === undefined
+        ? null
+        : this._fiberErrorMessage(result.error);
+    }
+    if (result.status === "aborted" || result.status === "interrupted") {
+      return result.reason ?? null;
+    }
+    return null;
+  }
+
+  private _applyManagedFiberRecoveryResult(
+    fiberId: string,
+    result: FiberRecoveryResult
+  ): void {
+    const completedAt = Date.now();
+    const snapshot = this._stringifyFiberSnapshot(result.snapshot);
+    const errorMessage = this._fiberRecoveryErrorMessage(result);
+    const metadata =
+      result.status === "completed" && result.metadata !== undefined
+        ? JSON.stringify(result.metadata)
+        : undefined;
+
+    if (metadata !== undefined) {
+      this.sql`
+        UPDATE cf_agents_fibers
+        SET status = ${result.status},
+            snapshot = COALESCE(${snapshot}, snapshot),
+            metadata_json = ${metadata},
+            error_message = ${errorMessage},
+            completed_at = ${completedAt}
+        WHERE fiber_id = ${fiberId}
+          AND status = 'interrupted'
+      `;
+      this._notifyManagedFiberTerminal(fiberId);
+      return;
+    }
+
+    this.sql`
+      UPDATE cf_agents_fibers
+      SET status = ${result.status},
+          snapshot = COALESCE(${snapshot}, snapshot),
+          error_message = ${errorMessage},
+          completed_at = ${completedAt}
+      WHERE fiber_id = ${fiberId}
+        AND status = 'interrupted'
+    `;
+    this._notifyManagedFiberTerminal(fiberId);
+  }
+
+  private _settleManagedFiberExecution(
+    fiberId: string,
+    outcome: { ok: true } | { ok: false; error: unknown },
+    signal: AbortSignal
+  ): void {
+    const completedAt = Date.now();
+    if (outcome.ok) {
+      this.sql`
+        UPDATE cf_agents_fibers
+        SET status = 'completed', completed_at = ${completedAt}
+        WHERE fiber_id = ${fiberId} AND status = 'running'
+      `;
+      this._notifyManagedFiberTerminal(fiberId);
+      return;
+    }
+
+    const message = this._fiberErrorMessage(outcome.error);
+    const status: FiberStatus = signal.aborted ? "aborted" : "error";
+    this.sql`
+      UPDATE cf_agents_fibers
+      SET status = ${status},
+          error_message = ${message},
+          completed_at = ${completedAt}
+      WHERE fiber_id = ${fiberId} AND status = 'running'
+    `;
+    this._notifyManagedFiberTerminal(fiberId);
+  }
+
+  private _parseFiberRecoverySnapshot(
+    fiberId: string,
+    snapshotText: string | null
+  ): unknown | null {
+    if (!snapshotText) return null;
+    try {
+      return JSON.parse(snapshotText) as unknown;
+    } catch {
+      console.warn(
+        `[Agent] Corrupted snapshot for fiber ${fiberId}, treating as null`
+      );
+      return null;
+    }
+  }
+
+  private async _runFiberRecoveryHook(
+    ctx: FiberRecoveryContext,
+    managedRow: FiberLedgerRow | null
+  ): Promise<void> {
+    try {
+      const handled = await this._handleInternalFiberRecovery(ctx);
+      if (!handled) {
+        const recoveryResult = await this.onFiberRecovered(ctx);
+        if (managedRow && recoveryResult) {
+          this._applyManagedFiberRecoveryResult(ctx.id, recoveryResult);
+        }
+      }
+    } catch (e) {
+      if (managedRow) {
+        this.sql`
+          UPDATE cf_agents_fibers
+          SET error_message = ${this._fiberErrorMessage(e)}
+          WHERE fiber_id = ${ctx.id}
+            AND status = 'interrupted'
+        `;
+      }
+      console.error(
+        `[Agent] Fiber recovery failed for "${ctx.name}" (${ctx.id}):`,
+        e
+      );
+    }
+  }
+
+  private _fiberInspectionFromRow(row: FiberLedgerRow): FiberInspection {
+    const snapshot = this._parseFiberSnapshot(row.snapshot);
+    const inspection: FiberInspection = {
+      fiberId: row.fiber_id,
+      name: row.name,
+      status: row.status,
+      createdAt: row.created_at
+    };
+
+    if (row.idempotency_key !== null) {
+      inspection.idempotencyKey = row.idempotency_key;
+    }
+    if (snapshot !== undefined) {
+      inspection.snapshot = snapshot;
+    }
+    if (row.error_message !== null) {
+      inspection.error = row.error_message;
+    }
+    const metadata = this._parseFiberJsonObject(row.metadata_json);
+    if (metadata !== null) {
+      inspection.metadata = metadata;
+    }
+    if (row.started_at !== null) {
+      inspection.startedAt = row.started_at;
+    }
+    if (row.completed_at !== null) {
+      inspection.completedAt = row.completed_at;
+    }
+
+    return inspection;
+  }
+
+  private async _waitForManagedFiber(
+    fiberId: string
+  ): Promise<FiberInspection | null> {
+    const row = this._readFiber(fiberId);
+    if (!row || this._isTerminalFiberStatus(row.status)) {
+      return row ? this._fiberInspectionFromRow(row) : null;
+    }
+
+    if (this._managedFiberExecutions.has(fiberId)) {
+      await this._waitForManagedFiberTerminal(fiberId);
+      return this.inspectFiber(fiberId);
+    }
+
+    await this._checkRunFibers();
+    return this.inspectFiber(fiberId);
+  }
+
+  private _readFiber(fiberId: string): FiberLedgerRow | null {
+    const rows = this.sql<FiberLedgerRow>`
+      SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
+             error_message, created_at, started_at, completed_at
+      FROM cf_agents_fibers
+      WHERE fiber_id = ${fiberId}
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  }
+
+  private _readFiberByKey(idempotencyKey: string): FiberLedgerRow | null {
+    const rows = this.sql<FiberLedgerRow>`
+      SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
+             error_message, created_at, started_at, completed_at
+      FROM cf_agents_fibers
+      WHERE idempotency_key = ${idempotencyKey}
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  }
+
+  private _listFiberRows(options?: ListFibersOptions): FiberLedgerRow[] {
+    const limit = Math.min(Math.max(options?.limit ?? 50, 1), 100);
+    const statuses = this._normalizeFiberStatusFilter(options?.status);
+    if (statuses) {
+      return [...statuses]
+        .flatMap((status) =>
+          this._listFiberRowsByStatus(status, limit, options?.name)
+        )
+        .sort((a, b) =>
+          b.created_at === a.created_at
+            ? b.fiber_id.localeCompare(a.fiber_id)
+            : b.created_at - a.created_at
+        )
+        .slice(0, limit);
+    }
+
+    if (options?.name) {
+      return this.sql<FiberLedgerRow>`
+        SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
+               error_message, created_at, started_at, completed_at
+        FROM cf_agents_fibers
+        WHERE name = ${options.name}
+        ORDER BY created_at DESC, fiber_id DESC
+        LIMIT ${limit}
+      `;
+    }
+
+    return this.sql<FiberLedgerRow>`
+      SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
+             error_message, created_at, started_at, completed_at
+      FROM cf_agents_fibers
+      ORDER BY created_at DESC, fiber_id DESC
+      LIMIT ${limit}
+    `;
+  }
+
+  private _listFiberRowsByStatus(
+    status: FiberStatus,
+    limit: number,
+    name?: string
+  ): FiberLedgerRow[] {
+    if (name) {
+      return this.sql<FiberLedgerRow>`
+        SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
+               error_message, created_at, started_at, completed_at
+        FROM cf_agents_fibers
+        WHERE status = ${status} AND name = ${name}
+        ORDER BY created_at DESC, fiber_id DESC
+        LIMIT ${limit}
+      `;
+    }
+
+    return this.sql<FiberLedgerRow>`
+      SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
+             error_message, created_at, started_at, completed_at
+      FROM cf_agents_fibers
+      WHERE status = ${status}
+      ORDER BY created_at DESC, fiber_id DESC
+      LIMIT ${limit}
+    `;
+  }
+
+  async inspectFiber(fiberId: string): Promise<FiberInspection | null> {
+    const row = this._readFiber(fiberId);
+    return row ? this._fiberInspectionFromRow(row) : null;
+  }
+
+  async inspectFiberByKey(
+    idempotencyKey: string
+  ): Promise<FiberInspection | null> {
+    const row = this._readFiberByKey(idempotencyKey);
+    return row ? this._fiberInspectionFromRow(row) : null;
+  }
+
+  async listFibers(options?: ListFibersOptions): Promise<FiberInspection[]> {
+    return this._listFiberRows(options).map((row) =>
+      this._fiberInspectionFromRow(row)
+    );
+  }
+
+  async cancelFiber(fiberId: string, reason?: string): Promise<boolean> {
+    const row = this._readFiber(fiberId);
+    if (!row || this._isTerminalFiberStatus(row.status)) {
+      return false;
+    }
+
+    const now = Date.now();
+    this.sql`
+      UPDATE cf_agents_fibers
+      SET status = 'aborted',
+          error_message = ${reason ?? null},
+          completed_at = ${now}
+      WHERE fiber_id = ${fiberId}
+        AND status IN ('pending', 'running')
+    `;
+    this._managedFiberAbortControllers.get(fiberId)?.abort(reason);
+    this._notifyManagedFiberTerminal(fiberId);
+    return true;
+  }
+
+  async cancelFiberByKey(
+    idempotencyKey: string,
+    reason?: string
+  ): Promise<boolean> {
+    const row = this._readFiberByKey(idempotencyKey);
+    return row ? this.cancelFiber(row.fiber_id, reason) : false;
+  }
+
+  async resolveFiber(
+    fiberId: string,
+    result: FiberRecoveryResult
+  ): Promise<boolean> {
+    const row = this._readFiber(fiberId);
+    if (!row || row.status !== "interrupted") {
+      return false;
+    }
+
+    this._applyManagedFiberRecoveryResult(fiberId, result);
+    return true;
+  }
+
+  async deleteFibers(options?: DeleteFibersOptions): Promise<number> {
+    const statuses =
+      this._normalizeFiberStatusFilter(options?.status) ??
+      new Set<FiberStatus>(["completed", "aborted", "interrupted", "error"]);
+    const terminalStatuses = [...statuses].filter((status) =>
+      this._isTerminalFiberStatus(status)
+    );
+    if (terminalStatuses.length === 0) {
+      return 0;
+    }
+
+    const limit = Math.min(Math.max(options?.limit ?? 100, 1), 500);
+    const completedBefore = options?.completedBefore?.getTime();
+    const rows = terminalStatuses
+      .flatMap((status) =>
+        this._listTerminalFiberRowsForDelete(status, limit, completedBefore)
+      )
+      .sort((a, b) =>
+        a.completed_at === b.completed_at
+          ? a.created_at - b.created_at
+          : (a.completed_at ?? 0) - (b.completed_at ?? 0)
+      )
+      .slice(0, limit);
+
+    for (const row of rows) {
+      this.sql`
+        DELETE FROM cf_agents_fibers
+        WHERE fiber_id = ${row.fiber_id}
+          AND status IN ('completed', 'aborted', 'interrupted', 'error')
+      `;
+    }
+
+    return rows.length;
+  }
+
+  private _listTerminalFiberRowsForDelete(
+    status: FiberStatus,
+    limit: number,
+    completedBefore?: number
+  ): FiberLedgerRow[] {
+    if (completedBefore !== undefined) {
+      return this.sql<FiberLedgerRow>`
+        SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
+               error_message, created_at, started_at, completed_at
+        FROM cf_agents_fibers
+        WHERE status = ${status}
+          AND completed_at IS NOT NULL
+          AND completed_at < ${completedBefore}
+        ORDER BY completed_at ASC, created_at ASC
+        LIMIT ${limit}
+      `;
+    }
+
+    return this.sql<FiberLedgerRow>`
+      SELECT fiber_id, idempotency_key, name, status, snapshot, metadata_json,
+             error_message, created_at, started_at, completed_at
+      FROM cf_agents_fibers
+      WHERE status = ${status}
+      ORDER BY completed_at ASC, created_at ASC
+      LIMIT ${limit}
+    `;
+  }
+
   // ── Fibers: durable execution ───────────────────────────────────────
 
   /**
@@ -4044,7 +4636,178 @@ export class Agent<
     name: string,
     fn: (ctx: FiberContext) => Promise<T>
   ): Promise<T> {
-    const id = nanoid();
+    return this._runFiberInternal(nanoid(), name, fn);
+  }
+
+  async startFiber(
+    name: string,
+    fn: (ctx: FiberContext) => Promise<void>,
+    options?: StartFiberOptions
+  ): Promise<StartFiberResult> {
+    const fiberId = options?.fiberId ?? nanoid();
+    const idempotencyKey = options?.idempotencyKey;
+    if (options?.fiberId !== undefined && options.fiberId.trim() === "") {
+      throw new Error("fiberId must not be blank");
+    }
+    if (
+      options?.idempotencyKey !== undefined &&
+      options.idempotencyKey.trim() === ""
+    ) {
+      throw new Error("idempotencyKey must not be blank");
+    }
+    const existingById = this._readFiber(fiberId);
+    const existingByKey = idempotencyKey
+      ? this._readFiberByKey(idempotencyKey)
+      : null;
+
+    if (
+      existingById &&
+      existingByKey &&
+      existingById.fiber_id !== existingByKey.fiber_id
+    ) {
+      throw new Error("fiberId and idempotencyKey refer to different fibers");
+    }
+    if (
+      existingByKey &&
+      options?.fiberId &&
+      existingByKey.fiber_id !== fiberId
+    ) {
+      throw new Error("fiberId and idempotencyKey refer to different fibers");
+    }
+
+    const existing = existingById ?? existingByKey;
+    if (existing) {
+      if (
+        options?.waitForCompletion &&
+        !this._isTerminalFiberStatus(existing.status)
+      ) {
+        const waited = await this._waitForManagedFiber(existing.fiber_id);
+        if (waited) {
+          return {
+            ...waited,
+            accepted: false
+          };
+        }
+        throw new Error(`Fiber ${existing.fiber_id} no longer exists`);
+      }
+      return {
+        ...this._fiberInspectionFromRow(existing),
+        accepted: false
+      };
+    }
+
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_agents_fibers
+        (fiber_id, idempotency_key, name, status, snapshot, metadata_json,
+         error_message, created_at, started_at, completed_at)
+      VALUES
+        (${fiberId}, ${idempotencyKey ?? null}, ${name}, 'pending', NULL,
+         ${options?.metadata ? JSON.stringify(options.metadata) : null}, NULL,
+         ${now}, NULL, NULL)
+    `;
+
+    const row = this._readFiber(fiberId);
+    if (!row) {
+      throw new Error(`Failed to create fiber ${fiberId}`);
+    }
+
+    const execution = this._executeManagedFiber(fiberId, name, fn)
+      .catch((error) => {
+        console.error(
+          `[Agent] Managed fiber "${name}" (${fiberId}) failed:`,
+          error
+        );
+      })
+      .finally(() => {
+        if (this._managedFiberExecutions.get(fiberId) === execution) {
+          this._managedFiberExecutions.delete(fiberId);
+        }
+      });
+    this._managedFiberExecutions.set(fiberId, execution);
+
+    if (options?.waitForCompletion) {
+      const completed = await this._waitForManagedFiber(fiberId);
+      if (!completed) {
+        throw new Error(`Fiber ${fiberId} no longer exists`);
+      }
+      return {
+        ...completed,
+        accepted: true
+      };
+    }
+
+    return {
+      ...this._fiberInspectionFromRow(row),
+      accepted: true
+    };
+  }
+
+  private async _executeManagedFiber(
+    fiberId: string,
+    name: string,
+    fn: (ctx: FiberContext) => Promise<void>
+  ): Promise<void> {
+    const row = this._readFiber(fiberId);
+    if (!row || row.status !== "pending") {
+      return;
+    }
+
+    const controller = new AbortController();
+    this._managedFiberAbortControllers.set(fiberId, controller);
+    const now = Date.now();
+    this.sql`
+      UPDATE cf_agents_fibers
+      SET status = 'running', started_at = ${now}
+      WHERE fiber_id = ${fiberId} AND status = 'pending'
+    `;
+
+    const updated = this._readFiber(fiberId);
+    if (!updated || updated.status !== "running") {
+      this._managedFiberAbortControllers.delete(fiberId);
+      return;
+    }
+
+    let settled = false;
+    try {
+      await this._runFiberInternal(fiberId, name, fn, {
+        signal: controller.signal,
+        managed: true,
+        beforeRunCleanup: (outcome) => {
+          settled = true;
+          this._settleManagedFiberExecution(
+            fiberId,
+            outcome,
+            controller.signal
+          );
+        }
+      });
+    } catch (error) {
+      if (!settled) {
+        this._settleManagedFiberExecution(
+          fiberId,
+          { ok: false, error },
+          controller.signal
+        );
+      }
+    } finally {
+      this._managedFiberAbortControllers.delete(fiberId);
+    }
+  }
+
+  private async _runFiberInternal<T>(
+    id: string,
+    name: string,
+    fn: (ctx: FiberContext) => Promise<T>,
+    options?: {
+      signal?: AbortSignal;
+      managed?: boolean;
+      beforeRunCleanup?: (
+        outcome: { ok: true } | { ok: false; error: unknown }
+      ) => void;
+    }
+  ): Promise<T> {
+    const signal = options?.signal ?? new AbortController().signal;
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, NULL, ${Date.now()})
@@ -4063,15 +4826,29 @@ export class Agent<
 
       dispose = await this.keepAlive();
       const stash = (data: unknown) => {
+        const snapshot = JSON.stringify(data);
         this.sql`
-          UPDATE cf_agents_runs SET snapshot = ${JSON.stringify(data)}
+          UPDATE cf_agents_runs SET snapshot = ${snapshot}
           WHERE id = ${id}
         `;
+        if (options?.managed) {
+          this.sql`
+            UPDATE cf_agents_fibers SET snapshot = ${snapshot}
+            WHERE fiber_id = ${id}
+          `;
+        }
       };
 
-      return await _fiberALS.run({ id, stash }, () =>
-        fn({ id, stash, snapshot: null })
-      );
+      try {
+        const result = await _fiberALS.run({ id, signal, stash }, () =>
+          fn({ id, signal, stash, snapshot: null })
+        );
+        options?.beforeRunCleanup?.({ ok: true });
+        return result;
+      } catch (error) {
+        options?.beforeRunCleanup?.({ ok: false, error });
+        throw error;
+      }
     } finally {
       this._runFiberActiveFibers.delete(id);
       this.sql`DELETE FROM cf_agents_runs WHERE id = ${id}`;
@@ -4116,7 +4893,7 @@ export class Agent<
   async onFiberRecovered(
     // oxlint-disable-next-line @typescript-eslint/no-unused-vars -- overridable hook
     _ctx: FiberRecoveryContext
-  ): Promise<void> {
+  ): Promise<void | FiberRecoveryResult> {
     console.warn(
       `[Agent] Fiber "${_ctx.name}" (${_ctx.id}) was interrupted. ` +
         "Override onFiberRecovered to handle recovery."
@@ -4151,17 +4928,7 @@ export class Agent<
       for (const row of rows) {
         if (this._runFiberActiveFibers.has(row.id)) continue;
 
-        let snapshot: unknown = null;
-        if (row.snapshot) {
-          try {
-            snapshot = JSON.parse(row.snapshot);
-          } catch {
-            console.warn(
-              `[Agent] Corrupted snapshot for fiber ${row.id}, treating as null`
-            );
-          }
-        }
-
+        const snapshot = this._parseFiberRecoverySnapshot(row.id, row.snapshot);
         const ctx: FiberRecoveryContext = {
           id: row.id,
           name: row.name,
@@ -4169,19 +4936,74 @@ export class Agent<
           createdAt: row.created_at
         };
 
-        try {
-          const handled = await this._handleInternalFiberRecovery(ctx);
-          if (!handled) {
-            await this.onFiberRecovered(ctx);
+        const managedRow = this._readFiber(row.id);
+        if (managedRow) {
+          if (this._isTerminalFiberStatus(managedRow.status)) {
+            this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
+            this._notifyManagedFiberTerminal(row.id);
+            continue;
           }
-        } catch (e) {
-          console.error(
-            `[Agent] Fiber recovery failed for "${ctx.name}" (${ctx.id}):`,
-            e
-          );
+
+          const completedAt = Date.now();
+          this.sql`
+            UPDATE cf_agents_fibers
+            SET status = 'interrupted',
+                snapshot = ${row.snapshot},
+                completed_at = ${completedAt}
+            WHERE fiber_id = ${row.id}
+              AND status IN ('pending', 'running')
+          `;
+          ctx.idempotencyKey = managedRow.idempotency_key ?? undefined;
+          ctx.metadata = this._parseFiberJsonObject(managedRow.metadata_json);
+          ctx.status = "interrupted";
         }
 
+        await this._runFiberRecoveryHook(ctx, managedRow);
         this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
+        if (managedRow) {
+          this._notifyManagedFiberTerminal(row.id);
+        }
+      }
+
+      const ledgerOnlyRows = this.sql<FiberLedgerRow>`
+        SELECT f.fiber_id, f.idempotency_key, f.name, f.status, f.snapshot,
+               f.metadata_json, f.error_message, f.created_at, f.started_at,
+               f.completed_at
+        FROM cf_agents_fibers f
+        LEFT JOIN cf_agents_runs r ON r.id = f.fiber_id
+        WHERE f.status IN ('pending', 'running')
+          AND r.id IS NULL
+      `;
+
+      for (const row of ledgerOnlyRows) {
+        if (this._runFiberActiveFibers.has(row.fiber_id)) continue;
+
+        const snapshot = this._parseFiberRecoverySnapshot(
+          row.fiber_id,
+          row.snapshot
+        );
+        const completedAt = Date.now();
+        this.sql`
+          UPDATE cf_agents_fibers
+          SET status = 'interrupted',
+              completed_at = ${completedAt}
+          WHERE fiber_id = ${row.fiber_id}
+            AND status IN ('pending', 'running')
+        `;
+
+        await this._runFiberRecoveryHook(
+          {
+            id: row.fiber_id,
+            name: row.name,
+            snapshot,
+            createdAt: row.created_at,
+            idempotencyKey: row.idempotency_key ?? undefined,
+            metadata: this._parseFiberJsonObject(row.metadata_json),
+            status: "interrupted"
+          },
+          row
+        );
+        this._notifyManagedFiberTerminal(row.fiber_id);
       }
     } finally {
       this._runFiberRecoveryInProgress = false;
@@ -7145,6 +7967,7 @@ export class Agent<
     this.sql`DROP TABLE IF EXISTS cf_agents_workflows`;
     this.sql`DROP TABLE IF EXISTS cf_agents_sub_agents`;
     this.sql`DROP TABLE IF EXISTS cf_agents_runs`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_fibers`;
     this.sql`DROP TABLE IF EXISTS cf_agents_facet_runs`;
     this.sql`DROP TABLE IF EXISTS cf_agent_tool_runs`;
   }

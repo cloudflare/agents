@@ -3,6 +3,11 @@ import type { Thread } from "chat";
 import { describe, expect, it } from "vitest";
 import type { UIMessage } from "ai";
 import {
+  aiReplyFailureMode,
+  aiReplyRecoveryMode,
+  type AiReplySnapshot
+} from "../index";
+import {
   conversationNameForThread,
   extractLatestAssistantText,
   isAskCommand,
@@ -114,6 +119,25 @@ describe("Telegram intelligence helpers", () => {
     ];
 
     expect(extractLatestAssistantText(messages)).toBe("Hi there.");
+  });
+
+  it("maps durable AI reply recovery snapshots to visible recovery actions", () => {
+    const base = {
+      type: "chat-sdk-messenger:ai-reply",
+      thread: {},
+      message: {}
+    } satisfies Omit<AiReplySnapshot, "stage">;
+
+    expect(aiReplyRecoveryMode({ ...base, stage: "accepted" })).toBe("answer");
+    expect(aiReplyRecoveryMode({ ...base, stage: "streaming" })).toBe(
+      "apologize"
+    );
+    expect(aiReplyRecoveryMode({ ...base, stage: "completed" })).toBeNull();
+  });
+
+  it("maps partial stream failures to apology mode", () => {
+    expect(aiReplyFailureMode(true)).toBe("apologize");
+    expect(aiReplyFailureMode(false)).toBe("error");
   });
 
   it("extracts text deltas from Think chat stream chunks", () => {

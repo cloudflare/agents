@@ -2,7 +2,9 @@
 
 The first implementation is complete: Chat SDK owns messenger ingress,
 `ChatStateAgent` backs Chat SDK state, and `ConversationAgent extends Think`
-owns per-thread AI history with Think `chat()` streaming.
+owns per-thread AI history with Think `chat()` streaming. AI replies are
+accepted through managed fibers so webhook retries reuse a stable idempotency
+key.
 
 ## Streaming Polish
 
@@ -19,6 +21,8 @@ owns per-thread AI history with Think `chat()` streaming.
 - Add clearer user-facing error messages for model failures, rate limits, and
   unsupported message types.
 - Review queue, lock, and debounce settings under high-volume group chats.
+- Revisit whether mid-stream recovery should offer a retry button instead of
+  only posting an interruption apology.
 - Decide whether to reduce internal subagent/facet calls on hot paths or simply
   document the expected observability noise.
 

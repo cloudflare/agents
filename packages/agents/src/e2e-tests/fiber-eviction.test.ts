@@ -139,6 +139,9 @@ function killProcess(child: ChildProcess): Promise<void> {
 // ── Tests ─────────────────────────────────────────────────────────────
 
 const RUN_FIBER_AGENT_NAME = "run-fiber-e2e";
+const MANAGED_COMPLETE_KEY = "managed-complete-e2e";
+const MANAGED_INTERRUPT_KEY = "managed-interrupt-e2e";
+const MANAGED_WAIT_KEY = "managed-wait-e2e";
 
 async function callAgentByPath(
   path: string,
@@ -197,6 +200,7 @@ async function callRunFiberAgent(
 
 const SUB_AGENT_FIBER_PARENT_NAME = "sub-agent-fiber-e2e";
 const SUB_AGENT_FIBER_CHILD_NAME = "child-fiber-e2e";
+const SUB_AGENT_MANAGED_KEY = "sub-managed-e2e";
 
 async function callSubAgentFiberParent(
   method: string,
@@ -250,6 +254,94 @@ describe("runFiber eviction e2e (no mixin)", () => {
     await waitForReady();
     console.log("[test] Wrangler restarted");
     return proc;
+  }
+
+  async function waitForManagedFiberStatus(
+    idempotencyKey: string,
+    status: string
+  ): Promise<{
+    runCount: number;
+    recoveredCount: number;
+    fiber: {
+      status: string;
+      snapshot?: unknown;
+      metadata?: Record<string, unknown>;
+      idempotencyKey?: string;
+    } | null;
+  }> {
+    for (let i = 0; i < 30; i++) {
+      await sleep(1000);
+      try {
+        const current = (await callRunFiberAgent("getManagedFiberStatus", [
+          idempotencyKey
+        ])) as {
+          runCount: number;
+          recoveredCount: number;
+          fiber: {
+            status: string;
+            snapshot?: unknown;
+            metadata?: Record<string, unknown>;
+            idempotencyKey?: string;
+          } | null;
+        };
+        console.log(
+          `[test] Managed poll ${i + 1}: status=${current.fiber?.status}, running=${current.runCount}, recovered=${current.recoveredCount}`
+        );
+        if (current.fiber?.status === status && current.runCount === 0) {
+          return current;
+        }
+      } catch {
+        console.log(
+          `[test] Managed poll ${i + 1}: error (agent may not be ready)`
+        );
+      }
+    }
+    throw new Error(`Managed fiber ${idempotencyKey} did not become ${status}`);
+  }
+
+  async function waitForChildManagedFiberStatus(
+    childName: string,
+    idempotencyKey: string,
+    status: string
+  ): Promise<{
+    runCount: number;
+    recoveredCount: number;
+    fiber: {
+      status: string;
+      snapshot?: unknown;
+      idempotencyKey?: string;
+    } | null;
+  }> {
+    for (let i = 0; i < 30; i++) {
+      await sleep(1000);
+      try {
+        const current = (await callSubAgentFiberParent(
+          "getChildManagedFiberStatus",
+          [childName, idempotencyKey]
+        )) as {
+          runCount: number;
+          recoveredCount: number;
+          fiber: {
+            status: string;
+            snapshot?: unknown;
+            idempotencyKey?: string;
+          } | null;
+        };
+        console.log(
+          `[test] Child managed poll ${i + 1}: status=${current.fiber?.status}, running=${current.runCount}, recovered=${current.recoveredCount}`
+        );
+        if (current.fiber?.status === status && current.runCount === 0) {
+          return current;
+        }
+      } catch {
+        console.log(
+          `[test] Child managed poll ${i + 1}: error (agent may not be ready)`
+        );
+      }
+    }
+    throw new Error(
+      `Child managed fiber ${idempotencyKey} did not become ${status}`
+    );
   }
 
   it("should recover a runFiber after process kill via persisted alarm", async () => {
@@ -372,5 +464,163 @@ describe("runFiber eviction e2e (no mixin)", () => {
     expect(recoveredFibers.length).toBeGreaterThanOrEqual(1);
     expect(recoveredFibers[0].name).toBe("subSlowSteps");
     expect(recoveredFibers[0].snapshot).not.toBeNull();
+  });
+
+  it("should mark a managed fiber interrupted after process kill", async () => {
+    wrangler = await startAndWait();
+
+    const accepted = (await callRunFiberAgent("startManagedSlowFiber", [
+      8,
+      MANAGED_INTERRUPT_KEY,
+      "interrupt"
+    ])) as { accepted: boolean; status: string; idempotencyKey?: string };
+    expect(accepted.accepted).toBe(true);
+    expect(accepted.status).toBe("pending");
+
+    await sleep(3500);
+    const before = (await callRunFiberAgent("getManagedFiberByKey", [
+      MANAGED_INTERRUPT_KEY
+    ])) as {
+      status: string;
+      snapshot?: { completedSteps?: Array<{ index: number }> };
+    };
+    expect(before.status).toBe("running");
+    expect(before.snapshot?.completedSteps?.length).toBeGreaterThan(0);
+    expect(before.snapshot?.completedSteps?.length).toBeLessThan(8);
+
+    wrangler = await killAndRestart();
+
+    const status = await waitForManagedFiberStatus(
+      MANAGED_INTERRUPT_KEY,
+      "interrupted"
+    );
+    expect(status.recoveredCount).toBeGreaterThanOrEqual(1);
+    expect(status.fiber).toMatchObject({
+      status: "interrupted",
+      idempotencyKey: MANAGED_INTERRUPT_KEY
+    });
+    expect(status.fiber?.snapshot).toMatchObject({
+      completedSteps: expect.any(Array),
+      totalSteps: 8
+    });
+  });
+
+  it("should apply managed fiber recovery results after process kill", async () => {
+    wrangler = await startAndWait();
+
+    const accepted = (await callRunFiberAgent("startManagedSlowFiber", [
+      8,
+      MANAGED_COMPLETE_KEY,
+      "complete"
+    ])) as { accepted: boolean; status: string };
+    expect(accepted).toMatchObject({ accepted: true, status: "pending" });
+
+    await sleep(3500);
+    const before = (await callRunFiberAgent("getManagedFiberByKey", [
+      MANAGED_COMPLETE_KEY
+    ])) as {
+      status: string;
+      snapshot?: { completedSteps?: Array<{ index: number }> };
+    };
+    expect(before.status).toBe("running");
+    expect(before.snapshot?.completedSteps?.length).toBeGreaterThan(0);
+    expect(before.snapshot?.completedSteps?.length).toBeLessThan(8);
+
+    wrangler = await killAndRestart();
+
+    const status = await waitForManagedFiberStatus(
+      MANAGED_COMPLETE_KEY,
+      "completed"
+    );
+    expect(status.recoveredCount).toBeGreaterThanOrEqual(1);
+    expect(status.fiber).toMatchObject({
+      status: "completed",
+      idempotencyKey: MANAGED_COMPLETE_KEY,
+      metadata: { recoveredBy: "onFiberRecovered" },
+      snapshot: {
+        recovered: true,
+        checkpoint: {
+          totalSteps: 8
+        }
+      }
+    });
+  });
+
+  it("should resolve duplicate waitForCompletion after process restart", async () => {
+    wrangler = await startAndWait();
+
+    await callRunFiberAgent("startManagedSlowFiber", [
+      8,
+      MANAGED_WAIT_KEY,
+      "complete"
+    ]);
+    await sleep(3500);
+    wrangler = await killAndRestart();
+
+    const retry = (await callRunFiberAgent("retryManagedSlowFiberAndWait", [
+      8,
+      MANAGED_WAIT_KEY,
+      "complete"
+    ])) as {
+      accepted: boolean;
+      status: string;
+      idempotencyKey?: string;
+      snapshot?: unknown;
+    };
+
+    expect(retry).toMatchObject({
+      accepted: false,
+      status: "completed",
+      idempotencyKey: MANAGED_WAIT_KEY,
+      snapshot: {
+        recovered: true,
+        checkpoint: {
+          totalSteps: 8
+        }
+      }
+    });
+  });
+
+  it("should recover a sub-agent managed fiber after process kill via the parent alarm", async () => {
+    wrangler = await startAndWait();
+
+    const accepted = (await callSubAgentFiberParent(
+      "startChildManagedSlowFiber",
+      [SUB_AGENT_FIBER_CHILD_NAME, 8, SUB_AGENT_MANAGED_KEY]
+    )) as { accepted: boolean; status: string };
+    expect(accepted).toMatchObject({ accepted: true, status: "pending" });
+
+    await sleep(3500);
+    const before = (await callSubAgentFiberParent(
+      "getChildManagedFiberStatus",
+      [SUB_AGENT_FIBER_CHILD_NAME, SUB_AGENT_MANAGED_KEY]
+    )) as {
+      fiber: {
+        status: string;
+        snapshot?: { completedSteps?: Array<{ index: number }> };
+      } | null;
+    };
+    expect(before.fiber?.status).toBe("running");
+    expect(before.fiber?.snapshot?.completedSteps?.length).toBeGreaterThan(0);
+    expect(before.fiber?.snapshot?.completedSteps?.length).toBeLessThan(8);
+
+    wrangler = await killAndRestart();
+
+    const status = await waitForChildManagedFiberStatus(
+      SUB_AGENT_FIBER_CHILD_NAME,
+      SUB_AGENT_MANAGED_KEY,
+      "completed"
+    );
+    expect(status.recoveredCount).toBeGreaterThanOrEqual(1);
+    expect(status.fiber).toMatchObject({
+      status: "completed",
+      idempotencyKey: SUB_AGENT_MANAGED_KEY,
+      snapshot: {
+        recovered: true,
+        checkpoint: {
+          totalSteps: 8
+        }
+      }
+    });
   });
 });

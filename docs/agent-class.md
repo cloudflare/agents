@@ -452,6 +452,36 @@ class MyAgent extends Agent {
 
 `this.keepAlive()` prevents the Durable Object from being evicted due to inactivity by holding an alarm-backed heartbeat ref. Returns a disposer function to stop the heartbeat. For scoped work, use `this.keepAliveWhile(fn)` which automatically cleans up when the function completes. See [Keeping the Agent Alive](./scheduling.md#keeping-the-agent-alive) for full documentation.
 
+### `this.runFiber` and `this.startFiber`
+
+`this.runFiber()` runs checkpointable work with crash recovery. `this.startFiber()` durably accepts background work with idempotency, status inspection, cancellation, and retained terminal records.
+
+```ts
+const receipt = await this.startFiber(
+  "process-webhook",
+  async (ctx) => {
+    ctx.stash({ webhookId });
+    await processWebhook(webhookId, { signal: ctx.signal });
+  },
+  { idempotencyKey: `webhook:${webhookId}`, waitForCompletion: true }
+);
+
+const current = await this.inspectFiber(receipt.fiberId);
+await this.cancelFiber(receipt.fiberId, "Superseded");
+if (current?.status === "interrupted") {
+  await this.resolveFiber(receipt.fiberId, { status: "completed" });
+}
+await this.deleteFibers({ status: ["completed", "error", "aborted"] });
+```
+
+Use `runFiber()` when the caller waits for the result. Use `startFiber()` when
+the caller needs an immediate durable receipt and may retry with the same
+idempotency key. Add `waitForCompletion: true` when the caller should wait for
+the accepted job to reach a terminal status while still deduping retries. Use
+`onFiberRecovered()` to decide what an interrupted managed fiber means for your
+application; return a recovery result to update the retained status record.
+`resolveFiber()` is for externally resolving `interrupted` rows only.
+
 ### Routing
 
 The `Agent` class re-exports PartyKit's [addressing helpers](#addressing) as `getAgentByName` and `routeAgentRequest`.

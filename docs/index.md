@@ -34,7 +34,7 @@
 - [Queue](./queue.md) - Immediate background task execution
 - [Scheduling](./scheduling.md) - Delayed, scheduled, and cron-based tasks
 - [Retries](./retries.md) - Automatic retries with exponential backoff and jitter
-- [Durable Execution](./durable-execution.md) - `runFiber()`, `stash()`, and crash recovery for long tasks
+- [Durable Execution](./durable-execution.md) - `runFiber()`, `startFiber()`, `stash()`, and crash recovery for long tasks
 - [Workflows](./workflows.md) - Durable multi-step processing with Cloudflare Workflows
 - [Human in the Loop](./human-in-the-loop.md) - Approval flows and manual intervention
 

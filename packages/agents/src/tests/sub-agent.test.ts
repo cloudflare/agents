@@ -967,7 +967,7 @@ describe("SubAgent", () => {
 
     const fiberId = await agent.subAgentHoldFiber("fiber-child", "held");
 
-    expect(await agent.getRootKeepAliveRefCount()).toBe(1);
+    await expectRootKeepAliveRefCount(agent, 1);
     expect(await agent.subAgentRunningFiberCount("fiber-child")).toBe(1);
     expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
       fiberId
@@ -986,6 +986,41 @@ describe("SubAgent", () => {
     expect(await agent.subAgentRunningFiberCount("fiber-child")).toBe(0);
     expect(await agent.facetRunRows()).toEqual([]);
     await expectRootKeepAliveRefCount(agent, 0);
+  });
+
+  it("holds root keepAlive and facet-run leases for managed sub-agent fibers", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const fiberId = await agent.subAgentHoldManagedFiber(
+      "managed-fiber-child",
+      "held-managed",
+      "managed-key"
+    );
+
+    await expectRootKeepAliveRefCount(agent, 1);
+    expect(await agent.subAgentRunningFiberCount("managed-fiber-child")).toBe(
+      1
+    );
+    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
+      fiberId
+    );
+    await expect(
+      agent.subAgentManagedFiber("managed-fiber-child", fiberId)
+    ).resolves.toMatchObject({
+      fiberId,
+      status: "running",
+      idempotencyKey: "managed-key"
+    });
+
+    await agent.subAgentReleaseHeldFiber("managed-fiber-child");
+    await expectRootKeepAliveRefCount(agent, 0);
+    await expect(
+      agent.subAgentManagedFiber("managed-fiber-child", fiberId)
+    ).resolves.toMatchObject({
+      fiberId,
+      status: "completed"
+    });
   });
 
   it("recovers an interrupted sub-agent fiber from the root alarm", async () => {
@@ -1013,6 +1048,31 @@ describe("SubAgent", () => {
         snapshot: { value: "checkpoint" }
       })
     ]);
+  });
+
+  it("applies managed sub-agent fiber recovery outcomes from the child", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertSubAgentInterruptedManagedFiber(
+      "managed-recover-child",
+      "managed-fiber-recover-1",
+      "managed-recovery-complete",
+      { value: "checkpoint" }
+    );
+
+    await runDurableObjectAlarm(agent);
+
+    await expect(
+      agent.subAgentManagedFiber(
+        "managed-recover-child",
+        "managed-fiber-recover-1"
+      )
+    ).resolves.toMatchObject({
+      status: "completed",
+      snapshot: { recovered: true }
+    });
+    expect(await agent.facetRunRows()).toEqual([]);
   });
 
   it("lets internal sub-agent fiber recovery schedule continuation work in the child", async () => {
