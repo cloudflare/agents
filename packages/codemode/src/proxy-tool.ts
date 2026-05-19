@@ -47,11 +47,11 @@ function providerTypeForMethod(
 ): string {
   const descriptors = providerDescriptors(provider);
   if (!descriptors?.[methodName]) return "";
-  return generateTypesFromJsonSchema({ [methodName]: descriptors[methodName] })
-    .replace(
-      "declare const codemode",
-      `declare const ${sanitizeToolName(provider.name ?? "codemode")}`
-    )
+  const generatedTypes = generateTypesFromJsonSchema({
+    [methodName]: descriptors[methodName]
+  });
+  return generatedTypes
+    .slice(0, generatedTypes.indexOf("declare const codemode"))
     .trim();
 }
 
