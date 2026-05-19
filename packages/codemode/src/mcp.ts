@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
@@ -415,7 +416,10 @@ export function openApiMcpServer(options: OpenApiMcpServerOptions): McpServer {
 
   const spec = options.spec;
 
-  const server = new McpServer({ name, version });
+  const server = new McpServer(
+    { name, version },
+    { jsonSchemaValidator: new CfWorkerJsonSchemaValidator() }
+  );
 
   // --- search tool ---
   server.registerTool(

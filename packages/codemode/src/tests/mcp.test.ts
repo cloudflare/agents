@@ -468,6 +468,20 @@ describe("openApiMcpServer", () => {
     await client.close();
   });
 
+  it("should use the Workers-safe JSON schema validator by default", () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const server = openApiMcpServer({
+      spec: sampleSpec,
+      executor,
+      request: async () => ({})
+    });
+
+    expect(
+      (server.server as unknown as { _jsonSchemaValidator: unknown })
+        ._jsonSchemaValidator?.constructor.name
+    ).toBe("CfWorkerJsonSchemaValidator");
+  });
+
   it("search tool description should match snapshot", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
     const server = openApiMcpServer({
