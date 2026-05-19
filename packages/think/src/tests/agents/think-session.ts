@@ -1,5 +1,5 @@
 import type { LanguageModel, UIMessage } from "ai";
-import { Output, tool } from "ai";
+import { hasToolCall, Output, tool } from "ai";
 import { Think } from "../../think";
 import type {
   StreamCallback,
@@ -1311,6 +1311,18 @@ export class ThinkToolsTestAgent extends Think {
     mode: "default" | "async-iterable" | "sync-iterable"
   ): Promise<void> {
     this._echoExecuteMode = mode;
+  }
+
+  async stopAfterEchoToolCall(): Promise<void> {
+    this._turnStopCondition = hasToolCall("echo");
+  }
+
+  private _turnStopCondition: TurnConfig["stopWhen"];
+
+  override beforeTurn(): TurnConfig | void {
+    if (this._turnStopCondition) {
+      return { stopWhen: this._turnStopCondition };
+    }
   }
 
   private _beforeToolCallThrowMessage: string | null = null;

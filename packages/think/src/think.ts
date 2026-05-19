@@ -88,6 +88,7 @@ import type {
   StreamTextOnChunkCallback,
   StreamTextOnStepFinishCallback,
   StreamTextOnToolCallFinishCallback,
+  StopCondition,
   ToolSet,
   TypedToolCall,
   UIMessage
@@ -100,6 +101,7 @@ export type {
   PrepareStepFunction,
   PrepareStepResult,
   StepResult,
+  StopCondition,
   TextStreamPart,
   TypedToolCall,
   TypedToolResult
@@ -368,6 +370,11 @@ export interface TurnConfig {
   toolChoice?: Parameters<typeof streamText>[0]["toolChoice"];
   /** Override maxSteps for this turn. */
   maxSteps?: number;
+  /**
+   * Additional AI SDK stop conditions for ending the turn early.
+   * Think always keeps its `maxSteps` stop condition as a safety bound.
+   */
+  stopWhen?: StopCondition<ToolSet> | Array<StopCondition<ToolSet>>;
   /**
    * Controls whether reasoning chunks are included in the UI message stream
    * for this turn. Defaults to the instance-level `sendReasoning` setting.
@@ -1497,6 +1504,14 @@ export class Think<
     const finalTools: ToolSet = this._wrapToolsWithDecision(mergedTools);
     const finalMaxSteps = config.maxSteps ?? this.maxSteps;
     const finalSendReasoning = config.sendReasoning ?? this.sendReasoning;
+    const finalStopWhen = [
+      stepCountIs(finalMaxSteps),
+      ...(Array.isArray(config.stopWhen)
+        ? config.stopWhen
+        : config.stopWhen
+          ? [config.stopWhen]
+          : [])
+    ];
 
     const result = streamText({
       model: finalModel,
@@ -1516,7 +1531,7 @@ export class Think<
       maxRetries: config.maxRetries,
       timeout: config.timeout,
       headers: config.headers,
-      stopWhen: stepCountIs(finalMaxSteps),
+      stopWhen: finalStopWhen,
       providerOptions: config.providerOptions as
         | Parameters<typeof streamText>[0]["providerOptions"]
         | undefined,
