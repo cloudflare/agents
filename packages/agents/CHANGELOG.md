@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.13.1
+
+### Patch Changes
+
+- [#1563](https://github.com/cloudflare/agents/pull/1563) [`32cde40`](https://github.com/cloudflare/agents/commit/32cde406b3ab022ec83707863c42f22c741527d8) Thanks [@threepointone](https://github.com/threepointone)! - Add managed fiber jobs with idempotent acceptance, optional completion waiting, inspection, cancellation, explicit recovery outcomes, and retained terminal status records.
+
 ## 0.13.0
 
 ### Minor Changes

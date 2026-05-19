@@ -1,5 +1,13 @@
 # @cloudflare/think
 
+## 0.7.1
+
+### Patch Changes
+
+- [#1561](https://github.com/cloudflare/agents/pull/1561) [`831ba1d`](https://github.com/cloudflare/agents/commit/831ba1d20d76c35c9de6ff1799c5f103256dee31) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Expose additive `TurnConfig.stopWhen` conditions so Think subclasses can end an agentic loop early, for example after a designated tool call, while retaining the existing `maxSteps` safety bound.
+
+- [#1563](https://github.com/cloudflare/agents/pull/1563) [`32cde40`](https://github.com/cloudflare/agents/commit/32cde406b3ab022ec83707863c42f22c741527d8) Thanks [@threepointone](https://github.com/threepointone)! - Add RPC-safe cancellation for `chat()` turns with `StreamCallback.onStart()` and `cancelChat()`.
+
 ## 0.7.0
 
 ### Minor Changes
