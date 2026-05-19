@@ -2,9 +2,9 @@ import type { JSONSchema7 } from "json-schema";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Tool as McpTool } from "@modelcontextprotocol/sdk/types.js";
 import type { JsonSchemaToolDescriptors } from "../json-schema-types";
-import type { SimpleToolRecord, ToolProvider } from "../executor";
+import type { SimpleToolRecord } from "../executor";
 import { sanitizeToolName } from "../utils";
-import type { ProviderOptions } from "./types";
+import type { NamedToolProvider, ProviderOptions } from "./types";
 import {
   addSnippets,
   attachProviderDescriptors,
@@ -47,14 +47,14 @@ function unwrapMcpResult(result: CallToolResult): unknown {
 
 export async function mcpProvider(
   options: ProviderOptions & { connection: McpConnectionLike }
-): Promise<ToolProvider> {
+): Promise<NamedToolProvider> {
   const providerName = sanitizeToolName(options.name);
   const tools = options.connection.tools?.length
     ? options.connection.tools
     : options.connection.fetchTools
       ? await options.connection.fetchTools()
       : [];
-  const provider: ToolProvider = { name: providerName, tools: {} };
+  const provider: NamedToolProvider = { name: providerName, tools: {} };
   const descriptors: JsonSchemaToolDescriptors = {};
 
   for (const tool of tools) {

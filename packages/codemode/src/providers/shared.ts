@@ -5,41 +5,78 @@ import {
 } from "../json-schema-types";
 import { runCode } from "../run-code";
 import { sanitizeToolName } from "../utils";
+import type { Executor, ResolvedProvider, SimpleToolRecord } from "../executor";
 import type {
-  Executor,
-  ResolvedProvider,
-  SimpleToolRecord,
-  ToolProvider
-} from "../executor";
-import type {
+  NamedToolProvider,
   ProviderSnippetRecord,
   ToolProviderWithDescriptors
 } from "./types";
+
+function declarationsForProvider(
+  providerName: string,
+  descriptors: JsonSchemaToolDescriptors
+): string {
+  return generateTypesFromJsonSchema(descriptors).replace(
+    "declare const codemode",
+    `declare const ${sanitizeToolName(providerName)}`
+  );
+}
 
 export function providerTypes(
   providerName: string,
   descriptors: JsonSchemaToolDescriptors,
   instructions?: string
 ): string {
-  const types = generateTypesFromJsonSchema(descriptors).replace(
-    "declare const codemode",
-    `declare const ${sanitizeToolName(providerName)}`
-  );
-  return [instructions, types].filter(Boolean).join("\n\n");
+  return [instructions, declarationsForProvider(providerName, descriptors)]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+export function methodTypes(
+  descriptors: JsonSchemaToolDescriptors,
+  methodName: string
+): string {
+  const descriptor = descriptors[methodName];
+  if (!descriptor) return "";
+  const generatedTypes = generateTypesFromJsonSchema({
+    [methodName]: descriptor
+  });
+  return generatedTypes
+    .slice(0, generatedTypes.indexOf("declare const codemode"))
+    .trim();
+}
+
+export function describeProvider(provider: NamedToolProvider): string {
+  const descriptors = (provider as ToolProviderWithDescriptors).descriptors;
+  return [
+    provider.name,
+    descriptors ? providerTypes(provider.name, descriptors) : provider.types
+  ]
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+}
+
+export function describeProviderMethod(
+  provider: NamedToolProvider,
+  methodName: string
+): string {
+  const descriptors = (provider as ToolProviderWithDescriptors).descriptors;
+  return descriptors ? methodTypes(descriptors, methodName) : "";
 }
 
 export function attachProviderDescriptors(
-  provider: ToolProvider,
+  provider: NamedToolProvider,
   descriptors: JsonSchemaToolDescriptors
 ): void {
   (provider as ToolProviderWithDescriptors).descriptors = descriptors;
 }
 
 function resolvedProviderFromToolProvider(
-  provider: ToolProvider
+  provider: NamedToolProvider
 ): ResolvedProvider {
   return {
-    name: provider.name ?? "codemode",
+    name: provider.name,
     fns: Object.fromEntries(
       Object.entries(provider.tools).flatMap(([name, tool]) => {
         const execute =
@@ -54,7 +91,7 @@ function resolvedProviderFromToolProvider(
 }
 
 export async function addSnippets(
-  provider: ToolProvider,
+  provider: NamedToolProvider,
   snippets: ProviderSnippetRecord | undefined,
   executor: Executor | undefined,
   descriptors: JsonSchemaToolDescriptors

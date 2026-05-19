@@ -17,6 +17,10 @@ export type ProviderOptions = {
   executor?: Executor;
 };
 
-export type ToolProviderWithDescriptors = ToolProvider & {
+export type NamedToolProvider = ToolProvider & {
+  name: string;
+};
+
+export type ToolProviderWithDescriptors = NamedToolProvider & {
   descriptors?: JsonSchemaToolDescriptors;
 };

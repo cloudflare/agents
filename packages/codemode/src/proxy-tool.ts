@@ -1,8 +1,11 @@
 import { tool, type Tool } from "ai";
 import { z } from "zod";
-import { generateTypesFromJsonSchema } from "./json-schema-types";
-import type { Executor, ResolvedProvider, ToolProvider } from "./executor";
-import type { ToolProviderWithDescriptors } from "./providers/types";
+import type { Executor, ResolvedProvider } from "./executor";
+import type { NamedToolProvider } from "./providers/types";
+import {
+  describeProvider as describeProviderTypes,
+  describeProviderMethod
+} from "./providers/shared";
 import { filterTools, extractFns } from "./resolve";
 import { runCode } from "./run-code";
 import type { CodeOutput } from "./shared";
@@ -15,7 +18,7 @@ export type ProxyToolInput = {
 };
 
 export type ProxyToolOutput = CodeOutput | string;
-export type CodeProvider = Promise<ToolProvider>;
+export type CodeProvider = Promise<NamedToolProvider>;
 
 export type CreateProxyToolOptions = {
   providers: CodeProvider[];
@@ -29,33 +32,18 @@ const proxySchema = z.object({
   execute: z.string().optional()
 });
 
-function providerStatus(providers: ToolProvider[]): string {
+function providerStatus(providers: NamedToolProvider[]): string {
   const rows = providers.map((provider) => {
     const tools = Object.keys(filterTools(provider.tools));
-    return `${provider.name ?? "codemode"} (${tools.length} method${tools.length === 1 ? "" : "s"})`;
+    return `${provider.name} (${tools.length} method${tools.length === 1 ? "" : "s"})`;
   });
   return [`Providers: ${providers.length}`, "", ...rows].join("\n").trim();
 }
 
-function providerDescriptors(provider: ToolProvider) {
-  return (provider as ToolProviderWithDescriptors).descriptors;
-}
-
-function providerTypeForMethod(
-  provider: ToolProvider,
-  methodName: string
+function searchProviders(
+  query: string,
+  providers: NamedToolProvider[]
 ): string {
-  const descriptors = providerDescriptors(provider);
-  if (!descriptors?.[methodName]) return "";
-  const generatedTypes = generateTypesFromJsonSchema({
-    [methodName]: descriptors[methodName]
-  });
-  return generatedTypes
-    .slice(0, generatedTypes.indexOf("declare const codemode"))
-    .trim();
-}
-
-function searchProviders(query: string, providers: ToolProvider[]): string {
   const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
   const lines: string[] = [];
   for (const provider of providers) {
@@ -63,15 +51,13 @@ function searchProviders(query: string, providers: ToolProvider[]): string {
       filterTools(provider.tools)
     )) {
       const safeName = sanitizeToolName(name);
-      const schemaDescriptor = providerDescriptors(provider)?.[safeName];
       const description =
-        schemaDescriptor?.description ??
-        (descriptor &&
+        descriptor &&
         typeof descriptor === "object" &&
         "description" in descriptor
           ? String((descriptor as { description?: unknown }).description ?? "")
-          : "");
-      const fullName = `${provider.name ?? "codemode"}.${safeName}`;
+          : "";
+      const fullName = `${provider.name}.${safeName}`;
       if (![fullName, safeName, name, description].some((v) => pattern.test(v)))
         continue;
       lines.push(`${fullName}${description ? ` — ${description}` : ""}`);
@@ -82,7 +68,10 @@ function searchProviders(query: string, providers: ToolProvider[]): string {
     : `No methods matching "${query}".`;
 }
 
-function describeProviders(target: string, providers: ToolProvider[]): string {
+function describeProviders(
+  target: string,
+  providers: NamedToolProvider[]
+): string {
   const [maybeProvider, maybeMethod] = target.includes(".")
     ? target.split(".", 2)
     : [target, undefined];
@@ -91,9 +80,8 @@ function describeProviders(target: string, providers: ToolProvider[]): string {
   );
   if (provider && !maybeMethod) {
     return [
-      provider.name ?? "codemode",
-      provider.types ?? "",
-      searchProviders(provider.name ?? "codemode", [provider])
+      describeProviderTypes(provider),
+      searchProviders(provider.name, [provider])
     ]
       .filter(Boolean)
       .join("\n\n")
@@ -114,12 +102,8 @@ function describeProviders(target: string, providers: ToolProvider[]): string {
         "description" in descriptor
           ? String((descriptor as { description?: unknown }).description ?? "")
           : "";
-      const methodTypes = providerTypeForMethod(candidate, safeName);
-      return [
-        `${candidate.name ?? "codemode"}.${safeName}`,
-        description,
-        methodTypes
-      ]
+      const methodTypes = describeProviderMethod(candidate, safeName);
+      return [`${candidate.name}.${safeName}`, description, methodTypes]
         .filter(Boolean)
         .join("\n\n")
         .trim();
@@ -128,14 +112,14 @@ function describeProviders(target: string, providers: ToolProvider[]): string {
   return `Provider method "${target}" not found.`;
 }
 
-function resolveProviders(providers: ToolProvider[]): {
+function resolveProviders(providers: NamedToolProvider[]): {
   resolvedProviders: ResolvedProvider[];
 } {
   const resolvedProviders: ResolvedProvider[] = [];
   for (const provider of providers) {
     const filtered = filterTools(provider.tools);
     const resolved: ResolvedProvider = {
-      name: provider.name ?? "codemode",
+      name: provider.name,
       fns: extractFns(filtered)
     };
     resolvedProviders.push(resolved);

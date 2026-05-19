@@ -1,7 +1,7 @@
 import type { JsonSchemaToolDescriptors } from "../json-schema-types";
-import type { SimpleToolRecord, ToolProvider } from "../executor";
+import type { SimpleToolRecord } from "../executor";
 import { sanitizeToolName } from "../utils";
-import type { ProviderOptions } from "./types";
+import type { NamedToolProvider, ProviderOptions } from "./types";
 import {
   addSnippets,
   attachProviderDescriptors,
@@ -19,7 +19,7 @@ export async function openApiProvider(
     spec: Record<string, unknown>;
     request: (options: OpenApiRequestOptions) => Promise<unknown>;
   }
-): Promise<ToolProvider> {
+): Promise<NamedToolProvider> {
   const providerName = sanitizeToolName(options.name);
   const descriptors: JsonSchemaToolDescriptors = {
     search: {
@@ -89,7 +89,7 @@ export async function openApiProvider(
       execute: options.request as (input: unknown) => Promise<unknown>
     }
   };
-  const provider: ToolProvider = {
+  const provider: NamedToolProvider = {
     name: providerName,
     tools
   };

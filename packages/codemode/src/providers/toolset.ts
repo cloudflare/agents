@@ -1,9 +1,8 @@
 import type { ToolSet } from "ai";
 import type { JsonSchemaToolDescriptors } from "../json-schema-types";
-import type { ToolProvider } from "../executor";
 import type { ToolDescriptors } from "../tool-types";
 import { sanitizeToolName } from "../utils";
-import type { ProviderOptions } from "./types";
+import type { NamedToolProvider, ProviderOptions } from "./types";
 import {
   addSnippets,
   attachProviderDescriptors,
@@ -12,8 +11,8 @@ import {
 
 export async function toolsetProvider(
   options: ProviderOptions & { tools: ToolDescriptors | ToolSet }
-): Promise<ToolProvider> {
-  const provider: ToolProvider = {
+): Promise<NamedToolProvider> {
+  const provider: NamedToolProvider = {
     name: sanitizeToolName(options.name),
     tools: options.tools,
     types: options.instructions
@@ -23,7 +22,7 @@ export async function toolsetProvider(
   if (Object.keys(descriptors).length > 0) {
     attachProviderDescriptors(provider, descriptors);
     provider.types = providerTypes(
-      provider.name ?? "codemode",
+      provider.name,
       descriptors,
       options.instructions
     );
