@@ -193,6 +193,7 @@ function App() {
                 <label className="block text-xs text-kumo-subtle mb-1">
                   Name
                   <input
+                    aria-label="My Server"
                     ref={mcpNameInputRef}
                     type="text"
                     placeholder="My Server"
@@ -204,6 +205,7 @@ function App() {
                 <label className="block text-xs text-kumo-subtle mb-1">
                   URL
                   <input
+                    aria-label="https://example.com/mcp"
                     ref={mcpUrlInputRef}
                     type="text"
                     placeholder="https://example.com/mcp"

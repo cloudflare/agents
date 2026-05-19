@@ -327,6 +327,7 @@ function DesignPhase({
             </span>
             <div className="flex gap-3">
               <input
+                aria-label="Inspector Bramblewood"
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}

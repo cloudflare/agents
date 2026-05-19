@@ -805,6 +805,7 @@ export function App() {
                     className="flex cursor-pointer select-none items-center gap-1.5 text-[13px] text-kumo-default"
                   >
                     <input
+                      aria-label={label}
                       type="checkbox"
                       checked={checked}
                       onChange={(e) => onChange(e.target.checked)}

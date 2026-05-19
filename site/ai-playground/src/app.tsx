@@ -387,6 +387,7 @@ const App = () => {
                     </label>
                     <div className="flex items-center gap-2">
                       <input
+                        aria-label="Temperature"
                         id="temperature"
                         className="w-full appearance-none cursor-pointer bg-ai rounded-full h-1.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:shadow-[0_0_0_2px_#901475]"
                         type="range"

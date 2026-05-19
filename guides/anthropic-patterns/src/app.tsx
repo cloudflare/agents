@@ -199,6 +199,7 @@ function PatternSection({
         <div className="form-group">
           <label htmlFor="sequential-input">Marketing Copy Input</label>
           <input
+            aria-label="Marketing Copy Input"
             id="sequential-input"
             type="text"
             name="input"
@@ -220,6 +221,7 @@ function PatternSection({
         <div className="form-group">
           <label htmlFor="routing-query">Customer Query</label>
           <input
+            aria-label="Customer Query"
             id="routing-query"
             type="text"
             name="query"
@@ -241,6 +243,7 @@ function PatternSection({
         <div className="form-group">
           <label htmlFor="parallel-code">Code for Review</label>
           <textarea
+            aria-label="Code for Review"
             id="parallel-code"
             name="code"
             value={state.code}
@@ -265,6 +268,7 @@ function PatternSection({
         <div className="form-group">
           <label htmlFor="orchestrator-request">Feature Request</label>
           <textarea
+            aria-label="Feature Request"
             id="orchestrator-request"
             name="featureRequest"
             value={state.featureRequest}
@@ -287,6 +291,7 @@ function PatternSection({
           <div className="form-group">
             <label htmlFor="evaluator-text">Text to Translate</label>
             <textarea
+              aria-label="Text to Translate"
               id="evaluator-text"
               name="text"
               value={state.text}

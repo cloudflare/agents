@@ -256,6 +256,7 @@ export function MusicTab() {
               ) : currentAudio ? (
                 /* eslint-disable-next-line jsx-a11y/media-has-caption */
                 <audio
+                  aria-label="Audio playback"
                   src={currentAudio}
                   controls
                   className="w-full rounded-lg"

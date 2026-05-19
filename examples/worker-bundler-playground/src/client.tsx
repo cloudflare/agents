@@ -113,6 +113,7 @@ function RequestTester({
           <option value="DELETE">DELETE</option>
         </select>
         <input
+          aria-label="Request path"
           type="text"
           value={path}
           onChange={(e) => setPath(e.target.value)}
@@ -132,6 +133,7 @@ function RequestTester({
 
       {method !== "GET" && method !== "HEAD" && (
         <textarea
+          aria-label="Request body"
           value={body}
           onChange={(e) => setBody(e.target.value)}
           placeholder='{"key": "value"}'

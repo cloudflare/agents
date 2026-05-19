@@ -258,6 +258,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
         <div className="relative mb-2">
           <div className="flex space-x-1.5">
             <input
+              aria-label="MCP server URL"
               type="text"
               className="grow p-1.5 text-sm border border-kumo-line rounded-md bg-kumo-base text-kumo-default hover:bg-kumo-tint focus:outline-none focus:ring-1 focus:ring-kumo-ring"
               placeholder="MCP server URL"
@@ -309,6 +310,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
                   Header Name
                 </label>
                 <input
+                  aria-label="Authorization, X-API-Key"
                   type="text"
                   className="w-full p-1.5 border border-kumo-line rounded-md text-xs bg-kumo-base text-kumo-default hover:bg-kumo-tint focus:outline-none focus:ring-1 focus:ring-kumo-ring"
                   placeholder="e.g., Authorization, X-API-Key"
@@ -329,6 +331,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
                 </label>
                 <div className="relative">
                   <input
+                    aria-label="API key or token"
                     type={showToken ? "text" : "password"}
                     className="w-full p-1.5 pr-8 border border-kumo-line rounded-md text-xs bg-kumo-base text-kumo-default hover:bg-kumo-tint focus:outline-none focus:ring-1 focus:ring-kumo-ring"
                     placeholder="API key or token"

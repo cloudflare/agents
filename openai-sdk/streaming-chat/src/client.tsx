@@ -312,6 +312,7 @@ function Chat() {
           }}
         >
           <input
+            aria-label="Type a message"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Type a message..."

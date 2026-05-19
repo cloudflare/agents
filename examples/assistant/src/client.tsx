@@ -553,6 +553,7 @@ function Chat({
                       className="space-y-2"
                     >
                       <input
+                        aria-label="Server name"
                         type="text"
                         value={mcpName}
                         onChange={(e) => setMcpName(e.target.value)}
@@ -561,6 +562,7 @@ function Chat({
                       />
                       <div className="flex gap-2">
                         <input
+                          aria-label="https://mcp.example.com"
                           type="text"
                           value={mcpUrl}
                           onChange={(e) => setMcpUrl(e.target.value)}
@@ -905,6 +907,7 @@ function Chat({
                           Persona
                         </label>
                         <textarea
+                          aria-label="You are a helpful assistant"
                           className="w-full px-3 py-1.5 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:ring-1 focus:ring-kumo-accent resize-none"
                           rows={3}
                           placeholder="You are a helpful assistant..."
@@ -1524,6 +1527,7 @@ function ChatSidebar({
               return (
                 <li key={chat.id} className="group relative">
                   <button
+                    aria-label={`Select chat ${chat.title}`}
                     type="button"
                     className={`w-full flex items-start gap-1 px-2 py-2 mx-1 rounded-md text-left ${
                       isActive ? "bg-kumo-hover" : "hover:bg-kumo-hover/60"

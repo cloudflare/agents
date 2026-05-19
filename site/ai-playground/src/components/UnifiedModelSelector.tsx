@@ -543,6 +543,7 @@ const UnifiedModelSelector = ({
                 </label>
                 <div className="relative">
                   <input
+                    aria-label={`${externalProvider === "xai" ? "xAI" : externalProvider} API key`}
                     type={showProviderKey ? "text" : "password"}
                     value={providerApiKey || ""}
                     onChange={(e) => onProviderApiKeyChange(e.target.value)}
@@ -573,6 +574,7 @@ const UnifiedModelSelector = ({
                     Account ID <span className="text-kumo-danger">*</span>
                   </label>
                   <input
+                    aria-label="Cloudflare account ID"
                     type="text"
                     value={gatewayAccountId || ""}
                     onChange={(e) => onGatewayAccountIdChange(e.target.value)}
@@ -590,6 +592,7 @@ const UnifiedModelSelector = ({
                     Gateway ID <span className="text-kumo-danger">*</span>
                   </label>
                   <input
+                    aria-label="AI Gateway ID"
                     type="text"
                     value={gatewayId || ""}
                     onChange={(e) => onGatewayIdChange(e.target.value)}
@@ -609,6 +612,7 @@ const UnifiedModelSelector = ({
                   </label>
                   <div className="relative">
                     <input
+                      aria-label="Cloudflare API key"
                       type={showGatewayKey ? "text" : "password"}
                       value={gatewayApiKey || ""}
                       onChange={(e) => onGatewayApiKeyChange(e.target.value)}

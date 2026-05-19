@@ -276,20 +276,22 @@ describe("Skill blocks in system prompt", () => {
     const prompt = blocks.toSystemPrompt();
 
     expect(prompt).toContain("SKILLS");
-    expect(prompt).toContain("load_context");
+    expect(prompt).toContain("[loadable]");
     expect(prompt).toContain("code-review");
     expect(prompt).toContain("Code review");
     expect(prompt).toContain("sql-query");
     expect(prompt).toContain("SQL guide");
   });
 
-  it("empty skill provider produces no prompt section", async () => {
+  it("empty skill provider renders with loadable tag", async () => {
     const blocks = new ContextBlocks([
       { label: "skills", provider: new MemorySkillProvider() }
     ]);
     await blocks.load();
     const prompt = blocks.toSystemPrompt();
-    expect(prompt).toBe("");
+    // Skill blocks are writable, so they render even when empty
+    expect(prompt).toContain("SKILLS");
+    expect(prompt).toContain("[loadable]");
   });
 });
 
@@ -349,8 +351,8 @@ type SetToolFn = {
   execute: (args: {
     label: string;
     content: string;
-    key?: string;
-    description?: string;
+    metadata?: { title?: string; description?: string };
+    action?: string;
   }) => Promise<string>;
 };
 
@@ -368,7 +370,7 @@ describe("set_context tool", () => {
     expect(await provider.get()).toBe("new fact");
   });
 
-  it("writes to skill block with key", async () => {
+  it("writes to skill block with title as key", async () => {
     const provider = new MemorySkillProvider();
     const blocks = new ContextBlocks([{ label: "skills", provider }]);
     await blocks.load();
@@ -376,15 +378,14 @@ describe("set_context tool", () => {
     const tool = tools.set_context as unknown as SetToolFn;
     const result = await tool.execute({
       label: "skills",
-      key: "pirate",
       content: "Talk like a pirate",
-      description: "Pirate style"
+      metadata: { title: "Pirate style" }
     });
-    expect(result).toContain("Written skill");
-    expect(await provider.load("pirate")).toBe("Talk like a pirate");
+    expect(result).toContain("Indexed");
+    expect(await provider.load("pirate-style")).toBe("Talk like a pirate");
   });
 
-  it("errors when skill block missing key", async () => {
+  it("auto-generates key from content when no title for skill block", async () => {
     const blocks = new ContextBlocks([
       {
         label: "skills",
@@ -395,7 +396,8 @@ describe("set_context tool", () => {
     const tools = await blocks.tools();
     const tool = tools.set_context as unknown as SetToolFn;
     const result = await tool.execute({ label: "skills", content: "no key" });
-    expect(result).toContain("key is required");
+    expect(result).toContain("Indexed");
+    expect(result).toMatch(/Indexed "no-key-[a-z0-9]+"/);
   });
 
   it("rejects writes to readonly block", async () => {
@@ -418,23 +420,21 @@ describe("set_context tool", () => {
     const tools = await blocks.tools();
     const tool = tools.set_context as unknown as SetToolFn;
 
-    // Write a skill with description
+    // Write a skill with metadata — title slugs into the key and also
+    // acts as the description when no explicit description is given.
     await tool.execute({
       label: "skills",
-      key: "greeting",
       content: "Say hello warmly",
-      description: "Greeting instructions"
+      metadata: { title: "Greeting instructions" }
     });
 
-    // Description should be stored in the provider
+    // Title should be slugified into the key
     const metadata = await provider.get();
-    expect(metadata).toContain("greeting");
-    expect(metadata).toContain("Greeting instructions");
+    expect(metadata).toContain("greeting-instructions");
 
     // Block content should be refreshed with new metadata
     const block = blocks.getBlock("skills");
-    expect(block?.content).toContain("greeting");
-    expect(block?.content).toContain("Greeting instructions");
+    expect(block?.content).toContain("greeting-instructions");
   });
 
   it("set_context without description stores content only", async () => {
@@ -445,18 +445,51 @@ describe("set_context tool", () => {
     const tools = await blocks.tools();
     const tool = tools.set_context as unknown as SetToolFn;
 
-    await tool.execute({
+    const result = await tool.execute({
       label: "skills",
-      key: "raw-skill",
       content: "Just content, no desc"
     });
 
-    expect(await provider.load("raw-skill")).toBe("Just content, no desc");
+    // Omitted titles get a deterministic content hash to avoid collisions.
+    const key = result.match(/Indexed "([^"]+)"/)?.[1];
+    expect(key).toMatch(/^just-content-no-desc-[a-z0-9]+$/);
+    expect(await provider.load(key!)).toBe("Just content, no desc");
+  });
 
-    // Metadata should list the key without description
-    const metadata = await provider.get();
-    expect(metadata).toContain("raw-skill");
-    expect(metadata).not.toContain(":");
+  it("auto-generated keys avoid content prefix and non-Latin collisions", async () => {
+    const provider = new MemorySkillProvider();
+    const blocks = new ContextBlocks([{ label: "skills", provider }]);
+    await blocks.load();
+
+    const tools = await blocks.tools();
+    const tool = tools.set_context as unknown as SetToolFn;
+
+    const first = await tool.execute({
+      label: "skills",
+      content:
+        "The deployment process for production requires approval from security team"
+    });
+    const second = await tool.execute({
+      label: "skills",
+      content:
+        "The deployment process for production requires approval from management"
+    });
+    const nonLatin = await tool.execute({
+      label: "skills",
+      content: "用户喜欢咖啡"
+    });
+
+    const firstKey = first.match(/Indexed "([^"]+)"/)?.[1];
+    const secondKey = second.match(/Indexed "([^"]+)"/)?.[1];
+    const nonLatinKey = nonLatin.match(/Indexed "([^"]+)"/)?.[1];
+
+    expect(firstKey).toBeDefined();
+    expect(secondKey).toBeDefined();
+    expect(nonLatinKey).toMatch(/^entry-[a-z0-9]+$/);
+    expect(firstKey).not.toBe(secondKey);
+    expect(await provider.load(firstKey!)).toContain("security team");
+    expect(await provider.load(secondKey!)).toContain("management");
+    expect(await provider.load(nonLatinKey!)).toBe("用户喜欢咖啡");
   });
 
   it("multiple set_context calls accumulate skills in metadata", async () => {
@@ -469,26 +502,22 @@ describe("set_context tool", () => {
 
     await tool.execute({
       label: "skills",
-      key: "skill-a",
       content: "Content A",
-      description: "First skill"
+      metadata: { title: "First skill" }
     });
     await tool.execute({
       label: "skills",
-      key: "skill-b",
       content: "Content B",
-      description: "Second skill"
+      metadata: { title: "Second skill" }
     });
 
     const block = blocks.getBlock("skills");
-    expect(block?.content).toContain("skill-a");
-    expect(block?.content).toContain("First skill");
-    expect(block?.content).toContain("skill-b");
-    expect(block?.content).toContain("Second skill");
+    expect(block?.content).toContain("first-skill");
+    expect(block?.content).toContain("second-skill");
 
-    // Both loadable
-    expect(await provider.load("skill-a")).toBe("Content A");
-    expect(await provider.load("skill-b")).toBe("Content B");
+    // Both loadable by slugified title
+    expect(await provider.load("first-skill")).toBe("Content A");
+    expect(await provider.load("second-skill")).toBe("Content B");
   });
 });
 

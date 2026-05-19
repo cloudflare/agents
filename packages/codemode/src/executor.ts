@@ -183,15 +183,6 @@ export interface ToolProvider {
 
   /** Type declarations for the LLM. Auto-generated from `tools` if omitted. */
   types?: string;
-
-  /**
-   * When true, tools accept positional args instead of a single object arg.
-   * The sandbox proxy uses `(...args)` and the dispatcher spreads the args array.
-   *
-   * Default tools use single-object args: `codemode.search({ query: "test" })`
-   * Positional tools use normal args: `state.readFile("/path")`
-   */
-  positionalArgs?: boolean;
 }
 
 // ── ToolDispatcher ────────────────────────────────────────────────────
@@ -203,30 +194,19 @@ export interface ToolProvider {
  */
 export class ToolDispatcher extends RpcTarget {
   #fns: Record<string, (...args: unknown[]) => Promise<unknown>>;
-  #positionalArgs: boolean;
-
-  constructor(
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>,
-    positionalArgs = false
-  ) {
+  constructor(fns: Record<string, (...args: unknown[]) => Promise<unknown>>) {
     super();
     this.#fns = fns;
-    this.#positionalArgs = positionalArgs;
   }
 
-  async call(name: string, argsJson: string): Promise<string> {
+  async call(name: string, argsJson?: string): Promise<string> {
     const fn = this.#fns[name];
     if (!fn) {
       return stringifyForCodemode({ error: `Tool "${name}" not found` });
     }
     try {
-      if (this.#positionalArgs) {
-        const args = argsJson ? parseForCodemode(argsJson) : [];
-        const result = await fn(...(Array.isArray(args) ? args : [args]));
-        return stringifyForCodemode({ result });
-      }
-      const args = argsJson ? parseForCodemode(argsJson) : {};
-      const result = await fn(args);
+      const args = argsJson ? parseForCodemode(argsJson) : [];
+      const result = await fn(...(Array.isArray(args) ? args : [args]));
       return stringifyForCodemode({ result });
     } catch (err) {
       return stringifyForCodemode({
@@ -350,30 +330,17 @@ export class DynamicWorkerExecutor implements Executor {
     }
 
     // Generate a Proxy global for each provider namespace.
-    const proxyInits = providers.map((p) => {
-      if (p.positionalArgs) {
-        return (
-          `    const ${p.name} = new Proxy({}, {\n` +
-          `      get: (_, toolName) => async (...args) => {\n` +
-          `        const resJson = await __dispatchers.${p.name}.call(String(toolName), __stringifyForCodemode(args));\n` +
-          `        const data = __parseForCodemode(resJson);\n` +
-          `        if (data.error) throw new Error(data.error);\n` +
-          `        return data.result;\n` +
-          `      }\n` +
-          `    });`
-        );
-      }
-      return (
+    const proxyInits = providers.map(
+      (p) =>
         `    const ${p.name} = new Proxy({}, {\n` +
-        `      get: (_, toolName) => async (args) => {\n` +
-        `        const resJson = await __dispatchers.${p.name}.call(String(toolName), __stringifyForCodemode(args ?? {}));\n` +
+        `      get: (_, toolName) => async (...args) => {\n` +
+        `        const resJson = await __dispatchers.${p.name}.call(String(toolName), __stringifyForCodemode(args));\n` +
         `        const data = __parseForCodemode(resJson);\n` +
         `        if (data.error) throw new Error(data.error);\n` +
         `        return data.result;\n` +
         `      }\n` +
         `    });`
-      );
-    });
+    );
 
     const executorModule = [
       'import { WorkerEntrypoint } from "cloudflare:workers";',
@@ -431,10 +398,7 @@ export class DynamicWorkerExecutor implements Executor {
         sanitizedNames.set(sanitizedName, name);
         sanitizedFns[sanitizedName] = fn;
       }
-      dispatchers[provider.name] = new ToolDispatcher(
-        sanitizedFns,
-        provider.positionalArgs
-      );
+      dispatchers[provider.name] = new ToolDispatcher(sanitizedFns);
     }
 
     const worker = this.#loader.get(`codemode-${crypto.randomUUID()}`, () => ({

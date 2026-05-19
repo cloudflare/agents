@@ -295,6 +295,7 @@ export function ChatRoomsDemo() {
               {rooms.length > 0 ? (
                 rooms.map((r) => (
                   <button
+                    aria-label={`Join room ${r.roomId}`}
                     key={r.roomId}
                     type="button"
                     onClick={() => handleJoinRoom(r.roomId)}

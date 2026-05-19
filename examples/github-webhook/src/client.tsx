@@ -49,6 +49,7 @@ function EventCard({ event }: { event: StoredEvent }) {
 
   return (
     <a
+      aria-label="Open GitHub event"
       href={event.url}
       target="_blank"
       rel="noopener noreferrer"
@@ -208,6 +209,7 @@ function App() {
       <div className="connect-section">
         <div className="connect-form">
           <input
+            aria-label="owner/repo (e.g., cloudflare/agents)"
             type="text"
             value={repoInput}
             onChange={(e) => setRepoInput(e.target.value)}

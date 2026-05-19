@@ -24,13 +24,16 @@ npm start
 
 Open the dev URL. Click **New** to create a chat. Start chatting.
 
-The assistant has three tools it can choose to call during a turn:
+The assistant has four tools it can choose to call during a turn:
 
 - `rememberFact(fact)` — saves a fact to the user's shared memory
   (persisted on the parent `Inbox`, visible to every chat on the
   next turn). Try: _"Remember I prefer TypeScript over JavaScript."_
 - `recallMemory()` — reads the full shared memory.
 - `getCurrentTime()` — returns the server's current ISO time.
+- `askResearcher(topic)` — delegates a focused question to a nested
+  `Researcher` sub-agent under the current `Chat`. Try: _"Ask the
+  researcher to summarize the tradeoffs in this conversation."_
 
 Each tool call renders in-line as a collapsible panel with state,
 input, and output; reasoning traces (if the model emits any) show
@@ -60,6 +63,15 @@ you want to seed the assistant with context without a tool call.
   │ parentPath │ │ parentPath │ │ parentPath │
   │  → Inbox   │ │  → Inbox   │ │  → Inbox   │
   └────────────┘ └────────────┘ └────────────┘
+        │
+        │ subAgent(Researcher, "default") — nested helper facet
+        ▼
+   ┌────────────┐
+   │ Researcher │
+   │ parentPath │
+   │ → Inbox    │
+   │ → Chat abc │
+   └────────────┘
 ```
 
 URL shapes the client connects to:
@@ -84,9 +96,13 @@ Key things worth looking at in `src/server.ts`:
   `this.subAgent(Chat, id)` / `this.deleteSubAgent(Chat, id)` that
   insert / remove the matching meta row.
 - `Chat.getInbox()` uses the framework's `parentAgent(Inbox)`
-  helper — pass the parent's class, get back a typed RPC stub
+  helper — pass the parent's class, get back a typed parent stub
   with the right identity baked in. No hardcoded user id, no
   `getAgentByName` plumbing inside the facet.
+- `Chat` can spawn a nested `Researcher` helper with
+  `this.subAgent(Researcher, "default")`. The helper calls
+  `this.parentAgent(Chat)` to get context from its direct parent even
+  though `Chat` is itself a facet rather than a top-level binding.
 - Each `Chat` owns its own SQLite database, stream state, and recovery
   state. If you build this pattern with `Think`, `chatRecovery` and
   `runFiber()` work from inside the chat facet; the root parent's alarm

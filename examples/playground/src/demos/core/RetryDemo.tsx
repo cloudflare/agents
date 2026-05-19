@@ -266,6 +266,7 @@ export function RetryDemo() {
               </div>
               <label className="flex items-center gap-2 text-sm text-kumo-subtle cursor-pointer">
                 <input
+                  aria-label="Permanent error (shouldRetry returns false)"
                   type="checkbox"
                   checked={permanent}
                   onChange={(e) => setPermanent(e.target.checked)}

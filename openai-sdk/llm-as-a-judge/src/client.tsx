@@ -50,6 +50,7 @@ function App() {
 
       <div style={{ marginBottom: "20px" }}>
         <input
+          aria-label="Describe your product"
           type="text"
           value={description || ""}
           onChange={handleDescriptionChange}

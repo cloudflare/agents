@@ -155,6 +155,7 @@ function ToolCard({
                 <span className="text-red-500"> *</span>
               )}
               <input
+                aria-label={key}
                 type={
                   schema.type === "number" || schema.type === "integer"
                     ? "number"

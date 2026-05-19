@@ -335,6 +335,7 @@ function EchoForm({
         <label className="block text-xs text-kumo-subtle">
           Message
           <input
+            aria-label="Message"
             type="text"
             value={message}
             onChange={(e) => setMessage(e.target.value)}
@@ -386,6 +387,7 @@ function SquareForm({
         <label className="block text-xs text-kumo-subtle">
           Number
           <input
+            aria-label="Number"
             type="number"
             value={number}
             onChange={(e) => setNumber(e.target.value)}

@@ -58,16 +58,16 @@ describe("ToolDispatcher", () => {
     expect(data.error).toBe("something broke");
   });
 
-  it("should handle empty args string", async () => {
-    const noArgs = vi.fn(async () => "ok");
+  it("should dispatch omitted args as no arguments", async () => {
+    const noArgs = vi.fn(async (...args: unknown[]) => args);
     const fns: ToolFns = { noArgs };
     const dispatcher = new ToolDispatcher(fns);
 
-    const resJson = await dispatcher.call("noArgs", "");
+    const resJson = await dispatcher.call("noArgs");
     const data = JSON.parse(resJson);
 
-    expect(data.result).toBe("ok");
-    expect(noArgs).toHaveBeenCalledWith({});
+    expect(data.result).toEqual([]);
+    expect(noArgs).toHaveBeenCalledWith();
   });
 
   it("should preserve Uint8Array results", async () => {
@@ -147,7 +147,7 @@ describe("DynamicWorkerExecutor", () => {
         const bytes = await state.accept("/x.bin", new Uint8Array([1, 2, 3]));
         return { isBytes: bytes instanceof Uint8Array, values: Array.from(bytes) };
       }`,
-      [{ name: "state", fns: { accept }, positionalArgs: true }]
+      [{ name: "state", fns: { accept } }]
     );
 
     expect(result.error).toBeUndefined();

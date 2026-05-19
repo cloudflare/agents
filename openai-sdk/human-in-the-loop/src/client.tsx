@@ -340,6 +340,7 @@ function App() {
 
       <div style={{ marginBottom: "20px" }}>
         <input
+          aria-label="Ask about the weather"
           type="text"
           value={question || ""}
           onChange={handleQuestionChange}

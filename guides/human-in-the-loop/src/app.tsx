@@ -264,6 +264,7 @@ export default function Chat() {
 
         <form onSubmit={handleSubmit}>
           <input
+            aria-label="Say something"
             disabled={pendingApproval}
             className="chat-input"
             value={input}

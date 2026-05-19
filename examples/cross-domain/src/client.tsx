@@ -137,6 +137,7 @@ function AsyncAuthApp() {
 
       <form className="message-form" onSubmit={handleSubmit}>
         <input
+          aria-label="Type your message"
           type="text"
           ref={inputRef}
           className="message-input"
@@ -269,6 +270,7 @@ function StaticAuthApp() {
         <h2>Cross-Domain Authentication Demo</h2>
         <div className="auth-controls">
           <input
+            aria-label="Enter auth token"
             ref={tokenInputRef}
             type="text"
             placeholder="Enter auth token"
@@ -302,6 +304,7 @@ function StaticAuthApp() {
 
       <form className="message-form" onSubmit={handleSubmit}>
         <input
+          aria-label="Type your message"
           type="text"
           ref={inputRef}
           className="message-input"
@@ -365,6 +368,7 @@ function App() {
         <div style={{ marginBottom: "10px" }}>
           <label style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <input
+              aria-label="Use Async Authentication (useAgent with async query)"
               type="checkbox"
               checked={useAsync}
               onChange={(e) => setUseAsync(e.target.checked)}

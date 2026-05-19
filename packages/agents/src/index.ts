@@ -28,7 +28,7 @@ import type {
 import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
 import { EmailMessage } from "cloudflare:email";
-import { RpcTarget } from "cloudflare:workers";
+import { RpcTarget, exports as workerExports } from "cloudflare:workers";
 import {
   type Connection,
   type ConnectionContext,
@@ -38,7 +38,7 @@ import {
   getServerByName,
   routePartykitRequest
 } from "partyserver";
-import { camelCaseToKebabCase } from "./utils";
+import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
 import {
   type RetryOptions,
   tryN,
@@ -265,23 +265,25 @@ export class SqlError extends Error {
 interface FacetCapableCtx {
   facets: DurableObjectFacets;
   /**
-   * Worker exports keyed by class export name. workerd's runtime
-   * contract: any class registered via `migrations.new_sqlite_classes`
-   * (or `migrations.new_classes`) — including facet-only classes
-   * that have NO entry in `durable_objects.bindings` — is exposed
-   * here as BOTH a `DurableObjectClass` (usable as
-   * `FacetStartupOptions.class`) AND a `DurableObjectNamespace`
-   * (usable for `idFromName`/`getByName`). The intersection is what
-   * makes `ctx.exports[OuterSubAgent].idFromName(...)` work from
-   * inside a nested facet bootstrap, even though `OuterSubAgent`
-   * isn't bound. Runtime lookups can still return `undefined` for
-   * unregistered class names; callers must null-check.
+   * Worker exports keyed by class export name. For facet creation, the
+   * runtime only needs the exported Durable Object class. Top-level
+   * Durable Object bindings may also expose namespace helpers here, but
+   * facet-only classes do not need to.
    */
   exports: Record<
     string,
-    (DurableObjectClass & DurableObjectNamespace) | undefined
+    | (DurableObjectClass & Partial<Pick<DurableObjectNamespace, "idFromName">>)
+    | undefined
   >;
 }
+
+type SubAgentPathInvokeEndpoint = {
+  _cf_invokeSubAgentPath(
+    path: ReadonlyArray<{ className: string; name: string }>,
+    method: string,
+    args: unknown[]
+  ): Promise<unknown>;
+};
 
 type SubAgentConnectionMeta = {
   id: string;
@@ -5513,6 +5515,64 @@ export class Agent<
     args: unknown[]
   ): Promise<unknown> {
     const stub = await this._cf_resolveSubAgent(className, name);
+    return await this._cf_invokeStubMethod(stub, className, method, args);
+  }
+
+  /**
+   * Bridge method used by `parentAgent()` when the requested parent is
+   * itself a facet (and therefore has no top-level env namespace).
+   * The root receives the full root-first target path, then each hop
+   * delegates to the next facet using that facet's own `ctx.facets`.
+   *
+   * @internal
+   */
+  async _cf_invokeSubAgentPath(
+    path: ReadonlyArray<{ className: string; name: string }>,
+    method: string,
+    args: unknown[]
+  ): Promise<unknown> {
+    const [self, next, ...rest] = path;
+    if (!self) {
+      throw new Error(`Sub-agent path invocation requires a non-empty path.`);
+    }
+
+    const ownClassName = (this.constructor as { name: string }).name;
+    if (self.className !== ownClassName || self.name !== this.name) {
+      throw new Error(
+        `Sub-agent path invocation reached ${ownClassName}("${this.name}") ` +
+          `but expected ${self.className}("${self.name}").`
+      );
+    }
+
+    if (!next) {
+      return await this._cf_invokeStubMethod(
+        this,
+        this.constructor.name,
+        method,
+        args
+      );
+    }
+
+    const child = await this._cf_resolveSubAgent(next.className, next.name);
+    if (rest.length === 0) {
+      return await this._cf_invokeStubMethod(
+        child,
+        next.className,
+        method,
+        args
+      );
+    }
+
+    const bridge = child as SubAgentPathInvokeEndpoint;
+    return await bridge._cf_invokeSubAgentPath([next, ...rest], method, args);
+  }
+
+  private async _cf_invokeStubMethod(
+    stub: unknown,
+    className: string,
+    method: string,
+    args: unknown[]
+  ): Promise<unknown> {
     // Must call `handle[method](...)` in one expression — extracting
     // via `const fn = handle[method]; fn.apply(handle, args)` breaks
     // the workerd RpcProperty binding. (Confirmed by the spike.)
@@ -5548,11 +5608,11 @@ export class Agent<
    *
    * The facet's name (and `this.name` getter) is handled entirely by
    * partyserver via `ctx.id.name`, which is populated because the
-   * parent passed an explicit `id: parentNs.idFromName(name)` to
+   * parent passed an explicit named Durable Object id to
    * `ctx.facets.get()` — see {@link _cf_resolveSubAgent}. No
    * `setName()` call or `__ps_name` storage write is needed; the
-   * facet's name survives cold wake automatically because the
-   * factory re-runs and `idFromName` is deterministic.
+   * facet's name survives cold wake automatically because the factory
+   * re-runs and `idFromName` is deterministic.
    *
    * @internal Called by {@link subAgent}.
    */
@@ -5561,9 +5621,9 @@ export class Agent<
     parentPath: ReadonlyArray<{ className: string; name: string }> = []
   ): Promise<void> {
     // Defense in depth: the parent is supposed to construct the
-    // facet with `id: parentNs.idFromName(name)` via
-    // `_cf_resolveSubAgent`, which makes `this.name` resolve to
-    // `name` automatically through partyserver's `ctx.id.name`. If
+    // facet with a named Durable Object id via `_cf_resolveSubAgent`,
+    // which makes `this.name` resolve to `name` automatically
+    // through partyserver's `ctx.id.name`. If
     // it didn't (e.g. someone bypassed `_cf_resolveSubAgent`, or
     // the parent's id construction has a bug), `this.name` would
     // silently report the parent's name instead of the facet's
@@ -5631,26 +5691,33 @@ export class Agent<
   }
 
   /**
-   * Resolve a typed RPC stub for this facet's **immediate** parent
+   * Resolve a typed parent stub for this facet's **immediate** parent
    * agent.
    *
    * Symmetric with `subAgent(Cls, name)`: while `subAgent` opens a
    * stub from parent to child, `parentAgent` opens one from child
    * to parent. Pass the direct parent's class reference — the
    * framework verifies it matches the last entry of
-   * `this.parentPath` at runtime, then looks up `env[Cls.name]` to
-   * find the namespace binding.
+   * `this.parentPath` at runtime. If the parent is a top-level
+   * Durable Object, the framework returns the normal namespace stub.
+   * If the parent is itself a facet, the framework returns a bridge
+   * proxy that routes method calls through the root/supervisor and
+   * then down the recorded facet path.
    *
    * `this.parentPath` is root-first, so the direct parent is the
    * **last** entry: `this.parentPath.at(-1)`. For grandparents and
    * further ancestors, iterate `this.parentPath` and use
    * `getAgentByName(env.X, this.parentPath[i].name)` directly.
    *
-   * Assumes the standard "binding name matches class name" convention.
-   * If your `wrangler.jsonc` binds the parent under a different name
-   * (e.g. `{ class_name: "Inbox", name: "MY_INBOX" }`), call
-   * `getAgentByName(env.MY_INBOX, this.parentPath.at(-1)!.name)`
-   * directly instead.
+   * For top-level parents, the framework first checks `env[Cls.name]`,
+   * then falls back to the Worker `exports` object. This supports
+   * custom binding names as long as the parent class is exported under
+   * its class name.
+   *
+   * Facet-parent stubs route normal HTTP `.fetch()` calls through the
+   * same root bridge as RPC methods. WebSocket upgrade requests are
+   * not supported yet because WebSocket handles cannot be serialized
+   * over RPC.
    *
    * @experimental The API surface may change before stabilizing.
    *
@@ -5658,7 +5725,8 @@ export class Agent<
    * @throws If `Cls.name` doesn't match the recorded direct-parent
    *         class (guards against accidentally reaching the wrong
    *         DO, especially in nested Root → Mid → Leaf chains).
-   * @throws If no env binding named `Cls.name` is found.
+   * @throws If no namespace is found for a top-level parent, or no
+   *         root namespace is available for a facet parent bridge.
    *
    * @example
    * ```ts
@@ -5693,18 +5761,115 @@ export class Agent<
           `whose constructor actually spawned this facet.`
       );
     }
-    const binding = (this.env as Record<string, unknown>)[cls.name] as
-      | DurableObjectNamespace<T>
-      | undefined;
+    if (this._parentPath.length > 1) {
+      return await this._cf_parentAgentFacetProxy<T>(
+        cls.name,
+        this._parentPath
+      );
+    }
+
+    const binding = this._cf_getTopLevelNamespaceByClassName<T>(cls.name);
     if (!binding) {
       throw new Error(
-        `parentAgent(${cls.name}): no top-level binding "${cls.name}" ` +
-          `found in env. If the parent is bound under a different name ` +
-          `(e.g. "MY_${cls.name.toUpperCase()}"), use ` +
-          `\`getAgentByName(env.MY_${cls.name.toUpperCase()}, this.parentPath.at(-1)!.name)\` directly.`
+        `parentAgent(${cls.name}): no top-level namespace for "${cls.name}" ` +
+          `was found in env or worker exports. Make sure the parent class is ` +
+          `exported under that class name and registered as a Durable Object binding.`
       );
     }
     return await getServerByName<Cloudflare.Env, T>(binding, parent.name);
+  }
+
+  private _cf_getTopLevelNamespaceByClassName<T extends Agent>(
+    className: string
+  ): DurableObjectNamespace<T> | undefined {
+    // Prefer explicit env bindings; fall back to worker exports so
+    // custom binding names still work when the class is exported under
+    // its constructor name.
+    return (
+      this._cf_asDurableObjectNamespace<T>(
+        (this.env as Record<string, unknown>)[className]
+      ) ??
+      this._cf_asDurableObjectNamespace<T>(
+        (workerExports as Record<string, unknown>)[className]
+      )
+    );
+  }
+
+  private _cf_asDurableObjectNamespace<T extends Agent>(
+    candidate: unknown
+  ): DurableObjectNamespace<T> | undefined {
+    const binding = candidate as DurableObjectNamespace<T> | undefined;
+    return binding?.idFromName ? binding : undefined;
+  }
+
+  private async _cf_parentAgentFacetProxy<T extends Agent>(
+    className: string,
+    parentPath: ReadonlyArray<{ className: string; name: string }>
+  ): Promise<DurableObjectStub<T>> {
+    const [root] = parentPath;
+    if (!root) {
+      throw new Error(`parentAgent(${className}): parent path is empty.`);
+    }
+
+    const rootBinding = this._cf_getTopLevelNamespaceByClassName<Agent>(
+      root.className
+    );
+    if (!rootBinding) {
+      throw new Error(
+        `parentAgent(${className}): direct parent is a facet, but no ` +
+          `top-level root namespace "${root.className}" was found in env ` +
+          `or worker exports to bridge the call.`
+      );
+    }
+
+    const rootStubPromise = getServerByName<Cloudflare.Env, Agent>(
+      rootBinding,
+      root.name
+    );
+    const targetPath = parentPath.map((step) => ({ ...step }));
+    const invokeBridge = async (method: string, args: unknown[]) => {
+      const rootStub = await rootStubPromise;
+      const bridge = rootStub as unknown as SubAgentPathInvokeEndpoint;
+      return await bridge._cf_invokeSubAgentPath(targetPath, method, args);
+    };
+    const owner = this;
+    return new Proxy(
+      {},
+      {
+        get(_target, prop) {
+          if (isInternalJsStubProp(prop)) return undefined;
+          if (typeof prop !== "string") return undefined;
+          if (prop === "fetch") {
+            return async (input: RequestInfo | URL, init?: RequestInit) => {
+              if (owner._cf_isWebSocketUpgradeRequest(input, init)) {
+                throw new Error(
+                  `parentAgent(${className}).fetch() does not support WebSocket upgrade requests yet. ` +
+                    `Use externally routed sub-agent URLs for WebSocket connections.`
+                );
+              }
+
+              return await invokeBridge(prop, [input, init]);
+            };
+          }
+          return async (...args: unknown[]) => {
+            return await invokeBridge(prop, args);
+          };
+        }
+      }
+    ) as DurableObjectStub<T>;
+  }
+
+  private _cf_isWebSocketUpgradeRequest(
+    input: RequestInfo | URL,
+    init?: RequestInit
+  ): boolean {
+    const initHeaders = init?.headers ? new Headers(init.headers) : undefined;
+    const requestHeaders =
+      input instanceof Request ? new Headers(input.headers) : undefined;
+    return (
+      initHeaders?.get("Upgrade")?.toLowerCase() === "websocket" ||
+      requestHeaders?.get("Upgrade")?.toLowerCase() === "websocket"
+    );
   }
 
   /**
@@ -6672,23 +6837,23 @@ export class Agent<
     // Composite key: class name + NUL + facet name, so two different
     // classes can share the same user-facing name.
     const facetKey = `${className}\0${name}`;
-    // Pass an explicit `id` in FacetStartupOptions so the facet has
-    // its own `ctx.id.name === name` (not the parent's name).
-    // Without this, facets inherit the parent DO's `ctx.id` and
-    // `this.name` on the facet would silently return the parent's
-    // name. See:
+    // Pass an explicit named `id` in FacetStartupOptions so the
+    // facet has its own `ctx.id.name === name` (not the parent's
+    // name). Without this, facets inherit the parent DO's `ctx.id`
+    // and `this.name` on the facet would silently return the
+    // parent's name. See:
     // https://developers.cloudflare.com/dynamic-workers/usage/durable-object-facets/
     //
-    // The id is constructed from the parent's own bound namespace,
-    // which is always present in `ctx.exports` because the parent
-    // Agent class is bound as a DO. Any bound DurableObjectNamespace
-    // would work — the id is opaque + a name; nothing routes
-    // through the namespace at runtime for facets. We use the
-    // parent's because it's guaranteed available without extra
-    // env-binding lookups.
-    const parentClassName = (this.constructor as { name: string }).name;
-    const parentNs = ctx.exports[parentClassName];
-    if (!parentNs?.idFromName) {
+    // For nested facets, the immediate parent is itself facet-only
+    // and is not expected to expose namespace helpers. Use the root
+    // supervisor namespace instead; the id is opaque for facet
+    // routing, but `idFromName(name)` gives PartyServer a stable
+    // `ctx.id.name`.
+    const rootClassName =
+      this._parentPath[0]?.className ??
+      (this.constructor as { name: string }).name;
+    const rootNs = ctx.exports[rootClassName];
+    if (!rootNs?.idFromName) {
       // Minification is the most common cause of this error in
       // production builds: aggressive bundlers rewrite class
       // identifiers to short ids, so `this.constructor.name`
@@ -6701,15 +6866,15 @@ export class Agent<
       // `_a`, `_ab`, `_a1`, `__a`). Real class names like
       // `MyAgent` or `_UnboundParent` start with an uppercase
       // letter and won't match.
-      const looksMinified = /^_*[a-z][a-z0-9]{0,2}$/.test(parentClassName);
+      const looksMinified = /^_*[a-z][a-z0-9]{0,2}$/.test(rootClassName);
       const minificationHint = looksMinified
-        ? ` The class name "${parentClassName}" looks minified — make sure your bundler preserves class names (e.g. esbuild's \`keepNames: true\`).`
+        ? ` The class name "${rootClassName}" looks minified — make sure your bundler preserves class names (e.g. esbuild's \`keepNames: true\`).`
         : "";
       throw new Error(
-        `Sub-agent bootstrap requires the parent class "${parentClassName}" to be bound as a Durable Object namespace, but ctx.exports["${parentClassName}"] is missing or doesn't expose idFromName.${minificationHint} Make sure the parent agent class is registered in your wrangler.jsonc durable_objects.bindings under its class name.`
+        `Sub-agent bootstrap requires the root agent class "${rootClassName}" to be available as a Durable Object namespace, but ctx.exports["${rootClassName}"] is missing or doesn't expose idFromName.${minificationHint} Make sure the root agent class is exported under that class name and registered in your wrangler.jsonc durable_objects.bindings.`
       );
     }
-    const facetId = parentNs.idFromName(name);
+    const facetId = rootNs.idFromName(name);
     const stub = ctx.facets.get(facetKey, () => ({
       class: Cls as DurableObjectClass,
       id: facetId

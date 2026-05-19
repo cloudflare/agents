@@ -319,6 +319,7 @@ function App() {
               </label>
               <div style={{ display: "flex", gap: "8px" }}>
                 <input
+                  aria-label="Paste a game ID"
                   name="gameId"
                   style={{
                     flex: 1,

@@ -213,6 +213,7 @@ function App() {
                   Prompt
                 </Text>
                 <textarea
+                  aria-label="Prompt"
                   className="mt-2 min-h-32 w-full rounded-lg border border-kumo-line bg-kumo-surface p-3 text-sm outline-none"
                   value={prompt}
                   onChange={(event) => setPrompt(event.currentTarget.value)}
@@ -224,6 +225,7 @@ function App() {
                   Idempotency key
                 </Text>
                 <input
+                  aria-label="Idempotency Key"
                   className="mt-2 w-full rounded-lg border border-kumo-line bg-kumo-surface p-3 text-sm outline-none"
                   value={idempotencyKey}
                   onChange={(event) =>

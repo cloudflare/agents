@@ -781,6 +781,16 @@ describe("Think — host bridge methods", () => {
     const messages = await agent.hostGetMessages();
     const texts = messages.map((m: { content: string }) => m.content);
     expect(texts).toContain("Injected message");
+
+    const cached = (await agent.getCachedMessagesForTest()) as UIMessage[];
+    const lastCached = cached[cached.length - 1];
+    expect(lastCached.role).toBe("user");
+    expect(lastCached.parts).toEqual([
+      { type: "text", text: "Injected message" }
+    ]);
+
+    const publicMessages = (await agent.getMessages()) as UIMessage[];
+    expect(publicMessages[publicMessages.length - 1]).toEqual(lastCached);
   });
 });
 

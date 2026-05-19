@@ -757,6 +757,50 @@ export class ThinkTestAgent extends Think {
     return this.getMessages();
   }
 
+  async getCachedMessagesForTest(): Promise<UIMessage[]> {
+    return this.messages;
+  }
+
+  async getSessionHistoryForTest(): Promise<UIMessage[]> {
+    return (await this.session.getHistory()) as UIMessage[];
+  }
+
+  async enableCompactionForTest(): Promise<void> {
+    this.session
+      .onCompaction(async (messages) => {
+        if (messages.length < 2) return null;
+        return {
+          summary: "compacted-summary",
+          fromMessageId: messages[0].id,
+          toMessageId: messages[messages.length - 1].id
+        };
+      })
+      .compactAfter(1);
+  }
+
+  async mutatingGetMessagesResultChangesCacheForTest(): Promise<boolean> {
+    const before = (await this.getMessages()).length;
+    const messages = await this.getMessages();
+    messages.push({
+      id: "mutated-outside-cache",
+      role: "user",
+      parts: [{ type: "text", text: "mutated" }]
+    });
+    return (await this.getMessages()).length !== before;
+  }
+
+  async appendHistoryMessageForTest(msg: UIMessage): Promise<void> {
+    await this.appendMessageToHistory(msg);
+  }
+
+  async appendSessionMessageForTest(msg: UIMessage): Promise<void> {
+    await this.session.appendMessage(msg);
+  }
+
+  async updateSessionMessageForTest(msg: UIMessage): Promise<void> {
+    await this.session.updateMessage(msg);
+  }
+
   async getResponseLog(): Promise<ChatResponseResult[]> {
     return this._responseLog;
   }
@@ -1778,7 +1822,7 @@ export class ThinkProgrammaticTestAgent extends Think {
         : null;
     return {
       result,
-      persistedMessageCount: this.getMessages().length,
+      persistedMessageCount: (await this.getMessages()).length,
       lastResponseStatus: lastResponse?.status ?? null
     };
   }

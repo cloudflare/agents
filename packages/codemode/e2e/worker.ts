@@ -206,8 +206,7 @@ async function handleExecute(body: ExecuteBody, env: Env): Promise<Response> {
     const result = await executor.execute(code, [
       {
         name: "state",
-        fns: { concat: concatFn },
-        positionalArgs: true
+        fns: { concat: concatFn }
       }
     ]);
     return Response.json(result);

@@ -339,6 +339,7 @@ export function WorkflowBasicDemo() {
                   Number of Steps: {stepCount}
                 </label>
                 <input
+                  aria-label="Step count"
                   id="step-count"
                   type="range"
                   min={2}

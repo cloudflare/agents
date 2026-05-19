@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@a2a-js/sdk": "^0.3.13",
-    "@cloudflare/kumo": "^2.1.0",
+    "@cloudflare/kumo": "^2.2.1",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
     "ai": "*",
@@ -19,16 +19,16 @@
     "workers-ai-provider": "*"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.36.4",
-    "@cloudflare/workers-types": "^4.20260511.1",
+    "@cloudflare/vite-plugin": "^1.37.2",
+    "@cloudflare/workers-types": "^4.20260519.1",
     "@tailwindcss/vite": "^4",
-    "@types/node": "^25.7.0",
+    "@types/node": "^25.9.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.1",
+    "@vitejs/plugin-react": "^6.0.2",
     "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",
-    "vite": "^8.0.12",
-    "wrangler": "^4.90.1"
+    "vite": "^8.0.13",
+    "wrangler": "^4.93.0"
   }
 }

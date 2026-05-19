@@ -229,6 +229,7 @@ function ToolInputForm({ schema, onSubmit }: ToolInputFormProps) {
             )}
           </span>
           <input
+            aria-label={key}
             type={prop.type === "number" ? "number" : "text"}
             value={values[key] ?? ""}
             onChange={(e) =>

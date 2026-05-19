@@ -177,12 +177,14 @@ describe("AIChatAgent messageConcurrency", () => {
       room
     );
 
+    // Keep the first turn active long enough for both overlapping latest
+    // submits to be admitted before the queued turn checks supersession.
     sendChatRequest(ws, "req-latest-1", [firstUserMessage], {
       format: "plaintext",
-      chunkCount: 8,
-      chunkDelayMs: 80
+      chunkCount: 15,
+      chunkDelayMs: 150
     });
-    await delay(50);
+    await waitForActiveRequest(agentStub, "req-latest-1");
 
     sendChatRequest(ws, "req-latest-2", [firstUserMessage, secondUserMessage], {
       format: "plaintext",

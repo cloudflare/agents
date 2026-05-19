@@ -267,6 +267,7 @@ function App() {
       <div className="border-t border-kumo-line p-4">
         <form onSubmit={handleSubmit} className="max-w-3xl mx-auto flex gap-2">
           <input
+            aria-label="Type your message"
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}

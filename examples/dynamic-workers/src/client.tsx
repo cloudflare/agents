@@ -218,6 +218,7 @@ function App() {
               </div>
             </div>
             <textarea
+              aria-label="Code"
               value={code}
               onChange={(e) => setCode(e.target.value)}
               spellCheck={false}

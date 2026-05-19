@@ -313,6 +313,7 @@ function Chat() {
                       className="space-y-2"
                     >
                       <input
+                        aria-label="Server name"
                         type="text"
                         value={mcpName}
                         onChange={(e) => setMcpName(e.target.value)}
@@ -321,6 +322,7 @@ function Chat() {
                       />
                       <div className="flex gap-2">
                         <input
+                          aria-label="https://mcp.example.com"
                           type="text"
                           value={mcpUrl}
                           onChange={(e) => setMcpUrl(e.target.value)}

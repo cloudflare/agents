@@ -380,7 +380,7 @@ Workflows provide:
 - **Long-running tasks** — run for days or weeks
 - **Progress tracking** — report status back to the agent
 
-See [Workflows](./docs/workflows.md) and [Human in the Loop](./docs/human-in-the-loop.md).
+See [Workflows](../../docs/workflows.md) and [Human in the Loop](../../docs/human-in-the-loop.md).
 
 ---
 
@@ -511,12 +511,12 @@ export default {
 
 ## Learn More
 
-[Getting Started](./docs/getting-started.md) ·
-[State Management](./docs/state.md) ·
-[Scheduling](./docs/scheduling.md) ·
-[Callable Methods](./docs/callable-methods.md) ·
-[MCP Integration](./docs/mcp-client.md) ·
-[Full Documentation](./docs/index.md)
+[Getting Started](../../docs/getting-started.md) ·
+[State Management](../../docs/state.md) ·
+[Scheduling](../../docs/scheduling.md) ·
+[Callable Methods](../../docs/callable-methods.md) ·
+[MCP Integration](../../docs/mcp-client.md) ·
+[Full Documentation](../../docs/index.md)
 
 ---
 

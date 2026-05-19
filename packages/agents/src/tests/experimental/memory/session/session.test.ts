@@ -8,6 +8,8 @@ import {
   type ContextProvider,
   type WritableContextProvider
 } from "../../../../experimental/memory/session/context";
+import type { SearchProvider } from "../../../../experimental/memory/session/search";
+import type { SkillProvider } from "../../../../experimental/memory/session/skills";
 import type {
   SessionProvider,
   SearchResult,
@@ -52,6 +54,29 @@ class MemoryBlockProvider implements WritableContextProvider {
   async set(content: string) {
     this.value = content;
   }
+}
+
+class EmptySkillProvider implements SkillProvider {
+  async get() {
+    return null;
+  }
+  async load() {
+    return null;
+  }
+}
+
+class WritableSkillProvider extends EmptySkillProvider {
+  async set() {}
+}
+
+class WritableSearchProvider implements SearchProvider {
+  async get() {
+    return null;
+  }
+  async search() {
+    return null;
+  }
+  async set() {}
 }
 
 // ── Pure unit tests (no DO needed) ──────────────────────────────
@@ -161,6 +186,21 @@ describe("ContextBlocks — frozen system prompt", () => {
     expect(prompt).toContain("MEMORY");
     expect(prompt).not.toContain("<context_block");
   });
+
+  it("renders empty skill blocks so load_context stays discoverable", async () => {
+    const blocks = new ContextBlocks([
+      {
+        label: "skills",
+        description: "Project docs",
+        provider: new EmptySkillProvider()
+      }
+    ]);
+    await blocks.load();
+
+    const prompt = blocks.toSystemPrompt();
+    expect(prompt).toContain("SKILLS");
+    expect(prompt).toContain("[loadable]");
+  });
 });
 
 const stubProvider: SessionProvider = {
@@ -211,6 +251,40 @@ describe("Session — tools() without load", () => {
     expect(tool.description).toContain("memory");
     expect(tool.description).toContain("todos");
     expect(tool.description).not.toContain("soul");
+  });
+
+  it("tools() labels keyed writable blocks in set_context description", async () => {
+    const session = new Session(stubProvider, {
+      context: [
+        {
+          label: "memory",
+          description: "Learned facts",
+          provider: new MemoryBlockProvider("")
+        },
+        {
+          label: "skills",
+          description: "Loadable docs",
+          provider: new WritableSkillProvider()
+        },
+        {
+          label: "knowledge",
+          description: "Searchable docs",
+          provider: new WritableSearchProvider()
+        }
+      ]
+    });
+
+    const tools = await session.tools();
+    const tool = tools.set_context as { description: string };
+
+    expect(tool.description).toContain('- "memory" (writable): Learned facts');
+    expect(tool.description).toContain(
+      '- "skills" (skill collection, keyed entries): Loadable docs'
+    );
+    expect(tool.description).toContain(
+      '- "knowledge" (searchable, keyed entries): Searchable docs'
+    );
+    expect(tool.description).toContain("metadata: { title, description }");
   });
 
   it("tools() execute lazily loads and writes to provider", async () => {
@@ -348,7 +422,7 @@ describe("Session.create() builder", () => {
     const { sql } = createSqlStub();
     const session = Session.create({ sql });
     // Should be usable immediately — no .build() needed
-    expect(session.getHistory()).toEqual([]);
+    expect(await session.getHistory()).toEqual([]);
   });
 
   it("withContext adds writable blocks with auto-created provider", async () => {
@@ -471,8 +545,9 @@ describe("Session.create() builder", () => {
       provider: new MemoryBlockProvider(null)
     });
     const prompt = await session.freezeSystemPrompt();
-    // Empty content → block not rendered
-    expect(prompt).not.toContain("MEMORY");
+    // Writable blocks render even when empty so the LLM knows they exist
+    expect(prompt).toContain("MEMORY");
+    expect(prompt).toContain("[writable]");
   });
 
   it("forSession before withContext namespaces correctly", async () => {
@@ -573,7 +648,9 @@ function createCompactableSession(
     getLatestLeaf: () => messages[messages.length - 1] ?? null,
     getBranches: () => [],
     getPathLength: () => messages.length,
-    appendMessage: (msg) => messages.push(msg),
+    appendMessage: (msg) => {
+      messages.push(msg);
+    },
     updateMessage: () => {},
     deleteMessages: () => {},
     clearMessages: () => {
@@ -811,7 +888,9 @@ describe("Session.compact()", () => {
       getLatestLeaf: () => messages[messages.length - 1] ?? null,
       getBranches: () => [],
       getPathLength: () => messages.length,
-      appendMessage: (msg) => messages.push(msg),
+      appendMessage: (msg) => {
+        messages.push(msg);
+      },
       updateMessage: () => {},
       deleteMessages: () => {},
       clearMessages: () => {},
@@ -865,7 +944,9 @@ describe("Session.compact()", () => {
       getLatestLeaf: () => messages[messages.length - 1] ?? null,
       getBranches: () => [],
       getPathLength: () => messages.length,
-      appendMessage: (msg) => messages.push(msg),
+      appendMessage: (msg) => {
+        messages.push(msg);
+      },
       updateMessage: () => {},
       deleteMessages: () => {},
       clearMessages: () => {},
@@ -946,7 +1027,9 @@ describe("Session.compact()", () => {
       getLatestLeaf: () => messages[messages.length - 1] ?? null,
       getBranches: () => [],
       getPathLength: () => messages.length,
-      appendMessage: (msg) => messages.push(msg),
+      appendMessage: (msg) => {
+        messages.push(msg);
+      },
       updateMessage: () => {},
       deleteMessages: () => {},
       clearMessages: () => {},
@@ -1232,5 +1315,81 @@ describe("AgentSearchProvider FTS5 (DO-backed)", () => {
   it("updating an entry replaces it in FTS5 index", async () => {
     const agent = await getSearchAgent(instanceName);
     expect(await agent.testUpdateReplacesEntry()).toEqual({ success: true });
+  });
+});
+
+// ── SessionProvider (external storage) tests ──────────────────────
+
+describe("Session.create with SessionProvider", () => {
+  it("accepts a SessionProvider directly", async () => {
+    const messages: SessionMessage[] = [];
+    const mockStorage: SessionProvider = {
+      getMessage: (id) => messages.find((m) => m.id === id) ?? null,
+      getHistory: () => messages,
+      getLatestLeaf: () => messages[messages.length - 1] ?? null,
+      getBranches: () => [],
+      getPathLength: () => messages.length,
+      appendMessage: (msg) => {
+        messages.push(msg);
+      },
+      updateMessage: () => {},
+      deleteMessages: () => {},
+      clearMessages: () => {
+        messages.length = 0;
+      },
+      addCompaction: () => ({
+        id: "",
+        summary: "",
+        fromMessageId: "",
+        toMessageId: "",
+        createdAt: ""
+      }),
+      getCompactions: () => []
+    };
+
+    const session = Session.create(mockStorage);
+
+    await session.appendMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "hello" }]
+    });
+
+    const history = await session.getHistory();
+    expect(history).toHaveLength(1);
+    expect(history[0].id).toBe("m1");
+  });
+
+  it("skips SQLite auto-wiring with SessionProvider", async () => {
+    const mockStorage: SessionProvider = {
+      getMessage: () => null,
+      getHistory: () => [],
+      getLatestLeaf: () => null,
+      getBranches: () => [],
+      getPathLength: () => 0,
+      appendMessage: () => {},
+      updateMessage: () => {},
+      deleteMessages: () => {},
+      clearMessages: () => {},
+      addCompaction: () => ({
+        id: "",
+        summary: "",
+        fromMessageId: "",
+        toMessageId: "",
+        createdAt: ""
+      }),
+      getCompactions: () => []
+    };
+
+    const session = Session.create(mockStorage).withContext("soul", {
+      provider: { get: async () => "identity" }
+    });
+
+    const prompt = await session.freezeSystemPrompt();
+    expect(prompt).toContain("SOUL");
+    expect(prompt).toContain("identity");
+
+    const tools = await session.tools();
+    expect(Object.keys(tools)).toHaveLength(0);
   });
 });

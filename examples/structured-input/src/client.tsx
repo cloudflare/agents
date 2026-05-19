@@ -269,6 +269,7 @@ function FreeTextInput({
       </div>
       {multiline ? (
         <textarea
+          aria-label={question}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           placeholder={placeholder || "Type your answer..."}
@@ -278,6 +279,7 @@ function FreeTextInput({
         />
       ) : (
         <input
+          aria-label={question}
           type="text"
           value={value}
           onChange={(e) => setValue(e.target.value)}

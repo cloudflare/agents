@@ -25,25 +25,25 @@ export class TestMultiSessionAgent extends Agent {
       const s1 = this.makeSession("chat-a");
       const s2 = this.makeSession("chat-b");
 
-      s1.appendMessage({
+      await s1.appendMessage({
         id: "a1",
         role: "user",
         parts: [{ type: "text", text: "hello from A" }]
       });
-      s1.appendMessage({
+      await s1.appendMessage({
         id: "a2",
         role: "assistant",
         parts: [{ type: "text", text: "reply A" }]
       });
 
-      s2.appendMessage({
+      await s2.appendMessage({
         id: "b1",
         role: "user",
         parts: [{ type: "text", text: "hello from B" }]
       });
 
-      const h1 = s1.getHistory();
-      const h2 = s2.getHistory();
+      const h1 = await s1.getHistory();
+      const h2 = await s2.getHistory();
 
       if (h1.length !== 2)
         return {
@@ -76,7 +76,7 @@ export class TestMultiSessionAgent extends Agent {
 
       // Add messages to s1
       for (let i = 0; i < 5; i++) {
-        s1.appendMessage({
+        await s1.appendMessage({
           id: `ca-${i}`,
           role: i % 2 === 0 ? "user" : "assistant",
           parts: [{ type: "text", text: `msg ${i}` }]
@@ -84,22 +84,22 @@ export class TestMultiSessionAgent extends Agent {
       }
 
       // Add messages to s2
-      s2.appendMessage({
+      await s2.appendMessage({
         id: "cb-0",
         role: "user",
         parts: [{ type: "text", text: "s2 msg" }]
       });
-      s2.appendMessage({
+      await s2.appendMessage({
         id: "cb-1",
         role: "assistant",
         parts: [{ type: "text", text: "s2 reply" }]
       });
 
       // Compact s1 only
-      s1.addCompaction("Summary of ca-1 to ca-3", "ca-1", "ca-3");
+      await s1.addCompaction("Summary of ca-1 to ca-3", "ca-1", "ca-3");
 
-      const h1 = s1.getHistory();
-      const h2 = s2.getHistory();
+      const h1 = await s1.getHistory();
+      const h2 = await s2.getHistory();
 
       // s1 should have compaction applied (3 msgs replaced by summary)
       const hasCompaction = h1.some((m) => m.id.startsWith("compaction_"));
@@ -197,22 +197,22 @@ export class TestMultiSessionAgent extends Agent {
       const s1 = this.makeSession("clear-a");
       const s2 = this.makeSession("clear-b");
 
-      s1.appendMessage({
+      await s1.appendMessage({
         id: "cl-a1",
         role: "user",
         parts: [{ type: "text", text: "s1 msg" }]
       });
-      s2.appendMessage({
+      await s2.appendMessage({
         id: "cl-b1",
         role: "user",
         parts: [{ type: "text", text: "s2 msg" }]
       });
 
       // Clear s1 only
-      s1.clearMessages();
+      await s1.clearMessages();
 
-      const h1 = s1.getHistory();
-      const h2 = s2.getHistory();
+      const h1 = await s1.getHistory();
+      const h2 = await s2.getHistory();
 
       if (h1.length !== 0)
         return {
@@ -288,15 +288,15 @@ export class TestMultiSessionAgent extends Agent {
       const info = mgr.create("ToDelete");
       const s = mgr.getSession(info.id);
 
-      s.appendMessage({
+      await s.appendMessage({
         id: "d1",
         role: "user",
         parts: [{ type: "text", text: "hello" }]
       });
-      if (s.getHistory().length !== 1)
+      if ((await s.getHistory()).length !== 1)
         return { success: false, error: "msg not added" };
 
-      mgr.delete(info.id);
+      await mgr.delete(info.id);
       if (mgr.get(info.id) !== null)
         return { success: false, error: "session still exists after delete" };
 
@@ -329,12 +329,12 @@ export class TestMultiSessionAgent extends Agent {
       const i1 = mgr.create("Chat1");
       const i2 = mgr.create("Chat2");
 
-      mgr.getSession(i1.id).appendMessage({
+      await mgr.getSession(i1.id).appendMessage({
         id: "ms1",
         role: "user",
         parts: [{ type: "text", text: "I love TypeScript" }]
       });
-      mgr.getSession(i2.id).appendMessage({
+      await mgr.getSession(i2.id).appendMessage({
         id: "ms2",
         role: "user",
         parts: [{ type: "text", text: "Python is great" }]
@@ -362,7 +362,7 @@ export class TestMultiSessionAgent extends Agent {
 
       const sInfo = mgr.create("SearchTest");
       const session = mgr.getSession(sInfo.id);
-      session.appendMessage({
+      await session.appendMessage({
         id: "st1",
         role: "user",
         parts: [
@@ -469,9 +469,9 @@ export class TestMultiSessionAgent extends Agent {
       });
 
       // Delete a message from s1 by specifying the sessionId
-      mgr.deleteMessages(s1Info.id, ["dm-a2"]);
+      await mgr.deleteMessages(s1Info.id, ["dm-a2"]);
 
-      const h1 = mgr.getHistory(s1Info.id);
+      const h1 = await mgr.getHistory(s1Info.id);
       if (h1.length !== 1)
         return {
           success: false,
@@ -484,7 +484,7 @@ export class TestMultiSessionAgent extends Agent {
         };
 
       // s2 should be completely unaffected
-      const h2 = mgr.getHistory(s2Info.id);
+      const h2 = await mgr.getHistory(s2Info.id);
       if (h2.length !== 1)
         return {
           success: false,
@@ -526,7 +526,7 @@ export class TestMultiSessionAgent extends Agent {
       const forked = await mgr.fork(original.id, "fork-m2", "Forked");
 
       // The forked session should have copied messages
-      const forkedHistory = mgr.getHistory(forked.id);
+      const forkedHistory = await mgr.getHistory(forked.id);
       if (forkedHistory.length !== 2)
         return {
           success: false,
@@ -573,7 +573,7 @@ export class TestMultiSessionAgent extends Agent {
 
       // Add 10 messages
       for (let i = 0; i < 10; i++) {
-        session.appendMessage({
+        await session.appendMessage({
           id: `cm-${i}`,
           role: i % 2 === 0 ? "user" : "assistant",
           parts: [{ type: "text", text: `msg ${i}` }]
@@ -581,17 +581,17 @@ export class TestMultiSessionAgent extends Agent {
       }
 
       // First compaction: summarize cm-1 through cm-7
-      session.addCompaction("Summary round 1", "cm-1", "cm-7");
+      await session.addCompaction("Summary round 1", "cm-1", "cm-7");
 
       // Verify compaction applied
-      let history = session.getHistory();
+      let history = await session.getHistory();
       const hasCompaction = history.some((m) => m.id.startsWith("compaction_"));
       if (!hasCompaction)
         return { success: false, error: "first compaction not applied" };
 
       // Now add more messages
       for (let i = 10; i < 15; i++) {
-        session.appendMessage({
+        await session.appendMessage({
           id: `cm-${i}`,
           role: i % 2 === 0 ? "user" : "assistant",
           parts: [{ type: "text", text: `msg ${i}` }]
@@ -600,22 +600,22 @@ export class TestMultiSessionAgent extends Agent {
 
       // Second compaction: the history now contains a synthetic compaction_ ID.
       // We must NOT use that synthetic ID as a fromId/toId.
-      history = session.getHistory();
+      history = await session.getHistory();
       const realMessages = history.filter(
         (m) => !m.id.startsWith("compaction_")
       );
 
       // Simulate what the example's compact() does:
       // use getCompactions()[0].fromMessageId as fromId for iterative compaction
-      const existing = session.getCompactions();
+      const existing = await session.getCompactions();
       const fromId =
         existing.length > 0 ? existing[0].fromMessageId : realMessages[1].id;
 
-      session.addCompaction("Summary round 2", fromId, "cm-12");
+      await session.addCompaction("Summary round 2", fromId, "cm-12");
 
       // Verify the second compaction works — history should have:
       // cm-0 + summary2 + cm-13 + cm-14
-      history = session.getHistory();
+      history = await session.getHistory();
       if (history[0].id !== "cm-0")
         return {
           success: false,

@@ -322,6 +322,7 @@ function SettingsPanel({
             <div className="space-y-3 p-3 bg-kumo-elevated/50 rounded-xl border border-kumo-line">
               <div className="space-y-2">
                 <input
+                  aria-label="https://docs.mcp.cloudflare.com/mcp"
                   type="text"
                   value={mcpUrl}
                   onChange={(e) => setMcpUrl(e.target.value)}
@@ -330,6 +331,7 @@ function SettingsPanel({
                   disabled={addingMcp}
                 />
                 <input
+                  aria-label="Server name (optional)"
                   type="text"
                   value={mcpName}
                   onChange={(e) => setMcpName(e.target.value)}

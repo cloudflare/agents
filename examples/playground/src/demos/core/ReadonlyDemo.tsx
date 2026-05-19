@@ -199,6 +199,7 @@ function ConnectionPanel({ mode }: { mode: "edit" | "view" }) {
           {isViewer && connected && (
             <label className="inline-flex items-center gap-1.5 text-xs cursor-pointer select-none">
               <input
+                aria-label="Lock"
                 type="checkbox"
                 checked={isReadonly}
                 onChange={handleToggleReadonly}

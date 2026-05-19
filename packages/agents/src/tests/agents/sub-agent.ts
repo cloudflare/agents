@@ -265,6 +265,11 @@ export class CounterSubAgent extends Agent {
     return await parent.getOwnName();
   }
 
+  async callCustomBoundParentName(): Promise<string> {
+    const parent = await this.parentAgent(CustomBoundSubAgentParent);
+    return await parent.getOwnName();
+  }
+
   /**
    * Call `parentAgent()` and return the error message if the agent
    * isn't a facet. Exercises the guard on the helper.
@@ -590,6 +595,14 @@ export class InnerSubAgent extends Agent {
     return this.selfPath.map((step) => ({ ...step }));
   }
 
+  async innerPing(): Promise<string> {
+    return `inner:${this.name}`;
+  }
+
+  override async onRequest(request: Request): Promise<Response> {
+    return Response.json(await describeFacetFetch(this.name, request));
+  }
+
   /**
    * Regression: a doubly-nested facet's direct parent is the last
    * entry of `parentPath`, not the first.
@@ -611,9 +624,90 @@ export class InnerSubAgent extends Agent {
       return e instanceof Error ? e.message : String(e);
     }
   }
+
+  // parentAgent() fixture methods: Inner -> Outer.
+  async callFacetParentPing(): Promise<string> {
+    const parent = await this.parentAgent(OuterSubAgent);
+    return await parent.outerPing();
+  }
+
+  async fetchFacetParent(path: string): Promise<FacetFetchDescription> {
+    const parent = await this.parentAgent(OuterSubAgent);
+    const response = await parent.fetch(`https://example.com${path}`, {
+      body: "hello from inner",
+      headers: { "x-parent-agent-test": "yes" },
+      method: "POST"
+    });
+    return (await response.json()) as FacetFetchDescription;
+  }
+
+  async fetchFacetParentWithRequest(
+    path: string
+  ): Promise<FacetFetchDescription> {
+    const parent = await this.parentAgent(OuterSubAgent);
+    const request = new Request(`https://example.com${path}`, {
+      body: "hello from request",
+      headers: { "x-parent-agent-test": "request" },
+      method: "POST"
+    });
+    const response = await parent.fetch(request);
+    return (await response.json()) as FacetFetchDescription;
+  }
+
+  async callDeepFacetParentPing(leafName: string): Promise<string> {
+    const leaf = await this.subAgent(LeafSubAgent, leafName);
+    return leaf.callFacetParentPing();
+  }
+
+  async fetchDeepFacetParent(
+    leafName: string,
+    path: string
+  ): Promise<FacetFetchDescription> {
+    const leaf = await this.subAgent(LeafSubAgent, leafName);
+    return leaf.fetchFacetParent(path);
+  }
+
+  async tryFetchDeepFacetParentWebSocket(leafName: string): Promise<string> {
+    const leaf = await this.subAgent(LeafSubAgent, leafName);
+    return leaf.tryFetchFacetParentWebSocket();
+  }
 }
 
 export class OuterSubAgent extends Agent {
+  async outerPing(): Promise<string> {
+    return `outer:${this.name}`;
+  }
+
+  override async onRequest(request: Request): Promise<Response> {
+    return Response.json(await describeFacetFetch(this.name, request));
+  }
+
+  async spawnInnerWithOwnNamespaceHelperHidden(
+    innerName: string
+  ): Promise<string> {
+    const exports = (
+      this.ctx as unknown as {
+        exports?: Record<string, { idFromName?: unknown } | undefined>;
+      }
+    ).exports;
+    const ownExport = exports?.OuterSubAgent;
+    const originalIdFromName = ownExport?.idFromName;
+
+    try {
+      if (ownExport) {
+        ownExport.idFromName = undefined;
+      }
+      await this.subAgent(InnerSubAgent, innerName);
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    } finally {
+      if (ownExport) {
+        ownExport.idFromName = originalIdFromName;
+      }
+    }
+  }
+
   async getInnerValue(innerName: string, key: string): Promise<string | null> {
     const inner = await this.subAgent(InnerSubAgent, innerName);
     return inner.getVal(key);
@@ -638,6 +732,53 @@ export class OuterSubAgent extends Agent {
   async innerTryParentAgentWithRoot(innerName: string): Promise<string> {
     const inner = await this.subAgent(InnerSubAgent, innerName);
     return inner.tryParentAgentWithRoot();
+  }
+
+  // parentAgent() fixture methods: delegate from Outer into Inner/Leaf.
+  async innerCallFacetParentPing(innerName: string): Promise<string> {
+    const inner = await this.subAgent(InnerSubAgent, innerName);
+    return inner.callFacetParentPing();
+  }
+
+  async innerFetchFacetParent(
+    innerName: string,
+    path: string
+  ): Promise<FacetFetchDescription> {
+    const inner = await this.subAgent(InnerSubAgent, innerName);
+    return inner.fetchFacetParent(path);
+  }
+
+  async innerFetchFacetParentWithRequest(
+    innerName: string,
+    path: string
+  ): Promise<FacetFetchDescription> {
+    const inner = await this.subAgent(InnerSubAgent, innerName);
+    return inner.fetchFacetParentWithRequest(path);
+  }
+
+  async innerCallDeepFacetParent(
+    innerName: string,
+    leafName: string
+  ): Promise<string> {
+    const inner = await this.subAgent(InnerSubAgent, innerName);
+    return inner.callDeepFacetParentPing(leafName);
+  }
+
+  async innerFetchDeepFacetParent(
+    innerName: string,
+    leafName: string,
+    path: string
+  ): Promise<FacetFetchDescription> {
+    const inner = await this.subAgent(InnerSubAgent, innerName);
+    return inner.fetchDeepFacetParent(leafName, path);
+  }
+
+  async innerTryFetchDeepFacetParentWebSocket(
+    innerName: string,
+    leafName: string
+  ): Promise<string> {
+    const inner = await this.subAgent(InnerSubAgent, innerName);
+    return inner.tryFetchDeepFacetParentWebSocket(leafName);
   }
 
   async scheduleInnerSet(
@@ -684,6 +825,63 @@ export class OuterSubAgent extends Agent {
 
   ping(): string {
     return "outer-pong";
+  }
+}
+
+type FacetFetchDescription = {
+  agentName: string;
+  body: string;
+  header: string | null;
+  method: string;
+  path: string;
+  search: string;
+};
+
+async function describeFacetFetch(
+  agentName: string,
+  request: Request
+): Promise<FacetFetchDescription> {
+  const url = new URL(request.url);
+  const body =
+    request.method === "GET" || request.method === "HEAD"
+      ? ""
+      : await request.text();
+  return {
+    agentName,
+    body,
+    header: request.headers.get("x-parent-agent-test"),
+    method: request.method,
+    path: url.pathname,
+    search: url.search
+  };
+}
+
+export class LeafSubAgent extends Agent {
+  async callFacetParentPing(): Promise<string> {
+    const parent = await this.parentAgent(InnerSubAgent);
+    return parent.innerPing();
+  }
+
+  async fetchFacetParent(path: string): Promise<FacetFetchDescription> {
+    const parent = await this.parentAgent(InnerSubAgent);
+    const response = await parent.fetch(`https://example.com${path}`, {
+      body: "hello from leaf",
+      headers: { "x-parent-agent-test": "yes" },
+      method: "POST"
+    });
+    return (await response.json()) as FacetFetchDescription;
+  }
+
+  async tryFetchFacetParentWebSocket(): Promise<string> {
+    try {
+      const parent = await this.parentAgent(InnerSubAgent);
+      await parent.fetch("https://example.com/ws-from-leaf", {
+        headers: { Upgrade: "websocket" }
+      });
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
   }
 }
 
@@ -784,6 +982,17 @@ export class BroadcastSubAgent extends Agent<Cloudflare.Env, BroadcastState> {
    */
   initializedOk(): boolean {
     return true;
+  }
+}
+
+export class CustomBoundSubAgentParent extends Agent {
+  async getOwnName(): Promise<string> {
+    return this.name;
+  }
+
+  async subAgentCallParentName(subAgentName: string): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.callCustomBoundParentName();
   }
 }
 
@@ -1272,6 +1481,14 @@ export class TestSubAgentParent extends Agent {
     await outer.spawnInner(innerName);
   }
 
+  async nestedSpawnWithFacetParentNamespaceHidden(
+    outerName: string,
+    innerName: string
+  ): Promise<string> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    return outer.spawnInnerWithOwnNamespaceHelperHidden(innerName);
+  }
+
   async insertNestedInterruptedFiber(
     outerName: string,
     innerName: string,
@@ -1523,6 +1740,61 @@ export class TestSubAgentParent extends Agent {
     return outer.innerTryParentAgentWithRoot(innerName);
   }
 
+  // parentAgent() regression fixtures exposed from the root test parent.
+  async subAgentNestedCallFacetParent(
+    outerName: string,
+    innerName: string
+  ): Promise<string> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    return outer.innerCallFacetParentPing(innerName);
+  }
+
+  async subAgentNestedFetchFacetParent(
+    outerName: string,
+    innerName: string,
+    path: string
+  ): Promise<FacetFetchDescription> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    return outer.innerFetchFacetParent(innerName, path);
+  }
+
+  async subAgentNestedFetchFacetParentWithRequest(
+    outerName: string,
+    innerName: string,
+    path: string
+  ): Promise<FacetFetchDescription> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    return outer.innerFetchFacetParentWithRequest(innerName, path);
+  }
+
+  async subAgentDeepCallFacetParent(
+    outerName: string,
+    innerName: string,
+    leafName: string
+  ): Promise<string> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    return outer.innerCallDeepFacetParent(innerName, leafName);
+  }
+
+  async subAgentDeepFetchFacetParent(
+    outerName: string,
+    innerName: string,
+    leafName: string,
+    path: string
+  ): Promise<FacetFetchDescription> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    return outer.innerFetchDeepFacetParent(innerName, leafName, path);
+  }
+
+  async subAgentDeepTryFetchFacetParentWebSocket(
+    outerName: string,
+    innerName: string,
+    leafName: string
+  ): Promise<string> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    return outer.innerTryFetchDeepFacetParentWebSocket(innerName, leafName);
+  }
+
   has(className: string, name: string): boolean {
     return this.hasSubAgent(className, name);
   }
@@ -1763,24 +2035,14 @@ export class HookingSubAgentParent extends Agent {
   }
 }
 
-// ── Unbound-parent fixtures ─────────────────────────────────────────
+// ── Root export-name fixtures ───────────────────────────────────────
 //
-// `_cf_resolveSubAgent` looks up the parent's namespace via
-// `ctx.exports[this.constructor.name]`. If `this.constructor.name`
-// doesn't match a key in `ctx.exports` (e.g. minification rewrote
-// the class identifier, or the class was exported under a different
-// name from its declaration), the throw fires with a helpful error.
-//
-// We exercise this path via two fixture parents whose class
-// identifiers (left of the `as` in the export rename below)
-// deliberately don't match their export names. `this.constructor.name`
-// for instances of these classes is the original class identifier,
-// but `ctx.exports[<class identifier>]` is undefined because the
-// worker's exports register the class under the export alias.
+// These root agents deliberately have class identifiers that differ
+// from their export names. Sub-agent bootstrap still needs the root
+// namespace to construct named facet ids, so these fixtures exercise
+// the descriptive error path.
 
-/** Class identifier `_UnboundParent` (could happen if a bundler kept
- *  the leading underscore but `ctx.exports` indexes by the export
- *  alias). Not "minified-looking" enough to trigger the hint. */
+/** Class identifier `_UnboundParent`, exported as `TestUnboundParentAgent`. */
 class _UnboundParent extends Agent {
   async tryToSpawn(name: string): Promise<string> {
     try {
@@ -1793,8 +2055,7 @@ class _UnboundParent extends Agent {
 }
 export { _UnboundParent as TestUnboundParentAgent };
 
-/** Class identifier `_a` — looks minified. The error message should
- *  include the minification hint. */
+/** Class identifier `_a`, exported as `TestMinifiedNameParentAgent`. */
 class _a extends Agent {
   async tryToSpawn(name: string): Promise<string> {
     try {
