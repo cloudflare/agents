@@ -23,7 +23,13 @@ import {
   type OutgoingMessage
 } from "./types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
-import { reconcileMessages, resolveToolMergeId } from "agents/chat";
+import {
+  reconcileMessages,
+  resolveToolMergeId,
+  createChatFiberSnapshot,
+  unwrapChatFiberSnapshot,
+  wrapChatFiberSnapshot
+} from "agents/chat";
 import {
   applyChunkToParts,
   isReplayChunk,
@@ -35,7 +41,8 @@ import {
   type TurnResult,
   type MessagePart,
   type StreamChunkData,
-  type SubmitConcurrencyDecision
+  type SubmitConcurrencyDecision,
+  type ChatFiberSnapshot
 } from "agents/chat";
 import { ResumableStream } from "agents/chat";
 import {
@@ -338,6 +345,8 @@ export class AIChatAgent<
    * @internal
    */
   protected _lastBody: Record<string, unknown> | undefined;
+  private _activeChatFiberSnapshot: ChatFiberSnapshot<"ai-chat-turn"> | null =
+    null;
 
   /**
    * Cache of last-persisted JSON for each message ID.
@@ -421,6 +430,49 @@ export class AIChatAgent<
    * ```
    */
   waitForMcpConnections: boolean | { timeout: number } = { timeout: 10_000 };
+
+  override stash(data: unknown): void {
+    const snapshot = this._activeChatFiberSnapshot
+      ? wrapChatFiberSnapshot(
+          "__cfAIChatFiberSnapshot",
+          this._activeChatFiberSnapshot,
+          data
+        )
+      : data;
+    super.stash(snapshot);
+  }
+
+  private async _runChatRecoveryFiber<T>(
+    requestId: string,
+    continuation: boolean,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    return this.runFiber(
+      `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
+      async () => {
+        const snapshot = createChatFiberSnapshot({
+          kind: "ai-chat-turn",
+          requestId,
+          continuation,
+          messages: this.messages,
+          lastBody: this._lastBody,
+          lastClientTools: this._lastClientTools
+        });
+        this._activeChatFiberSnapshot = snapshot;
+        super.stash(
+          wrapChatFiberSnapshot("__cfAIChatFiberSnapshot", snapshot, null)
+        );
+
+        try {
+          return await fn();
+        } finally {
+          if (this._activeChatFiberSnapshot?.requestId === requestId) {
+            this._activeChatFiberSnapshot = null;
+          }
+        }
+      }
+    );
+  }
 
   /**
    * Array of chat messages for the current conversation.
@@ -777,11 +829,10 @@ export class AIChatAgent<
                     };
 
                     if (this.chatRecovery) {
-                      await this.runFiber(
-                        `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${chatMessageId}`,
-                        async () => {
-                          await chatTurnBody();
-                        }
+                      await this._runChatRecoveryFiber(
+                        chatMessageId,
+                        false,
+                        chatTurnBody
                       );
                     } else {
                       await chatTurnBody();
@@ -1991,11 +2042,10 @@ export class AIChatAgent<
                 };
 
                 if (this.chatRecovery) {
-                  await this.runFiber(
-                    `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
-                    async () => {
-                      await autoContinuationBody();
-                    }
+                  await this._runChatRecoveryFiber(
+                    requestId,
+                    true,
+                    autoContinuationBody
                   );
                 } else {
                   await autoContinuationBody();
@@ -2072,11 +2122,10 @@ export class AIChatAgent<
             };
 
             if (this.chatRecovery) {
-              await this.runFiber(
-                `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
-                async () => {
-                  await programmaticBody();
-                }
+              await this._runChatRecoveryFiber(
+                requestId,
+                false,
+                programmaticBody
               );
             } else {
               await programmaticBody();
@@ -2759,15 +2808,54 @@ export class AIChatAgent<
         };
 
         if (this.chatRecovery) {
-          await this.runFiber(
-            `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
-            async () => {
-              await turnBody();
-            }
-          );
+          await this._runChatRecoveryFiber(requestId, true, turnBody);
         } else {
           await turnBody();
         }
+      },
+      { epoch }
+    );
+
+    if (this._turnQueue.generation !== epoch && status === "completed") {
+      status = "skipped";
+    } else if (wasAborted && status === "completed") {
+      status = "aborted";
+    }
+
+    return { requestId, status };
+  }
+
+  private async _retryLastUserTurn(
+    body?: Record<string, unknown>,
+    options?: SaveMessagesOptions
+  ): Promise<SaveMessagesResult> {
+    const lastMessage =
+      this.messages.length > 0 ? this.messages[this.messages.length - 1] : null;
+    if (!lastMessage || lastMessage.role !== "user") {
+      return { requestId: "", status: "skipped" };
+    }
+
+    const requestId = nanoid();
+    const clientTools = this._lastClientTools;
+    const resolvedBody = body ?? this._lastBody;
+    const epoch = this._turnQueue.generation;
+    let status: SaveMessagesResult["status"] = "completed";
+    let wasAborted = false;
+
+    await this._runExclusiveChatTurn(
+      requestId,
+      async () => {
+        if (this._turnQueue.generation !== epoch) {
+          status = "skipped";
+          return;
+        }
+
+        wasAborted = await this._runProgrammaticChatTurn(
+          requestId,
+          clientTools,
+          resolvedBody,
+          options?.signal
+        );
       },
       { epoch }
     );
@@ -2804,6 +2892,20 @@ export class AIChatAgent<
     }
 
     const requestId = ctx.name.slice(chatPrefix.length);
+    const { snapshot: recoverySnapshot, user: recoveryData } =
+      unwrapChatFiberSnapshot<"ai-chat-turn">(
+        "__cfAIChatFiberSnapshot",
+        ctx.snapshot
+      );
+
+    if (!this._lastBody && recoverySnapshot?.lastBody) {
+      this._lastBody = recoverySnapshot.lastBody;
+      this._persistRequestContext();
+    }
+    if (!this._lastClientTools && recoverySnapshot?.lastClientTools) {
+      this._lastClientTools = recoverySnapshot.lastClientTools;
+      this._persistRequestContext();
+    }
 
     let streamId = "";
     if (requestId) {
@@ -2829,10 +2931,11 @@ export class AIChatAgent<
       requestId,
       partialText: partial.text,
       partialParts: partial.parts,
-      recoveryData: ctx.snapshot,
+      recoveryData,
       messages: [...this.messages],
-      lastBody: this._lastBody,
-      lastClientTools: this._lastClientTools,
+      lastBody: this._lastBody ?? recoverySnapshot?.lastBody,
+      lastClientTools:
+        this._lastClientTools ?? recoverySnapshot?.lastClientTools,
       createdAt: ctx.createdAt
     });
 
@@ -2854,7 +2957,16 @@ export class AIChatAgent<
       this._resumableStream.complete(streamId);
     }
 
-    if (options.continue !== false) {
+    if (options.retry === true) {
+      await this.schedule(
+        0,
+        "_chatRecoveryRetry",
+        recoverySnapshot?.latestUserMessageId
+          ? { targetUserId: recoverySnapshot.latestUserMessageId }
+          : undefined,
+        { idempotent: true }
+      );
+    } else if (options.continue !== false) {
       const targetId = this._findLastAssistantMessage()?.id;
       await this.schedule(
         0,
@@ -2874,6 +2986,7 @@ export class AIChatAgent<
    * - `{}` (default): persist partial response + schedule continuation
    * - `{ continue: false }`: persist but don't continue
    * - `{ persist: false, continue: false }`: handle everything yourself
+   * - `{ retry: true }`: retry the latest unanswered user message
    *
    * `ctx.recoveryData` contains any data checkpointed via `this.stash()`
    * during streaming (e.g., OpenAI `responseId`).
@@ -2902,6 +3015,28 @@ export class AIChatAgent<
     }
 
     await this.continueLastTurn();
+  }
+
+  async _chatRecoveryRetry(data?: { targetUserId?: string }): Promise<void> {
+    const ready = await this.waitUntilStable({ timeout: 10_000 });
+    if (!ready) {
+      console.warn(
+        "[AIChatAgent] _chatRecoveryRetry timed out waiting for stable state, skipping retry"
+      );
+      return;
+    }
+
+    const lastMessage =
+      this.messages.length > 0 ? this.messages[this.messages.length - 1] : null;
+    if (!lastMessage || lastMessage.role !== "user") {
+      return;
+    }
+
+    if (data?.targetUserId && lastMessage.id !== data.targetUserId) {
+      return;
+    }
+
+    await this._retryLastUserTurn(this._lastBody);
   }
 
   /**

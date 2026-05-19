@@ -114,6 +114,8 @@ export type ChatRecoveryOptions = {
   persist?: boolean;
   /** Schedule a continuation via `continueLastTurn()`. Default: true. */
   continue?: boolean;
+  /** Retry the interrupted turn against the existing unanswered user message. Default: false. */
+  retry?: boolean;
 };
 
 /**

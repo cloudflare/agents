@@ -77,6 +77,13 @@ export {
   assistantContentKey
 } from "./message-reconciler";
 
+export {
+  createChatFiberSnapshot,
+  wrapChatFiberSnapshot,
+  unwrapChatFiberSnapshot,
+  type ChatFiberSnapshot
+} from "./recovery";
+
 export type {
   ChatResponseResult,
   ChatRecoveryContext,

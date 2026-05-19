@@ -634,16 +634,20 @@ export class ChatAgent extends AIChatAgent {
 
 **`ChatRecoveryOptions`:**
 
-| Field      | Default | Description                                       |
-| ---------- | ------- | ------------------------------------------------- |
-| `persist`  | `true`  | Save the partial response as an assistant message |
-| `continue` | `true`  | Schedule a continuation via `continueLastTurn()`  |
+| Field      | Default | Description                                                             |
+| ---------- | ------- | ----------------------------------------------------------------------- |
+| `persist`  | `true`  | Save the partial response as an assistant message                       |
+| `continue` | `true`  | Schedule a continuation via `continueLastTurn()`                        |
+| `retry`    | `false` | Retry the interrupted turn against the existing unanswered user message |
 
 Common return values:
 
 - `{}` — persist partial + auto-continue (default, works with providers that support assistant prefill)
 - `{ continue: false }` — persist partial but do not auto-continue (handle continuation yourself)
 - `{ persist: false, continue: false }` — handle everything yourself (e.g., retrieve a completed response from the provider)
+- `{ retry: true }` — run a new response for the latest unanswered user message instead of continuing a partial assistant message
+
+Use `continue` when recovery has a partial assistant message to extend. Use `retry` when recovery happens before any stream chunks were written, so `ctx.streamId === ""` and `ctx.partialText === ""` but the latest persisted message is still an unanswered user message. When `retry` is `true`, it takes precedence over `continue`.
 
 #### Guarding against stale recoveries
 

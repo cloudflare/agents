@@ -7,6 +7,7 @@ interface ChatRecoveryTestStub {
   setRecoveryOverride(options: {
     persist?: boolean;
     continue?: boolean;
+    retry?: boolean;
   }): Promise<void>;
   getRecoveryContexts(): Promise<unknown[]>;
   getPersistedMessages(): Promise<unknown[]>;
@@ -23,6 +24,7 @@ interface ChatRecoveryTestStub {
   insertInterruptedFiber(name: string, snapshot?: unknown): Promise<void>;
   triggerFiberRecovery(): Promise<void>;
   persistMessages(messages: unknown[]): Promise<void>;
+  runRecoveryRetryForTest(targetUserId?: string): Promise<void>;
 }
 
 async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
@@ -321,6 +323,57 @@ describe("onChatRecovery", () => {
     expect(fiberCtx.streamId).toBe("stream-fiber");
     expect(fiberCtx.partialText).toBe("Fiber recovery text");
     expect(fiberCtx.recoveryData).toEqual({ someUserData: true });
+  });
+
+  it("should retry a pre-stream interrupted user turn with retry: true", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setRecoveryOverride({ retry: true });
+    await agentStub.persistMessages([
+      {
+        id: "user-retry",
+        role: "user",
+        parts: [{ type: "text", text: "Retry this unanswered message" }]
+      }
+    ] as ChatMessage[]);
+
+    await agentStub.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-retry",
+      {
+        __cfAIChatFiberSnapshot: {
+          kind: "ai-chat-turn",
+          version: 1,
+          requestId: "req-retry",
+          continuation: false,
+          latestMessageId: "user-retry",
+          latestMessageRole: "user",
+          latestUserMessageId: "user-retry",
+          startedAt: Date.now()
+        },
+        user: { responseId: "pre-stream" }
+      }
+    );
+
+    await agentStub.triggerFiberRecovery();
+    await agentStub.runRecoveryRetryForTest("user-retry");
+
+    const contexts = (await agentStub.getRecoveryContexts()) as Array<{
+      streamId: string;
+      partialText: string;
+      recoveryData: unknown;
+    }>;
+    const ctx = contexts[contexts.length - 1];
+    expect(ctx.streamId).toBe("");
+    expect(ctx.partialText).toBe("");
+    expect(ctx.recoveryData).toEqual({ responseId: "pre-stream" });
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    expect(messages[0].id).toBe("user-retry");
   });
 
   it("should not double-recover when _checkRunFibers runs from both onStart and alarm", async () => {

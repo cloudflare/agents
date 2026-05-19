@@ -2150,6 +2150,10 @@ export class ThinkRecoveryTestAgent extends Think {
     return this.continueLastTurn();
   }
 
+  async runRecoveryRetryForTest(targetUserId?: string): Promise<void> {
+    await this._chatRecoveryRetry({ targetUserId });
+  }
+
   async insertInterruptedStream(
     streamId: string,
     requestId: string,

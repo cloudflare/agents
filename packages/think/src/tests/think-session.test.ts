@@ -1846,6 +1846,91 @@ describe("Think — onChatRecovery", () => {
     expect(ctx.partialText).toBe("Partial with stash");
   });
 
+  it("recovers a pre-stream interrupted chat fiber from its early snapshot", async () => {
+    const agent = await freshRecoveryAgent("pre-stream-recovery");
+
+    await agent.persistTestMessage({
+      id: "u-pre-stream",
+      role: "user",
+      parts: [{ type: "text", text: "Recover this unanswered message" }]
+    });
+
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-pre-stream",
+      {
+        __cfThinkChatFiberSnapshot: {
+          kind: "think-chat-turn",
+          version: 1,
+          requestId: "req-pre-stream",
+          continuation: false,
+          latestMessageId: "u-pre-stream",
+          latestMessageRole: "user",
+          latestUserMessageId: "u-pre-stream",
+          startedAt: Date.now()
+        },
+        user: { providerRequestId: "provider-pre-stream" }
+      }
+    );
+
+    await agent.triggerFiberRecovery();
+
+    const contexts = (await agent.getRecoveryContexts()) as Array<{
+      recoveryData: unknown;
+      partialText: string;
+      streamId: string;
+    }>;
+    const ctx = contexts[contexts.length - 1];
+
+    expect(ctx.streamId).toBe("");
+    expect(ctx.partialText).toBe("");
+    expect(ctx.recoveryData).toEqual({
+      providerRequestId: "provider-pre-stream"
+    });
+  });
+
+  it("{ retry: true } retries a pre-stream interrupted user turn without duplicating the user message", async () => {
+    const agent = await freshRecoveryAgent("pre-stream-retry");
+
+    await agent.setRecoveryOverride({ retry: true });
+    await agent.persistTestMessage({
+      id: "u-retry",
+      role: "user",
+      parts: [{ type: "text", text: "Retry this unanswered message" }]
+    });
+
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-retry", {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: "req-retry",
+        continuation: false,
+        latestMessageId: "u-retry",
+        latestMessageRole: "user",
+        latestUserMessageId: "u-retry",
+        startedAt: Date.now()
+      },
+      user: null
+    });
+
+    await agent.triggerFiberRecovery();
+    await agent.runRecoveryRetryForTest("u-retry");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    expect(messages[0].id).toBe("u-retry");
+    expect(
+      messages[1].parts
+        .filter((part): part is { type: "text"; text: string } => {
+          return part.type === "text" && "text" in part;
+        })
+        .map((part) => part.text)
+        .join("")
+    ).toBe("Continued response.");
+  });
+
   it("{ continue: false } persists but does not schedule continuation", async () => {
     const agent = await freshRecoveryAgent("no-continue");
 

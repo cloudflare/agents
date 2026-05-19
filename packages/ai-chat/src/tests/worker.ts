@@ -1455,6 +1455,10 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return this.continueLastTurn(body);
   }
 
+  async runRecoveryRetryForTest(targetUserId?: string): Promise<void> {
+    await this._chatRecoveryRetry({ targetUserId });
+  }
+
   async saveSyntheticUserMessage(
     text: string
   ): Promise<{ requestId: string; status: string }> {

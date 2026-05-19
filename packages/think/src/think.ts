@@ -130,13 +130,17 @@ import {
   parseProtocolMessage,
   applyChunkToParts,
   reconcileMessages,
-  resolveToolMergeId
+  resolveToolMergeId,
+  createChatFiberSnapshot,
+  unwrapChatFiberSnapshot,
+  wrapChatFiberSnapshot
 } from "agents/chat";
 import type {
   StreamChunkData,
   ClientToolSchema,
   MessagePart,
-  SubmitConcurrencyDecision
+  SubmitConcurrencyDecision,
+  ChatFiberSnapshot
 } from "agents/chat";
 import { Session } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
@@ -879,6 +883,8 @@ export class Think<
   private _submitConcurrency = new SubmitConcurrencyController({
     defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS
   });
+  private _activeChatFiberSnapshot: ChatFiberSnapshot<"think-chat-turn"> | null =
+    null;
   private static MESSAGE_DEBOUNCE_MS = 750;
   private _agentToolForwarders = new Map<
     string,
@@ -1073,6 +1079,49 @@ export class Think<
   /** Return the tools available to the assistant. */
   getTools(): ToolSet {
     return {};
+  }
+
+  override stash(data: unknown): void {
+    const snapshot = this._activeChatFiberSnapshot
+      ? wrapChatFiberSnapshot(
+          "__cfThinkChatFiberSnapshot",
+          this._activeChatFiberSnapshot,
+          data
+        )
+      : data;
+    super.stash(snapshot);
+  }
+
+  private async _runChatRecoveryFiber<T>(
+    requestId: string,
+    continuation: boolean,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    return this.runFiber(
+      `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
+      async () => {
+        const snapshot = createChatFiberSnapshot({
+          kind: "think-chat-turn",
+          requestId,
+          continuation,
+          messages: this.messages,
+          lastBody: this._lastBody,
+          lastClientTools: this._lastClientTools
+        });
+        this._activeChatFiberSnapshot = snapshot;
+        super.stash(
+          wrapChatFiberSnapshot("__cfThinkChatFiberSnapshot", snapshot, null)
+        );
+
+        try {
+          return await fn();
+        } finally {
+          if (this._activeChatFiberSnapshot?.requestId === requestId) {
+            this._activeChatFiberSnapshot = null;
+          }
+        }
+      }
+    );
   }
 
   private _systemPromptForTurn(baseSystem: string, tools: ToolSet): string {
@@ -2145,12 +2194,7 @@ export class Think<
           };
 
           if (this.chatRecovery) {
-            await this.runFiber(
-              `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
-              async () => {
-                await chatBody();
-              }
-            );
+            await this._runChatRecoveryFiber(requestId, false, chatBody);
           } else {
             await chatBody();
           }
@@ -3355,11 +3399,10 @@ export class Think<
           };
 
           if (this.chatRecovery) {
-            await this.runFiber(
-              `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
-              async () => {
-                await programmaticBody();
-              }
+            await this._runChatRecoveryFiber(
+              requestId,
+              false,
+              programmaticBody
             );
           } else {
             await programmaticBody();
@@ -3452,14 +3495,82 @@ export class Think<
           };
 
           if (this.chatRecovery) {
-            await this.runFiber(
-              `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
-              async () => {
-                await continueTurnBody();
-              }
-            );
+            await this._runChatRecoveryFiber(requestId, true, continueTurnBody);
           } else {
             await continueTurnBody();
+          }
+        } finally {
+          if (abortSignal?.aborted) wasAborted = true;
+          detachExternal();
+          this._aborts.remove(requestId);
+        }
+      });
+    });
+
+    if (this._turnQueue.generation !== epoch && status === "completed") {
+      status = "skipped";
+    } else if (wasAborted && status === "completed") {
+      status = "aborted";
+    }
+
+    return { requestId, status };
+  }
+
+  private async _retryLastUserTurn(
+    body?: Record<string, unknown>,
+    options?: SaveMessagesOptions
+  ): Promise<SaveMessagesResult> {
+    const lastLeaf = this.session.getLatestLeaf();
+    if (!lastLeaf || lastLeaf.role !== "user") {
+      return { requestId: "", status: "skipped" };
+    }
+
+    const requestId = crypto.randomUUID();
+    const clientTools = this._lastClientTools;
+    const resolvedBody = body ?? this._lastBody;
+    const epoch = this._turnQueue.generation;
+    let status: SaveMessagesResult["status"] = "completed";
+    let wasAborted = false;
+
+    await this.keepAliveWhile(async () => {
+      await this._turnQueue.enqueue(requestId, async () => {
+        if (this._turnQueue.generation !== epoch) {
+          status = "skipped";
+          return;
+        }
+
+        const abortSignal = this._aborts.getSignal(requestId);
+        const detachExternal = this._aborts.linkExternal(
+          requestId,
+          options?.signal
+        );
+        try {
+          const retryTurnBody = async () => {
+            const result = await agentContext.run(
+              {
+                agent: this,
+                connection: undefined,
+                request: undefined,
+                email: undefined
+              },
+              () =>
+                this._runInferenceLoop({
+                  signal: abortSignal,
+                  clientTools,
+                  body: resolvedBody,
+                  continuation: false
+                })
+            );
+
+            if (result) {
+              await this._streamResult(requestId, result, abortSignal);
+            }
+          };
+
+          if (this.chatRecovery) {
+            await this._runChatRecoveryFiber(requestId, false, retryTurnBody);
+          } else {
+            await retryTurnBody();
           }
         } finally {
           if (abortSignal?.aborted) wasAborted = true;
@@ -3897,12 +4008,7 @@ export class Think<
             };
 
             if (this.chatRecovery) {
-              await this.runFiber(
-                `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
-                async () => {
-                  await chatTurnBody();
-                }
-              );
+              await this._runChatRecoveryFiber(requestId, false, chatTurnBody);
             } else {
               await chatTurnBody();
             }
@@ -4543,6 +4649,20 @@ export class Think<
     }
 
     const requestId = ctx.name.slice(chatPrefix.length);
+    const { snapshot: recoverySnapshot, user: recoveryData } =
+      unwrapChatFiberSnapshot<"think-chat-turn">(
+        "__cfThinkChatFiberSnapshot",
+        ctx.snapshot
+      );
+
+    if (!this._lastBody && recoverySnapshot?.lastBody) {
+      this._lastBody = recoverySnapshot.lastBody;
+      this._persistBody();
+    }
+    if (!this._lastClientTools && recoverySnapshot?.lastClientTools) {
+      this._lastClientTools = recoverySnapshot.lastClientTools;
+      this._persistClientTools();
+    }
 
     let streamId = "";
     let streamStatus: "streaming" | "completed" | "error" | undefined;
@@ -4574,10 +4694,11 @@ export class Think<
       requestId,
       partialText: partial.text,
       partialParts: partial.parts,
-      recoveryData: ctx.snapshot,
+      recoveryData,
       messages: [...this.messages],
-      lastBody: this._lastBody,
-      lastClientTools: this._lastClientTools,
+      lastBody: this._lastBody ?? recoverySnapshot?.lastBody,
+      lastClientTools:
+        this._lastClientTools ?? recoverySnapshot?.lastClientTools,
       createdAt: ctx.createdAt
     });
 
@@ -4601,7 +4722,9 @@ export class Think<
       this._resumableStream.complete(streamId);
     }
 
-    const canContinue = options.continue !== false && !streamIsTerminal;
+    const shouldRetry = options.retry === true && !streamIsTerminal;
+    const canContinue =
+      !shouldRetry && options.continue !== false && !streamIsTerminal;
     const hasRunningSubmission = this._hasRunningSubmission(requestId);
 
     if (streamIsTerminal && hasRunningSubmission) {
@@ -4618,8 +4741,20 @@ export class Think<
     const recoveredRequestId =
       canContinue && hasRunningSubmission ? requestId : undefined;
 
-    if (canContinue) {
-      const lastLeaf = await this.session.getLatestLeaf();
+    if (shouldRetry) {
+      await this.schedule(
+        0,
+        "_chatRecoveryRetry",
+        {
+          ...(recoverySnapshot?.latestUserMessageId
+            ? { targetUserId: recoverySnapshot.latestUserMessageId }
+            : {}),
+          ...(recoveredRequestId ? { recoveredRequestId } : {})
+        },
+        { idempotent: true }
+      );
+    } else if (canContinue) {
+      const lastLeaf = this.session.getLatestLeaf();
       const targetId = lastLeaf?.role === "assistant" ? lastLeaf.id : undefined;
       await this.schedule(
         0,
@@ -4638,6 +4773,97 @@ export class Think<
     }
 
     return true;
+  }
+
+  async _chatRecoveryRetry(data?: {
+    targetUserId?: string;
+    recoveredRequestId?: string;
+  }): Promise<void> {
+    const recoveredSubmission = data?.recoveredRequestId
+      ? this._readRunningSubmissionByRequestId(data.recoveredRequestId)
+      : null;
+    if (data?.recoveredRequestId && !recoveredSubmission) {
+      return;
+    }
+
+    const controller = recoveredSubmission ? new AbortController() : null;
+    if (recoveredSubmission && controller) {
+      this._submissionAbortControllers.set(
+        recoveredSubmission.submission_id,
+        controller
+      );
+    }
+
+    try {
+      const ready = await this.waitUntilStable({ timeout: 10_000 });
+      if (!ready) {
+        if (data?.recoveredRequestId) {
+          await this._completeRecoveredSubmission(
+            data.recoveredRequestId,
+            "error",
+            null,
+            "Recovered chat retry timed out waiting for stable state."
+          );
+        }
+        return;
+      }
+
+      const lastLeaf = this.session.getLatestLeaf();
+      if (!lastLeaf || lastLeaf.role !== "user") {
+        if (data?.recoveredRequestId) {
+          await this._completeRecoveredSubmission(
+            data.recoveredRequestId,
+            "error",
+            null,
+            "Recovered chat retry was skipped because there is no unanswered user message."
+          );
+        }
+        return;
+      }
+
+      if (data?.targetUserId && lastLeaf.id !== data.targetUserId) {
+        if (data?.recoveredRequestId) {
+          await this._completeRecoveredSubmission(
+            data.recoveredRequestId,
+            "error",
+            null,
+            "Recovered chat retry was skipped because the conversation changed."
+          );
+        }
+        return;
+      }
+
+      const result = await this._retryLastUserTurn(
+        this._lastBody,
+        controller ? { signal: controller.signal } : undefined
+      );
+      if (data?.recoveredRequestId) {
+        await this._completeRecoveredSubmission(
+          data.recoveredRequestId,
+          result.status,
+          result.requestId || null,
+          result.status === "completed"
+            ? null
+            : `Recovery retry ${result.status}.`
+        );
+      }
+    } catch (error) {
+      if (data?.recoveredRequestId) {
+        await this._completeRecoveredSubmission(
+          data.recoveredRequestId,
+          "error",
+          null,
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+      throw error;
+    } finally {
+      if (recoveredSubmission) {
+        this._submissionAbortControllers.delete(
+          recoveredSubmission.submission_id
+        );
+      }
+    }
   }
 
   private _hasRunningSubmission(requestId: string): boolean {
@@ -4958,12 +5184,7 @@ export class Think<
           };
 
           if (this.chatRecovery) {
-            await this.runFiber(
-              `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
-              async () => {
-                await continuationBody();
-              }
-            );
+            await this._runChatRecoveryFiber(requestId, true, continuationBody);
           } else {
             await continuationBody();
           }
