@@ -537,6 +537,31 @@ function moveMessageToEnd<ChatMessage extends UIMessage>(
   return result;
 }
 
+function prependMissingHydratedMessages<ChatMessage extends UIMessage>(
+  hydratedMessages: ChatMessage[],
+  currentMessages: ChatMessage[]
+): ChatMessage[] {
+  if (currentMessages.length === 0) {
+    return hydratedMessages;
+  }
+
+  const currentMessageIds = new Set(
+    currentMessages.map((message) => message.id)
+  );
+  const missingHydratedMessages = hydratedMessages.filter(
+    (message) => !currentMessageIds.has(message.id)
+  );
+
+  if (missingHydratedMessages.length === 0) {
+    return currentMessages;
+  }
+
+  // History fetched after mount predates messages already rendered locally
+  // (for example an optimistic immediate send). Keep current copies for
+  // matching IDs because they may include newer streamed/client state.
+  return [...missingHydratedMessages, ...currentMessages];
+}
+
 /**
  * React hook for building AI chat interfaces using an Agent
  * @param options Chat options including the agent connection
@@ -1064,15 +1089,17 @@ export function useAgentChat<
   // Late-seed: when the initial-messages promise resolves AFTER the Chat
   // was already mounted (the URL-not-ready-on-first-render case), the
   // AI SDK's `useChat({ messages })` won't re-ingest the new value.
-  // This effect applies it once per cache key, and only when the chat
-  // is still empty at first observation — so subsequent emptying events
-  // (a server broadcast of CF_AGENT_CHAT_MESSAGES with `[]`, a
-  // `setMessages([])` on this tab, or an explicit `clearHistory()`)
-  // don't resurrect stale initial messages on top of the clear.
+  // This effect applies it once per cache key. If the user already sent
+  // an optimistic first message, prepend any missing hydrated history
+  // rather than overwriting or discarding either side. Existing in-memory
+  // message copies win by ID because they may include newer stream/client
+  // state than the fetch response.
   //
-  // Crucially, we mark the key as handled on EVERY observation — not
-  // just when we actively seed — so that later empty states for the
-  // same identity can never trip the guard into re-hydrating.
+  // Crucially, we mark the key as handled on EVERY observation so that
+  // subsequent emptying events (a server broadcast of
+  // CF_AGENT_CHAT_MESSAGES with `[]`, a `setMessages([])` on this tab,
+  // or an explicit `clearHistory()`) don't resurrect stale initial
+  // messages on top of the clear.
   useEffect(() => {
     if (!initialMessagesPromise) {
       return;
@@ -1080,19 +1107,12 @@ export function useAgentChat<
     if (seededInitialMessagesKeyRef.current === initialMessagesCacheKey) {
       return;
     }
-    if (chatMessages.length > 0) {
-      // Something already populated the chat (most commonly `useChat`
-      // picking up the fetched `initialMessages` on first render, or a
-      // server broadcast). Record that this identity has been handled
-      // so a subsequent empty state doesn't re-hydrate.
-      markInitialMessagesSeeded();
-      return;
-    }
 
     markInitialMessagesSeeded();
-    setMessages(initialMessagesRef.current);
+    setMessages((prevMessages: ChatMessage[]) =>
+      prependMissingHydratedMessages(initialMessagesRef.current, prevMessages)
+    );
   }, [
-    chatMessages.length,
     initialMessagesCacheKey,
     initialMessagesPromise,
     markInitialMessagesSeeded,

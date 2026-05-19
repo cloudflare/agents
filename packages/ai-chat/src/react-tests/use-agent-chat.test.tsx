@@ -378,7 +378,7 @@ describe("useAgentChat", () => {
     fetchSpy.mockRestore();
   });
 
-  it("should not replace an immediate first send with late initial message hydration", async () => {
+  it("should merge an immediate first send with late initial message hydration", async () => {
     let url = "";
     const agent = createAgent({
       name: "thread-first-send-before-history",
@@ -432,10 +432,10 @@ describe("useAgentChat", () => {
 
     await expect
       .element(screen.getByTestId("messages"))
-      .toHaveTextContent("First message");
+      .toHaveTextContent("Persisted history");
     await expect
       .element(screen.getByTestId("messages"))
-      .not.toHaveTextContent("Persisted history");
+      .toHaveTextContent("First message");
     expect(fetchSpy).toHaveBeenCalledTimes(1);
 
     fetchSpy.mockRestore();
