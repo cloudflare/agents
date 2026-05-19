@@ -355,6 +355,12 @@ your code owns forwarding and replay policy. Use `agentTool()` or
 `runAgentTool()` when a parent agent delegates work to a retained child and you
 want event replay, abort bridging, and UI drill-in.
 
+Use `startFiber()` from `agents` outside Think when the durable unit is an
+application-owned job around a turn, such as accepting a webhook once, restoring
+provider state, and posting a visible reply. `submitMessages()` owns Think's
+conversation admission; managed fibers own external side effects and recovery
+policy around that turn.
+
 See [Choosing a turn API](../../docs/think/index.md#choosing-a-turn-api) and
 [Programmatic Submissions](../../docs/think/programmatic-submissions.md) for the
 full API comparison.

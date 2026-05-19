@@ -60,5 +60,8 @@ idempotent retry, queue status, cancellation, and terminal history.
 - Use `saveMessages()` when the caller can wait for the Think turn to finish.
 - Use `submitMessages()` when the caller needs a fast durable receipt and safe
   retry.
+- Use `startFiber()` around the submission when the caller also owns external
+  side effects, such as accepting a webhook once, restoring provider state, and
+  posting a visible reply.
 - Use Workflows when the job is a multi-step process with retries, approvals,
   or long waits beyond one Think turn.

@@ -143,6 +143,8 @@ driving the work and what the caller needs back.
 | Server code needs fast durable acceptance and later status     | `submitMessages()`                              |
 | Parent code needs direct streaming RPC to a specific child     | `subAgent(...).chat()`                          |
 | A parent agent delegates work to a retained child agent        | `agentTool()` or `runAgentTool()`               |
+| Surround a turn with idempotent app-owned side effects         | `startFiber()`                                  |
+| Coordinate multi-step durable orchestration                    | Workflows                                       |
 | Add context or messages without starting a model turn          | `persistMessages()`                             |
 | Advanced subclass or recovery code continues an assistant turn | `continueLastTurn()`                            |
 
@@ -156,6 +158,18 @@ streaming when your code owns forwarding, cancellation, and replay policy. Use
 [Agent Tools](../agent-tools.md) when a parent model or workflow delegates to a
 child agent and you want retained child runs, event replay, abort bridging, and
 UI drill-in.
+
+Use [`startFiber()`](../durable-execution.md#startfiber) outside Think when the
+durable unit is an application job around a turn: accepting a webhook once,
+restoring a serialized channel/thread target, posting a visible reply, or
+recording app-level recovery policy. Think submissions own conversation
+admission and turn serialization; managed fibers own external job acceptance,
+idempotent side effects, and application recovery. Think and AIChat internals
+continue to use raw `runFiber()` for stream recovery because those fibers are
+internal recovery records, not externally inspectable application jobs.
+
+Use [Workflows](../workflows.md) when the durable unit is a multi-step process
+with retries per step, long waits, external events, or approvals.
 
 ## Configuration Overrides
 

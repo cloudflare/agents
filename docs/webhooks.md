@@ -454,6 +454,12 @@ return Response.json(
 );
 ```
 
+If the webhook owns application side effects around a turn, such as restoring a
+provider thread and posting a visible reply, use
+[`startFiber()`](./durable-execution.md#startfiber) around that job. Managed
+fibers retain status, dedupe provider retries, and let `onFiberRecovered()` or
+`resolveFiber()` record the app-level recovery outcome.
+
 ### Multi-Provider Routing
 
 Handle webhooks from multiple services in one worker:

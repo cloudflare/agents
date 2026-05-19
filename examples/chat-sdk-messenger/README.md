@@ -272,6 +272,30 @@ terminal status. That keeps durable webhook acceptance from bypassing the Chat
 SDK burst/debounce UX and avoids overlapping Telegram placeholder or streaming
 messages.
 
+## Production Behavior
+
+The example keeps the retry and recovery policy explicit so it is easy to adapt
+for other providers:
+
+- The managed fiber idempotency key is
+  `ai-reply:${thread.id}:${message.id}`. Provider retries for the same Chat SDK
+  message reuse the retained fiber instead of starting a second visible reply.
+- `waitForCompletion: true` keeps the Chat SDK handler pending until the visible
+  reply work reaches a terminal managed-fiber status. This preserves Chat SDK's
+  per-thread burst/debounce behavior for visible replies.
+- Long model turns can still exceed provider webhook timeouts. If Telegram
+  retries while the original reply is running in the same isolate, the duplicate
+  delivery joins the active managed fiber. After a restart, the duplicate
+  delivery observes the retained status and either returns or runs recovery.
+- `completed` duplicate deliveries are ignored because the visible reply already
+  finished.
+- `interrupted` duplicate deliveries restore the serialized Chat SDK
+  thread/message snapshot, run the same recovery policy, and call
+  `resolveFiber()` after application-level recovery succeeds.
+- `error` and `aborted` fibers are terminal. This example does not auto-retry
+  them; a production bot could add an operator command, retry button, or manual
+  reconciliation flow.
+
 Future iterations can use Chat SDK `createChatTools` once there is an approval
 UX for model-driven writes.
 

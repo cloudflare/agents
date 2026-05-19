@@ -8,10 +8,13 @@ key.
 
 ## Streaming Polish
 
-- Improve partial-response and cancellation behavior for long turns.
+- Decide whether long turns should keep webhook handling open with
+  `waitForCompletion: true` or acknowledge immediately and send an async
+  follow-up.
 - Consider provider-specific streaming affordances beyond text deltas.
 - Keep reasoning chunks hidden by default unless a deliberate debug mode exists.
-- Decide how errors and partial responses should render in chat.
+- Decide whether partial responses should end with only an interruption apology,
+  a retry button, or provider-specific recovery UI.
 
 ## Production Hardening
 
@@ -21,8 +24,10 @@ key.
 - Add clearer user-facing error messages for model failures, rate limits, and
   unsupported message types.
 - Review queue, lock, and debounce settings under high-volume group chats.
-- Revisit whether mid-stream recovery should offer a retry button instead of
-  only posting an interruption apology.
+- Decide whether terminal `error` or `aborted` managed fibers should support
+  user-triggered retry, operator-triggered retry, or manual reconciliation only.
+- Decide whether retained managed fibers need an admin/status inspection command
+  or should remain an implementation detail.
 - Decide whether to reduce internal subagent/facet calls on hot paths or simply
   document the expected observability noise.
 

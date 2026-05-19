@@ -471,7 +471,10 @@ await this.cancelFiber(receipt.fiberId, "Superseded");
 if (current?.status === "interrupted") {
   await this.resolveFiber(receipt.fiberId, { status: "completed" });
 }
-await this.deleteFibers({ status: ["completed", "error", "aborted"] });
+await this.deleteFibers({
+  status: ["completed", "error", "aborted"],
+  settledBefore: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+});
 ```
 
 Use `runFiber()` when the caller waits for the result. Use `startFiber()` when

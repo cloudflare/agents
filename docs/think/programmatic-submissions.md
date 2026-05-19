@@ -151,6 +151,37 @@ a turn, such as accepting a webhook once, restoring a serialized chat thread,
 and posting a visible reply. `submitMessages()` owns Think's message/session
 admission; `startFiber()` owns the surrounding application job.
 
+## Layering with `startFiber()`
+
+Use the two APIs together when the external job is larger than the Think turn
+itself:
+
+```typescript
+await this.startFiber(
+  "reply-to-webhook",
+  async (ctx) => {
+    ctx.stash({ webhookId, threadId });
+
+    const submission = await this.submitMessages(messages, {
+      idempotencyKey: `turn:${webhookId}`,
+      metadata: { threadId }
+    });
+
+    await postVisibleReply(threadId, submission.submissionId);
+  },
+  {
+    idempotencyKey: `webhook:${webhookId}`,
+    waitForCompletion: true
+  }
+);
+```
+
+The outer managed fiber answers: "Did this webhook job get accepted, recovered,
+cancelled, or resolved?" The inner submission answers: "Did this Think turn get
+admitted to the session and complete?" Keep those boundaries separate. Do not
+replace Think's internal `chatRecovery` fibers with managed fibers unless the
+work is an application-owned job that callers need to inspect or dedupe.
+
 Workflows can compose with this API:
 
 ```typescript

@@ -253,6 +253,67 @@ application-level recovery succeeds. `resolveFiber()` only updates managed
 fibers that are currently `interrupted`; it returns `false` for pending,
 running, or already-terminal rows.
 
+### Webhook recipe
+
+Use `startFiber()` around webhook side effects when the provider may retry the
+same delivery and the visible work must happen once.
+
+```typescript
+class WebhookAgent extends Agent {
+  async handleWebhook(event: WebhookEvent) {
+    const result = await this.startFiber(
+      "send-reply",
+      async (ctx) => {
+        ctx.stash({ eventId: event.id, target: event.replyTarget });
+        await sendReply(event.replyTarget, { signal: ctx.signal });
+      },
+      {
+        idempotencyKey: `webhook:${event.id}`,
+        metadata: { source: event.source },
+        waitForCompletion: true
+      }
+    );
+
+    if (result.status === "interrupted") {
+      await this.recoverWebhookReply(result);
+      await this.resolveFiber(result.fiberId, { status: "completed" });
+    }
+
+    return result;
+  }
+
+  async onFiberRecovered(ctx: FiberRecoveryContext) {
+    if (ctx.name !== "send-reply") return;
+
+    const snapshot = ctx.snapshot as {
+      eventId: string;
+      target: string;
+    } | null;
+
+    if (!snapshot) {
+      return {
+        status: "error",
+        error: "Missing webhook recovery snapshot"
+      };
+    }
+
+    await sendRecoveryMessage(snapshot.target);
+    return { status: "completed", snapshot };
+  }
+}
+```
+
+In this pattern:
+
+- The provider's delivery ID becomes the `idempotencyKey`.
+- `ctx.stash()` stores enough serializable data to recover without replaying the
+  original closure.
+- `waitForCompletion: true` keeps the caller open until the retained job reaches
+  a terminal status, while duplicate deliveries still dedupe by key.
+- `onFiberRecovered()` handles platform restarts and eviction.
+- `resolveFiber()` is useful when a later duplicate delivery performs the
+  application-level recovery instead of the alarm hook.
+
 ### Lifecycle
 
 #### Normal execution

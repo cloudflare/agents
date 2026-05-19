@@ -61,6 +61,7 @@
 - [Tools](./think/tools.md) - Workspace tools, code execution, extensions
 - [Client Tools](./think/client-tools.md) - Browser-side tools, approvals, and concurrency
 - [Sub-agents and Programmatic Turns](./think/sub-agents.md) - RPC streaming, `saveMessages`, recovery
+- [Programmatic Submissions](./think/programmatic-submissions.md) - Durable Think turn admission for webhooks and RPC callers
 
 ## MCP (Model Context Protocol)
 

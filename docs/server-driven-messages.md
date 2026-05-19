@@ -51,6 +51,12 @@ return Response.json({
 
 `submitMessages()` stores pending work first and appends the messages to the conversation `Session` only when the submission starts executing. It accepts serializable `UIMessage[]` values, not the function form supported by `saveMessages((messages) => ...)`.
 
+Use [`startFiber()`](./durable-execution.md#startfiber) outside Think when the
+durable unit is a surrounding application job, such as accepting a webhook once,
+restoring provider state, posting a visible reply, and recording recovery
+policy. `submitMessages()` owns Think's conversation admission; managed fibers
+own external side effects around that turn.
+
 For Think-specific guidance that also compares raw child `chat()` calls with
 agent tools, see [Choosing a turn API](./think/index.md#choosing-a-turn-api).
 
