@@ -11,7 +11,7 @@ const SCRIPT_DESCRIPTION = `Run a Puppeteer script against a real browser and re
 Write an async arrow function in JavaScript (not TypeScript). The \`page\` object is available as a global.
 
 Available methods:
-  page.goto(url, options?)         — navigate; waitUntil defaults to "domcontentloaded"
+  page.navigate(url, options?)     — navigate; waitUntil defaults to "domcontentloaded"
   page.title()                     — get the page <title>
   page.url()                       — get the current URL after redirects
   page.click(selector)             — click an element
@@ -28,7 +28,7 @@ The script's return value is JSON-stringified and returned as the tool result.
 
 Example:
 async () => {
-  await page.goto("https://example.com");
+  await page.navigate("https://example.com");
   const title = await page.title();
   const heading = await page.getText("h1");
   const paragraphs = await page.getTexts("p");
@@ -78,7 +78,7 @@ Think like a human QA reviewer: evaluate the spirit of a requirement, not just t
                 {
                   name: "page",
                   fns: {
-                    goto: async (url: unknown, opts?: unknown) =>
+                    navigate: async (url: unknown, opts?: unknown) =>
                       page.goto(
                         url as string,
                         (opts as Parameters<typeof page.goto>[1]) ?? {
