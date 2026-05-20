@@ -4739,7 +4739,9 @@ export class Think<
     }
 
     const recoveredRequestId =
-      canContinue && hasRunningSubmission ? requestId : undefined;
+      (canContinue || shouldRetry) && hasRunningSubmission
+        ? requestId
+        : undefined;
 
     if (shouldRetry) {
       await this.schedule(
@@ -4754,7 +4756,7 @@ export class Think<
         { idempotent: true }
       );
     } else if (canContinue) {
-      const lastLeaf = this.session.getLatestLeaf();
+      const lastLeaf = await this.session.getLatestLeaf();
       const targetId = lastLeaf?.role === "assistant" ? lastLeaf.id : undefined;
       await this.schedule(
         0,
