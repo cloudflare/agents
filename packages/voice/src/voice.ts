@@ -645,25 +645,43 @@ export function withVoice<TBase extends AgentLike>(
           }
           this.#sendJSON(connection, { type: "status", status: "listening" });
         } else {
-          this.#sendJSON(connection, {
-            type: "transcript_start",
-            role: "assistant"
-          });
           let fullText = "";
-          for await (const token of iterateText(turnResult)) {
-            if (signal.aborted) break;
-            fullText += token;
+          let pendingText = "";
+          let transcriptStarted = false;
+
+          const sendAssistantDelta = (token: string) => {
+            if (!transcriptStarted) {
+              pendingText += token;
+              if (pendingText.trim().length === 0) return;
+
+              this.#sendJSON(connection, {
+                type: "transcript_start",
+                role: "assistant"
+              });
+              transcriptStarted = true;
+              token = pendingText;
+              pendingText = "";
+            }
+
             this.#sendJSON(connection, {
               type: "transcript_delta",
               text: token
             });
+          };
+
+          for await (const token of iterateText(turnResult)) {
+            if (signal.aborted) break;
+            fullText += token;
+            sendAssistantDelta(token);
           }
-          this.#sendJSON(connection, {
-            type: "transcript_end",
-            text: fullText
-          });
 
           if (fullText && fullText.trim().length > 0) {
+            if (transcriptStarted) {
+              this.#sendJSON(connection, {
+                type: "transcript_end",
+                text: fullText
+              });
+            }
             this.saveMessage("assistant", fullText);
           }
           this.#sendJSON(connection, { type: "status", status: "idle" });
@@ -788,6 +806,10 @@ export function withVoice<TBase extends AgentLike>(
       if (typeof response === "string") {
         const llmMs = Date.now() - llmStart;
 
+        if (response.trim().length === 0) {
+          return { text: response, llmMs, ttsMs: 0, firstAudioMs: 0 };
+        }
+
         this.#sendJSON(connection, {
           type: "transcript_start",
           role: "assistant"
@@ -833,6 +855,8 @@ export function withVoice<TBase extends AgentLike>(
       const chunker = new SentenceChunker();
       const ttsQueue: AsyncIterable<ArrayBuffer>[] = [];
       let fullText = "";
+      let pendingTranscriptText = "";
+      let transcriptStarted = false;
       let firstAudioSentAt: number | null = null;
       let cumulativeTtsMs = 0;
 
@@ -929,16 +953,28 @@ export function withVoice<TBase extends AgentLike>(
         notifyDrain();
       };
 
-      this.#sendJSON(connection, {
-        type: "transcript_start",
-        role: "assistant"
-      });
+      const sendAssistantDelta = (token: string) => {
+        if (!transcriptStarted) {
+          pendingTranscriptText += token;
+          if (pendingTranscriptText.trim().length === 0) return;
+
+          this.#sendJSON(connection, {
+            type: "transcript_start",
+            role: "assistant"
+          });
+          transcriptStarted = true;
+          token = pendingTranscriptText;
+          pendingTranscriptText = "";
+        }
+
+        this.#sendJSON(connection, { type: "transcript_delta", text: token });
+      };
 
       for await (const token of tokenStream) {
         if (signal.aborted) break;
 
         fullText += token;
-        this.#sendJSON(connection, { type: "transcript_delta", text: token });
+        sendAssistantDelta(token);
 
         const sentences = chunker.add(token);
         for (const sentence of sentences) {
@@ -955,7 +991,9 @@ export function withVoice<TBase extends AgentLike>(
 
       streamComplete = true;
       notifyDrain();
-      this.#sendJSON(connection, { type: "transcript_end", text: fullText });
+      if (transcriptStarted) {
+        this.#sendJSON(connection, { type: "transcript_end", text: fullText });
+      }
 
       await drainPromise;
 
