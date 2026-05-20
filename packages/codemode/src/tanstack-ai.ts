@@ -245,7 +245,8 @@ export function createCodeTool(options: CreateCodeToolOptions): ServerTool {
 
     resolvedProviders.push({
       name: providerName,
-      fns: extractFns(filtered)
+      fns: extractFns(filtered),
+      createRuntime: provider.createRuntime
     });
   }
 

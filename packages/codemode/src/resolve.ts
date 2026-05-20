@@ -63,6 +63,10 @@ export function extractFns(
 export function resolveProvider(provider: ToolProvider): ResolvedProvider {
   const name = provider.name ?? "codemode";
   const filtered = filterTools(provider.tools);
-  const resolved: ResolvedProvider = { name, fns: extractFns(filtered) };
+  const resolved: ResolvedProvider = {
+    name,
+    fns: extractFns(filtered),
+    createRuntime: provider.createRuntime
+  };
   return resolved;
 }
