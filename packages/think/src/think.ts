@@ -4346,6 +4346,7 @@ export class Think<
           );
 
           if (action?.type === "error") {
+            streamError = action.error;
             this._broadcastChat({
               type: MSG_CHAT_RESPONSE,
               id: requestId,
@@ -4408,14 +4409,14 @@ export class Think<
       }
     }
 
-    if (
-      accumulator.parts.length > 0 &&
-      this._turnQueue.generation === clearGen
-    ) {
+    if (this._turnQueue.generation === clearGen) {
       try {
         const assistantMsg = accumulator.toMessage();
-        await this._persistAssistantMessage(assistantMsg, parentId);
-        this._broadcastMessages();
+
+        if (accumulator.parts.length > 0) {
+          await this._persistAssistantMessage(assistantMsg, parentId);
+          this._broadcastMessages();
+        }
 
         await this._fireResponseHook({
           message: assistantMsg,
