@@ -4048,6 +4048,7 @@ export class Think<
     let streamFinalized = false;
     let assistantMsg: UIMessage | null = null;
     let aborted = false;
+    let doneSent = false;
 
     try {
       this._insideInferenceLoop = true;
@@ -4064,7 +4065,19 @@ export class Think<
           // the WebSocket protocol, there is no wrapper frame to rewrite for
           // accumulator actions such as `error`.
           const streamChunk = chunk as unknown as StreamChunkData;
-          accumulator.applyChunk(streamChunk);
+          const { action } = accumulator.applyChunk(streamChunk);
+
+          if (action?.type === "error") {
+            this._broadcastChat({
+              type: MSG_CHAT_RESPONSE,
+              id: requestId,
+              body: action.error,
+              done: false,
+              error: true
+            });
+            continue;
+          }
+
           const chunkBody = JSON.stringify(chunk);
           this._resumableStream.storeChunk(streamId, chunkBody);
           chunksSinceFlush++;
@@ -4079,6 +4092,12 @@ export class Think<
             chunksSinceFlush = 0;
             hasFlushedContent = true;
           }
+          this._broadcastChat({
+            type: MSG_CHAT_RESPONSE,
+            id: requestId,
+            body: chunkBody,
+            done: false
+          });
           await callback.onEvent(chunkBody);
         }
       } finally {
@@ -4087,6 +4106,13 @@ export class Think<
 
       this._resumableStream.complete(streamId);
       streamFinalized = true;
+      this._broadcastChat({
+        type: MSG_CHAT_RESPONSE,
+        id: requestId,
+        body: "",
+        done: true
+      });
+      doneSent = true;
 
       assistantMsg = accumulator.toMessage();
       await this._persistAssistantMessage(assistantMsg);
@@ -4112,6 +4138,18 @@ export class Think<
       if (!streamFinalized) {
         this._resumableStream.markError(streamId);
         streamFinalized = true;
+      }
+      if (!doneSent) {
+        const streamError =
+          error instanceof Error ? error.message : "Stream error";
+        this._broadcastChat({
+          type: MSG_CHAT_RESPONSE,
+          id: requestId,
+          body: streamError,
+          done: true,
+          error: true
+        });
+        doneSent = true;
       }
 
       if (!assistantMsg && accumulator.parts.length > 0) {

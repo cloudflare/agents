@@ -272,6 +272,20 @@ async function setupTelegramWebhook(
   request: Request,
   env: Cloudflare.Env
 ): Promise<Response> {
+  const requestUrl = new URL(request.url);
+  const webhookUrl = `${requestUrl.origin}${WEBHOOK_PATH}`;
+  if (requestUrl.protocol !== "https:") {
+    return jsonResponse(
+      {
+        ok: false,
+        webhookUrl,
+        error:
+          "Telegram webhooks require HTTPS. Open the Quick Tunnel or deployed Worker URL and click Set webhook here again."
+      },
+      { status: 400 }
+    );
+  }
+
   if (!env.TELEGRAM_BOT_TOKEN) {
     return jsonResponse(
       {
@@ -292,8 +306,6 @@ async function setupTelegramWebhook(
     );
   }
 
-  const requestUrl = new URL(request.url);
-  const webhookUrl = `${requestUrl.origin}${WEBHOOK_PATH}`;
   const current = await telegramApi<TelegramWebhookInfo>(
     env.TELEGRAM_BOT_TOKEN,
     "getWebhookInfo"

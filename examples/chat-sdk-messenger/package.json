@@ -6,7 +6,6 @@
   "version": "0.0.0",
   "scripts": {
     "start": "vite dev",
-    "start:tunnel": "TUNNEL=1 vite dev",
     "deploy": "vite build && wrangler deploy",
     "test": "vitest --run --config src/tests/vitest.config.ts",
     "typecheck": "tsc --noEmit",

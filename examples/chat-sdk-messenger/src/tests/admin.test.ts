@@ -53,4 +53,19 @@ describe("ChatIngressAgent admin surface", () => {
       error: "TELEGRAM_BOT_TOKEN is not configured."
     });
   });
+
+  it("requires HTTPS before calling Telegram webhook setup", async () => {
+    const response = await exports.default.fetch(
+      "http://example.com/setup/telegram-webhook",
+      { method: "POST" }
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      webhookUrl: "http://example.com/webhooks/telegram",
+      error:
+        "Telegram webhooks require HTTPS. Open the Quick Tunnel or deployed Worker URL and click Set webhook here again."
+    });
+  });
 });

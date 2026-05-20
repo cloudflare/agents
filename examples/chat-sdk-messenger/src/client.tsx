@@ -95,8 +95,131 @@ function messageText(message: UIMessage): string {
     .join("");
 }
 
+function safeJson(value: unknown): string {
+  try {
+    const json = JSON.stringify(value, null, 2);
+    return json.length > 8_000
+      ? `${json.slice(0, 8_000)}\n... truncated`
+      : json;
+  } catch {
+    return String(value);
+  }
+}
+
+function partRecord(part: UIMessage["parts"][number]): Record<string, unknown> {
+  return part as unknown as Record<string, unknown>;
+}
+
+function partLabel(part: UIMessage["parts"][number]): string {
+  const { type } = part;
+  if (type === "text") {
+    return "Text";
+  }
+  if (type.includes("reasoning")) {
+    return "Reasoning trace";
+  }
+  if (type.startsWith("tool-")) {
+    return `Tool ${type.slice("tool-".length)}`;
+  }
+  if (type.includes("tool")) {
+    return "Tool event";
+  }
+  return type;
+}
+
+function MessageParts({ message }: { message: UIMessage }) {
+  if (message.parts.length === 0) {
+    return <div className="text-sm text-kumo-subtle">(empty message)</div>;
+  }
+
+  return (
+    <div className="space-y-2 text-sm">
+      {message.parts.map((part, index) => {
+        const record = partRecord(part);
+        const text = typeof record.text === "string" ? record.text : undefined;
+        if (part.type === "text" && text !== undefined) {
+          return (
+            <div key={index} className="whitespace-pre-wrap">
+              {text || "(empty text)"}
+            </div>
+          );
+        }
+
+        return (
+          <details
+            key={index}
+            className="rounded-md border border-kumo-line bg-kumo-surface p-2"
+          >
+            <summary className="cursor-pointer text-xs font-medium uppercase text-kumo-subtle">
+              {partLabel(part)}
+            </summary>
+            {text && (
+              <div className="mt-2 whitespace-pre-wrap text-sm">{text}</div>
+            )}
+            <pre className="mt-2 max-h-80 overflow-auto rounded bg-kumo-base p-2 text-xs">
+              {safeJson(part)}
+            </pre>
+          </details>
+        );
+      })}
+    </div>
+  );
+}
+
 function replyStatusBadge(job: AdminReplyJob) {
   return <Badge>{job.status}</Badge>;
+}
+
+function LocalhostTunnelModal() {
+  const [dismissed, setDismissed] = useState(false);
+  const isLocalhost =
+    window.location.protocol !== "https:" &&
+    (window.location.hostname === "localhost" ||
+      window.location.hostname === "127.0.0.1");
+
+  if (!isLocalhost || dismissed) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <Surface className="max-w-lg rounded-2xl p-6 shadow-2xl ring ring-kumo-line">
+        <div className="flex gap-3">
+          <InfoIcon
+            size={24}
+            weight="bold"
+            className="mt-0.5 shrink-0 text-kumo-accent"
+          />
+          <div>
+            <Text size="lg" bold>
+              Open the tunnel URL
+            </Text>
+            <span className="mt-3 block">
+              <Text size="sm" variant="secondary">
+                This example starts a Quick Tunnel for Telegram webhooks. Check
+                the terminal where `npm start` is running, copy the printed
+                `trycloudflare.com` URL, and open that HTTPS page instead.
+              </Text>
+            </span>
+            <span className="mt-3 block">
+              <Text size="sm" variant="secondary">
+                Telegram cannot use `localhost` as a webhook URL, so the setup
+                button only works from the tunnel or deployed Worker URL.
+              </Text>
+            </span>
+            <div className="mt-5 flex flex-wrap gap-3">
+              <Button onClick={() => window.location.reload()}>
+                I opened the tunnel URL
+              </Button>
+              <Button variant="secondary" onClick={() => setDismissed(true)}>
+                Continue locally
+              </Button>
+            </div>
+          </div>
+        </div>
+      </Surface>
+    </div>
+  );
 }
 
 function SetupCard({ setup }: { setup: AdminSetupInfo | null }) {
@@ -106,14 +229,7 @@ function SetupCard({ setup }: { setup: AdminSetupInfo | null }) {
   const webhookUrl = setup
     ? `${window.location.origin}${setup.webhookPath}`
     : `${window.location.origin}/webhooks/telegram`;
-  const command = [
-    `curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \\`,
-    `  -H "Content-Type: application/json" \\`,
-    `  -d '{`,
-    `    "url": "${webhookUrl}",`,
-    `    "secret_token": "$TELEGRAM_WEBHOOK_SECRET_TOKEN"`,
-    `  }'`
-  ].join("\n");
+  const isHttpsOrigin = window.location.protocol === "https:";
 
   async function setTelegramWebhook() {
     setIsSettingWebhook(true);
@@ -180,12 +296,23 @@ function SetupCard({ setup }: { setup: AdminSetupInfo | null }) {
               <dd>{setup?.webhookPath ?? "/webhooks/telegram"}</dd>
             </div>
           </dl>
-          <pre className="mt-3 overflow-x-auto rounded-lg bg-kumo-surface p-3 text-xs">
-            {command}
-          </pre>
+          <div className="mt-3 rounded-lg bg-kumo-surface p-3 text-xs">
+            <div className="text-kumo-subtle">Webhook URL</div>
+            <div className="mt-1 break-all">{webhookUrl}</div>
+          </div>
+          {!isHttpsOrigin && (
+            <span className="mt-2 block">
+              <Text size="xs" variant="secondary">
+                Telegram requires an HTTPS webhook. Start `npm start`, open the
+                printed `trycloudflare.com` URL, then click this button there.
+              </Text>
+            </span>
+          )}
           <div className="mt-3 flex flex-wrap items-center gap-3">
             <Button
-              disabled={!setup?.telegramConfigured || isSettingWebhook}
+              disabled={
+                !setup?.telegramConfigured || !isHttpsOrigin || isSettingWebhook
+              }
               onClick={() => void setTelegramWebhook()}
             >
               {isSettingWebhook ? "Setting webhook..." : "Set webhook here"}
@@ -419,9 +546,7 @@ function ThinkPane({
                   </span>
                   <span className="normal-case">{text.length} chars</span>
                 </div>
-                <div className="whitespace-pre-wrap text-sm">
-                  {text || "(non-text message)"}
-                </div>
+                <MessageParts message={message} />
               </div>
             );
           })
@@ -525,6 +650,7 @@ function App() {
 
   return (
     <main className="min-h-screen bg-kumo-base text-kumo-default">
+      <LocalhostTunnelModal />
       <div className="mx-auto flex min-h-screen max-w-7xl flex-col gap-6 px-6 py-8">
         <header className="flex items-center justify-between gap-4">
           <div>

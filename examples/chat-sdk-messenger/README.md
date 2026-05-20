@@ -45,23 +45,18 @@ TELEGRAM_WEBHOOK_SECRET_TOKEN=generate-a-random-secret
 TELEGRAM_BOT_USERNAME=your_bot_username
 ```
 
-Start the local Vite/Workers dev server:
+Start the local Vite/Workers dev server. This starts a Quick Tunnel by default
+so Telegram can reach your local webhook:
 
 ```bash
 npm start
 ```
 
-To test Telegram webhooks without deploying, start the same app through a Quick
-Tunnel:
-
-```bash
-npm run start:tunnel
-```
-
 The Vite plugin will print a public `trycloudflare.com` hostname. Open that
-hostname in your browser and click **Set webhook here** in the setup panel. That
-button checks Telegram's current webhook URL and only calls `setWebhook` when it
-needs to point at this tunnel.
+HTTPS hostname in your browser and click **Set webhook here** in the setup
+panel. The button is disabled on `http://localhost` because Telegram requires an
+HTTPS webhook URL. It checks Telegram's current webhook URL and only calls
+`setWebhook` when it needs to point at this tunnel.
 
 You can still set the webhook manually with:
 
@@ -390,8 +385,9 @@ ChatIngressAgent:tenant-b
 - Telegram callback data is limited to 64 bytes. Keep button action IDs short.
 - Telegram bots cannot fetch complete historical chat logs. Adapter history is
   limited to what the bot can see/cache.
-- The AI path streams assistant text only. Reasoning, tool calls, and tool
-  results are intentionally not rendered into the messenger yet.
+- The AI path renders assistant text into the messenger only. Reasoning, tool
+  calls, tool results, and unknown message parts are visible in the admin Think
+  pane for debugging, but they are not posted into Telegram.
 - The `default` parent Agent is intentionally simple; high-volume bots should
   consider routing to more specific parent Agent names.
 - The admin dashboard is a development/control-plane surface. Add real

@@ -18,6 +18,7 @@ import type { ChatResponseResult, SaveMessagesResult } from "../think";
 
 const MSG_CHAT_MESSAGES = "cf_agent_chat_messages";
 const MSG_CHAT_CLEAR = "cf_agent_chat_clear";
+const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
 
 async function freshAgent(name: string) {
   return getServerByName(
@@ -189,6 +190,47 @@ describe("Think — core", () => {
       await agent.testChat("Hello from RPC");
 
       await expect(userBroadcast).resolves.toBeTruthy();
+      await expect(assistantBroadcast).resolves.toBeTruthy();
+    } finally {
+      await closeWS(ws);
+    }
+  });
+
+  it("should broadcast RPC chat stream chunks to connected clients", async () => {
+    const room = "chat-rpc-stream-broadcast";
+    const agent = await freshAgent(room);
+    await agent.setMultiChunkResponse(["first ", "second"]);
+    const ws = await connectThinkTestAgentWS(room);
+
+    try {
+      const streamChunk = waitForProtocolMessage(ws, (message) => {
+        if (
+          message.type !== MSG_CHAT_RESPONSE ||
+          message.done !== false ||
+          typeof message.body !== "string"
+        ) {
+          return false;
+        }
+        const chunk = JSON.parse(message.body) as {
+          type?: string;
+          delta?: unknown;
+        };
+        return chunk.type === "text-delta" && chunk.delta === "first ";
+      });
+      const assistantBroadcast = waitForProtocolMessage(ws, (message) => {
+        const messages = message.messages as UIMessage[] | undefined;
+        return (
+          message.type === MSG_CHAT_MESSAGES &&
+          Array.isArray(messages) &&
+          messages.length === 2 &&
+          messages[1].role === "assistant"
+        );
+      });
+
+      const chat = agent.testChat("Hello from RPC");
+
+      await expect(streamChunk).resolves.toBeTruthy();
+      await expect(chat).resolves.toMatchObject({ done: true });
       await expect(assistantBroadcast).resolves.toBeTruthy();
     } finally {
       await closeWS(ws);
