@@ -674,6 +674,39 @@ export class ThinkTestAgent extends Think {
     }
   }
 
+  async runInBandStreamErrorForTest(errorText: string): Promise<void> {
+    const result: StreamableResult = {
+      toUIMessageStream() {
+        return {
+          [Symbol.asyncIterator]() {
+            let emitted = false;
+            return {
+              async next() {
+                if (!emitted) {
+                  emitted = true;
+                  return {
+                    done: false as const,
+                    value: { type: "error", errorText }
+                  };
+                }
+                return { done: true as const, value: undefined };
+              }
+            };
+          }
+        };
+      }
+    };
+
+    await (
+      this as unknown as {
+        _streamResult: (
+          requestId: string,
+          result: StreamableResult
+        ) => Promise<void>;
+      }
+    )._streamResult(crypto.randomUUID(), result);
+  }
+
   async testChatWithAbort(
     message: string,
     abortAfterEvents: number

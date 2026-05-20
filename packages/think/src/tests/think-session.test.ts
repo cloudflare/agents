@@ -922,6 +922,17 @@ describe("Think — onChatResponse", () => {
     expect(log[0].error).toContain("Boom");
   });
 
+  it("should fire onChatResponse with error status when in-band error arrives before any parts", async () => {
+    const agent = await freshAgent("hook-inband-error");
+
+    await agent.runInBandStreamErrorForTest("Early in-band error");
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("error");
+    expect(log[0].error).toContain("Early in-band error");
+  });
+
   it("should fire onChatResponse with aborted status on abort", async () => {
     const agent = await freshAgent("hook-abort");
 
