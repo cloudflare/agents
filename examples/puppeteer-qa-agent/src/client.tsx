@@ -97,7 +97,7 @@ function VerdictBadge({ verdict }: { verdict: "pass" | "fail" }) {
   );
 }
 
-function PageCheckToolCall({
+function PuppeteerScriptToolCall({
   input,
   output,
   isRunning,
@@ -110,16 +110,7 @@ function PageCheckToolCall({
   isError: boolean;
   errorText?: string;
 }) {
-  const checks = Array.isArray(input?.checks)
-    ? (input.checks as Array<{ type: string; selector?: string; name: string }>)
-    : [];
-  const url = typeof input?.url === "string" ? input.url : null;
-  const resultData =
-    output != null &&
-    typeof output === "object" &&
-    "data" in (output as object)
-      ? (output as { url: string; data: Record<string, unknown> })
-      : null;
+  const script = typeof input?.script === "string" ? input.script : null;
 
   return (
     <Surface className="max-w-[90%] px-4 py-3 rounded-xl ring ring-kumo-line overflow-hidden">
@@ -135,7 +126,7 @@ function PageCheckToolCall({
           <MagnifyingGlassIcon size={14} className="text-kumo-subtle" />
         )}
         <Text size="xs" variant="secondary" bold>
-          {isRunning ? "Inspecting page..." : "Page inspection"}
+          {isRunning ? "Running Puppeteer script..." : "Puppeteer script"}
         </Text>
         {!isRunning && !isError && (
           <span className="text-[10px] text-kumo-inactive bg-kumo-elevated px-1.5 py-0.5 rounded-full">
@@ -144,33 +135,14 @@ function PageCheckToolCall({
         )}
       </div>
 
-      {url && (
+      {script && (
         <div className="mb-2">
           <span className="text-[10px] uppercase tracking-wider text-kumo-inactive font-semibold">
-            URL
+            Script
           </span>
-          <p className="mt-0.5 text-xs font-mono text-kumo-subtle truncate">
-            {url}
-          </p>
-        </div>
-      )}
-
-      {checks.length > 0 && (
-        <div className="mb-2">
-          <span className="text-[10px] uppercase tracking-wider text-kumo-inactive font-semibold">
-            Checks ({checks.length})
-          </span>
-          <div className="mt-1 flex flex-wrap gap-1">
-            {checks.map((check, i) => (
-              <span
-                key={i}
-                className="text-[10px] font-mono bg-kumo-elevated text-kumo-subtle px-1.5 py-0.5 rounded"
-              >
-                {check.type}:{check.name}
-                {check.selector ? `[${check.selector}]` : ""}
-              </span>
-            ))}
-          </div>
+          <pre className="mt-1 p-2 rounded-lg bg-kumo-elevated text-xs font-mono text-kumo-subtle overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap break-all">
+            {script}
+          </pre>
         </div>
       )}
 
@@ -185,23 +157,14 @@ function PageCheckToolCall({
         </div>
       )}
 
-      {resultData && (
+      {output != null && !errorText && (
         <div className="mt-2">
           <span className="text-[10px] uppercase tracking-wider text-kumo-inactive font-semibold">
-            Extracted data
+            Result
           </span>
-          <div className="mt-1 space-y-1">
-            {Object.entries(resultData.data).map(([key, value]) => (
-              <div key={key} className="flex gap-2 text-xs">
-                <span className="font-mono text-kumo-accent shrink-0">{key}:</span>
-                <span className="text-kumo-subtle break-all">
-                  {Array.isArray(value)
-                    ? `[${(value as unknown[]).slice(0, 3).join(", ")}${(value as unknown[]).length > 3 ? `, +${(value as unknown[]).length - 3} more` : ""}]`
-                    : String(value ?? "null")}
-                </span>
-              </div>
-            ))}
-          </div>
+          <pre className="mt-1 p-2 rounded-lg bg-kumo-elevated text-xs font-mono text-kumo-subtle overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap break-all">
+            {typeof output === "string" ? output : JSON.stringify(output, null, 2)}
+          </pre>
         </div>
       )}
     </Surface>
@@ -349,10 +312,10 @@ function Chat() {
                     part.state === "input-streaming";
                   const isError = part.state === "output-error";
 
-                  if (toolName === "run_page_check") {
+                  if (toolName === "run_puppeteer_script") {
                     return (
                       <div key={part.toolCallId} className="flex justify-start">
-                        <PageCheckToolCall
+                        <PuppeteerScriptToolCall
                           input={toolInput}
                           output={toolOutput}
                           isRunning={isRunning}

@@ -2,6 +2,7 @@
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "ai": { "binding": "AI", "remote": true },
   "browser": { "binding": "BROWSER" },
+  "worker_loaders": [{ "binding": "LOADER" }],
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {

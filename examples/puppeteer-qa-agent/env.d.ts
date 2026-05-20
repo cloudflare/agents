@@ -6,6 +6,7 @@ declare namespace Cloudflare {
     durableNamespaces: "QAAgent";
   }
   interface Env {
+    LOADER: WorkerLoader;
     BROWSER: Fetcher;
     AI: Ai;
     QAAgent: DurableObjectNamespace<import("./src/server").QAAgent>;
