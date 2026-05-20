@@ -310,16 +310,8 @@ export function createBrowserToolHandlers(options: BrowserToolsOptions) {
   }
 
   async function execute(code: string): Promise<ToolResult> {
-    let session: CdpSession | undefined;
     try {
-      if (options.cdpUrl) {
-        session = await connectUrl(options.cdpUrl, {
-          timeoutMs: options.timeout,
-          headers: options.cdpHeaders
-        });
-      } else if (options.browser) {
-        session = await connectBrowser(options.browser, options.timeout);
-      } else {
+      if (!options.cdpUrl && !options.browser) {
         return {
           text: "Either 'browser' (Fetcher binding) or 'cdpUrl' must be provided",
           isError: true
@@ -329,21 +321,41 @@ export function createBrowserToolHandlers(options: BrowserToolsOptions) {
       const providers: ResolvedProvider[] = [
         {
           name: "cdp",
-          fns: {
-            send: async (method: unknown, params: unknown, opts: unknown) =>
-              session!.send(
-                method as string,
-                params,
-                opts as { timeoutMs?: number; sessionId?: string }
-              ),
-            attachToTarget: async (targetId: unknown, opts: unknown) =>
-              session!.attachToTarget(
-                targetId as string,
-                opts as { timeoutMs?: number }
-              ),
-            getDebugLog: async (limit: unknown) =>
-              session!.getDebugLog(limit as number | undefined),
-            clearDebugLog: async () => session!.clearDebugLog()
+          fns: {},
+          createRuntime: () => {
+            let session: CdpSession | undefined;
+            let sessionPromise: Promise<CdpSession> | undefined;
+
+            const getSession = async () => {
+              sessionPromise ??= options.cdpUrl
+                ? connectUrl(options.cdpUrl, {
+                    timeoutMs: options.timeout,
+                    headers: options.cdpHeaders
+                  })
+                : connectBrowser(options.browser!, options.timeout);
+              session = await sessionPromise;
+              return session;
+            };
+
+            return {
+              fns: {
+                send: async (method: unknown, params: unknown, opts: unknown) =>
+                  (await getSession()).send(
+                    method as string,
+                    params,
+                    opts as { timeoutMs?: number; sessionId?: string }
+                  ),
+                attachToTarget: async (targetId: unknown, opts: unknown) =>
+                  (await getSession()).attachToTarget(
+                    targetId as string,
+                    opts as { timeoutMs?: number }
+                  ),
+                getDebugLog: async (limit: unknown) =>
+                  (await getSession()).getDebugLog(limit as number | undefined),
+                clearDebugLog: async () => (await getSession()).clearDebugLog()
+              },
+              dispose: () => session?.close()
+            };
           }
         }
       ];
@@ -355,8 +367,6 @@ export function createBrowserToolHandlers(options: BrowserToolsOptions) {
       return { text: truncateResponse(result.result) };
     } catch (error) {
       return { text: formatError(error), isError: true };
-    } finally {
-      session?.close();
     }
   }
 

@@ -56,8 +56,8 @@ export interface CreateBrowserToolsOptions {
  *   that runs against a cached, normalized copy of the protocol.
  *
  * - **`browser_execute`** — run CDP commands against a live browser
- *   session. Each call opens a fresh session, exposes a `cdp` helper,
- *   and closes the session on completion.
+ *   session. Each call exposes a `cdp` helper, lazily opens a fresh
+ *   session on first use, and closes the session on completion.
  *
  * Both tools use the code-mode pattern: the LLM writes JavaScript
  * async arrow functions that execute in a sandboxed Worker isolate.
