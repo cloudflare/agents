@@ -1,0 +1,25 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "ai": { "binding": "AI", "remote": true },
+  "compatibility_date": "2026-04-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      // Only TaskAgent is bound top-level; SkillLearnerAgent is a sub-agent
+      // facet of TaskAgent and doesn't need its own top-level binding.
+      { "class_name": "TaskAgent", "name": "TaskAgent" }
+    ]
+  },
+  "main": "src/server.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["TaskAgent", "SkillLearnerAgent"],
+      "tag": "v1"
+    }
+  ],
+  "name": "skill-learning-browser-example"
+}

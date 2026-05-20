@@ -1,0 +1,32 @@
+{
+  "$schema": "../../../../node_modules/wrangler/config-schema.json",
+  "compatibility_date": "2026-04-15",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "enable_nodejs_tty_module",
+    "enable_nodejs_fs_module",
+    "enable_nodejs_http_modules",
+    "enable_nodejs_perf_hooks_module",
+    "enable_nodejs_v8_module",
+    "enable_nodejs_process_v2"
+  ],
+  // No AI binding: tests bypass the LLM path entirely — they test skill
+  // storage, retrieval, and template resolution directly without inference.
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "TaskAgent",
+        "name": "TaskAgent"
+      }
+      // SkillLearnerAgent is a sub-agent facet of TaskAgent — only needs
+      // a new_sqlite_classes entry, not a top-level binding.
+    ]
+  },
+  "main": "worker.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["TaskAgent", "SkillLearnerAgent"],
+      "tag": "v1"
+    }
+  ]
+}
