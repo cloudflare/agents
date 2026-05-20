@@ -9,7 +9,8 @@ key.
 ## Streaming Polish
 
 - Consider provider-specific streaming affordances beyond text deltas.
-- Keep reasoning chunks hidden by default unless a deliberate debug mode exists.
+- Keep reasoning, tool calls, and tool results visible only in deliberate admin
+  debug surfaces, not in messenger output.
 - Decide whether partial responses should end with only an interruption apology,
   a retry button, or provider-specific recovery UI.
 - Generalize the Telegram long-reply policy into provider-aware delivery helpers
@@ -57,11 +58,12 @@ key.
 
 - Move the Agents-backed Chat SDK `StateAdapter` into the SDK once one more
   example or app validates the same sharding and TTL behavior.
-- Extract the Think-to-Chat-SDK streaming bridge after the admin UI proves the
-  desired cancellation, empty-response, long-reply, and partial-failure
-  semantics.
-- Extract provider-aware delivery policy once another adapter validates the
-  split between editable first streams, overflow chunks, final-edit no-ops, rate
+- Use `src/intelligence/` as the staging area for a future Think-to-Chat-SDK
+  streaming bridge once one more provider validates the cancellation,
+  empty-response, long-reply, and partial-failure semantics.
+- Use `src/provider/telegram.ts` as the reference shape for provider-aware
+  delivery policy, then extract only after another adapter validates the split
+  between editable first streams, overflow chunks, final-edit no-ops, rate
   limits, and partial delivery failures.
 - Keep admin dashboard shape and Telegram-specific operations in examples until
   there is another consumer with the same product requirements.

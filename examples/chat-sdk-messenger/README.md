@@ -139,6 +139,17 @@ ChatIngressAgent
   ConversationAgent    # Think messages and model calls per thread
 ```
 
+The example code is split along the same boundaries:
+
+```text
+src/
+  admin/                # Admin directory and reply-job display helpers
+  intelligence/         # Think conversation, message conversion, reply delivery
+  provider/telegram.ts  # Telegram webhook setup, limits, and delivery policy
+  state/                # Agents-backed Chat SDK StateAdapter
+  index.ts              # Ingress orchestration and Chat SDK event wiring
+```
+
 `ChatIngressAgent` creates one Chat SDK runtime during `onStart()`:
 
 ```ts
@@ -220,7 +231,9 @@ The AI path is small on purpose:
 ```text
 src/intelligence/
   conversation-agent.ts  # ConversationAgent extends Think
+  delivery.ts            # Managed reply snapshots and failure policy
   messages.ts            # Chat SDK Message -> AI SDK UIMessage helpers
+  stream-callback.ts     # RPC-safe Think stream callback for Chat SDK delivery
 ```
 
 `ConversationAgent` uses Think's `messages` / Session storage as the canonical

@@ -1,6 +1,7 @@
 import { Agent, routeAgentRequest } from "agents";
 import { Message } from "chat";
 import appWorker, { ChatIngressAgent, ConversationAgent } from "../index";
+import { shardTelegramStateKey } from "../provider/telegram";
 import {
   AgentChatStateAdapter,
   ChatStateAgent,
@@ -146,7 +147,10 @@ export class TestHostAgent extends Agent {
       thread: defaultKeyShard("thread-state:telegram:123:456"),
       channel: defaultKeyShard("channel-state:telegram:123"),
       history: defaultKeyShard("msg-history:telegram:123:456"),
-      dedupe: defaultKeyShard("dedupe:telegram:123:999"),
+      dedupe: shardTelegramStateKey(
+        "dedupe:telegram:123:999",
+        defaultThreadShard
+      ),
       callback: defaultKeyShard("chat:callback:opaque"),
       fallbackThread: defaultThreadShard("telegram:123:456")
     };

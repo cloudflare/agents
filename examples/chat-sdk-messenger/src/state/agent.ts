@@ -11,12 +11,13 @@ interface StoredQueueEntry {
   expiresAt: number;
 }
 
-const CLEANUP_INTERVAL_SECONDS = 15 * 60;
+const NEXT_CLEANUP_AT_KEY = "next_cleanup_at";
+const CLEANUP_SCHEDULE_ID_KEY = "cleanup_schedule_id";
 
 export class ChatStateAgent extends Agent {
   onStart(): void {
     this.migrate();
-    void this.scheduleEvery(CLEANUP_INTERVAL_SECONDS, "cleanupExpired");
+    void this.scheduleNextCleanup();
   }
 
   subscribe(threadId: string): void {
@@ -43,7 +44,10 @@ export class ChatStateAgent extends Agent {
     return rows.length > 0;
   }
 
-  acquireLock(threadId: string, ttlMs: number): StoredLock | null {
+  async acquireLock(
+    threadId: string,
+    ttlMs: number
+  ): Promise<StoredLock | null> {
     const result = this.ctx.storage.transactionSync(() => {
       const now = Date.now();
 
@@ -76,6 +80,7 @@ export class ChatStateAgent extends Agent {
       return { threadId, token, expiresAt };
     });
 
+    await this.scheduleCleanupForExpiry(result?.expiresAt ?? null);
     return result;
   }
 
@@ -86,8 +91,12 @@ export class ChatStateAgent extends Agent {
     `;
   }
 
-  extendLock(threadId: string, token: string, ttlMs: number): boolean {
-    return this.ctx.storage.transactionSync(() => {
+  async extendLock(
+    threadId: string,
+    token: string,
+    ttlMs: number
+  ): Promise<boolean> {
+    const result = this.ctx.storage.transactionSync(() => {
       const now = Date.now();
       const rows = this.ctx.storage.sql
         .exec<{ thread_id: string }>(
@@ -102,6 +111,10 @@ export class ChatStateAgent extends Agent {
         .toArray();
       return rows.length > 0;
     });
+    if (result) {
+      await this.scheduleCleanupForExpiry(Date.now() + ttlMs);
+    }
+    return result;
   }
 
   forceReleaseLock(threadId: string): void {
@@ -111,10 +124,14 @@ export class ChatStateAgent extends Agent {
     `;
   }
 
-  enqueue(threadId: string, value: string, maxSize: number): number {
+  async enqueue(
+    threadId: string,
+    value: string,
+    maxSize: number
+  ): Promise<number> {
     const parsed = parseQueueEntry(value);
 
-    return this.ctx.storage.transactionSync(() => {
+    const count = this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
         "INSERT INTO chat_state_queue (thread_id, value, enqueued_at, expires_at) VALUES (?, ?, ?, ?)",
         threadId,
@@ -143,6 +160,8 @@ export class ChatStateAgent extends Agent {
         .one();
       return row.count;
     });
+    await this.scheduleCleanupForExpiry(parsed.expiresAt);
+    return count;
   }
 
   popQueue(threadId: string): string | null {
@@ -183,12 +202,12 @@ export class ChatStateAgent extends Agent {
     return rows[0]?.count ?? 0;
   }
 
-  listAppend(
+  async listAppend(
     key: string,
     value: string,
     maxLength?: number,
     ttlMs?: number
-  ): void {
+  ): Promise<void> {
     const expiresAt = ttlMs && ttlMs > 0 ? Date.now() + ttlMs : null;
 
     this.ctx.storage.transactionSync(() => {
@@ -223,6 +242,7 @@ export class ChatStateAgent extends Agent {
         );
       }
     });
+    await this.scheduleCleanupForExpiry(expiresAt);
   }
 
   listGet(key: string): string[] {
@@ -247,15 +267,20 @@ export class ChatStateAgent extends Agent {
     return this.readCacheValue(key, Date.now());
   }
 
-  cacheSet(key: string, value: string, ttlMs?: number): void {
+  async cacheSet(key: string, value: string, ttlMs?: number): Promise<void> {
     const expiresAt = ttlMs && ttlMs > 0 ? Date.now() + ttlMs : null;
     this.upsertCacheValue(key, value, expiresAt);
+    await this.scheduleCleanupForExpiry(expiresAt);
   }
 
-  cacheSetIfNotExists(key: string, value: string, ttlMs?: number): boolean {
+  async cacheSetIfNotExists(
+    key: string,
+    value: string,
+    ttlMs?: number
+  ): Promise<boolean> {
     const now = Date.now();
 
-    return this.ctx.storage.transactionSync(() => {
+    const inserted = this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
         "DELETE FROM chat_state_cache WHERE key = ? AND expires_at IS NOT NULL AND expires_at <= ?",
         key,
@@ -270,6 +295,11 @@ export class ChatStateAgent extends Agent {
       this.upsertCacheValue(key, value, expiresAt);
       return true;
     });
+    if (inserted) {
+      const expiresAt = ttlMs && ttlMs > 0 ? Date.now() + ttlMs : null;
+      await this.scheduleCleanupForExpiry(expiresAt);
+    }
+    return inserted;
   }
 
   cacheDelete(key: string): void {
@@ -279,8 +309,18 @@ export class ChatStateAgent extends Agent {
     `;
   }
 
-  cleanupExpired(): void {
+  async cleanupExpired(payload?: { expiresAt?: number }): Promise<void> {
+    const current = this.readCleanupMetadata();
+    if (
+      payload?.expiresAt !== undefined &&
+      current.nextCleanupAt !== null &&
+      payload.expiresAt !== current.nextCleanupAt
+    ) {
+      return;
+    }
+
     const now = Date.now();
+    this.clearCleanupMetadata();
 
     this.sql`
       DELETE FROM chat_state_locks
@@ -298,6 +338,7 @@ export class ChatStateAgent extends Agent {
       DELETE FROM chat_state_lists
       WHERE expires_at IS NOT NULL AND expires_at <= ${now}
     `;
+    await this.scheduleNextCleanup();
   }
 
   private migrate(): void {
@@ -339,6 +380,13 @@ export class ChatStateAgent extends Agent {
         key TEXT NOT NULL,
         value TEXT NOT NULL,
         expires_at INTEGER
+      )
+    `;
+
+    this.sql`
+      CREATE TABLE IF NOT EXISTS chat_state_metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
       )
     `;
 
@@ -388,6 +436,101 @@ export class ChatStateAgent extends Agent {
     this.sql`
       INSERT OR REPLACE INTO chat_state_cache (key, value, expires_at)
       VALUES (${key}, ${value}, ${expiresAt})
+    `;
+  }
+
+  private async scheduleCleanupForExpiry(
+    expiresAt: number | null
+  ): Promise<void> {
+    if (expiresAt === null) {
+      return;
+    }
+
+    await this.ensureCleanupScheduled(expiresAt);
+  }
+
+  private async scheduleNextCleanup(): Promise<void> {
+    const next = this.nextExpiry();
+    if (next === null) {
+      const current = this.readCleanupMetadata();
+      if (current.scheduleId) {
+        await this.cancelSchedule(current.scheduleId).catch(() => false);
+      }
+      this.clearCleanupMetadata();
+      return;
+    }
+
+    await this.ensureCleanupScheduled(next);
+  }
+
+  private async ensureCleanupScheduled(expiresAt: number): Promise<void> {
+    const current = this.readCleanupMetadata();
+    if (current.nextCleanupAt !== null && current.nextCleanupAt <= expiresAt) {
+      return;
+    }
+
+    if (current.scheduleId) {
+      await this.cancelSchedule(current.scheduleId).catch(() => false);
+    }
+
+    const delaySeconds = Math.max(
+      0,
+      Math.ceil((expiresAt - Date.now()) / 1000)
+    );
+    const schedule = await this.schedule(delaySeconds, "cleanupExpired", {
+      expiresAt
+    });
+    this.writeCleanupMetadata(expiresAt, schedule.id);
+  }
+
+  private nextExpiry(): number | null {
+    const rows = this.sql<{ expires_at: number | null }>`
+      SELECT MIN(expires_at) as expires_at
+      FROM (
+        SELECT expires_at FROM chat_state_locks
+        UNION ALL
+        SELECT expires_at FROM chat_state_queue
+        UNION ALL
+        SELECT expires_at FROM chat_state_cache WHERE expires_at IS NOT NULL
+        UNION ALL
+        SELECT expires_at FROM chat_state_lists WHERE expires_at IS NOT NULL
+      )
+    `;
+    return rows[0]?.expires_at ?? null;
+  }
+
+  private readCleanupMetadata(): {
+    nextCleanupAt: number | null;
+    scheduleId: string | null;
+  } {
+    const rows = this.sql<{ key: string; value: string }>`
+      SELECT key, value
+      FROM chat_state_metadata
+      WHERE key IN (${NEXT_CLEANUP_AT_KEY}, ${CLEANUP_SCHEDULE_ID_KEY})
+    `;
+    const values = new Map(rows.map((row) => [row.key, row.value]));
+    const nextCleanupAt = Number(values.get(NEXT_CLEANUP_AT_KEY));
+    return {
+      nextCleanupAt: Number.isFinite(nextCleanupAt) ? nextCleanupAt : null,
+      scheduleId: values.get(CLEANUP_SCHEDULE_ID_KEY) ?? null
+    };
+  }
+
+  private writeCleanupMetadata(expiresAt: number, scheduleId: string): void {
+    this.sql`
+      INSERT OR REPLACE INTO chat_state_metadata (key, value)
+      VALUES (${NEXT_CLEANUP_AT_KEY}, ${String(expiresAt)})
+    `;
+    this.sql`
+      INSERT OR REPLACE INTO chat_state_metadata (key, value)
+      VALUES (${CLEANUP_SCHEDULE_ID_KEY}, ${scheduleId})
+    `;
+  }
+
+  private clearCleanupMetadata(): void {
+    this.sql`
+      DELETE FROM chat_state_metadata
+      WHERE key IN (${NEXT_CLEANUP_AT_KEY}, ${CLEANUP_SCHEDULE_ID_KEY})
     `;
   }
 }

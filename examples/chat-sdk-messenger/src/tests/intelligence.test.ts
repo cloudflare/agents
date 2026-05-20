@@ -5,11 +5,8 @@ import type { UIMessage } from "ai";
 import {
   aiReplyFailureMode,
   aiReplyRecoveryMode,
-  isExpectedFinalEditNoop,
-  isIgnorableDeliveryError,
-  splitTelegramMessageText,
   type AiReplySnapshot
-} from "../index";
+} from "../intelligence/delivery";
 import {
   conversationNameForThread,
   extractLatestAssistantText,
@@ -23,6 +20,11 @@ import {
   TextStreamCallback,
   textDeltaFromStreamChunk
 } from "../intelligence/stream-callback";
+import {
+  isExpectedFinalEditNoop,
+  isIgnorableDeliveryError,
+  splitTelegramMessageText
+} from "../provider/telegram";
 
 function createMessage(
   text: string,

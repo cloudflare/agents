@@ -6,7 +6,6 @@ import type { AgentStateAdapterOptions } from "./types";
 const THREAD_STATE_PREFIX = "thread-state:";
 const CHANNEL_STATE_PREFIX = "channel-state:";
 const MESSAGE_HISTORY_PREFIX = "msg-history:";
-const TELEGRAM_DEDUPE_PREFIX = "dedupe:telegram:";
 
 function parseStoredJson<T>(raw: string, label: string): T {
   try {
@@ -34,11 +33,6 @@ export function defaultKeyShard(
     if (key.startsWith(prefix)) {
       return shardThread(key.slice(prefix.length));
     }
-  }
-
-  if (key.startsWith(TELEGRAM_DEDUPE_PREFIX)) {
-    const chatId = key.slice(TELEGRAM_DEDUPE_PREFIX.length).split(":")[0];
-    return chatId ? shardThread(`telegram:${chatId}`) : undefined;
   }
 
   return undefined;
