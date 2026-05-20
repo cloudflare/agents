@@ -1745,9 +1745,9 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
 
     type RunFiber = RecoverySlowStreamAgent["runFiber"];
     const originalRunFiber = this.runFiber.bind(this) as RunFiber;
-    (this as unknown as { runFiber: RunFiber }).runFiber = (async () => {
+    (this as unknown as { runFiber: RunFiber }).runFiber = (() => {
       throw new Error("simulated runFiber failure");
-    }) as RunFiber;
+    }) as unknown as RunFiber;
 
     let threw = false;
     try {

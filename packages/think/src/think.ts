@@ -3520,7 +3520,7 @@ export class Think<
     body?: Record<string, unknown>,
     options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
-    const lastLeaf = this.session.getLatestLeaf();
+    const lastLeaf = await this.session.getLatestLeaf();
     if (!lastLeaf || lastLeaf.role !== "user") {
       return { requestId: "", status: "skipped" };
     }
@@ -4808,7 +4808,7 @@ export class Think<
         return;
       }
 
-      const lastLeaf = this.session.getLatestLeaf();
+      const lastLeaf = await this.session.getLatestLeaf();
       if (!lastLeaf || lastLeaf.role !== "user") {
         if (data?.recoveredRequestId) {
           await this._completeRecoveredSubmission(
