@@ -39,10 +39,10 @@ The agent is configured with a weather lookup tool that requires approval for qu
 2. **Configure environment variables**:
 
    ```bash
-   cp .dev.vars.example .dev.vars
+   cp .env.example .env
    ```
 
-   Edit `.dev.vars` and add your OpenAI API key:
+   Edit `.env` and add your OpenAI API key:
 
    ```
    OPENAI_API_KEY=your_openai_api_key_here

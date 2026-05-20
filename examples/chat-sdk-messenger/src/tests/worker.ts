@@ -1,5 +1,6 @@
-import { Agent } from "agents";
+import { Agent, routeAgentRequest } from "agents";
 import { Message } from "chat";
+import appWorker, { ChatIngressAgent, ConversationAgent } from "../index";
 import {
   AgentChatStateAdapter,
   ChatStateAgent,
@@ -187,9 +188,13 @@ export class TestHostAgent extends Agent {
 }
 
 export { ChatStateAgent };
+export { ChatIngressAgent, ConversationAgent };
 
 export default {
-  fetch() {
-    return new Response("Not found", { status: 404 });
+  async fetch(request: Request, env: Cloudflare.Env) {
+    return (
+      (await routeAgentRequest(request, env, { cors: true })) ||
+      appWorker.fetch(request, env, {} as ExecutionContext)
+    );
   }
 } satisfies ExportedHandler<Cloudflare.Env>;

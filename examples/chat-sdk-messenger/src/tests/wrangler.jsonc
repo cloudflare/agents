@@ -15,13 +15,21 @@
       {
         "class_name": "TestHostAgent",
         "name": "TestHostAgent"
+      },
+      {
+        "class_name": "ChatIngressAgent",
+        "name": "ChatIngressAgent"
       }
     ]
   },
   "main": "worker.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["TestHostAgent", "ChatStateAgent"],
+      "new_sqlite_classes": [
+        "TestHostAgent",
+        "ChatStateAgent",
+        "ChatIngressAgent"
+      ],
       "tag": "v1"
     }
   ]

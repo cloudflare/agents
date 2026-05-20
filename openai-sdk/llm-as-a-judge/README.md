@@ -37,10 +37,10 @@ The agent is configured to generate a slogan and then receive feedback on the sl
 2. **Configure environment variables**:
 
    ```bash
-   cp .dev.vars.example .dev.vars
+   cp .env.example .env
    ```
 
-   Edit `.dev.vars` and add your OpenAI API key:
+   Edit `.env` and add your OpenAI API key:
 
    ```
    OPENAI_API_KEY=your_openai_api_key_here

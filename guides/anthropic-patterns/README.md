@@ -50,7 +50,7 @@ Each pattern is implemented as a Durable Object, providing persistence, real-tim
    npm install
    ```
 
-3. Create a `.dev.vars` file with your API keys:
+3. Create a `.env` file with your API keys:
 
    ```
    OPENAI_API_KEY=your_key_here

@@ -1,8 +1,9 @@
 import { createTelegramAdapter } from "@chat-adapter/telegram";
-import { Agent, getAgentByName } from "agents";
+import { Agent, callable, getAgentByName, routeAgentRequest } from "agents";
 import type {
   FiberContext,
   FiberRecoveryContext,
+  FiberInspection,
   FiberRecoveryResult,
   SubAgentStub
 } from "agents";
@@ -34,6 +35,9 @@ export { ChatStateAgent } from "./state";
 const WEBHOOK_PATH = "/webhooks/telegram";
 const DEFAULT_AGENT_NAME = "default";
 const AI_REPLY_FIBER_NAME = "chat-sdk-messenger:ai-reply";
+const TELEGRAM_API_BASE = "https://api.telegram.org";
+const TELEGRAM_STREAM_SOFT_LIMIT = 3_400;
+const TELEGRAM_FOLLOWUP_CHUNK_LIMIT = 3_500;
 const EMPTY_AI_RESPONSE =
   "I couldn't produce a text response. Please try again.";
 const INTERRUPTED_AI_RESPONSE =
@@ -46,6 +50,41 @@ export type AiReplySnapshot = {
   stage: AiReplyStage;
   thread: unknown;
   message: unknown;
+};
+
+export type AdminConversation = {
+  threadId: string;
+  conversationName: string;
+  provider: string;
+  title: string;
+  lastMessagePreview?: string;
+  createdAt: number;
+  lastMessageAt: number;
+};
+
+export type AdminReplyJob = {
+  fiberId: string;
+  status: FiberInspection["status"];
+  threadId?: string;
+  messageId?: string;
+  createdAt: number;
+  startedAt?: number;
+  settledAt?: number;
+  error?: string;
+};
+
+export type AdminSetupInfo = {
+  webhookPath: string;
+  agentName: string;
+  telegramConfigured: boolean;
+  telegramUserName: string;
+};
+
+export type TelegramWebhookSetupResult = {
+  ok: boolean;
+  webhookUrl: string;
+  alreadyConfigured: boolean;
+  description: string;
 };
 
 export function aiReplyRecoveryMode(
@@ -61,9 +100,77 @@ export function aiReplyRecoveryMode(
 }
 
 export function aiReplyFailureMode(
-  hasStreamedText: boolean
-): "apologize" | "error" {
+  hasStreamedText: boolean,
+  completedModelTurn = false,
+  expectedDeliveryCompletion = false
+): "apologize" | "error" | null {
+  if (expectedDeliveryCompletion) {
+    return null;
+  }
+
+  if (completedModelTurn) {
+    return "error";
+  }
+
   return hasStreamedText ? "apologize" : "error";
+}
+
+export function isIgnorableDeliveryError(error: unknown): boolean {
+  if (error === undefined || error === null) {
+    return false;
+  }
+
+  const candidate = error as { code?: unknown; message?: unknown };
+  const code = typeof candidate.code === "string" ? candidate.code : undefined;
+  const message =
+    typeof candidate.message === "string"
+      ? candidate.message.toLowerCase()
+      : String(error).toLowerCase();
+
+  return (
+    code === "VALIDATION_ERROR" && message.includes("message is not modified")
+  );
+}
+
+export function isExpectedFinalEditNoop(
+  error: unknown,
+  callback: Pick<TextStreamCallback, "visibleLimitReached">
+): boolean {
+  return callback.visibleLimitReached() && isIgnorableDeliveryError(error);
+}
+
+export function splitTelegramMessageText(
+  text: string,
+  limit = TELEGRAM_FOLLOWUP_CHUNK_LIMIT
+): string[] {
+  if (!text.trim()) {
+    return [];
+  }
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > limit) {
+    let splitAt = remaining.lastIndexOf("\n\n", limit);
+    if (splitAt < Math.floor(limit * 0.5)) {
+      splitAt = remaining.lastIndexOf("\n", limit);
+    }
+    if (splitAt < Math.floor(limit * 0.5)) {
+      splitAt = remaining.lastIndexOf(" ", limit);
+    }
+    if (splitAt < Math.floor(limit * 0.5)) {
+      splitAt = limit;
+    }
+
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt);
+  }
+
+  if (remaining) {
+    chunks.push(remaining);
+  }
+
+  return chunks;
 }
 
 function toError(error: unknown): Error {
@@ -120,8 +227,157 @@ function setupErrorResponse(error: Error): Response {
   );
 }
 
+function jsonResponse(value: unknown, init?: ResponseInit): Response {
+  return new Response(JSON.stringify(value, null, 2), {
+    ...init,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      ...init?.headers
+    }
+  });
+}
+
+type TelegramApiResponse<T> =
+  | {
+      ok: true;
+      result: T;
+      description?: string;
+    }
+  | {
+      ok: false;
+      description?: string;
+      error_code?: number;
+    };
+
+type TelegramWebhookInfo = {
+  url?: string;
+};
+
+async function telegramApi<T>(
+  token: string,
+  method: string,
+  body?: Record<string, unknown>
+): Promise<TelegramApiResponse<T>> {
+  const response = await fetch(`${TELEGRAM_API_BASE}/bot${token}/${method}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(body ?? {})
+  });
+  return (await response.json()) as TelegramApiResponse<T>;
+}
+
+async function setupTelegramWebhook(
+  request: Request,
+  env: Cloudflare.Env
+): Promise<Response> {
+  if (!env.TELEGRAM_BOT_TOKEN) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: "TELEGRAM_BOT_TOKEN is not configured."
+      },
+      { status: 400 }
+    );
+  }
+
+  if (!env.TELEGRAM_WEBHOOK_SECRET_TOKEN) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: "TELEGRAM_WEBHOOK_SECRET_TOKEN is not configured."
+      },
+      { status: 400 }
+    );
+  }
+
+  const requestUrl = new URL(request.url);
+  const webhookUrl = `${requestUrl.origin}${WEBHOOK_PATH}`;
+  const current = await telegramApi<TelegramWebhookInfo>(
+    env.TELEGRAM_BOT_TOKEN,
+    "getWebhookInfo"
+  );
+
+  if (!current.ok) {
+    return jsonResponse(
+      {
+        ok: false,
+        webhookUrl,
+        error: current.description ?? "Failed to inspect Telegram webhook."
+      },
+      { status: 502 }
+    );
+  }
+
+  if (current.result.url === webhookUrl) {
+    return jsonResponse({
+      ok: true,
+      webhookUrl,
+      alreadyConfigured: true,
+      description: "Telegram webhook already points at this origin."
+    } satisfies TelegramWebhookSetupResult);
+  }
+
+  const next = await telegramApi<true>(env.TELEGRAM_BOT_TOKEN, "setWebhook", {
+    url: webhookUrl,
+    secret_token: env.TELEGRAM_WEBHOOK_SECRET_TOKEN
+  });
+
+  if (!next.ok) {
+    return jsonResponse(
+      {
+        ok: false,
+        webhookUrl,
+        error: next.description ?? "Failed to set Telegram webhook."
+      },
+      { status: 502 }
+    );
+  }
+
+  return jsonResponse({
+    ok: true,
+    webhookUrl,
+    alreadyConfigured: false,
+    description: next.description ?? "Telegram webhook configured."
+  } satisfies TelegramWebhookSetupResult);
+}
+
 export function getIngressAgentName(_request: Request): string {
   return DEFAULT_AGENT_NAME;
+}
+
+function providerFromThreadId(threadId: string): string {
+  return threadId.split(":")[0] || "unknown";
+}
+
+function conversationTitle(thread: Thread): string {
+  return `${providerFromThreadId(thread.id)}:${thread.id.split(":")[1] ?? thread.id}`;
+}
+
+function messagePreview(message: Message): string {
+  return message.text.trim().slice(0, 160);
+}
+
+function metadataString(
+  metadata: Record<string, unknown> | null | undefined,
+  key: string
+): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function adminReplyJobFromFiber(fiber: FiberInspection): AdminReplyJob {
+  return {
+    fiberId: fiber.fiberId,
+    status: fiber.status,
+    threadId: metadataString(fiber.metadata, "threadId"),
+    messageId: metadataString(fiber.metadata, "messageId"),
+    createdAt: fiber.createdAt,
+    startedAt: fiber.startedAt,
+    settledAt: fiber.settledAt,
+    error: fiber.error
+  };
 }
 
 export class ChatIngressAgent extends Agent {
@@ -129,6 +385,7 @@ export class ChatIngressAgent extends Agent {
   private botStartupError?: Error;
 
   onStart(): void {
+    this.ensureAdminSchema();
     try {
       this.bot = this.createBot();
       this.botStartupError = undefined;
@@ -136,6 +393,24 @@ export class ChatIngressAgent extends Agent {
       this.bot = undefined;
       this.botStartupError = toError(error);
     }
+  }
+
+  private ensureAdminSchema(): void {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS chat_admin_conversations (
+        thread_id TEXT PRIMARY KEY,
+        conversation_name TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        title TEXT NOT NULL,
+        last_message_preview TEXT,
+        created_at INTEGER NOT NULL,
+        last_message_at INTEGER NOT NULL
+      )
+    `;
+    this.sql`
+      CREATE INDEX IF NOT EXISTS idx_chat_admin_conversations_last_message
+      ON chat_admin_conversations(last_message_at)
+    `;
   }
 
   override async onFiberRecovered(
@@ -152,6 +427,78 @@ export class ChatIngressAgent extends Agent {
 
     await this.recoverAiReply(snapshot);
     return { status: "completed" };
+  }
+
+  override async onBeforeSubAgent(
+    _request: Request,
+    { className, name }: { className: string; name: string }
+  ): Promise<Request | Response | void> {
+    if (className !== ConversationAgent.name) {
+      return new Response("Sub-agent not found", { status: 404 });
+    }
+
+    const rows = this.sql<{ thread_id: string }>`
+      SELECT thread_id
+      FROM chat_admin_conversations
+      WHERE conversation_name = ${name}
+      LIMIT 1
+    `;
+    if (!rows[0]) {
+      return new Response(`Conversation "${name}" not found`, { status: 404 });
+    }
+  }
+
+  @callable()
+  getSetupInfo(): AdminSetupInfo {
+    return {
+      webhookPath: WEBHOOK_PATH,
+      agentName: DEFAULT_AGENT_NAME,
+      telegramConfigured: Boolean(this.env.TELEGRAM_BOT_TOKEN),
+      telegramUserName:
+        this.env.TELEGRAM_BOT_USERNAME ?? "cloudflare_chat_sdk_bot"
+    };
+  }
+
+  @callable()
+  listConversations(): AdminConversation[] {
+    return this.readConversations();
+  }
+
+  @callable()
+  inspectConversation(threadId: string): AdminConversation | null {
+    return (
+      this.readConversations().find(
+        (conversation) => conversation.threadId === threadId
+      ) ?? null
+    );
+  }
+
+  @callable()
+  async resetConversationByThread(threadId: string): Promise<void> {
+    const conversation = this.readConversation(threadId);
+    if (!conversation) {
+      throw new Error(`Unknown conversation for thread ${threadId}`);
+    }
+    await (
+      await this.subAgent(ConversationAgent, conversation.conversationName)
+    ).resetConversation();
+  }
+
+  @callable()
+  async listReplyJobs(threadId?: string): Promise<AdminReplyJob[]> {
+    return (
+      await this.listFibers({
+        name: AI_REPLY_FIBER_NAME,
+        limit: 100
+      })
+    )
+      .map(adminReplyJobFromFiber)
+      .filter((job) => threadId === undefined || job.threadId === threadId);
+  }
+
+  @callable()
+  async cancelReplyJob(fiberId: string): Promise<boolean> {
+    return this.cancelFiber(fiberId, "Cancelled from messenger admin UI");
   }
 
   private async recoverAiReply(snapshot: AiReplySnapshot): Promise<void> {
@@ -200,6 +547,103 @@ export class ChatIngressAgent extends Agent {
       this.botStartupError ??
       new Error("Chat SDK runtime was not created during Agent startup")
     );
+  }
+
+  private readConversation(threadId: string): AdminConversation | null {
+    const rows = this.sql<{
+      thread_id: string;
+      conversation_name: string;
+      provider: string;
+      title: string;
+      last_message_preview: string | null;
+      created_at: number;
+      last_message_at: number;
+    }>`
+      SELECT thread_id, conversation_name, provider, title,
+             last_message_preview, created_at, last_message_at
+      FROM chat_admin_conversations
+      WHERE thread_id = ${threadId}
+      LIMIT 1
+    `;
+    const row = rows[0];
+    if (!row) {
+      return null;
+    }
+
+    return {
+      threadId: row.thread_id,
+      conversationName: row.conversation_name,
+      provider: row.provider,
+      title: row.title,
+      lastMessagePreview: row.last_message_preview ?? undefined,
+      createdAt: row.created_at,
+      lastMessageAt: row.last_message_at
+    };
+  }
+
+  private readConversations(): AdminConversation[] {
+    const rows = this.sql<{
+      thread_id: string;
+      conversation_name: string;
+      provider: string;
+      title: string;
+      last_message_preview: string | null;
+      created_at: number;
+      last_message_at: number;
+    }>`
+      SELECT thread_id, conversation_name, provider, title,
+             last_message_preview, created_at, last_message_at
+      FROM chat_admin_conversations
+      ORDER BY last_message_at DESC
+      LIMIT 100
+    `;
+
+    return rows.map((row) => ({
+      threadId: row.thread_id,
+      conversationName: row.conversation_name,
+      provider: row.provider,
+      title: row.title,
+      lastMessagePreview: row.last_message_preview ?? undefined,
+      createdAt: row.created_at,
+      lastMessageAt: row.last_message_at
+    }));
+  }
+
+  private async recordConversation(
+    thread: Thread,
+    message: Message
+  ): Promise<AdminConversation> {
+    const now = Date.now();
+    const conversationName = conversationNameForThread(thread);
+    const provider = providerFromThreadId(thread.id);
+    const title = conversationTitle(thread);
+    const preview = messagePreview(message);
+
+    await this.subAgent(ConversationAgent, conversationName);
+    this.sql`
+      INSERT INTO chat_admin_conversations
+        (thread_id, conversation_name, provider, title, last_message_preview,
+         created_at, last_message_at)
+      VALUES
+        (${thread.id}, ${conversationName}, ${provider}, ${title}, ${preview},
+         ${now}, ${now})
+      ON CONFLICT(thread_id) DO UPDATE SET
+        conversation_name = excluded.conversation_name,
+        provider = excluded.provider,
+        title = excluded.title,
+        last_message_preview = excluded.last_message_preview,
+        last_message_at = excluded.last_message_at
+    `;
+
+    return {
+      threadId: thread.id,
+      conversationName,
+      provider,
+      title,
+      lastMessagePreview: preview || undefined,
+      createdAt: now,
+      lastMessageAt: now
+    };
   }
 
   private createBot(): Chat {
@@ -311,19 +755,28 @@ export class ChatIngressAgent extends Agent {
     message: Message,
     fiber?: FiberContext
   ): Promise<void> {
-    const callback = new TextStreamCallback();
+    const callback = new TextStreamCallback({
+      visibleSoftLimit: TELEGRAM_STREAM_SOFT_LIMIT
+    });
     let agent: SubAgentStub<ConversationAgent> | undefined;
+    let completedModelTurn = false;
+    let deliveryError: unknown;
     fiber?.stash(aiReplySnapshot("streaming", thread, message));
     const post = thread
       .post(callback.stream())
       .catch(async (error: unknown) => {
-        callback.fail(error);
+        deliveryError = error;
+        if (isExpectedFinalEditNoop(error, callback)) {
+          return;
+        }
+
         const requestId = callback.requestId();
         if (agent && requestId) {
           await agent
             .cancelChat(requestId, toError(error).message)
             .catch(() => undefined);
         }
+        callback.fail(error);
         throw error;
       });
 
@@ -331,16 +784,30 @@ export class ChatIngressAgent extends Agent {
       await thread.startTyping("Thinking...");
       agent = await this.getConversationAgent(thread);
       await agent.chat(toThinkUserMessage(message), callback);
+      completedModelTurn = true;
       callback.close();
       await post;
       if (!callback.hasText()) {
         await thread.post(EMPTY_AI_RESPONSE);
       }
+      for (const chunk of splitTelegramMessageText(callback.remainingText())) {
+        await thread.post(chunk);
+      }
       fiber?.stash(aiReplySnapshot("completed", thread, message));
     } catch (error) {
       callback.fail(error);
       await post.catch(() => undefined);
-      if (aiReplyFailureMode(callback.hasText()) === "apologize") {
+      const failureMode = aiReplyFailureMode(
+        callback.hasText(),
+        completedModelTurn,
+        isExpectedFinalEditNoop(deliveryError ?? error, callback)
+      );
+      if (failureMode === null) {
+        fiber?.stash(aiReplySnapshot("completed", thread, message));
+        return;
+      }
+
+      if (failureMode === "apologize") {
         await thread.post(INTERRUPTED_AI_RESPONSE).catch(() => undefined);
         fiber?.stash(aiReplySnapshot("completed", thread, message));
         return;
@@ -358,6 +825,7 @@ export class ChatIngressAgent extends Agent {
     thread: Thread,
     message: Message
   ): Promise<void> {
+    await this.recordConversation(thread, message);
     const result = await this.startFiber(
       AI_REPLY_FIBER_NAME,
       async (fiber: FiberContext) => {
@@ -451,12 +919,24 @@ export default {
       return setupResponse(request, env);
     }
 
+    if (
+      request.method === "POST" &&
+      url.pathname === "/setup/telegram-webhook"
+    ) {
+      return setupTelegramWebhook(request, env);
+    }
+
     if (request.method === "POST" && url.pathname === WEBHOOK_PATH) {
       const agent = await getAgentByName(
         env.ChatIngressAgent,
         getIngressAgentName(request)
       );
       return agent.fetch(request);
+    }
+
+    const agentResponse = await routeAgentRequest(request, env);
+    if (agentResponse) {
+      return agentResponse;
     }
 
     return new Response("Not found", { status: 404 });

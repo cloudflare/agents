@@ -1,4 +1,4 @@
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { getServerByName } from "partyserver";
 import { describe, expect, it, vi } from "vitest";
 import type { UIMessage } from "ai";
@@ -16,11 +16,70 @@ import type {
 } from "./agents/think-session";
 import type { ChatResponseResult, SaveMessagesResult } from "../think";
 
+const MSG_CHAT_MESSAGES = "cf_agent_chat_messages";
+const MSG_CHAT_CLEAR = "cf_agent_chat_clear";
+
 async function freshAgent(name: string) {
   return getServerByName(
     env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
     name
   );
+}
+
+async function connectThinkTestAgentWS(room: string): Promise<WebSocket> {
+  const response = await exports.default.fetch(
+    `http://example.com/agents/think-test-agent/${room}`,
+    { headers: { Upgrade: "websocket" } }
+  );
+  expect(response.status).toBe(101);
+  const ws = response.webSocket as WebSocket;
+  expect(ws).toBeDefined();
+  ws.accept();
+  return ws;
+}
+
+function waitForProtocolMessage(
+  ws: WebSocket,
+  predicate: (message: Record<string, unknown>) => boolean,
+  timeout = 3000
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("Timed out waiting for protocol message")),
+      timeout
+    );
+    const handler = (event: MessageEvent) => {
+      try {
+        const message = JSON.parse(event.data as string) as Record<
+          string,
+          unknown
+        >;
+        if (predicate(message)) {
+          clearTimeout(timer);
+          ws.removeEventListener("message", handler);
+          resolve(message);
+        }
+      } catch {
+        // Ignore non-JSON frames.
+      }
+    };
+    ws.addEventListener("message", handler);
+  });
+}
+
+function closeWS(ws: WebSocket): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, 200);
+    ws.addEventListener(
+      "close",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true }
+    );
+    ws.close();
+  });
 }
 
 async function freshSessionAgent(name: string) {
@@ -102,6 +161,40 @@ describe("Think — core", () => {
     expect((messages[1] as { role: string }).role).toBe("assistant");
   });
 
+  it("should broadcast RPC chat message updates to connected clients", async () => {
+    const room = "chat-rpc-broadcast";
+    const agent = await freshAgent(room);
+    const ws = await connectThinkTestAgentWS(room);
+
+    try {
+      const userBroadcast = waitForProtocolMessage(ws, (message) => {
+        const messages = message.messages as UIMessage[] | undefined;
+        return (
+          message.type === MSG_CHAT_MESSAGES &&
+          Array.isArray(messages) &&
+          messages.length === 1 &&
+          messages[0].role === "user"
+        );
+      });
+      const assistantBroadcast = waitForProtocolMessage(ws, (message) => {
+        const messages = message.messages as UIMessage[] | undefined;
+        return (
+          message.type === MSG_CHAT_MESSAGES &&
+          Array.isArray(messages) &&
+          messages.length === 2 &&
+          messages[1].role === "assistant"
+        );
+      });
+
+      await agent.testChat("Hello from RPC");
+
+      await expect(userBroadcast).resolves.toBeTruthy();
+      await expect(assistantBroadcast).resolves.toBeTruthy();
+    } finally {
+      await closeWS(ws);
+    }
+  });
+
   it("should accumulate messages across multiple turns", async () => {
     const agent = await freshAgent("chat-multi");
 
@@ -128,6 +221,26 @@ describe("Think — core", () => {
     await agent.clearMessages();
     messages = await agent.getStoredMessages();
     expect(messages).toHaveLength(0);
+  });
+
+  it("should broadcast programmatic clearMessages to connected clients", async () => {
+    const room = "chat-rpc-clear-broadcast";
+    const agent = await freshAgent(room);
+    await agent.testChat("Hello before clear");
+    const ws = await connectThinkTestAgentWS(room);
+
+    try {
+      const clearBroadcast = waitForProtocolMessage(
+        ws,
+        (message) => message.type === MSG_CHAT_CLEAR
+      );
+
+      await agent.clearMessages();
+
+      await expect(clearBroadcast).resolves.toBeTruthy();
+    } finally {
+      await closeWS(ws);
+    }
   });
 
   it("should stream events via callback", async () => {

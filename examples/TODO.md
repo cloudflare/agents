@@ -36,13 +36,13 @@ Most examples should be full-stack (frontend + backend). Focused server-only MCP
 
 ## Secrets examples
 
-Standardise on `.env` / `.env.example` (not `.dev.vars` / `.dev.vars.example`).
+Standardise on `.env` / `.env.example`.
 
-- [ ] `github-webhook/` — rename `.dev.vars.example` to `.env.example`
-- [x] `mcp-client/` — renamed `.dev.vars.example` to `.env.example`
-- [x] `playground/` — renamed `.dev.vars.example` to `.env.example`
-- [x] `resumable-stream-chat/` — renamed `.dev.vars.example` to `.env.example`
-- [x] `tictactoe/` — renamed `.dev.vars.example` to `.env.example`
+- [x] `github-webhook/` — uses `.env.example`
+- [x] `mcp-client/` — uses `.env.example`
+- [x] `playground/` — uses `.env.example`
+- [x] `resumable-stream-chat/` — uses `.env.example`
+- [x] `tictactoe/` — uses `.env.example`
 
 ## SPA routing
 

@@ -2107,6 +2107,7 @@ export class Think<
               : userMessage;
 
           await this._appendMessageToHistory(userMsg);
+          this._broadcastMessages();
 
           const chatBody = async () => {
             let result: StreamableResult;
@@ -2172,6 +2173,7 @@ export class Think<
   async clearMessages(): Promise<void> {
     this.resetTurnState();
     await this._clearHistory();
+    this._broadcast({ type: MSG_CHAT_CLEAR });
   }
 
   private _ensureAgentToolChildRunTable(): void {
@@ -4088,6 +4090,7 @@ export class Think<
 
       assistantMsg = accumulator.toMessage();
       await this._persistAssistantMessage(assistantMsg);
+      this._broadcastMessages();
 
       if (!aborted) {
         await callback.onDone();
@@ -4114,6 +4117,7 @@ export class Think<
       if (!assistantMsg && accumulator.parts.length > 0) {
         assistantMsg = accumulator.toMessage();
         await this._persistAssistantMessage(assistantMsg);
+        this._broadcastMessages();
       }
 
       const wrapped = this.onChatError(error);

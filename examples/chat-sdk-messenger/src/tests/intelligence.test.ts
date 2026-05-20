@@ -5,6 +5,9 @@ import type { UIMessage } from "ai";
 import {
   aiReplyFailureMode,
   aiReplyRecoveryMode,
+  isExpectedFinalEditNoop,
+  isIgnorableDeliveryError,
+  splitTelegramMessageText,
   type AiReplySnapshot
 } from "../index";
 import {
@@ -138,6 +141,51 @@ describe("Telegram intelligence helpers", () => {
   it("maps partial stream failures to apology mode", () => {
     expect(aiReplyFailureMode(true)).toBe("apologize");
     expect(aiReplyFailureMode(false)).toBe("error");
+    expect(aiReplyFailureMode(true, true)).toBe("error");
+    expect(aiReplyFailureMode(true, false, true)).toBeNull();
+  });
+
+  it("classifies Telegram no-op edit errors as ignorable delivery failures", () => {
+    expect(
+      isIgnorableDeliveryError({
+        code: "VALIDATION_ERROR",
+        message:
+          "Bad Request: message is not modified: specified new message content is exactly the same"
+      })
+    ).toBe(true);
+    expect(
+      isIgnorableDeliveryError({
+        code: "VALIDATION_ERROR",
+        message: "Bad Request: message text is empty"
+      })
+    ).toBe(false);
+    expect(isIgnorableDeliveryError(new Error("network failed"))).toBe(false);
+  });
+
+  it("only treats final edit no-op errors as expected after the visible limit", () => {
+    const limitReached = { visibleLimitReached: () => true };
+    const limitNotReached = { visibleLimitReached: () => false };
+    const noopError = {
+      code: "VALIDATION_ERROR",
+      message: "Bad Request: message is not modified"
+    };
+
+    expect(isExpectedFinalEditNoop(noopError, limitReached)).toBe(true);
+    expect(isExpectedFinalEditNoop(noopError, limitNotReached)).toBe(false);
+    expect(
+      isExpectedFinalEditNoop(
+        { code: "NETWORK_ERROR", message: "fetch failed" },
+        limitReached
+      )
+    ).toBe(false);
+  });
+
+  it("splits long Telegram follow-up text without dropping boundary text", () => {
+    const text = "  alpha beta\n\ngamma delta  \n epsilon zeta  ";
+    const chunks = splitTelegramMessageText(text, 18);
+
+    expect(chunks.every((chunk) => chunk.length <= 18)).toBe(true);
+    expect(chunks.join("")).toBe(text);
   });
 
   it("extracts text deltas from Think chat stream chunks", () => {
@@ -170,6 +218,32 @@ describe("Telegram intelligence helpers", () => {
     expect(callback.hasText()).toBe(true);
     expect(callback.textSoFar()).toBe("hello world");
     expect(callback.requestId()).toBe("request-1");
+  });
+
+  it("can stop the visible stream while continuing to collect full text", async () => {
+    const callback = new TextStreamCallback({ visibleSoftLimit: 5 });
+    const chunks = collectText(callback.stream());
+
+    callback.onEvent(
+      JSON.stringify({ type: "text-delta", id: "t1", delta: "hello" })
+    );
+    callback.onEvent(
+      JSON.stringify({ type: "text-delta", id: "t1", delta: " world" })
+    );
+
+    await expect(chunks).resolves.toBe("hello");
+    expect(callback.visibleText()).toBe("hello");
+    expect(callback.textSoFar()).toBe("hello world");
+    expect(callback.remainingText()).toBe(" world");
+    expect(callback.visibleLimitReached()).toBe(true);
+
+    callback.onEvent(
+      JSON.stringify({ type: "text-delta", id: "t1", delta: " again" })
+    );
+    callback.onDone();
+
+    expect(callback.textSoFar()).toBe("hello world again");
+    expect(callback.remainingText()).toBe(" world again");
   });
 
   it("surfaces callback stream errors to consumers", async () => {

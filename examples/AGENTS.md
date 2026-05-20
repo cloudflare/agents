@@ -149,7 +149,7 @@ If the example needs secrets (API keys, etc.), include a `.env.example` showing 
 OPENAI_API_KEY=your-key-here
 ```
 
-Never commit actual secrets. Use `.env` / `.env.example` (not `.dev.vars` / `.dev.vars.example`).
+Never commit actual secrets. Use `.env` / `.env.example`.
 
 ### UI — Kumo
 

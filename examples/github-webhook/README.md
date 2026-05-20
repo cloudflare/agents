@@ -21,13 +21,13 @@ npm install
 
 ### 2. Configure webhook secret
 
-Copy `.dev.vars.example` to `.dev.vars` and set your webhook secret:
+Copy `.env.example` to `.env` and set your webhook secret:
 
 ```bash
-cp .dev.vars.example .dev.vars
+cp .env.example .env
 ```
 
-Edit `.dev.vars`:
+Edit `.env`:
 
 ```
 GITHUB_WEBHOOK_SECRET=your-secret-here

@@ -112,7 +112,7 @@ Oxlint does **not** handle formatting — Oxfmt does.
 - Always TypeScript, always ES modules
 - `wrangler.jsonc` (not `.toml`) for configuration
 - All wrangler configs use `compatibility_date: "2026-01-28"` and `compatibility_flags: ["nodejs_compat"]`
-- Never hardcode secrets — use `wrangler secret put` or `.dev.vars`
+- Never hardcode secrets — use `wrangler secret put` or `.env`
 - No native/FFI dependencies (must run in Workers runtime)
 
 ## Testing

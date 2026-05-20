@@ -5,6 +5,10 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-05-19",
   "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*", "/setup/*", "/webhooks/*"]
+  },
   "durable_objects": {
     "bindings": [
       {
