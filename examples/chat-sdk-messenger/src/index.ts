@@ -438,12 +438,10 @@ export class ChatIngressAgent extends Agent {
     });
     let agent: SubAgentStub<ConversationAgent> | undefined;
     let completedModelTurn = false;
-    let deliveryError: unknown;
     fiber?.stash(aiReplySnapshot("streaming", thread, message));
     const post = thread
       .post(callback.stream())
       .catch(async (error: unknown) => {
-        deliveryError = error;
         if (isExpectedFinalEditNoop(error, callback)) {
           return;
         }
@@ -478,7 +476,7 @@ export class ChatIngressAgent extends Agent {
       const failureMode = aiReplyFailureMode(
         callback.hasText(),
         completedModelTurn,
-        isExpectedFinalEditNoop(deliveryError ?? error, callback)
+        isExpectedFinalEditNoop(error, callback)
       );
       if (failureMode === null) {
         fiber?.stash(aiReplySnapshot("completed", thread, message));

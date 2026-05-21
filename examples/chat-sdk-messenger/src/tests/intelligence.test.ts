@@ -182,6 +182,25 @@ describe("Telegram intelligence helpers", () => {
     ).toBe(false);
   });
 
+  it("does not suppress model failures after an expected delivery no-op", () => {
+    const limitReached = { visibleLimitReached: () => true };
+    const deliveryNoop = {
+      code: "VALIDATION_ERROR",
+      message: "Bad Request: message is not modified"
+    };
+    const modelError = new Error("model rate limited");
+
+    expect(isExpectedFinalEditNoop(deliveryNoop, limitReached)).toBe(true);
+    expect(isExpectedFinalEditNoop(modelError, limitReached)).toBe(false);
+    expect(
+      aiReplyFailureMode(
+        true,
+        false,
+        isExpectedFinalEditNoop(modelError, limitReached)
+      )
+    ).toBe("apologize");
+  });
+
   it("splits long Telegram follow-up text without dropping boundary text", () => {
     const text = "  alpha beta\n\ngamma delta  \n epsilon zeta  ";
     const chunks = splitTelegramMessageText(text, 18);
