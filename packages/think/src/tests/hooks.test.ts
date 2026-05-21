@@ -436,7 +436,9 @@ describe("Think — extension observation hooks", () => {
     // beforeToolCall/afterToolCall/onStepFinish/onChunk but Think only
     // ever fired beforeTurn. The extension records each hook into a
     // workspace marker file via the host bridge.
-    const agent = await freshExtensionHookAgent("ext-before-tc");
+    const agent = await freshExtensionHookAgent(
+      `ext-before-tc-${crypto.randomUUID()}`
+    );
     await agent.testChat("ping");
 
     const files = await agent.listExtLogFiles();

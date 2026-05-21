@@ -2063,7 +2063,9 @@ describe("Think — onChatRecovery", () => {
   });
 
   it("retries a pre-stream interrupted user turn by default without duplicating the user message", async () => {
-    const agent = await freshRecoveryAgent("pre-stream-retry");
+    const agent = await freshRecoveryAgent(
+      `pre-stream-retry-${crypto.randomUUID()}`
+    );
 
     await agent.persistTestMessage({
       id: "u-retry",
