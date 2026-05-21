@@ -5,6 +5,7 @@ import type { UIMessage as ChatMessage } from "ai";
 import type { ChatResponseResult } from "../";
 import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
 import { getAgentByName } from "agents";
+import { subscribe } from "agents/observability";
 
 function connectResponseAgent(room: string) {
   return connectChatWS(`/agents/response-agent/${room}`);
@@ -116,6 +117,42 @@ describe("onChatResponse hook", () => {
     expect(results[0].status).toBe("completed");
 
     ws.close(1000);
+  });
+
+  it("fires with status=error for in-band SSE error chunks", async () => {
+    const room = crypto.randomUUID();
+    const observedTypes: string[] = [];
+    const unsubscribe = subscribe("message", (event) => {
+      if (event.agent === "ResponseAgent" && event.name === room) {
+        observedTypes.push(event.type);
+      }
+    });
+    const { ws } = await connectResponseAgent(room);
+    const done = waitForDone(ws, "req-sse-error");
+
+    try {
+      sendChatRequest(ws, "req-sse-error", [userMessage], {
+        format: "sse",
+        streamError: "SSE in-band failure"
+      });
+
+      expect(await done).toBe(true);
+      await new Promise((r) => setTimeout(r, 100));
+
+      const agentStub = await getAgentByName(env.ResponseAgent, room);
+      const results =
+        (await agentStub.getChatResponseResults()) as ChatResponseResult[];
+
+      expect(results).toHaveLength(1);
+      expect(results[0].status).toBe("error");
+      expect(results[0].error).toBe("SSE in-band failure");
+      expect(results[0].requestId).toBe("req-sse-error");
+      expect(observedTypes).toContain("message:error");
+      expect(observedTypes).not.toContain("message:response");
+    } finally {
+      unsubscribe();
+      ws.close(1000);
+    }
   });
 
   it("fires with status=error when the stream throws", async () => {
@@ -467,7 +504,7 @@ describe("onChatResponse error resilience", () => {
 });
 
 describe("Reader error propagation", () => {
-  it("client receives error:true and message is NOT persisted on stream error", async () => {
+  it("client receives error:true and partial message is persisted on stream error", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectResponseAgent(room);
 
@@ -497,12 +534,17 @@ describe("Reader error propagation", () => {
     expect(errorDone).toBeDefined();
     expect(errorDone!.error).toBe(true);
 
-    // The errored assistant message should NOT be persisted
+    // Partial chunks before the stream error should be persisted.
     const agentStub = await getAgentByName(env.ResponseAgent, room);
     await agentStub.waitForIdleForTest();
     const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = persisted.filter((m) => m.role === "assistant");
-    expect(assistantMessages).toHaveLength(0);
+    expect(assistantMessages).toHaveLength(1);
+    expect(
+      assistantMessages[0].parts.some(
+        (part) => part.type === "text" && part.text.includes("chunk-0")
+      )
+    ).toBe(true);
 
     ws.close(1000);
   });

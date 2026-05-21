@@ -170,11 +170,12 @@ async saveMessages(
 ): Promise<SaveMessagesResult>
 ```
 
-Returns `{ requestId, status }` where `status` is `"completed"`, `"skipped"`, or `"aborted"`.
+Returns `{ requestId, status, error? }` where `status` is `"completed"`, `"error"`, `"skipped"`, or `"aborted"`.
 
 | `status`      | When                                                                                                                      |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `"completed"` | Turn ran to completion.                                                                                                   |
+| `"error"`     | Turn started but the stream reported an error. `error` contains the stream error message when available.                  |
 | `"skipped"`   | Turn invalidated mid-flight (e.g. by `chat-clear`); user message persisted, no model run.                                 |
 | `"aborted"`   | Turn cancelled before completion via `options.signal` or `chat-request-cancel`. Partial assistant chunks still persisted. |
 

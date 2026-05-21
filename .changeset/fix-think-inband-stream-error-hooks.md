@@ -1,5 +1,7 @@
 ---
+"agents": patch
+"@cloudflare/ai-chat": patch
 "@cloudflare/think": patch
 ---
 
-Fire `onChatResponse` for in-band stream errors that arrive before any response parts.
+Return error statuses for in-band stream errors across programmatic chat turns.

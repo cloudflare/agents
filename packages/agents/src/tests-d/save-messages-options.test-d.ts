@@ -66,6 +66,8 @@ function describe(status: SaveMessagesResult["status"]): string {
       return "skipped";
     case "aborted":
       return "aborted";
+    case "error":
+      return "error";
     default: {
       const exhaustive: never = status;
       return exhaustive;

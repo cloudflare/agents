@@ -122,6 +122,38 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
     ]);
   });
 
+  it("returns error status for in-band stream errors", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    const result = await agentStub.enqueueSyntheticUserMessage("Fails", {
+      body: {
+        format: "sse",
+        streamError: "programmatic in-band failure"
+      }
+    });
+
+    expect(result.status).toBe("error");
+    expect(result.error).toBe("programmatic in-band failure");
+  });
+
+  it("returns error status when programmatic streams throw", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    const result = await agentStub.enqueueSyntheticUserMessage("Throws", {
+      body: {
+        format: "plaintext",
+        chunkCount: 6,
+        chunkDelayMs: 10,
+        throwError: true
+      }
+    });
+
+    expect(result.status).toBe("error");
+    expect(result.error).toBe("Simulated stream error");
+  });
+
   it("marks queued programmatic turns as skipped after chat clear", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);

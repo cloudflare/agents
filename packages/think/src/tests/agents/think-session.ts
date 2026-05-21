@@ -223,6 +223,93 @@ function createMultiChunkMockModel(chunks: string[]): LanguageModel {
   } as LanguageModel;
 }
 
+function createInBandErrorMockModel(
+  errorText: string,
+  textChunks: string[] = []
+): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-in-band-error",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream() {
+      _mockCallCount++;
+      const callId = _mockCallCount;
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (textChunks.length > 0) {
+            controller.enqueue({ type: "text-start", id: `t-${callId}` });
+            for (const chunk of textChunks) {
+              controller.enqueue({
+                type: "text-delta",
+                id: `t-${callId}`,
+                delta: chunk
+              });
+            }
+          }
+          controller.enqueue({ type: "error", error: new Error(errorText) });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+function createInBandErrorStreamResult(
+  errorText: string,
+  textChunks: string[] = [],
+  afterErrorTextChunks: string[] = []
+): StreamableResult {
+  return {
+    toUIMessageStream() {
+      return {
+        [Symbol.asyncIterator]() {
+          let index = 0;
+          const chunks: unknown[] = [];
+          if (textChunks.length > 0) {
+            chunks.push({ type: "text-start", id: "t-inband" });
+            for (const chunk of textChunks) {
+              chunks.push({
+                type: "text-delta",
+                id: "t-inband",
+                delta: chunk
+              });
+            }
+          }
+          chunks.push({ type: "error", errorText });
+          if (afterErrorTextChunks.length > 0) {
+            chunks.push({ type: "text-start", id: "t-after-error" });
+            for (const chunk of afterErrorTextChunks) {
+              chunks.push({
+                type: "text-delta",
+                id: "t-after-error",
+                delta: chunk
+              });
+            }
+          }
+
+          return {
+            async next() {
+              if (index < chunks.length) {
+                return {
+                  done: false as const,
+                  value: chunks[index++]
+                };
+              }
+              return { done: true as const, value: undefined };
+            }
+          };
+        }
+      };
+    }
+  };
+}
+
 /**
  * Mock model that emits multiple text-delta chunks with a configurable
  * delay between each. Lets tests reliably reach the read loop in
@@ -349,6 +436,10 @@ export class ThinkTestAgent extends Think {
   private _lastModelCallSettings: CapturedModelCallSettings | null = null;
   private _reasoningResponse: { response: string; reasoning: string } | null =
     null;
+  private _inBandErrorResponse: {
+    errorText: string;
+    textChunks: string[];
+  } | null = null;
   private _beforeStepLog: Array<{
     stepNumber: number;
     previousStepCount: number;
@@ -611,6 +702,35 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  async testChatWithoutErrorCallback(message: string): Promise<string> {
+    const cb: StreamCallback = {
+      onEvent() {},
+      onDone() {}
+    };
+    try {
+      await this.chat(message, cb);
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async testChatWithThrowingErrorCallback(message: string): Promise<string> {
+    const cb: StreamCallback = {
+      onEvent() {},
+      onDone() {},
+      onError() {
+        throw new Error("callback failed");
+      }
+    };
+    try {
+      await this.chat(message, cb);
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   async testChatWithUIMessage(msg: UIMessage): Promise<TestChatResult> {
     const cb = new TestCollectingCallback();
     await this.chat(msg, cb);
@@ -674,29 +794,18 @@ export class ThinkTestAgent extends Think {
     }
   }
 
-  async runInBandStreamErrorForTest(errorText: string): Promise<void> {
-    const result: StreamableResult = {
-      toUIMessageStream() {
-        return {
-          [Symbol.asyncIterator]() {
-            let emitted = false;
-            return {
-              async next() {
-                if (!emitted) {
-                  emitted = true;
-                  return {
-                    done: false as const,
-                    value: { type: "error", errorText }
-                  };
-                }
-                return { done: true as const, value: undefined };
-              }
-            };
-          }
-        };
-      }
-    };
+  async setInBandErrorResponse(
+    errorText: string,
+    textChunks: string[] = []
+  ): Promise<void> {
+    this._inBandErrorResponse = { errorText, textChunks };
+  }
 
+  async clearInBandErrorResponse(): Promise<void> {
+    this._inBandErrorResponse = null;
+  }
+
+  async runInBandStreamErrorForTest(errorText: string): Promise<void> {
     await (
       this as unknown as {
         _streamResult: (
@@ -704,7 +813,38 @@ export class ThinkTestAgent extends Think {
           result: StreamableResult
         ) => Promise<void>;
       }
-    )._streamResult(crypto.randomUUID(), result);
+    )._streamResult(
+      crypto.randomUUID(),
+      createInBandErrorStreamResult(errorText)
+    );
+  }
+
+  async runPartialInBandStreamErrorForTest(errorText: string): Promise<void> {
+    await (
+      this as unknown as {
+        _streamResult: (
+          requestId: string,
+          result: StreamableResult
+        ) => Promise<void>;
+      }
+    )._streamResult(
+      crypto.randomUUID(),
+      createInBandErrorStreamResult(errorText, ["partial response"])
+    );
+  }
+
+  async runInBandStreamErrorThenTextForTest(errorText: string): Promise<void> {
+    await (
+      this as unknown as {
+        _streamResult: (
+          requestId: string,
+          result: StreamableResult
+        ) => Promise<void>;
+      }
+    )._streamResult(
+      crypto.randomUUID(),
+      createInBandErrorStreamResult(errorText, [], ["ignored response"])
+    );
   }
 
   async testChatWithAbort(
@@ -803,6 +943,12 @@ export class ThinkTestAgent extends Think {
   }
 
   override getModel(): LanguageModel {
+    if (this._inBandErrorResponse) {
+      return createInBandErrorMockModel(
+        this._inBandErrorResponse.errorText,
+        this._inBandErrorResponse.textChunks
+      );
+    }
     if (this._reasoningResponse) {
       return createReasoningMockModel(
         this._reasoningResponse.response,
@@ -1485,8 +1631,18 @@ export class ThinkProgrammaticTestAgent extends Think {
   private _delayedChunks: { chunks: string[]; delayMs: number } | null = null;
   private _throwBeforeTurnError: string | null = null;
   private _submissionStatusDelayMs = 0;
+  private _inBandErrorResponse: {
+    errorText: string;
+    textChunks: string[];
+  } | null = null;
 
   override getModel(): LanguageModel {
+    if (this._inBandErrorResponse) {
+      return createInBandErrorMockModel(
+        this._inBandErrorResponse.errorText,
+        this._inBandErrorResponse.textChunks
+      );
+    }
     if (this._delayedChunks) {
       return createDelayedMultiChunkMockModel(
         this._delayedChunks.chunks,
@@ -1530,6 +1686,17 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async clearDelayedChunkResponse(): Promise<void> {
     this._delayedChunks = null;
+  }
+
+  async setInBandStreamErrorResponse(
+    errorText: string,
+    textChunks: string[] = []
+  ): Promise<void> {
+    this._inBandErrorResponse = { errorText, textChunks };
+  }
+
+  async clearInBandStreamErrorResponse(): Promise<void> {
+    this._inBandErrorResponse = null;
   }
 
   async setThrowingStreamError(message: string | null): Promise<void> {

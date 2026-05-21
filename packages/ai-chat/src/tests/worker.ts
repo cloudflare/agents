@@ -715,6 +715,8 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
           responseDelayMs?: number;
           chunkCount?: number;
           chunkDelayMs?: number;
+          streamError?: string;
+          throwError?: boolean;
         }
       | undefined;
     const format = body?.format ?? "plaintext";
@@ -722,6 +724,8 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     const responseDelayMs = body?.responseDelayMs ?? 0;
     const chunkCount = body?.chunkCount ?? 20;
     const chunkDelayMs = body?.chunkDelayMs ?? 50;
+    const streamError = body?.streamError;
+    const throwError = body?.throwError ?? false;
     const abortSignal = useAbortSignal ? options?.abortSignal : undefined;
 
     if (responseDelayMs > 0) {
@@ -731,6 +735,15 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async pull(controller) {
+        if (format === "sse" && streamError) {
+          const chunk = JSON.stringify({
+            type: "error",
+            errorText: streamError
+          });
+          controller.enqueue(encoder.encode(`data: ${chunk}\n\n`));
+          controller.close();
+          return;
+        }
         for (let i = 0; i < chunkCount; i++) {
           if (abortSignal?.aborted) {
             controller.close();
@@ -740,6 +753,9 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
           if (abortSignal?.aborted) {
             controller.close();
             return;
+          }
+          if (throwError && i === Math.floor(chunkCount / 2)) {
+            throw new Error("Simulated stream error");
           }
           if (format === "sse") {
             const chunk = JSON.stringify({
@@ -1044,6 +1060,7 @@ export class ResponseAgent extends AIChatAgent<Env> {
           chunkCount?: number;
           chunkDelayMs?: number;
           throwError?: boolean;
+          streamError?: string;
           useAbortSignal?: boolean;
         }
       | undefined;
@@ -1052,12 +1069,22 @@ export class ResponseAgent extends AIChatAgent<Env> {
     const chunkCount = body?.chunkCount ?? 3;
     const chunkDelayMs = body?.chunkDelayMs ?? 10;
     const throwError = body?.throwError ?? false;
+    const streamError = body?.streamError;
     const useAbortSignal = body?.useAbortSignal ?? false;
     const abortSignal = useAbortSignal ? options?.abortSignal : undefined;
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async pull(controller) {
+        if (format === "sse" && streamError) {
+          const chunk = JSON.stringify({
+            type: "error",
+            errorText: streamError
+          });
+          controller.enqueue(encoder.encode(`data: ${chunk}\n\n`));
+          controller.close();
+          return;
+        }
         for (let i = 0; i < chunkCount; i++) {
           if (abortSignal?.aborted) {
             controller.close();

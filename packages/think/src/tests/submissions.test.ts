@@ -11,10 +11,15 @@ import type {
 type ThinkSubmissionTestStub = {
   setDelayedChunkResponse(chunks: string[], delayMs: number): Promise<void>;
   clearDelayedChunkResponse(): Promise<void>;
+  setInBandStreamErrorResponse(
+    errorText: string,
+    textChunks?: string[]
+  ): Promise<void>;
+  clearInBandStreamErrorResponse(): Promise<void>;
   setThrowingStreamError(message: string | null): Promise<void>;
   getProgrammaticStreamErrorCountForTest(): Promise<number>;
   getSubmissionFinalStatusForTest(
-    resultStatus: "completed" | "skipped" | "aborted",
+    resultStatus: "completed" | "error" | "skipped" | "aborted",
     streamError?: string
   ): Promise<ThinkSubmissionStatus>;
   runNonSubmissionStreamFailureForTest(requestId: string): Promise<void>;
@@ -542,6 +547,36 @@ describe("Think durable submissions", () => {
     });
   });
 
+  it("preserves stream error text from recovered continuations", async () => {
+    const agent = await freshAgent();
+    await agent.setDelayedChunkResponse(["seed"], 1);
+    const seed = await agent.testSubmitMessages("seed conversation", {
+      submissionId: "sub-recovered-error-seed"
+    });
+    await waitForSubmission(
+      agent,
+      seed.submissionId,
+      (submission) => submission.status === "completed"
+    );
+
+    await agent.setInBandStreamErrorResponse("recovered in-band failure");
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-recovered-inband-error",
+      requestId: "sub-recovered-inband-error",
+      status: "running",
+      messagesAppliedAt: Date.now()
+    });
+
+    await agent.continueRecoveredChatForTest("sub-recovered-inband-error");
+
+    await expect(
+      agent.inspectSubmissionForTest("sub-recovered-inband-error")
+    ).resolves.toMatchObject({
+      status: "error",
+      error: "recovered in-band failure"
+    });
+  });
+
   it("aborts an active recovered continuation without a late overwrite", async () => {
     const agent = await freshAgent();
     await agent.setDelayedChunkResponse(["seed"], 1);
@@ -636,6 +671,23 @@ describe("Think durable submissions", () => {
     );
 
     expect(failed.error).toBe("boom");
+  });
+
+  it("stores error status and message when an in-band stream error occurs", async () => {
+    const agent = await freshAgent();
+    await agent.setInBandStreamErrorResponse("submission in-band failure");
+
+    const accepted = await agent.testSubmitMessages("in-band failure", {
+      submissionId: "sub-inband-error"
+    });
+
+    const failed = await waitForSubmission(
+      agent,
+      accepted.submissionId,
+      (submission) => submission.status === "error"
+    );
+
+    expect(failed.error).toBe("submission in-band failure");
   });
 
   it("does not retain stream error records for non-submission callers", async () => {

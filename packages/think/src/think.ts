@@ -178,6 +178,17 @@ function isWebSocketClosedSendError(error: unknown): boolean {
   );
 }
 
+function shouldMarkSkippedAfterGenerationChange(
+  status: SaveMessagesResult["status"]
+): boolean {
+  return status === "completed";
+}
+
+type StreamResultStatus = {
+  status: Exclude<SaveMessagesResult["status"], "skipped">;
+  error?: string;
+};
+
 type ChatRecoveryRetryData = {
   targetUserId?: string;
   originalRequestId?: string;
@@ -2355,12 +2366,13 @@ export class Think<
             .find((m) => m.request_id === result.requestId)?.id ?? null;
         const output = this.getAgentToolOutput(options.runId);
         const summary = this.getAgentToolSummary(options.runId, output);
-        const streamError = this._agentToolLastErrors.get(options.runId);
+        const streamError =
+          result.error ?? this._agentToolLastErrors.get(options.runId);
         const skipped = result.status === "skipped";
         const status: AgentToolChildRunStatus =
           result.status === "aborted"
             ? "aborted"
-            : skipped || streamError
+            : result.status === "error" || skipped || streamError
               ? "error"
               : "completed";
         const error: string | null =
@@ -3041,14 +3053,15 @@ export class Think<
       const streamError = this._programmaticStreamErrors.get(result.requestId);
       const finalStatus = this._getSubmissionFinalStatus(
         result.status,
-        streamError
+        result.error ?? streamError
       );
+      const errorMessage = result.error ?? streamError ?? null;
       this.sql`
         UPDATE cf_think_submissions
         SET status = ${finalStatus},
             request_id = ${result.requestId},
             stream_id = ${streamId},
-            error_message = ${finalStatus === "error" ? (streamError ?? null) : null},
+            error_message = ${finalStatus === "error" ? errorMessage : null},
             completed_at = ${Date.now()}
         WHERE submission_id = ${row.submission_id}
           AND status = 'running'
@@ -3338,6 +3351,7 @@ export class Think<
     const body = this._lastBody;
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
+    let error: string | undefined;
     let wasAborted = false;
 
     await this.keepAliveWhile(async () => {
@@ -3391,10 +3405,17 @@ export class Think<
             );
 
             if (result) {
-              await this._streamResult(requestId, result, abortSignal, {
-                captureProgrammaticStreamError:
-                  options?.captureProgrammaticStreamError
-              });
+              const streamResult = await this._streamResult(
+                requestId,
+                result,
+                abortSignal,
+                {
+                  captureProgrammaticStreamError:
+                    options?.captureProgrammaticStreamError
+                }
+              );
+              status = streamResult.status;
+              error = streamResult.error;
             }
           };
 
@@ -3415,13 +3436,16 @@ export class Think<
       });
     });
 
-    if (this._turnQueue.generation !== epoch && status === "completed") {
+    if (
+      this._turnQueue.generation !== epoch &&
+      shouldMarkSkippedAfterGenerationChange(status)
+    ) {
       status = "skipped";
     } else if (wasAborted && status === "completed") {
       status = "aborted";
     }
 
-    return { requestId, status };
+    return { requestId, status, ...(error !== undefined && { error }) };
   }
 
   /**
@@ -3455,6 +3479,7 @@ export class Think<
     const resolvedBody = body ?? this._lastBody;
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
+    let error: string | undefined;
     let wasAborted = false;
 
     await this.keepAliveWhile(async () => {
@@ -3488,9 +3513,16 @@ export class Think<
             );
 
             if (result) {
-              await this._streamResult(requestId, result, abortSignal, {
-                continuation: true
-              });
+              const streamResult = await this._streamResult(
+                requestId,
+                result,
+                abortSignal,
+                {
+                  continuation: true
+                }
+              );
+              status = streamResult.status;
+              error = streamResult.error;
             }
           };
 
@@ -3507,13 +3539,16 @@ export class Think<
       });
     });
 
-    if (this._turnQueue.generation !== epoch && status === "completed") {
+    if (
+      this._turnQueue.generation !== epoch &&
+      shouldMarkSkippedAfterGenerationChange(status)
+    ) {
       status = "skipped";
     } else if (wasAborted && status === "completed") {
       status = "aborted";
     }
 
-    return { requestId, status };
+    return { requestId, status, ...(error !== undefined && { error }) };
   }
 
   private async _retryLastUserTurn(
@@ -3529,6 +3564,7 @@ export class Think<
     const requestId = crypto.randomUUID();
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
+    let error: string | undefined;
     let wasAborted = false;
 
     await this.keepAliveWhile(async () => {
@@ -3562,7 +3598,13 @@ export class Think<
             );
 
             if (result) {
-              await this._streamResult(requestId, result, abortSignal);
+              const streamResult = await this._streamResult(
+                requestId,
+                result,
+                abortSignal
+              );
+              status = streamResult.status;
+              error = streamResult.error;
             }
           };
 
@@ -3579,13 +3621,16 @@ export class Think<
       });
     });
 
-    if (this._turnQueue.generation !== epoch && status === "completed") {
+    if (
+      this._turnQueue.generation !== epoch &&
+      shouldMarkSkippedAfterGenerationChange(status)
+    ) {
       status = "skipped";
     } else if (wasAborted && status === "completed") {
       status = "aborted";
     }
 
-    return { requestId, status };
+    return { requestId, status, ...(error !== undefined && { error }) };
   }
 
   // ── WebSocket protocol ──────────────────────────────────────────
@@ -4154,6 +4199,8 @@ export class Think<
     let assistantMsg: UIMessage | null = null;
     let aborted = false;
     let doneSent = false;
+    let streamError: string | undefined;
+    let pendingRpcError: string | undefined;
 
     try {
       this._insideInferenceLoop = true;
@@ -4173,6 +4220,7 @@ export class Think<
           const { action } = accumulator.applyChunk(streamChunk);
 
           if (action?.type === "error") {
+            streamError = action.error;
             this._broadcastChat({
               type: MSG_CHAT_RESPONSE,
               id: requestId,
@@ -4180,7 +4228,7 @@ export class Think<
               done: false,
               error: true
             });
-            continue;
+            break;
           }
 
           const chunkBody = JSON.stringify(chunk);
@@ -4220,17 +4268,30 @@ export class Think<
       doneSent = true;
 
       assistantMsg = accumulator.toMessage();
-      await this._persistAssistantMessage(assistantMsg);
-      this._broadcastMessages();
+      if (accumulator.parts.length > 0) {
+        await this._persistAssistantMessage(assistantMsg);
+        this._broadcastMessages();
+      }
 
-      if (!aborted) {
-        await callback.onDone();
+      if (streamError) {
         await this._fireResponseHook({
           message: assistantMsg,
           requestId,
           continuation: false,
-          status: "completed"
+          status: "error",
+          error: streamError
         });
+        pendingRpcError = streamError;
+      } else if (!aborted) {
+        await callback.onDone();
+        if (accumulator.parts.length > 0) {
+          await this._fireResponseHook({
+            message: assistantMsg,
+            requestId,
+            continuation: false,
+            status: "completed"
+          });
+        }
       } else {
         await this._fireResponseHook({
           message: assistantMsg,
@@ -4283,6 +4344,14 @@ export class Think<
         throw wrapped;
       }
     }
+
+    if (pendingRpcError) {
+      if (callback.onError) {
+        await callback.onError(pendingRpcError);
+      } else {
+        throw new Error(pendingRpcError);
+      }
+    }
   }
 
   private _shouldFlushRpcStreamChunk(
@@ -4311,7 +4380,7 @@ export class Think<
       parentId?: string;
       captureProgrammaticStreamError?: boolean;
     }
-  ) {
+  ): Promise<StreamResultStatus> {
     const clearGen = this._turnQueue.generation;
     const streamId = this._resumableStream.start(requestId);
     const continuation = options?.continuation ?? false;
@@ -4347,6 +4416,9 @@ export class Think<
 
           if (action?.type === "error") {
             streamError = action.error;
+            if (options?.captureProgrammaticStreamError) {
+              this._programmaticStreamErrors.set(requestId, streamError);
+            }
             this._broadcastChat({
               type: MSG_CHAT_RESPONSE,
               id: requestId,
@@ -4354,7 +4426,7 @@ export class Think<
               done: false,
               error: true
             });
-            continue;
+            break;
           }
 
           const chunkBody = JSON.stringify(chunk);
@@ -4409,7 +4481,10 @@ export class Think<
       }
     }
 
-    if (this._turnQueue.generation === clearGen) {
+    if (
+      this._turnQueue.generation === clearGen &&
+      (accumulator.parts.length > 0 || streamError || streamAborted)
+    ) {
       try {
         const assistantMsg = accumulator.toMessage();
 
@@ -4422,10 +4497,10 @@ export class Think<
           message: assistantMsg,
           requestId,
           continuation,
-          status: streamAborted
-            ? "aborted"
-            : streamError
-              ? "error"
+          status: streamError
+            ? "error"
+            : streamAborted
+              ? "aborted"
               : "completed",
           error: streamError
         });
@@ -4433,6 +4508,10 @@ export class Think<
         console.error("Failed to persist assistant message:", e);
       }
     }
+
+    return streamError
+      ? { status: "error", error: streamError }
+      : { status: streamAborted ? "aborted" : "completed" };
   }
 
   // ── Session-backed persistence ──────────────────────────────────
@@ -4877,7 +4956,7 @@ export class Think<
           result.requestId || null,
           result.status === "completed"
             ? null
-            : `Recovery retry ${result.status}.`
+            : (result.error ?? `Recovery retry ${result.status}.`)
         );
       }
     } catch (error) {
@@ -5048,7 +5127,9 @@ export class Think<
           data.recoveredRequestId,
           result.status,
           result.requestId || null,
-          result.status === "completed" ? null : `Recovery ${result.status}.`
+          result.status === "completed"
+            ? null
+            : (result.error ?? `Recovery ${result.status}.`)
         );
       }
     } catch (error) {

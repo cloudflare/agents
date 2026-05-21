@@ -933,6 +933,90 @@ describe("Think — onChatResponse", () => {
     expect(log[0].error).toContain("Early in-band error");
   });
 
+  it("should persist partial parts and fire error status for in-band errors", async () => {
+    const agent = await freshAgent("hook-partial-inband-error");
+
+    await agent.runPartialInBandStreamErrorForTest("Late in-band error");
+
+    const history = await agent.getStoredMessages();
+    expect(history).toHaveLength(1);
+    const assistantMsg = history[0] as {
+      role: string;
+      parts: Array<{ type: string; text?: string }>;
+    };
+    expect(assistantMsg.role).toBe("assistant");
+    expect(assistantMsg.parts[0]).toMatchObject({
+      type: "text",
+      text: "partial response"
+    });
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("error");
+    expect(log[0].error).toContain("Late in-band error");
+  });
+
+  it("should treat in-band errors as terminal stream events", async () => {
+    const agent = await freshAgent("hook-terminal-inband-error");
+
+    await agent.runInBandStreamErrorThenTextForTest("Terminal in-band error");
+
+    const history = await agent.getStoredMessages();
+    expect(history).toHaveLength(0);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("error");
+    expect(log[0].error).toContain("Terminal in-band error");
+  });
+
+  it("should report in-band stream errors through RPC chat onError", async () => {
+    const agent = await freshAgent("hook-rpc-inband-error");
+
+    await agent.setInBandErrorResponse("RPC in-band error");
+    const result = await agent.testChat("trigger rpc in-band error");
+
+    expect(result.done).toBe(false);
+    expect(result.error).toContain("RPC in-band error");
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("error");
+    expect(log[0].error).toContain("RPC in-band error");
+  });
+
+  it("should throw RPC in-band stream errors when no onError callback exists", async () => {
+    const agent = await freshAgent("hook-rpc-inband-error-no-callback");
+
+    await agent.setInBandErrorResponse("RPC missing callback error");
+    const error = await agent.testChatWithoutErrorCallback(
+      "trigger rpc in-band error"
+    );
+
+    expect(error).toContain("RPC missing callback error");
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("error");
+    expect(log[0].error).toContain("RPC missing callback error");
+  });
+
+  it("should not fire duplicate response hooks when RPC onError throws", async () => {
+    const agent = await freshAgent("hook-rpc-inband-error-callback-throws");
+
+    await agent.setInBandErrorResponse("RPC callback throws source error");
+    const error = await agent.testChatWithThrowingErrorCallback(
+      "trigger rpc in-band error"
+    );
+
+    expect(error).toBe("callback failed");
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("error");
+    expect(log[0].error).toContain("RPC callback throws source error");
+  });
+
   it("should fire onChatResponse with aborted status on abort", async () => {
     const agent = await freshAgent("hook-abort");
 
@@ -1391,6 +1475,26 @@ describe("Think — saveMessages", () => {
     expect(log).toHaveLength(1);
     expect(log[0].status).toBe("completed");
     expect(log[0].continuation).toBe(false);
+  });
+
+  it("should return error status for in-band stream errors", async () => {
+    const agent = await freshProgrammaticAgent("save-inband-error");
+    await agent.setInBandStreamErrorResponse("saveMessages in-band failure");
+
+    const result = (await agent.testSaveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "Trigger in-band error" }]
+      }
+    ])) as SaveMessagesResult;
+
+    expect(result.status).toBe("error");
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("error");
+    expect(log[0].error).toContain("saveMessages in-band failure");
   });
 
   it("should broadcast to connected clients", async () => {

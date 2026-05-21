@@ -69,12 +69,16 @@ export type SaveMessagesOptions = {
  *   completion, either by `MSG_CHAT_CANCEL` over the chat WebSocket or
  *   by an external `AbortSignal` passed via {@link SaveMessagesOptions}.
  *   Partial chunks streamed before the abort are still persisted.
+ * - `"error"` — the turn ran but ended with a stream error. Partial chunks
+ *   streamed before the error are still persisted.
  */
 export type SaveMessagesResult = {
   /** Server-generated request ID for the chat turn. */
   requestId: string;
-  /** Whether the turn ran, was skipped, or was aborted. */
-  status: "completed" | "skipped" | "aborted";
+  /** Whether the turn completed, errored, was skipped, or was aborted. */
+  status: "completed" | "error" | "skipped" | "aborted";
+  /** Error message when `status` is `"error"`. */
+  error?: string;
 };
 
 /**

@@ -334,9 +334,11 @@ messages against the latest persisted transcript when the turn actually starts.
 This avoids stale baselines when multiple `saveMessages()` calls queue up
 behind active work.
 
-`saveMessages()` returns `{ requestId, status }`. The `status` is `"completed"`
-when the turn ran, `"skipped"` when it was invalidated (chat cleared mid-flight),
-or `"aborted"` when an external `AbortSignal` cancelled it before completion.
+`saveMessages()` returns `{ requestId, status, error? }`. The `status` is
+`"completed"` when the turn ran, `"error"` when the stream reported an error,
+`"skipped"` when it was invalidated (chat cleared mid-flight), or `"aborted"`
+when an external `AbortSignal` cancelled it before completion. When `status` is
+`"error"`, `error` contains the stream error message when available.
 
 Pass `options.signal` to cancel the turn from outside. Useful for forwarding
 an upstream `AbortSignal` (e.g. an AI SDK tool `execute`'s `abortSignal` on a
@@ -361,7 +363,7 @@ retained, streaming tools.
 
 ### `onChatResponse`
 
-Called after a chat turn completes and the assistant message has been persisted. Override this to react when the agent finishes responding — broadcast state, process queued work, track analytics, or trigger follow-up messages.
+Called after a chat turn reaches a terminal state. Override this to react when the agent finishes responding — broadcast state, process queued work, track analytics, or trigger follow-up messages. Successful turns and errors that produced partial assistant chunks persist the assistant message before the hook runs; errors that occur before any assistant chunks still fire the hook with an empty assistant message and `status: "error"`.
 
 ```typescript
 import { AIChatAgent, type ChatResponseResult } from "@cloudflare/ai-chat";
@@ -395,13 +397,13 @@ Responses triggered from inside `onChatResponse` do not fire the hook concurrent
 
 **`ChatResponseResult` fields:**
 
-| Field          | Type                                  | Description                                          |
-| -------------- | ------------------------------------- | ---------------------------------------------------- |
-| `message`      | `UIMessage`                           | The finalized assistant message from this turn       |
-| `requestId`    | `string`                              | The request ID associated with this turn             |
-| `continuation` | `boolean`                             | Whether this turn was a continuation (auto-continue) |
-| `status`       | `"completed" \| "error" \| "aborted"` | How the turn ended                                   |
-| `error`        | `string \| undefined`                 | Error message when `status` is `"error"`             |
+| Field          | Type                                  | Description                                                                                                                    |
+| -------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `message`      | `UIMessage`                           | The finalized assistant message from this turn. Error turns can provide an empty assistant message if no chunks were produced. |
+| `requestId`    | `string`                              | The request ID associated with this turn                                                                                       |
+| `continuation` | `boolean`                             | Whether this turn was a continuation (auto-continue)                                                                           |
+| `status`       | `"completed" \| "error" \| "aborted"` | How the turn ended                                                                                                             |
+| `error`        | `string \| undefined`                 | Error message when `status` is `"error"`                                                                                       |
 
 `onChatResponse` fires for all turn completion paths: WebSocket chat requests, `saveMessages`, and auto-continuation after tool results or approvals.
 
