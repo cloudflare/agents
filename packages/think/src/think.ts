@@ -2347,6 +2347,7 @@ export class Think<
       )
     );
 
+    const epoch = this._turnQueue.generation;
     void this.keepAliveWhile(async () => {
       try {
         this.sql`
@@ -2368,12 +2369,14 @@ export class Think<
         const summary = this.getAgentToolSummary(options.runId, output);
         const streamError =
           result.error ?? this._agentToolLastErrors.get(options.runId);
-        const skipped = result.status === "skipped";
+        const skipped =
+          result.status === "skipped" ||
+          (result.status === "aborted" && this._turnQueue.generation !== epoch);
         const status: AgentToolChildRunStatus =
-          result.status === "aborted"
-            ? "aborted"
-            : result.status === "error" || skipped || streamError
-              ? "error"
+          result.status === "error" || skipped || streamError
+            ? "error"
+            : result.status === "aborted"
+              ? "aborted"
               : "completed";
         const error: string | null =
           status === "error"
@@ -2390,6 +2393,7 @@ export class Think<
               error_message = ${error},
               completed_at = ${Date.now()}
           WHERE run_id = ${options.runId}
+            AND completed_at IS NULL
         `;
       } catch (error) {
         this.sql`
@@ -2398,6 +2402,7 @@ export class Think<
               error_message = ${error instanceof Error ? error.message : String(error)},
               completed_at = ${Date.now()}
           WHERE run_id = ${options.runId}
+            AND completed_at IS NULL
         `;
       } finally {
         this._agentToolAbortControllers.delete(options.runId);

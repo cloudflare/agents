@@ -19,6 +19,10 @@ type ThinkAgentToolTestStub = {
     input: unknown,
     options: { runId: string }
   ): ReturnType<ThinkTestAgent["startAgentToolRun"]>;
+  cancelAgentToolRun(
+    runId: string,
+    reason?: unknown
+  ): ReturnType<ThinkTestAgent["cancelAgentToolRun"]>;
   getAgentToolCleanupMapSizesForTest(): Promise<{
     lastErrors: number;
     preTurnAssistantIds: number;
@@ -127,6 +131,30 @@ describe("Think agent tools", () => {
       runId,
       status: "error",
       error: "Agent tool run was skipped before the child could finish."
+    });
+  });
+
+  it("preserves explicit agent-tool cancellation as aborted", async () => {
+    const agent = await freshAgent();
+    const runId = crypto.randomUUID();
+
+    await agent.setBeforeStepAsyncDelay(50);
+    await agent.startAgentToolRun("cancelled probe", { runId });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await agent.cancelAgentToolRun(runId, "stop");
+
+    const inspection = await waitForAgentToolRun(agent, runId);
+    expect(inspection).toMatchObject({
+      runId,
+      status: "aborted",
+      error: "stop"
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await expect(agent.inspectAgentToolRun(runId)).resolves.toMatchObject({
+      runId,
+      status: "aborted",
+      error: "stop"
     });
   });
 
