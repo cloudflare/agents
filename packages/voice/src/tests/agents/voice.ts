@@ -178,7 +178,11 @@ export class TestEmptyResponseVoiceAgent extends VoiceBase {
 
   transcriber = new TestTranscriber();
   tts = new TestTTS();
-  #responseMode: "empty_string" | "empty_stream" = "empty_string";
+  #responseMode:
+    | "empty_string"
+    | "empty_stream"
+    | "whitespace_stream"
+    | "leading_whitespace_stream" = "empty_string";
 
   async onTurn(
     _transcript: string,
@@ -186,6 +190,18 @@ export class TestEmptyResponseVoiceAgent extends VoiceBase {
   ): Promise<string | AsyncIterable<string>> {
     if (this.#responseMode === "empty_stream") {
       return (async function* () {})();
+    }
+    if (this.#responseMode === "whitespace_stream") {
+      return (async function* () {
+        yield "   ";
+      })();
+    }
+    if (this.#responseMode === "leading_whitespace_stream") {
+      return (async function* () {
+        yield "   ";
+        yield "Hello";
+        yield " world.";
+      })();
     }
 
     return "";
@@ -199,7 +215,9 @@ export class TestEmptyResponseVoiceAgent extends VoiceBase {
         case "_set_response_mode":
           if (
             parsed.value === "empty_string" ||
-            parsed.value === "empty_stream"
+            parsed.value === "empty_stream" ||
+            parsed.value === "whitespace_stream" ||
+            parsed.value === "leading_whitespace_stream"
           ) {
             this.#responseMode = parsed.value;
           }

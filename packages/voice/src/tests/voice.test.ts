@@ -679,15 +679,111 @@ describe("VoiceAgent — empty response handling", () => {
 
     const messages = await collectMessagesUntil(
       ws,
-      (msg) => msg.type === "error"
+      (msg) => msg.type === "status" && msg.status === "listening"
     );
 
     expect(messages).toContainEqual({
       type: "error",
       message: "No response generated"
     });
-    expect(messages.map((m) => m.type)).not.toContain("transcript_start");
-    expect(messages.map((m) => m.type)).not.toContain("transcript_end");
+    const types = messages.map((m) => m.type);
+    expect(types).not.toContain("transcript_start");
+    expect(types).not.toContain("transcript_end");
+    expect(types).not.toContain("metrics");
+
+    sendJSON(ws, { type: "_get_message_count" });
+    const count = (await waitForType(ws, "_message_count")) as Record<
+      string,
+      unknown
+    >;
+    expect(count.count).toBe(1);
+
+    ws.close();
+  });
+
+  it("does not emit assistant transcript events for whitespace-only stream", async () => {
+    const { ws } = await connectEmptyWS(uniqueEmptyPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, {
+      type: "_set_response_mode",
+      value: "whitespace_stream"
+    });
+    await waitForType(ws, "_ack");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+
+    const messages = await collectMessagesUntil(
+      ws,
+      (msg) => msg.type === "status" && msg.status === "listening"
+    );
+
+    expect(messages).toContainEqual({
+      type: "error",
+      message: "No response generated"
+    });
+    const types = messages.map((m) => m.type);
+    expect(types).not.toContain("transcript_start");
+    expect(types).not.toContain("transcript_end");
+    expect(types).not.toContain("metrics");
+
+    sendJSON(ws, { type: "_get_message_count" });
+    const count = (await waitForType(ws, "_message_count")) as Record<
+      string,
+      unknown
+    >;
+    expect(count.count).toBe(1);
+
+    ws.close();
+  });
+
+  it("defers assistant transcript start until streamed text is non-empty", async () => {
+    const { ws } = await connectEmptyWS(uniqueEmptyPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, {
+      type: "_set_response_mode",
+      value: "leading_whitespace_stream"
+    });
+    await waitForType(ws, "_ack");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+
+    const messages = await collectMessagesUntil(
+      ws,
+      (msg) => msg.type === "transcript_end"
+    );
+    const assistantMessages = messages.filter((msg) =>
+      ["transcript_start", "transcript_delta", "transcript_end"].includes(
+        msg.type as string
+      )
+    );
+
+    expect(assistantMessages).toEqual([
+      { type: "transcript_start", role: "assistant" },
+      { type: "transcript_delta", text: "   Hello" },
+      { type: "transcript_delta", text: " world." },
+      { type: "transcript_end", text: "   Hello world." }
+    ]);
+
+    await waitForStatus(ws, "listening");
+
+    sendJSON(ws, { type: "_get_message_count" });
+    const count = (await waitForType(ws, "_message_count")) as Record<
+      string,
+      unknown
+    >;
+    expect(count.count).toBe(2);
 
     ws.close();
   });
