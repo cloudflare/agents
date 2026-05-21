@@ -2112,7 +2112,9 @@ describe("Think — onChatRecovery", () => {
   });
 
   it("continues a partial stream with request context from the recovered snapshot", async () => {
-    const agent = await freshRecoveryAgent("partial-continue-context");
+    const agent = await freshRecoveryAgent(
+      `partial-continue-context-${crypto.randomUUID()}`
+    );
 
     await agent.persistTestMessage({
       id: "u-continue",
