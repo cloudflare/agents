@@ -22,8 +22,9 @@ It exists for two purposes:
 - `WS /ws` calls the same `spawnChild()` from `ParentAgent.onMessage()`.
 - The worker uses `compatibility_date = "2026-04-01"` and
   `compatibility_flags = ["nodejs_compat"]`.
-- `ParentAgent` is bound as a top-level Durable Object. `ChildAgent` is only
-  listed in `new_sqlite_classes` and is reached as a facet/sub-agent.
+- `ParentAgent` is bound as a top-level Durable Object. `ChildAgent` is
+  exported from the Worker entry point and reached as a facet/sub-agent; it is
+  not listed in `new_sqlite_classes`.
 
 ## Commands
 

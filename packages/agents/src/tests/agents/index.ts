@@ -34,6 +34,7 @@ export { TestReadonlyAgent } from "./readonly";
 export { TestProtocolMessagesAgent } from "./protocol-messages";
 export { TestCallableAgent, TestParentAgent, TestChildAgent } from "./callable";
 export { TestQueueAgent } from "./queue";
+export { TestChatSdkStateHostAgent, ChatSdkStateAgent } from "./chat-sdk";
 export { TestRaceAgent } from "./race";
 export { TestRetryAgent, TestRetryDefaultsAgent } from "./retry";
 export { TestKeepAliveAgent } from "./keep-alive";

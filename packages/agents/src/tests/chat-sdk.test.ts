@@ -1,24 +1,32 @@
 import { env } from "cloudflare:workers";
-import { getAgentByName } from "agents";
+import { getAgentByName } from "../index";
 import { describe, expect, it } from "vitest";
-import type { TestHostAgent } from "./worker";
+import type { TestChatSdkStateHostAgent } from "./agents";
 
 type TestEnv = typeof env & {
-  TestHostAgent: DurableObjectNamespace<TestHostAgent>;
+  TestChatSdkStateHostAgent: DurableObjectNamespace<TestChatSdkStateHostAgent>;
 };
 
 function uniqueName(): string {
-  return `chat-sdk-messenger-${crypto.randomUUID()}`;
+  return `chat-sdk-state-${crypto.randomUUID()}`;
 }
 
-async function getHost(): Promise<TestHostAgent> {
+async function getHost(): Promise<TestChatSdkStateHostAgent> {
   return (await getAgentByName(
-    (env as TestEnv).TestHostAgent,
+    (env as TestEnv).TestChatSdkStateHostAgent,
     uniqueName()
-  )) as unknown as TestHostAgent;
+  )) as unknown as TestChatSdkStateHostAgent;
 }
 
-describe("ChatSdkStateAdapter", () => {
+describe("agents/chat-sdk StateAdapter", () => {
+  it("requires connect before use", async () => {
+    const host = await getHost();
+
+    await expect(host.testDisconnectedGuard()).resolves.toBe(
+      "ChatSdkStateAdapter is not connected"
+    );
+  });
+
   it("persists subscription state", async () => {
     const host = await getHost();
 
@@ -81,16 +89,30 @@ describe("ChatSdkStateAdapter", () => {
     ).resolves.toEqual([]);
   });
 
-  it("routes known Chat SDK keys to stable state shards", async () => {
+  it("routes known ChatSdk keys to stable state shards", async () => {
     const host = await getHost();
 
     await expect(host.testShardRouting()).resolves.toEqual({
       thread: "telegram:123",
       channel: "telegram:123",
       history: "telegram:123",
-      dedupe: "telegram:123",
+      transcript: "acme:user-123",
       callback: undefined,
       fallbackThread: "telegram:123"
+    });
+  });
+
+  it("supports ChatSdk feature paths backed by state", async () => {
+    const host = await getHost();
+
+    await expect(host.testChatFeaturePaths()).resolves.toEqual({
+      channelState: { topic: "support" },
+      dedupeHandledCount: 1,
+      history: ["third", "second"],
+      threadState: { mode: "alpha", count: 2 },
+      transcriptAfterDelete: 0,
+      transcriptCount: 2,
+      transcriptList: ["assistant reply", "handoff marker"]
     });
   });
 });

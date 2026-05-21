@@ -15,7 +15,7 @@ adapter.
 - A top-level `ChatIngressAgent` owns the Chat SDK runtime and webhook ingress.
 - Telegram webhooks enter through Chat SDK and are normalized into Chat SDK
   `Thread` and `Message` objects.
-- `ChatStateAgent` backs Chat SDK subscriptions, locks, queues, cache, and
+- `ChatSdkStateAgent` backs Chat SDK subscriptions, locks, queues, cache, and
   lists as an Agents SDK subagent.
 - `ConversationAgent extends Think` owns AI message history and model calls per
   Chat SDK `thread.id`.
@@ -110,7 +110,7 @@ flowchart TB
   Messenger[Messenger Provider] -->|"webhook event"| Worker[Worker]
   Worker --> ChatIngressAgent[ChatIngressAgent]
   ChatIngressAgent --> ChatSdk["Chat SDK runtime"]
-  ChatSdk -->|"locks, queues, subscriptions, cache"| ChatStateAgent[ChatStateAgent]
+  ChatSdk -->|"locks, queues, subscriptions, cache"| ChatSdkStateAgent[ChatSdkStateAgent]
   ChatSdk -->|"normalized Thread and Message"| ChatIngressAgent
   ChatIngressAgent -->|"UIMessage by thread id"| ConversationAgent[ConversationAgent extends Think]
   ConversationAgent --> WorkersAI[Workers AI]
@@ -135,7 +135,7 @@ Everything else is reached as a subagent:
 ```text
 ChatIngressAgent
   Chat({ adapters: { telegram } })
-  ChatStateAgent       # Chat SDK infrastructure state
+  ChatSdkStateAgent       # Chat SDK infrastructure state
   ConversationAgent    # Think messages and model calls per thread
 ```
 
@@ -146,13 +146,15 @@ src/
   admin/                # Admin directory and reply-job display helpers
   intelligence/         # Think conversation, message conversion, reply delivery
   provider/telegram.ts  # Telegram webhook setup, limits, and delivery policy
-  state/                # Agents-backed Chat SDK StateAdapter
+  state                 # Provided by agents/chat-sdk
   index.ts              # Ingress orchestration and Chat SDK event wiring
 ```
 
 `ChatIngressAgent` creates one Chat SDK runtime during `onStart()`:
 
 ```ts
+export { ChatSdkStateAgent } from "agents/chat-sdk";
+
 export class ChatIngressAgent extends Agent {
   onStart() {
     this.bot = this.createBot();
@@ -162,7 +164,7 @@ export class ChatIngressAgent extends Agent {
     return new Chat({
       userName,
       adapters: { telegram },
-      state: createAgentChatState({ parent: this }),
+      state: createChatSdkState(),
       concurrency: { strategy: "burst", debounceMs: 600 }
     });
   }
@@ -193,27 +195,24 @@ const bot = new Chat({
     slack,
     discord
   },
-  state: createAgentChatState({ parent: this })
+  state: createChatSdkState()
 });
 ```
 
 The important boundary is that provider adapters produce Chat SDK `Thread` and
-`Message` objects. From there, `ChatStateAgent` and `ConversationAgent` stay the
+`Message` objects. From there, `ChatSdkStateAgent` and `ConversationAgent` stay the
 same.
 
 ## State Subagent
 
-The Chat SDK state adapter is intentionally package-shaped:
+The Chat SDK state adapter is provided by `agents/chat-sdk`:
 
-```text
-src/state/
-  agent.ts
-  adapter.ts
-  index.ts
-  types.ts
+```ts
+import { ChatSdkStateAgent, createChatSdkState } from "agents/chat-sdk";
 ```
 
-`ChatStateAgent` is infrastructure only. It stores Chat SDK locks,
+Export `ChatSdkStateAgent` from your Worker entry point so sub-agent routing can
+resolve it. The state agent is infrastructure only: it stores Chat SDK locks,
 subscriptions, queues, generic cache values, and lists in Durable Object SQLite.
 It should not own channel personality, tools, or reasoning.
 
@@ -382,11 +381,11 @@ verifying the webhook and parsing the update at the Worker boundary:
 
 ```text
 ChatIngressAgent:tenant-a
-  ChatStateAgent:telegram:-100123
-  ChatStateAgent:slack:T123
+  ChatSdkStateAgent:telegram:-100123
+  ChatSdkStateAgent:slack:T123
 
 ChatIngressAgent:tenant-b
-  ChatStateAgent:discord:987
+  ChatSdkStateAgent:discord:987
 ```
 
 ## Caveats

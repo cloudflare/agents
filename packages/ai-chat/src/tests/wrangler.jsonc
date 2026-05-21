@@ -104,10 +104,14 @@
         "class_name": "AIChatAgentToolParent",
         "name": "AIChatAgentToolParent"
       },
+      // Test-harness-only binding: production only needs to export this
+      // facet class, but vitest-pool-workers needs it here for ctx.exports.
       {
         "class_name": "AIChatAgentToolChild",
         "name": "AIChatAgentToolChild"
       }
+      // `AIChatAgentToolChild` is addressed as a facet of
+      // `AIChatAgentToolParent`, so it does not need a migration entry.
     ]
   },
   "main": "worker.ts",
@@ -179,7 +183,7 @@
       "tag": "v12"
     },
     {
-      "new_sqlite_classes": ["AIChatAgentToolParent", "AIChatAgentToolChild"],
+      "new_sqlite_classes": ["AIChatAgentToolParent"],
       "tag": "v13"
     }
   ]

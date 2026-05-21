@@ -36,6 +36,7 @@ export {
   TestCallableAgent,
   TestParentAgent,
   TestChildAgent,
+  TestChatSdkStateHostAgent,
   TestQueueAgent,
   TestRaceAgent,
   TestRetryAgent,
@@ -66,6 +67,7 @@ export {
   TestUnboundParentAgent,
   TestMinifiedNameParentAgent
 } from "./agents";
+export { ChatSdkStateAgent } from "./agents";
 export { TestRunFiberAgent } from "./agents/run-fiber";
 import type { TestRunFiberAgent } from "./agents/run-fiber";
 
@@ -112,6 +114,7 @@ import type {
   TestNoIdentityAgent,
   TestCallableAgent,
   TestChildAgent,
+  TestChatSdkStateHostAgent,
   TestQueueAgent,
   TestRetryAgent,
   TestRetryDefaultsAgent,
@@ -160,6 +163,7 @@ export type Env = {
   TestNoIdentityAgent: DurableObjectNamespace<TestNoIdentityAgent>;
   TestCallableAgent: DurableObjectNamespace<TestCallableAgent>;
   TestChildAgent: DurableObjectNamespace<TestChildAgent>;
+  TestChatSdkStateHostAgent: DurableObjectNamespace<TestChatSdkStateHostAgent>;
   TestQueueAgent: DurableObjectNamespace<TestQueueAgent>;
   TestRetryAgent: DurableObjectNamespace<TestRetryAgent>;
   TestRetryDefaultsAgent: DurableObjectNamespace<TestRetryDefaultsAgent>;

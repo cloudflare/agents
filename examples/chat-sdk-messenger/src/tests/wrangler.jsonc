@@ -19,17 +19,19 @@
       {
         "class_name": "ChatIngressAgent",
         "name": "ChatIngressAgent"
+      },
+      // Test-harness-only binding: production only needs to export this
+      // facet class, but vitest-pool-workers needs it here for ctx.exports.
+      {
+        "class_name": "ChatSdkStateAgent",
+        "name": "ChatSdkStateAgent"
       }
     ]
   },
   "main": "worker.ts",
   "migrations": [
     {
-      "new_sqlite_classes": [
-        "TestHostAgent",
-        "ChatStateAgent",
-        "ChatIngressAgent"
-      ],
+      "new_sqlite_classes": ["TestHostAgent", "ChatIngressAgent"],
       "tag": "v1"
     }
   ]

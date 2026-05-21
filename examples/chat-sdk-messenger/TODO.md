@@ -1,7 +1,7 @@
 # TODO: Chat SDK Messenger Agents
 
 The first implementation is complete: Chat SDK owns messenger ingress,
-`ChatStateAgent` backs Chat SDK state, and `ConversationAgent extends Think`
+`ChatSdkStateAgent` backs Chat SDK state, and `ConversationAgent extends Think`
 owns per-thread AI history with Think `chat()` streaming. AI replies are
 accepted through managed fibers so webhook retries reuse a stable idempotency
 key.
@@ -56,8 +56,8 @@ key.
 
 ## SDK Extraction Candidates
 
-- Move the Agents-backed Chat SDK `StateAdapter` into the SDK once one more
-  example or app validates the same sharding and TTL behavior.
+- Continue hardening the Agents-backed Chat SDK `StateAdapter` in `agents/chat-sdk`
+  as more examples validate sharding and TTL behavior.
 - Use `src/intelligence/` as the staging area for a future Think-to-Chat-SDK
   streaming bridge once one more provider validates the cancellation,
   empty-response, long-reply, and partial-failure semantics.

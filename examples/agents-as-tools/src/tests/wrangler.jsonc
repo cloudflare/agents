@@ -24,16 +24,25 @@
       {
         "class_name": "Assistant",
         "name": "Assistant"
+      },
+      // Test-harness-only bindings: production only needs to export these
+      // facet classes, but vitest-pool-workers needs them here for ctx.exports.
+      {
+        "class_name": "Researcher",
+        "name": "Researcher"
+      },
+      {
+        "class_name": "Planner",
+        "name": "Planner"
       }
-      // `Researcher` is addressed as a facet of `Assistant` and
-      // doesn't need a top-level binding — only a `new_sqlite_classes`
-      // entry.
+      // `Researcher` and `Planner` are addressed as facets of `Assistant`
+      // and do not need migration entries.
     ]
   },
   "main": "worker.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["Assistant", "Researcher", "Planner"],
+      "new_sqlite_classes": ["Assistant"],
       "tag": "v1"
     }
   ]

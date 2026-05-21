@@ -28,12 +28,8 @@
   "main": "src/server.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["MyAssistant"],
-      "tag": "v1"
-    },
-    {
       "new_sqlite_classes": ["AssistantDirectory"],
-      "tag": "v2"
+      "tag": "v1"
     }
   ],
   "name": "think-assistant",

@@ -129,13 +129,17 @@ The child class must:
 
 - Extend `Agent`
 - Be exported from the worker entry point (so `ctx.exports[Cls.name]` can find it)
-- Be registered under `new_sqlite_classes` in `wrangler.jsonc`
+- Does NOT need to be registered under `new_sqlite_classes` unless the same class is also bound as a top-level Durable Object elsewhere. Facet storage is created through the top-level parent.
 - _Not_ share a name with the reserved token `"Sub"` (any class whose kebab-cased name equals `"sub"` is rejected; it would collide with the `/sub/` URL separator)
 
 The parent class also has requirements that are implicit for normal usage but worth knowing if you hit the related error:
 
 - Be bound as a Durable Object namespace in `wrangler.jsonc durable_objects.bindings`. (Top-level agents always are — this matters only if you try to call `subAgent()` from a class that's exported but unbound.)
 - Have its class name preserved by your bundler. The framework looks the parent up via `ctx.exports[this.constructor.name].idFromName(name)` to give the child its own `ctx.id.name`. If your bundler minifies class identifiers (e.g. esbuild without `keepNames: true`), `this.constructor.name` becomes a short id like `_a` and the lookup fails. The framework throws a descriptive error in that case pointing at the bundler config.
+
+### Notes for testing
+
+Tests that use `@cloudflare/vitest-pool-workers` may need to list facet classes as test-only Durable Object bindings so `ctx.exports` provides a facet-compatible class value. Keep those facet classes out of `new_sqlite_classes`; the extra binding belongs only in test `wrangler.jsonc` files and is not a production Worker requirement.
 
 ### `this.deleteSubAgent(Cls, name)`
 

@@ -6,6 +6,7 @@ import type {
   FiberRecoveryResult,
   SubAgentStub
 } from "agents";
+import { createChatSdkState } from "agents/chat-sdk";
 import { Chat } from "chat";
 import type { Message, Thread } from "chat";
 import {
@@ -55,10 +56,9 @@ import {
   shardTelegramStateKey,
   splitTelegramMessageText
 } from "./provider/telegram";
-import { createAgentChatState } from "./state";
 
 export { ConversationAgent } from "./intelligence/conversation-agent";
-export { ChatStateAgent } from "./state";
+export { ChatSdkStateAgent } from "agents/chat-sdk";
 
 export type {
   AdminConversation,
@@ -122,8 +122,7 @@ export class ChatIngressAgent extends Agent {
     const bot = new Chat({
       userName,
       adapters: { telegram },
-      state: createAgentChatState({
-        parent: this,
+      state: createChatSdkState({
         keyShard: (key) => shardTelegramStateKey(key, this.shardThread),
         shardKey: this.shardThread
       }),

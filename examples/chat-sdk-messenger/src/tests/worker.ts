@@ -1,13 +1,14 @@
 import { Agent, routeAgentRequest } from "agents";
+import {
+  ChatSdkStateAdapter,
+  defaultKeyShard,
+  defaultThreadShard
+} from "agents/chat-sdk";
 import { Message } from "chat";
 import appWorker, { ChatIngressAgent, ConversationAgent } from "../index";
 import { shardTelegramStateKey } from "../provider/telegram";
-import {
-  AgentChatStateAdapter,
-  ChatStateAgent,
-  defaultKeyShard,
-  defaultThreadShard
-} from "../state";
+
+export { ChatSdkStateAgent } from "agents/chat-sdk";
 
 interface TestLockResult {
   first: boolean;
@@ -156,8 +157,10 @@ export class TestHostAgent extends Agent {
     };
   }
 
-  private async createState(): Promise<AgentChatStateAdapter> {
-    const state = new AgentChatStateAdapter({ parent: this });
+  private async createState(): Promise<ChatSdkStateAdapter> {
+    const state = new ChatSdkStateAdapter({
+      parent: this
+    });
     await state.connect();
     return state;
   }
@@ -191,7 +194,6 @@ export class TestHostAgent extends Agent {
   }
 }
 
-export { ChatStateAgent };
 export { ChatIngressAgent, ConversationAgent };
 
 export default {

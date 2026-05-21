@@ -25,6 +25,8 @@
         "class_name": "AssistantDirectory",
         "name": "AssistantDirectory"
       },
+      // Test-harness-only binding: production only needs to export this
+      // facet class, but vitest-pool-workers needs it here for ctx.exports.
       {
         "class_name": "MyAssistant",
         "name": "MyAssistant"
@@ -35,7 +37,7 @@
   "main": "worker.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["AssistantDirectory", "MyAssistant"],
+      "new_sqlite_classes": ["AssistantDirectory"],
       "tag": "v1"
     }
   ]

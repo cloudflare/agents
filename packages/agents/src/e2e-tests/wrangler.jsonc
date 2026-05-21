@@ -13,6 +13,8 @@
         "name": "SubAgentFiberParent",
         "class_name": "SubAgentFiberParent"
       },
+      // Test-harness-only binding: production only needs to export this
+      // facet class, but vitest-pool-workers needs it here for ctx.exports.
       {
         "name": "SubAgentFiberChild",
         "class_name": "SubAgentFiberChild"
@@ -22,11 +24,7 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": [
-        "RunFiberTestAgent",
-        "SubAgentFiberParent",
-        "SubAgentFiberChild"
-      ]
+      "new_sqlite_classes": ["RunFiberTestAgent", "SubAgentFiberParent"]
     }
   ]
 }

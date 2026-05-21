@@ -126,6 +126,17 @@
         "name": "TestQueueAgent"
       },
       {
+        "class_name": "TestChatSdkStateHostAgent",
+        "name": "TestChatSdkStateHostAgent"
+      },
+      // Vitest-pool-workers currently needs facet-only classes listed as
+      // bindings for ctx.exports to provide a facet-compatible class value.
+      // They intentionally stay out of new_sqlite_classes below.
+      {
+        "class_name": "ChatSdkStateAgent",
+        "name": "ChatSdkStateAgent"
+      },
+      {
         "class_name": "TestRetryAgent",
         "name": "TestRetryAgent"
       },
@@ -169,6 +180,32 @@
         "class_name": "CustomBoundSubAgentParent",
         "name": "CUSTOM_BOUND_SUB_AGENT_PARENT"
       },
+      // Facet-only sub-agent fixtures. These bindings are test-harness-only;
+      // production Workers only need to export child classes.
+      {
+        "class_name": "CounterSubAgent",
+        "name": "CounterSubAgent"
+      },
+      {
+        "class_name": "OuterSubAgent",
+        "name": "OuterSubAgent"
+      },
+      {
+        "class_name": "InnerSubAgent",
+        "name": "InnerSubAgent"
+      },
+      {
+        "class_name": "LeafSubAgent",
+        "name": "LeafSubAgent"
+      },
+      {
+        "class_name": "CallbackSubAgent",
+        "name": "CallbackSubAgent"
+      },
+      {
+        "class_name": "BroadcastSubAgent",
+        "name": "BroadcastSubAgent"
+      },
       {
         "class_name": "TestMigrationAgent",
         "name": "TestMigrationAgent"
@@ -181,9 +218,27 @@
         "class_name": "SpikeSubParent",
         "name": "SpikeSubParent"
       },
+      // Test-harness-only binding for the WebSocket sub-agent fixture.
+      {
+        "class_name": "SpikeSubChild",
+        "name": "SpikeSubChild"
+      },
       {
         "class_name": "HookingSubAgentParent",
         "name": "HookingSubAgentParent"
+      },
+      // Test-harness-only bindings for reserved-name guard fixtures.
+      {
+        "class_name": "Sub",
+        "name": "Sub"
+      },
+      {
+        "class_name": "SUB",
+        "name": "SUB"
+      },
+      {
+        "class_name": "Sub_",
+        "name": "Sub_"
       },
       {
         "class_name": "ReservedClassParent",
@@ -264,6 +319,7 @@
         "TestCallableAgent",
         "TestChildAgent",
         "TestQueueAgent",
+        "TestChatSdkStateHostAgent",
         "TestRetryAgent",
         "TestRetryDefaultsAgent",
         "TestRunFiberAgent",
@@ -275,20 +331,10 @@
         "TestWaitConnectionsAgent",
         "TestSubAgentParent",
         "CustomBoundSubAgentParent",
-        "CounterSubAgent",
-        "OuterSubAgent",
-        "InnerSubAgent",
-        "LeafSubAgent",
-        "CallbackSubAgent",
-        "BroadcastSubAgent",
         "TestMigrationAgent",
         "TestConnectionUriAgent",
         "SpikeSubParent",
-        "SpikeSubChild",
         "HookingSubAgentParent",
-        "Sub",
-        "SUB",
-        "Sub_",
         "ReservedClassParent",
         "TestUnboundParentAgent",
         "TestMinifiedNameParentAgent"

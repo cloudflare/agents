@@ -862,12 +862,10 @@ Concrete ones the design has to answer before it can ship:
    channel's tables in-place during constructor; teach the multi-channel
    reader to also read the legacy tables transparently; defer migration
    to a major bump. Pick before shipping Ring 1.
-9. **Wrangler config implications.** Each helper class has to be a
-   bound `new_sqlite_classes` entry per the routing primitive's
-   requirements. How invasive is this for users who just want
-   "spawn a helper"? Possibly a ergonomics issue worth solving with
-   a single `helpers: [HelperA, HelperB, ...]` declaration on the
-   parent class.
+9. **Wrangler config implications.** Helper classes need to be exported from
+   the Worker entry point so `ctx.exports` can resolve them, but they should
+   not be bound or listed in `new_sqlite_classes` unless they are also used as
+   top-level Durable Objects.
 10. **Test infrastructure.** `examples/assistant` finally got a
     vitest+workers harness in #1384's follow-ups. Helper streaming
     needs equivalent coverage: parent broadcasts a helper event,
@@ -1789,8 +1787,8 @@ Planner } as const` used by `onConnect` / `clearHelperRuns` to
   - Added the `plan(description)` tool, dispatching `Planner` via
     `_runHelperTurn`. Updated the Assistant's system prompt to nudge
     the LLM toward `plan` for "how do I implement X" queries.
-  - Wrangler bumped to a v2 migration adding `Planner` to
-    `new_sqlite_classes` (idempotent for existing deployments).
+  - Planner is exported from the Worker entry point so sub-agent routing can
+    resolve it.
   - Test worker grew a `Planner` test subclass — same mock-model
     plumbing as `TestResearcher`, deliberately duplicated rather
     than mixed in (TypeScript class mixins are gnarlier than two
@@ -1857,11 +1855,9 @@ helperClassByType]`. Adding a class is one site (the registry):
     `"Researcher"` explicitly — closes the footgun where a future
     Planner test could silently check Researcher's facet table and
     pass for the wrong reason.
-  - **Wrangler v2 migration consolidated into v1.** The example
-    isn't deployed anywhere, so the v2 entry that added `Planner`
-    to `new_sqlite_classes` was rolled into v1. Cleaner for first-
-    time deploys; v2-tag-handling is no longer something the
-    example has to think about.
+  - **Wrangler config simplified.** The example is not deployed anywhere, so
+    helper facet classes stay out of `new_sqlite_classes`; only the top-level
+    Assistant class needs a migration entry.
   - **Polish pass.** Updated `runResearchHelper` references in the
     README, server doc-comments, test file headers, and the older
     parts of this design doc to the post-rename name

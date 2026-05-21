@@ -22,7 +22,7 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["ParentAgent", "ChildAgent"]
+      "new_sqlite_classes": ["ParentAgent"]
     }
   ]
 }

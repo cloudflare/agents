@@ -1,17 +1,26 @@
-import type { Lock, QueueEntry, StateAdapter } from "chat";
-import type { SubAgentStub } from "agents";
-import { ChatStateAgent } from "./agent";
-import type { AgentStateAdapterOptions } from "./types";
+import type {
+  Lock as ChatSdkLock,
+  QueueEntry as ChatSdkQueueEntry,
+  StateAdapter as ChatSdkStateAdapterInterface
+} from "chat";
+import {
+  getCurrentAgent,
+  type SubAgentClass,
+  type SubAgentStub
+} from "../index";
+import { ChatSdkStateAgent } from "./agent";
+import type { ChatSdkStateAdapterOptions } from "./types";
 
 const THREAD_STATE_PREFIX = "thread-state:";
 const CHANNEL_STATE_PREFIX = "channel-state:";
 const MESSAGE_HISTORY_PREFIX = "msg-history:";
+const TRANSCRIPTS_USER_PREFIX = "transcripts:user:";
 
 function parseStoredJson<T>(raw: string, label: string): T {
   try {
     return JSON.parse(raw) as T;
   } catch (error) {
-    throw new Error(`AgentChatStateAdapter expected JSON-encoded ${label}`, {
+    throw new Error(`ChatSdkStateAdapter expected JSON-encoded ${label}`, {
       cause: error
     });
   }
@@ -28,7 +37,8 @@ export function defaultKeyShard(
   for (const prefix of [
     THREAD_STATE_PREFIX,
     CHANNEL_STATE_PREFIX,
-    MESSAGE_HISTORY_PREFIX
+    MESSAGE_HISTORY_PREFIX,
+    TRANSCRIPTS_USER_PREFIX
   ]) {
     if (key.startsWith(prefix)) {
       return shardThread(key.slice(prefix.length));
@@ -38,17 +48,24 @@ export function defaultKeyShard(
   return undefined;
 }
 
-export class AgentChatStateAdapter implements StateAdapter {
-  private readonly parent: AgentStateAdapterOptions["parent"];
-  private readonly agentClass: typeof ChatStateAgent;
+export class ChatSdkStateAdapter implements ChatSdkStateAdapterInterface {
+  private readonly parent: NonNullable<ChatSdkStateAdapterOptions["parent"]>;
+  private readonly agentClass: SubAgentClass<ChatSdkStateAgent>;
   private readonly defaultName: string;
   private readonly keyShard?: (key: string) => string | undefined;
   private readonly shardKey: (threadId: string) => string;
   private connected = false;
 
-  constructor(options: AgentStateAdapterOptions) {
-    this.parent = options.parent;
-    this.agentClass = options.agent ?? ChatStateAgent;
+  constructor(options: ChatSdkStateAdapterOptions = {}) {
+    const parent = options.parent ?? getCurrentAgent().agent;
+    if (!parent) {
+      throw new Error(
+        "ChatSdkStateAdapter requires a parent Agent. Pass `parent` or create it inside an Agent context."
+      );
+    }
+
+    this.parent = parent;
+    this.agentClass = options.agent ?? ChatSdkStateAgent;
     this.defaultName = options.name ?? "default";
     this.keyShard = options.keyShard;
     this.shardKey = options.shardKey ?? defaultThreadShard;
@@ -74,17 +91,20 @@ export class AgentChatStateAdapter implements StateAdapter {
     return (await this.stateAgent(threadId)).isSubscribed(threadId);
   }
 
-  async acquireLock(threadId: string, ttlMs: number): Promise<Lock | null> {
+  async acquireLock(
+    threadId: string,
+    ttlMs: number
+  ): Promise<ChatSdkLock | null> {
     return (await this.stateAgent(threadId)).acquireLock(threadId, ttlMs);
   }
 
-  async releaseLock(lock: Lock): Promise<void> {
+  async releaseLock(lock: ChatSdkLock): Promise<void> {
     await (
       await this.stateAgent(lock.threadId)
     ).releaseLock(lock.threadId, lock.token);
   }
 
-  async extendLock(lock: Lock, ttlMs: number): Promise<boolean> {
+  async extendLock(lock: ChatSdkLock, ttlMs: number): Promise<boolean> {
     return (await this.stateAgent(lock.threadId)).extendLock(
       lock.threadId,
       lock.token,
@@ -98,7 +118,7 @@ export class AgentChatStateAdapter implements StateAdapter {
 
   async enqueue(
     threadId: string,
-    entry: QueueEntry,
+    entry: ChatSdkQueueEntry,
     maxSize: number
   ): Promise<number> {
     return (await this.stateAgent(threadId)).enqueue(
@@ -108,11 +128,11 @@ export class AgentChatStateAdapter implements StateAdapter {
     );
   }
 
-  async dequeue(threadId: string): Promise<QueueEntry | null> {
+  async dequeue(threadId: string): Promise<ChatSdkQueueEntry | null> {
     const raw = await (await this.stateAgent(threadId)).popQueue(threadId);
     return raw === null
       ? null
-      : parseStoredJson<QueueEntry>(raw, `queue entry for ${threadId}`);
+      : parseStoredJson<ChatSdkQueueEntry>(raw, `queue entry for ${threadId}`);
   }
 
   async queueDepth(threadId: string): Promise<number> {
@@ -170,7 +190,7 @@ export class AgentChatStateAdapter implements StateAdapter {
 
   private async stateAgent(
     threadId?: string
-  ): Promise<SubAgentStub<ChatStateAgent>> {
+  ): Promise<SubAgentStub<ChatSdkStateAgent>> {
     this.ensureConnected();
     const name = threadId ? this.shardKey(threadId) : this.defaultName;
     return this.parent.subAgent(this.agentClass, name);
@@ -178,7 +198,7 @@ export class AgentChatStateAdapter implements StateAdapter {
 
   private async stateAgentForKey(
     key: string
-  ): Promise<SubAgentStub<ChatStateAgent>> {
+  ): Promise<SubAgentStub<ChatSdkStateAgent>> {
     this.ensureConnected();
     const name =
       this.keyShard?.(key) ??
@@ -189,7 +209,7 @@ export class AgentChatStateAdapter implements StateAdapter {
 
   private ensureConnected(): void {
     if (!this.connected) {
-      throw new Error("AgentChatStateAdapter is not connected");
+      throw new Error("ChatSdkStateAdapter is not connected");
     }
   }
 }
