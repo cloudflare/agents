@@ -1,5 +1,11 @@
 # @cloudflare/think
 
+## 0.7.2
+
+### Patch Changes
+
+- [#1570](https://github.com/cloudflare/agents/pull/1570) [`4f14b9c`](https://github.com/cloudflare/agents/commit/4f14b9c7d16c3fe76268b053c2c3bde3b308915c) Thanks [@threepointone](https://github.com/threepointone)! - Broadcast message updates from programmatic `Think.chat()` turns and `clearMessages()` so connected `useAgentChat` clients stay in sync without reconnecting.
+
 ## 0.7.1
 
 ### Patch Changes
