@@ -23,6 +23,7 @@ import type {
   ChunkContext
 } from "../../think";
 import { sanitizeMessage, enforceRowSizeLimit } from "agents/chat";
+import type { ClientToolSchema } from "agents/chat";
 import { Session } from "agents/experimental/memory/session";
 import { z } from "zod";
 
@@ -2000,9 +2001,13 @@ export class ThinkRecoveryTestAgent extends Think {
     partialText: string;
     streamId: string;
     createdAt: number;
+    lastBody?: Record<string, unknown>;
+    lastClientTools?: ClientToolSchema[];
   }> = [];
   private _recoveryOverride: ChatRecoveryOptions = {};
   private _turnCallCount = 0;
+  private _turnBodies: Array<Record<string, unknown> | undefined> = [];
+  private _turnClientToolNames: Array<string[]> = [];
   private _stashData: unknown = null;
   private _stashResult: { success: boolean; error?: string } | null = null;
 
@@ -2010,8 +2015,10 @@ export class ThinkRecoveryTestAgent extends Think {
     return createMockModel("Continued response.");
   }
 
-  override beforeTurn(_ctx: TurnContext): void {
+  override beforeTurn(ctx: TurnContext): void {
     this._turnCallCount++;
+    this._turnBodies.push(ctx.body);
+    this._turnClientToolNames.push(Object.keys(ctx.tools));
 
     if (this._stashData !== null) {
       try {
@@ -2033,7 +2040,9 @@ export class ThinkRecoveryTestAgent extends Think {
       recoveryData: ctx.recoveryData,
       partialText: ctx.partialText,
       streamId: ctx.streamId,
-      createdAt: ctx.createdAt
+      createdAt: ctx.createdAt,
+      lastBody: ctx.lastBody,
+      lastClientTools: ctx.lastClientTools
     });
     return this._recoveryOverride;
   }
@@ -2068,9 +2077,19 @@ export class ThinkRecoveryTestAgent extends Think {
       partialText: string;
       streamId: string;
       createdAt: number;
+      lastBody?: Record<string, unknown>;
+      lastClientTools?: ClientToolSchema[];
     }>
   > {
     return this._recoveryContexts;
+  }
+
+  async getTurnBodies(): Promise<Array<Record<string, unknown> | undefined>> {
+    return this._turnBodies;
+  }
+
+  async getTurnClientToolNames(): Promise<string[][]> {
+    return this._turnClientToolNames;
   }
 
   async setRecoveryOverride(options: ChatRecoveryOptions): Promise<void> {
@@ -2150,8 +2169,56 @@ export class ThinkRecoveryTestAgent extends Think {
     return this.continueLastTurn();
   }
 
-  async runRecoveryRetryForTest(targetUserId?: string): Promise<void> {
-    await this._chatRecoveryRetry({ targetUserId });
+  async runRecoveryRetryForTest(options?: {
+    targetUserId?: string;
+    lastBody?: Record<string, unknown>;
+  }): Promise<void> {
+    await this._chatRecoveryRetry(options);
+  }
+
+  async runScheduledRecoveryRetryForTest(): Promise<void> {
+    const rows = this.sql<{ payload: string }>`
+      SELECT payload FROM cf_agents_schedules
+      WHERE callback = '_chatRecoveryRetry'
+      ORDER BY time ASC
+      LIMIT 1
+    `;
+    if (!rows[0]) return;
+    await this._chatRecoveryRetry(
+      JSON.parse(rows[0].payload) as {
+        targetUserId?: string;
+        lastBody?: Record<string, unknown>;
+      }
+    );
+  }
+
+  async runScheduledRecoveryContinueForTest(): Promise<void> {
+    const rows = this.sql<{ payload: string }>`
+      SELECT payload FROM cf_agents_schedules
+      WHERE callback = '_chatRecoveryContinue'
+      ORDER BY time ASC
+      LIMIT 1
+    `;
+    if (!rows[0]) return;
+    await this._chatRecoveryContinue(
+      JSON.parse(rows[0].payload) as {
+        targetAssistantId?: string;
+        lastBody?: Record<string, unknown> | null;
+        lastClientTools?: ClientToolSchema[] | null;
+      }
+    );
+  }
+
+  async setRequestContextForTest(
+    body?: Record<string, unknown>,
+    clientTools?: ClientToolSchema[]
+  ): Promise<void> {
+    const internals = this as unknown as {
+      _lastBody?: Record<string, unknown>;
+      _lastClientTools?: ClientToolSchema[];
+    };
+    internals._lastBody = body;
+    internals._lastClientTools = clientTools;
   }
 
   async insertInterruptedStream(
@@ -2174,11 +2241,13 @@ export class ThinkRecoveryTestAgent extends Think {
     }
   }
 
-  async getScheduledChatRecoveryCountForTest(): Promise<number> {
+  async getScheduledChatRecoveryCountForTest(
+    callback = "_chatRecoveryContinue"
+  ): Promise<number> {
     const rows = this.sql<{ count: number }>`
       SELECT COUNT(*) as count
       FROM cf_agents_schedules
-      WHERE callback = '_chatRecoveryContinue'
+      WHERE callback = ${callback}
     `;
     return rows[0]?.count ?? 0;
   }

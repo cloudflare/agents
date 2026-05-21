@@ -138,6 +138,65 @@ describe("runFiber", () => {
       expect(count).toBe(0);
     });
 
+    it("should apply internal stash wrappers to initial and user checkpoints", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "stash-internal-wrapper"
+      );
+
+      const result = (await agent.runWithInternalStashWrapper()) as unknown as {
+        initialSnapshot: unknown;
+        stashedSnapshot: unknown;
+      };
+
+      expect(result.initialSnapshot).toEqual({
+        __testFiberSnapshot: { requestId: "initial" },
+        user: null
+      });
+      expect(result.stashedSnapshot).toEqual({
+        __testFiberSnapshot: { requestId: "wrapped" },
+        user: { user: "checkpoint" }
+      });
+    });
+
+    it("should not leak an internal stash wrapper into concurrent plain fibers", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "stash-wrapper-concurrent"
+      );
+
+      const result =
+        (await agent.runWrappedAndPlainConcurrentStash()) as unknown as {
+          wrappedSnapshot: unknown;
+          plainSnapshot: unknown;
+        };
+
+      expect(result.wrappedSnapshot).toEqual({
+        __testFiberSnapshot: { requestId: "wrapped" },
+        user: { task: "wrapped" }
+      });
+      expect(result.plainSnapshot).toEqual({ task: "plain" });
+    });
+
+    it("should clean up fiber rows when a fiber fails after writing an internal initial snapshot", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "stash-wrapper-initial-then-throw"
+      );
+
+      const result =
+        (await agent.runWithInitialSnapshotThenThrow()) as unknown as {
+          threw: boolean;
+          runningFiberCount: number;
+        };
+
+      expect(result.threw).toBe(true);
+      expect(result.runningFiberCount).toBe(0);
+
+      const log = (await agent.getExecutionLog()) as unknown as string[];
+      expect(log).toContain("initial-then-throw");
+    });
+
     it("should throw when this.stash() is called outside a fiber", async () => {
       const agent = await getAgentByName(
         env.TestRunFiberAgent,

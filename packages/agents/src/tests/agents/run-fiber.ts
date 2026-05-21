@@ -406,6 +406,100 @@ export class TestRunFiberAgent extends Agent {
     }).catch(console.error);
   }
 
+  async runWithInternalStashWrapper(): Promise<{
+    initialSnapshot: unknown;
+    stashedSnapshot: unknown;
+  }> {
+    let initialSnapshot: unknown = null;
+    let stashedSnapshot: unknown = null;
+
+    await this._runFiberWithStashWrapper(
+      "internal-wrapped",
+      async (ctx) => {
+        initialSnapshot = this._readRunSnapshot(ctx.id);
+        this.stash({ user: "checkpoint" });
+        stashedSnapshot = this._readRunSnapshot(ctx.id);
+      },
+      {
+        initialSnapshot: {
+          __testFiberSnapshot: { requestId: "initial" },
+          user: null
+        },
+        wrapStash: (data) => ({
+          __testFiberSnapshot: { requestId: "wrapped" },
+          user: data
+        })
+      }
+    );
+
+    return { initialSnapshot, stashedSnapshot };
+  }
+
+  async runWrappedAndPlainConcurrentStash(): Promise<{
+    wrappedSnapshot: unknown;
+    plainSnapshot: unknown;
+  }> {
+    let wrappedSnapshot: unknown = null;
+    let plainSnapshot: unknown = null;
+
+    await Promise.all([
+      this._runFiberWithStashWrapper(
+        "internal-wrapped-concurrent",
+        async (ctx) => {
+          await new Promise((r) => setTimeout(r, 10));
+          this.stash({ task: "wrapped" });
+          wrappedSnapshot = this._readRunSnapshot(ctx.id);
+          await new Promise((r) => setTimeout(r, 50));
+        },
+        {
+          initialSnapshot: {
+            __testFiberSnapshot: { requestId: "initial" },
+            user: null
+          },
+          wrapStash: (data) => ({
+            __testFiberSnapshot: { requestId: "wrapped" },
+            user: data
+          })
+        }
+      ),
+      this.runFiber("plain-concurrent", async (ctx) => {
+        await new Promise((r) => setTimeout(r, 20));
+        this.stash({ task: "plain" });
+        plainSnapshot = this._readRunSnapshot(ctx.id);
+      })
+    ]);
+
+    return { wrappedSnapshot, plainSnapshot };
+  }
+
+  async runWithInitialSnapshotThenThrow(): Promise<{
+    threw: boolean;
+    runningFiberCount: number;
+  }> {
+    let threw = false;
+
+    await this._runFiberWithStashWrapper(
+      "internal-wrapper-initial-then-throw",
+      async () => {
+        this.executionLog.push("initial-then-throw");
+        throw new Error("simulated fiber failure");
+      },
+      {
+        initialSnapshot: {
+          __testFiberSnapshot: { requestId: "initial" },
+          user: null
+        }
+      }
+    ).catch(() => {
+      threw = true;
+    });
+
+    return {
+      threw,
+      runningFiberCount: await this.getRunningFiberCount()
+    };
+  }
+
   async stashOutsideFiber(): Promise<string> {
     try {
       this.stash({ bad: true });
@@ -434,6 +528,14 @@ export class TestRunFiberAgent extends Agent {
       SELECT COUNT(*) as count FROM cf_agents_runs
     `;
     return rows[0].count;
+  }
+
+  private _readRunSnapshot(id: string): unknown {
+    const rows = this.sql<{ snapshot: string | null }>`
+      SELECT snapshot FROM cf_agents_runs WHERE id = ${id} LIMIT 1
+    `;
+    const snapshot = rows[0]?.snapshot;
+    return snapshot ? JSON.parse(snapshot) : null;
   }
 
   async waitFor(ms: number): Promise<void> {

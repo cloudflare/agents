@@ -64,7 +64,8 @@ export function wrapChatFiberSnapshot<Kind extends string>(
 
 export function unwrapChatFiberSnapshot<Kind extends string>(
   key: string,
-  value: unknown
+  value: unknown,
+  expectedKind?: Kind
 ): {
   snapshot: ChatFiberSnapshot<Kind> | null;
   user: unknown | null;
@@ -76,6 +77,15 @@ export function unwrapChatFiberSnapshot<Kind extends string>(
   const envelope = value as Record<string, unknown>;
   const snapshot = envelope[key];
   if (typeof snapshot !== "object" || snapshot === null) {
+    return { snapshot: null, user: value };
+  }
+  const candidate = snapshot as Record<string, unknown>;
+  if (
+    candidate.version !== 1 ||
+    (expectedKind !== undefined && candidate.kind !== expectedKind) ||
+    typeof candidate.requestId !== "string" ||
+    typeof candidate.continuation !== "boolean"
+  ) {
     return { snapshot: null, user: value };
   }
 

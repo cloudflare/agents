@@ -779,6 +779,16 @@ const _fiberALS = new AsyncLocalStorage<{
   stash: (data: unknown) => void;
 }>();
 
+type InternalFiberOptions = {
+  signal?: AbortSignal;
+  managed?: boolean;
+  initialSnapshot?: unknown;
+  wrapStash?: (data: unknown) => unknown;
+  beforeRunCleanup?: (
+    outcome: { ok: true } | { ok: false; error: unknown }
+  ) => void;
+};
+
 function getNextCronTime(cron: string) {
   const interval = parseCronExpression(cron);
   return interval.getNextDate();
@@ -4640,6 +4650,23 @@ export class Agent<
     return this._runFiberInternal(nanoid(), name, fn);
   }
 
+  /**
+   * Internal framework entry point for fibers that need to compose their own
+   * recovery metadata with user checkpoint data while preserving the public
+   * `this.stash()` behavior.
+   *
+   * This deliberately stays protected/internal rather than becoming a public
+   * `runFiber()` option until the durable execution API needs this generality.
+   * @internal
+   */
+  protected async _runFiberWithStashWrapper<T>(
+    name: string,
+    fn: (ctx: FiberContext) => Promise<T>,
+    options: Pick<InternalFiberOptions, "initialSnapshot" | "wrapStash">
+  ): Promise<T> {
+    return this._runFiberInternal(nanoid(), name, fn, options);
+  }
+
   async startFiber(
     name: string,
     fn: (ctx: FiberContext) => Promise<void>,
@@ -4800,13 +4827,7 @@ export class Agent<
     id: string,
     name: string,
     fn: (ctx: FiberContext) => Promise<T>,
-    options?: {
-      signal?: AbortSignal;
-      managed?: boolean;
-      beforeRunCleanup?: (
-        outcome: { ok: true } | { ok: false; error: unknown }
-      ) => void;
-    }
+    options?: InternalFiberOptions
   ): Promise<T> {
     const signal = options?.signal ?? new AbortController().signal;
     this.sql`
@@ -4815,10 +4836,28 @@ export class Agent<
     `;
     this._runFiberActiveFibers.add(id);
 
+    const writeSnapshot = (data: unknown) => {
+      const snapshot = JSON.stringify(data);
+      this.sql`
+        UPDATE cf_agents_runs SET snapshot = ${snapshot}
+        WHERE id = ${id}
+      `;
+      if (options?.managed) {
+        this.sql`
+          UPDATE cf_agents_fibers SET snapshot = ${snapshot}
+          WHERE fiber_id = ${id}
+        `;
+      }
+    };
+
     let root: RootFacetRpcSurface | undefined;
     let registeredFacetRun = false;
     let dispose: () => void = () => {};
     try {
+      if ("initialSnapshot" in (options ?? {})) {
+        writeSnapshot(options?.initialSnapshot);
+      }
+
       if (this._isFacet) {
         root = await this._rootAlarmOwner();
         await root._cf_registerFacetRun(this.selfPath, id);
@@ -4827,17 +4866,7 @@ export class Agent<
 
       dispose = await this.keepAlive();
       const stash = (data: unknown) => {
-        const snapshot = JSON.stringify(data);
-        this.sql`
-          UPDATE cf_agents_runs SET snapshot = ${snapshot}
-          WHERE id = ${id}
-        `;
-        if (options?.managed) {
-          this.sql`
-            UPDATE cf_agents_fibers SET snapshot = ${snapshot}
-            WHERE fiber_id = ${id}
-          `;
-        }
+        writeSnapshot(options?.wrapStash ? options.wrapStash(data) : data);
       };
 
       try {

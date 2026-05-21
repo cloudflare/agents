@@ -1365,12 +1365,22 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   recoveryContexts: ChatRecoveryContext[] = [];
   recoveryOverride: ChatRecoveryOptions | null = null;
   onChatMessageCallCount = 0;
+  onChatMessageBodies: Array<Record<string, unknown> | undefined> = [];
+  onChatMessageClientTools: Array<ClientToolSchema[] | undefined> = [];
   includeReasoningInResponse = false;
   private _stashData: unknown = null;
   private _stashResult: { success: boolean; error?: string } | null = null;
 
-  async onChatMessage() {
+  async onChatMessage(
+    _onFinish?: unknown,
+    ctx?: {
+      body?: Record<string, unknown>;
+      clientTools?: ClientToolSchema[];
+    }
+  ) {
     this.onChatMessageCallCount++;
+    this.onChatMessageBodies.push(ctx?.body);
+    this.onChatMessageClientTools.push(ctx?.clientTools);
 
     if (this._stashData !== null) {
       try {
@@ -1455,8 +1465,54 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return this.continueLastTurn(body);
   }
 
-  async runRecoveryRetryForTest(targetUserId?: string): Promise<void> {
-    await this._chatRecoveryRetry({ targetUserId });
+  async runRecoveryRetryForTest(options?: {
+    targetUserId?: string;
+    lastBody?: Record<string, unknown>;
+    lastClientTools?: ClientToolSchema[];
+  }): Promise<void> {
+    await this._chatRecoveryRetry(options);
+  }
+
+  async runScheduledRecoveryRetryForTest(): Promise<void> {
+    const rows = this.sql<{ payload: string }>`
+      SELECT payload FROM cf_agents_schedules
+      WHERE callback = '_chatRecoveryRetry'
+      ORDER BY time ASC
+      LIMIT 1
+    `;
+    if (!rows[0]) return;
+    await this._chatRecoveryRetry(
+      JSON.parse(rows[0].payload) as {
+        targetUserId?: string;
+        lastBody?: Record<string, unknown>;
+        lastClientTools?: ClientToolSchema[];
+      }
+    );
+  }
+
+  async runScheduledRecoveryContinueForTest(): Promise<void> {
+    const rows = this.sql<{ payload: string }>`
+      SELECT payload FROM cf_agents_schedules
+      WHERE callback = '_chatRecoveryContinue'
+      ORDER BY time ASC
+      LIMIT 1
+    `;
+    if (!rows[0]) return;
+    await this._chatRecoveryContinue(
+      JSON.parse(rows[0].payload) as {
+        targetAssistantId?: string;
+        lastBody?: Record<string, unknown> | null;
+        lastClientTools?: ClientToolSchema[] | null;
+      }
+    );
+  }
+
+  setRequestContextForTest(
+    body?: Record<string, unknown>,
+    clientTools?: ClientToolSchema[]
+  ): void {
+    this._lastBody = body;
+    this._lastClientTools = clientTools;
   }
 
   async saveSyntheticUserMessage(
@@ -1474,6 +1530,22 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   getOnChatMessageCallCount(): number {
     return this.onChatMessageCallCount;
+  }
+
+  getOnChatMessageBodies(): Array<Record<string, unknown> | undefined> {
+    return this.onChatMessageBodies;
+  }
+
+  getOnChatMessageClientTools(): Array<ClientToolSchema[] | undefined> {
+    return this.onChatMessageClientTools;
+  }
+
+  getScheduleCountForCallback(callback: string): number {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_schedules
+      WHERE callback = ${callback}
+    `;
+    return rows[0]?.count ?? 0;
   }
 
   async waitForIdleForTest(): Promise<void> {
@@ -1498,17 +1570,18 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     `;
     const createdAt = metadataRows[0]?.created_at ?? Date.now();
 
-    const options = await this.onChatRecovery({
-      streamId,
-      requestId,
-      partialText: partial.text,
-      partialParts: partial.parts as ChatRecoveryContext["partialParts"],
-      recoveryData: null,
-      messages: [...this.messages],
-      lastBody: this._lastBody,
-      lastClientTools: this._lastClientTools,
-      createdAt
-    });
+    const options =
+      (await this.onChatRecovery({
+        streamId,
+        requestId,
+        partialText: partial.text,
+        partialParts: partial.parts as ChatRecoveryContext["partialParts"],
+        recoveryData: null,
+        messages: [...this.messages],
+        lastBody: this._lastBody,
+        lastClientTools: this._lastClientTools,
+        createdAt
+      })) ?? {};
 
     if (options.persist !== false) {
       this._persistOrphanedStream(streamId);
@@ -1704,10 +1777,10 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
   }
 
   /**
-   * Regression seam for issue #1406: simulates `runFiber` throwing
-   * before it invokes its callback (e.g. SQLite error inserting the
-   * fiber row). Verifies that the external-signal listener attached
-   * by `linkExternal` is still detached and the registry entry is
+   * Regression seam for issue #1406: simulates the internal chat fiber
+   * wrapper throwing before it invokes its callback (e.g. SQLite error
+   * inserting the fiber row). Verifies that the external-signal listener
+   * attached by `linkExternal` is still detached and the registry entry is
    * still removed even when the fiber start path fails.
    */
   async testSaveMessagesWithRunFiberFailure(text: string): Promise<{
@@ -1743,11 +1816,21 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
       (originalRemove as (...args: unknown[]) => void)(type, listener, options);
     }) as RemoveListener;
 
-    type RunFiber = RecoverySlowStreamAgent["runFiber"];
-    const originalRunFiber = this.runFiber.bind(this) as RunFiber;
-    (this as unknown as { runFiber: RunFiber }).runFiber = (() => {
+    type RunFiberWithStashWrapper = (
+      name: string,
+      fn: unknown,
+      options: unknown
+    ) => Promise<unknown>;
+    const fiberMethods = this as unknown as {
+      _runFiberWithStashWrapper: RunFiberWithStashWrapper;
+    };
+    const originalRunFiberWithStashWrapper =
+      fiberMethods._runFiberWithStashWrapper.bind(
+        this
+      ) as RunFiberWithStashWrapper;
+    fiberMethods._runFiberWithStashWrapper = (() => {
       throw new Error("simulated runFiber failure");
-    }) as unknown as RunFiber;
+    }) as RunFiberWithStashWrapper;
 
     let threw = false;
     try {
@@ -1765,7 +1848,7 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
     } catch {
       threw = true;
     } finally {
-      (this as unknown as { runFiber: RunFiber }).runFiber = originalRunFiber;
+      fiberMethods._runFiberWithStashWrapper = originalRunFiberWithStashWrapper;
     }
 
     return {
