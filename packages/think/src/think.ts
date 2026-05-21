@@ -4257,7 +4257,11 @@ export class Think<
         this._insideInferenceLoop = false;
       }
 
-      this._resumableStream.complete(streamId);
+      if (streamError) {
+        this._resumableStream.markError(streamId);
+      } else {
+        this._resumableStream.complete(streamId);
+      }
       streamFinalized = true;
       this._broadcastChat({
         type: MSG_CHAT_RESPONSE,
@@ -4442,7 +4446,11 @@ export class Think<
         this._insideInferenceLoop = false;
       }
 
-      this._resumableStream.complete(streamId);
+      if (streamError) {
+        this._resumableStream.markError(streamId);
+      } else {
+        this._resumableStream.complete(streamId);
+      }
       this._pendingResumeConnections.clear();
       this._broadcastChat({
         type: MSG_CHAT_RESPONSE,

@@ -692,6 +692,16 @@ export class ThinkTestAgent extends Think {
     this._resumableStream.complete(streamId);
   }
 
+  async getLatestStreamStatusForTest(): Promise<string | null> {
+    const streams = this.sql<{ status: string }>`
+      SELECT status
+      FROM cf_ai_chat_stream_metadata
+      ORDER BY created_at DESC
+      LIMIT 1
+    `;
+    return streams[0]?.status ?? null;
+  }
+
   async testChat(message: string): Promise<TestChatResult> {
     const cb = new TestCollectingCallback();
     await this.chat(message, cb);

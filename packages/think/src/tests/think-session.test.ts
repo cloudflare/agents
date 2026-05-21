@@ -931,6 +931,7 @@ describe("Think — onChatResponse", () => {
     expect(log).toHaveLength(1);
     expect(log[0].status).toBe("error");
     expect(log[0].error).toContain("Early in-band error");
+    await expect(agent.getLatestStreamStatusForTest()).resolves.toBe("error");
   });
 
   it("should persist partial parts and fire error status for in-band errors", async () => {
@@ -954,6 +955,7 @@ describe("Think — onChatResponse", () => {
     expect(log).toHaveLength(1);
     expect(log[0].status).toBe("error");
     expect(log[0].error).toContain("Late in-band error");
+    await expect(agent.getLatestStreamStatusForTest()).resolves.toBe("error");
   });
 
   it("should treat in-band errors as terminal stream events", async () => {
@@ -983,6 +985,7 @@ describe("Think — onChatResponse", () => {
     expect(log).toHaveLength(1);
     expect(log[0].status).toBe("error");
     expect(log[0].error).toContain("RPC in-band error");
+    await expect(agent.getLatestStreamStatusForTest()).resolves.toBe("error");
   });
 
   it("should throw RPC in-band stream errors when no onError callback exists", async () => {
