@@ -888,6 +888,94 @@ describe("Client tools continuation", () => {
     ws.close(1000);
   });
 
+  it("clears queued auto-continuation state after a continuation stream error", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    try {
+      await agentStub.setTestBody({
+        continuationStreamError: "Continuation stream failed",
+        continuationStreamErrorDelayMs: 250
+      });
+
+      await agentStub.persistMessages([
+        {
+          id: "user-stream-error",
+          role: "user",
+          parts: [{ type: "text", text: "Run tools" }]
+        },
+        {
+          id: "assistant-stream-error",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-firstTool",
+              toolCallId: "call_first_stream_error",
+              state: "input-available",
+              input: {}
+            },
+            {
+              type: "tool-secondTool",
+              toolCallId: "call_second_stream_error",
+              state: "input-available",
+              input: {}
+            }
+          ] as ChatMessage["parts"]
+        }
+      ]);
+
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_RESULT,
+          toolCallId: "call_first_stream_error",
+          toolName: "firstTool",
+          output: { ok: true },
+          autoContinue: true
+        })
+      );
+
+      let activeContinuation:
+        | Awaited<ReturnType<typeof agentStub.getContinuationStateForTest>>
+        | undefined;
+      const start = Date.now();
+      while (Date.now() - start < 3000) {
+        const state = await agentStub.getContinuationStateForTest();
+        if (state.activeRequestId !== null) {
+          activeContinuation = state;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(activeContinuation).toBeDefined();
+
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_RESULT,
+          toolCallId: "call_second_stream_error",
+          toolName: "secondTool",
+          output: { ok: true },
+          autoContinue: true
+        })
+      );
+
+      await agentStub.waitForIdleForTest();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await agentStub.waitForIdleForTest();
+
+      expect(await agentStub.getLatestStreamStatusForTest()).toBe("error");
+      expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
+      expect(await agentStub.getContinuationStateForTest()).toEqual({
+        hasPending: false,
+        hasDeferred: false,
+        activeRequestId: null,
+        activeConnectionId: null
+      });
+    } finally {
+      ws.close(1000);
+    }
+  });
+
   it("should clear stored client tools when chat is cleared", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

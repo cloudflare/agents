@@ -97,11 +97,13 @@ export class TestChatAgent extends AIChatAgent<Env> {
   private _capturedClientTools: ClientToolSchema[] | undefined = undefined;
   // Store captured requestId from onChatMessage options for testing
   private _capturedRequestId: string | undefined = undefined;
+  private _chatMessageCallCount = 0;
 
   async onChatMessage(
     _onFinish: StreamTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions
   ) {
+    this._chatMessageCallCount++;
     // Capture the body, clientTools, and requestId from options for testing
     this._capturedBody = options?.body;
     this._capturedClientTools = options?.clientTools;
@@ -156,6 +158,22 @@ export class TestChatAgent extends AIChatAgent<Env> {
         { type: "text-end", id: "sse-t" },
         { type: "finish" }
       ]);
+    }
+
+    const continuationStreamError = options?.body?.continuationStreamError;
+    if (options?.continuation && typeof continuationStreamError === "string") {
+      const delayMs =
+        typeof options.body?.continuationStreamErrorDelayMs === "number"
+          ? options.body.continuationStreamErrorDelayMs
+          : 25;
+      return makeDelayedSSEChunkResponse(
+        [
+          { type: "start" },
+          { type: "error", errorText: continuationStreamError }
+        ],
+        delayMs,
+        options.abortSignal
+      );
     }
 
     if (
@@ -387,6 +405,14 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this.waitUntilStable(options);
   }
 
+  setTestBody(body: Record<string, unknown>): void {
+    (this as unknown as { _lastBody: Record<string, unknown> })._lastBody =
+      body;
+    (
+      this as unknown as { _persistRequestContext(): void }
+    )._persistRequestContext();
+  }
+
   resetTurnStateForTest(): void {
     this.resetTurnState();
   }
@@ -399,6 +425,45 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   async waitForIdleForTest(): Promise<void> {
     await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+  }
+
+  getChatMessageCallCountForTest(): number {
+    return this._chatMessageCallCount;
+  }
+
+  getContinuationStateForTest(): {
+    hasPending: boolean;
+    hasDeferred: boolean;
+    activeRequestId: string | null;
+    activeConnectionId: string | null;
+  } {
+    const continuation = (
+      this as unknown as {
+        _continuation: {
+          pending: unknown;
+          deferred: unknown;
+          activeRequestId: string | null;
+          activeConnectionId: string | null;
+        };
+      }
+    )._continuation;
+
+    return {
+      hasPending: continuation.pending !== null,
+      hasDeferred: continuation.deferred !== null,
+      activeRequestId: continuation.activeRequestId,
+      activeConnectionId: continuation.activeConnectionId
+    };
+  }
+
+  getLatestStreamStatusForTest(): string | null {
+    const rows = this.sql<{ status: string }>`
+      select status
+      from cf_ai_chat_stream_metadata
+      order by created_at desc
+      limit 1
+    `;
+    return rows[0]?.status ?? null;
   }
 
   getPersistedMessages(): ChatMessage[] {

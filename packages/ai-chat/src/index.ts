@@ -1242,8 +1242,13 @@ export class AIChatAgent<
 
   /** @internal Delegate to _resumableStream */
   protected _markStreamError(streamId: string) {
+    const erroredRequestId = this._resumableStream.activeRequestId;
     this._resumableStream.markError(streamId);
     this._pendingResumeConnections.clear();
+    if (erroredRequestId === this._continuation.activeRequestId) {
+      this._continuation.activeRequestId = null;
+      this._continuation.activeConnectionId = null;
+    }
   }
 
   /**
@@ -2030,10 +2035,19 @@ export class AIChatAgent<
                     );
 
                     if (response) {
-                      await this._reply(requestId, response, [], {
-                        continuation: true,
-                        chatMessageId: requestId
-                      });
+                      const replyResult = await this._reply(
+                        requestId,
+                        response,
+                        [],
+                        {
+                          continuation: true,
+                          chatMessageId: requestId
+                        }
+                      );
+                      if (replyResult.status === "error") {
+                        this._clearAllAutoContinuationState(true);
+                        return;
+                      }
                       this._activateDeferredAutoContinuation();
                     } else {
                       this._clearPendingAutoContinuation(true);
