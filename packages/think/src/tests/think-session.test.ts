@@ -2,6 +2,7 @@ import { env, exports } from "cloudflare:workers";
 import { getServerByName } from "partyserver";
 import { describe, expect, it, vi } from "vitest";
 import type { UIMessage } from "ai";
+import { subscribe } from "agents/observability";
 import type {
   ThinkTestAgent,
   ThinkSessionTestAgent,
@@ -911,6 +912,37 @@ describe("Think — onChatResponse", () => {
     expect(log[0].requestId).toBeTruthy();
   });
 
+  it("should fire onChatResponse for empty successful streams", async () => {
+    const agent = await freshAgent("hook-empty-stream");
+
+    await agent.runEmptyStreamForTest();
+
+    const history = await agent.getStoredMessages();
+    expect(history).toHaveLength(0);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("completed");
+    expect(log[0].message.role).toBe("assistant");
+    expect(log[0].message.parts).toHaveLength(0);
+  });
+
+  it("should fire onChatResponse and onDone for empty successful RPC streams", async () => {
+    const agent = await freshAgent("hook-empty-rpc-stream");
+
+    const result = await agent.runEmptyRpcStreamForTest();
+
+    expect(result.doneCalled).toBe(true);
+    const history = await agent.getStoredMessages();
+    expect(history).toHaveLength(0);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("completed");
+    expect(log[0].message.role).toBe("assistant");
+    expect(log[0].message.parts).toHaveLength(0);
+  });
+
   it("should fire onChatResponse with error status on failure", async () => {
     const agent = await freshAgent("hook-error");
 
@@ -923,15 +955,27 @@ describe("Think — onChatResponse", () => {
   });
 
   it("should fire onChatResponse with error status when in-band error arrives before any parts", async () => {
-    const agent = await freshAgent("hook-inband-error");
+    const room = "hook-inband-error";
+    const observedTypes: string[] = [];
+    const unsubscribe = subscribe("message", (event) => {
+      if (event.agent === "ThinkTestAgent" && event.name === room) {
+        observedTypes.push(event.type);
+      }
+    });
+    const agent = await freshAgent(room);
 
-    await agent.runInBandStreamErrorForTest("Early in-band error");
+    try {
+      await agent.runInBandStreamErrorForTest("Early in-band error");
 
-    const log = (await agent.getResponseLog()) as ChatResponseResult[];
-    expect(log).toHaveLength(1);
-    expect(log[0].status).toBe("error");
-    expect(log[0].error).toContain("Early in-band error");
-    await expect(agent.getLatestStreamStatusForTest()).resolves.toBe("error");
+      const log = (await agent.getResponseLog()) as ChatResponseResult[];
+      expect(log).toHaveLength(1);
+      expect(log[0].status).toBe("error");
+      expect(log[0].error).toContain("Early in-band error");
+      expect(observedTypes).toContain("message:error");
+      await expect(agent.getLatestStreamStatusForTest()).resolves.toBe("error");
+    } finally {
+      unsubscribe();
+    }
   });
 
   it("should persist partial parts and fire error status for in-band errors", async () => {
@@ -973,19 +1017,31 @@ describe("Think — onChatResponse", () => {
   });
 
   it("should report in-band stream errors through RPC chat onError", async () => {
-    const agent = await freshAgent("hook-rpc-inband-error");
+    const room = "hook-rpc-inband-error";
+    const observedTypes: string[] = [];
+    const unsubscribe = subscribe("message", (event) => {
+      if (event.agent === "ThinkTestAgent" && event.name === room) {
+        observedTypes.push(event.type);
+      }
+    });
+    const agent = await freshAgent(room);
 
-    await agent.setInBandErrorResponse("RPC in-band error");
-    const result = await agent.testChat("trigger rpc in-band error");
+    try {
+      await agent.setInBandErrorResponse("RPC in-band error");
+      const result = await agent.testChat("trigger rpc in-band error");
 
-    expect(result.done).toBe(false);
-    expect(result.error).toContain("RPC in-band error");
+      expect(result.done).toBe(false);
+      expect(result.error).toContain("RPC in-band error");
 
-    const log = (await agent.getResponseLog()) as ChatResponseResult[];
-    expect(log).toHaveLength(1);
-    expect(log[0].status).toBe("error");
-    expect(log[0].error).toContain("RPC in-band error");
-    await expect(agent.getLatestStreamStatusForTest()).resolves.toBe("error");
+      const log = (await agent.getResponseLog()) as ChatResponseResult[];
+      expect(log).toHaveLength(1);
+      expect(log[0].status).toBe("error");
+      expect(log[0].error).toContain("RPC in-band error");
+      expect(observedTypes).toContain("message:error");
+      await expect(agent.getLatestStreamStatusForTest()).resolves.toBe("error");
+    } finally {
+      unsubscribe();
+    }
   });
 
   it("should throw RPC in-band stream errors when no onError callback exists", async () => {

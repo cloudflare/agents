@@ -310,6 +310,22 @@ function createInBandErrorStreamResult(
   };
 }
 
+function createEmptyStreamResult(): StreamableResult {
+  return {
+    toUIMessageStream() {
+      return {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              return { done: true as const, value: undefined };
+            }
+          };
+        }
+      };
+    }
+  };
+}
+
 /**
  * Mock model that emits multiple text-delta chunks with a configurable
  * delay between each. Lets tests reliably reach the read loop in
@@ -855,6 +871,40 @@ export class ThinkTestAgent extends Think {
       crypto.randomUUID(),
       createInBandErrorStreamResult(errorText, [], ["ignored response"])
     );
+  }
+
+  async runEmptyStreamForTest(): Promise<void> {
+    await (
+      this as unknown as {
+        _streamResult: (
+          requestId: string,
+          result: StreamableResult
+        ) => Promise<void>;
+      }
+    )._streamResult(crypto.randomUUID(), createEmptyStreamResult());
+  }
+
+  async runEmptyRpcStreamForTest(): Promise<{ doneCalled: boolean }> {
+    let doneCalled = false;
+    await (
+      this as unknown as {
+        _streamResultToRpcCallback: (
+          requestId: string,
+          result: StreamableResult,
+          callback: StreamCallback
+        ) => Promise<void>;
+      }
+    )._streamResultToRpcCallback(
+      crypto.randomUUID(),
+      createEmptyStreamResult(),
+      {
+        onEvent() {},
+        onDone() {
+          doneCalled = true;
+        }
+      }
+    );
+    return { doneCalled };
   }
 
   async testChatWithAbort(

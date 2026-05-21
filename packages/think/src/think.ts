@@ -4226,6 +4226,7 @@ export class Think<
 
           if (action?.type === "error") {
             streamError = action.error;
+            this._emit("message:error", { error: streamError });
             this._broadcastChat({
               type: MSG_CHAT_RESPONSE,
               id: requestId,
@@ -4293,14 +4294,12 @@ export class Think<
         pendingRpcError = streamError;
       } else if (!aborted) {
         await callback.onDone();
-        if (accumulator.parts.length > 0) {
-          await this._fireResponseHook({
-            message: assistantMsg,
-            requestId,
-            continuation: false,
-            status: "completed"
-          });
-        }
+        await this._fireResponseHook({
+          message: assistantMsg,
+          requestId,
+          continuation: false,
+          status: "completed"
+        });
       } else {
         await this._fireResponseHook({
           message: assistantMsg,
@@ -4428,6 +4427,7 @@ export class Think<
             if (options?.captureProgrammaticStreamError) {
               this._programmaticStreamErrors.set(requestId, streamError);
             }
+            this._emit("message:error", { error: streamError });
             this._broadcastChat({
               type: MSG_CHAT_RESPONSE,
               id: requestId,
@@ -4494,10 +4494,7 @@ export class Think<
       }
     }
 
-    if (
-      this._turnQueue.generation === clearGen &&
-      (accumulator.parts.length > 0 || streamError || streamAborted)
-    ) {
+    if (this._turnQueue.generation === clearGen) {
       try {
         const assistantMsg = accumulator.toMessage();
 
