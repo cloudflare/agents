@@ -3229,6 +3229,19 @@ export class Agent<
     )) as unknown as RootFacetRpcSurface;
   }
 
+  private _cf_rootResolvesToSelf(): boolean {
+    const root = this._parentPath[0];
+    if (!root) return false;
+
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    const binding = ctx.exports?.[root.className] as
+      | DurableObjectNamespace
+      | undefined;
+    if (!binding?.idFromName) return false;
+
+    return binding.idFromName(root.name).equals(this.ctx.id);
+  }
+
   private _validateScheduleCallback(
     when: Date | string | number,
     callback: keyof this,
@@ -6224,6 +6237,13 @@ export class Agent<
 
   protected async _cf_hydrateSubAgentConnectionsFromRoot(): Promise<void> {
     if (!this._isFacet || this._parentPath.length === 0) return;
+
+    if (this._cf_rootResolvesToSelf()) {
+      // The root stub would resolve back to this blocked Durable Object
+      // during startup. The facet view cannot see root-owned hibernated
+      // sockets locally, so preserve liveness and skip best-effort hydration.
+      return;
+    }
 
     const root = await this._rootAlarmOwner();
     const metas = await root._cf_subAgentConnectionMetas(this.selfPath);

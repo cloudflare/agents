@@ -1393,6 +1393,18 @@ describe("SubAgent", () => {
     expect(error).toBe("");
   });
 
+  it("should restart a same-name sub-agent without self-deadlocking startup", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    expect(await agent.subAgentPing(name)).toBe("pong");
+    await agent.subAgentAbort(name);
+
+    // Regression for #1577: the child's persisted parent path points at
+    // the same DO id, so startup hydration must not resolve root via RPC.
+    expect(await agent.subAgentPing(name)).toBe("pong");
+  });
+
   it("should spawn a sub-agent from a WebSocket onMessage turn", async () => {
     const name = uniqueName();
     const ws = await connectWS(`/agents/test-sub-agent-parent/${name}`);
