@@ -320,6 +320,22 @@ describe("TelnyxTTS", () => {
       expect(audio).toBeNull();
     });
 
+    it("unblocks a waiting stream immediately when abort close throws", async () => {
+      const tts = new TelnyxTTS({ apiKey: "test-key", backend: "websocket" });
+      const controller = new AbortController();
+      const mockWs = new MockWebSocket("mock");
+      mockWs.close.mockImplementation(() => {
+        throw new Error("close failed");
+      });
+      mockFetch.mockResolvedValueOnce({ webSocket: mockWs });
+
+      const promise = tts.synthesize("Hello", controller.signal);
+      await vi.waitFor(() => expect(mockWs.send).toHaveBeenCalledTimes(3));
+      controller.abort();
+
+      await expect(promise).resolves.toBeNull();
+    });
+
     it("skips blob frames where text is not null", async () => {
       const tts = new TelnyxTTS({ apiKey: "test-key", backend: "websocket" });
       const mockWs = new MockWebSocket("mock");

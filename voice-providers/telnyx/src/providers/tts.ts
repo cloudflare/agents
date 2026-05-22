@@ -286,6 +286,7 @@ export class TelnyxTTS implements TTSProvider, StreamingTTSProvider {
       } catch {
         /* ignore */
       }
+      notify();
     };
 
     if (signal) {
