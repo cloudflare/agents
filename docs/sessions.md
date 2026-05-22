@@ -75,14 +75,15 @@ const session = new Session(new AgentSessionProvider(this), {
 
 All builder methods return `this` for chaining. Order does not matter — providers are resolved lazily on first use.
 
-| Method                          | Description                                                                                                                                                   |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Session.create(agent)`         | Static factory. `agent` is any object with a `sql` tagged template method (i.e. your Agent/DO).                                                               |
-| `.forSession(sessionId)`        | Namespace this session by ID. Required for multi-session isolation when not using SessionManager. Context provider keys and storage are scoped to this ID.    |
-| `.withContext(label, options?)` | Add a context block. See [Context Blocks](#context-blocks).                                                                                                   |
-| `.withCachedPrompt(provider?)`  | Enable system prompt persistence. The prompt is frozen on first use and survives DO hibernation/eviction. Without an explicit provider, auto-wires to SQLite. |
-| `.onCompaction(fn)`             | Register a compaction function. See [Compaction](#compaction).                                                                                                |
-| `.compactAfter(tokenThreshold)` | Auto-compact when estimated token count exceeds the threshold. Checked after each `appendMessage()`. Requires `.onCompaction()`.                              |
+| Method                                    | Description                                                                                                                                                   |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Session.create(agent)`                   | Static factory. `agent` is any object with a `sql` tagged template method (i.e. your Agent/DO).                                                               |
+| `.forSession(sessionId)`                  | Namespace this session by ID. Required for multi-session isolation when not using SessionManager. Context provider keys and storage are scoped to this ID.    |
+| `.withContext(label, options?)`           | Add a context block. See [Context Blocks](#context-blocks).                                                                                                   |
+| `.withCachedPrompt(provider?)`            | Enable system prompt persistence. The prompt is frozen on first use and survives DO hibernation/eviction. Without an explicit provider, auto-wires to SQLite. |
+| `.onCompaction(fn)`                       | Register a compaction function. See [Compaction](#compaction).                                                                                                |
+| `.compactAfter(tokenThreshold, options?)` | Auto-compact when estimated token count exceeds the threshold. Checked after each `appendMessage()`. Requires `.onCompaction()`.                              |
+| `.onCompactionError(handler)`             | Handle errors from automatic compaction. Handler failures are swallowed so message writes remain non-fatal.                                                   |
 
 ### Messages
 
@@ -404,7 +405,28 @@ const overlays = await session.getCompactions();
 
 When `.compactAfter(threshold)` is set, `appendMessage()` checks the estimated token count after each write. If it exceeds the threshold, `compact()` is called automatically. Auto-compaction failure is non-fatal — the message is already saved.
 
-> **Note:** Token estimation is heuristic (not tiktoken). It uses `max(chars/4, words*1.3)` with 4 tokens per-message overhead. This is intentional — tiktoken would add 80-120MB heap overhead, which exceeds Cloudflare Workers' 128MB limit.
+By default, the estimate includes stored message parts plus the Session-managed frozen system prompt. That means context blocks and cached prompts managed by `Session` contribute to the threshold. The estimate does not include framework-specific prompt additions or tool schema serialization that happen outside `Session`, such as Think's final capability prompt and tool catalog.
+
+Use `tokenCounter` when you have model-reported usage or your own tokenizer:
+
+```typescript
+const session = Session.create(this)
+  .onCompaction(myCompactFn)
+  .compactAfter(100_000, {
+    tokenCounter: async ({ messages, systemPrompt, contextBlocks }) => {
+      return estimateWithYourTokenizer({
+        messages,
+        systemPrompt,
+        contextBlocks
+      });
+    }
+  })
+  .onCompactionError((err) => {
+    console.warn("Auto-compaction failed", err);
+  });
+```
+
+> **Note:** The default token estimation is heuristic (not tiktoken). It uses `max(chars/4, words*1.3)` with 4 tokens per-message overhead, and also applies the string heuristic to the Session-managed system prompt. This is intentional — tiktoken would add 80-120MB heap overhead, which exceeds Cloudflare Workers' 128MB limit.
 
 > **Gotcha:** Compaction is iterative but single-overlay. Each new compaction extends from the earliest existing compaction's `fromMessageId` to the new end. So you always have at most one active compaction overlay per session, and it keeps growing. The previous compaction rows remain in the database but are superseded by the latest one (which covers a wider range). `getCompactions()` returns all of them, but `getHistory()` applies the latest one.
 
@@ -432,14 +454,15 @@ Context blocks, prompt caching, and compaction settings are propagated to all se
 
 ### Builder Methods
 
-| Method                          | Description                                                                                                              |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `SessionManager.create(agent)`  | Static factory.                                                                                                          |
-| `.withContext(label, options?)` | Add context block template for all sessions.                                                                             |
-| `.withCachedPrompt(provider?)`  | Enable prompt persistence for all sessions.                                                                              |
-| `.onCompaction(fn)`             | Register compaction function for all sessions.                                                                           |
-| `.compactAfter(tokenThreshold)` | Auto-compact threshold for all sessions.                                                                                 |
-| `.withSearchableHistory(label)` | Add a cross-session searchable history block to every session. The model can search past conversations from any session. |
+| Method                                    | Description                                                                                                              |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `SessionManager.create(agent)`            | Static factory.                                                                                                          |
+| `.withContext(label, options?)`           | Add context block template for all sessions.                                                                             |
+| `.withCachedPrompt(provider?)`            | Enable prompt persistence for all sessions.                                                                              |
+| `.onCompaction(fn)`                       | Register compaction function for all sessions.                                                                           |
+| `.compactAfter(tokenThreshold, options?)` | Auto-compact threshold for all sessions. Supports the same `tokenCounter` option as `Session`.                           |
+| `.onCompactionError(handler)`             | Handle automatic compaction errors for managed sessions.                                                                 |
+| `.withSearchableHistory(label)`           | Add a cross-session searchable history block to every session. The model can search past conversations from any session. |
 
 ### Session Lifecycle
 

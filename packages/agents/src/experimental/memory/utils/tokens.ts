@@ -49,10 +49,21 @@ export function estimateStringTokens(text: string): number {
   return Math.ceil(Math.max(charEstimate, wordEstimate));
 }
 
+function estimateUnknownTokens(value: unknown): number {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === "string") return estimateStringTokens(value);
+
+  try {
+    return estimateStringTokens(JSON.stringify(value));
+  } catch {
+    return estimateStringTokens(String(value));
+  }
+}
+
 /**
  * Estimate total token count for an array of UIMessages.
  *
- * Walks each message's parts (text, tool invocations, tool results)
+ * Walks each message's parts (text, reasoning, tool invocations, tool results)
  * and applies per-message overhead.
  *
  * This is a heuristic. Do not use where exact counts are required.
@@ -62,21 +73,18 @@ export function estimateMessageTokens(messages: SessionMessage[]): number {
   for (const msg of messages) {
     tokens += TOKENS_PER_MESSAGE;
     for (const part of msg.parts) {
-      if (part.type === "text") {
-        tokens += estimateStringTokens(
-          (part as { type: "text"; text: string }).text
-        );
+      if (part.type === "text" || part.type === "reasoning") {
+        tokens += estimateUnknownTokens(part.text ?? part.reasoning);
       } else if (
         part.type.startsWith("tool-") ||
         part.type === "dynamic-tool"
       ) {
-        const toolPart = part as { input?: unknown; output?: unknown };
-        if (toolPart.input) {
-          tokens += estimateStringTokens(JSON.stringify(toolPart.input));
-        }
-        if (toolPart.output) {
-          tokens += estimateStringTokens(JSON.stringify(toolPart.output));
-        }
+        tokens += estimateUnknownTokens(part.input);
+        tokens += estimateUnknownTokens(part.output ?? part.result);
+      } else if (part.text !== undefined) {
+        tokens += estimateUnknownTokens(part.text);
+      } else if (part.result !== undefined) {
+        tokens += estimateUnknownTokens(part.result);
       }
     }
   }

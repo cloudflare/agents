@@ -505,7 +505,7 @@ export class ContextBlocks {
     return this.captureSnapshot();
   }
 
-  private captureSnapshot(): string {
+  private renderPrompt(): string {
     const parts: string[] = [];
     const sep = "═".repeat(46);
 
@@ -534,7 +534,11 @@ export class ContextBlocks {
       parts.push(`${sep}\n${header}\n${sep}\n${block.content}`);
     }
 
-    this.snapshot = parts.join("\n\n");
+    return parts.join("\n\n");
+  }
+
+  private captureSnapshot(): string {
+    this.snapshot = this.renderPrompt();
     return this.snapshot;
   }
 
@@ -598,6 +602,28 @@ export class ContextBlocks {
     }
 
     return prompt;
+  }
+
+  /**
+   * Return the prompt text used for token estimation without persisting a new
+   * frozen prompt to the prompt store.
+   *
+   * This still reads an existing cached prompt when present, so estimates match
+   * the prompt that inference would reuse. If no cached prompt exists, it loads
+   * providers and renders the current blocks without freezing the snapshot.
+   */
+  async getSystemPromptForEstimate(): Promise<string> {
+    if (this.snapshot !== null) {
+      return this.snapshot;
+    }
+
+    if (this.promptStore) {
+      const stored = await this.promptStore.get();
+      if (stored !== null) return stored;
+    }
+
+    if (!this.loaded) await this.load();
+    return this.renderPrompt();
   }
 
   /**
