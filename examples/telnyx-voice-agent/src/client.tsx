@@ -452,6 +452,7 @@ function App() {
                 value={text}
                 onChange={(event) => setText(event.target.value)}
                 placeholder="Send a text turn to the same agent..."
+                aria-label="Text message"
                 disabled={!canSendText}
               />
               <Button
