@@ -230,6 +230,13 @@ export class TestWorkflowAgent extends Agent {
     });
   }
 
+  // Start a simple workflow using the Agent's generated default ID
+  async runSimpleWorkflowTestWithDefaultId(params: {
+    value: string;
+  }): Promise<string> {
+    return this.runWorkflow("SIMPLE_WORKFLOW", params);
+  }
+
   // Send an event to a workflow
   async sendApprovalEvent(
     workflowId: string,

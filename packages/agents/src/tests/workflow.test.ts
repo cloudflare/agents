@@ -260,6 +260,16 @@ describe("workflow operations", () => {
       );
     });
 
+    it("should generate valid default workflow IDs", async () => {
+      const agentStub = await getTestAgent("workflow-default-id-test");
+
+      const workflowId = await agentStub.runSimpleWorkflowTestWithDefaultId({
+        value: "default-id"
+      });
+
+      expect(workflowId).toMatch(/^wf_[a-zA-Z0-9_-]+$/);
+    });
+
     it("should migrate workflow binding names", async () => {
       const agentStub = await getTestAgent("workflow-migrate-test");
 

@@ -8091,8 +8091,8 @@ export class Agent<
       );
     }
 
-    // Generate workflow ID if not provided
-    const workflowId = options?.id ?? nanoid();
+    // Workflows instance IDs must start with [a-zA-Z0-9_].
+    const workflowId = options?.id ?? `wf_${nanoid()}`;
 
     // Inject agent identity and workflow name into params
     const augmentedParams = {
