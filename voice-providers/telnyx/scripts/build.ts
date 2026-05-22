@@ -5,7 +5,7 @@ async function main() {
   await build({
     clean: true,
     dts: true,
-    entry: ["src/index.ts", "src/stt.ts", "src/tts.ts", "src/telephony.ts"],
+    entry: ["src/index.ts", "src/stt.ts", "src/tts.ts", "src/browser.ts"],
     skipNodeModulesBundle: true,
     external: ["cloudflare:workers", "@telnyx/webrtc"],
     format: "esm",

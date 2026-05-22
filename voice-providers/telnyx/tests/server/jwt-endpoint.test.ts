@@ -163,11 +163,18 @@ describe("TelnyxJWTEndpoint", () => {
           new Response(JSON.stringify({ errors: [{ detail: "Not found" }] }), {
             status: 404
           })
-        );
+        )
+        .mockResolvedValueOnce(new Response(null, { status: 200 }));
 
       await expect(
         new TelnyxJWTEndpoint(MOCK_CONFIG).createToken()
       ).rejects.toThrow("Failed to generate JWT: 404");
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
+      expect(fetchSpy.mock.calls[2]?.[0]).toBe(
+        "https://api.telnyx.com/v2/telephony_credentials/cred-789"
+      );
+      const [, revokeOptions] = fetchSpy.mock.calls[2] as [string, RequestInit];
+      expect(revokeOptions.method).toBe("DELETE");
     });
   });
 
@@ -198,6 +205,16 @@ describe("TelnyxJWTEndpoint", () => {
       await expect(
         new TelnyxJWTEndpoint(MOCK_CONFIG).revokeCredential("bad-id")
       ).rejects.toThrow("Failed to revoke credential: 404");
+    });
+
+    it("URL-encodes credential IDs when deleting", async () => {
+      fetchSpy.mockResolvedValueOnce(new Response(null, { status: 200 }));
+
+      await new TelnyxJWTEndpoint(MOCK_CONFIG).revokeCredential("cred/789");
+
+      expect(fetchSpy.mock.calls[0]?.[0]).toBe(
+        "https://api.telnyx.com/v2/telephony_credentials/cred%2F789"
+      );
     });
   });
 

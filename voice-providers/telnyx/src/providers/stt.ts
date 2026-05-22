@@ -167,6 +167,16 @@ export class TelnyxSTTSession implements TranscriberSession {
         );
       }
 
+      if (this.closed) {
+        try {
+          (ws as unknown as { accept: () => void }).accept();
+          ws.close();
+        } catch {
+          // ignore cleanup errors for a session that was closed while connecting
+        }
+        return;
+      }
+
       // Register listeners BEFORE accepting the connection to avoid
       // a race where frames arrive between accept() and addEventListener().
       ws.addEventListener("message", (event: MessageEvent) => {

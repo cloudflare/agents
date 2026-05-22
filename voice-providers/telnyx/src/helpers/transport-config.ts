@@ -4,7 +4,7 @@
  *
  * Usage:
  * ```typescript
- * import { createTelnyxVoiceConfig } from "@cloudflare/voice-telnyx";
+ * import { createTelnyxVoiceConfig } from "@cloudflare/voice-telnyx/browser";
  * import { VoiceClient } from "@cloudflare/voice/client";
  *
  * const telnyx = await createTelnyxVoiceConfig({
@@ -95,11 +95,16 @@ export async function createTelnyxVoiceConfig(
   const cleanup = async (): Promise<void> => {
     bridge.stop();
     if (credentialId) {
-      await fetch(options.jwtEndpoint, {
+      const response = await fetch(options.jwtEndpoint, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ credentialId })
       });
+      if (!response.ok) {
+        throw new Error(
+          `Failed to revoke Telnyx credential: ${response.status}`
+        );
+      }
     }
   };
 

@@ -1,13 +1,15 @@
 import { Agent, routeAgentRequest } from "agents";
 import { withVoice, type VoiceTurnContext } from "@cloudflare/voice";
-import { TelnyxSTT, TelnyxTTS } from "@cloudflare/voice-telnyx";
-import { TelnyxJWTEndpoint } from "@cloudflare/voice-telnyx/telephony";
+import { TelnyxJWTEndpoint } from "@cloudflare/voice-telnyx";
+import { TelnyxSTT } from "@cloudflare/voice-telnyx/stt";
+import { TelnyxTTS } from "@cloudflare/voice-telnyx/tts";
 import { streamText } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 
 const VoiceAgent = withVoice(Agent);
 
 const SYSTEM_PROMPT = `You are a friendly phone voice assistant powered by Cloudflare Workers and Telnyx. Keep responses concise, conversational, and suitable for a live phone call.`;
+let warnedUnauthenticatedTelnyxTokenEndpoint = false;
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
   transcriber = new TelnyxSTT({
@@ -51,6 +53,13 @@ export default {
         return new Response(
           "TELNYX_CREDENTIAL_CONNECTION_ID is required for telephony",
           { status: 500 }
+        );
+      }
+
+      if (!warnedUnauthenticatedTelnyxTokenEndpoint) {
+        warnedUnauthenticatedTelnyxTokenEndpoint = true;
+        console.warn(
+          "[telnyx-voice-agent] /api/telnyx-token is using allowUnauthenticated: true for the local demo. Add an authorize() callback before deploying this endpoint publicly."
         );
       }
 

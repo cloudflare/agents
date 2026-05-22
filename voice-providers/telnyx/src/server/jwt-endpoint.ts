@@ -88,43 +88,55 @@ export class TelnyxJWTEndpoint {
     const credentialId = credBody.data.id;
     const sipUsername = credBody.data.sip_username;
 
-    // Step 2: Generate JWT from the credential
-    const tokenResponse = await fetch(
-      `${this.baseUrl}/telephony_credentials/${credentialId}/token`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-
-    if (!tokenResponse.ok) {
-      throw new Error(`Failed to generate JWT: ${tokenResponse.status}`);
-    }
-
-    // The Telnyx token endpoint may return a raw JWT string or a JSON
-    // wrapper like { data: "eyJ..." }. Handle both.
-    const tokenText = await tokenResponse.text();
-    let token: string;
     try {
-      const parsed: unknown = JSON.parse(tokenText);
-      token =
-        typeof parsed === "string"
-          ? parsed
-          : typeof parsed === "object" &&
-              parsed !== null &&
-              "data" in parsed &&
-              typeof parsed.data === "string"
-            ? parsed.data
-            : tokenText;
-    } catch {
-      // Raw JWT string (not JSON-wrapped)
-      token = tokenText;
-    }
+      // Step 2: Generate JWT from the credential
+      const tokenResponse = await fetch(
+        `${this.telephonyCredentialUrl(credentialId)}/token`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`,
+            "Content-Type": "application/json"
+          }
+        }
+      );
 
-    return { token, credentialId, sipUsername };
+      if (!tokenResponse.ok) {
+        throw new Error(`Failed to generate JWT: ${tokenResponse.status}`);
+      }
+
+      // The Telnyx token endpoint may return a raw JWT string or a JSON
+      // wrapper like { data: "eyJ..." }. Handle both.
+      const tokenText = await tokenResponse.text();
+      let token: string;
+      try {
+        const parsed: unknown = JSON.parse(tokenText);
+        token =
+          typeof parsed === "string"
+            ? parsed
+            : typeof parsed === "object" &&
+                parsed !== null &&
+                "data" in parsed &&
+                typeof parsed.data === "string"
+              ? parsed.data
+              : tokenText;
+      } catch {
+        // Raw JWT string (not JSON-wrapped)
+        token = tokenText;
+      }
+
+      return { token, credentialId, sipUsername };
+    } catch (error) {
+      try {
+        await this.revokeCredential(credentialId);
+      } catch (revokeError) {
+        console.warn(
+          `Failed to revoke Telnyx credential ${credentialId} after token creation failed:`,
+          revokeError
+        );
+      }
+      throw error;
+    }
   }
 
   /**
@@ -132,16 +144,13 @@ export class TelnyxJWTEndpoint {
    * Call this when a session ends to clean up server-side resources.
    */
   async revokeCredential(credentialId: string): Promise<void> {
-    const response = await fetch(
-      `${this.baseUrl}/telephony_credentials/${credentialId}`,
-      {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          "Content-Type": "application/json"
-        }
+    const response = await fetch(this.telephonyCredentialUrl(credentialId), {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        "Content-Type": "application/json"
       }
-    );
+    });
 
     if (!response.ok) {
       throw new Error(`Failed to revoke credential: ${response.status}`);
@@ -258,6 +267,12 @@ export class TelnyxJWTEndpoint {
         headers: { ...headers, "Content-Type": "application/json" }
       }
     );
+  }
+
+  private telephonyCredentialUrl(credentialId: string): string {
+    return `${this.baseUrl}/telephony_credentials/${encodeURIComponent(
+      credentialId
+    )}`;
   }
 
   private corsHeaders(request: Request): Record<string, string> {

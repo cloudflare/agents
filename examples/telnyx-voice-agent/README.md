@@ -42,12 +42,18 @@ npm run start -w @cloudflare/agents-telnyx-voice-agent
 Open the local URL and click **Connect phone bridge**. The browser fetches a short-lived Telnyx WebRTC token, opens a WebSocket to the Cloudflare Agent, then waits for an inbound phone call. Call the phone number assigned to your Telnyx SIP connection; inbound calls are auto-answered and routed through the AI agent.
 
 The browser acts as a control panel and bridge. Audio comes from the phone call and returns to the phone call — it does not use the browser microphone or speakers.
+Keep the browser tab open for the duration of the call; closing it closes the live WebRTC bridge.
 
 ## Deploy
 
 ```bash
 npm run deploy -w @cloudflare/agents-telnyx-voice-agent
 ```
+
+This example intentionally allows unauthenticated token creation for local demos.
+Before deploying publicly, replace `allowUnauthenticated: true` with an
+`authorize()` callback so arbitrary visitors cannot mint Telnyx credentials on
+your account.
 
 ## Key pattern
 

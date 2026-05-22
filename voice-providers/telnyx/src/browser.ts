@@ -1,7 +1,7 @@
 /**
- * @cloudflare/voice-telnyx/telephony
+ * @cloudflare/voice-telnyx/browser
  *
- * Telnyx PSTN telephony bridge for the Cloudflare Agents SDK.
+ * Browser-side Telnyx PSTN telephony bridge for the Cloudflare Agents SDK.
  * Depends on @telnyx/webrtc for WebRTC-based phone audio.
  */
 
@@ -19,10 +19,6 @@ export {
   TelnyxPhoneTransport,
   type TelnyxPhoneTransportConfig
 } from "./transport/phone-transport.js";
-export {
-  TelnyxJWTEndpoint,
-  type TelnyxJWTEndpointConfig
-} from "./server/jwt-endpoint.js";
 export {
   createTelnyxVoiceConfig,
   type TelnyxVoiceConfigOptions,

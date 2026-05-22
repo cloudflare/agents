@@ -9,7 +9,7 @@ import type {
 import {
   createTelnyxVoiceConfig,
   TelnyxPhoneClient
-} from "@cloudflare/voice-telnyx/telephony";
+} from "@cloudflare/voice-telnyx/browser";
 import {
   Badge,
   Button,
@@ -114,6 +114,7 @@ function App() {
   const phoneClientRef = useRef<TelnyxPhoneClient | null>(null);
   const cleanupRef = useRef<(() => Promise<void>) | null>(null);
   const callStartedRef = useRef(false);
+  const connectAttemptRef = useRef(0);
 
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -139,22 +140,41 @@ function App() {
 
   useEffect(() => {
     return () => {
+      connectAttemptRef.current++;
       phoneClientRef.current?.disconnect();
       void cleanupRef.current?.();
     };
   }, []);
 
+  async function cleanupCurrentBridge() {
+    phoneClientRef.current?.disconnect();
+    phoneClientRef.current = null;
+    const cleanup = cleanupRef.current;
+    cleanupRef.current = null;
+    await cleanup?.();
+  }
+
   async function connectBridge() {
+    const attempt = connectAttemptRef.current + 1;
+    connectAttemptRef.current = attempt;
     setConnecting(true);
     setError(null);
     setBridgeStatus("Fetching a Telnyx WebRTC token...");
 
     try {
+      await cleanupCurrentBridge();
+      if (connectAttemptRef.current !== attempt) return;
+
       const telnyx = await createTelnyxVoiceConfig({
         jwtEndpoint: "/api/telnyx-token",
         autoAnswer: true,
-        debug: true
+        debug: false
       });
+
+      if (connectAttemptRef.current !== attempt) {
+        await telnyx.cleanup();
+        return;
+      }
 
       cleanupRef.current = telnyx.cleanup;
       setSipUsername(telnyx.sipUsername || null);
@@ -176,6 +196,7 @@ function App() {
       phoneClient.addEventListener("mutechange", setIsMuted);
       phoneClient.addEventListener("error", setError);
       phoneClient.addEventListener("connectionchange", (isConnected) => {
+        if (connectAttemptRef.current !== attempt) return;
         setConnected(isConnected);
         if (!isConnected) {
           setBridgeStatus("Worker connection dropped; reconnecting...");
@@ -206,6 +227,12 @@ function App() {
         );
       });
 
+      if (connectAttemptRef.current !== attempt) {
+        phoneClient.disconnect();
+        await telnyx.cleanup();
+        return;
+      }
+
       phoneClientRef.current = phoneClient;
       phoneClient.connect();
     } catch (err) {
@@ -221,10 +248,13 @@ function App() {
   }
 
   async function disconnectBridge() {
-    phoneClientRef.current?.disconnect();
-    phoneClientRef.current = null;
-    await cleanupRef.current?.();
-    cleanupRef.current = null;
+    connectAttemptRef.current++;
+    try {
+      await cleanupCurrentBridge();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+    }
 
     setConnected(false);
     setConnecting(false);
@@ -243,7 +273,8 @@ function App() {
   }
 
   const canSendText = connected && phoneClientRef.current !== null;
-  const bridgeActive = connected || connecting;
+  const bridgeActive =
+    connected || connecting || phoneClientRef.current !== null;
 
   return (
     <main className="min-h-screen bg-kumo-base text-kumo-default">

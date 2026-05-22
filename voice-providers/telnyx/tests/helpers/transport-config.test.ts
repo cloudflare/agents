@@ -135,6 +135,25 @@ describe("createTelnyxVoiceConfig", () => {
     expect(result.bridge.stop).toHaveBeenCalled();
   });
 
+  it("cleanup throws when credential revocation fails", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify(MOCK_TOKEN_RESPONSE), { status: 200 })
+    );
+
+    const result = await createTelnyxVoiceConfig({
+      jwtEndpoint: "/api/telnyx-token"
+    });
+
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "nope" }), { status: 500 })
+    );
+
+    await expect(result.cleanup()).rejects.toThrow(
+      "Failed to revoke Telnyx credential: 500"
+    );
+    expect(result.bridge.stop).toHaveBeenCalled();
+  });
+
   it("throws when JWT fetch fails", async () => {
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 })

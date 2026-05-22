@@ -375,6 +375,28 @@ describe("TelnyxSTTSession", () => {
   });
 
   describe("close", () => {
+    it("closes a WebSocket that resolves after the session is closed", async () => {
+      const ws = createMockWebSocket();
+      let resolveFetch:
+        | ((value: { webSocket?: MockWebSocket }) => void)
+        | undefined;
+      mockFetch.mockImplementationOnce(
+        () =>
+          new Promise<{ webSocket?: MockWebSocket }>((resolve) => {
+            resolveFetch = resolve;
+          })
+      );
+
+      const session = new TelnyxSTT({ apiKey: "test-key" }).createSession();
+      session.close();
+      resolveFetch?.({ webSocket: ws });
+      await flushConnection();
+
+      expect(ws.accept).toHaveBeenCalledTimes(1);
+      expect(ws.close).toHaveBeenCalledTimes(1);
+      expect(ws.send).not.toHaveBeenCalled();
+    });
+
     it("closes the WebSocket", async () => {
       const session = new TelnyxSTT({ apiKey: "test-key" }).createSession();
       await flushConnection();

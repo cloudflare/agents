@@ -123,6 +123,30 @@ describe("TelnyxCallBridge", () => {
       expect(bridge.connected).toBe(true);
     });
 
+    it("start is idempotent once connected", async () => {
+      const { TelnyxRTC, __mockClient } = await getMockTelnyx();
+      setReadyOnStart(__mockClient);
+      const bridge = new TelnyxCallBridge({ loginToken: "test-jwt" });
+
+      await bridge.start();
+      await bridge.start();
+
+      expect(TelnyxRTC).toHaveBeenCalledTimes(1);
+      expect(__mockClient.connect).toHaveBeenCalledTimes(1);
+    });
+
+    it("stop settles an in-flight start", async () => {
+      const { __mockClient } = await getMockTelnyx();
+      __mockClient.on.mockImplementation(() => {});
+      const bridge = new TelnyxCallBridge({ loginToken: "test-jwt" });
+
+      const startPromise = bridge.start();
+      bridge.stop();
+
+      await expect(startPromise).resolves.toBeUndefined();
+      expect(__mockClient.disconnect).toHaveBeenCalled();
+    });
+
     it("stop disconnects the client and sets connected to false", async () => {
       const { __mockClient } = await getMockTelnyx();
       setReadyOnStart(__mockClient);
@@ -629,10 +653,16 @@ describe("TelnyxCallBridge", () => {
   });
 
   describe("package exports", () => {
-    it("exports TelnyxCallBridge from the package root", async () => {
-      const mod = await import("../../src/index.js");
+    it("exports TelnyxCallBridge from the browser entrypoint", async () => {
+      const mod = await import("../../src/browser.js");
 
       expect(mod.TelnyxCallBridge).toBeDefined();
+    });
+
+    it("keeps browser telephony out of the package root", async () => {
+      const mod = await import("../../src/index.js");
+
+      expect("TelnyxCallBridge" in mod).toBe(false);
     });
   });
 });

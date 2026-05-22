@@ -16,7 +16,7 @@
  * @example
  * ```typescript
  * import { WebSocketVoiceTransport, VoiceClient } from "@cloudflare/voice/client";
- * import { TelnyxPhoneTransport, createTelnyxVoiceConfig } from "@cloudflare/voice-telnyx";
+ * import { TelnyxPhoneTransport, createTelnyxVoiceConfig } from "@cloudflare/voice-telnyx/browser";
  *
  * const telnyx = await createTelnyxVoiceConfig({
  *   jwtEndpoint: "/api/telnyx-token",

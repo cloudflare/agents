@@ -12,14 +12,13 @@
  * speakers. VoiceClient has no hook to redirect this. TelnyxPhoneClient
  * gives full control over both audio directions.
  *
- * **Server requirement:** Use `audioFormat: "pcm16"` in your server-side
- * VoiceAgentOptions so audio arrives as 16kHz mono Int16 LE — the format
- * TelnyxCallBridge.playAudio() expects.
+ * For lowest latency, configure the server to send 16kHz mono PCM16 audio.
+ * Non-PCM formats such as MP3 are decoded in the browser before playback.
  *
  * @example
  * ```typescript
  * import { WebSocketVoiceTransport } from "@cloudflare/voice/client";
- * import { TelnyxPhoneClient, createTelnyxVoiceConfig } from "@cloudflare/voice-telnyx";
+ * import { TelnyxPhoneClient, createTelnyxVoiceConfig } from "@cloudflare/voice-telnyx/browser";
  *
  * const telnyx = await createTelnyxVoiceConfig({
  *   jwtEndpoint: "/api/telnyx-token",
@@ -210,7 +209,7 @@ export class TelnyxPhoneClient {
       this.emit("connectionchange", true);
       this.emit("error", null);
       // If we were already in a call when reconnecting, re-send start_call
-      if (this.inCall) this.transport.sendJSON({ type: "start_call" });
+      if (this.inCall) this.transport.sendJSON(this.createStartCallMessage());
     };
 
     this.transport.onclose = () => {
@@ -263,9 +262,7 @@ export class TelnyxPhoneClient {
     this.emit("error", null);
     this.emit("metricschange", null);
 
-    const startMsg: Record<string, unknown> = { type: "start_call" };
-    if (this.preferredFormat) startMsg.preferred_format = this.preferredFormat;
-    this.transport.sendJSON(startMsg);
+    this.transport.sendJSON(this.createStartCallMessage());
 
     // Wire bridge → server audio pipeline
     this.bridge.onAudioLevel = (rms) => this.processAudioLevel(rms);
@@ -339,6 +336,12 @@ export class TelnyxPhoneClient {
   /** Send arbitrary JSON to the agent (app-level messages). */
   sendJSON(data: Record<string, unknown>): void {
     if (this.transport.connected) this.transport.sendJSON(data);
+  }
+
+  private createStartCallMessage(): Record<string, unknown> {
+    const startMsg: Record<string, unknown> = { type: "start_call" };
+    if (this.preferredFormat) startMsg.preferred_format = this.preferredFormat;
+    return startMsg;
   }
 
   // ─── Server Message Handling ──────────────────────────────────────────

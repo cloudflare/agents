@@ -168,6 +168,23 @@ describe("TelnyxPhoneClient", () => {
 
       expect(client.serverProtocolVersion).toBe(1);
     });
+
+    it("re-sends preferred audio format when reconnecting during a call", async () => {
+      await startCall(client, transport);
+      transport.sendJSON.mockClear();
+
+      transport._fireClose();
+      transport._fireOpen();
+
+      expect(transport.sendJSON).toHaveBeenCalledWith({
+        type: "hello",
+        protocol_version: 1
+      });
+      expect(transport.sendJSON).toHaveBeenCalledWith({
+        type: "start_call",
+        preferred_format: "pcm16"
+      });
+    });
   });
 
   describe("startCall / endCall", () => {

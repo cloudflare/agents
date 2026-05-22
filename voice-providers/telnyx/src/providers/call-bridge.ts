@@ -112,6 +112,10 @@ export class TelnyxCallBridge implements VoiceAudioInput {
   private playbackContext: AudioContext | null = null;
   private playbackWorklet: AudioWorkletNode | null = null;
   private playbackBlobUrl: string | null = null;
+  private startPromise: Promise<void> | null = null;
+  private finishStart: (() => void) | null = null;
+  private startAttempt = 0;
+  private mediaSetupAttempt = 0;
 
   constructor(config: TelnyxCallBridgeConfig) {
     this.config = config;
@@ -129,27 +133,49 @@ export class TelnyxCallBridge implements VoiceAudioInput {
 
   /** Connect to Telnyx and start listening for calls. */
   async start(): Promise<void> {
-    this.client = new TelnyxRTC({
+    if (this._connected) return;
+    if (this.startPromise) return this.startPromise;
+
+    const attempt = ++this.startAttempt;
+    const client = new TelnyxRTC({
       login_token: this.config.loginToken,
       debug: this.config.debug
     });
+    this.client = client;
 
-    return new Promise<void>((resolve, reject) => {
-      this.client?.on("telnyx.ready", () => {
+    this.startPromise = new Promise<void>((resolve, reject) => {
+      this.finishStart = resolve;
+      client.on("telnyx.ready", () => {
+        if (this.startAttempt !== attempt || this.client !== client) {
+          resolve();
+          return;
+        }
         this._connected = true;
         resolve();
       });
 
-      this.client?.on("telnyx.error", (error: unknown) => {
+      client.on("telnyx.error", (error: unknown) => {
+        if (this.startAttempt !== attempt || this.client !== client) {
+          resolve();
+          return;
+        }
         reject(error);
       });
 
-      this.client?.on("telnyx.notification", (notification: unknown) => {
+      client.on("telnyx.notification", (notification: unknown) => {
+        if (this.startAttempt !== attempt || this.client !== client) return;
         this.handleNotification(notification);
       });
 
-      this.client?.connect();
+      client.connect();
+    }).finally(() => {
+      if (this.startAttempt === attempt) {
+        this.startPromise = null;
+        this.finishStart = null;
+      }
     });
+
+    return this.startPromise;
   }
 
   /** Answer the current inbound call. */
@@ -223,6 +249,11 @@ export class TelnyxCallBridge implements VoiceAudioInput {
 
   /** Disconnect from Telnyx and clean up all resources. */
   stop(): void {
+    this.startAttempt++;
+    this.mediaSetupAttempt++;
+    this.finishStart?.();
+    this.finishStart = null;
+    this.startPromise = null;
     this.stopAudioCapture();
     this.stopAudioPlayback();
     this._activeCall = null;
@@ -263,10 +294,13 @@ export class TelnyxCallBridge implements VoiceAudioInput {
         console.log(
           "[TelnyxCallBridge] call active — starting audio capture + playback"
         );
-        this.startAudioCapture(call).catch((err) =>
+        this.mediaSetupAttempt++;
+        this.stopAudioCapture();
+        this.stopAudioPlayback();
+        this.startAudioCapture(call, this.mediaSetupAttempt).catch((err) =>
           console.error("[TelnyxCallBridge] startAudioCapture failed:", err)
         );
-        this.startAudioPlayback(call).catch((err) =>
+        this.startAudioPlayback(call, this.mediaSetupAttempt).catch((err) =>
           console.error("[TelnyxCallBridge] startAudioPlayback failed:", err)
         );
         break;
@@ -274,6 +308,7 @@ export class TelnyxCallBridge implements VoiceAudioInput {
       case "hangup":
       case "destroy":
       case "purge":
+        this.mediaSetupAttempt++;
         this.stopAudioCapture();
         this.stopAudioPlayback();
         this._activeCall = null;
@@ -281,7 +316,42 @@ export class TelnyxCallBridge implements VoiceAudioInput {
     }
   }
 
-  private async startAudioCapture(call: TelnyxCallLike): Promise<void> {
+  private isCurrentMediaSetup(setupAttempt: number): boolean {
+    return this.mediaSetupAttempt === setupAttempt;
+  }
+
+  private cleanupCaptureResources(resources: {
+    audioEl?: HTMLAudioElement | null;
+    context?: AudioContext | null;
+    source?: MediaStreamAudioSourceNode | null;
+    worklet?: AudioWorkletNode | null;
+    blobUrl?: string | null;
+  }): void {
+    resources.worklet?.disconnect();
+    resources.source?.disconnect();
+    resources.context?.close();
+    if (resources.blobUrl) URL.revokeObjectURL(resources.blobUrl);
+    if (resources.audioEl) {
+      resources.audioEl.pause();
+      resources.audioEl.srcObject = null;
+      resources.audioEl.remove();
+    }
+  }
+
+  private cleanupPlaybackResources(resources: {
+    context?: AudioContext | null;
+    worklet?: AudioWorkletNode | null;
+    blobUrl?: string | null;
+  }): void {
+    resources.worklet?.disconnect();
+    resources.context?.close();
+    if (resources.blobUrl) URL.revokeObjectURL(resources.blobUrl);
+  }
+
+  private async startAudioCapture(
+    call: TelnyxCallLike,
+    setupAttempt: number
+  ): Promise<void> {
     // Get the remote audio track from the peer connection receiver.
     const pc = getPeerConnection(call);
     let track: MediaStreamTrack | null = null;
@@ -316,13 +386,13 @@ export class TelnyxCallBridge implements VoiceAudioInput {
     // WebRTC audio decoder to start processing incoming RTP packets. Without
     // a media element consumer, the decoder may never run despite packets
     // arriving at the transport level (totalSamplesReceived stays 0).
-    this.captureAudioEl = document.createElement("audio");
-    this.captureAudioEl.srcObject = remoteStream;
-    this.captureAudioEl.autoplay = true;
-    this.captureAudioEl.volume = 0; // silent — audio goes to AI pipeline, not speakers
-    document.body.appendChild(this.captureAudioEl);
+    const captureAudioEl = document.createElement("audio");
+    captureAudioEl.srcObject = remoteStream;
+    captureAudioEl.autoplay = true;
+    captureAudioEl.volume = 0; // silent — audio goes to AI pipeline, not speakers
+    document.body.appendChild(captureAudioEl);
     try {
-      await this.captureAudioEl.play();
+      await captureAudioEl.play();
     } catch (e) {
       console.warn("[TelnyxCallBridge] audio element play() failed:", e);
     }
@@ -343,34 +413,47 @@ export class TelnyxCallBridge implements VoiceAudioInput {
         }, 5000);
       });
     }
-
-    // Start background stats monitoring to track decoder state
-    if (pc) {
-      this.monitorInboundStats(pc);
+    if (!this.isCurrentMediaSetup(setupAttempt)) {
+      this.cleanupCaptureResources({ audioEl: captureAudioEl });
+      return;
     }
 
     // Set up AudioContext for capture at 48kHz (matching WebRTC)
-    this.captureContext = new AudioContext({ sampleRate: 48000 });
-    if (this.captureContext.state === "suspended") {
-      await this.captureContext.resume();
+    const captureContext = new AudioContext({ sampleRate: 48000 });
+    if (captureContext.state === "suspended") {
+      await captureContext.resume();
+    }
+    if (!this.isCurrentMediaSetup(setupAttempt)) {
+      this.cleanupCaptureResources({
+        audioEl: captureAudioEl,
+        context: captureContext
+      });
+      return;
     }
 
     const blob = new Blob([PCM_CAPTURE_PROCESSOR_SOURCE], {
       type: "application/javascript"
     });
-    this.captureBlobUrl = URL.createObjectURL(blob);
-    await this.captureContext.audioWorklet.addModule(this.captureBlobUrl);
+    const captureBlobUrl = URL.createObjectURL(blob);
+    await captureContext.audioWorklet.addModule(captureBlobUrl);
+    if (!this.isCurrentMediaSetup(setupAttempt)) {
+      this.cleanupCaptureResources({
+        audioEl: captureAudioEl,
+        context: captureContext,
+        blobUrl: captureBlobUrl
+      });
+      return;
+    }
 
-    this.captureSource =
-      this.captureContext.createMediaStreamSource(remoteStream);
-    this.captureWorklet = new AudioWorkletNode(
-      this.captureContext,
+    const captureSource = captureContext.createMediaStreamSource(remoteStream);
+    const captureWorklet = new AudioWorkletNode(
+      captureContext,
       "pcm-capture-processor"
     );
 
     const downsampleRatio = 3; // 48kHz → 16kHz
     let captureCount = 0;
-    this.captureWorklet.port.onmessage = (event: MessageEvent) => {
+    captureWorklet.port.onmessage = (event: MessageEvent) => {
       if (!(event.data instanceof Float32Array)) return;
       const raw = event.data;
 
@@ -397,8 +480,18 @@ export class TelnyxCallBridge implements VoiceAudioInput {
       this.onAudioData?.(int16.buffer as ArrayBuffer);
     };
 
-    this.captureSource.connect(this.captureWorklet);
-    this.captureWorklet.connect(this.captureContext.destination);
+    this.captureAudioEl = captureAudioEl;
+    this.captureContext = captureContext;
+    this.captureBlobUrl = captureBlobUrl;
+    this.captureSource = captureSource;
+    this.captureWorklet = captureWorklet;
+    captureSource.connect(captureWorklet);
+    captureWorklet.connect(captureContext.destination);
+
+    // Start background stats monitoring to track decoder state
+    if (pc) {
+      this.monitorInboundStats(pc);
+    }
   }
 
   private monitorInboundStats(pc: RTCPeerConnection): void {
@@ -466,28 +559,45 @@ export class TelnyxCallBridge implements VoiceAudioInput {
     }
   }
 
-  private async startAudioPlayback(call: TelnyxCallLike): Promise<void> {
+  private async startAudioPlayback(
+    call: TelnyxCallLike,
+    setupAttempt: number
+  ): Promise<void> {
     const peerConnection = getPeerConnection(call);
     if (!peerConnection) return;
 
-    this.playbackContext = new AudioContext({ sampleRate: 48000 });
-    if (this.playbackContext.state === "suspended") {
-      await this.playbackContext.resume();
+    const playbackContext = new AudioContext({ sampleRate: 48000 });
+    if (playbackContext.state === "suspended") {
+      await playbackContext.resume();
+    }
+    if (!this.isCurrentMediaSetup(setupAttempt)) {
+      this.cleanupPlaybackResources({ context: playbackContext });
+      return;
     }
 
     const blob = new Blob([PCM_PLAYBACK_PROCESSOR_SOURCE], {
       type: "application/javascript"
     });
-    this.playbackBlobUrl = URL.createObjectURL(blob);
-    await this.playbackContext.audioWorklet.addModule(this.playbackBlobUrl);
+    const playbackBlobUrl = URL.createObjectURL(blob);
+    await playbackContext.audioWorklet.addModule(playbackBlobUrl);
+    if (!this.isCurrentMediaSetup(setupAttempt)) {
+      this.cleanupPlaybackResources({
+        context: playbackContext,
+        blobUrl: playbackBlobUrl
+      });
+      return;
+    }
 
-    this.playbackWorklet = new AudioWorkletNode(
-      this.playbackContext,
+    const playbackWorklet = new AudioWorkletNode(
+      playbackContext,
       "pcm-playback-processor"
     );
 
-    const destination = this.playbackContext.createMediaStreamDestination();
-    this.playbackWorklet.connect(destination);
+    const destination = playbackContext.createMediaStreamDestination();
+    this.playbackContext = playbackContext;
+    this.playbackBlobUrl = playbackBlobUrl;
+    this.playbackWorklet = playbackWorklet;
+    playbackWorklet.connect(destination);
 
     const audioTrack = destination.stream.getAudioTracks()[0];
     if (audioTrack) {

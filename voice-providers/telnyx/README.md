@@ -16,27 +16,23 @@ npm install @cloudflare/voice @cloudflare/voice-telnyx
 
 ## Subpath imports
 
-Use subpaths to keep STT/TTS imports independent of browser telephony code:
+The package root is server-safe and does not import browser WebRTC code. Use
+`/browser` only when you need the browser-side PSTN bridge:
 
 ```ts
 import { TelnyxSTT } from "@cloudflare/voice-telnyx/stt";
 import { TelnyxTTS } from "@cloudflare/voice-telnyx/tts";
-import { TelnyxCallBridge } from "@cloudflare/voice-telnyx/telephony";
-
-// Or import everything:
-import {
-  TelnyxSTT,
-  TelnyxTTS,
-  TelnyxCallBridge
-} from "@cloudflare/voice-telnyx";
+import { TelnyxJWTEndpoint } from "@cloudflare/voice-telnyx";
+import { TelnyxCallBridge } from "@cloudflare/voice-telnyx/browser";
 ```
 
-## Browser voice agent
+## Worker voice agent
 
 ```ts
 import { Agent, routeAgentRequest } from "agents";
 import { withVoice, type VoiceTurnContext } from "@cloudflare/voice";
-import { TelnyxSTT, TelnyxTTS } from "@cloudflare/voice-telnyx";
+import { TelnyxSTT } from "@cloudflare/voice-telnyx/stt";
+import { TelnyxTTS } from "@cloudflare/voice-telnyx/tts";
 
 const VoiceAgent = withVoice(Agent);
 
@@ -97,13 +93,16 @@ const tts = new TelnyxTTS({
 
 ### Telephony / PSTN bridge
 
+Server-side token helpers are available from the package root. Browser-side
+WebRTC/PSTN helpers are exported from `@cloudflare/voice-telnyx/browser`.
+
 ```ts
+import { TelnyxJWTEndpoint } from "@cloudflare/voice-telnyx";
 import {
-  TelnyxJWTEndpoint,
   createTelnyxVoiceConfig,
-  TelnyxPhoneTransport
-} from "@cloudflare/voice-telnyx/telephony";
-import { WebSocketVoiceTransport, VoiceClient } from "@cloudflare/voice/client";
+  TelnyxPhoneClient
+} from "@cloudflare/voice-telnyx/browser";
+import { WebSocketVoiceTransport } from "@cloudflare/voice/client";
 ```
 
 Create a server-side endpoint that keeps your Telnyx API key secret. The endpoint requires an `authorize` callback by default so a public route cannot mint Telnyx credentials for arbitrary clients:
@@ -122,7 +121,7 @@ const jwt = new TelnyxJWTEndpoint({
 return jwt.handleRequest(request);
 ```
 
-Create a browser bridge and route server audio back to the phone call:
+Create a browser bridge and connect it with `TelnyxPhoneClient`:
 
 ```ts
 const telnyx = await createTelnyxVoiceConfig({
@@ -130,20 +129,17 @@ const telnyx = await createTelnyxVoiceConfig({
   autoAnswer: true
 });
 
-const transport = new TelnyxPhoneTransport({
-  inner: new WebSocketVoiceTransport({ agent: "my-voice-agent" }),
+const client = new TelnyxPhoneClient({
+  transport: new WebSocketVoiceTransport({ agent: "my-voice-agent" }),
   bridge: telnyx.bridge
-});
-
-const client = new VoiceClient({
-  agent: "my-voice-agent",
-  audioInput: telnyx.audioInput,
-  transport,
-  preferredFormat: "pcm16"
 });
 ```
 
-> **Important:** Phone playback expects 16 kHz mono PCM16 server audio. Configure your server agent with `withVoice(Agent, { audioFormat: "pcm16" })` when routing agent responses to Telnyx PSTN through `TelnyxPhoneTransport`.
+`TelnyxPhoneClient` sends phone-call audio to the agent as PCM16. For playback,
+it routes PCM16 responses directly to the phone bridge and decodes formats such
+as MP3 in the browser before playback. If you use the lower-level
+`TelnyxPhoneTransport`, configure your server agent to send PCM16 audio because
+that transport does not decode non-PCM formats.
 
 ## Environment variables
 
