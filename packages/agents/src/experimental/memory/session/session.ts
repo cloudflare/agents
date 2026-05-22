@@ -430,9 +430,12 @@ export class Session {
   private async _estimateTokenCount(): Promise<number> {
     const messages = await this.getHistory();
     const systemPrompt = await this.context.getSystemPromptForEstimate();
-    const contextBlocks = this.context.getBlocks();
 
     if (this._tokenCounter) {
+      if (!this.context.isLoaded()) {
+        await this.context.load();
+      }
+      const contextBlocks = this.context.getBlocks();
       const estimate = await this._tokenCounter({
         messages,
         systemPrompt,

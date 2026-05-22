@@ -1156,6 +1156,87 @@ describe("Session.compact()", () => {
     expect(compactCalled).toBe(true);
   });
 
+  it("loads context blocks for a custom counter when prompt store is cached", async () => {
+    const counterInputs: Array<{
+      historyLength: number;
+      systemPrompt: string;
+      blockLabels: string[];
+      blockContents: string[];
+    }> = [];
+    const messages: SessionMessage[] = [];
+    const compactions: StoredCompaction[] = [];
+    const storage: SessionProvider = {
+      getMessage: (id) => messages.find((m) => m.id === id) ?? null,
+      getHistory: () => messages,
+      getLatestLeaf: () => messages[messages.length - 1] ?? null,
+      getBranches: () => [],
+      getPathLength: () => messages.length,
+      appendMessage: (msg) => {
+        messages.push(msg);
+      },
+      updateMessage: () => {},
+      deleteMessages: () => {},
+      clearMessages: () => {},
+      addCompaction: (summary, fromMessageId, toMessageId) => {
+        const compaction = {
+          id: "c1",
+          summary,
+          fromMessageId,
+          toMessageId,
+          createdAt: ""
+        };
+        compactions.push(compaction);
+        return compaction;
+      },
+      getCompactions: () => compactions
+    };
+    const session = new Session(storage, {
+      context: [
+        {
+          label: "memory",
+          provider: new ReadonlyBlockProvider("current block content")
+        }
+      ],
+      promptStore: new MemoryBlockProvider("cached frozen prompt")
+    })
+      .onCompaction(async () => ({
+        fromMessageId: "m0",
+        toMessageId: "m1",
+        summary: "cached prompt counter"
+      }))
+      .compactAfter(10, {
+        tokenCounter: ({ messages: history, systemPrompt, contextBlocks }) => {
+          counterInputs.push({
+            historyLength: history.length,
+            systemPrompt,
+            blockLabels: contextBlocks.map((block) => block.label),
+            blockContents: contextBlocks.map((block) => block.content)
+          });
+          return 11;
+        }
+      });
+
+    messages.push({
+      id: "m0",
+      role: "user",
+      parts: [{ type: "text", text: "short" }]
+    });
+
+    await session.appendMessage({
+      id: "m1",
+      role: "assistant",
+      parts: [{ type: "text", text: "ok" }]
+    });
+
+    expect(counterInputs).toContainEqual({
+      historyLength: 2,
+      systemPrompt: "cached frozen prompt",
+      blockLabels: ["memory"],
+      blockContents: ["current block content"]
+    });
+    expect(compactions[0].summary).toBe("cached prompt counter");
+  });
+
   it("treats non-finite custom token counter results as zero", async () => {
     let compactCalled = false;
     const { session, setTokenThreshold } = createCompactableSession(
