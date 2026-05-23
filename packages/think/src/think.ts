@@ -100,6 +100,9 @@ import {
   stepCountIs,
   streamText
 } from "ai";
+import * as skills from "./skills";
+import { SkillRegistry } from "./skills";
+import type { SkillSource } from "./skills";
 
 // Re-export AI SDK types that appear on Think's public lifecycle hooks
 // so users can import them from a single place.
@@ -112,6 +115,8 @@ export type {
   TypedToolCall,
   TypedToolResult
 } from "ai";
+export { skills };
+export type { SkillSource };
 import {
   Agent,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
@@ -1180,7 +1185,8 @@ export class Think<
   private static readonly CONFIG_KEYS = [
     "_think_config",
     "lastClientTools",
-    "lastBody"
+    "lastBody",
+    "skillsFingerprint"
   ] as const;
   /**
    * Wait for MCP server connections to be ready before the inference
@@ -1190,6 +1196,8 @@ export class Think<
    * for a custom timeout. Defaults to `false` (no waiting).
    */
   waitForMcpConnections: boolean | { timeout: number } = false;
+
+  private _skillRegistry: SkillRegistry | null = null;
 
   /**
    * Controls how overlapping user submit requests behave while another
@@ -1295,6 +1303,8 @@ export class Think<
             break;
         }
       });
+
+      await this._initializeSkills();
 
       // Force Session to initialize its tables (assistant_messages,
       // assistant_compactions, assistant_config, etc.) so that subsequent
@@ -1844,6 +1854,52 @@ export class Think<
   }
 
   /**
+   * Return Agent Skills sources for this Think agent.
+   *
+   * Bundled skills are typically imported with:
+   *
+   * ```typescript
+   * import productSkills from "./skills" with { type: "skills" };
+   * ```
+   */
+  getSkills(): SkillSource[] | Promise<SkillSource[]> {
+    return [];
+  }
+
+  private async _initializeSkills(): Promise<void> {
+    const sources = await this.getSkills();
+    if (sources.length === 0) return;
+
+    const registry = new SkillRegistry(sources);
+    await registry.load();
+    this._skillRegistry = registry;
+
+    await this.session.addContext(registry.contextLabel, {
+      description: "Think skills: available skill catalog",
+      provider: {
+        get: () => registry.systemPrompt()
+      }
+    });
+
+    const previous = this._configGet("skillsFingerprint");
+    if (previous !== registry.fingerprint) {
+      await this.session.refreshSystemPrompt();
+      this._configSet("skillsFingerprint", registry.fingerprint);
+    }
+  }
+
+  private async _refreshSkillsIfChanged(): Promise<void> {
+    if (!this._skillRegistry) return;
+
+    await this._skillRegistry.refresh();
+    const previous = this._configGet("skillsFingerprint");
+    if (previous !== this._skillRegistry.fingerprint) {
+      await this.session.refreshSystemPrompt();
+      this._configSet("skillsFingerprint", this._skillRegistry.fingerprint);
+    }
+  }
+
+  /**
    * Return sandboxed extension configurations. Defines load order,
    * which determines hook execution order.
    * Requires `extensionLoader` to be set.
@@ -2121,13 +2177,16 @@ export class Think<
     const workspaceTools = createWorkspaceTools(this.workspace);
     const baseTools = this.getTools();
     const extensionTools = this.extensionManager?.getTools() ?? {};
+    await this._refreshSkillsIfChanged();
     const contextTools = await this.session.tools();
+    const skillTools = this._skillRegistry?.tools() ?? {};
     const clientToolSet = createToolsFromClientSchemas(input.clientTools);
     const tools: ToolSet = {
       ...workspaceTools,
       ...baseTools,
       ...extensionTools,
       ...contextTools,
+      ...skillTools,
       ...(this.mcp?.getAITools?.() ?? {}),
       ...clientToolSet
     };

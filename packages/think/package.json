@@ -21,7 +21,8 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "chat": "^4.29.0"
+    "chat": "^4.29.0",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@chat-adapter/telegram": "^4.29.0",

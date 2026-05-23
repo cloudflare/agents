@@ -1,0 +1,36 @@
+{
+  "name": "@cloudflare/agents-agent-skills-example",
+  "description": "Think agent with bundled Agent Skills imported at build time",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/ai-chat": "*",
+    "@cloudflare/kumo": "^2.2.1",
+    "@cloudflare/think": "*",
+    "@phosphor-icons/react": "^2.1.10",
+    "agents": "*",
+    "ai": "^6.0.185",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "workers-ai-provider": "^3.1.14"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.37.2",
+    "@cloudflare/workers-types": "^4.20260519.1",
+    "@tailwindcss/vite": "^4",
+    "@types/node": "^25.9.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "tailwindcss": "^4.3.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.13",
+    "wrangler": "^4.93.0"
+  }
+}

@@ -1,5 +1,188 @@
 import babel from "@rolldown/plugin-babel";
+import { createHash } from "node:crypto";
+import { readdir, readFile, stat } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
+import { parse as parseYaml } from "yaml";
 import type { Plugin } from "vite";
+
+const SKILLS_VIRTUAL_PUBLIC_PREFIX = "virtual:agents-skills:";
+const SKILLS_VIRTUAL_PREFIX = "\0agents:skills:";
+const SKILL_RESOURCE_ROOTS = new Set(["references", "scripts", "assets"]);
+
+interface SkillFile {
+  name: string;
+  description: string;
+  body: string;
+  rawContent: string;
+  compatibility?: string;
+  license?: string;
+  allowedTools?: string;
+  metadata?: Record<string, unknown>;
+  resources: Array<{
+    path: string;
+    kind: "reference" | "script" | "asset" | "file";
+    size: number;
+    content: string;
+  }>;
+}
+
+function parseFrontmatter(raw: string): {
+  data: Record<string, unknown>;
+  body: string;
+} {
+  const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!match) return { data: {}, body: raw };
+  const parsed = parseYaml(match[1] ?? "");
+  const data =
+    parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  return { data, body: match[2] ?? "" };
+}
+
+function stringField(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function recordField(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function resourceKind(path: string): "reference" | "script" | "asset" | "file" {
+  if (path.startsWith("references/")) return "reference";
+  if (path.startsWith("scripts/")) return "script";
+  if (path.startsWith("assets/")) return "asset";
+  return "file";
+}
+
+async function collectFiles(
+  root: string,
+  relativeRoot = ""
+): Promise<Array<{ path: string; absolutePath: string; size: number }>> {
+  const entries = await readdir(join(root, relativeRoot), {
+    withFileTypes: true
+  }).catch(() => []);
+  const files: Array<{ path: string; absolutePath: string; size: number }> = [];
+
+  for (const entry of entries) {
+    const relativePath = relativeRoot
+      ? `${relativeRoot}/${entry.name}`
+      : entry.name;
+    const absolutePath = join(root, relativePath);
+    if (entry.isDirectory()) {
+      const resourceRoot = relativePath.split("/")[0];
+      if (!SKILL_RESOURCE_ROOTS.has(resourceRoot)) continue;
+      files.push(...(await collectFiles(root, relativePath)));
+    } else if (entry.isFile() && relativePath !== "SKILL.md") {
+      const resourceRoot = relativePath.split("/")[0];
+      if (!SKILL_RESOURCE_ROOTS.has(resourceRoot)) continue;
+      const info = await stat(absolutePath);
+      files.push({ path: relativePath, absolutePath, size: info.size });
+    }
+  }
+
+  return files.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+async function readSkill(skillDir: string): Promise<SkillFile | null> {
+  const skillPath = join(skillDir, "SKILL.md");
+  const rawContent = await readFile(skillPath, "utf8").catch(() => null);
+  if (rawContent === null) return null;
+
+  const { data, body } = parseFrontmatter(rawContent);
+  const name = stringField(data.name);
+  const description = stringField(data.description);
+  if (!name || !description) return null;
+
+  const resources = await Promise.all(
+    (await collectFiles(skillDir)).map(async (file) => ({
+      path: file.path,
+      kind: resourceKind(file.path),
+      size: file.size,
+      content: await readFile(file.absolutePath, "utf8")
+    }))
+  );
+
+  return {
+    name,
+    description,
+    body,
+    rawContent,
+    compatibility: stringField(data.compatibility),
+    license: stringField(data.license),
+    allowedTools: stringField(data["allowed-tools"]),
+    metadata: recordField(data.metadata),
+    resources
+  };
+}
+
+async function buildSkillsModule(dir: string): Promise<string> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  const skills: SkillFile[] = [];
+  const seen = new Set<string>();
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const skill = await readSkill(join(dir, entry.name));
+    if (!skill || seen.has(skill.name)) continue;
+    seen.add(skill.name);
+    skills.push(skill);
+  }
+
+  skills.sort((a, b) => a.name.localeCompare(b.name));
+
+  const hash = createHash("sha256");
+  hash.update(JSON.stringify(skills));
+
+  const manifest = {
+    id: `bundle:${basename(dir)}`,
+    fingerprint: hash.digest("hex"),
+    skills
+  };
+
+  return `const manifest = ${JSON.stringify(manifest)};\nexport default {\n  id: manifest.id,\n  fingerprint: manifest.fingerprint,\n  async list() {\n    return manifest.skills.map(({ body, rawContent, resources, ...skill }) => skill);\n  },\n  async load(name) {\n    const skill = manifest.skills.find((entry) => entry.name === name);\n    if (!skill) return null;\n    return {\n      ...skill,\n      resources: skill.resources.map(({ content, ...resource }) => resource)\n    };\n  },\n  async readResource(name, path) {\n    const skill = manifest.skills.find((entry) => entry.name === name);\n    const resource = skill?.resources.find((entry) => entry.path === path);\n    return resource ? { ...resource } : null;\n  }\n};\n`;
+}
+
+function skillsImportPlugin(): Plugin {
+  return {
+    name: "agents-skills-import",
+    transform(code, id) {
+      if (
+        !code.includes('type: "skills"') &&
+        !code.includes("type: 'skills'")
+      ) {
+        return null;
+      }
+
+      const next = code.replace(
+        /from\s+(["'])([^"']+)\1\s+with\s+\{\s*type\s*:\s*(["'])skills\3\s*\}/g,
+        (_match, quote: string, source: string) => {
+          const resolved = resolve(id, "..", source);
+          return `from ${quote}${SKILLS_VIRTUAL_PUBLIC_PREFIX}${encodeURIComponent(resolved)}${quote}`;
+        }
+      );
+
+      return next === code ? null : next;
+    },
+    async resolveId(source, importer, options) {
+      const attributes = (options as { attributes?: Record<string, string> })
+        .attributes;
+      if (source.startsWith(SKILLS_VIRTUAL_PUBLIC_PREFIX)) {
+        return `${SKILLS_VIRTUAL_PREFIX}${decodeURIComponent(source.slice(SKILLS_VIRTUAL_PUBLIC_PREFIX.length))}`;
+      }
+      if (attributes?.type !== "skills") return null;
+      if (!importer) return null;
+      const resolved = resolve(importer, "..", source);
+      return `${SKILLS_VIRTUAL_PREFIX}${resolved}`;
+    },
+    async load(id) {
+      if (!id.startsWith(SKILLS_VIRTUAL_PREFIX)) return null;
+      return buildSkillsModule(id.slice(SKILLS_VIRTUAL_PREFIX.length));
+    }
+  };
+}
 
 /**
  * Vite plugin for Agents SDK projects.
@@ -8,17 +191,20 @@ import type { Plugin } from "vite";
  * oxc#9170) so `@callable()` works at runtime. Will grow to cover other
  * Agents-specific build concerns as needed.
  */
-export default function agents(): Plugin {
-  return babel({
-    presets: [
-      {
-        preset: () => ({
-          plugins: [
-            ["@babel/plugin-proposal-decorators", { version: "2023-11" }]
-          ]
-        }),
-        rolldown: { filter: { code: "@" } }
-      }
-    ]
-  }) as unknown as Plugin;
+export default function agents(): Plugin[] {
+  return [
+    skillsImportPlugin(),
+    babel({
+      presets: [
+        {
+          preset: () => ({
+            plugins: [
+              ["@babel/plugin-proposal-decorators", { version: "2023-11" }]
+            ]
+          }),
+          rolldown: { filter: { code: "@" } }
+        }
+      ]
+    }) as unknown as Plugin
+  ];
 }
