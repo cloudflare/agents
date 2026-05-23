@@ -1,6 +1,7 @@
 # Think Skills
 
-Status: implemented MVP, with R2 and script execution follow-ups in progress
+Status: implemented MVP; Git-backed sources and R2 write/delete helpers remain
+follow-ups
 
 ## Problem
 
