@@ -25,6 +25,21 @@ export interface SkillResource extends SkillResourceDescriptor {
   content: string;
 }
 
+export interface SkillScriptContext {
+  skill: SkillDescriptor;
+}
+
+export interface SkillScriptRequest {
+  skill: SkillContent;
+  path: string;
+  source: string;
+  input: unknown;
+}
+
+export interface SkillScriptRunner {
+  run(request: SkillScriptRequest): Promise<unknown>;
+}
+
 export interface SkillSource {
   id: string;
   fingerprint: string;

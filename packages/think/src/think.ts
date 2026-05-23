@@ -102,7 +102,7 @@ import {
 } from "ai";
 import * as skills from "./skills";
 import { SkillRegistry } from "./skills";
-import type { SkillSource } from "./skills";
+import type { SkillScriptRunner, SkillSource } from "./skills";
 
 // Re-export AI SDK types that appear on Think's public lifecycle hooks
 // so users can import them from a single place.
@@ -1870,7 +1870,7 @@ export class Think<
     const sources = await this.getSkills();
     if (sources.length === 0) return;
 
-    const registry = new SkillRegistry(sources);
+    const registry = new SkillRegistry(sources, this.getSkillScriptRunner());
     await registry.load();
     this._skillRegistry = registry;
 
@@ -1886,6 +1886,10 @@ export class Think<
       await this.session.refreshSystemPrompt();
       this._configSet("skillsFingerprint", registry.fingerprint);
     }
+  }
+
+  getSkillScriptRunner(): SkillScriptRunner | null {
+    return null;
   }
 
   private async _refreshSkillsIfChanged(): Promise<void> {

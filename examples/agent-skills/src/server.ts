@@ -1,10 +1,11 @@
 import { callable, routeAgentRequest } from "agents";
-import { Think } from "@cloudflare/think";
+import { Think, skills } from "@cloudflare/think";
 import { createWorkersAI } from "workers-ai-provider";
 import bundledSkills from "./skills" with { type: "skills" };
 
 type Env = {
   AI: Ai;
+  LOADER: WorkerLoader;
   SkillsAgent: DurableObjectNamespace<SkillsAgent>;
 };
 
@@ -26,6 +27,13 @@ export class SkillsAgent extends Think<Env> {
 
   getSkills() {
     return [bundledSkills];
+  }
+
+  getSkillScriptRunner() {
+    return skills.workerScriptRunner({
+      loader: this.env.LOADER,
+      workspaceInstance: this.workspace
+    });
   }
 
   @callable()

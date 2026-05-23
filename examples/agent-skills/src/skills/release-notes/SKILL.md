@@ -14,6 +14,18 @@ Turn implementation details into user-facing release notes.
 3. Avoid internal file names unless the user asks for engineering notes.
 4. Keep the tone factual and concise.
 
+When the user provides a rough list of changes, run
+`scripts/format-release-notes.ts` with `{ "changes": [...] }` to create a first
+draft, then polish the wording for the user's audience.
+
+If the user asks to inspect or echo the raw script input, run
+`scripts/count-changes.sh`; it demonstrates Bash skill scripts reading
+`/input.json`.
+
+If the user asks for a quick count and compact summary of changes, run
+`scripts/summarize-changes.py` with `{ "changes": [...] }`; it demonstrates
+Python skill scripts using the same JSON input and skill metadata contract.
+
 ## Output format
 
 Use this structure:

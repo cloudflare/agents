@@ -91,7 +91,7 @@ function App() {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
   const [input, setInput] = useState(
-    "Write release notes for: added bundled Think skills, a Vite import attribute, and a skill activation tool."
+    "Write release notes for these changes: added bundled Think skills, added a Vite import attribute, added a skill activation tool. Use the release notes script."
   );
   const [skills, setSkills] = useState<SkillSummary[]>([]);
 
@@ -163,7 +163,9 @@ function App() {
                   The Worker imports `./skills` with an import attribute. The
                   Agents Vite plugin bundles each `SKILL.md`, Think registers
                   them through `getSkills()`, and the model can call
-                  `activate_skill` when a task matches a skill description.
+                  `activate_skill` when a task matches a skill description. The
+                  release-notes skill also demonstrates `run_skill_script` with
+                  TypeScript, Python, and Bash scripts.
                 </Text>
               </span>
             </div>
@@ -283,7 +285,7 @@ function App() {
               </Text>
               <div className="mt-3 space-y-2">
                 {[
-                  "Write release notes for: added Think skills, import attributes, and skill tools.",
+                  "Write release notes for these changes: added Think skills, import attributes, and skill tools. Use the release notes script.",
                   "Make a debug plan for an intermittent WebSocket disconnect.",
                   "What skills are available in this demo?"
                 ].map((prompt) => (

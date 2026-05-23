@@ -157,8 +157,9 @@ Session context tools:
   structured skill content and resource listing.
 - `read_skill_resource({ name, path })`: loads `references/`, `scripts/`, or
   `assets/` on demand.
-- `run_skill_script({ name, path, input })`: optional, only registered when a
-  script runner is configured.
+- `run_skill_script({ name, path, input? })`: optional, only registered when a
+  script runner is configured. Script paths must live under `scripts/`; omitted
+  input defaults to `{}`.
 
 Skill content should be wrapped in identifiable tags with the skill name and
 version/fingerprint. This gives compaction and diagnostics something stable to
@@ -189,31 +190,62 @@ frontmatter field. It is a hint, not a full permission model. Think should
 define and enforce its own capability envelope.
 
 Scripts should receive explicit capabilities rather than ambient access to the
-agent:
+agent. The first implementation keeps this concrete: runner options are the
+permission boundary.
 
 ```ts
-type SkillScriptPermissions = {
-  network?: string[];
-  workspace?: "none" | "read" | "read-write";
-  context?: {
-    read?: string[] | "all";
-    write?: string[] | "own";
-  };
-  messages?: "none" | "read";
-  session?: {
-    metadata?: boolean;
-  };
-  tools?: string[] | "none";
-};
+skills.workerScriptRunner({
+  loader: this.env.LOADER,
+  workspaceInstance: this.workspace,
+  tools: {
+    search_docs: this.getTools().search_docs
+  }
+});
 ```
 
-The default is locked down: no network, no workspace, no messages, and no tools.
-Apps can opt in per source or per skill. Tool access is by name; Think should
-not expose the full turn toolset to a script by default.
+The default is useful but not ambiently powerful: no network and no tools, with
+read-only workspace access when `workspaceInstance` is provided, and a 30 second
+script timeout. Tool access is explicit; Think does not expose the full turn
+toolset to a script by default. Workspace access is `"none"`, `"read"`, or
+`"read-write"`, with
+`workspace: "read-write"` required for mutating filesystem operations.
 
-JavaScript and TypeScript scripts can run through the existing Dynamic Worker
-execution path. Python and Bash are expected future runtime targets for
-`executeTool`, but they should use the same permission envelope.
+JavaScript scripts run through the existing codemode Dynamic Worker execution
+path. TypeScript scripts are first stripped/compiled with
+`@cloudflare/worker-bundler`, then run through the same codemode path so tool and
+workspace namespaces stay consistent. Python scripts with `.py` extensions run
+as Python Dynamic Workers with the `python_workers` compatibility flag. Bash
+scripts with `.sh` or `.bash` extensions run through `just-bash`, which provides
+a simulated shell and virtual filesystem instead of ambient host shell access.
+Python Workers have slower cold starts than JavaScript Workers, so JavaScript
+remains the preferred runtime for one-off generated code.
+
+The initial script contract is:
+
+```ts
+export default async function run(input, ctx) {
+  return input;
+}
+```
+
+Python scripts use the equivalent Python contract:
+
+```py
+def run(input, ctx):
+    return input
+```
+
+`input` defaults to `{}` when omitted. `ctx` starts with skill metadata.
+Workspace and tools are available through runtime-specific namespaces when
+enabled by the runner. JavaScript and TypeScript use the codemode sandbox
+namespaces; Python exposes `tools.<name>(input)`, `tools.call(name, input)`, and
+`workspace.read_file()`, `workspace.list_files()`, `workspace.glob()`, and
+`workspace.write_file()` according to the configured workspace permission.
+
+Bash scripts receive the JSON input via stdin and `/input.json`; skill metadata
+is written to `/context.json`. When enabled, workspace access is exposed through
+commands such as `workspace-read`, `workspace-list`, and `workspace-glob`, while
+explicit tools are exposed through a `tool <name> <json>` command.
 
 ## MVP
 
@@ -228,8 +260,9 @@ The first implementation stays narrow:
 6. Add `activate_skill` and `read_skill_resource`.
 7. Add the `type: "skills"` import-attribute transform in `agents/vite`.
 8. Add a read-only R2-backed Agent Skills source.
+9. Add optional script execution for JavaScript/TypeScript, Python, and Bash.
 
-Git and script execution should follow once the source story is proven.
+Git-backed sources should follow once the source story is proven.
 
 ## Alternatives
 
@@ -259,6 +292,7 @@ ambient Bash/Python execution is not the right default.
 
 ## Decision
 
-Use bundled skills plus Think-native activation tools as the MVP, with
-`skills.r2(...)` as the first runtime source. Keep R2 read-only for now. Git and
-script execution remain follow-up layers after the core source API is validated.
+Use bundled skills plus Think-native activation tools as the primary skills API,
+with `skills.r2(...)` as the first runtime source. Keep R2 read-only for now.
+Git-backed sources remain a follow-up layer after the core source API is
+validated.
