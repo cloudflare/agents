@@ -416,3 +416,134 @@ describe("assistant tools — grep", () => {
     expect(result.note).toContain("skipped");
   });
 });
+
+// ── Bash tool ─────────────────────────────────────────────────────────
+
+describe("assistant tools — bash", () => {
+  it("runs bash against workspace files and persists changes", async () => {
+    const agent = await freshAgent("bash-basic");
+    await agent.seed([
+      { path: "/input.txt", content: "hello\n" },
+      { path: "/remove.txt", content: "bye\n" }
+    ]);
+
+    const result = (await agent.toolBash(`cat /input.txt > /copy.txt
+printf "world\\n" >> /input.txt
+rm /remove.txt`)) as {
+      stdout: string;
+      stderr: string;
+      exitCode: number;
+      changedFiles: {
+        created: string[];
+        updated: string[];
+        deleted: string[];
+      };
+    };
+
+    expect(result).toMatchObject({
+      stdout: "",
+      stderr: "",
+      exitCode: 0
+    });
+    expect(result.changedFiles.created).toContain("/copy.txt");
+    expect(result.changedFiles.updated).toContain("/input.txt");
+    expect(result.changedFiles.deleted).toContain("/remove.txt");
+
+    const copied = (await agent.toolRead("/copy.txt")) as { content: string };
+    expect(copied.content).toContain("hello");
+    const updated = (await agent.toolRead("/input.txt")) as { content: string };
+    expect(updated.content).toContain("world");
+    const removed = (await agent.toolRead("/remove.txt")) as { error: string };
+    expect(removed.error).toContain("File not found");
+  });
+
+  it("returns non-zero bash exits with output", async () => {
+    const agent = await freshAgent("bash-nonzero");
+
+    const result = (await agent.toolBash(`echo before
+echo bad >&2
+exit 9`)) as {
+      stdout: string;
+      stderr: string;
+      exitCode: number;
+    };
+
+    expect(result.stdout).toBe("before\n");
+    expect(result.stderr).toBe("bad\n");
+    expect(result.exitCode).toBe(9);
+  });
+
+  it("does not overwrite workspace files skipped during mounting", async () => {
+    const agent = await freshAgent("bash-skip-protected");
+    await agent.seed([{ path: "/large.txt", content: "keep me" }]);
+
+    const result = (await agent.toolBash(
+      'echo "replace me" > /large.txt',
+      undefined,
+      { maxWorkspaceFileBytes: 3 }
+    )) as {
+      errors: string[];
+      skippedFiles: string[];
+    };
+
+    expect(result.skippedFiles).toContain("/large.txt");
+    expect(result.errors.join("\n")).toContain("protected workspace file");
+
+    const read = (await agent.toolRead("/large.txt")) as { content: string };
+    expect(read.content).toContain("keep me");
+  });
+
+  it("persists empty directory creates and deletes", async () => {
+    const agent = await freshAgent("bash-empty-dirs");
+    await agent.seedDir("/remove-empty");
+
+    const result = (await agent.toolBash(`mkdir /created-empty
+rmdir /remove-empty`)) as {
+      changedFiles: {
+        directoriesCreated: string[];
+        directoriesDeleted: string[];
+      };
+    };
+
+    expect(result.changedFiles.directoriesCreated).toContain("/created-empty");
+    expect(result.changedFiles.directoriesDeleted).toContain("/remove-empty");
+
+    const listed = (await agent.toolList("/")) as { entries: string[] };
+    expect(listed.entries).toContain("created-empty/");
+    expect(listed.entries).not.toContain("remove-empty/");
+  });
+
+  it("mounts workspace directories beyond the first readDir page", async () => {
+    const agent = await freshAgent("bash-paginated");
+    await agent.seed(
+      Array.from({ length: 1005 }, (_, index) => ({
+        path: `/many/file-${String(index).padStart(4, "0")}.txt`,
+        content: String(index)
+      }))
+    );
+
+    const result = (await agent.toolBash("cat /many/file-1004.txt", undefined, {
+      maxWorkspaceFiles: 1100
+    })) as {
+      stdout: string;
+      exitCode: number;
+    };
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("1004");
+  });
+
+  it("returns structured output for bash timeouts", async () => {
+    const agent = await freshAgent("bash-timeout");
+
+    const result = (await agent.toolBash("while true; do :; done", undefined, {
+      timeout: 1
+    })) as {
+      stderr: string;
+      exitCode: number;
+    };
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toBeTruthy();
+  });
+});

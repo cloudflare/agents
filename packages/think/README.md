@@ -149,9 +149,15 @@ drill-in, and cleanup patterns.
 
 ## Built-in workspace
 
-Every Think agent gets `this.workspace` — a virtual filesystem backed by the DO's SQLite storage. Workspace tools (`read`, `write`, `edit`, `list`, `find`, `grep`, `delete`) are automatically available to the model.
+Every Think agent gets `this.workspace` — a virtual filesystem backed by the DO's SQLite storage. Workspace tools (`read`, `write`, `edit`, `list`, `find`, `grep`, `delete`, `bash`) are automatically available to the model.
 
 The `read` tool returns line-numbered text for text files. For images and PDFs, it keeps the persisted tool result compact and passes file bytes to multimodal-capable models using AI SDK content parts.
+The `bash` tool runs sandboxed shell workflows through `just-bash`, with network
+access disabled by default, and syncs changed files and empty directories back
+into the workspace. It snapshots up to 1,000 files by default, skips files larger
+than 1 MB, and treats skipped paths as protected during write-back. Set
+`workspaceBash = false` on your Think subclass to opt out, or pass an options
+object to tune limits, timeout, and network access.
 
 ```ts
 export class MyAgent extends Think<Env> {
@@ -291,6 +297,7 @@ Script execution requires a Worker Loader binding:
 | `getSkillScriptRunner()` | `null`                             | Optional runner for `run_skill_script`          |
 | `getExtensions()`        | `[]`                               | Sandboxed extension declarations (load order)   |
 | `extensionLoader`        | `undefined`                        | `WorkerLoader` binding — enables extensions     |
+| `workspaceBash`          | `true`                             | Include the default workspace `bash` tool       |
 | `chatRecovery`           | `true`                             | Wrap turns in `runFiber` for durable execution  |
 
 On each turn, Think appends a small capability block to the assembled system prompt. The block is based on the tools available for that turn, so models learn about workspace tools, context-loading tools, extension tools, sandboxed execution, MCP/client tools, and delegated-agent tools only when they are actually exposed.
@@ -697,6 +704,7 @@ import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 
 // Use with a custom ReadOperations/WriteOperations implementation
 const tools = createWorkspaceTools(myCustomStorage);
+const toolsWithoutBash = createWorkspaceTools(myCustomStorage, { bash: false });
 ```
 
 Each tool is an AI SDK `tool()` with Zod schemas. The underlying operations are abstracted behind interfaces (`ReadOperations`, `WriteOperations`, etc.) so you can create tools backed by any storage.

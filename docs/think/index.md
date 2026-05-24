@@ -268,6 +268,7 @@ with retries per step, long waits, external events, or approvals.
 | `configureSession()`     | identity                         | Add context blocks, compaction, search, skills — see [Sessions](../sessions.md) |
 | `getSkills()`            | `[]`                             | Return Agent Skills sources for on-demand skill activation                      |
 | `getSkillScriptRunner()` | `null`                           | Enable the optional `run_skill_script` tool                                     |
+| `workspaceBash`          | `true`                           | Include or configure the default workspace `bash` tool                          |
 | `messageConcurrency`     | `"queue"`                        | How overlapping submits behave — see [Client Tools](./client-tools.md)          |
 | `waitForMcpConnections`  | `false`                          | Wait for MCP servers before inference                                           |
 | `chatRecovery`           | `true`                           | Wrap turns in `runFiber` for durable execution, including sub-agent turns       |

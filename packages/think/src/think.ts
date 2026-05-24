@@ -1266,6 +1266,15 @@ export class Think<
    */
   workspace!: WorkspaceLike;
 
+  /**
+   * Include the default workspace Bash tool. Enabled by default so models can
+   * run shell-style multi-file workflows against the workspace. Set to `false`
+   * to omit it from the built-in workspace tools.
+   */
+  workspaceBash:
+    | boolean
+    | NonNullable<Parameters<typeof createWorkspaceTools>[1]>["bash"] = true;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
 
@@ -2178,7 +2187,9 @@ export class Think<
       await this.mcp.waitForConnections({ timeout });
     }
 
-    const workspaceTools = createWorkspaceTools(this.workspace);
+    const workspaceTools = createWorkspaceTools(this.workspace, {
+      bash: this.workspaceBash
+    });
     const baseTools = this.getTools();
     const extensionTools = this.extensionManager?.getTools() ?? {};
     await this._refreshSkillsIfChanged();

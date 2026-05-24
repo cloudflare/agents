@@ -6,7 +6,7 @@ Think provides built-in workspace file tools on every turn, plus integration poi
 
 On every turn, Think merges tools from multiple sources. Later sources override earlier ones if names collide:
 
-1. **Workspace tools** — `read`, `write`, `edit`, `list`, `find`, `grep`, `delete` (built-in)
+1. **Workspace tools** — `read`, `write`, `edit`, `list`, `find`, `grep`, `delete`, `bash` (built-in)
 2. **`getTools()`** — your custom server-side tools
 3. **Session tools** — `set_context`, `load_context`, `search_context` (from `configureSession`)
 4. **Extension tools** — tools from loaded extensions (prefixed by extension name)
@@ -30,6 +30,32 @@ Every Think agent gets `this.workspace` — a virtual filesystem backed by the D
 | `find`   | Find files matching a glob pattern                                          |
 | `grep`   | Search file contents by regex or fixed string                               |
 | `delete` | Delete a file or directory                                                  |
+| `bash`   | Run a sandboxed Bash script against workspace files                         |
+
+The `bash` tool is enabled by default. It mounts workspace files into a
+`just-bash` virtual filesystem, runs with network access disabled, and writes
+created, updated, and deleted files and empty directories back to the workspace.
+Use it for shell-style workflows that combine multiple file operations; use the
+narrower tools for simple reads, writes, and edits.
+
+To keep tool calls bounded, the Bash tool snapshots up to 1,000 workspace files
+by default and skips files larger than 1 MB. Skipped files are reported in the
+tool result and are treated as protected during write-back so the script cannot
+accidentally overwrite or delete content that was not mounted. You can tune
+`maxWorkspaceFiles`, `maxWorkspaceFileBytes`, `maxOutputBytes`, `timeout`, and
+`network` through `workspaceBash`.
+
+Disable the default Bash tool for conservative deployments:
+
+```typescript
+export class MyAgent extends Think<Env> {
+  workspaceBash = false;
+
+  getModel() {
+    /* ... */
+  }
+}
+```
 
 ### R2 Spillover
 
@@ -492,4 +518,7 @@ Or create the full set from a Workspace:
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 
 const tools = createWorkspaceTools(myCustomWorkspace);
+const toolsWithoutBash = createWorkspaceTools(myCustomWorkspace, {
+  bash: false
+});
 ```
