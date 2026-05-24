@@ -2,9 +2,11 @@ import { parseSkillMarkdown } from "./frontmatter";
 import type {
   SkillContent,
   SkillDescriptor,
+  SkillResource,
   SkillResourceDescriptor,
   SkillSource
 } from "./types";
+import { validateSkillResourcePath } from "./types";
 
 export interface R2SkillSourceOptions {
   prefix?: string;
@@ -32,6 +34,91 @@ function resourceKind(path: string): SkillResourceDescriptor["kind"] {
   if (path.startsWith("scripts/")) return "script";
   if (path.startsWith("assets/")) return "asset";
   return "file";
+}
+
+const TEXT_EXTENSIONS = new Set([
+  ".bash",
+  ".css",
+  ".csv",
+  ".html",
+  ".js",
+  ".json",
+  ".jsx",
+  ".md",
+  ".mjs",
+  ".py",
+  ".sh",
+  ".svg",
+  ".ts",
+  ".tsx",
+  ".txt",
+  ".xml",
+  ".yaml",
+  ".yml"
+]);
+
+const MIME_TYPES = new Map([
+  [".css", "text/css"],
+  [".gif", "image/gif"],
+  [".html", "text/html"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".js", "text/javascript"],
+  [".json", "application/json"],
+  [".md", "text/markdown"],
+  [".mjs", "text/javascript"],
+  [".pdf", "application/pdf"],
+  [".png", "image/png"],
+  [".py", "text/x-python"],
+  [".sh", "text/x-shellscript"],
+  [".svg", "image/svg+xml"],
+  [".ts", "text/typescript"],
+  [".tsx", "text/typescript"],
+  [".txt", "text/plain"],
+  [".webp", "image/webp"],
+  [".woff", "font/woff"],
+  [".woff2", "font/woff2"],
+  [".xml", "application/xml"],
+  [".yaml", "application/yaml"],
+  [".yml", "application/yaml"]
+]);
+
+function extensionOf(path: string): string {
+  const file = path.split("/").at(-1) ?? path;
+  const index = file.lastIndexOf(".");
+  return index === -1 ? "" : file.slice(index).toLowerCase();
+}
+
+function resourceEncoding(path: string): "text" | "base64" {
+  return TEXT_EXTENSIONS.has(extensionOf(path)) ? "text" : "base64";
+}
+
+function resourceMimeType(path: string): string | undefined {
+  return MIME_TYPES.get(extensionOf(path));
+}
+
+function base64Encode(bytes: ArrayBuffer): string {
+  let binary = "";
+  const view = new Uint8Array(bytes);
+  for (let i = 0; i < view.length; i++) {
+    binary += String.fromCharCode(view[i]!);
+  }
+  return btoa(binary);
+}
+
+async function readObjectFingerprint(
+  bucket: R2Bucket,
+  key: string,
+  path: string
+): Promise<string | null> {
+  const object = await bucket.get(key);
+  if (!object) return null;
+  const encoding = resourceEncoding(path);
+  const content =
+    encoding === "base64"
+      ? base64Encode(await object.arrayBuffer())
+      : await object.text();
+  return `${encoding}:${content}`;
 }
 
 function stableHash(parts: string[]): string {
@@ -80,6 +167,27 @@ async function readObject(
   return object ? object.text() : null;
 }
 
+async function readResourceObject(
+  bucket: R2Bucket,
+  key: string,
+  descriptor: SkillResourceDescriptor
+): Promise<SkillResource | null> {
+  const object = await bucket.get(key);
+  if (!object) return null;
+
+  const encoding = descriptor.encoding ?? resourceEncoding(descriptor.path);
+  const content =
+    encoding === "base64"
+      ? base64Encode(await object.arrayBuffer())
+      : await object.text();
+
+  return {
+    ...descriptor,
+    encoding,
+    content
+  };
+}
+
 export function r2(
   bucket: R2Bucket,
   options: R2SkillSourceOptions = {}
@@ -124,6 +232,12 @@ export function r2(
         .map((object) => object.key)
         .filter(
           (key) => key.startsWith(`${prefix}${directory}/`) && key !== skillKey
+        )
+        .filter(
+          (key) =>
+            validateSkillResourcePath(
+              key.slice(`${prefix}${directory}/`.length)
+            ) === null
         );
       const resources: SkillResourceDescriptor[] = [];
 
@@ -134,7 +248,9 @@ export function r2(
         resources.push({
           path,
           kind: resourceKind(path),
-          size: listedResource?.size
+          size: listedResource?.size,
+          encoding: resourceEncoding(path),
+          mimeType: resourceMimeType(path)
         });
       }
 
@@ -165,7 +281,10 @@ export function r2(
       if (fingerprintMode === "content") {
         fingerprintParts.push(rawContent);
         for (const key of resourceKeys) {
-          fingerprintParts.push((await readObject(bucket, key)) ?? "");
+          const path = key.slice(`${prefix}${directory}/`.length);
+          fingerprintParts.push(
+            (await readObjectFingerprint(bucket, key, path)) ?? ""
+          );
         }
       } else {
         fingerprintParts.push(...skillObjects.map(objectFingerprintPart));
@@ -194,6 +313,7 @@ export function r2(
       return skill ? { ...skill.content } : null;
     },
     async readResource(name: string, path: string) {
+      if (validateSkillResourcePath(path) !== null) return null;
       await refreshIndex();
       const skill = byName.get(name);
       if (!skill) return null;
@@ -203,11 +323,11 @@ export function r2(
         ?.find((entry) => entry.path === path);
       if (!resource) return null;
 
-      const content = await readObject(
+      return readResourceObject(
         bucket,
-        `${prefix}${skill.directory}/${path}`
+        `${prefix}${skill.directory}/${path}`,
+        resource
       );
-      return content !== null ? { ...resource, content } : null;
     },
     async refresh() {
       await refreshIndex();

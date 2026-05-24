@@ -4,10 +4,12 @@ import type {
   SkillContent,
   SkillDescriptor,
   SkillRegistrySnapshot,
+  SkillResource,
   SkillResourceDescriptor,
   SkillScriptRunner,
   SkillSource
 } from "./types";
+import { validateSkillResourcePath } from "./types";
 import { validateSkillScriptPath } from "./runner";
 
 const SKILL_CONTEXT_LABEL = "think_skills";
@@ -24,7 +26,10 @@ function wrapSkillContent(skill: SkillContent): string {
     ? [
         "",
         "<skill_resources>",
-        ...skill.resources.map((resource) => `  <file>${resource.path}</file>`),
+        ...skill.resources.map(
+          (resource) =>
+            `  <file kind="${resource.kind}" encoding="${resource.encoding ?? "text"}"${resource.size === undefined ? "" : ` size="${resource.size}"`}>${resource.path}</file>`
+        ),
         "</skill_resources>"
       ].join("\n")
     : "";
@@ -42,8 +47,21 @@ function renderResourceList(
 ): string {
   if (!resources?.length) return "No bundled resources.";
   return resources
-    .map((resource) => `- ${resource.path} (${resource.kind})`)
+    .map((resource) => {
+      const encoding = resource.encoding ?? "text";
+      const size =
+        resource.size === undefined ? "" : `, ${resource.size} bytes`;
+      const mimeType = resource.mimeType ? `, ${resource.mimeType}` : "";
+      return `- ${resource.path} (${resource.kind}, ${encoding}${mimeType}${size})`;
+    })
     .join("\n");
+}
+
+function validateResourcePath(path: string): string | null {
+  if (path.startsWith("../")) {
+    return `Resource paths cannot use "../". To read from another skill, use a qualified path like "other-skill/references/file.md".`;
+  }
+  return validateSkillResourcePath(path);
 }
 
 export class SkillRegistry {
@@ -130,6 +148,64 @@ export class SkillRegistry {
     return source ? source.load(name) : null;
   }
 
+  private resolveResourceTarget(
+    name: string | undefined,
+    path: string
+  ):
+    | {
+        ok: true;
+        name: string;
+        path: string;
+      }
+    | {
+        ok: false;
+        error: string;
+      } {
+    const pathError = validateResourcePath(path);
+    if (pathError) return { ok: false, error: pathError };
+
+    if (name) return { ok: true, name, path };
+
+    const [candidateName, ...rest] = path.split("/");
+    if (!candidateName || rest.length === 0) {
+      return {
+        ok: false,
+        error:
+          "Resource path must include a skill name when name is omitted, for example: cloudflare-brand/references/tokens.md"
+      };
+    }
+    if (!this.descriptors.has(candidateName)) {
+      return {
+        ok: false,
+        error: `Unknown skill in qualified resource path: ${candidateName}`
+      };
+    }
+    return { ok: true, name: candidateName, path: rest.join("/") };
+  }
+
+  private async readResource(
+    name: string,
+    path: string
+  ): Promise<SkillResource | string> {
+    const source = this.sourceBySkill.get(name);
+    if (!source?.readResource) {
+      return `Skill "${name}" has no readable resources.`;
+    }
+    const resource = await source.readResource(name, path);
+    return resource ?? `Resource not found: ${name}/${path}`;
+  }
+
+  private async readSkillResources(
+    skill: SkillContent
+  ): Promise<SkillResource[]> {
+    const resources: SkillResource[] = [];
+    for (const descriptor of skill.resources ?? []) {
+      const resource = await this.readResource(skill.name, descriptor.path);
+      if (typeof resource !== "string") resources.push(resource);
+    }
+    return resources;
+  }
+
   tools(): ToolSet {
     const modelSkillNames = [...this.descriptors.values()].map(
       (skill) => skill.name
@@ -162,19 +238,24 @@ export class SkillRegistry {
     if (modelSkillNames.length > 0) {
       tools.read_skill_resource = tool({
         description:
-          "Read a bundled resource from an available skill by relative path.",
+          "Read a bundled resource from an available skill by relative path. Pass name and path, or use a qualified path like skill-name/references/file.md.",
         inputSchema: z.object({
-          name: z.enum(modelSkillNames as [string, ...string[]]),
+          name: z.enum(modelSkillNames as [string, ...string[]]).optional(),
           path: z.string().min(1)
         }),
-        execute: async ({ name, path }: { name: string; path: string }) => {
-          const source = this.sourceBySkill.get(name);
-          if (!source?.readResource)
-            return `Skill "${name}" has no readable resources.`;
-          const resource = await source.readResource(name, path);
-          if (!resource) return `Resource not found: ${name}/${path}`;
+        execute: async ({ name, path }: { name?: string; path: string }) => {
+          const target = this.resolveResourceTarget(name, path);
+          if (!target.ok) return target.error;
+
+          const resource = await this.readResource(target.name, target.path);
+          if (typeof resource === "string") return resource;
+
+          const encoding = resource.encoding ?? "text";
+          const mimeType = resource.mimeType
+            ? ` mimeType="${resource.mimeType}"`
+            : "";
           return [
-            `<skill_resource name="${name}" path="${resource.path}" kind="${resource.kind}">`,
+            `<skill_resource name="${target.name}" path="${resource.path}" kind="${resource.kind}" encoding="${encoding}"${mimeType}>`,
             resource.content,
             "</skill_resource>"
           ].join("\n");
@@ -221,13 +302,17 @@ export class SkillRegistry {
 
           const resource = await source.readResource(name, path);
           if (!resource) return `Script not found: ${name}/${path}`;
+          if ((resource.encoding ?? "text") !== "text") {
+            return `Script resource must be text, got ${resource.encoding}: ${name}/${path}`;
+          }
 
           try {
             return await this.scriptRunner!.run({
               skill,
               path,
               source: resource.content,
-              input
+              input,
+              resources: await this.readSkillResources(skill)
             });
           } catch (error) {
             return `Skill script failed: ${error instanceof Error ? error.message : String(error)}`;

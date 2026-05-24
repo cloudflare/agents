@@ -7,7 +7,29 @@ import type { Plugin } from "vite";
 
 const SKILLS_VIRTUAL_PUBLIC_PREFIX = "virtual:agents-skills:";
 const SKILLS_VIRTUAL_PREFIX = "\0agents:skills:";
-const SKILL_RESOURCE_ROOTS = new Set(["references", "scripts", "assets"]);
+const SKILL_RESOURCE_ROOTS = new Set([
+  "references",
+  "scripts",
+  "assets",
+  "graphics",
+  "fonts",
+  "templates",
+  "rendered-files",
+  "illustrations"
+]);
+const SKILL_IGNORED_ROOTS = new Set([
+  ".git",
+  ".hg",
+  ".svn",
+  ".DS_Store",
+  ".idea",
+  ".vscode",
+  "dist",
+  "build",
+  "coverage",
+  "node_modules"
+]);
+const SPEC_RESOURCE_ROOTS = new Set(["references", "scripts", "assets"]);
 
 interface SkillFile {
   name: string;
@@ -22,6 +44,8 @@ interface SkillFile {
     path: string;
     kind: "reference" | "script" | "asset" | "file";
     size: number;
+    encoding: "text" | "base64";
+    mimeType?: string;
     content: string;
   }>;
 }
@@ -53,13 +77,84 @@ function recordField(value: unknown): Record<string, unknown> | undefined {
 function resourceKind(path: string): "reference" | "script" | "asset" | "file" {
   if (path.startsWith("references/")) return "reference";
   if (path.startsWith("scripts/")) return "script";
-  if (path.startsWith("assets/")) return "asset";
+  if (
+    path.startsWith("assets/") ||
+    path.startsWith("graphics/") ||
+    path.startsWith("fonts/") ||
+    path.startsWith("templates/") ||
+    path.startsWith("rendered-files/") ||
+    path.startsWith("illustrations/")
+  ) {
+    return "asset";
+  }
   return "file";
+}
+
+const TEXT_EXTENSIONS = new Set([
+  ".bash",
+  ".css",
+  ".csv",
+  ".html",
+  ".js",
+  ".json",
+  ".jsx",
+  ".md",
+  ".mjs",
+  ".py",
+  ".sh",
+  ".svg",
+  ".ts",
+  ".tsx",
+  ".txt",
+  ".xml",
+  ".yaml",
+  ".yml"
+]);
+
+const MIME_TYPES = new Map([
+  [".css", "text/css"],
+  [".gif", "image/gif"],
+  [".html", "text/html"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".js", "text/javascript"],
+  [".json", "application/json"],
+  [".md", "text/markdown"],
+  [".mjs", "text/javascript"],
+  [".pdf", "application/pdf"],
+  [".png", "image/png"],
+  [".py", "text/x-python"],
+  [".sh", "text/x-shellscript"],
+  [".svg", "image/svg+xml"],
+  [".ts", "text/typescript"],
+  [".tsx", "text/typescript"],
+  [".txt", "text/plain"],
+  [".webp", "image/webp"],
+  [".woff", "font/woff"],
+  [".woff2", "font/woff2"],
+  [".xml", "application/xml"],
+  [".yaml", "application/yaml"],
+  [".yml", "application/yaml"]
+]);
+
+function extensionOf(path: string): string {
+  const file = path.split("/").at(-1) ?? path;
+  const index = file.lastIndexOf(".");
+  return index === -1 ? "" : file.slice(index).toLowerCase();
+}
+
+function resourceEncoding(path: string): "text" | "base64" {
+  return TEXT_EXTENSIONS.has(extensionOf(path)) ? "text" : "base64";
+}
+
+function resourceMimeType(path: string): string | undefined {
+  return MIME_TYPES.get(extensionOf(path));
 }
 
 async function collectFiles(
   root: string,
-  relativeRoot = ""
+  relativeRoot = "",
+  warn?: (message: string) => void
 ): Promise<Array<{ path: string; absolutePath: string; size: number }>> {
   const entries = await readdir(join(root, relativeRoot), {
     withFileTypes: true
@@ -73,11 +168,30 @@ async function collectFiles(
     const absolutePath = join(root, relativePath);
     if (entry.isDirectory()) {
       const resourceRoot = relativePath.split("/")[0];
-      if (!SKILL_RESOURCE_ROOTS.has(resourceRoot)) continue;
-      files.push(...(await collectFiles(root, relativePath)));
+      if (!resourceRoot || SKILL_IGNORED_ROOTS.has(resourceRoot)) continue;
+      if (!SKILL_RESOURCE_ROOTS.has(resourceRoot)) {
+        if (!relativeRoot) {
+          warn?.(
+            `Ignoring skill directory "${relativePath}". Bundled skill resources should live under references/, scripts/, assets/, or a known asset root.`
+          );
+        }
+        continue;
+      }
+      if (!SPEC_RESOURCE_ROOTS.has(resourceRoot) && !relativeRoot) {
+        warn?.(
+          `Bundling non-standard skill resource root "${resourceRoot}/". Prefer assets/ for portable Agent Skills when possible.`
+        );
+      }
+      files.push(...(await collectFiles(root, relativePath, warn)));
     } else if (entry.isFile() && relativePath !== "SKILL.md") {
       const resourceRoot = relativePath.split("/")[0];
-      if (!SKILL_RESOURCE_ROOTS.has(resourceRoot)) continue;
+      if (!resourceRoot || SKILL_IGNORED_ROOTS.has(resourceRoot)) continue;
+      if (!SKILL_RESOURCE_ROOTS.has(resourceRoot)) {
+        warn?.(
+          `Ignoring skill file "${relativePath}". Bundled skill resources should live under references/, scripts/, assets/, or a known asset root.`
+        );
+        continue;
+      }
       const info = await stat(absolutePath);
       files.push({ path: relativePath, absolutePath, size: info.size });
     }
@@ -86,7 +200,10 @@ async function collectFiles(
   return files.sort((a, b) => a.path.localeCompare(b.path));
 }
 
-async function readSkill(skillDir: string): Promise<SkillFile | null> {
+async function readSkill(
+  skillDir: string,
+  warn?: (message: string) => void
+): Promise<SkillFile | null> {
   const skillPath = join(skillDir, "SKILL.md");
   const rawContent = await readFile(skillPath, "utf8").catch(() => null);
   if (rawContent === null) return null;
@@ -97,12 +214,19 @@ async function readSkill(skillDir: string): Promise<SkillFile | null> {
   if (!name || !description) return null;
 
   const resources = await Promise.all(
-    (await collectFiles(skillDir)).map(async (file) => ({
-      path: file.path,
-      kind: resourceKind(file.path),
-      size: file.size,
-      content: await readFile(file.absolutePath, "utf8")
-    }))
+    (await collectFiles(skillDir, "", warn)).map(async (file) => {
+      const encoding = resourceEncoding(file.path);
+      const bytes = await readFile(file.absolutePath);
+      return {
+        path: file.path,
+        kind: resourceKind(file.path),
+        size: file.size,
+        encoding,
+        mimeType: resourceMimeType(file.path),
+        content:
+          encoding === "base64" ? bytes.toString("base64") : bytes.toString()
+      };
+    })
   );
 
   return {
@@ -118,14 +242,17 @@ async function readSkill(skillDir: string): Promise<SkillFile | null> {
   };
 }
 
-async function buildSkillsModule(dir: string): Promise<string> {
+async function buildSkillsModule(
+  dir: string,
+  warn?: (message: string) => void
+): Promise<string> {
   const entries = await readdir(dir, { withFileTypes: true });
   const skills: SkillFile[] = [];
   const seen = new Set<string>();
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const skill = await readSkill(join(dir, entry.name));
+    const skill = await readSkill(join(dir, entry.name), warn);
     if (!skill || seen.has(skill.name)) continue;
     seen.add(skill.name);
     skills.push(skill);
@@ -179,7 +306,10 @@ function skillsImportPlugin(): Plugin {
     },
     async load(id) {
       if (!id.startsWith(SKILLS_VIRTUAL_PREFIX)) return null;
-      return buildSkillsModule(id.slice(SKILLS_VIRTUAL_PREFIX.length));
+      return buildSkillsModule(
+        id.slice(SKILLS_VIRTUAL_PREFIX.length),
+        (message) => this.warn(message)
+      );
     }
   };
 }

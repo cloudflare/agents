@@ -107,6 +107,41 @@ describe("skill script runner", () => {
     ).rejects.toThrow("before failure");
   });
 
+  it("runs TypeScript skill files with sibling script imports", async () => {
+    const runner = skills.workerScriptRunner({
+      loader: env.LOADER
+    });
+
+    await expect(
+      runner.run({
+        skill: {
+          name: "release-notes",
+          description: "Draft release notes.",
+          body: "Use the script."
+        },
+        path: "scripts/format.ts",
+        input: { text: "hello" },
+        source: `import { format } from "./helper";
+const data = globalThis.input as { text: string };
+console.log(format(data.text));`,
+        resources: [
+          {
+            path: "scripts/helper.ts",
+            kind: "script",
+            encoding: "text",
+            content: `export function format(text: string) {
+  return text.toUpperCase();
+}`
+          }
+        ]
+      })
+    ).resolves.toEqual({
+      stdout: "HELLO\n",
+      stderr: "",
+      exitCode: 0
+    });
+  });
+
   it("runs bash skill scripts with input files and explicit tools", async () => {
     const runner = skills.workerScriptRunner({
       loader: env.LOADER,
@@ -128,13 +163,49 @@ describe("skill script runner", () => {
         path: "scripts/format.sh",
         input: { text: "hello" },
         source: `echo "input=$(cat /input.json)"
-tool shout '{"text":"hello"}'`
+cat /skill/references/template.txt
+tool shout '{"text":"hello"}'`,
+        resources: [
+          {
+            path: "references/template.txt",
+            kind: "reference",
+            encoding: "text",
+            content: "template\n"
+          }
+        ]
       })
     ).resolves.toEqual({
-      stdout: 'input={"text":"hello"}\n"HELLO"\n',
+      stdout: 'input={"text":"hello"}\ntemplate\n"HELLO"\n',
       stderr: "",
       exitCode: 0
     });
+  });
+
+  it("rejects unsafe mounted resource paths", async () => {
+    const runner = skills.workerScriptRunner({
+      loader: env.LOADER
+    });
+
+    await expect(
+      runner.run({
+        skill: {
+          name: "unsafe",
+          description: "Unsafe paths.",
+          body: "Use python."
+        },
+        path: "scripts/read.py",
+        input: {},
+        source: `print("nope")`,
+        resources: [
+          {
+            path: "../input.json",
+            kind: "file",
+            encoding: "text",
+            content: "{}"
+          }
+        ]
+      })
+    ).rejects.toThrow("normalized relative path");
   });
 
   it("runs python skill scripts with input and context", async () => {
@@ -160,6 +231,45 @@ tool shout '{"text":"hello"}'`
     ).resolves.toEqual({
       text: "HELLO",
       skill: "release-notes"
+    });
+  });
+
+  it("runs python skill files as CLI-style scripts", async () => {
+    const runner = skills.workerScriptRunner({
+      loader: env.LOADER
+    });
+
+    await expect(
+      runner.run({
+        skill: {
+          name: "release-notes",
+          description: "Draft release notes.",
+          body: "Use the python script."
+        },
+        path: "scripts/format.py",
+        input: { text: "hello" },
+        source: `import json
+
+with open("/input.json") as handle:
+    data = json.load(handle)
+
+with open("/skill/references/template.txt") as handle:
+    template = handle.read()
+
+print(template.replace("{{text}}", data["text"].upper()))`,
+        resources: [
+          {
+            path: "references/template.txt",
+            kind: "reference",
+            encoding: "text",
+            content: "Result: {{text}}"
+          }
+        ]
+      })
+    ).resolves.toEqual({
+      stdout: "Result: HELLO\n",
+      stderr: "",
+      exitCode: 0
     });
   });
 
@@ -288,6 +398,27 @@ tool shout '{"text":"hello"}'`
     raise Exception("boom")`
       })
     ).rejects.toThrow("boom");
+  });
+
+  it("times out CPU-bound python CLI scripts", async () => {
+    const runner = skills.workerScriptRunner({
+      loader: env.LOADER,
+      timeout: 50
+    });
+
+    await expect(
+      runner.run({
+        skill: {
+          name: "slow",
+          description: "Slow skill.",
+          body: "Run slow script."
+        },
+        path: "scripts/slow.py",
+        input: {},
+        source: `while True:
+    pass`
+      })
+    ).rejects.toThrow("Python script execution timed out");
   });
 
   it("allows bash scripts to read from a provided workspace by default", async () => {

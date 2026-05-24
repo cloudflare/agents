@@ -6,6 +6,7 @@ import type {
   SkillResource,
   SkillSource
 } from "./types";
+import { validateSkillResourcePath } from "./types";
 
 function descriptorFromEntry(
   sourceId: string,
@@ -31,9 +32,11 @@ function contentFromEntry(
     ...descriptorFromEntry(sourceId, entry),
     body: entry.body,
     rawContent: entry.rawContent,
-    resources: entry.resources?.map(({ content: _content, ...resource }) => ({
-      ...resource
-    }))
+    resources: entry.resources
+      ?.filter((resource) => validateSkillResourcePath(resource.path) === null)
+      .map(({ content: _content, ...resource }) => ({
+        ...resource
+      }))
   };
 }
 
@@ -57,7 +60,11 @@ export function fromManifest(manifest: SkillManifest): SkillSource {
       path: string
     ): Promise<SkillResource | null> {
       const skill = byName.get(name);
+      if (validateSkillResourcePath(path) !== null) return null;
       const resource = skill?.resources?.find((entry) => entry.path === path);
+      if (resource && validateSkillResourcePath(resource.path) !== null) {
+        return null;
+      }
       return resource ? { ...resource } : null;
     }
   };

@@ -80,8 +80,12 @@ The plugin:
 - Discovers child directories containing `SKILL.md`.
 - Parses YAML frontmatter and markdown body.
 - Validates required Agent Skills fields leniently enough for interoperability.
-- Bundles `SKILL.md` bodies and resources only under `references/`, `scripts/`,
-  and `assets/` so unrelated local files do not leak into the Worker bundle.
+- Bundles `SKILL.md` bodies and resources under `references/`, `scripts/`,
+  `assets/`, and a small set of common asset roots such as `graphics/` and
+  `fonts/`, with diagnostics for ignored top-level files so unrelated local
+  files do not leak into the Worker bundle.
+- Records resource size, MIME type when known, and content encoding. Text
+  resources are stored as text; binary resources are stored as base64.
 - Emits a deterministic fingerprint over metadata, bodies, resource paths, and
   resource contents.
 - Generates a plain `SkillSource` module that Think consumes without making
@@ -156,8 +160,9 @@ Session context tools:
 
 - `activate_skill({ name })`: enum-constrained to available skills, returns
   structured skill content and resource listing.
-- `read_skill_resource({ name, path })`: loads `references/`, `scripts/`, or
-  `assets/` on demand.
+- `read_skill_resource({ name?, path })`: loads bundled resources on demand.
+  Callers may pass `{ name, path }` or a qualified path such as
+  `other-skill/references/file.md`.
 - `run_skill_script({ name, path, input? })`: optional, only registered when a
   script runner is configured. Script paths must live under `scripts/`; omitted
   input defaults to `{}`.
@@ -212,16 +217,31 @@ toolset to a script by default. Workspace access is `"none"`, `"read"`, or
 `workspace: "read-write"` required for mutating filesystem operations.
 
 JavaScript scripts run through the existing codemode Dynamic Worker execution
-path. TypeScript scripts are first stripped/compiled with
-`@cloudflare/worker-bundler`, then run through the same codemode path so tool and
-workspace namespaces stay consistent. Python scripts with `.py` extensions run
-as Python Dynamic Workers with the `python_workers` compatibility flag. Bash
-scripts with `.sh` or `.bash` extensions run through `just-bash`, which provides
-a simulated shell and virtual filesystem instead of ambient host shell access.
-Python Workers have slower cold starts than JavaScript Workers, so JavaScript
-remains the preferred runtime for one-off generated code.
+path. TypeScript scripts are first compiled with `@cloudflare/worker-bundler`,
+then run through the same codemode path so tool and workspace namespaces stay
+consistent. Python scripts with `.py` extensions run as Python Dynamic Workers
+with the `python_workers` compatibility flag. Bash scripts with `.sh` or
+`.bash` extensions run through `just-bash`, which provides a simulated shell and
+virtual filesystem instead of ambient host shell access. Python Workers have
+slower cold starts than JavaScript Workers, so JavaScript remains the preferred
+runtime for one-off generated code.
 
-The initial script contract is:
+For Python and Bash, the primary script contract is path-based, matching
+CLI-oriented Agent Skills. The runner mounts:
+
+- `/skill`: `SKILL.md` and bundled skill resources.
+- `/input.json`: the `run_skill_script` input, defaulting to `{}`.
+- `/context.json`: skill metadata.
+- `/workspace`: reserved for workspace-backed files; direct workspace access is
+  still governed by the explicit workspace permission.
+
+JavaScript and TypeScript filesystem compatibility needs a separate design pass.
+For now, JS/TS scripts can run as top-level files, can write output through
+`console`, can import sibling script files bundled by `@cloudflare/worker-bundler`,
+and may use the Think-specific function contract below.
+
+For Think-specific compatibility, JavaScript and TypeScript scripts may still
+export a function:
 
 ```ts
 export default async function run(input, ctx) {
@@ -229,24 +249,23 @@ export default async function run(input, ctx) {
 }
 ```
 
-Python scripts use the equivalent Python contract:
+Python scripts may use the equivalent compatibility contract:
 
 ```py
 def run(input, ctx):
     return input
 ```
 
-`input` defaults to `{}` when omitted. `ctx` starts with skill metadata.
-Workspace and tools are available through runtime-specific namespaces when
-enabled by the runner. JavaScript and TypeScript use the codemode sandbox
-namespaces; Python exposes `tools.<name>(input)`, `tools.call(name, input)`, and
-`workspace.read_file()`, `workspace.list_files()`, `workspace.glob()`, and
-`workspace.write_file()` according to the configured workspace permission.
-
-Bash scripts receive the JSON input via stdin and `/input.json`; skill metadata
-is written to `/context.json`. When enabled, workspace access is exposed through
-commands such as `workspace-read`, `workspace-list`, and `workspace-glob`, while
-explicit tools are exposed through a `tool <name> <json>` command.
+`input` defaults to `{}` when omitted. `ctx` starts with skill metadata. For
+function-style scripts, workspace and tools are available through
+runtime-specific namespaces when enabled by the runner. JavaScript and
+TypeScript use the codemode sandbox namespaces; Python exposes
+`tools.<name>(input)`, `tools.call(name, input)`, and `workspace.read_file()`,
+`workspace.list_files()`, `workspace.glob()`, and `workspace.write_file()`
+according to the configured workspace permission. Bash exposes workspace access
+through commands such as `workspace-read`, `workspace-list`, and
+`workspace-glob`, while explicit tools are exposed through a
+`tool <name> <json>` command.
 
 ## MVP
 

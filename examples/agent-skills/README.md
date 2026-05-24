@@ -56,14 +56,15 @@ export class SkillsAgent extends Think<Env> {
 The `agents/vite` plugin turns the local `src/skills/*/SKILL.md` directories
 into a `SkillSource` that Think can register at startup. The optional script
 runner executes JavaScript/TypeScript files under `scripts/` in a sandboxed
-Worker, using `@cloudflare/worker-bundler` to compile TypeScript first. It runs
-`.py` files as Python Dynamic Workers, and `.sh`/`.bash` files through
-`just-bash`, when a skill asks for script execution. Script execution requires
-the `worker_loaders` binding shown in `wrangler.jsonc`. Passing
-`workspaceInstance` gives scripts read-only workspace access by default; opt in
-to `workspace: "read-write"`, tools, or network only when a skill needs them.
-The default 30 second timeout leaves room for TypeScript compilation and Dynamic
-Worker cold starts in local development.
+Worker, using `@cloudflare/worker-bundler` to compile TypeScript and bundle
+sibling script imports. It runs `.py` files as Python Dynamic Workers, and
+`.sh`/`.bash` files through `just-bash`, with `/input.json`, `/context.json`, and
+bundled resources under `/skill` materialized for those runtimes. Script
+execution requires the `worker_loaders` binding shown in `wrangler.jsonc`.
+Passing `workspaceInstance` gives scripts read-only workspace access by default;
+opt in to `workspace: "read-write"`, tools, or network only when a skill needs
+them. The default 30 second timeout leaves room for TypeScript compilation and
+Dynamic Worker cold starts in local development.
 
 ## Related
 

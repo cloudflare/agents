@@ -7,6 +7,7 @@ import type {
   SkillScriptRunner,
   SkillScriptContext
 } from "./types";
+import { validateSkillResourcePath } from "./types";
 
 export interface WorkerSkillScriptRunnerOptions {
   loader: WorkerLoader;
@@ -160,26 +161,107 @@ function workspaceProvider(
   return { name: "workspace", tools };
 }
 
-function scriptModule(source: string, input: unknown, ctx: SkillScriptContext) {
+function mountedFiles(request: SkillScriptRequest): Record<
+  string,
+  {
+    content: string;
+    encoding: "text" | "base64";
+  }
+> {
+  const files: Record<
+    string,
+    {
+      content: string;
+      encoding: "text" | "base64";
+    }
+  > = {
+    "/input.json": {
+      content: JSON.stringify(request.input),
+      encoding: "text"
+    },
+    "/context.json": {
+      content: JSON.stringify(skillScriptContext(request)),
+      encoding: "text"
+    },
+    "/skill/SKILL.md": {
+      content: request.skill.rawContent ?? request.skill.body,
+      encoding: "text"
+    }
+  };
+
+  for (const resource of request.resources ?? []) {
+    const pathError = validateSkillResourcePath(resource.path);
+    if (pathError) throw new Error(pathError);
+    files[`/skill/${resource.path}`] = {
+      content: resource.content,
+      encoding: resource.encoding ?? "text"
+    };
+  }
+  files[`/skill/${request.path}`] = {
+    content: request.source,
+    encoding: "text"
+  };
+
+  return files;
+}
+
+function validateMountedResourcePaths(request: SkillScriptRequest): void {
+  for (const resource of request.resources ?? []) {
+    const pathError = validateSkillResourcePath(resource.path);
+    if (pathError) throw new Error(pathError);
+  }
+}
+
+function scriptModule(source: string, request: SkillScriptRequest) {
+  const input = request.input;
+  const ctx = skillScriptContext(request);
   const runnableSource = source.replace(
-    /^\s*export\s+default\s+/,
+    /^\s*export\s+default\s+/m,
     "const __skillRun = "
   );
+  const functionStyle = /^\s*export\s+default\s+/m.test(source);
 
   return [
     "async () => {",
-    runnableSource,
+    `globalThis.input = ${JSON.stringify(input)};`,
+    `globalThis.ctx = ${JSON.stringify(ctx)};`,
     "",
-    'if (typeof __skillRun !== "function") {',
-    '  throw new Error("Skill script must default export a function.");',
-    "}",
-    `return await __skillRun(${JSON.stringify(input)}, ${JSON.stringify(ctx)});`,
+    functionStyle ? runnableSource : source,
+    "",
+    ...(functionStyle
+      ? [
+          'if (typeof __skillRun !== "function") {',
+          '  throw new Error("Skill script default export must be a function.");',
+          "}",
+          `return { __skillScriptMode: "function", result: await __skillRun(${JSON.stringify(input)}, ${JSON.stringify(ctx)}) };`
+        ]
+      : [
+          `return { __skillScriptMode: "cli", stdout: "", stderr: "", exitCode: 0 };`
+        ]),
     "}"
   ].join("\n");
 }
 
 function stdinText(stdin: unknown): string {
   return typeof stdin === "string" ? stdin : String(stdin ?? "");
+}
+
+function bashFiles(request: SkillScriptRequest): Record<string, string> {
+  const files: Record<string, string> = {
+    "/input.json": JSON.stringify(request.input),
+    "/context.json": JSON.stringify(skillScriptContext(request)),
+    "/skill-script.sh": request.source,
+    "/skill/SKILL.md": request.skill.rawContent ?? request.skill.body,
+    [`/skill/${request.path}`]: request.source
+  };
+
+  for (const resource of request.resources ?? []) {
+    const pathError = validateSkillResourcePath(resource.path);
+    if (pathError) throw new Error(pathError);
+    files[`/skill/${resource.path}`] = resource.content;
+  }
+
+  return files;
 }
 
 function skillScriptContext(request: SkillScriptRequest): SkillScriptContext {
@@ -297,23 +379,28 @@ class SkillScriptHostBridge extends RpcTarget {
   }
 }
 
-function pythonScriptModule(source: string): string {
+function pythonScriptModule(request: SkillScriptRequest): string {
+  const source = request.source;
   const sourceLiteral = JSON.stringify(source);
+  const filesLiteral = JSON.stringify(mountedFiles(request));
 
   return String.raw`
 import asyncio
+import base64
+import contextlib
 import inspect
+import io
 import json
+import os
+import sys
+import time
 import types
 from js import Object
 from pyodide.ffi import to_js as pyodide_to_js
 from workers import WorkerEntrypoint
 
-skill_module = types.ModuleType("skill_script")
-exec(${sourceLiteral}, skill_module.__dict__)
-
-if not hasattr(skill_module, "run") or not callable(skill_module.run):
-    raise Exception("Python skill script must define a callable run(input, ctx).")
+SKILL_SOURCE = ${sourceLiteral}
+SKILL_FILES = ${filesLiteral}
 
 async def maybe_await(value):
     if inspect.isawaitable(value):
@@ -328,6 +415,28 @@ async def decode_host_response(raw):
 
 def to_js(obj):
     return pyodide_to_js(obj, dict_converter=Object.fromEntries)
+
+def materialize_files():
+    for path, file in SKILL_FILES.items():
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        mode = "wb" if file.get("encoding") == "base64" else "w"
+        with open(path, mode) as handle:
+            if file.get("encoding") == "base64":
+                handle.write(base64.b64decode(file.get("content", "")))
+            else:
+                handle.write(file.get("content", ""))
+
+def looks_function_style(source):
+    return "def run(" in source or "async def run(" in source
+
+def timeout_trace(deadline):
+    def trace(frame, event, arg):
+        if time.monotonic() > deadline:
+            raise TimeoutError("Python script execution timed out")
+        return trace
+    return trace
 
 class ToolNamespace:
     def __init__(self, host):
@@ -364,15 +473,63 @@ class WorkspaceNamespace:
 
 class Default(WorkerEntrypoint):
     async def evaluate(self, input, ctx, host, timeout_ms=None):
-        skill_module.tools = ToolNamespace(host)
-        skill_module.workspace = WorkspaceNamespace(host)
+        materialize_files()
         try:
-            execution = maybe_await(skill_module.run(input, ctx))
+            if looks_function_style(SKILL_SOURCE):
+                skill_module = types.ModuleType("skill_script")
+                skill_module.tools = ToolNamespace(host)
+                skill_module.workspace = WorkspaceNamespace(host)
+                exec(SKILL_SOURCE, skill_module.__dict__)
+                if not hasattr(skill_module, "run") or not callable(skill_module.run):
+                    raise Exception("Python function-style skill script must define a callable run(input, ctx).")
+                execution = maybe_await(skill_module.run(input, ctx))
+                previous_trace = sys.gettrace()
+                if timeout_ms is not None:
+                    sys.settrace(timeout_trace(time.monotonic() + (timeout_ms / 1000)))
+                try:
+                    if timeout_ms is not None:
+                        result = await asyncio.wait_for(execution, timeout_ms / 1000)
+                    else:
+                        result = await execution
+                finally:
+                    sys.settrace(previous_trace)
+                return to_js({"result": result, "logs": [], "mode": "function"})
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            previous_stdin = sys.stdin
+            previous_trace = sys.gettrace()
             if timeout_ms is not None:
-                result = await asyncio.wait_for(execution, timeout_ms / 1000)
-            else:
-                result = await execution
-            return to_js({"result": result, "logs": []})
+                sys.settrace(timeout_trace(time.monotonic() + (timeout_ms / 1000)))
+            sys.stdin = io.StringIO(json.dumps(input))
+            try:
+                namespace = {"__name__": "__main__", "__file__": "/skill/script.py"}
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    exec(SKILL_SOURCE, namespace)
+            finally:
+                sys.stdin = previous_stdin
+                sys.settrace(previous_trace)
+            return to_js({
+                "result": {
+                    "stdout": stdout.getvalue(),
+                    "stderr": stderr.getvalue(),
+                    "exitCode": 0
+                },
+                "logs": [],
+                "mode": "cli"
+            })
+        except TimeoutError:
+            return to_js({"error": "Python script execution timed out", "logs": []})
+        except SystemExit as err:
+            return to_js({
+                "result": {
+                    "stdout": stdout.getvalue() if "stdout" in locals() else "",
+                    "stderr": stderr.getvalue() if "stderr" in locals() else "",
+                    "exitCode": int(err.code) if isinstance(err.code, int) else 1
+                },
+                "logs": [],
+                "mode": "cli"
+            })
         except asyncio.TimeoutError:
             return to_js({"error": "Python script execution timed out", "logs": []})
         except Exception as err:
@@ -477,16 +634,7 @@ async function runBashScript(
 
   try {
     const bash = new Bash({
-      files: {
-        "/input.json": JSON.stringify(request.input),
-        "/context.json": JSON.stringify({
-          skill: {
-            name: request.skill.name,
-            description: request.skill.description
-          }
-        }),
-        "/skill-script.sh": request.source
-      },
+      files: bashFiles(request),
       customCommands,
       defenseInDepth: true,
       network: options.network ? {} : undefined
@@ -519,25 +667,38 @@ function moduleSource(
   return module?.js ?? module?.cjs ?? null;
 }
 
-async function compileTypeScriptScript(
-  request: SkillScriptRequest
+async function prepareJavaScriptSource(
+  request: SkillScriptRequest,
+  runtime: "javascript" | "typescript"
 ): Promise<string> {
   const { createWorker } = await import("@cloudflare/worker-bundler");
+  const files: Record<string, string> = {};
+  for (const resource of request.resources ?? []) {
+    const extension = extensionOf(resource.path);
+    if (
+      resource.kind === "script" &&
+      (resource.encoding ?? "text") === "text" &&
+      [".js", ".mjs", ".ts", ".tsx"].includes(extension)
+    ) {
+      files[resource.path] = resource.content;
+    }
+  }
+  files[request.path] = request.source;
+  const needsBundler =
+    runtime === "typescript" || Object.keys(files).length > 1;
+  if (!needsBundler) return request.source;
+
   const result = await createWorker({
-    files: {
-      [request.path]: request.source
-    },
+    files,
     entryPoint: request.path,
-    bundle: false
+    bundle: Object.keys(files).length > 1
   });
   const compiled =
     moduleSource(result.modules[result.mainModule]) ??
     moduleSource(Object.values(result.modules)[0]);
 
   if (!compiled) {
-    throw new Error(
-      `Failed to compile TypeScript skill script: ${request.path}`
-    );
+    throw new Error(`Failed to compile skill script: ${request.path}`);
   }
 
   return compiled;
@@ -572,8 +733,8 @@ async function runJavaScriptScript(
   }
 
   const source =
-    runtime === "typescript"
-      ? await compileTypeScriptScript(request)
+    runtime === "typescript" || runtime === "javascript"
+      ? await prepareJavaScriptSource(request, runtime)
       : request.source;
   const executor = new DynamicWorkerExecutor({
     loader: options.loader,
@@ -581,7 +742,7 @@ async function runJavaScriptScript(
     globalOutbound: options.network ? undefined : null
   });
   const result = await executor.execute(
-    scriptModule(source, request.input, skillScriptContext(request)),
+    scriptModule(source, request),
     providers
   );
 
@@ -590,6 +751,31 @@ async function runJavaScriptScript(
       ? `\n\nConsole output:\n${result.logs.join("\n")}`
       : "";
     throw new Error(`${result.error}${logs}`);
+  }
+
+  if (
+    typeof result.result === "object" &&
+    result.result !== null &&
+    (result.result as { __skillScriptMode?: unknown }).__skillScriptMode ===
+      "cli"
+  ) {
+    return {
+      stdout: result.logs?.length ? `${result.logs.join("\n")}\n` : "",
+      stderr: (result.result as { stderr?: string }).stderr ?? "",
+      exitCode: (result.result as { exitCode?: number }).exitCode ?? 0
+    };
+  }
+
+  if (
+    typeof result.result === "object" &&
+    result.result !== null &&
+    (result.result as { __skillScriptMode?: unknown }).__skillScriptMode ===
+      "function"
+  ) {
+    const functionResult = (result.result as { result?: unknown }).result;
+    return result.logs?.length
+      ? { result: functionResult, logs: result.logs }
+      : functionResult;
   }
 
   return result.logs?.length
@@ -609,7 +795,7 @@ async function runPythonScript(
       compatibilityFlags: ["python_workers", "disable_python_external_sdk"],
       mainModule: "skill_runner.py",
       modules: {
-        "skill_runner.py": pythonScriptModule(request.source)
+        "skill_runner.py": pythonScriptModule(request)
       },
       globalOutbound: options.network ? undefined : null
     })
@@ -653,6 +839,14 @@ async function runPythonScript(
       throw new Error(response.error);
     }
 
+    if (
+      typeof response === "object" &&
+      response !== null &&
+      (response as { mode?: unknown }).mode === "cli"
+    ) {
+      return response.result;
+    }
+
     return response.logs?.length
       ? { result: response.result, logs: response.logs }
       : response.result;
@@ -672,6 +866,7 @@ export function workerScriptRunner(
           : options.tools;
       const validation = validateSkillScriptPath(request.path);
       if (!validation.ok) throw new Error(validation.error);
+      validateMountedResourcePaths(request);
 
       if (validation.runtime === "bash") {
         return runBashScript(request, options, tools);

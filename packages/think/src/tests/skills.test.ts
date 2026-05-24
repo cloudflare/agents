@@ -46,6 +46,18 @@ const manifest: SkillManifest = {
           path: "scripts/not-a-script.js",
           kind: "file",
           content: "Not executable."
+        },
+        {
+          path: "assets/logo.png",
+          kind: "asset",
+          encoding: "base64",
+          mimeType: "image/png",
+          content: "aGVsbG8="
+        },
+        {
+          path: "../input.json",
+          kind: "file",
+          content: "unsafe"
         }
       ]
     },
@@ -96,7 +108,8 @@ Review carefully.
       resources: [
         { path: "scripts/review.ts", kind: "script" },
         { path: "scripts/not-a-script.txt", kind: "file" },
-        { path: "scripts/not-a-script.js", kind: "file" }
+        { path: "scripts/not-a-script.js", kind: "file" },
+        { path: "assets/logo.png", kind: "asset", encoding: "base64" }
       ]
     });
 
@@ -105,6 +118,16 @@ Review carefully.
     ).resolves.toMatchObject({
       content: "export default function review() {}"
     });
+    await expect(
+      source.readResource?.("code-review", "assets/logo.png")
+    ).resolves.toMatchObject({
+      encoding: "base64",
+      mimeType: "image/png",
+      content: "aGVsbG8="
+    });
+    await expect(
+      source.readResource?.("code-review", "../input.json")
+    ).resolves.toBeNull();
   });
 
   it("renders all skills in the model catalog", async () => {
@@ -143,6 +166,19 @@ Review carefully.
     });
     expect(resource).toContain("<skill_resource");
     expect(resource).toContain("export default function review");
+
+    const qualified = await executable(tools.read_skill_resource).execute({
+      path: "always-on/references/rules.md"
+    });
+    expect(qualified).toContain('name="always-on"');
+    expect(qualified).toContain("Rules reference");
+
+    const binary = await executable(tools.read_skill_resource).execute({
+      path: "code-review/assets/logo.png"
+    });
+    expect(binary).toContain('encoding="base64"');
+    expect(binary).toContain('mimeType="image/png"');
+    expect(binary).toContain("aGVsbG8=");
   });
 
   it("exposes run_skill_script only when a runner is configured", async () => {

@@ -221,6 +221,12 @@ src/skills/release-notes/scripts/format-release-notes.ts
 src/skills/release-notes/references/style-guide.md
 ```
 
+Bundled resources are packaged with explicit `encoding` metadata. Text resources
+are returned directly; binary assets are returned as base64. `read_skill_resource`
+can read `{ name, path }` or a qualified path such as
+`release-notes/references/style-guide.md`, which helps skills reference resources
+from other skills.
+
 Skills are on-demand instructions, not always-on system prompt text. The model
 sees the catalog first, then calls `activate_skill` when a user task matches a
 skill description. Use `getSystemPrompt()` or a Session context block for
@@ -228,12 +234,18 @@ behavior that should apply to every turn.
 
 Script execution is opt-in. `getSkillScriptRunner()` enables
 `run_skill_script`, which can run JavaScript, TypeScript, Python, and Bash
-scripts under `scripts/`. If `workspaceInstance` is provided, scripts get
-read-only workspace access by default. Workspace writes, tools, and network
-access are opt-in. Scripts default to a 30 second timeout, which can be
-overridden with `timeout`. TypeScript scripts are compiled with
-`@cloudflare/worker-bundler`; Python scripts run as Python Dynamic Workers; Bash
-scripts run through `just-bash`.
+scripts under `scripts/`. Python and Bash scripts receive `/input.json`,
+`/context.json`, and bundled skill resources under `/skill`. JavaScript and
+TypeScript scripts can run as top-level files and may import sibling script files;
+`export default function run(input, ctx)` remains the recommended JS/TS contract
+until the filesystem compatibility story is revisited. Python `def run(input,
+ctx)` scripts are still supported.
+
+If `workspaceInstance` is provided, scripts get read-only workspace access by
+default. Workspace writes, tools, and network access are opt-in. Scripts default
+to a 30 second timeout, which can be overridden with `timeout`. TypeScript
+scripts are compiled with `@cloudflare/worker-bundler`; Python scripts run as
+Python Dynamic Workers; Bash scripts run through `just-bash`.
 
 Script execution requires a Worker Loader binding:
 

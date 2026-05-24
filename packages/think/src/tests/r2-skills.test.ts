@@ -51,7 +51,8 @@ function fakeBucket(initialObjects: FakeObject[]): FakeBucket {
         size: object.content.length,
         etag: object.etag ?? object.content,
         uploaded: object.uploaded ?? new Date("2026-01-01T00:00:00.000Z"),
-        text: async () => object.content
+        text: async () => object.content,
+        arrayBuffer: async () => new TextEncoder().encode(object.content).buffer
       } as unknown as R2ObjectBody;
     }
   } as unknown as FakeBucket;
@@ -79,6 +80,16 @@ Check correctness first.
     key: "skills/code-review/scripts/review.ts",
     etag: "resource-2",
     content: "export default function review() {}"
+  },
+  {
+    key: "skills/code-review/assets/logo.png",
+    etag: "resource-3",
+    content: "hello"
+  },
+  {
+    key: "skills/code-review/../input.json",
+    etag: "unsafe",
+    content: "unsafe"
   },
   {
     key: "skills/debug-plan/SKILL.md",
@@ -135,6 +146,13 @@ describe("R2 Think skills", () => {
       body: "# Code Review\nCheck correctness first.\n",
       resources: [
         {
+          path: "assets/logo.png",
+          kind: "asset",
+          encoding: "base64",
+          mimeType: "image/png",
+          size: "hello".length
+        },
+        {
           path: "references/checklist.md",
           kind: "reference",
           size: "Review checklist".length
@@ -165,6 +183,23 @@ describe("R2 Think skills", () => {
 
     await expect(
       source.readResource?.("code-review", "missing.md")
+    ).resolves.toBeNull();
+  });
+
+  it("reads binary resources as base64", async () => {
+    const source = skills.r2(bucket, { prefix: "skills/" });
+
+    await expect(
+      source.readResource?.("code-review", "assets/logo.png")
+    ).resolves.toMatchObject({
+      path: "assets/logo.png",
+      kind: "asset",
+      encoding: "base64",
+      mimeType: "image/png",
+      content: "aGVsbG8="
+    });
+    await expect(
+      source.readResource?.("code-review", "../input.json")
     ).resolves.toBeNull();
   });
 
@@ -272,6 +307,39 @@ description: Review code carefully.
 ---
 Different instructions.
 `
+        }
+      ]),
+      { prefix: "skills/", fingerprint: "content" }
+    );
+
+    await first.list();
+    await changedContent.list();
+
+    expect(changedContent.fingerprint).not.toBe(first.fingerprint);
+  });
+
+  it("fingerprints binary resource contents when requested", async () => {
+    const first = skills.r2(bucket, {
+      prefix: "skills/",
+      fingerprint: "content"
+    });
+    const changedContent = skills.r2(
+      fakeBucket([
+        {
+          key: "skills/code-review/SKILL.md",
+          etag: "skill-1",
+          content: `---
+name: code-review
+description: Review code carefully.
+---
+# Code Review
+Check correctness first.
+`
+        },
+        {
+          key: "skills/code-review/assets/logo.png",
+          etag: "resource-3",
+          content: "different"
         }
       ]),
       { prefix: "skills/", fingerprint: "content" }

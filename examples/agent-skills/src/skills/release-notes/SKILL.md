@@ -24,7 +24,7 @@ If the user asks to inspect or echo the raw script input, run
 
 If the user asks for a quick count and compact summary of changes, run
 `scripts/summarize-changes.py` with `{ "changes": [...] }`; it demonstrates
-Python skill scripts using the same JSON input and skill metadata contract.
+Python skill scripts reading the same `/input.json` and `/context.json` files.
 
 ## Output format
 

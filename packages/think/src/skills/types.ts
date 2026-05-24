@@ -19,6 +19,8 @@ export interface SkillResourceDescriptor {
   path: string;
   kind: "reference" | "script" | "asset" | "file";
   size?: number;
+  encoding?: "text" | "base64";
+  mimeType?: string;
 }
 
 export interface SkillResource extends SkillResourceDescriptor {
@@ -34,6 +36,7 @@ export interface SkillScriptRequest {
   path: string;
   source: string;
   input: unknown;
+  resources?: SkillResource[];
 }
 
 export interface SkillScriptRunner {
@@ -75,4 +78,15 @@ export interface SkillManifest {
 export interface SkillRegistrySnapshot {
   fingerprint: string;
   catalogPrompt: string | null;
+}
+
+export function validateSkillResourcePath(path: string): string | null {
+  if (
+    path.startsWith("/") ||
+    path.includes("\0") ||
+    path.split("/").some((part) => part === "" || part === "." || part === "..")
+  ) {
+    return `Skill resource path must be a normalized relative path: ${path}`;
+  }
+  return null;
 }
