@@ -236,10 +236,14 @@ Script execution is opt-in. `getSkillScriptRunner()` enables
 `run_skill_script`, which can run JavaScript, TypeScript, Python, and Bash
 scripts under `scripts/`. Python and Bash scripts receive `/input.json`,
 `/context.json`, and bundled skill resources under `/skill`. JavaScript and
-TypeScript scripts can run as top-level files and may import sibling script files;
-`export default function run(input, ctx)` remains the recommended JS/TS contract
-until the filesystem compatibility story is revisited. Python `def run(input,
-ctx)` scripts are still supported.
+TypeScript scripts can run as top-level files, import sibling script files, and
+use a partial `fs`/`node:fs` compatibility layer for skill-local files through
+static imports or dynamic `import("node:fs")`. Sync FS reads work for `/skill`,
+`/input.json`, and `/context.json`; workspace access is async-only through
+`fs.promises`. Writes to `/output` are returned as script artifacts, while writes
+to `/workspace` require `workspace: "read-write"` and must use async APIs.
+`export default function run(input, ctx)` remains supported for JS/TS, and Python
+`def run(input, ctx)` scripts are still supported.
 
 If `workspaceInstance` is provided, scripts get read-only workspace access by
 default. Workspace writes, tools, and network access are opt-in. Scripts default

@@ -16,7 +16,8 @@ Turn implementation details into user-facing release notes.
 
 When the user provides a rough list of changes, run
 `scripts/format-release-notes.ts` with `{ "changes": [...] }` to create a first
-draft, then polish the wording for the user's audience.
+draft, then polish the wording for the user's audience. The TypeScript script
+demonstrates reading `references/style-guide.md` with `node:fs`.
 
 If the user asks to inspect or echo the raw script input, run
 `scripts/count-changes.sh`; it demonstrates Bash skill scripts reading

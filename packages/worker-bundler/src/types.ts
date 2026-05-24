@@ -157,6 +157,16 @@ export interface CreateWorkerOptions {
   conditions?: string[];
 
   /**
+   * Exact virtual module aliases available during bundling. Each key is an
+   * import specifier (for example `"node:fs"` or `"virtual:app/config"`) and
+   * each value is JavaScript module source loaded by the bundler.
+   *
+   * Only applies when `bundle: true`. In transform-only mode this option is
+   * ignored and a warning is added to the result's `warnings` array.
+   */
+  virtualModules?: Record<string, string>;
+
+  /**
    * Escape hatch for advanced users: extra esbuild plugins to run **before**
    * the bundler's internal virtual-filesystem plugin.
    *

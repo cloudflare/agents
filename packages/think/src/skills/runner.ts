@@ -22,6 +22,7 @@ type SkillScriptRuntime = "javascript" | "typescript" | "python" | "bash";
 type WorkspaceAccess = "none" | "read" | "read-write";
 
 const DEFAULT_SCRIPT_TIMEOUT_MS = 30_000;
+const MAX_OUTPUT_ARTIFACT_BYTES = 64_000;
 
 const SUPPORTED_SCRIPT_EXTENSIONS = new Set([
   ".js",
@@ -137,6 +138,18 @@ function workspaceProvider(
             : String(input);
         return workspace.glob(pattern);
       }
+    },
+    stat: {
+      description: "Get workspace file metadata.",
+      execute: async (input: unknown) => {
+        const path =
+          typeof input === "object" &&
+          input !== null &&
+          typeof (input as { path?: unknown }).path === "string"
+            ? (input as { path: string }).path
+            : String(input);
+        return workspace.stat(path);
+      }
     }
   };
 
@@ -212,17 +225,20 @@ function validateMountedResourcePaths(request: SkillScriptRequest): void {
   }
 }
 
-function scriptModule(source: string, request: SkillScriptRequest) {
+function scriptModule(
+  source: string,
+  request: SkillScriptRequest,
+  functionStyle: boolean
+) {
   const input = request.input;
   const ctx = skillScriptContext(request);
-  const runnableSource = source.replace(
-    /^\s*export\s+default\s+/m,
-    "const __skillRun = "
-  );
-  const functionStyle = /^\s*export\s+default\s+/m.test(source);
+  const runnableSource = source.includes("export default")
+    ? source.replace(/^\s*export\s+default\s+/m, "const __skillRun = ")
+    : source;
 
   return [
     "async () => {",
+    "globalThis.__thinkSkillFsRuntime = { outputFiles: {} };",
     `globalThis.input = ${JSON.stringify(input)};`,
     `globalThis.ctx = ${JSON.stringify(ctx)};`,
     "",
@@ -233,10 +249,10 @@ function scriptModule(source: string, request: SkillScriptRequest) {
           'if (typeof __skillRun !== "function") {',
           '  throw new Error("Skill script default export must be a function.");',
           "}",
-          `return { __skillScriptMode: "function", result: await __skillRun(${JSON.stringify(input)}, ${JSON.stringify(ctx)}) };`
+          `return { __skillScriptMode: "function", result: await __skillRun(${JSON.stringify(input)}, ${JSON.stringify(ctx)}), outputFiles: Object.values(globalThis.__thinkSkillFsRuntime.outputFiles) };`
         ]
       : [
-          `return { __skillScriptMode: "cli", stdout: "", stderr: "", exitCode: 0 };`
+          `return { __skillScriptMode: "cli", stdout: "", stderr: "", exitCode: 0, outputFiles: Object.values(globalThis.__thinkSkillFsRuntime.outputFiles) };`
         ]),
     "}"
   ].join("\n");
@@ -262,6 +278,358 @@ function bashFiles(request: SkillScriptRequest): Record<string, string> {
   }
 
   return files;
+}
+
+function scriptFileTable(request: SkillScriptRequest): Record<
+  string,
+  {
+    content: string;
+    encoding: "text" | "base64";
+  }
+> {
+  return mountedFiles(request);
+}
+
+function skillFileTableModule(request: SkillScriptRequest): string {
+  return `export const files = ${JSON.stringify(scriptFileTable(request))};\n`;
+}
+
+function skillPathModule(): string {
+  return `
+function normalize(path) {
+  const raw = String(path);
+  const absolute = raw.startsWith("/") ? raw : \`/skill/\${raw}\`;
+  const parts = [];
+  for (const part of absolute.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  return "/" + parts.join("/");
+}
+
+export function join(...parts) {
+  return normalize(parts.join("/"));
+}
+
+export function resolve(...parts) {
+  return normalize(parts.join("/"));
+}
+
+export function dirname(path) {
+  const normalized = normalize(path);
+  return normalized.split("/").slice(0, -1).join("/") || "/";
+}
+
+export function basename(path) {
+  return normalize(path).split("/").at(-1) || "";
+}
+
+export function extname(path) {
+  const base = basename(path);
+  const index = base.lastIndexOf(".");
+  return index === -1 ? "" : base.slice(index);
+}
+
+export default {
+  join,
+  resolve,
+  dirname,
+  basename,
+  extname
+};
+`;
+}
+
+function skillFsModule(workspaceAccess: WorkspaceAccess): string {
+  const canReadWorkspace = workspaceAccess !== "none";
+  const canWriteWorkspace = workspaceAccess === "read-write";
+  return `
+import { files } from "virtual:think-skill-files";
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+const canReadWorkspace = ${JSON.stringify(canReadWorkspace)};
+const canWriteWorkspace = ${JSON.stringify(canWriteWorkspace)};
+const maxOutputArtifactBytes = ${MAX_OUTPUT_ARTIFACT_BYTES};
+
+function runtime() {
+  const existing = globalThis.__thinkSkillFsRuntime;
+  if (existing) return existing;
+  const created = { outputFiles: {} };
+  globalThis.__thinkSkillFsRuntime = created;
+  return created;
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function base64ToBytes(value) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function normalize(path) {
+  const raw = String(path);
+  const absolute = raw.startsWith("/") ? raw : \`/skill/\${raw}\`;
+  const parts = [];
+  for (const part of absolute.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  return "/" + parts.join("/");
+}
+
+function workspacePath(path) {
+  const normalized = normalize(path);
+  if (normalized === "/workspace") return ".";
+  if (normalized.startsWith("/workspace/")) {
+    return normalized.slice("/workspace/".length);
+  }
+  return null;
+}
+
+function outputPath(path) {
+  const raw = String(path);
+  const normalized = raw.startsWith("/") ? normalize(raw) : raw;
+  if (normalized === "/output") return null;
+  if (normalized.startsWith("/output/")) return normalized;
+  return null;
+}
+
+function outputFile(path) {
+  return runtime().outputFiles[normalize(path)] ?? null;
+}
+
+function localFile(path) {
+  const normalized = normalize(path);
+  return files[normalized] ?? outputFile(normalized);
+}
+
+function fileToBytes(file) {
+  return file.encoding === "base64"
+    ? base64ToBytes(file.content)
+    : textEncoder.encode(file.content);
+}
+
+function decodeFile(file, encoding) {
+  if (encoding === null || encoding === undefined) return fileToBytes(file);
+  const normalizedEncoding =
+    typeof encoding === "string"
+      ? encoding.toLowerCase()
+      : String(encoding?.encoding ?? "utf8").toLowerCase();
+  if (normalizedEncoding === "buffer") return fileToBytes(file);
+  if (normalizedEncoding === "base64") {
+    return file.encoding === "base64" ? file.content : bytesToBase64(fileToBytes(file));
+  }
+  if (file.encoding === "base64") return textDecoder.decode(fileToBytes(file));
+  return file.content;
+}
+
+function bytesFromData(data, encoding) {
+  if (data instanceof Uint8Array) return data;
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  const text = String(data);
+  if (String(encoding ?? "").toLowerCase() === "base64") return base64ToBytes(text);
+  return textEncoder.encode(text);
+}
+
+function textFromData(data, encoding) {
+  if (typeof data === "string") return data;
+  return textDecoder.decode(bytesFromData(data, encoding));
+}
+
+function writeOutput(path, data, encoding) {
+  const target = outputPath(path);
+  if (!target) {
+    throw new Error("Skill scripts can only write to /output/... or async /workspace/... with write access.");
+  }
+  const bytes = bytesFromData(data, encoding);
+  if (bytes.byteLength > maxOutputArtifactBytes) {
+    throw new Error(
+      \`Output artifact exceeds \${maxOutputArtifactBytes} bytes: \${target}\`
+    );
+  }
+  const isText = typeof data === "string" && String(encoding ?? "utf8").toLowerCase() !== "base64";
+  const file = isText
+    ? { path: target, encoding: "text", content: String(data) }
+    : { path: target, encoding: "base64", content: bytesToBase64(bytes) };
+  runtime().outputFiles[target] = file;
+}
+
+function readLocal(path, encoding) {
+  if (workspacePath(path) !== null) {
+    throw new Error("Synchronous workspace access is not supported. Use fs.promises.readFile().");
+  }
+  const file = localFile(path);
+  if (!file) throw new Error(\`File not found in skill filesystem: \${normalize(path)}\`);
+  return decodeFile(file, encoding);
+}
+
+async function readWorkspace(path, encoding) {
+  if (!canReadWorkspace) throw new Error("Workspace access is not available.");
+  const content = await workspace.readFile({ path });
+  if (content === null || content === undefined) {
+    throw new Error(\`Workspace file not found: \${path}\`);
+  }
+  if (encoding === null || encoding === undefined) {
+    return textEncoder.encode(String(content));
+  }
+  return String(content);
+}
+
+async function writeWorkspace(path, data, encoding) {
+  if (!canWriteWorkspace) throw new Error("Workspace write access is not available.");
+  await workspace.writeFile({ path, content: textFromData(data, encoding) });
+}
+
+export function readFileSync(path, encoding = "utf8") {
+  return readLocal(path, encoding);
+}
+
+export function writeFileSync(path, data, encoding = "utf8") {
+  if (workspacePath(path) !== null) {
+    throw new Error("Synchronous workspace writes are not supported. Use fs.promises.writeFile().");
+  }
+  writeOutput(path, data, encoding);
+}
+
+export function existsSync(path) {
+  if (workspacePath(path) !== null) {
+    throw new Error("Synchronous workspace access is not supported. Use fs.promises.readFile().");
+  }
+  return Boolean(localFile(path));
+}
+
+export function readdirSync(path = "/skill") {
+  if (workspacePath(path) !== null) {
+    throw new Error("Synchronous workspace access is not supported. Use fs.promises.readdir().");
+  }
+  const prefix = normalize(path).replace(/\\/$/, "") + "/";
+  return [
+    ...new Set(
+      Object.keys({ ...files, ...runtime().outputFiles })
+        .filter((file) => file.startsWith(prefix))
+        .map((file) => file.slice(prefix.length).split("/")[0])
+        .filter(Boolean)
+    )
+  ];
+}
+
+export function statSync(path) {
+  if (workspacePath(path) !== null) {
+    throw new Error("Synchronous workspace access is not supported. Use fs.promises.stat().");
+  }
+  const file = localFile(path);
+  const normalized = normalize(path);
+  const isDirectory = Object.keys({ ...files, ...runtime().outputFiles }).some((filePath) =>
+    filePath.startsWith(normalized.replace(/\\/$/, "") + "/")
+  );
+  if (!file && !isDirectory) {
+    throw new Error(\`File not found in skill filesystem: \${normalized}\`);
+  }
+  return {
+    isFile: () => Boolean(file),
+    isDirectory: () => !file && isDirectory,
+    size: file ? fileToBytes(file).byteLength : 0
+  };
+}
+
+export async function readFile(path, encoding = "utf8") {
+  const workspaceTarget = workspacePath(path);
+  if (workspaceTarget !== null) return readWorkspace(workspaceTarget, encoding);
+  return readLocal(path, encoding);
+}
+
+export async function writeFile(path, data, encoding = "utf8") {
+  const workspaceTarget = workspacePath(path);
+  if (workspaceTarget !== null) {
+    return writeWorkspace(workspaceTarget, data, encoding);
+  }
+  writeOutput(path, data, encoding);
+}
+
+export async function readdir(path = "/skill") {
+  const workspaceTarget = workspacePath(path);
+  if (workspaceTarget !== null) {
+    if (!canReadWorkspace) throw new Error("Workspace access is not available.");
+    const entries = await workspace.listFiles({ path: workspaceTarget });
+    return entries.map((entry) => entry.name ?? entry.path);
+  }
+  return readdirSync(path);
+}
+
+export async function stat(path) {
+  const workspaceTarget = workspacePath(path);
+  if (workspaceTarget !== null) {
+    if (!canReadWorkspace) throw new Error("Workspace access is not available.");
+    const result = await workspace.stat({ path: workspaceTarget });
+    if (!result) {
+      throw new Error(\`Workspace file not found: \${workspaceTarget}\`);
+    }
+    return {
+      isFile: () => result.type === "file",
+      isDirectory: () => result.type === "directory",
+      size: result.size ?? 0
+    };
+  }
+  return statSync(path);
+}
+
+export const promises = {
+  readFile,
+  writeFile,
+  readdir,
+  stat
+};
+
+export default {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  readdirSync,
+  statSync,
+  promises
+};
+`;
+}
+
+function skillFsPromisesModule(): string {
+  return `
+export {
+  readFile,
+  writeFile,
+  readdir,
+  stat,
+  promises as default
+} from "node:fs";
+`;
+}
+
+function skillVirtualModules(
+  request: SkillScriptRequest,
+  workspaceAccess: WorkspaceAccess
+): Record<string, string> {
+  const files = skillFileTableModule(request);
+  const fs = skillFsModule(workspaceAccess);
+  const fsPromises = skillFsPromisesModule();
+  const path = skillPathModule();
+
+  return {
+    "virtual:think-skill-files": files,
+    fs,
+    "node:fs": fs,
+    "fs/promises": fsPromises,
+    "node:fs/promises": fsPromises,
+    path,
+    "node:path": path
+  };
 }
 
 function skillScriptContext(request: SkillScriptRequest): SkillScriptContext {
@@ -667,9 +1035,31 @@ function moduleSource(
   return module?.js ?? module?.cjs ?? null;
 }
 
+function stripEsmExportBlock(source: string): string {
+  return source.replace(/\n?export\s*\{[\s\S]*?\};?/g, "");
+}
+
+function rewriteBundledSource(source: string, functionStyle: boolean): string {
+  const defaultExport = source.match(
+    /export\s*\{\s*([A-Za-z_$][\w$]*)\s+as\s+default\s*\};?/m
+  );
+  if (functionStyle && defaultExport) {
+    return source.replace(
+      defaultExport[0],
+      `const __skillRun = ${defaultExport[1]};`
+    );
+  }
+  if (!functionStyle) {
+    return stripEsmExportBlock(source);
+  }
+  return source;
+}
+
 async function prepareJavaScriptSource(
   request: SkillScriptRequest,
-  runtime: "javascript" | "typescript"
+  runtime: "javascript" | "typescript",
+  workspaceAccess: WorkspaceAccess,
+  functionStyle: boolean
 ): Promise<string> {
   const { createWorker } = await import("@cloudflare/worker-bundler");
   const files: Record<string, string> = {};
@@ -684,14 +1074,33 @@ async function prepareJavaScriptSource(
     }
   }
   files[request.path] = request.source;
+  const virtualModules = skillVirtualModules(request, workspaceAccess);
+  const fsCompatImports = [
+    request.source,
+    ...Object.entries(files)
+      .filter(([path]) => path !== request.path)
+      .map(([, content]) => content)
+  ].some(
+    (source) =>
+      /\bfrom\s+["'](?:node:)?(?:fs|fs\/promises|path)["']/.test(source) ||
+      /\bimport\s*\(\s*["'](?:node:)?(?:fs|fs\/promises|path)["']\s*\)/.test(
+        source
+      )
+  );
   const needsBundler =
-    runtime === "typescript" || Object.keys(files).length > 1;
+    runtime === "typescript" ||
+    Object.keys(files).length > 1 ||
+    fsCompatImports;
   if (!needsBundler) return request.source;
 
   const result = await createWorker({
     files,
     entryPoint: request.path,
-    bundle: Object.keys(files).length > 1
+    bundle: Object.keys(files).length > 1 || fsCompatImports,
+    virtualModules:
+      Object.keys(files).length > 1 || fsCompatImports
+        ? virtualModules
+        : undefined
   });
   const compiled =
     moduleSource(result.modules[result.mainModule]) ??
@@ -701,7 +1110,7 @@ async function prepareJavaScriptSource(
     throw new Error(`Failed to compile skill script: ${request.path}`);
   }
 
-  return compiled;
+  return rewriteBundledSource(compiled, functionStyle);
 }
 
 async function runJavaScriptScript(
@@ -732,9 +1141,15 @@ async function runJavaScriptScript(
     providers.push(resolveProvider({ name: "tools", tools } as ToolProvider));
   }
 
+  const functionStyle = /^\s*export\s+default\s+/m.test(request.source);
   const source =
     runtime === "typescript" || runtime === "javascript"
-      ? await prepareJavaScriptSource(request, runtime)
+      ? await prepareJavaScriptSource(
+          request,
+          runtime,
+          workspaceAccess,
+          functionStyle
+        )
       : request.source;
   const executor = new DynamicWorkerExecutor({
     loader: options.loader,
@@ -742,7 +1157,7 @@ async function runJavaScriptScript(
     globalOutbound: options.network ? undefined : null
   });
   const result = await executor.execute(
-    scriptModule(source, request),
+    scriptModule(source, request, functionStyle),
     providers
   );
 
@@ -759,10 +1174,13 @@ async function runJavaScriptScript(
     (result.result as { __skillScriptMode?: unknown }).__skillScriptMode ===
       "cli"
   ) {
+    const outputFiles =
+      (result.result as { outputFiles?: unknown[] }).outputFiles ?? [];
     return {
       stdout: result.logs?.length ? `${result.logs.join("\n")}\n` : "",
       stderr: (result.result as { stderr?: string }).stderr ?? "",
-      exitCode: (result.result as { exitCode?: number }).exitCode ?? 0
+      exitCode: (result.result as { exitCode?: number }).exitCode ?? 0,
+      ...(outputFiles.length > 0 ? { outputFiles } : {})
     };
   }
 
@@ -773,9 +1191,16 @@ async function runJavaScriptScript(
       "function"
   ) {
     const functionResult = (result.result as { result?: unknown }).result;
-    return result.logs?.length
-      ? { result: functionResult, logs: result.logs }
-      : functionResult;
+    const outputFiles =
+      (result.result as { outputFiles?: unknown[] }).outputFiles ?? [];
+    if (result.logs?.length || outputFiles.length > 0) {
+      return {
+        result: functionResult,
+        ...(result.logs?.length ? { logs: result.logs } : {}),
+        ...(outputFiles.length > 0 ? { outputFiles } : {})
+      };
+    }
+    return functionResult;
   }
 
   return result.logs?.length

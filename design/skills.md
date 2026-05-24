@@ -235,10 +235,15 @@ CLI-oriented Agent Skills. The runner mounts:
 - `/workspace`: reserved for workspace-backed files; direct workspace access is
   still governed by the explicit workspace permission.
 
-JavaScript and TypeScript filesystem compatibility needs a separate design pass.
-For now, JS/TS scripts can run as top-level files, can write output through
-`console`, can import sibling script files bundled by `@cloudflare/worker-bundler`,
-and may use the Think-specific function contract below.
+JavaScript and TypeScript scripts use `@cloudflare/worker-bundler` virtual module
+aliases for partial `fs`/`node:fs`, `fs/promises`, and `path` compatibility,
+including static imports and dynamic `import("node:fs")`. Sync FS reads are
+limited to embedded files (`/skill`, `/input.json`, and `/context.json`).
+Workspace reads and writes cross the host Worker boundary, so they are async-only
+through `fs.promises`; sync workspace access throws a clear error. Writes to
+`/output` create scratch artifacts returned by `run_skill_script` and do not
+mutate durable workspace state. Async writes to `/workspace` require
+`workspace: "read-write"`.
 
 For Think-specific compatibility, JavaScript and TypeScript scripts may still
 export a function:
