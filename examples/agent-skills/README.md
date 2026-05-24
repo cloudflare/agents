@@ -5,6 +5,10 @@ skills directory imported with `type: "skills"`.
 
 ## Run
 
+You need Wrangler authenticated against an account with Workers AI access. The
+example uses `ai.remote: true` and a Worker Loader binding, so local development
+will call Cloudflare services.
+
 ```bash
 npm install
 npm start
@@ -61,10 +65,10 @@ sibling script imports. JS/TS scripts can read bundled skill files through a
 partial `fs`/`node:fs` compatibility layer using static imports or dynamic
 `import("node:fs")`, write scratch artifacts to `/output`, and use async
 `fs.promises` calls for workspace access. It runs `.py` files as Python Dynamic
-Workers, and `.sh`/`.bash` files through `just-bash`, with `/input.json`,
-`/context.json`, and bundled resources under `/skill` materialized for those
-runtimes. Script execution requires the `worker_loaders` binding shown in
-`wrangler.jsonc`.
+Workers with the same `/output` artifact return shape, and `.sh`/`.bash` files
+through `just-bash`, with `/input.json`, `/context.json`, and bundled resources
+under `/skill` materialized for those runtimes. Script execution requires the
+`worker_loaders` binding shown in `wrangler.jsonc`.
 Passing `workspaceInstance` gives scripts read-only workspace access by default;
 opt in to `workspace: "read-write"`, tools, or network only when a skill needs
 them. The default 30 second timeout leaves room for TypeScript compilation and

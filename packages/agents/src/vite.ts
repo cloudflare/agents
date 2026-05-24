@@ -162,6 +162,7 @@ async function collectFiles(
   const files: Array<{ path: string; absolutePath: string; size: number }> = [];
 
   for (const entry of entries) {
+    if (SKILL_IGNORED_ROOTS.has(entry.name)) continue;
     const relativePath = relativeRoot
       ? `${relativeRoot}/${entry.name}`
       : entry.name;
@@ -198,6 +199,35 @@ async function collectFiles(
   }
 
   return files.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+async function collectWatchTargets(
+  root: string,
+  relativeRoot = ""
+): Promise<string[]> {
+  const directory = join(root, relativeRoot);
+  const entries = await readdir(directory, { withFileTypes: true }).catch(
+    () => []
+  );
+  const targets = [directory];
+
+  for (const entry of entries) {
+    if (SKILL_IGNORED_ROOTS.has(entry.name)) continue;
+    const relativePath = relativeRoot
+      ? `${relativeRoot}/${entry.name}`
+      : entry.name;
+    const resourceRoot = relativePath.split("/")[0];
+    if (!resourceRoot || SKILL_IGNORED_ROOTS.has(resourceRoot)) continue;
+
+    const absolutePath = join(root, relativePath);
+    targets.push(absolutePath);
+
+    if (entry.isDirectory()) {
+      targets.push(...(await collectWatchTargets(root, relativePath)));
+    }
+  }
+
+  return targets;
 }
 
 async function readSkill(
@@ -306,10 +336,11 @@ function skillsImportPlugin(): Plugin {
     },
     async load(id) {
       if (!id.startsWith(SKILLS_VIRTUAL_PREFIX)) return null;
-      return buildSkillsModule(
-        id.slice(SKILLS_VIRTUAL_PREFIX.length),
-        (message) => this.warn(message)
-      );
+      const dir = id.slice(SKILLS_VIRTUAL_PREFIX.length);
+      for (const target of await collectWatchTargets(dir)) {
+        this.addWatchFile(target);
+      }
+      return buildSkillsModule(dir, (message) => this.warn(message));
     }
   };
 }

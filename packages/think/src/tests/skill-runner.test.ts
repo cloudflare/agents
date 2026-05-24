@@ -506,6 +506,60 @@ tool shout '{"text":"hello"}'`,
     });
   });
 
+  it("mounts binary resources for bash scripts as decoded bytes", async () => {
+    const runner = skills.workerScriptRunner({
+      loader: env.LOADER
+    });
+
+    await expect(
+      runner.run({
+        skill: {
+          name: "binary-reader",
+          description: "Read binary resources.",
+          body: "Use the bash script."
+        },
+        path: "scripts/read.sh",
+        input: {},
+        source: "content=$(cat /skill/assets/data.bin)\necho ${#content}",
+        resources: [
+          {
+            path: "assets/data.bin",
+            kind: "asset",
+            encoding: "base64",
+            content: "aGk="
+          }
+        ]
+      })
+    ).resolves.toEqual({
+      stdout: "2\n",
+      stderr: "",
+      exitCode: 0
+    });
+  });
+
+  it("returns non-zero bash exits without throwing", async () => {
+    const runner = skills.workerScriptRunner({
+      loader: env.LOADER
+    });
+
+    await expect(
+      runner.run({
+        skill: {
+          name: "failing-bash",
+          description: "Fail with output.",
+          body: "Use the bash script."
+        },
+        path: "scripts/fail.sh",
+        input: {},
+        source: 'echo "before failure"\necho "bad" >&2\nexit 7'
+      })
+    ).resolves.toEqual({
+      stdout: "before failure\n",
+      stderr: "bad\n",
+      exitCode: 7
+    });
+  });
+
   it("rejects unsafe mounted resource paths", async () => {
     const runner = skills.workerScriptRunner({
       loader: env.LOADER
@@ -596,6 +650,99 @@ print(template.replace("{{text}}", data["text"].upper()))`,
       stderr: "",
       exitCode: 0
     });
+  });
+
+  it("returns output files from python CLI-style scripts", async () => {
+    const runner = skills.workerScriptRunner({
+      loader: env.LOADER
+    });
+
+    await expect(
+      runner.run({
+        skill: {
+          name: "python-writer",
+          description: "Write output files.",
+          body: "Use the python script."
+        },
+        path: "scripts/write.py",
+        input: {},
+        source: `import os
+
+os.makedirs("/output/nested", exist_ok=True)
+with open("/output/result.txt", "w") as handle:
+    handle.write("hello")
+with open("/output/nested/data.bin", "wb") as handle:
+    handle.write(bytes([0xff, 0x00, 0x01]))
+print("done")`
+      })
+    ).resolves.toEqual({
+      stdout: "done\n",
+      stderr: "",
+      exitCode: 0,
+      outputFiles: [
+        {
+          path: "/output/nested/data.bin",
+          encoding: "base64",
+          content: "/wAB"
+        },
+        {
+          path: "/output/result.txt",
+          encoding: "text",
+          content: "hello"
+        }
+      ]
+    });
+  });
+
+  it("returns output files from python function-style scripts", async () => {
+    const runner = skills.workerScriptRunner({
+      loader: env.LOADER
+    });
+
+    await expect(
+      runner.run({
+        skill: {
+          name: "python-writer",
+          description: "Write output files.",
+          body: "Use the python script."
+        },
+        path: "scripts/write.py",
+        input: {},
+        source: `def run(input, ctx):
+    with open("/output/function.txt", "w") as handle:
+        handle.write("function")
+    return "ok"`
+      })
+    ).resolves.toEqual({
+      result: "ok",
+      outputFiles: [
+        {
+          path: "/output/function.txt",
+          encoding: "text",
+          content: "function"
+        }
+      ]
+    });
+  });
+
+  it("rejects oversized python output artifacts", async () => {
+    const runner = skills.workerScriptRunner({
+      loader: env.LOADER
+    });
+
+    await expect(
+      runner.run({
+        skill: {
+          name: "python-writer",
+          description: "Write output files.",
+          body: "Use the python script."
+        },
+        path: "scripts/write.py",
+        input: {},
+        source: `with open("/output/large.txt", "w") as handle:
+    handle.write("x" * 64001)`
+      })
+    ).rejects.toThrow("Output artifact exceeds");
   });
 
   it("runs python skill scripts with explicit tools", async () => {
@@ -790,7 +937,9 @@ print(template.replace("{{text}}", data["text"].upper()))`,
         input: {},
         source: "echo nope | workspace-write generated.txt"
       })
-    ).rejects.toThrow("workspace-write");
+    ).resolves.toMatchObject({
+      exitCode: 127
+    });
 
     await expect(workspace.readFile("generated.txt")).resolves.toBeNull();
   });

@@ -240,8 +240,9 @@ TypeScript scripts can run as top-level files, import sibling script files, and
 use a partial `fs`/`node:fs` compatibility layer for skill-local files through
 static imports or dynamic `import("node:fs")`. Sync FS reads work for `/skill`,
 `/input.json`, and `/context.json`; workspace access is async-only through
-`fs.promises`. Writes to `/output` are returned as script artifacts, while writes
-to `/workspace` require `workspace: "read-write"` and must use async APIs.
+`fs.promises`. JS/TS and Python writes to `/output` are returned as script
+artifacts, while writes to `/workspace` require `workspace: "read-write"` and
+must use async APIs.
 `export default function run(input, ctx)` remains supported for JS/TS, and Python
 `def run(input, ctx)` scripts are still supported.
 
@@ -734,17 +735,18 @@ getTools() {
 }
 ```
 
-## Peer dependencies
+## Runtime dependencies
 
-| Package                      | Required | Notes                                        |
-| ---------------------------- | -------- | -------------------------------------------- |
-| `agents`                     | yes      | Cloudflare Agents SDK                        |
-| `ai`                         | yes      | Vercel AI SDK v6                             |
-| `zod`                        | yes      | Schema validation (v4)                       |
-| `@cloudflare/shell`          | yes      | Workspace filesystem                         |
-| `@cloudflare/codemode`       | optional | For `createExecuteTool` and JS skill scripts |
-| `@cloudflare/worker-bundler` | optional | For TypeScript skill scripts                 |
-| `@chat-adapter/telegram`     | optional | Required for Telegram messengers             |
+| Package                      | Notes                                                     |
+| ---------------------------- | --------------------------------------------------------- |
+| `agents`                     | Cloudflare Agents SDK peer dependency                     |
+| `ai`                         | Vercel AI SDK v6 peer dependency                          |
+| `zod`                        | Schema validation peer dependency                         |
+| `@cloudflare/shell`          | Workspace filesystem                                      |
+| `@cloudflare/codemode`       | Code execution, `createExecuteTool`, and JS skill scripts |
+| `@cloudflare/worker-bundler` | TypeScript skill script compilation                       |
+| `just-bash`                  | Bash skill script execution                               |
+| `@chat-adapter/telegram`     | Required for Telegram messengers                          |
 
 ## Acknowledgments
 

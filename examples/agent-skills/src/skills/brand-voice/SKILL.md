@@ -1,6 +1,6 @@
 ---
 name: brand-voice
-description: Keep responses concise, practical, and focused on showing how Think skills work. Use this for every response in the demo.
+description: Keep skill-related demo responses concise, practical, and focused on showing how Think skills work.
 ---
 
 # Brand Voice

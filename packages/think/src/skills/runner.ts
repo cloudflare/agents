@@ -262,8 +262,19 @@ function stdinText(stdin: unknown): string {
   return typeof stdin === "string" ? stdin : String(stdin ?? "");
 }
 
-function bashFiles(request: SkillScriptRequest): Record<string, string> {
-  const files: Record<string, string> = {
+function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function bashFiles(
+  request: SkillScriptRequest
+): Record<string, string | Uint8Array> {
+  const files: Record<string, string | Uint8Array> = {
     "/input.json": JSON.stringify(request.input),
     "/context.json": JSON.stringify(skillScriptContext(request)),
     "/skill-script.sh": request.source,
@@ -274,7 +285,10 @@ function bashFiles(request: SkillScriptRequest): Record<string, string> {
   for (const resource of request.resources ?? []) {
     const pathError = validateSkillResourcePath(resource.path);
     if (pathError) throw new Error(pathError);
-    files[`/skill/${resource.path}`] = resource.content;
+    files[`/skill/${resource.path}`] =
+      (resource.encoding ?? "text") === "base64"
+        ? base64ToBytes(resource.content)
+        : resource.content;
   }
 
   return files;
@@ -785,6 +799,7 @@ def to_js(obj):
     return pyodide_to_js(obj, dict_converter=Object.fromEntries)
 
 def materialize_files():
+    os.makedirs("/output", exist_ok=True)
     for path, file in SKILL_FILES.items():
         directory = os.path.dirname(path)
         if directory:
@@ -795,6 +810,33 @@ def materialize_files():
                 handle.write(base64.b64decode(file.get("content", "")))
             else:
                 handle.write(file.get("content", ""))
+
+def collect_output_files():
+    output_files = []
+    if not os.path.isdir("/output"):
+        return output_files
+
+    for root, _dirs, files in os.walk("/output"):
+        for name in sorted(files):
+            path = os.path.join(root, name)
+            with open(path, "rb") as handle:
+                content = handle.read()
+            if len(content) > ${MAX_OUTPUT_ARTIFACT_BYTES}:
+                raise Exception(f"Output artifact exceeds ${MAX_OUTPUT_ARTIFACT_BYTES} bytes: {path}")
+            try:
+                output_files.append({
+                    "path": path,
+                    "encoding": "text",
+                    "content": content.decode("utf-8")
+                })
+            except UnicodeDecodeError:
+                output_files.append({
+                    "path": path,
+                    "encoding": "base64",
+                    "content": base64.b64encode(content).decode("ascii")
+                })
+
+    return sorted(output_files, key=lambda file: file["path"])
 
 def looks_function_style(source):
     return "def run(" in source or "async def run(" in source
@@ -861,7 +903,12 @@ class Default(WorkerEntrypoint):
                         result = await execution
                 finally:
                     sys.settrace(previous_trace)
-                return to_js({"result": result, "logs": [], "mode": "function"})
+                return to_js({
+                    "result": result,
+                    "logs": [],
+                    "mode": "function",
+                    "outputFiles": collect_output_files()
+                })
 
             stdout = io.StringIO()
             stderr = io.StringIO()
@@ -884,7 +931,8 @@ class Default(WorkerEntrypoint):
                     "exitCode": 0
                 },
                 "logs": [],
-                "mode": "cli"
+                "mode": "cli",
+                "outputFiles": collect_output_files()
             })
         except TimeoutError:
             return to_js({"error": "Python script execution timed out", "logs": []})
@@ -896,7 +944,8 @@ class Default(WorkerEntrypoint):
                     "exitCode": int(err.code) if isinstance(err.code, int) else 1
                 },
                 "logs": [],
-                "mode": "cli"
+                "mode": "cli",
+                "outputFiles": collect_output_files()
             })
         except asyncio.TimeoutError:
             return to_js({"error": "Python script execution timed out", "logs": []})
@@ -1011,12 +1060,6 @@ async function runBashScript(
       signal: controller.signal,
       stdin: JSON.stringify(request.input)
     });
-
-    if (result.exitCode !== 0) {
-      throw new Error(
-        `Bash script exited with code ${result.exitCode}: ${result.stderr}`
-      );
-    }
 
     return {
       stdout: result.stdout,
@@ -1236,6 +1279,8 @@ async function runPythonScript(
       result?: unknown;
       error?: string;
       logs?: string[];
+      mode?: "cli" | "function";
+      outputFiles?: unknown[];
     }>;
   };
 
@@ -1264,17 +1309,31 @@ async function runPythonScript(
       throw new Error(response.error);
     }
 
-    if (
-      typeof response === "object" &&
-      response !== null &&
-      (response as { mode?: unknown }).mode === "cli"
-    ) {
+    const outputFiles = response.outputFiles ?? [];
+
+    if (response.mode === "cli") {
+      if (
+        typeof response.result === "object" &&
+        response.result !== null &&
+        outputFiles.length > 0
+      ) {
+        return {
+          ...response.result,
+          outputFiles
+        };
+      }
       return response.result;
     }
 
-    return response.logs?.length
-      ? { result: response.result, logs: response.logs }
-      : response.result;
+    if (response.logs?.length || outputFiles.length > 0) {
+      return {
+        result: response.result,
+        ...(response.logs?.length ? { logs: response.logs } : {}),
+        ...(outputFiles.length > 0 ? { outputFiles } : {})
+      };
+    }
+
+    return response.result;
   } finally {
     if (timeout) clearTimeout(timeout);
   }

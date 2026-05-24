@@ -255,20 +255,101 @@ with retries per step, long waits, external events, or approvals.
 
 ## Configuration Overrides
 
-| Method / Property       | Default                          | Description                                                                     |
-| ----------------------- | -------------------------------- | ------------------------------------------------------------------------------- |
-| `getModel()`            | throws                           | Return the `LanguageModel` to use                                               |
-| `getSystemPrompt()`     | `"You are a helpful assistant."` | System prompt (fallback when no context blocks)                                 |
-| `getTools()`            | `{}`                             | AI SDK `ToolSet` for the agentic loop                                           |
-| `getScheduledTasks()`   | `{}`                             | Code-declared recurring prompts or handlers                                     |
-| `getDefaultTimezone()`  | `undefined`                      | Default timezone for wall-clock scheduled tasks                                 |
-| `getMessengers()`       | `{}`                             | Messenger ingress and delivery declarations — see [Messengers](./messengers.md) |
-| `maxSteps`              | `10`                             | Max tool-call rounds per turn                                                   |
-| `sendReasoning`         | `true`                           | Send reasoning chunks to chat clients                                           |
-| `configureSession()`    | identity                         | Add context blocks, compaction, search, skills — see [Sessions](../sessions.md) |
-| `messageConcurrency`    | `"queue"`                        | How overlapping submits behave — see [Client Tools](./client-tools.md)          |
-| `waitForMcpConnections` | `false`                          | Wait for MCP servers before inference                                           |
-| `chatRecovery`          | `true`                           | Wrap turns in `runFiber` for durable execution, including sub-agent turns       |
+| Method / Property        | Default                          | Description                                                                     |
+| ------------------------ | -------------------------------- | ------------------------------------------------------------------------------- |
+| `getModel()`             | throws                           | Return the `LanguageModel` to use                                               |
+| `getSystemPrompt()`      | `"You are a helpful assistant."` | System prompt (fallback when no context blocks)                                 |
+| `getTools()`             | `{}`                             | AI SDK `ToolSet` for the agentic loop                                           |
+| `getScheduledTasks()`    | `{}`                             | Code-declared recurring prompts or handlers                                     |
+| `getDefaultTimezone()`   | `undefined`                      | Default timezone for wall-clock scheduled tasks                                 |
+| `getMessengers()`        | `{}`                             | Messenger ingress and delivery declarations — see [Messengers](./messengers.md) |
+| `maxSteps`               | `10`                             | Max tool-call rounds per turn                                                   |
+| `sendReasoning`          | `true`                           | Send reasoning chunks to chat clients                                           |
+| `configureSession()`     | identity                         | Add context blocks, compaction, search, skills — see [Sessions](../sessions.md) |
+| `getSkills()`            | `[]`                             | Return Agent Skills sources for on-demand skill activation                      |
+| `getSkillScriptRunner()` | `null`                           | Enable the optional `run_skill_script` tool                                     |
+| `messageConcurrency`     | `"queue"`                        | How overlapping submits behave — see [Client Tools](./client-tools.md)          |
+| `waitForMcpConnections`  | `false`                          | Wait for MCP servers before inference                                           |
+| `chatRecovery`           | `true`                           | Wrap turns in `runFiber` for durable execution, including sub-agent turns       |
+
+## Agent Skills
+
+Think supports [Agent Skills](https://agentskills.io/) as on-demand
+instructions. A skill source provides a catalog of skill names and descriptions;
+Think adds that catalog to the system prompt and exposes tools the model can use
+when a user task matches a skill.
+
+Bundled skills are usually imported with the Agents Vite plugin:
+
+```typescript
+import { Think, skills } from "@cloudflare/think";
+import bundledSkills from "./skills" with { type: "skills" };
+
+type Env = {
+  AI: Ai;
+  LOADER: WorkerLoader;
+  SKILLS_BUCKET: R2Bucket;
+};
+
+export class MyAgent extends Think<Env> {
+  getSkills() {
+    return [
+      bundledSkills,
+      skills.r2(this.env.SKILLS_BUCKET, { prefix: "skills/" })
+    ];
+  }
+
+  getSkillScriptRunner() {
+    return skills.workerScriptRunner({
+      loader: this.env.LOADER,
+      workspaceInstance: this.workspace
+    });
+  }
+}
+```
+
+The imported directory should contain one child directory per skill:
+
+```text
+src/skills/release-notes/SKILL.md
+src/skills/release-notes/scripts/format-release-notes.ts
+src/skills/release-notes/references/style-guide.md
+```
+
+When skills are available, Think exposes:
+
+| Tool                  | Purpose                                                             |
+| --------------------- | ------------------------------------------------------------------- |
+| `activate_skill`      | Load a matching skill's instructions and bundled resource list      |
+| `read_skill_resource` | Read a bundled resource by `{ name, path }` or `skill-name/path`    |
+| `run_skill_script`    | Run a bundled script when `getSkillScriptRunner()` returns a runner |
+
+Skills are not always-on system prompt text. Use `getSystemPrompt()` or a
+Session context block for behavior that should apply to every turn. Use skills
+for task-specific procedures, references, scripts, templates, and assets that
+should be loaded only when relevant.
+
+Script execution is opt-in and requires a Worker Loader binding:
+
+```jsonc
+{
+  "worker_loaders": [{ "binding": "LOADER" }]
+}
+```
+
+`skills.workerScriptRunner()` runs JavaScript, TypeScript, Python, and Bash
+scripts under `scripts/`. TypeScript is compiled with
+`@cloudflare/worker-bundler`; Python runs as Python Dynamic Workers; Bash runs
+through `just-bash`. Scripts receive `/input.json`, `/context.json`, and bundled
+resources under `/skill`. JS/TS scripts can also import sibling script files and
+use partial `fs` / `node:fs` compatibility: sync reads for skill-local files,
+async `fs.promises` for `/workspace`, scratch writes to `/output` returned as
+artifacts for JS/TS and Python scripts, and async workspace writes only with
+`workspace: "read-write"`.
+
+Passing `workspaceInstance` gives scripts read-only workspace access by default.
+Network access, tools, and workspace writes are opt-in. The default timeout is
+30 seconds.
 
 ## Dynamic Configuration
 
@@ -418,7 +499,7 @@ Think's `this.messages` getter reads directly from Session's tree-structured sto
 
 | Export                                  | Description                                                   |
 | --------------------------------------- | ------------------------------------------------------------- |
-| `@cloudflare/think`                     | `Think`, `Session`, `Workspace` — main class + re-exports     |
+| `@cloudflare/think`                     | `Think`, `Session`, `Workspace`, `skills` namespace           |
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
 | `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
 | `@cloudflare/think/workflows`           | `ThinkWorkflow`, `step.prompt()` — Workflow prompts           |
@@ -429,14 +510,15 @@ Think's `this.messages` getter reads directly from Session's tree-structured sto
 
 ## Peer Dependencies
 
-| Package                  | Required | Notes                            |
-| ------------------------ | -------- | -------------------------------- |
-| `agents`                 | yes      | Cloudflare Agents SDK            |
-| `ai`                     | yes      | Vercel AI SDK v6                 |
-| `zod`                    | yes      | Schema validation (v4)           |
-| `@cloudflare/shell`      | yes      | Workspace filesystem             |
-| `@cloudflare/codemode`   | optional | For `createExecuteTool`          |
-| `@chat-adapter/telegram` | optional | Required for Telegram messengers |
+| Package                      | Required | Notes                               |
+| ---------------------------- | -------- | ----------------------------------- |
+| `agents`                     | yes      | Cloudflare Agents SDK               |
+| `ai`                         | yes      | Vercel AI SDK v6                    |
+| `zod`                        | yes      | Schema validation (v4)              |
+| `@cloudflare/shell`          | yes      | Workspace filesystem                |
+| `@cloudflare/codemode`       | yes      | Code execution and JS skill scripts |
+| `@cloudflare/worker-bundler` | yes      | TypeScript skill scripts            |
+| `@chat-adapter/telegram`     | optional | Required for Telegram messengers    |
 
 ## Docs
 
