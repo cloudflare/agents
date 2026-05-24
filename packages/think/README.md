@@ -103,19 +103,66 @@ export class MyAgent extends Think<Env> {
 
 ### Configuration
 
-| Method / Property    | Default                            | Description                                     |
-| -------------------- | ---------------------------------- | ----------------------------------------------- |
-| `getModel()`         | throws                             | Return the `LanguageModel` to use               |
-| `getSystemPrompt()`  | careful assistant operating prompt | System prompt (fallback when no context blocks) |
-| `getTools()`         | `{}`                               | AI SDK `ToolSet` for the agentic loop           |
-| `maxSteps`           | `10`                               | Max tool-call rounds per turn (property)        |
-| `sendReasoning`      | `true`                             | Send reasoning chunks to chat clients           |
-| `configureSession()` | identity                           | Add context blocks, compaction, search, skills  |
-| `getExtensions()`    | `[]`                               | Sandboxed extension declarations (load order)   |
-| `extensionLoader`    | `undefined`                        | `WorkerLoader` binding — enables extensions     |
-| `chatRecovery`       | `true`                             | Wrap turns in `runFiber` for durable execution  |
+| Method / Property      | Default                            | Description                                     |
+| ---------------------- | ---------------------------------- | ----------------------------------------------- |
+| `getModel()`           | throws                             | Return the `LanguageModel` to use               |
+| `getSystemPrompt()`    | careful assistant operating prompt | System prompt (fallback when no context blocks) |
+| `getTools()`           | `{}`                               | AI SDK `ToolSet` for the agentic loop           |
+| `getScheduledTasks()`  | `{}`                               | Code-declared recurring prompts                 |
+| `getDefaultTimezone()` | `undefined`                        | Default timezone for wall-clock schedules       |
+| `maxSteps`             | `10`                               | Max tool-call rounds per turn (property)        |
+| `sendReasoning`        | `true`                             | Send reasoning chunks to chat clients           |
+| `configureSession()`   | identity                           | Add context blocks, compaction, search, skills  |
+| `getExtensions()`      | `[]`                               | Sandboxed extension declarations (load order)   |
+| `extensionLoader`      | `undefined`                        | `WorkerLoader` binding — enables extensions     |
+| `chatRecovery`         | `true`                             | Wrap turns in `runFiber` for durable execution  |
 
 On each turn, Think appends a small capability block to the assembled system prompt. The block is based on the tools available for that turn, so models learn about workspace tools, context-loading tools, extension tools, sandboxed execution, MCP/client tools, and delegated-agent tools only when they are actually exposed.
+
+### Scheduled tasks
+
+Use `getScheduledTasks()` for code-declared recurring prompts. Think reconciles
+these declarations on startup, stores durable one-shot schedules for the next
+occurrence, and runs each occurrence through `submitMessages()` with an
+idempotency key.
+
+```ts
+import { Think } from "@cloudflare/think";
+import type { ThinkScheduledTasks } from "@cloudflare/think";
+
+export class Assistant extends Think<Env> {
+  getDefaultTimezone() {
+    return "Europe/London";
+  }
+
+  getScheduledTasks(): ThinkScheduledTasks {
+    return {
+      weeklyCommitReport: {
+        schedule: "every week on monday at 09:00",
+        prompt:
+          "Compile all my GitHub commits for the last week and send an email to my boss."
+      },
+      workout: {
+        schedule: "every day at 08:00 in Europe/London",
+        prompt: "Start my workout."
+      }
+    };
+  }
+}
+```
+
+The DSL is intentionally small: `every <n> minutes`, `every <n> hours`,
+`every day at HH:mm`, `every weekday at HH:mm`, and
+`every week on monday,wednesday at HH:mm`. Wall-clock schedules require either
+an inline timezone, a task `timezone`, or `getDefaultTimezone()`. If an alarm is
+late, Think runs the intended occurrence once and schedules the next future
+occurrence; it does not backfill missed runs.
+
+The return type annotation gives TypeScript literal checks for schedule strings.
+If you prefer not to annotate the method, wrap the object with
+`defineScheduledTasks(...)` to keep the same checks. Think also validates
+scheduled tasks at runtime during startup reconciliation, so dynamically built
+objects still fail before schedules are persisted.
 
 ### Lifecycle hooks
 
