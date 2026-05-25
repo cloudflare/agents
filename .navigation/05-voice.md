@@ -1,0 +1,168 @@
+# 05 — Voice Pipeline
+
+The voice packages add real-time speech-to-text (STT) and text-to-speech (TTS) capability to any agent. The architecture is a mixin pattern: you call `withVoice(Agent)` to produce a new class that is both a normal agent and a voice pipeline.
+
+All code lives in `packages/voice/` with provider-specific implementations in `voice-providers/`.
+
+---
+
+## Core pipeline (`packages/voice/src/voice.ts`)
+
+[`withVoice<TBase>(Base)` mixin](../packages/voice/src/voice.ts#L195-L240) — the main export. Takes any `Agent` subclass and returns a new class that adds the full voice pipeline. Typical usage:
+
+```typescript
+class MyVoiceAgent extends withVoice(Agent)<Env> {
+  async onTurn(connection, transcription) { /* ... */ }
+}
+```
+
+[`VoiceAgentMixinMembers` interface](../packages/voice/src/voice.ts#L133-L162) — the public API surface added by the mixin. Key members:
+- `onTurn(connection, transcription)` — override this to handle a complete voice utterance. Receives the transcribed text; respond by calling `this.speak(text)`.
+- `speak(text)` — send text to the TTS engine; the audio is streamed back to the client.
+- `onTurnStart()` / `onTurnEnd()` — lifecycle hooks for each voice interaction.
+- `transcriber` — the STT provider (set in `onStart()`).
+- `tts` — the TTS provider (set in `onStart()`).
+
+[Audio connection management](../packages/voice/src/voice.ts#L240-L600) — internals: per-connection audio buffers, transcriber session lifecycle, interrupt detection (when the user starts speaking while the agent is still speaking), and message history management.
+
+[History persistence](../packages/voice/src/voice.ts#L600-L1074) — voice conversations are persisted as text messages in the agent's SQL storage, enabling multi-turn context. The mixin maintains a message array that it passes to the LLM on each turn.
+
+---
+
+## Audio pipeline state (`src/audio-pipeline.ts`)
+
+[`AudioConnectionManager` class](../packages/voice/src/audio-pipeline.ts#L34-L146) — manages per-connection state: audio buffers (up to 30 seconds / ~960 KB), the active transcriber session, and its abort controller. Kept separate from the mixin so the state is cleanly scoped to a single WebSocket connection.
+
+[`MAX_AUDIO_BUFFER_BYTES` constant](../packages/voice/src/audio-pipeline.ts#L1-L33) — 960 KB, equivalent to about 30 seconds of 16 kHz mono PCM. Excess audio is dropped to prevent runaway memory growth.
+
+---
+
+## Streaming text to sentences (`src/sentence-chunker.ts`)
+
+LLM output arrives as a stream of tokens. Feeding every token to TTS would produce robotic speech with unnatural pauses. The sentence chunker buffers tokens and emits complete sentences.
+
+[`SentenceChunker` class](../packages/voice/src/sentence-chunker.ts#L1-L115) — call `add(token)` for each token; it returns complete sentences as strings. Call `flush()` at the end of the stream to get any remaining partial sentence. Splits on `.`, `!`, `?` followed by a space or capital letter, with a minimum sentence length of 10 characters to avoid splitting abbreviations.
+
+---
+
+## Browser client (`src/voice-client.ts`)
+
+[`VoiceClient` class](../packages/voice/src/voice-client.ts#L1-L200) — the browser-side counterpart to the voice mixin. Manages the WebSocket connection, microphone capture, VAD (voice activity detection), and audio playback.
+
+[`VoiceClientOptions` interface](../packages/voice/src/voice-client.ts#L37-L84) — configuration: silence detection threshold, number of chunks before treating silence as an utterance end, whether to interrupt the agent mid-speech, and a custom transport factory.
+
+[`VoiceClientEventMap` interface](../packages/voice/src/voice-client.ts#L87-L97) — the events you listen to: `statuschange` (connection state), `transcriptchange` (final transcript updated), `interimtranscript` (partial result), `metricschange` (latency stats), `error`.
+
+[WebSocket connection and audio capture](../packages/voice/src/voice-client.ts#L200-L450) — the `connect()` method: opens the WebSocket, sends a `hello` message with the protocol version, starts the microphone stream, and sets up the VAD. Audio is chunked into fixed-size frames and sent as binary WebSocket messages. The VAD detects silence gaps to decide when an utterance ends.
+
+[Playback and interrupt handling](../packages/voice/src/voice-client.ts#L450-L700) — the `_handleServerMessage()` method: routes incoming binary audio frames to the audio context for playback, handles `transcript` messages to update the transcript state, and handles `status` changes (idle/listening/thinking/speaking). When the user starts speaking while the agent is speaking, a `CF_VOICE_INTERRUPT` message is sent to stop TTS.
+
+[Metrics collection and disconnect](../packages/voice/src/voice-client.ts#L700-L906) — latency metrics (time-to-first-audio, round-trip time) are calculated per utterance and exposed via the `metricschange` event. The `disconnect()` method closes the microphone stream, stops the audio context, and closes the WebSocket cleanly.
+
+---
+
+## React hooks (`src/voice-react.tsx`)
+
+[`useVoiceAgent(options)` hook](../packages/voice/src/voice-react.tsx#L1-L150) — wraps `VoiceClient` for React. Returns `{ status, transcript, interimTranscript, audioLevel, start, stop }`. Cleans up the client on unmount.
+
+[`useVoiceInput(options)` hook](../packages/voice/src/voice-react.tsx#L150-L250) — a lighter hook for voice-to-text dictation only (no TTS, no full agent connection). Useful for adding speech input to a regular chat UI.
+
+---
+
+## Workers AI providers (`src/workers-ai-providers.ts`)
+
+Convenience implementations that use Cloudflare's built-in AI models so you don't need external API keys.
+
+[`WorkersAITTS` class](../packages/voice/src/workers-ai-providers.ts#L46-L100) — TTS via the `@cf/deepgram/aura-1` Workers AI model. Implements the `TTSProvider` interface.
+
+[`WorkersAIFluxSTT` class](../packages/voice/src/workers-ai-providers.ts#L100-L200) — continuous STT using the Flux model. Implements `Transcriber`. Includes end-of-turn detection heuristics.
+
+[`WorkersAINova3STT` class](../packages/voice/src/workers-ai-providers.ts#L200-L330) — STT using the Nova 3 model variant. Generally higher accuracy for English.
+
+[Provider implementation internals](../packages/voice/src/workers-ai-providers.ts#L330-L595) — how each provider streams audio to the Workers AI binding, handles partial results and final transcripts, and signals end-of-utterance to the voice pipeline.
+
+---
+
+## SFU utilities (`src/sfu-utils.ts`)
+
+For deployments using Cloudflare Realtime (a Selective Forwarding Unit for WebRTC), audio needs to be encoded/decoded in the SFU's wire format.
+
+[Protobuf varint helpers: `encodeVarint()` and `decodeVarint()`](../packages/voice/src/sfu-utils.ts#L18-L43) — encode/decode protocol-buffer-style varints. Used to frame audio packets in the SFU protocol.
+
+[Packet handling: `extractPayloadFromProtobuf()` and `encodePayloadToProtobuf()`](../packages/voice/src/sfu-utils.ts#L45-L96) — unwrap/wrap audio payloads from/into protobuf frames.
+
+[Audio resampling: `downsample48kStereoTo16kMono()` and `upsample16kMonoTo48kStereo()`](../packages/voice/src/sfu-utils.ts#L99-L200) — WebRTC sends 48 kHz stereo PCM; the STT engines expect 16 kHz mono. These convert between the two.
+
+---
+
+## Voice input only — no TTS (`src/voice-input.ts`)
+
+[`withVoiceInput<TBase>(Base)` mixin](../packages/voice/src/voice-input.ts#L1-L349) — a lighter mixin than `withVoice`. Adds STT transcription but no TTS or LLM turn. Use this when you want speech dictation into an existing chat UI rather than a fully conversational voice agent.
+
+[`VoiceInputMixinMembers` interface](../packages/voice/src/voice-input.ts#L50-L100) — the API surface: `transcriber`, `onTranscript(text, connection)`, `createTranscriber(connection)`, `beforeCallStart()`, `onCallStart()`, `onCallEnd()`, `onInterrupt()`, `afterTranscribe()`.
+
+---
+
+## Shared wire types (`src/types.ts`)
+
+[`VOICE_PROTOCOL_VERSION` constant](../packages/voice/src/types.ts#L1-L50) — an integer bumped on breaking wire protocol changes. The server sends it in the initial `welcome` message; clients can detect mismatches.
+
+[`VoiceClientMessage` union type](../packages/voice/src/types.ts#L50-L130) — the messages sent from browser to agent: `hello`, `start_call`, `end_call`, `start_of_speech`, `end_of_speech`, `interrupt`, `text_message`.
+
+[`VoiceServerMessage` union type](../packages/voice/src/types.ts#L130-L243) — the messages sent from agent to browser: `welcome`, `status`, `audio_config`, `transcript`, `transcript_start`, `transcript_delta`, `audio_chunk`, `error`.
+
+[`Transcriber` and `TTSProvider` interfaces](../packages/voice/src/types.ts#L200-L243) — the contracts every STT and TTS provider must implement. `Transcriber` is an `AsyncIterable<TranscriptEvent>`. `TTSProvider` has `synthesize(text): Promise<Uint8Array>`. `StreamingTTSProvider` extends it with `synthesizeStream(text): AsyncIterable<Uint8Array>`.
+
+---
+
+## Text stream normalisation (`src/text-stream.ts`)
+
+The voice pipeline needs to handle LLM output as a stream of text chunks regardless of where it comes from (AI SDK, raw fetch, plain string).
+
+[`TextSource` type and `iterateText(source)` function](../packages/voice/src/text-stream.ts#L1-L210) — normalises a `string`, `ReadableStream<Uint8Array>`, `ReadableStream<string>`, or `AsyncIterable<string>` into a uniform `AsyncGenerator<string>`. The `Uint8Array` stream path parses newline-delimited JSON / SSE to extract text deltas from common AI API response shapes.
+
+---
+
+## Voice providers (`voice-providers/`)
+
+Each provider is a small package implementing the `Transcriber` or `TTSProvider` interface.
+
+### Deepgram (`voice-providers/deepgram/`)
+
+[`DeepgramSTT` class](../voice-providers/deepgram/src/index.ts#L1-L100) — connects to `wss://api.deepgram.com/v1/listen` for real-time streaming STT. Configurable model (default `nova-3`), language, smart formatting, punctuation, and endpointing delay.
+
+[`DeepgramSTT` implementation — streaming and events](../voice-providers/deepgram/src/index.ts#L100-L259) — the full implementation: binary audio is sent as WebSocket frames, text results arrive as JSON messages. `interim_results: true` enables partial transcripts. The adapter translates Deepgram's `Results` JSON into `TranscriptEvent` objects (final vs interim, single vs alternative hypotheses) and handles connection keep-alive with KeepAlive messages.
+
+### ElevenLabs (`voice-providers/elevenlabs/`)
+
+[`ElevenLabsTTS` class](../voice-providers/elevenlabs/src/index.ts#L1-L100) — implements both `TTSProvider` (full response) and `StreamingTTSProvider` (chunked streaming). Model `eleven_flash_v2_5` is the low-latency default. Supports per-request `voiceId` and `outputFormat` overrides.
+
+### Twilio (`voice-providers/twilio/`)
+
+[`TwilioAdapter` class — overview](../voice-providers/twilio/src/index.ts#L1-L100) — bridges Twilio Media Streams (which send μ-law 8 kHz audio over WebSocket) to the `VoiceAgent` protocol (which expects 16 kHz PCM). Includes a full μ-law decode/encode table and translates Twilio lifecycle events (`connected`, `start`, `stop`) to the agent protocol.
+
+[`TwilioAdapter` implementation — audio and lifecycle](../voice-providers/twilio/src/index.ts#L100-L389) — the full implementation: μ-law codec tables, the bidirectional audio conversion pipeline (Twilio sends μ-law 8 kHz base64-encoded; the pipeline decodes, resamples to 16 kHz, and delivers PCM to the agent), and the outgoing direction (agent audio is downsampled from 16 kHz to 8 kHz μ-law and re-encoded as Twilio Media Stream messages).
+
+### Telnyx (`voice-providers/telnyx/`)
+
+[Telnyx top-level exports](../voice-providers/telnyx/src/index.ts#L1-L20) — re-exports `TelnyxSTT`, `TelnyxTTS`, `TelnyxClient`, and `TelnyxJWTEndpoint`. The `browser` export provides WebRTC-based browser integration via `@telnyx/webrtc`.
+
+[`TelnyxSTT` class in `providers/stt.ts`](../voice-providers/telnyx/src/providers/stt.ts#L1-L262) — Telnyx's streaming STT provider. Sends audio to the Telnyx WebSocket API and emits `TranscriptEvent` objects. Configurable model, language, and punctuation.
+
+[`TelnyxTTS` class in `providers/tts.ts`](../voice-providers/telnyx/src/providers/tts.ts#L1-L345) — Telnyx TTS. Implements both `TTSProvider` (full response) and `StreamingTTSProvider`. Supports multiple voices and audio formats.
+
+[`TelnyxCallBridge` class in `providers/call-bridge.ts`](../voice-providers/telnyx/src/providers/call-bridge.ts#L1-L628) — the server-side bridge for Telnyx phone calls. Receives Telnyx webhook events, manages the call state machine (ringing → active → ended), and routes audio to the voice agent pipeline.
+
+[`TelnyxPhoneClient` class in `phone-client.ts`](../voice-providers/telnyx/src/phone-client.ts#L1-L578) — the counterpart to `TelnyxCallBridge`: the Telnyx API client that places outbound calls, answers inbound calls, and manages media streams.
+
+[`TelnyxJWTEndpoint` class in `server/jwt-endpoint.ts`](../voice-providers/telnyx/src/server/jwt-endpoint.ts#L1-L288) — generates short-lived JWTs for the browser WebRTC client. Browsers need a credential before they can connect to Telnyx's WebRTC infrastructure.
+
+[Transport config helpers in `helpers/transport-config.ts`](../voice-providers/telnyx/src/helpers/transport-config.ts#L1-L119) — utility functions that build the correct WebSocket URL, credentials, and codec settings for different Telnyx transport modes.
+
+[Phone transport in `transport/phone-transport.ts`](../voice-providers/telnyx/src/transport/phone-transport.ts#L1-L154) — the lower-level transport class used by `TelnyxCallBridge` to send and receive audio over Telnyx's media streams.
+
+[Audio utilities in `audio/utils.ts`](../voice-providers/telnyx/src/audio/utils.ts#L1-L110) — audio format conversion helpers specific to Telnyx's requirements (sample rate conversion, codec negotiation).
+
+[Browser WebRTC client in `browser.ts`](../voice-providers/telnyx/src/browser.ts#L1-L27) — thin re-export of the `@telnyx/webrtc` browser SDK with Telnyx-specific defaults applied.
+
+[`TelnyxClient` class in `client.ts`](../voice-providers/telnyx/src/client.ts#L1-L22) — REST API client for Telnyx account management operations (creating SIP connections, configuring phone numbers, etc.).
