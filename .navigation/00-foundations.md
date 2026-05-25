@@ -86,7 +86,7 @@ Agents pass structured data over RPC. The serialization layer handles the transl
 
 [`SubAgentClass<T>` and `SubAgentStub<T>`](../packages/agents/src/index.ts#L421-L450) — TypeScript generics that let the type system know which methods are available on a remote sub-agent (facet). `SubAgentStub` automatically removes `async` and wraps return types in `Promise`, reflecting the RPC boundary.
 
-[Sub-routing implementation](../packages/agents/src/sub-routing.ts#L1-L335) — path parsing and matching for facet addresses. A facet is identified by a path like `myAgent/facet/sessionId`; this module decodes and encodes those paths and verifies they belong to the correct parent agent.
+[Sub-routing — path parsing, facet address encoding, and parent validation](../packages/agents/src/sub-routing.ts#L1-L300) and [Sub-routing — remaining helpers and exports](../packages/agents/src/sub-routing.ts#L301-L335) — path parsing and matching for facet addresses. A facet is identified by a path like `myAgent/facet/sessionId`; this module decodes and encodes those paths and verifies they belong to the correct parent agent.
 
 ---
 

@@ -57,7 +57,7 @@ const dispose = subscribe("agent", (event) => {
 
 ### Session class (`session/session.ts`)
 
-[`Session` class](../packages/agents/src/experimental/memory/session/session.ts#L1-L703) — the main object. Represents a single conversation thread.
+[Session class — constructor, create() builder, and builder chain methods](../packages/agents/src/experimental/memory/session/session.ts#L1-L240) and [Session — getContext(), getHistory(), append(), update(), delete(), and search()](../packages/agents/src/experimental/memory/session/session.ts#L240-L500) and [Session — compact(), getSystemPrompt(), and internal state management](../packages/agents/src/experimental/memory/session/session.ts#L500-L703) — the main object. Represents a single conversation thread.
 
 [`Session.create(provider, options)` static builder](../packages/agents/src/experimental/memory/session/session.ts#L1-L100) — the entry point. Use the builder chain: `.withContext(block)`, `.withCachedPrompt(text)`, `.withTools(tools)`, `.withSearch(provider)`.
 
@@ -75,19 +75,19 @@ Key methods:
 
 ### Context blocks (`session/context.ts`)
 
-[`ContextConfig`, `ContextBlock`, `ContextBlocks` types and class](../packages/agents/src/experimental/memory/session/context.ts#L1-L866) — context blocks are named slots in the system prompt that hold persistent data the LLM can read and (optionally) write. Each block has a `label`, a `description`, a `provider` (how to fetch the content), and a `maxTokens` budget. The `ContextBlocks` class manages the full set for a session.
+[context.ts — ContextProvider interface, ContextConfig, ContextBlock, and ContextBlocks class setup](../packages/agents/src/experimental/memory/session/context.ts#L1-L200) and [ContextBlocks — load(), addBlock(), removeBlock(), setBlock(), and skill management](../packages/agents/src/experimental/memory/session/context.ts#L200-L480) and [ContextBlocks — toSystemPrompt(), captureSnapshot(), getWritableBlocks(), and tools() generator](../packages/agents/src/experimental/memory/session/context.ts#L480-L700) and [ContextBlocks tools — set_context, load_context, unload_context, and search_context implementations](../packages/agents/src/experimental/memory/session/context.ts#L700-L866) — context blocks are named slots in the system prompt that hold persistent data the LLM can read and (optionally) write. Each block has a `label`, a `description`, a `provider` (how to fetch the content), and a `maxTokens` budget. The `ContextBlocks` class manages the full set for a session.
 
 ### Session manager (`session/manager.ts`)
 
-[`SessionManager` class](../packages/agents/src/experimental/memory/session/manager.ts#L1-L494) — coordinates multiple sessions. Useful for multi-user or multi-conversation agents. Tracks active sessions, handles session creation and cleanup.
+[SessionManager — class setup, factory, builder methods, and lazy init helpers](../packages/agents/src/experimental/memory/session/manager.ts#L1-L200) and [SessionManager — getSession(), create(), get/list/delete/rename, and message helpers](../packages/agents/src/experimental/memory/session/manager.ts#L200-L380) and [SessionManager — branching, compaction, usage tracking, search, and tools](../packages/agents/src/experimental/memory/session/manager.ts#L380-L494) — coordinates multiple sessions. Useful for multi-user or multi-conversation agents. Tracks active sessions, handles session creation and cleanup.
 
 ### Storage providers (`session/providers/`)
 
-[`AgentSessionProvider` in `providers/agent.ts`](../packages/agents/src/experimental/memory/session/providers/agent.ts#L1-L397) — stores sessions in the agent's own SQLite. The simplest option; zero external dependencies.
+[AgentSessionProvider — SQL schema, getMessage(), getHistory(), and getLatestLeaf()](../packages/agents/src/experimental/memory/session/providers/agent.ts#L1-L200) and [AgentSessionProvider — appendMessage(), updateMessage(), searchMessages(), and addCompaction()](../packages/agents/src/experimental/memory/session/providers/agent.ts#L200-L397) — stores sessions in the agent's own SQLite. The simplest option; zero external dependencies.
 
 [`AgentContextProvider` in `providers/agent-context.ts`](../packages/agents/src/experimental/memory/session/providers/agent-context.ts#L1-L55) — read-only context provider backed by agent state. Useful for exposing agent state as a context block.
 
-[`PostgresSessionProvider` in `providers/postgres.ts`](../packages/agents/src/experimental/memory/session/providers/postgres.ts#L1-L340) — stores sessions in a Postgres database. Enables shared history across multiple agent instances or geographic regions.
+[PostgresSessionProvider — connection setup, schema creation, and read methods](../packages/agents/src/experimental/memory/session/providers/postgres.ts#L1-L180) and [PostgresSessionProvider — write methods, compaction, and transaction helpers](../packages/agents/src/experimental/memory/session/providers/postgres.ts#L180-L340) — stores sessions in a Postgres database. Enables shared history across multiple agent instances or geographic regions.
 
 [`PostgresContextProvider` in `providers/postgres-context.ts`](../packages/agents/src/experimental/memory/session/providers/postgres-context.ts#L1-L47) — reads context blocks from Postgres.
 
@@ -99,7 +99,7 @@ Key methods:
 
 [`compactMessages()` in `utils/compaction.ts`](../packages/agents/src/experimental/memory/utils/compaction.ts#L1-L101) — takes a message array and returns a summarised version that fits within a token budget, preserving the most recent messages verbatim.
 
-[Compaction helpers in `utils/compaction-helpers.ts`](../packages/agents/src/experimental/memory/utils/compaction-helpers.ts#L1-L493) — lower-level utilities: selecting which messages to compact, formatting them for summarisation, and merging the summary back in.
+[compaction-helpers — isCompactionMessage, tool-pair alignment, and boundary functions](../packages/agents/src/experimental/memory/utils/compaction-helpers.ts#L1-L160) and [compaction-helpers — token-budget tail protection and sanitizeToolPairs()](../packages/agents/src/experimental/memory/utils/compaction-helpers.ts#L160-L300) and [compaction-helpers — computeSummaryBudget(), buildSummaryPrompt(), and createCompactFunction()](../packages/agents/src/experimental/memory/utils/compaction-helpers.ts#L300-L493) — lower-level utilities: selecting which messages to compact, formatting them for summarisation, and merging the summary back in.
 
 ### Session index and utility re-exports
 
@@ -131,7 +131,7 @@ WebMCP is an experimental browser API that exposes MCP tools through `navigator.
 
 [`registerWebMcp(tools, options?)` function](../packages/agents/src/experimental/webmcp.ts#L1-L100) — registers an array of `ModelContextTool` objects with the browser's model context. Each tool has a `name`, `description`, JSON schema for inputs, and an `execute` function.
 
-[`McpHttpClient` class](../packages/agents/src/experimental/webmcp.ts#L146-L566) — an HTTP transport wrapper that bridges the browser-side WebMCP protocol to an HTTP MCP server. Used when the browser needs to proxy tool calls to a remote endpoint.
+[McpHttpClient — constructor, initialize(), listTools(), and callTool()](../packages/agents/src/experimental/webmcp.ts#L146-L290) and [WebMcpOptions, WebMcpHandle, and registerWebMcp() signature](../packages/agents/src/experimental/webmcp.ts#L290-L440) and [registerWebMcp() — tool registration, sync logic, watch setup, and return handle](../packages/agents/src/experimental/webmcp.ts#L440-L566) — an HTTP transport wrapper that bridges the browser-side WebMCP protocol to an HTTP MCP server. Used when the browser needs to proxy tool calls to a remote endpoint.
 
 [`ModelContextTool` interface](../packages/agents/src/experimental/webmcp.ts#L1-L50) — the shape of a tool registered with `navigator.modelContext`: `name`, `description`, JSON Schema `schema`, and `execute(input) => Promise<unknown>`.
 

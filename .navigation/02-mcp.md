@@ -20,7 +20,7 @@ All MCP code lives in `packages/agents/src/mcp/`.
 
 `McpAgent` is the abstract base class for agents that *are* an MCP server. Extend it and implement `init()` to register your tools, resources, and prompts with an `McpServer` instance from the `@modelcontextprotocol/sdk` package.
 
-[`McpAgent<Env, State, Props>` class](../packages/agents/src/mcp/index.ts#L30-L553) — the full class. Key things to note:
+[McpAgent class — transport type parsing, session ID extraction, and onStart() wiring](../packages/agents/src/mcp/index.ts#L30-L200) and [McpAgent — request handling and elicitInput() implementation](../packages/agents/src/mcp/index.ts#L200-L499) and [McpAgent — _handleElicitationResponse() and session cleanup](../packages/agents/src/mcp/index.ts#L500-L553) — the full class. Key things to note:
 
 [`getTransportType()` and `getSessionId()`](../packages/agents/src/mcp/index.ts#L71-L99) — the agent's Durable Object name encodes the transport and session ID, e.g. `sse:abc123`. These helpers parse that name. The transport type determines which transport class is wired up in `onStart()`.
 
@@ -46,7 +46,7 @@ Four transport classes sit between the `McpServer` and the network. They share t
 
 **Worker transport** (for serving MCP directly from a plain Worker, no Durable Object):
 
-[`WorkerTransport`](../packages/agents/src/mcp/worker-transport.ts#L90-L941) — similar to `StreamableHTTPServerTransport` but designed for stateless Workers. Persists session state to Durable Object storage (via `restoreState()` / `saveState()`) to survive request boundaries.
+[WorkerTransport — private fields, state restore/save, and request dispatch](../packages/agents/src/mcp/worker-transport.ts#L90-L270) and [WorkerTransport.handleGetRequest() — SSE stream setup and WebSocket relay](../packages/agents/src/mcp/worker-transport.ts#L270-L410) and [WorkerTransport.handlePostRequest() — JSON-RPC processing and response streaming](../packages/agents/src/mcp/worker-transport.ts#L410-L670) and [WorkerTransport.handleDeleteRequest(), validateSession(), close(), and send()](../packages/agents/src/mcp/worker-transport.ts#L670-L941) — similar to `StreamableHTTPServerTransport` but designed for stateless Workers. Persists session state to Durable Object storage (via `restoreState()` / `saveState()`) to survive request boundaries.
 
 [`handleGetRequest()` in WorkerTransport](../packages/agents/src/mcp/worker-transport.ts#L270-L402) — sets up the SSE stream with `Last-Event-ID` resumability so clients can reconnect and replay missed events.
 
@@ -62,9 +62,9 @@ Four transport classes sit between the `McpServer` and the network. They share t
 
 [`createMcpHandler()` in `handler.ts`](../packages/agents/src/mcp/handler.ts#L28-L121) — if you want to expose an MCP server from a plain Worker (not a Durable Object), use this. It creates a `WorkerTransport`, wires up CORS, and handles auth context injection. Returns an `async (request, env, ctx) => Response` function.
 
-[`createStreamingHttpHandler()` in `utils.ts`](../packages/agents/src/mcp/utils.ts#L31-L500) — lower-level: creates the HTTP router that translates between web-standard `Request`/`Response` and the MCP SDK's Transport interface. `createMcpHandler()` delegates to this.
+[createStreamingHttpHandler() — header validation, session ID handling, and GET path](../packages/agents/src/mcp/utils.ts#L31-L200) and [createStreamingHttpHandler() — POST path, WebSocket bridging, and 202 Accepted](../packages/agents/src/mcp/utils.ts#L200-L499) — lower-level: creates the HTTP router that translates between web-standard `Request`/`Response` and the MCP SDK's Transport interface. `createMcpHandler()` delegates to this.
 
-[`corsHeaders()` utility](../packages/agents/src/mcp/utils.ts#L501-L829) — applies `Access-Control-*` headers from a `CORSOptions` config.
+[createAutoHandler() and createLegacySseHandler() — unified and legacy HTTP routing](../packages/agents/src/mcp/utils.ts#L501-L740) and [corsHeaders(), handleCORS(), and isDurableObjectNamespace() utilities](../packages/agents/src/mcp/utils.ts#L740-L829) — applies `Access-Control-*` headers from a `CORSOptions` config.
 
 ---
 
@@ -72,7 +72,7 @@ Four transport classes sit between the `McpServer` and the network. They share t
 
 Your agent connects to external MCP servers through `MCPClientManager`. An instance lives at `this.mcp` on every `Agent` that has used `addMcpServer()`.
 
-[`MCPClientManager` class](../packages/agents/src/mcp/client.ts#L266-L600) — manages a registry of named server connections backed by SQLite. Connections survive agent hibernation.
+[MCPClientManager — constructor, registerServer(), and connection initiation](../packages/agents/src/mcp/client.ts#L266-L520) and [MCPClientManager — restoreConnectionsFromStorage() and getAITools()](../packages/agents/src/mcp/client.ts#L520-L620) — manages a registry of named server connections backed by SQLite. Connections survive agent hibernation.
 
 [`isBlockedUrl()` — SSRF protection](../packages/agents/src/mcp/client.ts#L133-L161) — blocks connections to private IPv4/IPv6 ranges, link-local addresses, loopback, and cloud metadata endpoints. Always called before opening a transport connection to a user-supplied URL.
 
@@ -92,7 +92,7 @@ Each server connection is managed by a `MCPClientConnection` instance, which own
 
 [`MCPConnectionState` enum](../packages/agents/src/mcp/client-connection.ts#L55-L68) — the states: `AUTHENTICATING → CONNECTING → DISCOVERING → READY → FAILED`. Every transition is logged to the observability channel.
 
-[`MCPClientConnection` class](../packages/agents/src/mcp/client-connection.ts#L105-L816) — the connection lifecycle:
+[MCPClientConnection — fields, init(), finishAuthProbe(), and completeAuthorization()](../packages/agents/src/mcp/client-connection.ts#L105-L280) and [discoverAndRegister(), discover(), and cancelDiscovery()](../packages/agents/src/mcp/client-connection.ts#L280-L490) and [registerTools(), registerResources(), registerPrompts(), and elicitation handling](../packages/agents/src/mcp/client-connection.ts#L490-L640) and [Session metadata, close(), getTransport(), tryConnect(), and error handlers](../packages/agents/src/mcp/client-connection.ts#L640-L816) — the connection lifecycle:
 
 [`init()` — connection initiation](../packages/agents/src/mcp/client-connection.ts#L156-L204) — chooses the transport (probes streamable-HTTP first, falls back to SSE on 404/405), starts the OAuth flow if needed.
 
@@ -132,7 +132,7 @@ The `MCPClientManager` is the most complex part of the client side. This section
 
 [`getTools()` and per-server tool namespacing](../packages/agents/src/mcp/client.ts#L900-L1100) — aggregates tools from all `READY` servers. By default tools are namespaced with the server name (`serverName_toolName`) to avoid collisions. The `stripNamespace` option removes the prefix if you control the tool names.
 
-[OAuth state management in `MCPClientManager`](../packages/agents/src/mcp/client.ts#L1100-L1400) — stores and retrieves per-server OAuth state. When a server requires auth, `registerServer()` stores an `AUTHENTICATING` state and returns an `authorizationUrl`. After the user authorises, `completeAuthorization()` is called with the callback URL.
+[MCPClientManager — OAuth state storage and completeAuthorization()](../packages/agents/src/mcp/client.ts#L1100-L1300) and [MCPClientManager — getTools() and per-server tool namespacing](../packages/agents/src/mcp/client.ts#L1300-L1400) — stores and retrieves per-server OAuth state. When a server requires auth, `registerServer()` stores an `AUTHENTICATING` state and returns an `authorizationUrl`. After the user authorises, `completeAuthorization()` is called with the callback URL.
 
 [SQLite persistence schema](../packages/agents/src/mcp/client.ts#L1400-L1617) — the `cf_agents_mcp_servers` table schema and the read/write helpers. Each row stores: server name, transport type, URL, auth state, capabilities, and the last-connected timestamp.
 

@@ -66,7 +66,7 @@ Cloudflare Workflows are durable, multi-step async processes that can pause and 
 
 ### Implementation
 
-[`AgentWorkflow<Env, Params, Progress>` class](../packages/agents/src/workflows.ts#L62-L437) — extend this instead of the raw Cloudflare `WorkflowEntrypoint` to get:
+[AgentWorkflow — class structure, waitForApproval(), and progress()](../packages/agents/src/workflows.ts#L62-L250) and [AgentWorkflow — complete(), error(), event callbacks, and workflow tracking](../packages/agents/src/workflows.ts#L250-L437) — extend this instead of the raw Cloudflare `WorkflowEntrypoint` to get:
 - Automatic tracking of workflow state in the agent's SQLite
 - `this.waitForApproval(options)` — pause the step and wait for a human decision
 - `this.progress(data)` — broadcast progress updates to the agent's connected clients
@@ -98,9 +98,9 @@ These tools let agents control a headless Chrome browser via the Chrome DevTools
 
 [`createBrowserTools()` for TanStack AI](../packages/agents/src/browser/tanstack-ai.ts#L1-L72) — same tools in TanStack's `ServerTool` format.
 
-[`createBrowserToolHandlers(options)` in `shared.ts`](../packages/agents/src/browser/shared.ts#L1-L364) — the shared implementation behind both adapters. Handles CDP spec caching (5-minute TTL), tool execution, and error formatting.
+[createBrowserToolHandlers() — CDP spec caching and tool option normalisation](../packages/agents/src/browser/shared.ts#L1-L180) and [createBrowserToolHandlers() — tool execution, result formatting, and error handling](../packages/agents/src/browser/shared.ts#L180-L364) — the shared implementation behind both adapters. Handles CDP spec caching (5-minute TTL), tool execution, and error formatting.
 
-[`CdpSession` class in `cdp-session.ts`](../packages/agents/src/browser/cdp-session.ts#L1-L318) — a WebSocket-based CDP client. Manages command/response correlation, target sessions, and debug logging. This is the host-side client that talks to Chrome; the generated code runs in a separate sandbox.
+[`CdpSession` class — WebSocket setup, command dispatch, and response correlation](../packages/agents/src/browser/cdp-session.ts#L1-L300) and [`CdpSession` — session cleanup and debug logging helpers](../packages/agents/src/browser/cdp-session.ts#L301-L318) — a WebSocket-based CDP client. Manages command/response correlation, target sessions, and debug logging. This is the host-side client that talks to Chrome; the generated code runs in a separate sandbox.
 
 [`truncateResponse()` in `truncate.ts`](../packages/agents/src/browser/truncate.ts#L1-L16) — limits browser tool output to ~6 000 tokens. Adds a notice if the response was cut.
 
@@ -110,7 +110,7 @@ These tools let agents control a headless Chrome browser via the Chrome DevTools
 
 The Chat SDK state adapter bridges the Agent storage layer to the `@cloudflare/ai-chat` Chat SDK's state management protocol. Used when you need to back a Chat SDK app with Durable Object storage.
 
-[`ChatSdkStateAgent` class in `agent.ts`](../packages/agents/src/chat-sdk/agent.ts#L1-L550) — extends `Agent` to provide SQLite-backed storage for locks, queues, subscriptions, and list structures. Each operation maps to a SQL table. Lock leases are automatically cleaned up on a schedule.
+[ChatSdkStateAgent — SQL table setup, lock acquisition, and lock release](../packages/agents/src/chat-sdk/agent.ts#L1-L200) and [ChatSdkStateAgent — queue operations, list operations, and subscription management](../packages/agents/src/chat-sdk/agent.ts#L200-L400) and [ChatSdkStateAgent — lock cleanup scheduling and housekeeping](../packages/agents/src/chat-sdk/agent.ts#L400-L550) — extends `Agent` to provide SQLite-backed storage for locks, queues, subscriptions, and list structures. Each operation maps to a SQL table. Lock leases are automatically cleaned up on a schedule.
 
 [`ChatSdkStateAdapter` class in `adapter.ts`](../packages/agents/src/chat-sdk/adapter.ts#L1-L215) — implements the Chat SDK `StateAdapter` interface on top of `ChatSdkStateAgent`. Provides `connect()`, `disconnect()`, `subscribe()`, `acquireLock()`, `releaseLock()`, `enqueue()`, `dequeue()`, `appendToList()`, and `listGet()`.
 
@@ -150,4 +150,4 @@ The Chat SDK state adapter bridges the Agent storage layer to the `@cloudflare/a
 
 [`useAgentState<T>(agent, options?)` hook](../packages/agents/src/react.tsx#L100-L200) — lighter variant: just the state, no full stub reference. Useful when you only need to read state, not call methods.
 
-[Full React hook implementation](../packages/agents/src/react.tsx#L1-L863) — the complete file. Also exports `AgentProvider` and `useAgentContext()` for context-based access patterns.
+[useAgent() hook — WebSocket connection setup and state subscription](../packages/agents/src/react.tsx#L1-L300) and [useAgent() — reconnection, state updates, and AgentProvider context](../packages/agents/src/react.tsx#L300-L599) and [useAgentState(), AgentContext, and hook utility exports](../packages/agents/src/react.tsx#L600-L863) — the complete file. Also exports `AgentProvider` and `useAgentContext()` for context-based access patterns.

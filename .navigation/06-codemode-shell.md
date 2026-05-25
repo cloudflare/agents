@@ -17,11 +17,11 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 ### In-memory filesystem internals (`src/memory.ts`)
 
-[`FileSystemStateBackend` class](../packages/shell/src/memory.ts#L1-L541) — the in-memory storage backend that `InMemoryFs` delegates to. Stores the filesystem tree as a nested object in RAM. Implements every filesystem operation (read, write, stat, mkdir, readdir, rm, cp, mv, symlink, glob) without touching real storage. The implementation is the reference for how all these operations should behave.
+[FileSystemStateBackend — class setup, readFile(), writeFile(), and stat()](../packages/shell/src/memory.ts#L1-L200) and [FileSystemStateBackend — mkdir(), readdir(), rm(), cp(), mv(), and symlink()](../packages/shell/src/memory.ts#L200-L400) and [FileSystemStateBackend — glob(), search(), and directory tree helpers](../packages/shell/src/memory.ts#L400-L541) — the in-memory storage backend that `InMemoryFs` delegates to. Stores the filesystem tree as a nested object in RAM. Implements every filesystem operation (read, write, stat, mkdir, readdir, rm, cp, mv, symlink, glob) without touching real storage. The implementation is the reference for how all these operations should behave.
 
 ### Backend type vocabulary (`src/backend.ts`)
 
-[Full `backend.ts` type definitions](../packages/shell/src/backend.ts#L1-L420) — the complete vocabulary of types for file operations in `@cloudflare/shell`. Beyond the basics already mentioned, this file defines: `StateArchiveEntry` (for zip/tar operations), `StateFileDetection` (MIME type inference), `StateFindOptions` (for `find`-style glob traversal), `StateHashOptions` (for computing file hashes), `StateJsonUpdateOperation` (for atomic JSON field updates), `StateTreeNode` and `StateTreeOptions` (for directory tree summaries), and the full set of options for each operation.
+[backend.ts — StateStat, StateDirent, operation options, and StateSearchOptions](../packages/shell/src/backend.ts#L1-L150) and [backend.ts — StateArchiveEntry, StateFileDetection, StateFindOptions, and StateHashOptions](../packages/shell/src/backend.ts#L150-L290) and [backend.ts — StateJsonUpdateOperation, StateTreeNode, StateTreeOptions, and remaining types](../packages/shell/src/backend.ts#L290-L420) — the complete vocabulary of types for file operations in `@cloudflare/shell`. Beyond the basics already mentioned, this file defines: `StateArchiveEntry` (for zip/tar operations), `StateFileDetection` (MIME type inference), `StateFindOptions` (for `find`-style glob traversal), `StateHashOptions` (for computing file hashes), `StateJsonUpdateOperation` (for atomic JSON field updates), `StateTreeNode` and `StateTreeOptions` (for directory tree summaries), and the full set of options for each operation.
 
 ### The `Workspace` class (`src/filesystem.ts`)
 
@@ -31,13 +31,13 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 [`DEFAULT_INLINE_THRESHOLD`](../packages/shell/src/filesystem.ts#L184-L200) — files larger than 1.5 MB are spilled to R2 instead of stored inline in SQLite. The database row stores the R2 key; reads are transparent.
 
-[`readFile()`, `writeFile()`, `stat()`, `readDir()`, `glob()`, `symlink()`](../packages/shell/src/filesystem.ts#L200-L800) — the core file operations. All synchronous-flavoured (SQLite is sync in Workers). `glob()` uses the pattern-to-regex converter in `helpers.ts`.
+[Workspace — constructor, ensureInit(), and database setup](../packages/shell/src/filesystem.ts#L200-L450) and [Workspace — readFile(), readFileBytes(), and read-path caching](../packages/shell/src/filesystem.ts#L450-L700) and [Workspace — writeFile(), writeFileBytes(), and R2 spill decision](../packages/shell/src/filesystem.ts#L700-L800) — the core file operations. All synchronous-flavoured (SQLite is sync in Workers). `glob()` uses the pattern-to-regex converter in `helpers.ts`.
 
 [`planEdits()` method](../packages/shell/src/filesystem.ts#L800-L1000) — computes the operations needed to transform the workspace toward a desired state without applying them. Used by the `execute` tool to show a preview before committing changes.
 
 [`search()` method](../packages/shell/src/filesystem.ts#L1000-L1200) — full-text search across all files. Delegates to `searchTextContent()` in `helpers.ts`.
 
-[R2 integration — large file handling](../packages/shell/src/filesystem.ts#L1200-L1600) — when a file exceeds `DEFAULT_INLINE_THRESHOLD` (1.5 MB), the content is stored in R2 and only the key is kept in SQLite. Reads are transparent: `readFile()` checks whether the row has an R2 key and fetches from R2 if needed. Writes similarly decide whether to inline or spill.
+[Workspace — rm(), cp(), and mv() with symlink resolution](../packages/shell/src/filesystem.ts#L1200-L1450) and [Workspace — diff(), path normalisation, and glob walking](../packages/shell/src/filesystem.ts#L1450-L1600) — when a file exceeds `DEFAULT_INLINE_THRESHOLD` (1.5 MB), the content is stored in R2 and only the key is kept in SQLite. Reads are transparent: `readFile()` checks whether the row has an R2 key and fetches from R2 if needed. Writes similarly decide whether to inline or spill.
 
 [Transaction support and atomic operations](../packages/shell/src/filesystem.ts#L1600-L1843) — `Workspace` exposes a `transaction(fn)` method that wraps multiple SQL operations in a single transaction. Also covers `copy()`, `move()`, and `rename()` with their edge cases (cross-directory moves, overwrite handling, symlink resolution).
 
@@ -59,7 +59,7 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 [`myersDiff()` algorithm](../packages/shell/src/helpers.ts#L506-L582) — the classic O(n+m) diff algorithm. Worth knowing it's here if you ever need to understand how edits are represented.
 
-[Additional string utilities in `helpers.ts`](../packages/shell/src/helpers.ts#L200-L506) — the middle section of `helpers.ts` covers: `truncateLines()` (limits long files for LLM context), `formatSearchResults()` (human-readable search output), `normalizeLineEndings()` (CRLF → LF), `countBytes()` (UTF-8 byte length), and `indent()` / `dedent()` for code formatting operations.
+[helpers.ts — truncateLines(), formatSearchResults(), and normalizeLineEndings()](../packages/shell/src/helpers.ts#L200-L360) and [helpers.ts — countBytes(), indent(), dedent(), and remaining text utilities](../packages/shell/src/helpers.ts#L360-L506) — the middle section of `helpers.ts` covers: `truncateLines()` (limits long files for LLM context), `formatSearchResults()` (human-readable search output), `normalizeLineEndings()` (CRLF → LF), `countBytes()` (UTF-8 byte length), and `indent()` / `dedent()` for code formatting operations.
 
 ### Git integration (`src/git/`)
 
@@ -89,7 +89,7 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 [`generateTypesFromJsonSchema(schema)` function](../packages/codemode/src/json-schema-types.ts#L1-L50) — converts a JSON Schema object to JSDoc/TypeScript type declarations. These are injected into the sandbox as inline type comments so the LLM's generated code is properly typed without a separate compilation step.
 
-[`jsonSchemaToTypeString()` and recursive type conversion](../packages/codemode/src/json-schema-types.ts#L50-L397) — the full recursive implementation: handles `$ref` resolution, `oneOf`/`anyOf`/`allOf` unions, `nullable`, array and object types, and nested schemas. The output is valid TypeScript that can be pasted directly into the sandbox's type declarations.
+[jsonSchemaToTypeString() — primitive, array, and object type handling](../packages/codemode/src/json-schema-types.ts#L50-L220) and [jsonSchemaToTypeString() — oneOf/anyOf/allOf unions, $ref resolution, and nullable](../packages/codemode/src/json-schema-types.ts#L220-L397) — the full recursive implementation: handles `$ref` resolution, `oneOf`/`anyOf`/`allOf` unions, `nullable`, array and object types, and nested schemas. The output is valid TypeScript that can be pasted directly into the sandbox's type declarations.
 
 ### MCP integration (`src/mcp.ts`)
 
@@ -159,7 +159,7 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 ### TanStack AI integration (`src/tanstack-ai.ts`)
 
-[`createCodemodeTools()` for TanStack](../packages/codemode/src/tanstack-ai.ts#L1-L310) — same as the AI SDK adapter but returns `ServerTool[]` in TanStack AI's format. Use this if your agent uses TanStack AI's chat adapter instead of the AI SDK's `streamText`.
+[tanstack-ai.ts — tool descriptor building and input schema setup](../packages/codemode/src/tanstack-ai.ts#L1-L160) and [tanstack-ai.ts — ServerTool array construction and createCodemodeTools() export](../packages/codemode/src/tanstack-ai.ts#L160-L310) — same as the AI SDK adapter but returns `ServerTool[]` in TanStack AI's format. Use this if your agent uses TanStack AI's chat adapter instead of the AI SDK's `streamText`.
 
 ---
 
@@ -173,11 +173,11 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 [`queryJsonValue(value, query)` and JSON path helpers](../packages/shell/src/extras.ts#L1-L200) — JSONPath-style querying into nested objects. Used by workspace tools that need to read or update specific fields in JSON files without rewriting them entirely.
 
-[`StateTreeNode`, `treeWorkspace()`, and `hashWorkspace()`](../packages/shell/src/extras.ts#L200-L630) — builds a directory tree summary (`StateTreeNode`) with sizes and hashes. Used to give the LLM a compact overview of the workspace structure and to detect which files changed between turns.
+[extras.ts — extractTar() and archive utilities](../packages/shell/src/extras.ts#L200-L430) and [extras.ts — parseJsonPath(), setJsonPathValue(), and deleteJsonPathValue()](../packages/shell/src/extras.ts#L430-L630) — builds a directory tree summary (`StateTreeNode`) with sizes and hashes. Used to give the LLM a compact overview of the workspace structure and to detect which files changed between turns.
 
 ### Prompt generation (`src/prompt.ts`)
 
-[`STATE_TYPES` constant and `STATE_SYSTEM_PROMPT`](../packages/shell/src/prompt.ts#L1-L341) — TypeScript type declarations for the `state` API that is injected into every sandbox execution. Export `STATE_TYPES` into your system prompt so the LLM knows the exact types it can use when writing code that calls the workspace filesystem. The `STATE_SYSTEM_PROMPT` template includes instructions for how to use the state API.
+[prompt.ts — STATE_TYPES: primitive types, options, and search type declarations](../packages/shell/src/prompt.ts#L1-L175) and [prompt.ts — STATE_TYPES: JSON, archive, tree types and STATE_SYSTEM_PROMPT template](../packages/shell/src/prompt.ts#L175-L341) — TypeScript type declarations for the `state` API that is injected into every sandbox execution. Export `STATE_TYPES` into your system prompt so the LLM knows the exact types it can use when writing code that calls the workspace filesystem. The `STATE_SYSTEM_PROMPT` template includes instructions for how to use the state API.
 
 ### Workers entry point (`src/workers.ts`)
 
@@ -187,7 +187,7 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 [`FileSystem` interface in `src/fs/interface.ts`](../packages/shell/src/fs/interface.ts#L1-L130) — the protocol that both `WorkspaceFileSystem` and `InMemoryFs` implement. Covers: `readFile`, `readFileBytes`, `writeFile`, `writeFileBytes`, `stat`, `lstat`, `mkdir`, `readdir`, `rm`, `cp`, `mv`, `symlink`, `glob`, and directory listing.
 
-[`InMemoryFs` class](../packages/shell/src/fs/in-memory-fs.ts#L1-L745) — a pure in-memory implementation backed by a `Map`. No SQLite, no R2. Used in tests, in the browser sandbox, and anywhere you need a throwaway filesystem. Supports all the same operations as `WorkspaceFileSystem` including symlinks and recursive operations.
+[InMemoryFs — class setup, readFile(), writeFile(), stat(), and lstat()](../packages/shell/src/fs/in-memory-fs.ts#L1-L250) and [InMemoryFs — mkdir(), readdir(), rm(), cp(), mv(), and symlink()](../packages/shell/src/fs/in-memory-fs.ts#L250-L500) and [InMemoryFs — glob(), tree walking, and internal node structure](../packages/shell/src/fs/in-memory-fs.ts#L500-L745) — a pure in-memory implementation backed by a `Map`. No SQLite, no R2. Used in tests, in the browser sandbox, and anywhere you need a throwaway filesystem. Supports all the same operations as `WorkspaceFileSystem` including symlinks and recursive operations.
 
 [File encoding utilities in `src/fs/encoding.ts`](../packages/shell/src/fs/encoding.ts#L1-L93) — `encodeText(s)` / `decodeText(bytes)` UTF-8 converters, and helpers for detecting binary vs. text files. Used throughout the read/write path to handle binary files transparently.
 
@@ -195,7 +195,7 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 ### Git operations (`src/git/`)
 
-[`createGit(fs, defaultDir)` factory in `src/git/index.ts`](../packages/shell/src/git/index.ts#L1-L407) — the main git integration. Wraps `isomorphic-git` to provide a high-level API: `clone(url)`, `status()`, `add(path)`, `commit(message)`, `push()`, `pull()`, `log()`, `diff()`, `branch()`, `checkout()`. Returns `GitStatusEntry[]` (file path, working-tree status, index status) and `GitLogEntry[]` (hash, message, author, date).
+[createGit() — clone(), status(), add(), commit(), and push()](../packages/shell/src/git/index.ts#L1-L200) and [createGit() — pull(), log(), diff(), branch(), checkout(), and GitStatusEntry types](../packages/shell/src/git/index.ts#L200-L407) — the main git integration. Wraps `isomorphic-git` to provide a high-level API: `clone(url)`, `status()`, `add(path)`, `commit(message)`, `push()`, `pull()`, `log()`, `diff()`, `branch()`, `checkout()`. Returns `GitStatusEntry[]` (file path, working-tree status, index status) and `GitLogEntry[]` (hash, message, author, date).
 
 [`createGitFs(filesystem)` adapter in `src/git/fs-adapter.ts`](../packages/shell/src/git/fs-adapter.ts#L1-L183) — adapts the `FileSystem` interface to the shape `isomorphic-git` expects. `isomorphic-git` uses a custom `fs` object with a specific callback-style API; this adapter bridges the gap.
 

@@ -37,7 +37,7 @@ All code lives in `packages/agents/src/chat/`.
 
 The AI SDK delivers a stream of *chunks* (typed payloads like `text-start`, `tool-input-delta`, `tool-output-available`, etc.). The chat layer reassembles these into `UIMessage` objects that the client renders.
 
-[`applyChunkToParts()` in `message-builder.ts`](../packages/agents/src/chat/message-builder.ts#L78-L400) — handles every possible chunk type. Returns `true` if the chunk was consumed. Called once per chunk; the caller maintains the accumulating parts array. This is the most detailed file if you want to understand the full streaming message format.
+[applyChunkToParts() — text, reasoning, and file chunk handling](../packages/agents/src/chat/message-builder.ts#L78-L250) and [applyChunkToParts() — tool input/output chunks and step-start handling](../packages/agents/src/chat/message-builder.ts#L250-L400) — handles every possible chunk type. Returns `true` if the chunk was consumed. Called once per chunk; the caller maintains the accumulating parts array. This is the most detailed file if you want to understand the full streaming message format.
 
 [`StreamAccumulator` class in `stream-accumulator.ts`](../packages/agents/src/chat/stream-accumulator.ts#L59-L232) — a stateful wrapper around `applyChunkToParts()`. Call `applyChunk()` per chunk; call `toMessage()` to get a snapshot. Also emits `ChunkAction` signals (e.g. `tool-approval-request`, `message-metadata`) so the layer above can react to notable events without parsing every chunk itself.
 
@@ -61,7 +61,7 @@ The AI SDK delivers a stream of *chunks* (typed payloads like `text-start`, `too
 
 When a client disconnects mid-stream, it should be able to reconnect and receive the chunks it missed.
 
-[`ResumableStream` class](../packages/agents/src/chat/resumable-stream.ts#L79-L591) — buffers stream chunks to a SQLite table (`cf_ai_chat_stream_chunks`) keyed by `stream_id`. When a client reconnects with `Last-Event-ID`, `replay()` re-sends the stored chunks, then hands off to the live stream.
+[ResumableStream — SQLite schema, start(), storeChunk(), and flush logic](../packages/agents/src/chat/resumable-stream.ts#L79-L300) and [ResumableStream — replay(), replayChunks(), and reconnection handoff](../packages/agents/src/chat/resumable-stream.ts#L300-L450) and [ResumableStream — restore(), clearAll(), destroy(), and lazy cleanup](../packages/agents/src/chat/resumable-stream.ts#L450-L591) — buffers stream chunks to a SQLite table (`cf_ai_chat_stream_chunks`) keyed by `stream_id`. When a client reconnects with `Last-Event-ID`, `replay()` re-sends the stored chunks, then hands off to the live stream.
 
 [`start()`, `storeChunk()`, `complete()`](../packages/agents/src/chat/resumable-stream.ts#L156-L250) — the lifecycle. Chunks are batched in memory up to `CHUNK_BUFFER_SIZE = 10` then flushed to SQLite. Old streams are pruned after 24 hours (`CLEANUP_AGE_THRESHOLD_MS`).
 

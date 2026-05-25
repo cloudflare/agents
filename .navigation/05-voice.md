@@ -23,9 +23,9 @@ class MyVoiceAgent extends withVoice(Agent)<Env> {
 - `transcriber` — the STT provider (set in `onStart()`).
 - `tts` — the TTS provider (set in `onStart()`).
 
-[Audio connection management](../packages/voice/src/voice.ts#L240-L600) — internals: per-connection audio buffers, transcriber session lifecycle, interrupt detection (when the user starts speaking while the agent is still speaking), and message history management.
+[Voice mixin — onConnect handler, message routing, and onTurn hook definition](../packages/voice/src/voice.ts#L240-L450) and [Voice mixin — interrupt detection and TTS playback queue management](../packages/voice/src/voice.ts#L450-L600) — internals: per-connection audio buffers, transcriber session lifecycle, interrupt detection (when the user starts speaking while the agent is still speaking), and message history management.
 
-[History persistence](../packages/voice/src/voice.ts#L600-L1074) — voice conversations are persisted as text messages in the agent's SQL storage, enabling multi-turn context. The mixin maintains a message array that it passes to the LLM on each turn.
+[Voice mixin — message persistence and getConversationHistory()](../packages/voice/src/voice.ts#L600-L800) and [Voice mixin — speak(), speakAll(), and TTS synchronisation](../packages/voice/src/voice.ts#L800-L1000) and [Voice mixin — call lifecycle (_handleStartCall, _handleEndCall) and pipeline execution](../packages/voice/src/voice.ts#L1000-L1074) — voice conversations are persisted as text messages in the agent's SQL storage, enabling multi-turn context. The mixin maintains a message array that it passes to the LLM on each turn.
 
 ---
 
@@ -97,7 +97,7 @@ For deployments using Cloudflare Realtime (a Selective Forwarding Unit for WebRT
 
 ## Voice input only — no TTS (`src/voice-input.ts`)
 
-[`withVoiceInput<TBase>(Base)` mixin](../packages/voice/src/voice-input.ts#L1-L349) — a lighter mixin than `withVoice`. Adds STT transcription but no TTS or LLM turn. Use this when you want speech dictation into an existing chat UI rather than a fully conversational voice agent.
+[withVoiceInput mixin — VoiceInputMixinMembers interface and mixin class setup](../packages/voice/src/voice-input.ts#L1-L180) and [withVoiceInput — onConnect, audio capture, transcript dispatch, and call lifecycle](../packages/voice/src/voice-input.ts#L180-L349) — a lighter mixin than `withVoice`. Adds STT transcription but no TTS or LLM turn. Use this when you want speech dictation into an existing chat UI rather than a fully conversational voice agent.
 
 [`VoiceInputMixinMembers` interface](../packages/voice/src/voice-input.ts#L50-L100) — the API surface: `transcriber`, `onTranscript(text, connection)`, `createTranscriber(connection)`, `beforeCallStart()`, `onCallStart()`, `onCallEnd()`, `onInterrupt()`, `afterTranscribe()`.
 
@@ -149,11 +149,11 @@ Each provider is a small package implementing the `Transcriber` or `TTSProvider`
 
 [`TelnyxSTT` class in `providers/stt.ts`](../voice-providers/telnyx/src/providers/stt.ts#L1-L262) — Telnyx's streaming STT provider. Sends audio to the Telnyx WebSocket API and emits `TranscriptEvent` objects. Configurable model, language, and punctuation.
 
-[`TelnyxTTS` class in `providers/tts.ts`](../voice-providers/telnyx/src/providers/tts.ts#L1-L345) — Telnyx TTS. Implements both `TTSProvider` (full response) and `StreamingTTSProvider`. Supports multiple voices and audio formats.
+[`TelnyxTTS` — class setup, configuration, and synthesize() implementation](../voice-providers/telnyx/src/providers/tts.ts#L1-L300) and [`TelnyxTTS` — streaming synthesis and audio format helpers](../voice-providers/telnyx/src/providers/tts.ts#L301-L345) — Telnyx TTS. Implements both `TTSProvider` (full response) and `StreamingTTSProvider`. Supports multiple voices and audio formats.
 
-[`TelnyxCallBridge` class in `providers/call-bridge.ts`](../voice-providers/telnyx/src/providers/call-bridge.ts#L1-L628) — the server-side bridge for Telnyx phone calls. Receives Telnyx webhook events, manages the call state machine (ringing → active → ended), and routes audio to the voice agent pipeline.
+[`TelnyxCallBridge` — class setup, constructor, and incoming call handling](../voice-providers/telnyx/src/providers/call-bridge.ts#L1-L300) and [`TelnyxCallBridge` — audio routing and call state machine](../voice-providers/telnyx/src/providers/call-bridge.ts#L301-L500) and [`TelnyxCallBridge` — lifecycle cleanup and media stream teardown](../voice-providers/telnyx/src/providers/call-bridge.ts#L501-L628) — the server-side bridge for Telnyx phone calls. Receives Telnyx webhook events, manages the call state machine (ringing → active → ended), and routes audio to the voice agent pipeline.
 
-[`TelnyxPhoneClient` class in `phone-client.ts`](../voice-providers/telnyx/src/phone-client.ts#L1-L578) — the counterpart to `TelnyxCallBridge`: the Telnyx API client that places outbound calls, answers inbound calls, and manages media streams.
+[`TelnyxPhoneClient` — class setup, auth, and outbound call initiation](../voice-providers/telnyx/src/phone-client.ts#L1-L300) and [`TelnyxPhoneClient` — inbound call handling, media streams, and cleanup](../voice-providers/telnyx/src/phone-client.ts#L301-L578) — the counterpart to `TelnyxCallBridge`: the Telnyx API client that places outbound calls, answers inbound calls, and manages media streams.
 
 [`TelnyxJWTEndpoint` class in `server/jwt-endpoint.ts`](../voice-providers/telnyx/src/server/jwt-endpoint.ts#L1-L288) — generates short-lived JWTs for the browser WebRTC client. Browsers need a credential before they can connect to Telnyx's WebRTC infrastructure.
 

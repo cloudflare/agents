@@ -8,7 +8,7 @@
 
 [Public exports in `index.ts`](../packages/worker-bundler/src/index.ts#L1-L206) — the package's public surface: re-exports from the subsystems below, plus `createApp()` which is the most common entry point.
 
-[`createApp(options)` in `app.ts`](../packages/worker-bundler/src/app.ts#L1-L373) — bundles a full-stack application: a server Worker, an optional client bundle, and static assets. Returns separate asset maps so the host can serve them. Internally calls `bundleWithEsbuild()` for the Worker, `resolveModule()` for dependencies, and `AssetHandler` for static serving.
+[`createApp(options)` in `app.ts` — option parsing, server bundle setup, and client bundle creation](../packages/worker-bundler/src/app.ts#L1-L300) and [`createApp()` — asset manifest assembly and return value construction](../packages/worker-bundler/src/app.ts#L301-L373) — bundles a full-stack application: a server Worker, an optional client bundle, and static assets. Returns separate asset maps so the host can serve them. Internally calls `bundleWithEsbuild()` for the Worker, `resolveModule()` for dependencies, and `AssetHandler` for static serving.
 
 [`CreateAppOptions` interface](../packages/worker-bundler/src/app.ts#L37-L100) — the config object for `createApp()`: `files` (virtual filesystem), `server` (entry point path), `client` (optional browser bundle entry), `assets` (static files), `bundle` (boolean), `minify`, `sourcemap`.
 
@@ -24,7 +24,7 @@
 
 ## Bundler (`src/bundler.ts`)
 
-[`bundleWithEsbuild(options)` function](../packages/worker-bundler/src/bundler.ts#L73-L420) — the core: runs esbuild-wasm inside the Worker to produce a single-file bundle. Takes a virtual file map (not the actual filesystem) as `files`. Supports TypeScript, JSX, custom `define` replacements, and esbuild plugins.
+[bundleWithEsbuild() — virtual filesystem esbuild plugin setup and module resolution](../packages/worker-bundler/src/bundler.ts#L73-L240) and [bundleWithEsbuild() — path resolution helpers, loader selection, and esbuild initialisation](../packages/worker-bundler/src/bundler.ts#L240-L420) — the core: runs esbuild-wasm inside the Worker to produce a single-file bundle. Takes a virtual file map (not the actual filesystem) as `files`. Supports TypeScript, JSX, custom `define` replacements, and esbuild plugins.
 
 [`BundleOptions` interface](../packages/worker-bundler/src/bundler.ts#L53-L72) — the input shape: `files` (map of path → content), `entryPoint`, `externals` (modules to leave unbundled), `minify`, `sourcemap`, `jsx` runtime, `define` replacements, esbuild `plugins`.
 
@@ -44,7 +44,7 @@
 
 ## Transformer (`src/transformer.ts`)
 
-[`transformCode(code, options)` function](../packages/worker-bundler/src/transformer.ts#L56-L416) — transpiles TypeScript/JSX to plain JavaScript using **Sucrase** (no WASM, ~20× faster than Babel). Supports source maps, automatic JSX transform, and production mode. Used when `bundle: false` but transpilation is still needed.
+[transformCode() — Sucrase transpilation and file-type detection helpers](../packages/worker-bundler/src/transformer.ts#L56-L150) and [transformAndResolve() — two-pass collect-and-transform with import rewriting](../packages/worker-bundler/src/transformer.ts#L150-L310) and [transformer — rewriteImports(), calculateRelativePath(), and getDirectory() helpers](../packages/worker-bundler/src/transformer.ts#L310-L416) — transpiles TypeScript/JSX to plain JavaScript using **Sucrase** (no WASM, ~20× faster than Babel). Supports source maps, automatic JSX transform, and production mode. Used when `bundle: false` but transpilation is still needed.
 
 [`TransformOptions` interface](../packages/worker-bundler/src/transformer.ts#L1-L55) — `filePath` (for source map references), `sourceMap`, `jsxRuntime` (`"automatic"` or `"classic"`), `production`.
 
@@ -58,7 +58,7 @@
 
 ## Package installer (`src/installer.ts`)
 
-[`installDependencies(packages, options)` function](../packages/worker-bundler/src/installer.ts#L96-L542) — fetches npm packages from the registry and installs them into a virtual `node_modules`. No `npm` binary required: packages are fetched as tarballs, extracted, and stored in the virtual file map.
+[installDependencies() — entry point, installPackage() recursion, and fetchPackageMetadata()](../packages/worker-bundler/src/installer.ts#L96-L320) and [installer — resolveVersion(), fetchPackageFiles(), and extractTarball()](../packages/worker-bundler/src/installer.ts#L320-L470) and [installer — decompress(), parseTar(), readString(), and isTextFile()](../packages/worker-bundler/src/installer.ts#L470-L542) — fetches npm packages from the registry and installs them into a virtual `node_modules`. No `npm` binary required: packages are fetched as tarballs, extracted, and stored in the virtual file map.
 
 [`fetchWithTimeout()` helper](../packages/worker-bundler/src/installer.ts#L18-L38) — wraps `fetch()` with a 30-second timeout. Used for all registry requests.
 
@@ -92,7 +92,7 @@
 
 The asset handler is more involved than it first appears — it implements a proper static file server with SPA support, custom headers, and redirect rules.
 
-[`AssetHandler` class](../packages/worker-bundler/src/asset-handler.ts#L91-L400) — the main class. `handle(request)` walks through the routing pipeline: check redirects → resolve path → apply trailing-slash normalisation → find asset → set content-type/encoding headers → return `Response`.
+[AssetHandler — normalizeConfig(), computeETag(), buildAssetManifest(), and redirect handling](../packages/worker-bundler/src/asset-handler.ts#L91-L300) and [AssetHandler — custom headers, path encoding, and getIntent() HTML routing factory](../packages/worker-bundler/src/asset-handler.ts#L300-L470) and [AssetHandler — htmlAutoTrailingSlash(), htmlForceTrailingSlash(), and htmlDropTrailingSlash()](../packages/worker-bundler/src/asset-handler.ts#L470-L700) and [AssetHandler — not-found handling, cache headers, and handleAssetRequest() entry point](../packages/worker-bundler/src/asset-handler.ts#L700-L995) — the main class. `handle(request)` walks through the routing pipeline: check redirects → resolve path → apply trailing-slash normalisation → find asset → set content-type/encoding headers → return `Response`.
 
 [Redirect rules](../packages/worker-bundler/src/asset-handler.ts#L400-L600) — `AssetConfig.redirects` is an array of `{from, to, status}` entries. Supports exact paths, wildcard patterns, and optional query-string passthrough. Processed before any other routing.
 
@@ -112,7 +112,7 @@ The asset handler is more involved than it first appears — it implements a pro
 
 ## Module resolver details (`src/resolver.ts`)
 
-[Package.json `exports` field resolution](../packages/worker-bundler/src/resolver.ts#L56-L375) — the bulk of the resolver handles the `exports` field in `package.json`. This field can specify different entry points for different conditions (`"worker"`, `"browser"`, `"import"`, `"require"`). The resolver evaluates the condition array in priority order to find the right file.
+[resolver — resolveModule(), resolveRelative(), and resolvePackage() with exports field](../packages/worker-bundler/src/resolver.ts#L56-L220) and [resolver — resolveWithExtensions(), parsePackageSpecifier(), path helpers, and import parsers](../packages/worker-bundler/src/resolver.ts#L220-L375) — the bulk of the resolver handles the `exports` field in `package.json`. This field can specify different entry points for different conditions (`"worker"`, `"browser"`, `"import"`, `"require"`). The resolver evaluates the condition array in priority order to find the right file.
 
 ---
 

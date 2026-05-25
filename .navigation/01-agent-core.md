@@ -140,7 +140,7 @@ Agents are addressed by name within a Durable Object namespace. The runtime glue
 
 The following ranges cover the internals of the `Agent` class that you rarely need to understand in day-to-day work, but are invaluable when debugging unexpected behaviour.
 
-[RPC dispatch table construction](../packages/agents/src/index.ts#L1560-L1870) — how `@callable()` methods are discovered at startup and registered in the dispatch table. Includes the `AsyncLocalStorage` context wrapping that makes `getCurrentAgent()` work inside every method call.
+[RPC dispatch table construction and method wrapping](../packages/agents/src/index.ts#L1560-L1710) and [Callable method wiring and AsyncLocalStorage context propagation](../packages/agents/src/index.ts#L1710-L1870) — how `@callable()` methods are discovered at startup and registered in the dispatch table. Includes the `AsyncLocalStorage` context wrapping that makes `getCurrentAgent()` work inside every method call.
 
 [Lifecycle method instrumentation](../packages/agents/src/index.ts#L1870-L2160) — how the base class wraps your `onRequest`, `onMessage`, `onConnect`, `onClose`, and `onStart` overrides with observability emission, error handling, and context propagation. Read this if you see unexpected double-invocations or silent error swallowing.
 
@@ -148,15 +148,15 @@ The following ranges cover the internals of the `Agent` class that you rarely ne
 
 [Queue processing loop](../packages/agents/src/index.ts#L3070-L3160) — the `while` loop that drains the SQLite queue table, calling each queued callback in turn. Includes retry logic and error recovery.
 
-[Schedule storage and alarm integration](../packages/agents/src/index.ts#L3350-L4079) — how schedules are persisted to a `cf_agents_schedules` SQLite table and how the Durable Object `alarm()` handler fires them. The `schedule()` method picks the earliest scheduled time and sets the DO alarm accordingly.
+[Schedule SQL storage — create, update, and lookup helpers](../packages/agents/src/index.ts#L3350-L3649) and [Schedule cancellation and getSchedules internals](../packages/agents/src/index.ts#L3650-L3916) — how schedules are persisted to a `cf_agents_schedules` SQLite table and how the Durable Object `alarm()` handler fires them. The `schedule()` method picks the earliest scheduled time and sets the DO alarm accordingly.
 
-[Fiber persistence and recovery](../packages/agents/src/index.ts#L4488-L5133) — the fiber lifecycle: how `startFiber()` creates a ledger entry in `cf_agents_fibers`, how the fiber function runs inside a protected `try/catch` that stores the current step, and how `onStart()` recovers in-progress fibers after hibernation.
+[Fiber ledger reads — list, inspect, and query running fibers](../packages/agents/src/index.ts#L4488-L4732) and [startFiber implementation — persistence, execution, and error recovery](../packages/agents/src/index.ts#L4732-L5000) and [Fiber cleanup and hibernation handoff](../packages/agents/src/index.ts#L5000-L5133) — the fiber lifecycle: how `startFiber()` creates a ledger entry in `cf_agents_fibers`, how the fiber function runs inside a protected `try/catch` that stores the current step, and how `onStart()` recovers in-progress fibers after hibernation.
 
-[Sub-agent (facet) wiring](../packages/agents/src/index.ts#L5133-L6000) — how sub-agents are created, how their Durable Object names are computed from the parent's path, and how parent-to-child RPC calls are routed.
+[Facet fiber recovery and scheduled callback dispatch into sub-agents](../packages/agents/src/index.ts#L5133-L5350) and [Alarm lifecycle, fetch() entry point, and broadcast helpers](../packages/agents/src/index.ts#L5350-L5649) and [Broadcast helpers continued and sub-agent routing setup](../packages/agents/src/index.ts#L5650-L5700) and [Sub-agent WebSocket connection bridging and routing helpers](../packages/agents/src/index.ts#L5700-L5999) — how sub-agents are created, how their Durable Object names are computed from the parent's path, and how parent-to-child RPC calls are routed.
 
-[Server-side MCP integration](../packages/agents/src/index.ts#L6000-L9330) — the `mcp` property, `addMcpServer()` implementation, SQLite persistence of server metadata, and the reconnection logic that runs in `onStart()`.
+[Sub-agent RPC invocation and facet initialisation as sub-agent](../packages/agents/src/index.ts#L6000-L6299) and [Agent identity accessors — name, parentPath, selfPath, parentAgent](../packages/agents/src/index.ts#L6300-L6599) and [Sub-agent instantiation, namespace resolution, and method binding](../packages/agents/src/index.ts#L6600-L6899) and [Sub-agent state management, registration, and cleanup](../packages/agents/src/index.ts#L6900-L7199) and [Agent factory methods — agent() and facets() entry points](../packages/agents/src/index.ts#L7200-L7499) and [Agent factory internals — state initialisation and prop binding](../packages/agents/src/index.ts#L7500-L7799) and [Agent tooling helpers and internal utility methods](../packages/agents/src/index.ts#L7800-L8099) and [addMcpServer — HTTP and SSE transport path](../packages/agents/src/index.ts#L8100-L8399) and [addMcpServer — connection establishment and callback host resolution](../packages/agents/src/index.ts#L8400-L8699) and [MCP connection state management and server discovery](../packages/agents/src/index.ts#L8700-L8999) and [MCP tool and resource registration; getMcpServers() (part 1)](../packages/agents/src/index.ts#L9000-L9299) and [MCP tool and resource registration; getMcpServers() (part 2)](../packages/agents/src/index.ts#L9300-L9330) — the `mcp` property, `addMcpServer()` implementation, SQLite persistence of server metadata, and the reconnection logic that runs in `onStart()`.
 
-[Email and routing internals](../packages/agents/src/index.ts#L9330-L9836) — `_onEmail()` implementation, how the email resolver is called, how replies are signed, and the internal routing helpers used by `routeAgentRequest()`.
+[addMcpServer() — RPC transport variant and EmailBridge wiring](../packages/agents/src/index.ts#L9330-L9629) and [getMcpServers(), createOAuthProvider(), and routeAgentRequest() internals](../packages/agents/src/index.ts#L9630-L9836) — `_onEmail()` implementation, how the email resolver is called, how replies are signed, and the internal routing helpers used by `routeAgentRequest()`.
 
 ---
 
@@ -190,7 +190,7 @@ The following ranges cover the internals of the `Agent` class that you rarely ne
 
 On the browser side, `packages/agents/src/client.ts` implements the matching half of the RPC protocol.
 
-[`AgentClient` class (browser-side stub)](../packages/agents/src/client.ts#L1-L545) — connects via WebSocket, sends RPC calls, receives state updates, and exposes the same API surface as the server-side agent. The `useAgent()` React hook wraps this.
+[AgentClient types, RPC method types, and createStubProxy() factory](../packages/agents/src/client.ts#L1-L220) and [AgentClient constructor, WebSocket setup, and message handlers](../packages/agents/src/client.ts#L220-L430) and [AgentClient RPC dispatch, setState(), close(), and agentFetch() helper](../packages/agents/src/client.ts#L430-L545) — connects via WebSocket, sends RPC calls, receives state updates, and exposes the same API surface as the server-side agent. The `useAgent()` React hook wraps this.
 
 [`useAgent()` React hook](../packages/agents/src/react.tsx#L1-L100) — the simplest way to use an agent from a React component. Returns `{ agent, state }` where `agent` is the stub and `state` is the latest broadcast state.
 
