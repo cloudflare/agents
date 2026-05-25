@@ -157,6 +157,12 @@ import { Session } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
 import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "./tools/workspace";
+import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
+import type {
+  MessengerContext,
+  ThinkMessengers,
+  MessengerThinkHost
+} from "./messengers";
 
 export { Session } from "agents/experimental/memory/session";
 export { Workspace } from "@cloudflare/shell";
@@ -1213,6 +1219,10 @@ export class Think<
   /** Cached messages — kept in sync with session storage. */
   private _cachedMessages: UIMessage[] = [];
 
+  private _activeMessengerContext?: MessengerContext;
+
+  private _messengerRuntime?: ThinkMessengerRuntime;
+
   /**
    * WorkerLoader binding for sandboxed extensions.
    * Set this to enable `getExtensions()` and dynamic extension loading.
@@ -1301,6 +1311,7 @@ export class Think<
       this._restoreClientTools();
       this._restoreBody();
       this._setupProtocolHandlers();
+      this._initializeMessengers();
 
       // 8. User's onStart
       await _onStart();
@@ -1633,6 +1644,54 @@ export class Think<
   /** Return the tools available to the assistant. */
   getTools(): ToolSet {
     return {};
+  }
+
+  /** Return messenger integrations that should be routed through this Think agent. */
+  getMessengers(): ThinkMessengers {
+    return {};
+  }
+
+  getMessengerContext(): MessengerContext | undefined {
+    if (this._activeMessengerContext) {
+      return this._activeMessengerContext;
+    }
+
+    const message = this.messages.at(-1) as
+      | (UIMessage & { metadata?: { messenger?: MessengerContext } })
+      | undefined;
+    return message?.metadata?.messenger;
+  }
+
+  async chatWithMessengerContext(
+    userMessage: string | UIMessage,
+    callback: StreamCallback,
+    context: MessengerContext,
+    options?: ChatOptions
+  ): Promise<void> {
+    const previous = this._activeMessengerContext;
+    this._activeMessengerContext = context;
+    try {
+      await this.chat(userMessage, callback, options);
+    } finally {
+      this._activeMessengerContext = previous;
+    }
+  }
+
+  private _initializeMessengers(): void {
+    if (this.parentPath.length > 0) {
+      return;
+    }
+
+    const messengers = this.getMessengers();
+    if (Object.keys(messengers).length === 0) {
+      return;
+    }
+
+    this._messengerRuntime = new ThinkMessengerRuntime(
+      messengers,
+      this as unknown as MessengerThinkHost
+    );
+    this._messengerRuntime.initialize();
   }
 
   /** Return code-declared scheduled tasks for this agent. */
@@ -5023,6 +5082,11 @@ export class Think<
       ) {
         return Response.json(this.messages);
       }
+      const messengerResponse =
+        await this._messengerRuntime?.handleRequest(request);
+      if (messengerResponse) {
+        return messengerResponse;
+      }
       return _onRequest(request);
     };
   }
@@ -6047,6 +6111,10 @@ export class Think<
   protected override async _handleInternalFiberRecovery(
     ctx: FiberRecoveryContext
   ): Promise<boolean> {
+    if (await this._messengerRuntime?.handleFiberRecovery(ctx)) {
+      return true;
+    }
+
     const chatPrefix = (this.constructor as typeof Think).CHAT_FIBER_NAME + ":";
     if (!ctx.name.startsWith(chatPrefix)) {
       return false;

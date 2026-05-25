@@ -10,6 +10,8 @@ async function main() {
       "src/think.ts",
       "src/workflows.ts",
       "src/extensions/index.ts",
+      "src/messengers/index.ts",
+      "src/messengers/telegram.ts",
       "src/tools/workspace.ts",
       "src/tools/execute.ts",
       "src/tools/extensions.ts",

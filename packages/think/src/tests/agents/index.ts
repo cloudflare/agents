@@ -24,3 +24,4 @@ export {
 export { ThinkFiberTestAgent } from "./fiber";
 export { ThinkClientToolsAgent } from "./client-tools";
 export { ThinkExtensionHookAgent } from "./extension-hooks";
+export { ThinkMessengerRouteTestAgent } from "./messengers";

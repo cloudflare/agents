@@ -24,7 +24,8 @@ export {
   ThinkNonRecoveryTestAgent,
   ThinkAgentToolParent,
   StuckThinkAgentToolChild,
-  ThinkExtensionHookAgent
+  ThinkExtensionHookAgent,
+  ThinkMessengerRouteTestAgent
 } from "./agents";
 
 import type {
@@ -49,7 +50,8 @@ import type {
   ThinkNonRecoveryTestAgent,
   ThinkAgentToolParent,
   StuckThinkAgentToolChild,
-  ThinkExtensionHookAgent
+  ThinkExtensionHookAgent,
+  ThinkMessengerRouteTestAgent
 } from "./agents";
 
 export type Env = {
@@ -75,6 +77,7 @@ export type Env = {
   ThinkAgentToolParent: DurableObjectNamespace<ThinkAgentToolParent>;
   StuckThinkAgentToolChild: DurableObjectNamespace<StuckThinkAgentToolChild>;
   ThinkExtensionHookAgent: DurableObjectNamespace<ThinkExtensionHookAgent>;
+  ThinkMessengerRouteTestAgent: DurableObjectNamespace<ThinkMessengerRouteTestAgent>;
   LOADER: WorkerLoader;
 };
 

@@ -33,6 +33,7 @@ export class MessengerAgent extends Agent<Env> {
     const telegram = createTelegramAdapter({
       botToken: this.env.TELEGRAM_BOT_TOKEN,
       mode: "webhook",
+      secretToken: this.env.TELEGRAM_WEBHOOK_SECRET_TOKEN,
       userName: "my_bot"
     });
 
@@ -174,6 +175,7 @@ Physical cleanup is lazy. `ChatSdkStateAgent` schedules one cleanup callback for
 See `examples/chat-sdk-messenger` for a complete Telegram bot that uses:
 
 - `createChatSdkState()` for Chat SDK state.
-- `ChatSdkStateAgent` as a sub-agent.
+- `ThinkMessengerStateAgent`, a Think-specific wrapper around
+  `ChatSdkStateAgent`, as a sub-agent.
 - Chat SDK burst/debounce concurrency.
 - Think-backed AI replies running in managed fibers.
