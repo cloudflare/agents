@@ -22,6 +22,8 @@ const REPO_ROOT = path.resolve(__dirname, "..");
 const VERBOSE = process.argv.includes("--verbose");
 const SHOW_UNCOVERED = process.argv.includes("--uncovered");
 
+const MAX_RANGE = 300;
+
 // ---------------------------------------------------------------------------
 // 1. Collect source files we care about
 // ---------------------------------------------------------------------------
@@ -102,7 +104,7 @@ function parseMarkdownLinks(mdPath) {
   let m;
   LINK_RE.lastIndex = 0;
   while ((m = LINK_RE.exec(content)) !== null) {
-    const rawHref = m[2];
+    const rawHref = m[2]; // eslint-disable-line no-unused-vars (used in refs below)
     // Resolve the file path (strip fragment)
     const rangeMatch = rawHref.match(RANGE_RE);
     const relFile = rawHref.replace(RANGE_RE, "");
@@ -114,10 +116,10 @@ function parseMarkdownLinks(mdPath) {
     if (rangeMatch) {
       const start = parseInt(rangeMatch[1], 10);
       const end = rangeMatch[2] ? parseInt(rangeMatch[2], 10) : start;
-      refs.push({ file: absFile, start, end });
+      refs.push({ file: absFile, start, end, text: m[1], rawHref });
     } else {
       // Whole-file reference — mark every line covered
-      refs.push({ file: absFile, start: 1, end: fileTotals.get(absFile) });
+      refs.push({ file: absFile, start: 1, end: fileTotals.get(absFile), text: m[1], rawHref });
     }
   }
   return refs;
@@ -132,9 +134,24 @@ const mdFiles = fs
 // Map from absolute source path -> Set of covered line numbers
 const coveredLines = new Map();
 
+// Oversized ranges: { mdFile, text, file, start, end, size }
+const oversizedRanges = [];
+
 for (const md of mdFiles) {
   const refs = parseMarkdownLinks(md);
-  for (const { file, start, end } of refs) {
+  for (const { file, start, end, text, rawHref } of refs) {
+    const size = end - start + 1;
+    if (size > MAX_RANGE) {
+      oversizedRanges.push({
+        mdFile: path.basename(md),
+        text,
+        rel: path.relative(REPO_ROOT, file),
+        start,
+        end,
+        size
+      });
+      continue; // don't count toward coverage
+    }
     if (!coveredLines.has(file)) coveredLines.set(file, new Set());
     const s = coveredLines.get(file);
     for (let i = start; i <= end; i++) s.add(i);
@@ -170,6 +187,19 @@ console.log(
   `Source files referenced: ${[...coveredLines.keys()].length}`
 );
 console.log(`Navigation docs scanned: ${mdFiles.length}`);
+
+if (oversizedRanges.length > 0) {
+  oversizedRanges.sort((a, b) => b.size - a.size);
+  console.log(
+    `\n--- Oversized ranges (>${MAX_RANGE} lines, NOT counted, ${oversizedRanges.length} total) ---\n`
+  );
+  for (const { mdFile, text, rel, start, end, size } of oversizedRanges) {
+    const label = text.length > 50 ? text.slice(0, 47) + "…" : text;
+    console.log(
+      `  ${size.toString().padStart(5)} lines  ${rel}#L${start}-L${end}  [${label}]  (${mdFile})`
+    );
+  }
+}
 
 if (VERBOSE) {
   console.log("\n--- Per-file coverage (source files, largest first) ---\n");
