@@ -46,7 +46,7 @@ Agents can receive inbound emails via Cloudflare Email Workers.
 
 [`isAutoReplyEmail(headers)` and internal HMAC helpers](../packages/agents/src/email.ts#L38-L103) — `isAutoReplyEmail()` (L38-L61) checks `Auto-Submitted`, `X-Auto-Response-Suppress`, and `Precedence` headers to detect automated emails that should be skipped. `computeAgentSignature()` (L81-L98) is the internal HMAC-SHA256 primitive used by both `signAgentHeaders` and `verifyAgentSignature`. `SignatureVerificationResult` discriminated union starts at L103.
 
-[Signature verification internals](../packages/agents/src/email.ts#L103-L400) — the complete HMAC-SHA256 signature scheme for secure replies: the signing format, clock-skew tolerance (`MAX_CLOCK_SKEW_SECONDS = 5 minutes`), nonce tracking to prevent replay attacks, and the `SignatureVerificationResult` discriminated union returned by the verifier.
+[Signature and resolver implementation](../packages/agents/src/email.ts#L103-L400) — spans the rest of the file. Covers: `SignatureVerificationResult` discriminated union and `verifyAgentSignature()` (clock-skew check, constant-time comparison); `signAgentHeaders(secret, agentName, agentId)` which produces the four `X-Agent-*` headers for outbound email; resolver types (`EmailResolverResult`, `EmailResolver<Env>`, `SignatureFailureReason`, `SecureReplyResolverOptions`); and all four resolver factory functions: `createSecureReplyEmailResolver`, `createAddressBasedEmailResolver` (parses `local+subaddress@domain`), `createCatchAllEmailResolver` (routes everything to one named agent), and the removed `createHeaderBasedEmailResolver` stub.
 
 ---
 
@@ -66,13 +66,13 @@ Cloudflare Workflows are durable, multi-step async processes that can pause and 
 
 ### Implementation
 
-[AgentWorkflow — class structure, waitForApproval(), and progress()](../packages/agents/src/workflows.ts#L62-L250) and [AgentWorkflow — complete(), error(), event callbacks, and workflow tracking](../packages/agents/src/workflows.ts#L250-L437) — extend this instead of the raw Cloudflare `WorkflowEntrypoint` to get:
+[AgentWorkflow — class fields, constructor, and `_initAgent()`/`_wrapStep()`](../packages/agents/src/workflows.ts#L62-L250) and [AgentWorkflow — `agent` getter, `reportProgress()`, `broadcastToClients()`, `waitForApproval()`, and re-exports](../packages/agents/src/workflows.ts#L250-L437) — extend this instead of the raw Cloudflare `WorkflowEntrypoint` to get:
 - Automatic tracking of workflow state in the agent's SQLite
 - `this.waitForApproval(options)` — pause the step and wait for a human decision
 - `this.progress(data)` — broadcast progress updates to the agent's connected clients
 - `this.complete(result)` / `this.error(err)` — terminal callbacks
 
-[`runWorkflow()` method on `Agent`](../packages/agents/src/index.ts#L9330-L9430) — start a workflow from within an agent. Returns a `WorkflowInfo` with the instance ID. The agent subscribes to the workflow's callbacks and broadcasts them to WebSocket clients.
+[`runWorkflow()` method on `Agent`](../packages/agents/src/index.ts#L8235-L8300) — start a workflow from within an agent. Injects the agent's name, binding name, and workflow name into the workflow params so `AgentWorkflow` can call back. Tracks the new instance in the `cf_agents_workflows` SQLite table with status `"queued"`. Returns a `Promise<string>` resolving to the workflow instance ID.
 
 ---
 
@@ -100,7 +100,7 @@ These tools let agents control a headless Chrome browser via the Chrome DevTools
 
 [createBrowserToolHandlers() — CDP spec caching and tool option normalisation](../packages/agents/src/browser/shared.ts#L1-L180) and [createBrowserToolHandlers() — tool execution, result formatting, and error handling](../packages/agents/src/browser/shared.ts#L180-L364) — the shared implementation behind both adapters. Handles CDP spec caching (5-minute TTL), tool execution, and error formatting.
 
-[`CdpSession` class — WebSocket setup, command dispatch, and response correlation](../packages/agents/src/browser/cdp-session.ts#L1-L300) and [`CdpSession` — session cleanup and debug logging helpers](../packages/agents/src/browser/cdp-session.ts#L301-L318) — a WebSocket-based CDP client. Manages command/response correlation, target sessions, and debug logging. This is the host-side client that talks to Chrome; the generated code runs in a separate sandbox.
+[`CdpSession` class — WebSocket setup, command dispatch, and response correlation](../packages/agents/src/browser/cdp-session.ts#L1-L216) and [`connectBrowser()` and `connectUrl()` factory functions](../packages/agents/src/browser/cdp-session.ts#L218-L318) — `CdpSession` is the host-side CDP client: manages command/response correlation via a pending-command `Map`, per-command timeouts, `attachToTarget()` for page-scoped sessions, and a ring-buffer debug log. `connectBrowser()` opens a CDP WebSocket through the Browser Rendering binding (Fetcher); `connectUrl()` discovers the debugger URL from a `/json/version` endpoint and connects to a local or remote Chrome instance.
 
 [`truncateResponse()` in `truncate.ts`](../packages/agents/src/browser/truncate.ts#L1-L16) — limits browser tool output to ~6 000 tokens. Adds a notice if the response was cut.
 
@@ -128,7 +128,7 @@ The Chat SDK state adapter bridges the Agent storage layer to the `@cloudflare/a
 
 ## Browser automation module index (`src/browser/index.ts`)
 
-[`browser/index.ts` re-exports](../packages/agents/src/browser/index.ts#L1-L15) — re-exports `createBrowserTools()` (both adapters), `createBrowserToolHandlers()`, `CdpSession`, and `truncateResponse()`.
+[`browser/index.ts` re-exports](../packages/agents/src/browser/index.ts#L1-L15) — re-exports `CdpSession`, `connectBrowser`, `connectUrl`, and their option types from `cdp-session.ts`; and `createBrowserToolHandlers`, `BrowserToolsOptions`, `ToolResult`, `SEARCH_DESCRIPTION`, and `EXECUTE_DESCRIPTION` from `shared.ts`. Note: `createBrowserTools()` is NOT exported here — import it directly from `agents/browser/ai` or `agents/browser/tanstack-ai`.
 
 ---
 

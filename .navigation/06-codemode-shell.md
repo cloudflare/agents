@@ -53,13 +53,13 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 [`searchTextContent(content, options)` function](../packages/shell/src/helpers.ts#L145-L201) — line-by-line text search with context lines. Returns an array of `{lineNumber, line, contextBefore, contextAfter}` matches.
 
-[`replaceTextContent(content, search, replacement)` function](../packages/shell/src/helpers.ts#L203-L220) — search-and-replace with diff output. Used by the `edit` workspace tool.
+[`replaceTextContent(content, search, replacement)` function](../packages/shell/src/helpers.ts#L203-L220) — search-and-replace using the same `createTextMatcher()` regex builder as `searchTextContent`. Returns `{replaced: number, content: string}` — the replacement count and the updated string. Used by `replaceInFile()` and `replaceInFiles()` in `FileSystemStateBackend`.
 
 [`diffContent(a, b)` function](../packages/shell/src/helpers.ts#L37-L52) — unified diff of two text strings. Uses Myers diff algorithm (implemented at the bottom of the file). Capped at 10 000 lines to avoid runaway computation.
 
 [`myersDiff()` algorithm](../packages/shell/src/helpers.ts#L506-L582) — the classic O(n+m) diff algorithm. Worth knowing it's here if you ever need to understand how edits are represented.
 
-[helpers.ts — truncateLines(), formatSearchResults(), and normalizeLineEndings()](../packages/shell/src/helpers.ts#L200-L360) and [helpers.ts — countBytes(), indent(), dedent(), and remaining text utilities](../packages/shell/src/helpers.ts#L360-L506) — the middle section of `helpers.ts` covers: `truncateLines()` (limits long files for LLM context), `formatSearchResults()` (human-readable search output), `normalizeLineEndings()` (CRLF → LF), `countBytes()` (UTF-8 byte length), and `indent()` / `dedent()` for code formatting operations.
+[helpers.ts — collectFileSearchResults(), collectFileReplaceResults(), applyTextEdits(), and planTextEdits()](../packages/shell/src/helpers.ts#L220-L506) — the batch-operation helpers used by `FileSystemStateBackend`. `collectFileSearchResults` and `collectFileReplaceResults` fan out single-file operations across a list of glob-matched paths and roll back on error when `rollbackOnError` is set. `applyTextEdits` writes a list of `{path, content}` edits atomically (with rollback). `planTextEdits` does the same dry-run computation that `StateBackend.planEdits` exposes to callers. The section ends with `createTextMatcher()` (builds the regex from `StateSearchOptions`) and `escapeRegExp()`.
 
 ### Git integration (`src/git/`)
 
@@ -159,7 +159,7 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 ### TanStack AI integration (`src/tanstack-ai.ts`)
 
-[tanstack-ai.ts — tool descriptor building and input schema setup](../packages/codemode/src/tanstack-ai.ts#L1-L160) and [tanstack-ai.ts — ServerTool array construction and createCodemodeTools() export](../packages/codemode/src/tanstack-ai.ts#L160-L310) — same as the AI SDK adapter but returns `ServerTool[]` in TanStack AI's format. Use this if your agent uses TanStack AI's chat adapter instead of the AI SDK's `streamText`.
+[tanstack-ai.ts — `generateTypes()` for TanStack AI tools and `tanstackTools()` factory](../packages/codemode/src/tanstack-ai.ts#L1-L160) and [tanstack-ai.ts — `createCodeTool()` returning a `ServerTool` and `generateTypesFromRecord()` fallback](../packages/codemode/src/tanstack-ai.ts#L160-L310) — TanStack AI integration for codemode. `generateTypes()` converts an array of `TanStackTool` objects (which may use Zod, ArkType, or plain JSON Schema) into TypeScript type declarations via `convertSchemaToJsonSchema()`. `tanstackTools()` wraps a `TanStackTool[]` into a `ToolProvider` for use with `createCodeTool`. `createCodeTool()` returns a single `ServerTool` (TanStack AI's server-side tool format) rather than an AI SDK tool — use this module's entry point when your agent uses `@tanstack/ai`'s `chat()` adapter.
 
 ---
 

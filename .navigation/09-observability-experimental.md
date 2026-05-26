@@ -98,7 +98,7 @@ Key methods:
 
 [`estimateStringTokens(text)` and `estimateMessageTokens(messages)` in `utils/tokens.ts`](../packages/agents/src/experimental/memory/utils/tokens.ts#L1-L84) — fast (no model call) token count estimates. `estimateStringTokens` uses a hybrid heuristic (max of character-based and word-based estimates) to handle both dense content and prose. `estimateMessageTokens` walks an array of `SessionMessage` objects, summing per-part estimates plus a per-message overhead constant. Avoids real tokenizers (e.g. tiktoken) because they cost ~80-120MB of heap, which exceeds Cloudflare Worker memory limits.
 
-[`compactMessages()` in `utils/compaction.ts`](../packages/agents/src/experimental/memory/utils/compaction.ts#L1-L101) — takes a message array and returns a summarised version that fits within a token budget, preserving the most recent messages verbatim.
+[`truncateOlderMessages()` in `utils/compaction.ts`](../packages/agents/src/experimental/memory/utils/compaction.ts#L1-L101) — a read-time truncation utility. Takes a message array and returns a copy with tool outputs and long text parts trimmed in older messages, leaving the most recent `keepRecent` messages (default: 4) fully intact. Used in `assembleContext()` before sending history to the LLM to avoid blowing the context window with verbose tool outputs.
 
 [compaction-helpers — isCompactionMessage, tool-pair alignment, and boundary functions](../packages/agents/src/experimental/memory/utils/compaction-helpers.ts#L1-L160) and [compaction-helpers — token-budget tail protection and sanitizeToolPairs()](../packages/agents/src/experimental/memory/utils/compaction-helpers.ts#L160-L300) and [compaction-helpers — computeSummaryBudget(), buildSummaryPrompt(), and createCompactFunction()](../packages/agents/src/experimental/memory/utils/compaction-helpers.ts#L300-L493) — lower-level utilities: selecting which messages to compact, formatting them for summarisation, and merging the summary back in.
 
@@ -108,7 +108,7 @@ Key methods:
 
 [`memory/index.ts` — top-level exports](../packages/agents/src/experimental/memory/index.ts#L1-L17) — the package-level entry point. Re-exports everything from `session/index.ts` plus the utils.
 
-[`utils/index.ts`](../packages/agents/src/experimental/memory/utils/index.ts#L1-L23) — re-exports `estimateTokens`, `compactMessages`, and the compaction helpers for use outside the session module.
+[`utils/index.ts`](../packages/agents/src/experimental/memory/utils/index.ts#L1-L23) — re-exports `estimateStringTokens`, `estimateMessageTokens`, token constants, `truncateOlderMessages`, and the compaction helpers (`createCompactFunction`, `buildSummaryPrompt`, `computeSummaryBudget`, `sanitizeToolPairs`, etc.) for use outside the session module.
 
 ### Postgres adapter base (`session/providers/postgres-adapter.ts`)
 

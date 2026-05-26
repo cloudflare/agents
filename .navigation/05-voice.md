@@ -82,11 +82,11 @@ Convenience implementations that use Cloudflare's built-in AI models so you don'
 
 [`WorkersAITTS` class](../packages/voice/src/workers-ai-providers.ts#L46-L100) — TTS via the `@cf/deepgram/aura-1` Workers AI model. Implements the `TTSProvider` interface.
 
-[`WorkersAIFluxSTT` class](../packages/voice/src/workers-ai-providers.ts#L100-L200) — continuous STT using the Flux model. Implements `Transcriber`. Includes end-of-turn detection heuristics.
+[`WorkersAIFluxSTT` class](../packages/voice/src/workers-ai-providers.ts#L100-L200) — continuous STT using the `@cf/deepgram/flux` model. Implements `Transcriber`. The Flux model has built-in conversational end-of-turn detection (`EndOfTurn` events); no client-side silence detection is needed. Recommended for `withVoice` conversational agents.
 
-[`WorkersAINova3STT` class](../packages/voice/src/workers-ai-providers.ts#L200-L330) — STT using the Nova 3 model variant. Generally higher accuracy for English.
+[`WorkersAINova3STT` class](../packages/voice/src/workers-ai-providers.ts#L200-L330) — continuous STT using the `@cf/deepgram/nova-3` model. Uses server-side VAD endpointing and `speech_final` results for utterance detection. Recommended for `withVoiceInput` dictation UIs.
 
-[Provider implementation internals](../packages/voice/src/workers-ai-providers.ts#L330-L595) — how each provider streams audio to the Workers AI binding, handles partial results and final transcripts, and signals end-of-utterance to the voice pipeline.
+[FluxSession and Nova3Session implementations](../packages/voice/src/workers-ai-providers.ts#L330-L595) — the internal per-call session classes for each Workers AI STT provider. Each opens a Workers AI WebSocket session (`ai.run(..., { websocket: true })`), buffers audio while connecting, and translates model-specific events (`StartOfTurn`/`EndOfTurn` for Flux; `Results` with `speech_final` for Nova 3) into the pipeline's `onInterim`/`onSpeechStart`/`onUtterance` callbacks.
 
 ---
 
@@ -98,7 +98,7 @@ For deployments using Cloudflare Realtime (a Selective Forwarding Unit for WebRT
 
 [Packet handling: `extractPayloadFromProtobuf()` and `encodePayloadToProtobuf()`](../packages/voice/src/sfu-utils.ts#L45-L96) — unwrap/wrap audio payloads from/into protobuf frames.
 
-[Audio resampling: `downsample48kStereoTo16kMono()` and `upsample16kMonoTo48kStereo()`](../packages/voice/src/sfu-utils.ts#L99-L200) — WebRTC sends 48 kHz stereo PCM; the STT engines expect 16 kHz mono. These convert between the two.
+[Audio resampling and SFU API helpers](../packages/voice/src/sfu-utils.ts#L99-L235) — `downsample48kStereoTo16kMono()` and `upsample16kMonoTo48kStereo()` convert between the WebRTC wire format (48 kHz stereo) and the STT format (16 kHz mono). The remainder of the file contains SFU REST API helpers (`sfuFetch`, `createSFUSession`, `addSFUTracks`, `renegotiateSFUSession`, `createSFUWebSocketAdapter`) for setting up Cloudflare Realtime sessions.
 
 ---
 
@@ -116,9 +116,9 @@ For deployments using Cloudflare Realtime (a Selective Forwarding Unit for WebRT
 
 [`VoiceClientMessage` union type](../packages/voice/src/types.ts#L50-L130) — the messages sent from browser to agent: `hello`, `start_call`, `end_call`, `start_of_speech`, `end_of_speech`, `interrupt`, `text_message`.
 
-[`VoiceServerMessage` union type](../packages/voice/src/types.ts#L130-L243) — the messages sent from agent to browser: `welcome`, `status`, `audio_config`, `transcript`, `transcript_start`, `transcript_delta`, `audio_chunk`, `error`.
+[`VoiceServerMessage` union type](../packages/voice/src/types.ts#L130-L243) — the messages sent from agent to browser: `welcome`, `status`, `audio_config`, `transcript`, `transcript_start`, `transcript_delta`, `transcript_end`, `transcript_interim`, `playback_interrupt`, `metrics`, `error`.
 
-[`Transcriber` and `TTSProvider` interfaces](../packages/voice/src/types.ts#L200-L243) — the contracts every STT and TTS provider must implement. `Transcriber` is an `AsyncIterable<TranscriptEvent>`. `TTSProvider` has `synthesize(text): Promise<Uint8Array>`. `StreamingTTSProvider` extends it with `synthesizeStream(text): AsyncIterable<Uint8Array>`.
+[`Transcriber` and `TTSProvider` interfaces](../packages/voice/src/types.ts#L200-L243) — the contracts every STT and TTS provider must implement. `Transcriber` has `createSession(options): TranscriberSession`; sessions receive audio via `feed(chunk)` and fire callbacks (`onInterim`, `onSpeechStart`, `onUtterance`). `TTSProvider` has `synthesize(text): Promise<ArrayBuffer | null>`. `StreamingTTSProvider` extends it with `synthesizeStream(text): AsyncGenerator<ArrayBuffer>`. Also defines `VoiceAudioInput` and `VoiceTransport` interfaces used by the browser client.
 
 ---
 
@@ -138,7 +138,7 @@ Each provider is a small package implementing the `Transcriber` or `TTSProvider`
 
 [`DeepgramSTT` class](../voice-providers/deepgram/src/index.ts#L1-L100) — connects to `wss://api.deepgram.com/v1/listen` for real-time streaming STT. Configurable model (default `nova-3`), language, smart formatting, punctuation, and endpointing delay.
 
-[`DeepgramSTT` implementation — streaming and events](../voice-providers/deepgram/src/index.ts#L100-L259) — the full implementation: binary audio is sent as WebSocket frames, text results arrive as JSON messages. `interim_results: true` enables partial transcripts. The adapter translates Deepgram's `Results` JSON into `TranscriptEvent` objects (final vs interim, single vs alternative hypotheses) and handles connection keep-alive with KeepAlive messages.
+[`DeepgramSession` implementation — streaming and events](../voice-providers/deepgram/src/index.ts#L100-L259) — the internal per-call `DeepgramSession` class. Binary audio is sent as WebSocket frames; text results arrive as JSON. `interim_results: true` enables partial transcripts. The session accumulates `is_final` segments and emits the joined utterance when `speech_final: true` arrives. On close it sends a `CloseStream` JSON message before shutting down the WebSocket.
 
 ### ElevenLabs (`voice-providers/elevenlabs/`)
 

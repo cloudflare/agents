@@ -84,13 +84,13 @@
 
 ## Virtual filesystem (`src/file-system.ts`)
 
-[Virtual file system used by the bundler](../packages/worker-bundler/src/file-system.ts#L1-L296) — an esbuild plugin that intercepts module resolution and load calls, serving files from a `Map<string, string>` in memory rather than the real filesystem. This is what makes bundling work inside a Worker that has no filesystem access.
+[Virtual filesystem implementations in `file-system.ts`](../packages/worker-bundler/src/file-system.ts#L1-L296) — defines the `FileSystem` interface (`read`, `write`, `delete`, `list`, `flush`) and four implementations: `InMemoryFileSystem` (backed by a `Map`, for tests and build pipelines), `OverlayFileSystem` (write-overlay over any inner FS, buffers changes until `flush()`), `DurableObjectRawFileSystem` (immediate per-write KV persistence), and `DurableObjectKVFileSystem` (buffered KV writes via an overlay). Also includes `createFileSystemSnapshot()` (materialises an async iterable of `[path, content]` pairs into an `InMemoryFileSystem`) and `isFileSystem()` (type guard). Note: the esbuild plugin that *uses* a `FileSystem` lives in `bundler.ts`, not here.
 
 ---
 
 ## MIME types (`src/mime.ts`)
 
-[`getMimeType(path)` function](../packages/worker-bundler/src/mime.ts#L1-L97) — maps file extensions to MIME type strings. Used by the asset handler when setting `Content-Type` response headers.
+[`inferContentType(path)` and `isTextContentType()` functions](../packages/worker-bundler/src/mime.ts#L1-L97) — `inferContentType()` maps file extensions to MIME type strings (HTML, JS, CSS, JSON, images, fonts, media, archives, WASM, source maps). Returns `undefined` for unknown extensions. `isTextContentType()` classifies a content type as text-based (used to decide between text and binary module storage). Used by `buildAssetManifest()` and the asset handler.
 
 ---
 
@@ -98,15 +98,21 @@
 
 The asset handler is more involved than it first appears — it implements a proper static file server with SPA support, custom headers, and redirect rules.
 
-[AssetHandler — normalizeConfig(), computeETag(), buildAssetManifest(), and redirect handling](../packages/worker-bundler/src/asset-handler.ts#L91-L300) and [AssetHandler — custom headers, path encoding, and getIntent() HTML routing factory](../packages/worker-bundler/src/asset-handler.ts#L300-L470) and [AssetHandler — htmlAutoTrailingSlash(), htmlForceTrailingSlash(), and htmlDropTrailingSlash()](../packages/worker-bundler/src/asset-handler.ts#L470-L700) and [AssetHandler — not-found handling, cache headers, and handleAssetRequest() entry point](../packages/worker-bundler/src/asset-handler.ts#L700-L995) — the main class. `handle(request)` walks through the routing pipeline: check redirects → resolve path → apply trailing-slash normalisation → find asset → set content-type/encoding headers → return `Response`.
+[normalizeConfig(), computeETag(), buildAssetManifest(), buildAssets(), and redirect handling](../packages/worker-bundler/src/asset-handler.ts#L91-L301) — `normalizeConfig()` fills in defaults and normalises the `redirects.static` record with line numbers for priority resolution. `computeETag()` uses FNV-1a for text and SHA-256 for binary. Redirect handling: `matchStaticRedirects()`, `matchDynamicRedirects()` (with glob/`:placeholder` patterns), and `handleRedirects()` (returns a redirect `Response` or a proxied pathname for status-200 rewrites).
 
-[Redirect rules](../packages/worker-bundler/src/asset-handler.ts#L400-L600) — `AssetConfig.redirects` is an array of `{from, to, status}` entries. Supports exact paths, wildcard patterns, and optional query-string passthrough. Processed before any other routing.
+[Custom headers, path encoding/decoding, and getIntent() HTML routing dispatcher](../packages/worker-bundler/src/asset-handler.ts#L303-L424) — `attachCustomHeaders()` applies `AssetConfig.headers` glob rules to a response (supports both `set` and `unset`). `decodePath()` and `encodePath()` handle percent-encoding on a per-segment basis. `getIntent()` dispatches to the appropriate HTML-handling mode and returns a typed `Intent` (asset, redirect, or undefined).
 
-[Trailing-slash normalisation](../packages/worker-bundler/src/asset-handler.ts#L600-L750) — when `trailingSlash: "auto"` (the default), the handler adds a trailing slash for directory-like paths and removes it for file-like paths. Prevents 404s caused by mismatched URL forms.
+[htmlAutoTrailingSlash(), htmlForceTrailingSlash(), and htmlDropTrailingSlash() routing modes](../packages/worker-bundler/src/asset-handler.ts#L462-L833) — three HTML routing functions that implement the `html_handling` modes. Each resolves a requested pathname against the asset manifest following different slash conventions, using `safeRedirect()` to avoid redirect loops. They handle `/index`, `/index.html`, trailing-slash, `.html`-extension, and bare-path variants.
 
-[SPA fallback](../packages/worker-bundler/src/asset-handler.ts#L750-L900) — when `spaFallback: true`, any 404 that doesn't match a static asset serves `index.html` with a 200 status instead. This lets client-side routers handle deep links.
+[htmlNone(), notFound(), cache-control helpers, and handleAssetRequest() entry point](../packages/worker-bundler/src/asset-handler.ts#L836-L995) — `htmlNone()` does an exact manifest lookup only. `notFound()` implements `not_found_handling`: SPA mode serves `/index.html` only for requests that include `text/html` in `Accept`; `404-page` mode walks up the directory tree for the nearest `404.html`. `getCacheControl()` returns immutable caching for content-hashed filenames. `handleAssetRequest()` is the public entry point: validates method (GET/HEAD only), runs redirects, decodes the path, calls `getIntent()`, handles ETag conditional requests, fetches content from storage, and applies custom headers.
 
-[Custom response headers](../packages/worker-bundler/src/asset-handler.ts#L900-L995) — `AssetConfig.headers` is an array of `{path, headers}` entries where `path` is a glob. Matching entries' headers are merged into the response. Useful for `Cache-Control`, `X-Frame-Options`, etc.
+[Redirect rules](../packages/worker-bundler/src/asset-handler.ts#L202-L301) — `AssetConfig.redirects` is an object with `static` and `dynamic` sub-records, both keyed by URL pattern (`{ status, to }`). Static redirects also support `https://host/path` keys for host-specific rules; conflicts are resolved by declaration order (line numbers). Dynamic redirects support `*` wildcards and `:placeholder` tokens with substitution in the destination. Processed before any HTML handling.
+
+[Trailing-slash and HTML normalisation](../packages/worker-bundler/src/asset-handler.ts#L382-L833) — controlled by `AssetConfig.html_handling`. The default `"auto-trailing-slash"` mode transparently serves directory-style URLs with or without the slash by attempting `index.html` lookups and `safeRedirect()` where needed. `"force-trailing-slash"` always redirects to the slash form; `"drop-trailing-slash"` always redirects to the no-slash form; `"none"` does exact matching only.
+
+[Not-found handling](../packages/worker-bundler/src/asset-handler.ts#L848-L879) — controlled by `AssetConfig.not_found_handling`. `"single-page-application"` serves `/index.html` with status 200 for requests that include `text/html` in `Accept` (skips API/fetch calls). `"404-page"` walks up the directory tree to find the nearest `404.html` and returns it with status 404. `"none"` (default) returns null so the request falls through to the user's Worker.
+
+[Custom response headers](../packages/worker-bundler/src/asset-handler.ts#L303-L351) — `AssetConfig.headers` is a record keyed by glob pattern, each value being `{ set?: Record<string, string>, unset?: string[] }`. Multiple matching patterns are applied in order; `set` uses `append` for repeated keys, `unset` deletes headers. Useful for `Cache-Control`, `X-Frame-Options`, CORS headers, etc.
 
 ---
 
