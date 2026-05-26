@@ -6,7 +6,7 @@
 
 ## High-level API (`src/index.ts`, `src/app.ts`)
 
-[Public exports in `index.ts`](../packages/worker-bundler/src/index.ts#L1-L206) — the package's public surface: re-exports from the subsystems below, plus `createApp()` which is the most common entry point.
+[Public exports and `createWorker()` in `index.ts`](../packages/worker-bundler/src/index.ts#L1-L206) — the package's public surface: re-exports of types and helpers from the subsystems below, plus `createWorker()` — the main entry point that auto-detects the entry point, installs npm dependencies, transpiles TypeScript/JSX, and either bundles everything with esbuild-wasm (`bundle: true`) or produces separate modules via Sucrase (`bundle: false`).
 
 [`createApp(options)` in `app.ts` — option parsing, server bundle setup, and client bundle creation](../packages/worker-bundler/src/app.ts#L1-L300) and [`createApp()` — asset manifest assembly and return value construction](../packages/worker-bundler/src/app.ts#L301-L373) — bundles a full-stack application: a server Worker, an optional client bundle, and static assets. Returns separate asset maps so the host can serve them. Internally calls `bundleWithEsbuild()` for the Worker, `resolveModule()` for dependencies, and `AssetHandler` for static serving.
 

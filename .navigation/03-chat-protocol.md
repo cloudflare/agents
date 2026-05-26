@@ -14,8 +14,11 @@ All code lives in `packages/agents/src/chat/`.
 
 - `CHAT_MESSAGES` — server pushes updated message array to client
 - `USE_CHAT_REQUEST` / `USE_CHAT_RESPONSE` — a submit/stream round trip
+- `CHAT_CLEAR` — client requests all history to be cleared
+- `CHAT_REQUEST_CANCEL` — client cancels an in-flight request
 - `TOOL_RESULT` / `TOOL_APPROVAL` — client-side tool execution results
-- `STREAM_RESUMING` / `STREAM_RESUME_ACK` / `STREAM_RESUME_NONE` — reconnection handshake
+- `MESSAGE_UPDATED` — server notifies a specific message was updated
+- `STREAM_RESUME_REQUEST` / `STREAM_RESUME_ACK` / `STREAM_RESUME_NONE` — reconnection handshake
 
 [`parseProtocolMessage()` in `parse-protocol.ts`](../packages/agents/src/chat/parse-protocol.ts#L67-L133) — parses the raw JSON from a WebSocket message into a typed discriminated union (`ChatProtocolEvent`). Every incoming message flows through this before any business logic runs.
 
@@ -23,11 +26,11 @@ All code lives in `packages/agents/src/chat/`.
 
 ## Public lifecycle types (`lifecycle.ts`)
 
-[`ChatResponseResult`](../packages/agents/src/chat/lifecycle.ts#L23-L34) — returned when a chat turn completes. Carries the final message, whether there is a continuation pending, and any error.
+[`ChatResponseResult`](../packages/agents/src/chat/lifecycle.ts#L23-L34) — returned when a chat turn completes. Carries the final assistant message, the request ID, whether this turn was itself a continuation of the previous assistant turn, and the turn's terminal status (`completed`, `error`, or `aborted`).
 
 [`MessageConcurrency`](../packages/agents/src/chat/lifecycle.ts#L143-L148) — the strategy for handling overlapping submits: `"queue"` (serialise), `"latest"` (drop older in-flight), `"merge"` (coalesce), `"drop"` (ignore new while busy), or `{strategy: "debounce", debounceMs?}`.
 
-[`ChatRecoveryContext`](../packages/agents/src/chat/lifecycle.ts#L88-L111) — the data saved to SQLite when a stream is interrupted so it can be resumed after hibernation.
+[`ChatRecoveryContext`](../packages/agents/src/chat/lifecycle.ts#L88-L111) — the context object passed to the `onChatRecovery` lifecycle hook when an interrupted stream is detected after a Durable Object restart. Contains the partial text and parts reconstructed from stored chunks, the stream and request IDs, current persisted messages, and the timestamp the fiber started (useful for suppressing stale replays).
 
 [`SaveMessagesOptions` and `SaveMessagesResult`](../packages/agents/src/chat/lifecycle.ts#L40-L82) — the API for the `saveMessages()` hook (implemented by `AIChatAgent` subclasses). The `signal` field is an external `AbortSignal` you can wire to your own cancellation logic.
 
@@ -47,11 +50,11 @@ The AI SDK delivers a stream of *chunks* (typed payloads like `text-start`, `too
 
 ## Message persistence and hygiene
 
-[`sanitizeMessage()` in `sanitize.ts`](../packages/agents/src/chat/sanitize.ts#L29-L76) — strips ephemeral metadata (OpenAI run IDs, empty reasoning blocks) before a message is written to SQLite. Always called before persistence.
+[`sanitizeMessage()` in `sanitize.ts`](../packages/agents/src/chat/sanitize.ts#L29-L76) — strips ephemeral OpenAI provider metadata (`itemId` and `reasoningEncryptedContent`) from part metadata, and filters out reasoning parts that have no text and no remaining provider metadata. Always called before persistence.
 
 [`enforceRowSizeLimit()` in `sanitize.ts`](../packages/agents/src/chat/sanitize.ts#L76-L185) — compacts tool outputs and truncates text to keep rows under 1.8 MB (`ROW_MAX_BYTES = 1_800_000`). Cloudflare's SQLite has row size limits, and very long tool outputs can blow past them. The algorithm prioritises preserving assistant text at the expense of tool output fidelity.
 
-[`truncateToolOutput()` in `tool-output-truncation.ts`](../packages/agents/src/chat/tool-output-truncation.ts#L11-L221) — recursively truncates deeply-nested objects and long strings. Depth limit is 8 levels; arrays beyond 100 elements are sliced; strings beyond 10 000 characters are trimmed. Adds a `__truncated` sentinel so the LLM knows data was dropped.
+[`truncateToolOutput()` in `tool-output-truncation.ts`](../packages/agents/src/chat/tool-output-truncation.ts#L11-L221) — recursively truncates deeply-nested objects and long strings to a caller-supplied `maxChars` budget. Depth limit is 8 levels (`DEFAULT_MAX_DEPTH`); arrays and objects distribute the budget across children and pop excess elements when still over budget; strings are sliced with a `... [truncated N chars]` suffix. Adds a `__truncated` sentinel flag so the LLM knows data was dropped.
 
 [`reconcileMessages()` in `message-reconciler.ts`](../packages/agents/src/chat/message-reconciler.ts#L26-L210) — a three-pass algorithm that merges the client's view of the message list with the server's authoritative state. Pass 1: merge server-known tool outputs into stale client parts. Pass 2: reconcile IDs (exact match → content-key hash → toolCallId). Pass 3: deduplicate by toolCallId. The `assistantContentKey()` helper hashes the content for identity checks.
 

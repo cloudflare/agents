@@ -30,7 +30,7 @@ Before the `Agent` class itself, `index.ts` opens with the exported types that d
 
 [RPC wire types: `RPCRequest`, `StateUpdateMessage`, `RPCResponse`](../packages/agents/src/index.ts#L158-L228) — every callable method invocation between a browser client and agent travels as one of these. `StateUpdateMessage` is broadcast to all connected clients whenever state changes.
 
-[`CallableMetadata` and the `callable()` decorator](../packages/agents/src/index.ts#L230-L469) — marking an agent method with `@callable()` makes it invocable over RPC. The decorator stores metadata (description, etc.) in a `WeakMap`; the Agent base class reads this during startup to build its dispatch table.
+[Internal facet connection bridge types, `SubAgentClass<T>`, `SubAgentStub<T>`, and the `callable()` decorator](../packages/agents/src/index.ts#L230-L469) — this range is dominated by internal plumbing for the facet (sub-agent) system: `FacetCapableCtx`, `SubAgentConnectionBridge`, `RootSubAgentConnectionBridge`, and `SubAgentWebSocketEndpoint` implement the per-connection message bridge between parent and child Durable Objects. `SubAgentClass<T>` and `SubAgentStub<T>` (L421-L445) are the public TypeScript types for referencing and calling a sub-agent. At the tail end (L451-L479), `callable()` (and its deprecated alias `unstable_callable`) is the method decorator that marks agent methods as RPC-invocable; it stores `CallableMetadata` in a `WeakMap` that the Agent base class reads to build its dispatch table.
 
 ---
 
@@ -38,7 +38,7 @@ Before the `Agent` class itself, `index.ts` opens with the exported types that d
 
 [`QueueItem<T>` and `Schedule<T>`](../packages/agents/src/index.ts#L481-L577) — the shapes stored in SQLite for queued callbacks and scheduled tasks respectively. A `Schedule` can be a one-shot future timestamp, a cron expression, or a delay.
 
-[`ScheduleCriteria`](../packages/agents/src/index.ts#L578-L660) — filter options passed to `getSchedules()`: filter by callback name, schedule type, or time range.
+[`ScheduleCriteria` and `RootFacetRpcSurface`](../packages/agents/src/index.ts#L578-L660) — `ScheduleCriteria` (L578-L582) is the filter type passed to `getSchedules()`: filter by id, schedule type, or time range. The bulk of this range (L584-L655) is `RootFacetRpcSurface`, an internal RPC interface that facets call on their parent to delegate alarm-owning operations such as scheduling, keep-alive tokens, broadcast, and WebSocket connection management.
 
 [Fiber types: `FiberContext`, `FiberStatus`, `FiberInspection`, `StartFiberOptions`](../packages/agents/src/index.ts#L661-L755) — fibers are lightweight long-running async tasks that survive Durable Object hibernation. These types describe what gets persisted to SQLite and how callers interact with a fiber's lifecycle.
 
@@ -62,9 +62,9 @@ Before the `Agent` class itself, `index.ts` opens with the exported types that d
 
 Agents pass structured data over RPC. The serialization layer handles the translation to/from JSON-safe values.
 
-[`Serializable` and `Deserializable` types](../packages/agents/src/serializable.ts#L1-L50) — generic constraints that ensure values round-trip through JSON without loss.
+[JSON serialisability type constraints](../packages/agents/src/serializable.ts#L1-L50) — defines `SerializablePrimitive`, `NonSerializable`, and the recursive compile-time predicate `CanSerialize<T>` that rejects functions, symbols, bigints, Dates, Maps, Sets, and typed arrays. Also exports `SerializableValue` (the legacy recursive union) and `SerializableReturnValue`.
 
-[`serialize()` / `deserialize()` helpers](../packages/agents/src/serializable.ts#L51-L175) — used internally by the Agent class when sending RPC arguments and responses. Worth knowing so you understand why certain argument types are rejected at the type level.
+[RPC method type-checking helpers](../packages/agents/src/serializable.ts#L51-L175) — builds on the serialisability predicates to define `RPCMethod<T>`, `ClientParameters<T>`, and `AllSerializableValues<A>`. These constrain which methods can be decorated with `@callable()` and what argument/return types are allowed over RPC. The Agent class imports these to provide compile-time errors when a method's signature is not safely serialisable.
 
 ---
 
@@ -76,9 +76,9 @@ Agents pass structured data over RPC. The serialization layer handles the transl
 
 ## Miscellaneous utilities (`src/utils.ts`, `src/schedule.ts`)
 
-[`camelToSnake()` and `isStub()` helpers](../packages/agents/src/utils.ts#L1-L35) — `camelToSnake` is used to normalise Durable Object class names into URL path segments. `isStub` checks whether you hold a real agent instance or a remote stub (needed to avoid infinite RPC loops).
+[`INTERNAL_JS_STUB_PROPS`, `isInternalJsStubProp()`, and `camelCaseToKebabCase()` helpers](../packages/agents/src/utils.ts#L1-L35) — `INTERNAL_JS_STUB_PROPS` is a set of property names (e.g. `toJSON`, `then`, `constructor`) that JS runtimes and test frameworks probe on arbitrary objects; `isInternalJsStubProp()` uses it so RPC-stub Proxies return `undefined` for those probes instead of firing a spurious RPC call. `camelCaseToKebabCase()` normalises Durable Object class names into URL path segments used in facet routing.
 
-[Schedule utilities](../packages/agents/src/schedule.ts#L1-L140) — helper functions for parsing, normalising, and formatting cron and delay expressions. Used internally by `schedule()`.
+[Schedule prompt and schema utilities](../packages/agents/src/schedule.ts#L1-L140) — provides `getSchedulePrompt()` (an LLM system-prompt snippet for a schedule-parsing component) and `scheduleSchema` (a Zod discriminated-union schema that an LLM response is validated against). Together they let an agent use `generateObject()` to parse natural-language scheduling requests into a structured `{ description, when }` object. Not used by the internal `schedule()` method; this is the AI-assisted scheduling helper for agent authors.
 
 ---
 
@@ -92,6 +92,6 @@ Agents pass structured data over RPC. The serialization layer handles the transl
 
 ## Agent tool types (`src/agent-tool-types.ts`, `src/agent-tools.ts`)
 
-[`AgentToolDescriptor` and `AgentToolTypes`](../packages/agents/src/agent-tool-types.ts#L1-L158) — describes the shape of a tool as seen by the agent runtime: name, description, input schema, output schema. Used when exposing agent capabilities to other agents or to the MCP layer.
+[Agent tool run lifecycle types](../packages/agents/src/agent-tool-types.ts#L1-L158) — defines the TypeScript vocabulary for orchestrating sub-agent tool runs: `AgentToolRunStatus` (starting/running/completed/error/aborted/interrupted), `AgentToolRunInfo`, `RunAgentToolOptions`, `RunAgentToolResult`, `AgentToolEvent` (streaming events emitted during a run), `AgentToolEventMessage`, `AgentToolChildAdapter` (the interface a chat-capable sub-agent must implement), and `AgentToolRunState` (the shape stored and broadcast to connected clients). Used by `Agent.runAgentTool()` and the `agentTool()` factory.
 
-[`createAgentTools()` and related helpers](../packages/agents/src/agent-tools.ts#L1-L130) — builds the AI SDK `ToolSet` that lets one agent call another agent's `@callable()` methods as if they were ordinary AI tools.
+[`agentTool()` factory](../packages/agents/src/agent-tools.ts#L1-L130) — exports `agentTool(cls, options)`, which wraps a chat-capable sub-agent class into an AI SDK `Tool`. When the tool is invoked during a model turn, it dispatches `Agent.runAgentTool()` on the current agent, streams chunks, and returns the run summary or structured output. Also re-exports all types from `agent-tool-types.ts` for convenience.
