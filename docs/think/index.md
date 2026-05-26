@@ -286,6 +286,68 @@ route modules stay under React Router's conventions. The Worker shim exists so
 Think can keep exporting generated Durable Object classes while the host
 framework owns app rendering.
 
+### TanStack Start Hosts
+
+TanStack Start apps use the same host-framework shape: the Cloudflare Vite plugin
+creates the `ssr` workerd environment, TanStack owns document routing, and Think
+handles its route prefix after the app server returns `null`.
+
+See `examples/think-tanstack-start` for a complete runnable example.
+
+```typescript
+// vite.config.ts
+import { cloudflare } from "@cloudflare/vite-plugin";
+import { tanstackStart } from "@tanstack/react-start/plugin/vite";
+import react from "@vitejs/plugin-react";
+import { think } from "@cloudflare/think/vite";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [
+    cloudflare({ viteEnvironment: { name: "ssr" } }),
+    tanstackStart(),
+    react(),
+    think({ routePrefix: "/api/agents", allowNonVirtualMain: true })
+  ]
+});
+```
+
+Use the same Worker shim:
+
+```typescript
+// src/worker.ts
+export { default } from "virtual:think/entry";
+export * from "virtual:think/entry";
+```
+
+Then delegate ordinary app requests to TanStack Start:
+
+```typescript
+// src/server.ts
+import handler from "@tanstack/react-start/server-entry";
+import type { ThinkAppContext } from "@cloudflare/think/server-entry";
+
+export default {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+    _think?: ThinkAppContext
+  ) {
+    const url = new URL(request.url);
+    if (url.pathname.startsWith("/api/agents/")) {
+      return null;
+    }
+
+    return handler.fetch(request);
+  }
+};
+```
+
+TanStack route modules are also part of the client build. If a route needs
+Cloudflare bindings, access them through a TanStack server function instead of
+importing `cloudflare:workers` into client-executed code.
+
 ### Diagnostics
 
 During Vite build/startup, Think reads `wrangler.jsonc` or `wrangler.json`,
