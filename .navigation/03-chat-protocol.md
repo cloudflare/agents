@@ -18,7 +18,7 @@ All code lives in `packages/agents/src/chat/`.
 - `CHAT_REQUEST_CANCEL` — client cancels an in-flight request
 - `TOOL_RESULT` / `TOOL_APPROVAL` — client-side tool execution results
 - `MESSAGE_UPDATED` — server notifies a specific message was updated
-- `STREAM_RESUME_REQUEST` / `STREAM_RESUME_ACK` / `STREAM_RESUME_NONE` — reconnection handshake
+- `STREAM_RESUMING` / `STREAM_RESUME_ACK` / `STREAM_RESUME_NONE` / `STREAM_RESUME_REQUEST` — reconnection handshake messages (server signals resuming, client acknowledges with stream ID, server signals nothing to resume, client requests resume)
 
 [`parseProtocolMessage()` in `parse-protocol.ts`](../packages/agents/src/chat/parse-protocol.ts#L67-L133) — parses the raw JSON from a WebSocket message into a typed discriminated union (`ChatProtocolEvent`). Every incoming message flows through this before any business logic runs.
 
@@ -30,9 +30,9 @@ All code lives in `packages/agents/src/chat/`.
 
 [`MessageConcurrency`](../packages/agents/src/chat/lifecycle.ts#L143-L148) — the strategy for handling overlapping submits: `"queue"` (serialise), `"latest"` (drop older in-flight), `"merge"` (coalesce), `"drop"` (ignore new while busy), or `{strategy: "debounce", debounceMs?}`.
 
-[`ChatRecoveryContext`](../packages/agents/src/chat/lifecycle.ts#L88-L111) — the context object passed to the `onChatRecovery` lifecycle hook when an interrupted stream is detected after a Durable Object restart. Contains the partial text and parts reconstructed from stored chunks, the stream and request IDs, current persisted messages, and the timestamp the fiber started (useful for suppressing stale replays).
+[`ChatRecoveryContext`](../packages/agents/src/chat/lifecycle.ts#L88-L111) — the context object passed to the `onChatRecovery` lifecycle hook when an interrupted stream is detected after a Durable Object restart. Contains the partial text and parts reconstructed from stored chunks, the stream and request IDs, `recoveryData` (arbitrary checkpoint written by `this.stash()` during the interrupted turn), current persisted messages, the last request body and client tool schemas, and the timestamp the fiber started (useful for suppressing stale replays).
 
-[`SaveMessagesOptions` and `SaveMessagesResult`](../packages/agents/src/chat/lifecycle.ts#L40-L82) — the API for the `saveMessages()` hook (implemented by `AIChatAgent` subclasses). The `signal` field is an external `AbortSignal` you can wire to your own cancellation logic.
+[`SaveMessagesOptions` and `SaveMessagesResult`](../packages/agents/src/chat/lifecycle.ts#L40-L82) — types for the programmatic `saveMessages()` and `continueLastTurn()` entry points. `SaveMessagesOptions.signal` is an optional external `AbortSignal` that cancels the in-flight turn the same way a `CHAT_REQUEST_CANCEL` WebSocket message would. `SaveMessagesResult` carries the server-generated request ID and a terminal status (`completed`, `error`, `skipped`, or `aborted`).
 
 ---
 
@@ -40,7 +40,7 @@ All code lives in `packages/agents/src/chat/`.
 
 The AI SDK delivers a stream of *chunks* (typed payloads like `text-start`, `tool-input-delta`, `tool-output-available`, etc.). The chat layer reassembles these into `UIMessage` objects that the client renders.
 
-[applyChunkToParts() — text, reasoning, and file chunk handling](../packages/agents/src/chat/message-builder.ts#L78-L250) and [applyChunkToParts() — tool input/output chunks and step-start handling](../packages/agents/src/chat/message-builder.ts#L250-L400) — handles every possible chunk type. Returns `true` if the chunk was consumed. Called once per chunk; the caller maintains the accumulating parts array. This is the most detailed file if you want to understand the full streaming message format.
+[applyChunkToParts() — text, reasoning, file, and source chunk handling](../packages/agents/src/chat/message-builder.ts#L78-L250) and [applyChunkToParts() — tool input/output chunks, step-start, and data-* part handling](../packages/agents/src/chat/message-builder.ts#L250-L400) — handles every possible chunk type. Returns `true` if the chunk was consumed. Called once per chunk; the caller maintains the accumulating parts array. The second half also covers `data-*` developer-defined typed JSON blobs (with transient/ephemeral and in-place reconciliation logic). This is the most detailed file if you want to understand the full streaming message format.
 
 [`StreamAccumulator` class in `stream-accumulator.ts`](../packages/agents/src/chat/stream-accumulator.ts#L59-L232) — a stateful wrapper around `applyChunkToParts()`. Call `applyChunk()` per chunk; call `toMessage()` to get a snapshot. Also emits `ChunkAction` signals (e.g. `tool-approval-request`, `message-metadata`) so the layer above can react to notable events without parsing every chunk itself.
 
@@ -56,7 +56,7 @@ The AI SDK delivers a stream of *chunks* (typed payloads like `text-start`, `too
 
 [`truncateToolOutput()` in `tool-output-truncation.ts`](../packages/agents/src/chat/tool-output-truncation.ts#L11-L221) — recursively truncates deeply-nested objects and long strings to a caller-supplied `maxChars` budget. Depth limit is 8 levels (`DEFAULT_MAX_DEPTH`); arrays and objects distribute the budget across children and pop excess elements when still over budget; strings are sliced with a `... [truncated N chars]` suffix. Adds a `__truncated` sentinel flag so the LLM knows data was dropped.
 
-[`reconcileMessages()` in `message-reconciler.ts`](../packages/agents/src/chat/message-reconciler.ts#L26-L210) — a three-pass algorithm that merges the client's view of the message list with the server's authoritative state. Pass 1: merge server-known tool outputs into stale client parts. Pass 2: reconcile IDs (exact match → content-key hash → toolCallId). Pass 3: deduplicate by toolCallId. The `assistantContentKey()` helper hashes the content for identity checks.
+[`reconcileMessages()` in `message-reconciler.ts`](../packages/agents/src/chat/message-reconciler.ts#L26-L210) — a two-pass algorithm that merges the client's view of the message list with the server's authoritative state. Pass 1 (`mergeServerToolOutputs`): promote stale client tool parts (in `input-available`, `approval-requested`, or `approval-responded` state) to `output-available` using server-known outputs. Pass 2 (`reconcileAssistantIds`): re-map message IDs via exact match first, then content-key hash for tool-call-free messages. Also exports `resolveToolMergeId()` (single-message variant) and `assistantContentKey()` (hashes sanitized parts for identity checks).
 
 ---
 
@@ -64,9 +64,9 @@ The AI SDK delivers a stream of *chunks* (typed payloads like `text-start`, `too
 
 When a client disconnects mid-stream, it should be able to reconnect and receive the chunks it missed.
 
-[ResumableStream — SQLite schema, start(), storeChunk(), and flush logic](../packages/agents/src/chat/resumable-stream.ts#L79-L300) and [ResumableStream — replay(), replayChunks(), and reconnection handoff](../packages/agents/src/chat/resumable-stream.ts#L300-L450) and [ResumableStream — restore(), clearAll(), destroy(), and lazy cleanup](../packages/agents/src/chat/resumable-stream.ts#L450-L591) — buffers stream chunks to a SQLite table (`cf_ai_chat_stream_chunks`) keyed by `stream_id`. When a client reconnects with `Last-Event-ID`, `replay()` re-sends the stored chunks, then hands off to the live stream.
+[ResumableStream — SQLite schema, start(), storeChunk(), and flush logic](../packages/agents/src/chat/resumable-stream.ts#L79-L300) and [ResumableStream — replayChunks(), replayCompletedChunksByRequestId(), and reconnection handoff](../packages/agents/src/chat/resumable-stream.ts#L300-L450) and [ResumableStream — restore(), clearAll(), destroy(), and lazy cleanup](../packages/agents/src/chat/resumable-stream.ts#L450-L591) — buffers stream chunks to a SQLite table (`cf_ai_chat_stream_chunks`) keyed by `stream_id`. When a client reconnects, `replayChunks()` re-sends stored chunks and either hands off to the live stream (with a `replayComplete` signal) or finalises an orphaned stream from before a DO hibernation.
 
-[`start()`, `storeChunk()`, `complete()`](../packages/agents/src/chat/resumable-stream.ts#L156-L250) — the lifecycle. Chunks are batched in memory up to `CHUNK_BUFFER_SIZE = 10` then flushed to SQLite. Old streams are pruned after 24 hours (`CLEANUP_AGE_THRESHOLD_MS`).
+[`start()`, `storeChunk()`, `complete()`](../packages/agents/src/chat/resumable-stream.ts#L156-L250) — the stream lifecycle. `start()` writes a `streaming` metadata row and returns a stream ID. `storeChunk()` buffers chunks in memory and flushes to SQLite when the buffer hits `CHUNK_BUFFER_SIZE = 10` (hard cap `CHUNK_BUFFER_MAX_SIZE = 100`). Oversized individual chunks (above 1.8 MB) are skipped to prevent SQLite row-limit crashes. `complete()` flushes remaining chunks and marks the metadata row `completed`. Old streams are pruned after 24 hours (`CLEANUP_AGE_THRESHOLD_MS`).
 
 ---
 
@@ -128,7 +128,7 @@ When a tool call returns, the agent often needs to re-run the model with the too
 
 ## Recovery (`recovery.ts`)
 
-[`createChatFiberSnapshot()` and `unwrapChatFiberSnapshot()`](../packages/agents/src/chat/recovery.ts#L17-L96) — serialize the in-progress state of a chat turn (which request was running, what the last persisted message was) so that if the Durable Object hibernates mid-stream, the turn can be resumed on wakeup.
+[`createChatFiberSnapshot()`, `wrapChatFiberSnapshot()`, and `unwrapChatFiberSnapshot()`](../packages/agents/src/chat/recovery.ts#L17-L96) — serialize and deserialize the in-progress state of a chat turn (request ID, continuation flag, last message IDs, start timestamp, last request body and client tools) so that if the Durable Object hibernates mid-stream, the turn can be detected and resumed on wakeup. `wrapChatFiberSnapshot()` embeds the snapshot in a keyed envelope alongside user data; `unwrapChatFiberSnapshot()` extracts and validates it.
 
 ---
 
