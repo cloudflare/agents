@@ -112,28 +112,25 @@ The React hook uses an explicit `ChatTransport` object rather than HTTP, which a
 
 [Core architecture and documentation header](../packages/think/src/think.ts#L1-L200) — the opening comment explains Think's design philosophy, capabilities (tree-structured messages, multi-session SQLite, context blocks, fiber recovery), and how it relates to `AIChatAgent`.
 
-[`getModel()`, `getSystemPrompt()`, `getTools()` — configuration overrides](../packages/think/src/think.ts#L1000-L1100) — the three methods most subclasses need to override. `getModel()` returns the AI SDK model to use. `getSystemPrompt()` returns the system prompt string. `getTools()` returns the `ToolSet`.
+[`getModel()`, `getSystemPrompt()`, `getTools()` — configuration overrides](../packages/think/src/think.ts#L1000-L1100) — the three methods most subclasses need to override. `getModel()` returns the AI SDK model to use. `getSystemPrompt()` returns the default system prompt string (used when no context blocks are configured). `getTools()` returns the `ToolSet`. Also contains the private `think_config` table helpers and `_migrateLegacyConfigToThinkTable()`.
 
-[System prompt building and Think capability block](../packages/think/src/think.ts#L1100-L1200) — Think auto-generates a structured system prompt section that tells the LLM about the available context blocks and workspace tools. You can inject this into your own prompt via `getThinkBlock()`.
+[System prompt building and Think capability block](../packages/think/src/think.ts#L1100-L1200) — `_systemPromptForTurn()` appends Think's capability block to the base system prompt unless the prompt already contains it. `_buildThinkCapabilityBlock()` generates a structured paragraph telling the LLM which tool categories are available in this turn (workspace, context-loading, extension, execute). Also `configureSession()`, `getExtensions()`, and the lifecycle hook declarations (`beforeTurn`, `beforeStep`, `beforeToolCall`, `afterToolCall`, `onStepFinish`, `onChunk`, `onChatResponse`, `onChatError`).
 
-[Lifecycle hooks](../packages/think/src/think.ts#L2000-L2100) — Think exposes richer hooks than `AIChatAgent`:
-- `beforeTurn(ctx)` — inspect/mutate the turn context before inference
-- `beforeStep(ctx)` — called before each reasoning step
-- `beforeToolCall(ctx, call)` — intercept a tool call before execution
-- `afterToolCall(ctx, call, result)` — inspect the result after execution
-- `onStepFinish(snapshot)` — per-step analytics
-- `onChunk(snapshot)` — per-chunk callbacks for streaming analytics
-- `onChatResponse(result)` — post-turn hook
+[Lifecycle hooks — `beforeTurn`, `beforeStep`, `beforeToolCall`, `afterToolCall`, `onStepFinish`, `onChunk`](../packages/think/src/think.ts#L1200-L1499) — Think exposes richer hooks than `AIChatAgent`. The hook bodies live in this range:
+- `beforeTurn(ctx)` — inspect/mutate the assembled turn context before `streamText()` is called
+- `beforeStep(ctx)` — called before each AI SDK step via `prepareStep`; can override model, tools, or messages per step
+- `beforeToolCall(ctx)` — intercept a tool call before `execute` runs; return `allow`, `block`, or `substitute`
+- `afterToolCall(ctx)` — observe the outcome after execution; backed by `experimental_onToolCallFinish`
+- `onStepFinish(ctx)` — per-step analytics hook
+- `onChunk(ctx)` — per-token streaming hook (high-frequency)
 
-[Sub-agent RPC entry point — `chat()` method](../packages/think/src/think.ts#L2100-L2200) — when Think is used as a sub-agent (called over RPC by another agent), this method is the entry point. It streams responses via a callback rather than a WebSocket.
+Also contains `_runInferenceLoop()` opening (MCP wait, tool assembly).
 
-[Think — context block initialisation and session-backed SQLite setup](../packages/think/src/think.ts#L400-L699) and [Think — message history schema and FTS5 search index setup](../packages/think/src/think.ts#L700-L800) — persistent key-value memory that the LLM can read and write. Each block has a label and a type (`"string"`, `"json"`, `"markdown"`, etc.). They are stored in SQLite and injected into the system prompt on each turn so the LLM accumulates knowledge across sessions.
+[Think — type definitions, `TurnInput`, `WorkerLoader`, and class field declarations](../packages/think/src/think.ts#L400-L699) — `TurnConfig` type (all fields that `beforeTurn()` can override), `PrepareStepContext`/`StepConfig`, `ToolCallContext`/`ToolCallDecision`/`ToolCallResultContext` types for the hook signatures, and `TurnInput`. Also the Think class field declarations: `session`, `workspace`, `extensionLoader`, `extensionManager`, and the `constructor` body (session init, extension loading, protocol handler setup).
 
-[Session-backed SQLite storage](../packages/think/src/think.ts#L800-L1000) — Think maintains a richer message history than `AIChatAgent`: FTS5 full-text search over messages, non-destructive compaction, and multi-session support (each conversation is a separate session).
+[Think — `messages` getter, live cache helpers, and private per-message storage methods](../packages/think/src/think.ts#L700-L800) — the `messages` getter backed by `_cachedMessages`. `_readMessagesFromStorage()`, `_replaceCachedMessages()`, `_syncMessages()`, `_upsertCachedMessage()`, `_patchCachedMessage()`, `_appendMessageToHistory()`, `_updateMessageInHistory()`, `_upsertMessageInHistory()`, `_clearHistory()`, plus the protected overrides that subclasses may call.
 
-[Programmatic turns — `submitMessages()`](../packages/think/src/think.ts#L3000-L3100) — same as `AIChatAgent`'s `submitMessages()`, but with Think's full lifecycle hooks applied.
-
-[Think recovery — saving in-progress fiber state on hibernation](../packages/think/src/think.ts#L4400-L4699) and [Think recovery — restoring turn on wakeup via ChatRecoveryContext](../packages/think/src/think.ts#L4700-L4999) and [Think — stream finalisation, database bookkeeping, and fiber cleanup (part 1)](../packages/think/src/think.ts#L5000-L5299) and [Think — stream finalisation and fiber cleanup (part 2)](../packages/think/src/think.ts#L5300-L5421) — end-of-stream bookkeeping: updating the database, broadcasting the final message list, cleaning up fibers.
+[Durable submission queue — `submitMessages()`, `submit()`, and submission table management](../packages/think/src/think.ts#L3000-L3100) — Think's `submitMessages()` / `submit()` API persists a turn request to the `cf_think_submissions` SQLite table so it survives Durable Object hibernation. `_startSubmissionDrain()` processes pending rows one at a time via `_runSubmission()`, which calls `_runProgrammaticMessagesTurn()` and updates the row to `completed`/`error`/`aborted`. Unlike `AIChatAgent`'s in-memory `saveMessages()`, submissions are durable across restarts.
 
 ### Extensions (`src/extensions/`)
 
