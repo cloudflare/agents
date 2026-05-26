@@ -1,5 +1,11 @@
 # @cloudflare/codemode
 
+## 0.3.8
+
+### Patch Changes
+
+- [#1555](https://github.com/cloudflare/agents/pull/1555) [`2d45abd`](https://github.com/cloudflare/agents/commit/2d45abdcb6bb0bbe71c135a4b12071a118cd776e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Default `openApiMcpServer` to the MCP SDK's Workers-safe JSON schema validator so elicitation response validation does not rely on runtime code generation.
+
 ## 0.3.7
 
 ### Patch Changes

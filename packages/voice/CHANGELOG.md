@@ -1,5 +1,11 @@
 # @cloudflare/voice
 
+## 0.2.1
+
+### Patch Changes
+
+- [#1568](https://github.com/cloudflare/agents/pull/1568) [`c7649ac`](https://github.com/cloudflare/agents/commit/c7649aceb870ba60a8a6dd55933272d043daa944) Thanks [@cjol](https://github.com/cjol)! - Avoid emitting empty assistant transcript entries when a voice turn produces no response text.
+
 ## 0.2.0
 
 ### Minor Changes
