@@ -15,9 +15,9 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 [`StateCapabilities`, `StateStat`, `StateDirent`, `StateSearchOptions`](../packages/shell/src/backend.ts#L1-L100) — the type vocabulary for file operations. `StateSearchOptions` controls text search behaviour: case sensitivity, regex, whole-word matching, lines of context.
 
-### In-memory filesystem internals (`src/memory.ts`)
+### `FileSystemStateBackend` (`src/memory.ts`)
 
-[FileSystemStateBackend — class setup, readFile(), writeFile(), and stat()](../packages/shell/src/memory.ts#L1-L200) and [FileSystemStateBackend — mkdir(), readdir(), rm(), cp(), mv(), and symlink()](../packages/shell/src/memory.ts#L200-L400) and [FileSystemStateBackend — glob(), search(), and directory tree helpers](../packages/shell/src/memory.ts#L400-L541) — the in-memory storage backend that `InMemoryFs` delegates to. Stores the filesystem tree as a nested object in RAM. Implements every filesystem operation (read, write, stat, mkdir, readdir, rm, cp, mv, symlink, glob) without touching real storage. The implementation is the reference for how all these operations should behave.
+[FileSystemStateBackend — class setup, readFile(), writeFile(), stat(), and JSON helpers](../packages/shell/src/memory.ts#L1-L200) and [FileSystemStateBackend — searchText(), searchFiles(), replaceInFile(), rm(), cp(), mv(), and symlink()](../packages/shell/src/memory.ts#L200-L400) and [FileSystemStateBackend — planEdits(), applyEdits(), applyEditPlan(), and private helpers](../packages/shell/src/memory.ts#L400-L541) — the concrete `StateBackend` implementation. Wraps any `FileSystem` (pass `InMemoryFs` for ephemeral state or `WorkspaceFileSystem` for durable storage). Delegates all low-level I/O to the underlying `FileSystem` and adds higher-level operations: JSON read/write/query/update, text search and replace across files, atomic edit plans (`planEdits`/`applyEdits`), and archive operations via helpers in `extras.ts`.
 
 ### Backend type vocabulary (`src/backend.ts`)
 
@@ -25,27 +25,27 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 ### The `Workspace` class (`src/filesystem.ts`)
 
-[`Workspace` class](../packages/shell/src/filesystem.ts#L1-L200) — the main export of this package. Wraps SQLite to provide a persistent filesystem. Auto-detects the backend: `SqlStorage` (Durable Objects), `D1Database`, or a custom `SqlBackend` interface.
+[Module doc, `SqlBackend` interface, `SqlSource` type, and `WorkspaceOptions`](../packages/shell/src/filesystem.ts#L1-L200) — the entry point for the `Workspace` class. Defines `SqlBackend` (the two-method `query`/`run` interface), `SqlSource` (the auto-detect union of `SqlStorage | D1Database | SqlBackend`), `WorkspaceOptions` (SQL backend, namespace, R2 bucket, inline threshold, `onChange` hook), and the public `FileInfo`/`FileStat`/`WorkspaceFsLike` types used throughout the package.
 
-[`SqlBackend` interface](../packages/shell/src/filesystem.ts#L37-L42) — the two-method interface (`query()` and `run()`) that any SQL-like storage must implement to back the workspace.
+[`SqlBackend` interface](../packages/shell/src/filesystem.ts#L37-L43) — the two-method interface (`query()` and `run()`) that any SQL-like storage must implement to back the workspace.
 
 [`DEFAULT_INLINE_THRESHOLD`](../packages/shell/src/filesystem.ts#L184-L200) — files larger than 1.5 MB are spilled to R2 instead of stored inline in SQLite. The database row stores the R2 key; reads are transparent.
 
-[Workspace — constructor, ensureInit(), and database setup](../packages/shell/src/filesystem.ts#L200-L450) and [Workspace — readFile(), readFileBytes(), and read-path caching](../packages/shell/src/filesystem.ts#L450-L700) and [Workspace — writeFile(), writeFileBytes(), and R2 spill decision](../packages/shell/src/filesystem.ts#L700-L800) — the core file operations. All synchronous-flavoured (SQLite is sync in Workers). `glob()` uses the pattern-to-regex converter in `helpers.ts`.
+[Workspace — constructor, ensureInit(), R2 helpers, symlink resolution, and symlink API](../packages/shell/src/filesystem.ts#L200-L450) and [Workspace — stat(), lstat(), readFile(), and readFileBytes()](../packages/shell/src/filesystem.ts#L450-L700) and [Workspace — writeFileBytes(), writeFile(), and readFileStream()](../packages/shell/src/filesystem.ts#L700-L900) — the core file operations. The constructor validates namespace, registers the config in a `WeakMap` (prevents conflicting R2/threshold settings on the same SQL source), and lazily creates the SQLite table via `ensureInit()`. `readFile()`/`readFileBytes()` check whether a row's `storage_backend` is `'r2'` and fetch from R2 if so; `writeFileBytes()` spills to R2 when the file exceeds `DEFAULT_INLINE_THRESHOLD` (1.5 MB).
 
-[`planEdits()` method](../packages/shell/src/filesystem.ts#L800-L1000) — computes the operations needed to transform the workspace toward a desired state without applying them. Used by the `execute` tool to show a preview before committing changes.
+[Workspace — deleteFile(), fileExists(), exists(), and readDir()](../packages/shell/src/filesystem.ts#L900-L1100) — secondary read/write helpers. `deleteFile()` cleans up R2 objects before removing the SQLite row. `readDir()` queries children by `parent_path` with optional `limit`/`offset` pagination. `glob()` uses a SQL `LIKE` prefix narrowing followed by a `RegExp` filter built by the local `globToRegex()`.
 
-[`search()` method](../packages/shell/src/filesystem.ts#L1000-L1200) — full-text search across all files. Delegates to `searchTextContent()` in `helpers.ts`.
+[Workspace — mkdir(), rm(), and cp()](../packages/shell/src/filesystem.ts#L1100-L1270) — directory and deletion primitives. `mkdir()` creates parent directories recursively (guarded against infinite loops by `MAX_MKDIR_DEPTH`). `rm()` deletes R2 objects for any file stored externally before removing the SQL row; recursive removal calls `deleteDescendants()` which batches the R2 deletes. `cp()` handles symlinks (re-creates the link rather than copying the target), directories (recursive), and files (streams bytes through `readFileBytes`/`writeFileBytes`).
 
-[Workspace — rm(), cp(), and mv() with symlink resolution](../packages/shell/src/filesystem.ts#L1200-L1450) and [Workspace — diff(), path normalisation, and glob walking](../packages/shell/src/filesystem.ts#L1450-L1600) — when a file exceeds `DEFAULT_INLINE_THRESHOLD` (1.5 MB), the content is stored in R2 and only the key is kept in SQLite. Reads are transparent: `readFile()` checks whether the row has an R2 key and fetches from R2 if needed. Writes similarly decide whether to inline or spill.
+[Workspace — mv()](../packages/shell/src/filesystem.ts#L1264-L1370) and [Workspace — diff(), diffContent(), getWorkspaceInfo(), and internal helpers](../packages/shell/src/filesystem.ts#L1370-L1541) — `mv()` has a fast path for R2-backed files: it copies the R2 object to a new key, deletes the old key, then updates the SQL row in one statement (avoids a full data round-trip). `diff()` and `diffContent()` produce unified diffs between two files or between a file and a proposed new content string. `getWorkspaceInfo()` returns aggregate counts and total byte usage via a single SQL aggregate query. `deleteDescendants()` uses a `LIKE '%'` pattern to bulk-delete all descendants of a directory, including their R2 objects.
 
-[Transaction support and atomic operations](../packages/shell/src/filesystem.ts#L1600-L1843) — `Workspace` exposes a `transaction(fn)` method that wraps multiple SQL operations in a single transaction. Also covers `copy()`, `move()`, and `rename()` with their edge cases (cross-directory moves, overwrite handling, symlink resolution).
+[Base64 helpers, path utilities, `globToRegex()`, `unifiedDiff()`, and `myersDiff()`](../packages/shell/src/filesystem.ts#L1541-L1843) — private module-level helpers used throughout the class. `bytesToBase64`/`base64ToBytes` serialize binary file content for inline SQLite storage. `normalizePath()` resolves `.` and `..` segments and enforces `MAX_PATH_LENGTH`. `globToRegex()` converts glob patterns to `RegExp` for post-filter after the SQL `LIKE` prefix scan. `unifiedDiff()` and `myersDiff()` implement the Myers O(n+m) diff algorithm used by `diff()` and `diffContent()`.
 
 ### Filesystem abstraction (`src/fs/`)
 
-[`FileSystem` interface in `src/fs/interface.ts`](../packages/shell/src/filesystem.ts#L1-L50) — the common interface shared by `Workspace` (SQLite-backed) and `InMemoryFs` (test/ephemeral). Methods: `readFile`, `writeFile`, `stat`, `lstat`, `mkdir`, `readdir`, `rm`, `cp`, `mv`, `symlink`, `glob`.
+[`FileSystem` interface in `src/fs/interface.ts`](../packages/shell/src/fs/interface.ts#L1-L75) — the common interface shared by `WorkspaceFileSystem` (SQLite-backed adapter) and `InMemoryFs` (test/ephemeral). Methods: `readFile`, `writeFile`, `stat`, `lstat`, `mkdir`, `readdir`, `readdirWithFileTypes`, `rm`, `cp`, `mv`, `symlink`, `readlink`, `realpath`, `glob`. Callers throw `ENOENT` errors (never return null) — the key semantic difference from `Workspace`'s nullable returns.
 
-[`InMemoryFs` class](../packages/shell/src/memory.ts#L1-L100) — a pure in-memory implementation. Used in tests and for temporary scratch workspaces that don't need persistence.
+[`InMemoryFs` class](../packages/shell/src/fs/in-memory-fs.ts#L1-L100) — a pure in-memory implementation backed by a rooted tree of `Map`s (not a flat hash). Used in tests and for temporary scratch workspaces that don't need persistence.
 
 ### Helpers (`src/helpers.ts`)
 
@@ -63,9 +63,9 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 ### Git integration (`src/git/`)
 
-[`createGit(filesystem, defaultDir)` factory](../packages/shell/src/filesystem.ts#L1843-L1843) — binds the `isomorphic-git` library to a `FileSystem` instance. Returns an object with `clone`, `status`, `add`, `commit`, `push`, `pull`, `log`, `diff`, and friends.
+[`createGit(filesystem, defaultDir)` factory](../packages/shell/src/git/index.ts#L52-L200) — binds the `isomorphic-git` library to a `FileSystem` instance. Returns an object with `clone`, `status`, `add`, `rm`, `commit`, `log`, `branch`, `checkout`, and `fetch` operations.
 
-[`createGitFs(filesystem)` adapter](../packages/shell/src/filesystem.ts#L1-L50) — adapts the custom `FileSystem` interface to the shape that `isomorphic-git` expects. The bridge between the two worlds.
+[`createGitFs(filesystem)` adapter](../packages/shell/src/git/fs-adapter.ts#L1-L183) — adapts the custom `FileSystem` interface to the callback-style `fs` object that `isomorphic-git` expects. The bridge between the two worlds.
 
 ---
 
@@ -167,7 +167,7 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 ### The `Workspace` FileSystem adapter (`src/workspace.ts`)
 
-[`WorkspaceFileSystem` class](../packages/shell/src/workspace.ts#L1-L216) — adapts a `WorkspaceFsLike` (the core `Workspace` class or any object that satisfies its interface) to the `FileSystem` interface used by `isomorphic-git`. The main difference: `Workspace` returns `null` on missing files while `FileSystem` expects `ENOENT` errors. This adapter handles the conversion.
+[`WorkspaceFileSystem` class and `createWorkspaceStateBackend()` factory](../packages/shell/src/workspace.ts#L1-L216) — `WorkspaceFileSystem` adapts a `WorkspaceFsLike` (the concrete `Workspace` or a cross-DO proxy) to the `FileSystem` interface. The key conversion: `Workspace` returns `null` on missing files while `FileSystem` contracts require `ENOENT` errors. `createWorkspaceStateBackend(workspace)` is a convenience factory that composes `WorkspaceFileSystem` with `FileSystemStateBackend` to produce a `StateBackend` suitable for codemode's `state.*` sandbox API.
 
 ### Extras — advanced file operations (`src/extras.ts`)
 

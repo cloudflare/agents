@@ -8,7 +8,7 @@ All MCP code lives in `packages/agents/src/mcp/`.
 
 ## Types and shared constants
 
-[`TransportType`, `ServeOptions`, `CORSOptions`](../packages/agents/src/mcp/types.ts#L1-L25) — the three transport types (`"sse"`, `"streamable-http"`, `"rpc"`) and the config for serving a handler over HTTP.
+[`TransportType`, `ServeOptions`, `CORSOptions`](../packages/agents/src/mcp/types.ts#L1-L25) — the four transport types (`"sse"`, `"streamable-http"`, `"rpc"`, `"auto"`), the config for serving a handler over HTTP (`ServeOptions`), and CORS configuration (`CORSOptions`). Also exports `McpClientOptions` and `MaybePromise`.
 
 [`isUnauthorized()` and `isTransportNotImplemented()`](../packages/agents/src/mcp/errors.ts#L1-L39) — error classifiers used during transport negotiation. When a client tries streamable-HTTP and gets a 404/405, these tell the retry logic to fall back to SSE.
 
@@ -20,7 +20,7 @@ All MCP code lives in `packages/agents/src/mcp/`.
 
 `McpAgent` is the abstract base class for agents that *are* an MCP server. Extend it and implement `init()` to register your tools, resources, and prompts with an `McpServer` instance from the `@modelcontextprotocol/sdk` package.
 
-[McpAgent class — transport type parsing, session ID extraction, and onStart() wiring](../packages/agents/src/mcp/index.ts#L30-L200) and [McpAgent — request handling and elicitInput() implementation](../packages/agents/src/mcp/index.ts#L200-L499) and [McpAgent — _handleElicitationResponse() and session cleanup](../packages/agents/src/mcp/index.ts#L500-L553) — the full class. Key things to note:
+[McpAgent class — fields, helpers, transport initialisation, and onStart() wiring](../packages/agents/src/mcp/index.ts#L30-L200) and [McpAgent — onConnect() request routing, onSSEMcpMessage(), and elicitInput() implementation](../packages/agents/src/mcp/index.ts#L200-L499) and [McpAgent — _handleElicitationResponse(), handleMcpMessage(), and the static serve()/serveSSE()/mount() factory methods plus module re-exports](../packages/agents/src/mcp/index.ts#L500-L553) — the full class. Key things to note:
 
 [`getTransportType()` and `getSessionId()`](../packages/agents/src/mcp/index.ts#L71-L99) — the agent's Durable Object name encodes the transport and session ID, e.g. `sse:abc123`. These helpers parse that name. The transport type determines which transport class is wired up in `onStart()`.
 
@@ -62,9 +62,9 @@ Four transport classes sit between the `McpServer` and the network. They share t
 
 [`createMcpHandler()` in `handler.ts`](../packages/agents/src/mcp/handler.ts#L28-L121) — if you want to expose an MCP server from a plain Worker (not a Durable Object), use this. It creates a `WorkerTransport`, wires up CORS, and handles auth context injection. Returns an `async (request, env, ctx) => Response` function.
 
-[createStreamingHttpHandler() — header validation, session ID handling, and GET path](../packages/agents/src/mcp/utils.ts#L31-L200) and [createStreamingHttpHandler() — POST path, WebSocket bridging, and 202 Accepted](../packages/agents/src/mcp/utils.ts#L200-L499) — lower-level: creates the HTTP router that translates between web-standard `Request`/`Response` and the MCP SDK's Transport interface. `createMcpHandler()` delegates to this.
+[createStreamingHttpHandler() — Accept/Content-Type validation, session ID handling, and POST path (body parsing, DO websocket bridging, SSE response)](../packages/agents/src/mcp/utils.ts#L31-L200) and [createStreamingHttpHandler() — POST path continuation (WebSocket event relay, 202 Accepted), GET path (standalone SSE stream), and DELETE path (session teardown)](../packages/agents/src/mcp/utils.ts#L200-L499) — lower-level: creates the HTTP router that translates between web-standard `Request`/`Response` and the MCP SDK's Transport interface. `createMcpHandler()` delegates to this.
 
-[createAutoHandler() and createLegacySseHandler() — unified and legacy HTTP routing](../packages/agents/src/mcp/utils.ts#L501-L740) and [corsHeaders(), handleCORS(), and isDurableObjectNamespace() utilities](../packages/agents/src/mcp/utils.ts#L740-L829) — applies `Access-Control-*` headers from a `CORSOptions` config.
+[createLegacySseHandler() and createAutoHandler() — legacy SSE and auto-negotiating HTTP routing](../packages/agents/src/mcp/utils.ts#L501-L740) — `createLegacySseHandler()` handles the classic two-endpoint SSE pattern (GET for stream, POST to `/message`); `createAutoHandler()` wraps both handlers and dispatches based on request shape. [`corsHeaders()`, `handleCORS()`, and `isDurableObjectNamespace()`](../packages/agents/src/mcp/utils.ts#L740-L829) — CORS header builder, OPTIONS preflight responder, and a runtime type-guard that checks whether a binding is a `DurableObjectNamespace`.
 
 ---
 
@@ -72,17 +72,17 @@ Four transport classes sit between the `McpServer` and the network. They share t
 
 Your agent connects to external MCP servers through `MCPClientManager`. An instance lives at `this.mcp` on every `Agent` that has used `addMcpServer()`.
 
-[MCPClientManager — constructor, registerServer(), and connection initiation](../packages/agents/src/mcp/client.ts#L266-L520) and [MCPClientManager — restoreConnectionsFromStorage() and getAITools()](../packages/agents/src/mcp/client.ts#L520-L620) — manages a registry of named server connections backed by SQLite. Connections survive agent hibernation.
+[MCPClientManager — constructor, SQL helpers, storage operations, connection filtering, and OAuth/auth-provider helpers](../packages/agents/src/mcp/client.ts#L266-L520) and [MCPClientManager — restoreConnectionsFromStorage(), _trackConnection(), and waitForConnections()](../packages/agents/src/mcp/client.ts#L520-L620) — manages a registry of named server connections backed by SQLite. Connections survive agent hibernation.
 
 [`isBlockedUrl()` — SSRF protection](../packages/agents/src/mcp/client.ts#L133-L161) — blocks connections to private IPv4/IPv6 ranges, link-local addresses, loopback, and cloud metadata endpoints. Always called before opening a transport connection to a user-supplied URL.
 
 [`MCPServerOptions` and `MCPConnectionResult`](../packages/agents/src/mcp/client.ts#L167-L216) — the options you pass when registering a server (transport type, headers, auth provider) and the discriminated union returned when a connection attempt completes.
 
-[`registerServer()`](../packages/agents/src/mcp/client.ts#L350-L520) — stores server metadata in SQLite and opens the connection. Also initiates OAuth if `auth` is configured.
+[`registerServer()`](../packages/agents/src/mcp/client.ts#L893-L932) — stores server metadata in SQLite and creates the in-memory connection object. Fires `onServerStateChanged` but does not connect; call `connectToServer()` afterwards.
 
-[`restoreConnectionsFromStorage()`](../packages/agents/src/mcp/client.ts#L521-L617) — called during `onStart()` to reconnect to all previously registered servers. This is what makes MCP connections survive hibernation.
+[`restoreConnectionsFromStorage()`](../packages/agents/src/mcp/client.ts#L521-L618) — called during `onStart()` to reconnect to all previously registered servers. This is what makes MCP connections survive hibernation.
 
-[`getAITools()`](../packages/agents/src/mcp/client.ts#L618-L700) — aggregates tools from all `READY` servers into a single AI SDK `ToolSet`. Pass this to your `generateText()` / `streamText()` calls.
+[`getAITools()`](../packages/agents/src/mcp/client.ts#L1319-L1381) — aggregates tools from all `READY` servers into a single AI SDK `ToolSet`. Wraps each tool's `execute` in a `callTool()` call and converts JSON Schema to Zod. Pass this to your `generateText()` / `streamText()` calls.
 
 ---
 

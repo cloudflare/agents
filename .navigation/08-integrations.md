@@ -8,13 +8,13 @@ This section covers the glue code that connects agents to the wider world: the H
 
 These are the functions you put in your Worker's `fetch` handler.
 
-[`routeAgentRequest<Env>(request, env, ctx, options?)`](../packages/agents/src/index.ts#L9836-L9937) — routes an incoming HTTP or WebSocket request to the correct Durable Object (agent) by parsing the URL. The URL shape is `/<agent-class-name>/<agent-name>`. If the agent class name is in `env` as a Durable Object namespace binding, the request is forwarded.
+[`routeAgentRequest<Env>(request, env, options?)`](../packages/agents/src/index.ts#L9836-L9846) — routes an incoming HTTP or WebSocket request to the correct Durable Object (agent) by parsing the URL. The URL shape is `/<agent-class-name>/<agent-name>`. If the agent class name is in `env` as a Durable Object namespace binding, the request is forwarded.
 
 [`AgentNamespace<T>` type](../packages/agents/src/index.ts#L9808-L9820) — the type of `env.MY_AGENT` — a Durable Object namespace with extra routing helpers. You declare `MY_AGENT: AgentNamespace<MyAgent>` in your `Env` interface.
 
 [`getAgentByName<T>(namespace, name, options?)`](../packages/agents/src/index.ts#L10019-L10033) — get a stub for a specific agent instance by name, without going through the HTTP routing layer. Useful for server-to-server communication.
 
-[`EmailBridge` class](../packages/agents/src/index.ts#L9870-L9937) — internal: wraps the agent's Durable Object stub to receive email callbacks. You don't instantiate this directly; `routeAgentEmail()` uses it.
+[`EmailBridge` class and `agentMapCache`](../packages/agents/src/index.ts#L9870-L9937) — internal: `EmailBridge` (L9870-L9922) extends `RpcTarget` to wrap a `ForwardableEmailMessage`, exposing `getRaw()`, `setReject()`, `forward()`, and `reply()` as RPC methods. Using `RpcTarget` lets the runtime tear down the bidirectional session cleanly once email handling completes. `agentMapCache` (L9924-L9929) is a `WeakMap` that caches a normalised name→namespace map per `env` object to avoid rebuilding it on every email. You don't use either directly; `routeAgentEmail()` uses them internally.
 
 ---
 
@@ -22,11 +22,11 @@ These are the functions you put in your Worker's `fetch` handler.
 
 Sub-agents (also called facets) are Durable Object *facets* — isolated compute units that share the parent agent's storage namespace but run their own code.
 
-[`routeSubAgentRequest<Env>(request, env, ctx, options?)`](../packages/agents/src/sub-routing.ts#L1-L100) — same as `routeAgentRequest()` but for sub-agents. The path includes the parent agent's name as a prefix, e.g. `/parent-agent/my-name/sub-agent-type/sub-agent-name`.
+[`SubAgentPathMatch` type and `parseSubAgentPath(url, options?)`](../packages/agents/src/sub-routing.ts#L1-L123) — `SUB_PREFIX` constant (`"sub"`), the `SubAgentPathMatch` interface (`childClass`, `childName`, `remainingPath`), and `parseSubAgentPath()` which extracts the first `/sub/{class}/{name}` segment from a URL, converting kebab-case class names back to CamelCase against a known-classes list. Returns `null` if no matching segment is found. Internal `resolveClassName` helper is also in this range.
 
-[`getSubAgentByName<T>(namespace, parentName, subAgentName, options?)`](../packages/agents/src/sub-routing.ts#L100-L200) — get a stub for a sub-agent instance.
+[`routeSubAgentRequest(req, parent, options?)`](../packages/agents/src/sub-routing.ts#L125-L241) — the sub-agent HTTP/WebSocket routing entry point. Calls `parseSubAgentPath()` then forwards the request to the parent DO's `fetch()` handler (which runs `onBeforeSubAgent` in the parent isolate). Accepts an optional `fromPath` to reroute without rewriting the full URL. Internal `rewritePathname` helper is also in this range.
 
-[`parseSubAgentPath(pathname)` and `SubAgentPathMatch` type](../packages/agents/src/sub-routing.ts#L200-L335) — parse a URL path into its components (parent agent class, parent agent name, sub-agent class, sub-agent name). Returns `null` if the path doesn't match the expected shape.
+[`getSubAgentByName<T>(parent, cls, name)`](../packages/agents/src/sub-routing.ts#L243-L335) — returns a typed RPC-only `Proxy` stub for a sub-agent. Each method call proxies through the parent DO via `_cf_invokeSubAgent(className, name, method, args)`. Does not support `.fetch()` (use `routeSubAgentRequest` for HTTP/WS). Does not run `onBeforeSubAgent`.
 
 ---
 
@@ -36,7 +36,7 @@ Agents can receive inbound emails via Cloudflare Email Workers.
 
 [`routeAgentEmail<Env>(message, env, ctx, options?)`](../packages/agents/src/index.ts#L9938-L10018) — the top-level email handler. Parses the inbound `EmailMessage`, determines which agent should handle it (using the configured resolver), and calls `onEmail()` on that agent instance.
 
-[`createHeaderBasedEmailResolver<Env>()`](../packages/agents/src/email.ts#L271-L312) — the simplest resolver: looks at the `X-Agent-Name` header on the inbound email to determine which agent to route to. Works well when you control the sender.
+[`createHeaderBasedEmailResolver<Env>()` — REMOVED](../packages/agents/src/email.ts#L271-L312) — this function has been removed due to a security vulnerability (it trusted attacker-controlled email headers, enabling IDOR attacks). The stub always throws with migration guidance. Use `createAddressBasedEmailResolver` for inbound mail or `createSecureReplyEmailResolver` for reply flows instead.
 
 [`createSecureReplyEmailResolver<Env>(options)`](../packages/agents/src/email.ts#L313-L357) — for reply threads: extracts a signed agent identifier from the reply-to address. Uses HMAC-SHA256 to verify the signature so you know replies haven't been spoofed.
 
@@ -44,7 +44,7 @@ Agents can receive inbound emails via Cloudflare Email Workers.
 
 [`createCatchAllEmailResolver<Env>()`](../packages/agents/src/email.ts#L394-L399) — routes all emails to a single named agent.
 
-[`signAgentHeaders(agentName, secret)` and `isAutoReplyEmail()`](../packages/agents/src/email.ts#L38-L103) — utilities for the secure reply resolver: generate signed headers to include in outgoing email, and detect auto-reply emails that should be ignored.
+[`isAutoReplyEmail(headers)` and internal HMAC helpers](../packages/agents/src/email.ts#L38-L103) — `isAutoReplyEmail()` (L38-L61) checks `Auto-Submitted`, `X-Auto-Response-Suppress`, and `Precedence` headers to detect automated emails that should be skipped. `computeAgentSignature()` (L81-L98) is the internal HMAC-SHA256 primitive used by both `signAgentHeaders` and `verifyAgentSignature`. `SignatureVerificationResult` discriminated union starts at L103.
 
 [Signature verification internals](../packages/agents/src/email.ts#L103-L400) — the complete HMAC-SHA256 signature scheme for secure replies: the signing format, clock-skew tolerance (`MAX_CLOCK_SKEW_SECONDS = 5 minutes`), nonce tracking to prevent replay attacks, and the `SignatureVerificationResult` discriminated union returned by the verifier.
 

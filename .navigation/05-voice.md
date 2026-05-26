@@ -17,15 +17,22 @@ class MyVoiceAgent extends withVoice(Agent)<Env> {
 ```
 
 [`VoiceAgentMixinMembers` interface](../packages/voice/src/voice.ts#L133-L162) — the public API surface added by the mixin. Key members:
-- `onTurn(connection, transcription)` — override this to handle a complete voice utterance. Receives the transcribed text; respond by calling `this.speak(text)`.
-- `speak(text)` — send text to the TTS engine; the audio is streamed back to the client.
-- `onTurnStart()` / `onTurnEnd()` — lifecycle hooks for each voice interaction.
-- `transcriber` — the STT provider (set in `onStart()`).
-- `tts` — the TTS provider (set in `onStart()`).
+- `onTurn(transcript, context)` — override this to handle a complete voice utterance. Returns a `TextSource` (string, stream, or async iterable); the pipeline synthesises it to audio.
+- `speak(connection, text)` — synthesise text to audio and send it to a specific connection.
+- `speakAll(text)` — synthesise and broadcast audio to all active connections.
+- `beforeCallStart()` / `onCallStart()` / `onCallEnd()` — call lifecycle hooks.
+- `afterTranscribe()` / `beforeSynthesize()` / `afterSynthesize()` — per-turn transform hooks.
+- `transcriber` / `tts` — the STT and TTS provider properties.
 
-[Voice mixin — onConnect handler, message routing, and onTurn hook definition](../packages/voice/src/voice.ts#L240-L450) and [Voice mixin — interrupt detection and TTS playback queue management](../packages/voice/src/voice.ts#L450-L600) — internals: per-connection audio buffers, transcriber session lifecycle, interrupt detection (when the user starts speaking while the agent is still speaking), and message history management.
+[Voice mixin — constructor, onConnect/onClose/onMessage wiring, and user-overridable hooks](../packages/voice/src/voice.ts#L240-L450) — the constructor wraps the base class lifecycle methods to intercept voice protocol messages and binary audio frames. User-overridable hooks (`onTurn`, `createTranscriber`, `beforeCallStart`, `onCallStart`, `onCallEnd`, `onInterrupt`, `afterTranscribe`, `beforeSynthesize`, `afterSynthesize`) and conversation persistence (`saveMessage`, `getConversationHistory`) are also defined here.
 
-[Voice mixin — message persistence and getConversationHistory()](../packages/voice/src/voice.ts#L600-L800) and [Voice mixin — speak(), speakAll(), and TTS synchronisation](../packages/voice/src/voice.ts#L800-L1000) and [Voice mixin — call lifecycle (_handleStartCall, _handleEndCall) and pipeline execution](../packages/voice/src/voice.ts#L1000-L1074) — voice conversations are persisted as text messages in the agent's SQL storage, enabling multi-turn context. The mixin maintains a message array that it passes to the LLM on each turn.
+[Voice mixin — speakAll(), synthesize helpers, and call lifecycle (#handleStartCall, #handleEndCall, #handleInterrupt, #handleBargeIn)](../packages/voice/src/voice.ts#L450-L600) — `speakAll()` broadcasts TTS audio to all connections; `#handleStartCall` initialises the transcriber session and sends `audio_config`; `#handleEndCall` and `#handleInterrupt`/`#handleBargeIn` abort in-flight TTS and clean up connection state.
+
+[Voice mixin — #handleTextMessage() and #runPipeline(): the core STT→LLM→TTS execution path](../packages/voice/src/voice.ts#L600-L800) — `#runPipeline` is called for each transcribed utterance: it invokes `afterTranscribe`, saves the user message, calls `onTurn`, then feeds the result to `#streamResponse`. `#handleTextMessage` is the equivalent path for text-only (non-voice) input from the client.
+
+[Voice mixin — #streamResponse() and #streamingTTSPipeline(): sentence-chunked streaming TTS](../packages/voice/src/voice.ts#L800-L1000) — `#streamResponse` handles both plain-string and streaming LLM responses. For streams it delegates to `#streamingTTSPipeline`, which uses `SentenceChunker` to break the token stream into sentences, fans each sentence out to TTS concurrently via an eager queue, and streams audio chunks to the client as they are synthesised.
+
+[Voice mixin — tail of #streamingTTSPipeline(), #sendJSON() helper, and eagerAsyncIterable() utility](../packages/voice/src/voice.ts#L1000-L1074) — the final metrics collection and return from the streaming pipeline; the internal `#sendJSON` helper that serialises voice protocol messages; and `eagerAsyncIterable`, which eagerly buffers an async iterable so TTS synthesis for sentence N+1 starts before the consumer has finished consuming sentence N.
 
 ---
 
@@ -41,17 +48,17 @@ class MyVoiceAgent extends withVoice(Agent)<Env> {
 
 LLM output arrives as a stream of tokens. Feeding every token to TTS would produce robotic speech with unnatural pauses. The sentence chunker buffers tokens and emits complete sentences.
 
-[`SentenceChunker` class](../packages/voice/src/sentence-chunker.ts#L1-L115) — call `add(token)` for each token; it returns complete sentences as strings. Call `flush()` at the end of the stream to get any remaining partial sentence. Splits on `.`, `!`, `?` followed by a space or capital letter, with a minimum sentence length of 10 characters to avoid splitting abbreviations.
+[`SentenceChunker` class](../packages/voice/src/sentence-chunker.ts#L1-L115) — call `add(token)` for each token; it returns complete sentences as strings. Call `flush()` at the end of the stream to get any remaining partial sentence. Splits on `.`, `!`, `?` followed by a space or newline, with a minimum sentence length of 10 characters to avoid splitting abbreviations.
 
 ---
 
 ## Browser client (`src/voice-client.ts`)
 
-[`VoiceClient` class](../packages/voice/src/voice-client.ts#L1-L200) — the browser-side counterpart to the voice mixin. Manages the WebSocket connection, microphone capture, VAD (voice activity detection), and audio playback.
+[`VoiceClient` class — AudioWorklet processor, PCM helpers, and `WebSocketVoiceTransport`](../packages/voice/src/voice-client.ts#L1-L200) — the browser-side counterpart to the voice mixin. The top of the file defines the inline `AudioCaptureProcessor` AudioWorklet source (resamples mic audio from 48 kHz to 16 kHz), PCM/RMS helpers, and the `WebSocketVoiceTransport` class (the default transport backed by PartySocket). The `VoiceClient` class declaration and its constructor begin here.
 
-[`VoiceClientOptions` interface](../packages/voice/src/voice-client.ts#L37-L84) — configuration: silence detection threshold, number of chunks before treating silence as an utterance end, whether to interrupt the agent mid-speech, and a custom transport factory.
+[`VoiceClientOptions` interface](../packages/voice/src/voice-client.ts#L37-L84) — configuration: `agent` name, optional `host`/`name`/`query` for routing, `transport` (custom `VoiceTransport`), `audioInput` (custom mic source), `preferredFormat` for TTS audio, silence detection tuning (`silenceThreshold`, `silenceDurationMs`), interrupt detection tuning (`interruptThreshold`, `interruptChunks`), and `maxTranscriptMessages`.
 
-[`VoiceClientEventMap` interface](../packages/voice/src/voice-client.ts#L87-L97) — the events you listen to: `statuschange` (connection state), `transcriptchange` (final transcript updated), `interimtranscript` (partial result), `metricschange` (latency stats), `error`.
+[`VoiceClientEventMap` interface](../packages/voice/src/voice-client.ts#L87-L97) — the events you listen to: `statuschange` (idle/listening/thinking/speaking), `transcriptchange` (final transcript array updated), `interimtranscript` (partial STT result), `metricschange` (latency stats), `audiolevelchange` (mic RMS), `connectionchange` (WebSocket open/close), `mutechange`, `error`, `custommessage` (non-protocol server messages).
 
 [WebSocket connection and audio capture](../packages/voice/src/voice-client.ts#L200-L450) — the `connect()` method: opens the WebSocket, sends a `hello` message with the protocol version, starts the microphone stream, and sets up the VAD. Audio is chunked into fixed-size frames and sent as binary WebSocket messages. The VAD detects silence gaps to decide when an utterance ends.
 

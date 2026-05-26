@@ -10,18 +10,18 @@ The observability system uses Node.js `diagnostics_channel` — a zero-overhead 
 
 ### Event type definitions
 
-[`BaseEvent<T, Payload>` type in `base.ts`](../packages/agents/src/observability/base.ts#L1-L28) — the envelope wrapping every event. Carries `agentClass` (the class name), `agentName` (the instance name), `payload`, and `timestamp`.
+[`BaseEvent<T, Payload>` type in `base.ts`](../packages/agents/src/observability/base.ts#L1-L28) — the envelope wrapping every event. Carries `agent` (the class name), `name` (the Durable Object instance name), `payload`, and `timestamp`. Both `agent` and `name` are optional so the same type can be used in non-agent contexts.
 
 [`AgentObservabilityEvent` union type in `agent.ts`](../packages/agents/src/observability/agent.ts#L1-L79) — the full set of events emitted by the Agent class. Discriminated by the `type` field:
 
-- `state:update` — state changed, with old and new values
-- `rpc` / `rpc:error` — a `@callable()` method was invoked
+- `state:update` — state changed
+- `rpc` / `rpc:error` — an RPC method was invoked or failed
 - `message:request/response/clear/cancel/error` — WebSocket message lifecycle
 - `tool:result` / `tool:approval` — tool execution outcomes
-- `schedule:created/cancelled/fired/error` — schedule events
-- `queue:enqueued/processed/error` — queue events
-- `submission:started/completed/error` — programmatic `submitMessages()` turns
-- `workflow:started/completed/error` — workflow events
+- `schedule:create/execute/cancel/retry/error/duplicate_warning` — schedule events
+- `queue:create/retry/error` — queue events
+- `submission:create/status/error` — programmatic `submitMessages()` turns
+- `workflow:start/event/approved/rejected/terminated/paused/resumed/restarted` — workflow lifecycle events
 - `email:receive/reply/send` — email events
 - `connect` / `disconnect` / `destroy` — connection lifecycle
 
@@ -29,9 +29,9 @@ The observability system uses Node.js `diagnostics_channel` — a zero-overhead 
 
 ### The observability API
 
-[`Observability` interface and `channels` object in `index.ts`](../packages/agents/src/observability/index.ts#L1-L129) — `channels` is a plain object mapping event category strings to `diagnostics_channel.Channel` instances. `genericObservability` is the default implementation that publishes to these channels.
+[`Observability` interface and `channels` object in `index.ts`](../packages/agents/src/observability/index.ts#L1-L129) — `channels` is a plain object mapping category keys (`state`, `rpc`, `message`, `schedule`, `lifecycle`, `workflow`, `mcp`, `email`) to `diagnostics_channel.Channel` instances. `genericObservability` is the default implementation that routes each event to the correct channel via `getChannel()`. Also defines `ObservabilityEvent` (union of all event types) and `ChannelEventMap` (maps each channel key to its specific event type for type-safe subscriptions).
 
-[`subscribe<K>(channelName, listener)` function](../packages/agents/src/observability/index.ts#L70-L129) — type-safe subscription. The generic parameter `K` constrains the listener type so TypeScript knows which event type the channel emits. Returns a dispose function to unsubscribe.
+[`subscribe<K>(channelKey, callback)` function](../packages/agents/src/observability/index.ts#L70-L129) — type-safe subscription. The generic parameter `K` is a key of `ChannelEventMap`, which constrains the callback so TypeScript knows which event type the channel carries (e.g. subscribing to `"rpc"` gives a typed `rpc | rpc:error` event). Internally prefixes the key with `"agents:"` to form the full channel name. Returns a dispose function to unsubscribe.
 
 Example usage:
 ```typescript
@@ -57,25 +57,26 @@ const dispose = subscribe("agent", (event) => {
 
 ### Session class (`session/session.ts`)
 
-[Session class — constructor, create() builder, and builder chain methods](../packages/agents/src/experimental/memory/session/session.ts#L1-L240) and [Session — getContext(), getHistory(), append(), update(), delete(), and search()](../packages/agents/src/experimental/memory/session/session.ts#L240-L500) and [Session — compact(), getSystemPrompt(), and internal state management](../packages/agents/src/experimental/memory/session/session.ts#L500-L703) — the main object. Represents a single conversation thread.
+[Session class — constructor, create() builder, and builder chain methods](../packages/agents/src/experimental/memory/session/session.ts#L1-L240) and [Session — history reads, broadcast helpers, and write methods](../packages/agents/src/experimental/memory/session/session.ts#L240-L500) and [Session — compact(), context-block accessors, skill management, system prompt, search, and tools()](../packages/agents/src/experimental/memory/session/session.ts#L500-L703) — the main object. Represents a single conversation thread.
 
-[`Session.create(provider, options)` static builder](../packages/agents/src/experimental/memory/session/session.ts#L1-L100) — the entry point. Use the builder chain: `.withContext(block)`, `.withCachedPrompt(text)`, `.withTools(tools)`, `.withSearch(provider)`.
+[`Session.create(provider)` static builder](../packages/agents/src/experimental/memory/session/session.ts#L1-L100) — the entry point. Accepts either a `SqlProvider` (an Agent with a `sql` method, for auto-wired SQLite) or a `SessionProvider` directly. Use the builder chain: `.withContext(label, options?)`, `.withCachedPrompt(provider?)`, `.onCompaction(fn)`, `.compactAfter(threshold)`, `.forSession(id)`.
 
 Key methods:
-- `getContext()` — returns the full system prompt including context blocks
-- `getHistory()` — returns the message array
-- `append(message)` — add a message
-- `update(id, message)` — update an existing message
-- `search(query)` — FTS search across history
-- `compact(model)` — summarise old messages to save context window space
+- `freezeSystemPrompt()` / `refreshSystemPrompt()` — get or rebuild the system prompt with all context blocks rendered
+- `getHistory(leafId?)` — returns the message path from root to leaf
+- `appendMessage(message, parentId?)` — add a message; triggers auto-compaction if threshold is set
+- `updateMessage(message)` — update an existing message
+- `search(query)` — search across history via the storage provider
+- `compact()` — run the registered compaction function and store the result as an overlay
+- `tools()` — returns the AI tool set (`set_context`, `load_context`, `unload_context`, `search_context`) wired to the session's context blocks
 
 ### Session provider interface (`session/provider.ts`)
 
-[`SessionProvider` interface](../packages/agents/src/experimental/memory/session/provider.ts#L1-L92) — the storage abstraction. Any backend that implements these methods can back the session system. Methods: `getMessage`, `getHistory`, `getLatestLeaf`, `getBranches`, `appendMessage`, `updateMessage`, `searchMessages`, `addCompaction`.
+[`SessionProvider` interface](../packages/agents/src/experimental/memory/session/provider.ts#L1-L92) — the storage abstraction. Any backend that implements these methods can back the session system. Read methods: `getMessage`, `getHistory` (root-to-leaf path with compaction overlays applied), `getLatestLeaf`, `getBranches`, `getPathLength`. Write methods: `appendMessage`, `updateMessage`, `deleteMessages`, `clearMessages`. Compaction: `addCompaction`, `getCompactions`. Optional search: `searchMessages`. Also defines `SearchResult` and `StoredCompaction` value types.
 
 ### Context blocks (`session/context.ts`)
 
-[context.ts — ContextProvider interface, ContextConfig, ContextBlock, and ContextBlocks class setup](../packages/agents/src/experimental/memory/session/context.ts#L1-L200) and [ContextBlocks — load(), addBlock(), removeBlock(), setBlock(), and skill management](../packages/agents/src/experimental/memory/session/context.ts#L200-L480) and [ContextBlocks — toSystemPrompt(), captureSnapshot(), getWritableBlocks(), and tools() generator](../packages/agents/src/experimental/memory/session/context.ts#L480-L700) and [ContextBlocks tools — set_context, load_context, unload_context, and search_context implementations](../packages/agents/src/experimental/memory/session/context.ts#L700-L866) — context blocks are named slots in the system prompt that hold persistent data the LLM can read and (optionally) write. Each block has a `label`, a `description`, a `provider` (how to fetch the content), and a `maxTokens` budget. The `ContextBlocks` class manages the full set for a session.
+[context.ts — ContextProvider, WritableContextProvider, ContextConfig, ContextBlock interfaces, and ContextBlocks class constructor](../packages/agents/src/experimental/memory/session/context.ts#L1-L200) and [ContextBlocks — load(), addBlock(), removeBlock(), setBlock(), skill management (setSkill, loadSkill, unloadSkill), and search entry management](../packages/agents/src/experimental/memory/session/context.ts#L200-L480) and [ContextBlocks — toSystemPrompt(), captureSnapshot(), freezeSystemPrompt(), refreshSystemPrompt(), and tools() setup](../packages/agents/src/experimental/memory/session/context.ts#L480-L700) and [ContextBlocks tools — set_context, load_context, unload_context, and search_context implementations](../packages/agents/src/experimental/memory/session/context.ts#L700-L866) — context blocks are named slots in the system prompt that hold persistent data the LLM can read and (optionally) write. Each block has a `label`, a `description`, a `provider` (how to fetch the content), and a `maxTokens` budget. Providers can be read-only (`ContextProvider`), writable (`WritableContextProvider`), skill-based (`SkillProvider`), or searchable (`SearchProvider`). The `ContextBlocks` class manages the full set for a session.
 
 ### Session manager (`session/manager.ts`)
 
@@ -129,16 +130,18 @@ WebMCP is an experimental browser API that exposes MCP tools through `navigator.
 
 **Status: experimental — follows the evolving WebMCP browser API specification.**
 
-[`registerWebMcp(tools, options?)` function](../packages/agents/src/experimental/webmcp.ts#L1-L100) — registers an array of `ModelContextTool` objects with the browser's model context. Each tool has a `name`, `description`, JSON schema for inputs, and an `execute` function.
+[Browser API type declarations](../packages/agents/src/experimental/webmcp.ts#L1-L100) — module-level JSDoc and the TypeScript ambient declarations that model Chrome's `navigator.modelContext` API: `ModelContextToolAnnotations`, `ModelContextClient`, `ModelContextTool` (the shape of a tool registered with `navigator.modelContext`: `name`, `description`, `inputSchema`, and `execute`), `ModelContextRegisterToolOptions`, `ModelContext`, and the global `Navigator` interface extension. None of these are exported — they are local type scaffolding.
 
-[McpHttpClient — constructor, initialize(), listTools(), and callTool()](../packages/agents/src/experimental/webmcp.ts#L146-L290) and [WebMcpOptions, WebMcpHandle, and registerWebMcp() signature](../packages/agents/src/experimental/webmcp.ts#L290-L440) and [registerWebMcp() — tool registration, sync logic, watch setup, and return handle](../packages/agents/src/experimental/webmcp.ts#L440-L566) — an HTTP transport wrapper that bridges the browser-side WebMCP protocol to an HTTP MCP server. Used when the browser needs to proxy tool calls to a remote endpoint.
+[`WebMcpLogger` interface and default/silent logger constants](../packages/agents/src/experimental/webmcp.ts#L103-L145) — `WebMcpLogger` is the exported diagnostic logging interface (`info`, `warn`, `error`). The module creates two built-in implementations: `DEFAULT_LOGGER` (prefixes output with `[webmcp-adapter]`) and `SILENT_LOGGER` (no-op). Pass your own `WebMcpLogger` via `WebMcpOptions.logger`, or set `quiet: true` for the silent variant.
 
-[`ModelContextTool` interface](../packages/agents/src/experimental/webmcp.ts#L1-L50) — the shape of a tool registered with `navigator.modelContext`: `name`, `description`, JSON Schema `schema`, and `execute(input) => Promise<unknown>`.
+[McpHttpClient — constructor, initialize(), listTools(), and callTool()](../packages/agents/src/experimental/webmcp.ts#L146-L290) — internal HTTP transport wrapper (not exported). Wraps the MCP SDK `Client` + `StreamableHTTPClientTransport` to connect to a remote MCP endpoint, paginate through tools, and call them. Also handles dynamic headers (`getHeaders`) and per-request timeouts. `listenForChanges()` wires up `tools/list_changed` notifications.
 
-[`WebMcpLogger` interface](../packages/agents/src/experimental/webmcp.ts#L50-L100) — diagnostic logging interface for WebMCP events. Pass your own implementation to trace registration, discovery, and invocation.
+[WebMcpOptions, WebMcpHandle, and registerWebMcp() signature](../packages/agents/src/experimental/webmcp.ts#L290-L440) — exported public API types. `WebMcpOptions` configures the adapter (URL, headers, watch mode, prefix, timeout, logger, callbacks). `WebMcpHandle` is the return value: exposes the currently registered tool names, `refresh()`, `dispose()`, and `disposed`.
+
+[registerWebMcp() — tool registration, sync logic, watch setup, and return handle](../packages/agents/src/experimental/webmcp.ts#L440-L566) — the implementation of `registerWebMcp()`. Initialises the `McpHttpClient`, performs the initial tool sync, optionally sets up watch-mode for `tools/list_changed` notifications, and returns a `WebMcpHandle`. If `navigator.modelContext` is absent (non-Chrome), returns a no-op handle immediately without making any network requests.
 
 ---
 
 ## AI SDK type compatibility (`src/ai-types.ts`)
 
-[`ai-types.ts` — AI SDK type shims](../packages/agents/src/ai-types.ts#L1-L5) — a tiny file that re-exports type aliases to keep the agents package compatible with both AI SDK v4 and v5 type shapes. If you see unexpected type errors when mixing agent code with AI SDK code, check here first.
+[`ai-types.ts` — deprecated compatibility shim](../packages/agents/src/ai-types.ts#L1-L5) — re-exports `IncomingMessage` and `OutgoingMessage` from `@cloudflare/ai-chat/types` and merges the `MessageType` enum from both `@cloudflare/ai-chat` and the agents package. Emits a deprecation warning at import time: all AI Chat modules have moved to `@cloudflare/ai-chat` and this file will be removed in the next major version.

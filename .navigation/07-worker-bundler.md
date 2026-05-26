@@ -8,23 +8,25 @@
 
 [Public exports and `createWorker()` in `index.ts`](../packages/worker-bundler/src/index.ts#L1-L206) — the package's public surface: re-exports of types and helpers from the subsystems below, plus `createWorker()` — the main entry point that auto-detects the entry point, installs npm dependencies, transpiles TypeScript/JSX, and either bundles everything with esbuild-wasm (`bundle: true`) or produces separate modules via Sucrase (`bundle: false`).
 
-[`createApp(options)` in `app.ts` — option parsing, server bundle setup, and client bundle creation](../packages/worker-bundler/src/app.ts#L1-L300) and [`createApp()` — asset manifest assembly and return value construction](../packages/worker-bundler/src/app.ts#L301-L373) — bundles a full-stack application: a server Worker, an optional client bundle, and static assets. Returns separate asset maps so the host can serve them. Internally calls `bundleWithEsbuild()` for the Worker, `resolveModule()` for dependencies, and `AssetHandler` for static serving.
+[`CreateAppOptions` and `CreateAppResult` interfaces in `app.ts`](../packages/worker-bundler/src/app.ts#L37-L182) — the config object and result type for `createApp()`. `CreateAppOptions` covers: `files` (virtual filesystem), `server` (entry point path), `client` (optional browser bundle entry or array), `assets` (static files map), `assetConfig`, `bundle`, `externals`, `target`, `minify`, `sourcemap`, `registry`, `jsx`, `jsxImportSource`, `define`, `loader`, `conditions`, and the esbuild-plugins escape hatch. `CreateAppResult` extends `CreateWorkerResult` with `assets`, `assetManifest`, `assetConfig`, and `clientBundles`.
 
-[`CreateAppOptions` interface](../packages/worker-bundler/src/app.ts#L37-L100) — the config object for `createApp()`: `files` (virtual filesystem), `server` (entry point path), `client` (optional browser bundle entry), `assets` (static files), `bundle` (boolean), `minify`, `sourcemap`.
+[`createApp()` implementation](../packages/worker-bundler/src/app.ts#L195-L373) — three-phase function: (1) bundle each client entry point with `bundleWithEsbuild()` targeting the browser; (2) merge client outputs with user-provided static assets and call `buildAssetManifest()`; (3) bundle the server Worker (esbuild or transform-only). Returns server modules (for the isolate) and assets/manifest (for host-side serving) separately. Callers use `handleAssetRequest()` to serve assets before forwarding to the isolate.
 
 ---
 
 ## Configuration (`src/config.ts`, `src/types.ts`)
 
-[`BundleConfig` and `AppConfig` types](../packages/worker-bundler/src/config.ts#L1-L182) — the full configuration schemas, including default values. Shared between `bundleWithEsbuild()` and `createApp()`.
+[Wrangler config parsing in `config.ts`](../packages/worker-bundler/src/config.ts#L1-L182) — `parseWranglerConfig()` reads `wrangler.toml`, `wrangler.json`, or `wrangler.jsonc` from the virtual filesystem and extracts `main`, `compatibilityDate`, and `compatibilityFlags`. Includes `extractWranglerConfig()` (handles both snake_case TOML and camelCase JSON formats), `stripJsonComments()` (JSONC support), and `hasNodejsCompat()` (checks for the `nodejs_compat` flag, used to set esbuild's `platform: "node"`). No `BundleConfig` or `AppConfig` types exist in this file.
 
-[Shared types in `types.ts`](../packages/worker-bundler/src/types.ts#L1-L213) — `BundleResult`, `AssetMetadata`, `VirtualFile`, `InstallResult`, and others. The common vocabulary across all subsystems.
+[Shared types in `types.ts`](../packages/worker-bundler/src/types.ts#L1-L213) — `Files` (path→content map), `Module` and `Modules` (Worker Loader output formats), `BundlerLoader` (portable loader names like `js`, `ts`, `json`, `text`, `binary`), `JsxMode`, `CreateWorkerOptions` (full options for `createWorker()`), `WranglerConfig`, and `CreateWorkerResult`. These are the common vocabulary across all subsystems. Note: `AssetMetadata`, `AssetManifest`, `InstallResult`, and `AssetStorage` live in their own modules, not here.
 
 ---
 
 ## Bundler (`src/bundler.ts`)
 
-[bundleWithEsbuild() — virtual filesystem esbuild plugin setup and module resolution](../packages/worker-bundler/src/bundler.ts#L73-L240) and [bundleWithEsbuild() — path resolution helpers, loader selection, and esbuild initialisation](../packages/worker-bundler/src/bundler.ts#L240-L420) — the core: runs esbuild-wasm inside the Worker to produce a single-file bundle. Takes a virtual file map (not the actual filesystem) as `files`. Supports TypeScript, JSX, custom `define` replacements, and esbuild plugins.
+[bundleWithEsbuild() — virtual filesystem esbuild plugin and bundle execution](../packages/worker-bundler/src/bundler.ts#L73-L233) — the core bundling function. Constructs an esbuild `virtual-fs` plugin that intercepts all `onResolve` and `onLoad` calls to serve files from a `FileSystem` instance instead of the real disk. User-supplied plugins run before the internal plugin. Calls `esbuild.build()` with `write: false` and returns the first output file as `bundle.js`.
+
+[Path resolution helpers, loader selection, esbuild WASM initialization, and runtime guard](../packages/worker-bundler/src/bundler.ts#L235-L421) — `resolveRelativePath()` (normalises `../`/`./` against the virtual filesystem), `getLoader()` (maps file extensions to esbuild loaders with override support), and the WASM initialisation machinery: `isCloudflareWorkersRuntime()`, `NOT_IN_WORKERS_ERROR` (thrown when called outside Workers), a `pendingWasmImport` pre-warmed at module-evaluation time to reduce first-call latency, and `initializeEsbuild()` which lazily calls `esbuild.initialize({ wasmModule, worker: false })`.
 
 [`BundleOptions` interface](../packages/worker-bundler/src/bundler.ts#L53-L72) — the input shape: `files` (map of path → content), `entryPoint`, `externals` (modules to leave unbundled), `minify`, `sourcemap`, `jsx` runtime, `define` replacements, esbuild `plugins`.
 
@@ -44,35 +46,39 @@
 
 ## Transformer (`src/transformer.ts`)
 
-[transformCode() — Sucrase transpilation and file-type detection helpers](../packages/worker-bundler/src/transformer.ts#L56-L150) and [transformAndResolve() — two-pass collect-and-transform with import rewriting](../packages/worker-bundler/src/transformer.ts#L150-L310) and [transformer — rewriteImports(), calculateRelativePath(), and getDirectory() helpers](../packages/worker-bundler/src/transformer.ts#L310-L416) — transpiles TypeScript/JSX to plain JavaScript using **Sucrase** (no WASM, ~20× faster than Babel). Supports source maps, automatic JSX transform, and production mode. Used when `bundle: false` but transpilation is still needed.
+[transformCode() — Sucrase transpilation and file-type detection helpers](../packages/worker-bundler/src/transformer.ts#L56-L143) — `transformCode()` strips TypeScript types and transforms JSX via Sucrase (no WASM, ~20× faster than Babel). `isTypeScriptFile()`, `isJsxFile()`, `isJavaScriptFile()`, and `getOutputPath()` are file-type helpers used throughout the transformer.
 
-[`TransformOptions` interface](../packages/worker-bundler/src/transformer.ts#L1-L55) — `filePath` (for source map references), `sourceMap`, `jsxRuntime` (`"automatic"` or `"classic"`), `production`.
+[transformAndResolve() — two-pass collect-and-transform with import rewriting](../packages/worker-bundler/src/transformer.ts#L148-L269) — produces multiple modules instead of a single bundle (used when `bundle: false`). First pass: traverses all reachable imports using `parseImports()` and `resolveModule()`, builds a source→output path map. Second pass: calls `transformCode()` on each TypeScript file then rewrites import specifiers via `rewriteImports()`.
+
+[rewriteImports(), calculateRelativePath(), and getDirectory() helpers](../packages/worker-bundler/src/transformer.ts#L271-L417) — `rewriteImports()` rewrites all import/export specifiers in transformed code to use the final output paths so the Worker Loader can match modules by name. `calculateRelativePath()` computes a `../`-relative path between two output files. `getDirectory()` extracts the directory component of a path.
+
+[`TransformResult` and `TransformOptions` interfaces](../packages/worker-bundler/src/transformer.ts#L1-L55) — `TransformResult` carries `code` and optional `sourceMap` string. `TransformOptions` covers `filePath` (for source map references), `sourceMap`, `preserveJsx`, `jsxRuntime` (`"automatic"`, `"classic"`, or `"preserve"`), `jsxImportSource`, and `production`.
 
 ---
 
 ## TypeScript support (`src/typescript.ts`)
 
-[TypeScript-specific bundling helpers](../packages/worker-bundler/src/typescript.ts#L1-L242) — integration with the TypeScript compiler API for cases where full type checking (not just transpilation) is needed. Used by the `"./typescript"` export of the package.
+[TypeScript language service integration](../packages/worker-bundler/src/typescript.ts#L1-L242) — `createTypescriptLanguageService()` wires the package's `FileSystem` abstraction into `@typescript/vfs`'s virtual TypeScript environment, enabling full type-checking and completions (not just transpilation). Returns a `TypescriptFileSystem` wrapper that keeps the virtual TS environment in sync with subsequent writes and deletes. Also includes `parseTsConfig()` (reads `tsconfig.json` from the virtual FS), `createSystem()` (builds a `TypeScript.System` that delegates to the FileSystem plus bundled `lib.*.d.ts` files), and `createDefaultTypeScriptLibMap()` (fetches TypeScript 6 type definitions via the npm registry). Used by the `"./typescript"` export.
 
 ---
 
 ## Package installer (`src/installer.ts`)
 
-[installDependencies() — entry point, installPackage() recursion, and fetchPackageMetadata()](../packages/worker-bundler/src/installer.ts#L96-L320) and [installer — resolveVersion(), fetchPackageFiles(), and extractTarball()](../packages/worker-bundler/src/installer.ts#L320-L470) and [installer — decompress(), parseTar(), readString(), and isTextFile()](../packages/worker-bundler/src/installer.ts#L470-L542) — fetches npm packages from the registry and installs them into a virtual `node_modules`. No `npm` binary required: packages are fetched as tarballs, extracted, and stored in the virtual file map.
+[installDependencies() — entry point, installPackage() recursion, and fetchPackageMetadata()](../packages/worker-bundler/src/installer.ts#L96-L287) and [installer — resolveVersion(), fetchPackageFiles(), extractTarball(), and decompress()](../packages/worker-bundler/src/installer.ts#L289-L400) and [installer — parseTar(), readString(), isTextFile(), and hasDependencies()](../packages/worker-bundler/src/installer.ts#L402-L543) — fetches npm packages from the registry and installs them into a virtual `node_modules`. No `npm` binary required: packages are fetched as `.tgz` tarballs, gzip-decompressed via `DecompressionStream`, tar-parsed, and stored in the virtual filesystem. `installPackage()` recurses for transitive dependencies and deduplicates using an in-progress map. Packages already present in the filesystem are skipped (supports pre-warmed filesystems). `hasDependencies()` checks whether `package.json` has any entries in `dependencies`.
 
-[`fetchWithTimeout()` helper](../packages/worker-bundler/src/installer.ts#L18-L38) — wraps `fetch()` with a 30-second timeout. Used for all registry requests.
+[`fetchWithTimeout()` helper](../packages/worker-bundler/src/installer.ts#L18-L38) — internal (non-exported) helper that wraps `fetch()` with a 30-second timeout using `AbortController`. Throws a descriptive error on timeout. Used for all registry metadata and tarball requests.
 
-[`InstallOptions` and `InstallResult` types](../packages/worker-bundler/src/installer.ts#L61-L84) — `InstallOptions` specifies the npm registry URL (defaults to `https://registry.npmjs.org`). `InstallResult` carries the list of installed packages and any warnings (e.g. peer dependency mismatches).
+[`InstallOptions` and `InstallResult` types](../packages/worker-bundler/src/installer.ts#L61-L84) — `InstallOptions` (internal, not exported) has `dev` (whether to include devDependencies, default false) and `registry` (npm registry URL, defaults to `https://registry.npmjs.org`). `InstallResult` (exported) carries `installed` (list of `name@version` strings for packages fetched in this call) and `warnings` (e.g. missing versions, fetch failures).
 
 ---
 
 ## Asset handler (`src/asset-handler.ts`)
 
-[`AssetStorage` interface and `createMemoryStorage()` factory](../packages/worker-bundler/src/asset-handler.ts#L20-L51) — `AssetStorage` is a minimal interface for looking up static files by pathname. `createMemoryStorage()` builds an in-memory store from a `Map<string, content>`.
+[`AssetStorage`, `AssetMetadata`, `AssetManifest`, and `createMemoryStorage()`](../packages/worker-bundler/src/asset-handler.ts#L20-L51) — `AssetStorage` is a pluggable interface (`get(pathname)` returning stream/buffer/string/null) so assets can be served from KV, R2, or memory. `AssetMetadata` holds `contentType` and `etag` (no content). `AssetManifest` is `Map<string, AssetMetadata>` — the routing index used for ETag checks and content-type headers without fetching content. `createMemoryStorage()` wraps a pathname→content `Record` as an `AssetStorage`.
 
-[`AssetConfig` interface](../packages/worker-bundler/src/asset-handler.ts#L58-L91) — configuration for the asset handler: trailing-slash handling, SPA fallback (serve `index.html` for unknown routes), custom redirect rules, and response headers.
+[`AssetConfig` interface](../packages/worker-bundler/src/asset-handler.ts#L58-L91) — configuration for the asset handler: `html_handling` (`"auto-trailing-slash"` | `"force-trailing-slash"` | `"drop-trailing-slash"` | `"none"`), `not_found_handling` (`"single-page-application"` | `"404-page"` | `"none"`), `redirects` (object with `static` and `dynamic` sub-records keyed by URL pattern), and `headers` (record of glob patterns to `{ set, unset }` header rules).
 
-[`AssetManifest` type](../packages/worker-bundler/src/asset-handler.ts#L36-L56) — a `Map<string, AssetMetadata>` that maps URL paths to metadata (content hash, content type, encoding). The bundler emits this alongside the asset files; the handler uses it for routing.
+[`buildAssetManifest()` and `buildAssets()` helpers](../packages/worker-bundler/src/asset-handler.ts#L136-L190) — `buildAssetManifest()` takes a pathname→content map and returns an `AssetManifest` by computing content types via `inferContentType()` and ETags (FNV-1a hash for text, SHA-256 for binary). `buildAssets()` is a convenience wrapper that returns both a manifest and an `InMemoryStorage` in one call. These are what `createApp()` calls after collecting client bundles and static assets.
 
 ---
 
