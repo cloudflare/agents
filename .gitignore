@@ -1,3 +1,6 @@
+# Claude Code internal state (worktrees, session data)
+.claude/
+
 # Logs
 logs
 *.log
