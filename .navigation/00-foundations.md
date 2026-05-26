@@ -10,7 +10,7 @@ The codebase uses its own tiny event/disposable system rather than Node's EventE
 
 [`Disposable` interface and `DisposableStore`](../packages/agents/src/core/events.ts#L1-L52) — a resource-cleanup pattern: anything that should be torn down implements `Disposable`, and a `DisposableStore` lets you register multiple disposables and `.dispose()` them all at once. Used throughout the MCP client layer to clean up subscriptions.
 
-[`Emitter<T>` class and `Event<T>` type](../packages/agents/src/core/events.ts#L30-L52) — a typed single-event emitter. `Event<T>` is just a function type `(listener) => Disposable`. You attach listeners and get back a `Disposable` to remove them. Keeps the API surface small and avoids the stringly-typed `on('event', fn)` pattern.
+[`Event<T>` type and `Emitter<T>` class](../packages/agents/src/core/events.ts#L30-L52) — `Event<T>` (L28, just above) is a function type `(listener) => Disposable`; `Emitter<T>` (L30) implements it with a `Set`-backed listener list. You attach listeners and get back a `Disposable` to remove them. Keeps the API surface small and avoids the stringly-typed `on('event', fn)` pattern.
 
 ---
 
@@ -30,31 +30,31 @@ Before the `Agent` class itself, `index.ts` opens with the exported types that d
 
 [RPC wire types: `RPCRequest`, `StateUpdateMessage`, `RPCResponse`](../packages/agents/src/index.ts#L158-L228) — every callable method invocation between a browser client and agent travels as one of these. `StateUpdateMessage` is broadcast to all connected clients whenever state changes.
 
-[Internal facet connection bridge types, `SubAgentClass<T>`, `SubAgentStub<T>`, and the `callable()` decorator](../packages/agents/src/index.ts#L230-L469) — this range is dominated by internal plumbing for the facet (sub-agent) system: `FacetCapableCtx`, `SubAgentConnectionBridge`, `RootSubAgentConnectionBridge`, and `SubAgentWebSocketEndpoint` implement the per-connection message bridge between parent and child Durable Objects. `SubAgentClass<T>` and `SubAgentStub<T>` (L421-L445) are the public TypeScript types for referencing and calling a sub-agent. At the tail end (L451-L479), `callable()` (and its deprecated alias `unstable_callable`) is the method decorator that marks agent methods as RPC-invocable; it stores `CallableMetadata` in a `WeakMap` that the Agent base class reads to build its dispatch table.
+[`CallableMetadata`, `SqlError`, and internal facet connection bridge types through `callable()` decorator](../packages/agents/src/index.ts#L230-L469) — the range opens with `CallableMetadata` (L230-L235) and its backing `callableMetadata` WeakMap (L237), followed by `SqlError` (L242-L252). The bulk of the range is internal plumbing for the facet (sub-agent) system: `FacetCapableCtx`, `SubAgentPathInvokeEndpoint`, `SubAgentConnectionBridge`, `RootSubAgentConnectionBridge`, and `SubAgentWebSocketEndpoint` implement the per-connection message bridge between parent and child Durable Objects. `SubAgentClass<T>` and `SubAgentStub<T>` (L421-L445) are the public TypeScript types for referencing and calling a sub-agent. At the tail end (L451-L479), `callable()` (and its deprecated alias `unstable_callable`) is the method decorator that marks agent methods as RPC-invocable; it writes into the `callableMetadata` WeakMap that the Agent base class reads to build its dispatch table.
 
 ---
 
 ## Queue, Schedule, and Fiber type vocabulary (`src/index.ts` — type section cont.)
 
-[`QueueItem<T>` and `Schedule<T>`](../packages/agents/src/index.ts#L481-L577) — the shapes stored in SQLite for queued callbacks and scheduled tasks respectively. A `Schedule` can be a one-shot future timestamp, a cron expression, or a delay.
+[`QueueItem<T>`, `Schedule<T>`, and internal storage row types](../packages/agents/src/index.ts#L481-L577) — public shapes for queued callbacks (`QueueItem`) and scheduled tasks (`Schedule`); a `Schedule` can be a one-shot timestamp, a cron expression, a delay, or a repeating interval. The remainder of the range contains internal SQLite row shapes (`ScheduleStorageRow`, `FacetRunStorageRow`, `AgentToolRunStorageRow`) and `DeferredAgentToolFinish` that the Agent class uses internally.
 
 [`ScheduleCriteria` and `RootFacetRpcSurface`](../packages/agents/src/index.ts#L578-L660) — `ScheduleCriteria` (L578-L582) is the filter type passed to `getSchedules()`: filter by id, schedule type, or time range. The bulk of this range (L584-L655) is `RootFacetRpcSurface`, an internal RPC interface that facets call on their parent to delegate alarm-owning operations such as scheduling, keep-alive tokens, broadcast, and WebSocket connection management.
 
-[Fiber types: `FiberContext`, `FiberStatus`, `FiberInspection`, `StartFiberOptions`](../packages/agents/src/index.ts#L661-L755) — fibers are lightweight long-running async tasks that survive Durable Object hibernation. These types describe what gets persisted to SQLite and how callers interact with a fiber's lifecycle.
+[Fiber types: `FiberContext`, `FiberStatus`, `FiberInspection`, `StartFiberOptions`, and related](../packages/agents/src/index.ts#L661-L755) — fibers are lightweight long-running async tasks that survive Durable Object hibernation. The range covers the full fiber type vocabulary: `FiberContext` (execution context with `stash()`/`signal`), `FiberStatus`, `StartFiberOptions`, `FiberInspection`, `StartFiberResult`, `FiberRecoveryResult`, `ListFibersOptions`, `DeleteFibersOptions`, the internal `FiberLedgerRow` SQLite shape, and `FiberRecoveryContext` (passed to `onFiberRecovered` after a DO restart).
 
 ---
 
 ## MCP server metadata types (`src/index.ts`)
 
-[`MCPServer`, `MCPServersState`, `AddMcpServerOptions`](../packages/agents/src/index.ts#L809-L900) — describe the set of MCP servers an agent is currently connected to (the `mcp` property exposed by the agent) and the options for connecting to a new one.
+[`MCPServerMessage`, `MCPServersState`, `MCPServer`, `AddMcpServerOptions`, and identity constants](../packages/agents/src/index.ts#L809-L900) — the range opens with `MCPServerMessage` (the WebSocket broadcast type) then defines `MCPServersState` and `MCPServer` which describe the set of MCP servers an agent is connected to, and `AddMcpServerOptions` / `AddRpcMcpServerOptions` for connecting to new servers. The tail of the range (L874-L900) contains internal implementation constants: `DEFAULT_KEEP_ALIVE_INTERVAL_MS`, sub-agent identity version strings, and SQLite schema constants used by the Agent class.
 
 ---
 
 ## Static agent configuration (`src/index.ts`)
 
-[`AgentStaticOptions` interface](../packages/agents/src/index.ts#L1104-L1145) — a class-level options bag set via `static options = { ... }` on your agent subclass. Covers hibernation behaviour, default retry/backoff settings, and initial state. Read this before reading the `Agent` class so you know which knobs exist.
+[`AgentStaticOptions` interface and internal retry helpers](../packages/agents/src/index.ts#L1104-L1145) — `AgentStaticOptions` (L1104-L1116) is the class-level options bag set via `static options = { ... }` on your agent subclass, covering hibernation, identity broadcast, hung-schedule timeout, keep-alive interval, and retry defaults. The rest of the range (L1118-L1145) contains the internal helpers `parseRetryOptions` and `resolveRetryConfig` used by the queue/schedule alarm handlers.
 
-[`DEFAULT_AGENT_STATIC_OPTIONS` constant](../packages/agents/src/index.ts#L1063-L1103) — the defaults: hibernation on, modest retry limits.
+[`DEFAULT_AGENT_STATIC_OPTIONS` constant and `ResolvedAgentOptions` interface](../packages/agents/src/index.ts#L1063-L1103) — the defaults (hibernation on, `sendIdentityOnConnect` on, `hungScheduleTimeoutSeconds` 30, modest retry limits), followed by the `ResolvedAgentOptions` interface (L1087-L1096) which is the fully-resolved version of those options with no optional fields.
 
 ---
 
@@ -70,7 +70,7 @@ Agents pass structured data over RPC. The serialization layer handles the transl
 
 ## Retry utilities (`src/retries.ts`)
 
-[`RetryOptions` type and `withRetry()` function](../packages/agents/src/retries.ts#L1-L159) — an exponential-backoff retry wrapper with jitter. The `Agent` class exposes this as `this.retry()`, and the MCP client uses it for tool calls. The implementation lives here so it can also be imported independently.
+[`RetryOptions`, `validateRetryOptions`, `jitterBackoff`, `tryN`, and `isErrorRetryable`](../packages/agents/src/retries.ts#L1-L159) — the full retry utility module. `RetryOptions` (L1-L11) is the public options type. `validateRetryOptions` (L32-L66) checks option values eagerly at enqueue/schedule time. `jitterBackoff` (L78-L85) computes the "Full Jitter" exponential delay. `tryN` (L96-L140) is the core retry loop: it runs a function up to `n` times with jittered backoff, used internally by the Agent as `this.retry()` and by the MCP client. `isErrorRetryable` (L148-L158) tests Cloudflare DO error flags.
 
 ---
 
@@ -86,7 +86,7 @@ Agents pass structured data over RPC. The serialization layer handles the transl
 
 [`SubAgentClass<T>` and `SubAgentStub<T>`](../packages/agents/src/index.ts#L421-L450) — TypeScript generics that let the type system know which methods are available on a remote sub-agent (facet). `SubAgentStub` automatically removes `async` and wraps return types in `Promise`, reflecting the RPC boundary.
 
-[Sub-routing — path parsing, facet address encoding, and parent validation](../packages/agents/src/sub-routing.ts#L1-L300) and [Sub-routing — remaining helpers and exports](../packages/agents/src/sub-routing.ts#L301-L335) — path parsing and matching for facet addresses. A facet is identified by a path like `myAgent/facet/sessionId`; this module decodes and encodes those paths and verifies they belong to the correct parent agent.
+[Sub-routing — `parseSubAgentPath`, `routeSubAgentRequest`](../packages/agents/src/sub-routing.ts#L1-L300) and [Sub-routing — `getSubAgentByName` and exports](../packages/agents/src/sub-routing.ts#L301-L335) — external addressability helpers for sub-agents (facets). The first range defines `SUB_PREFIX`, `SubAgentPathMatch`, `parseSubAgentPath` (URL → `{ childClass, childName, remainingPath }`), and `routeSubAgentRequest` (the sub-agent analog of `routeAgentRequest` for custom fetch handlers). The second range contains `getSubAgentByName` (returns a typed RPC stub that proxies method calls through the parent via a stateless per-call bridge, the sub-agent analog of `getAgentByName`).
 
 ---
 
