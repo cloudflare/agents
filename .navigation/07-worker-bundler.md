@@ -118,13 +118,15 @@ The asset handler is more involved than it first appears — it implements a pro
 
 ## Bundler utilities (`src/utils.ts`)
 
-[Utility helpers in `utils.ts`](../packages/worker-bundler/src/utils.ts#L1-L122) — miscellaneous helpers used across the bundler: path normalisation, virtual file system helpers, and error formatting for build failures. Not part of the public API.
+[Entry-point detection utilities in `utils.ts`](../packages/worker-bundler/src/utils.ts#L1-L122) — `DEFAULT_ENTRY_POINTS` (the ordered list of fallback paths tried when no entry is specified: `src/index.ts`, `src/worker.ts`, etc.), `detectEntryPoint()` (priority: wrangler `main` > `package.json` `exports`/`module`/`main` > defaults), and `formatFileListForError()` (renders a short file list for "entry point not found" errors, filtering out `node_modules/`). Not part of the public API.
 
 ---
 
 ## Module resolver details (`src/resolver.ts`)
 
-[resolver — resolveModule(), resolveRelative(), and resolvePackage() with exports field](../packages/worker-bundler/src/resolver.ts#L56-L220) and [resolver — resolveWithExtensions(), parsePackageSpecifier(), path helpers, and import parsers](../packages/worker-bundler/src/resolver.ts#L220-L375) — the bulk of the resolver handles the `exports` field in `package.json`. This field can specify different entry points for different conditions (`"worker"`, `"browser"`, `"import"`, `"require"`). The resolver evaluates the condition array in priority order to find the right file.
+[resolveModule(), resolveRelative(), and resolvePackage() with exports field](../packages/worker-bundler/src/resolver.ts#L64-L183) — `resolveModule()` dispatches to `resolveRelative()` for `./`/`/`-prefixed specifiers or `resolvePackage()` for bare specifiers. `resolvePackage()` looks up `node_modules/<name>/package.json`, uses the `resolve.exports` library to evaluate the `exports` field with the given conditions array (e.g. `"worker"`, `"browser"`, `"import"`), then falls back to the `module`/`main` legacy fields, then to index files.
+
+[resolveWithExtensions(), parsePackageSpecifier(), path helpers, and import parsers](../packages/worker-bundler/src/resolver.ts#L185-L376) — `resolveWithExtensions()` tries exact path, then each extension in order, then `index.<ext>` variants. `parsePackageSpecifier()` splits a bare specifier into package name (handles `@scope/pkg`) and optional subpath. Path utilities: `getDirectory()`, `joinPaths()`, `normalizePath()`, `normalizeRelativePath()`. `parseImports()` extracts import specifiers from source code using `es-module-lexer` with a regex fallback for JSX files (used by `transformAndResolve()`).
 
 ---
 

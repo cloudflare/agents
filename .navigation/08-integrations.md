@@ -34,7 +34,7 @@ Sub-agents (also called facets) are Durable Object *facets* — isolated compute
 
 Agents can receive inbound emails via Cloudflare Email Workers.
 
-[`routeAgentEmail<Env>(message, env, ctx, options?)`](../packages/agents/src/index.ts#L9938-L10018) — the top-level email handler. Parses the inbound `EmailMessage`, determines which agent should handle it (using the configured resolver), and calls `onEmail()` on that agent instance.
+[`routeAgentEmail<Env>(email, env, options)`](../packages/agents/src/index.ts#L9938-L10018) — the top-level email handler. Calls the configured `resolver` to determine which agent should handle the email, looks up that agent's namespace in `env` (using `agentMapCache` for fast repeated lookups), then calls `_onEmail()` on the agent via an `EmailBridge` RPC target.
 
 [`createHeaderBasedEmailResolver<Env>()` — REMOVED](../packages/agents/src/email.ts#L271-L312) — this function has been removed due to a security vulnerability (it trusted attacker-controlled email headers, enabling IDOR attacks). The stub always throws with migration guidance. Use `createAddressBasedEmailResolver` for inbound mail or `createSecureReplyEmailResolver` for reply flows instead.
 
@@ -146,8 +146,8 @@ The Chat SDK state adapter bridges the Agent storage layer to the `@cloudflare/a
 
 ## React hooks (`src/react.tsx`)
 
-[`useAgent<T>(agent, options?)` hook](../packages/agents/src/react.tsx#L1-L100) — connects a React component to an agent. Returns `{agent: stub, state: State}` where `state` is the latest broadcast state. The hook handles WebSocket lifecycle (connect on mount, disconnect on unmount, reconnect on network error).
+[`useAgent<T>(options)` hook — type signatures, options, and utility functions](../packages/agents/src/react.tsx#L1-L255) — the first ~255 lines cover: query-cache helpers (`createCacheKey`, `getCacheEntry`, `setCacheEntry`), `buildSubPath` for constructing `/sub/{agent}/{name}/...` URL tails, `UseAgentOptions<State>` type (all hook configuration including `agent`, `name`, `basePath`, `query`, `sub`, `onStateUpdate`, `onIdentity`, etc.), and the three overload signatures for `useAgent`.
 
-[`useAgentState<T>(agent, options?)` hook](../packages/agents/src/react.tsx#L100-L200) — lighter variant: just the state, no full stub reference. Useful when you only need to read state, not call methods.
+[`useAgent()` implementation](../packages/agents/src/react.tsx#L256-L800) — the full hook body. Manages: async query caching with TTL and cache invalidation on disconnect; sub-agent chain URL construction; WebSocket lifecycle via `usePartySocket`; identity tracking (`cf_agent_identity` messages); agent state updates (`cf_agent_state` messages); RPC call dispatch with per-call timeouts and streaming support; `setState`, `call`, `stub`, `getHttpUrl` properties attached to the socket; and a `ready` promise that resolves when the server confirms identity.
 
-[useAgent() hook — WebSocket connection setup and state subscription](../packages/agents/src/react.tsx#L1-L300) and [useAgent() — reconnection, state updates, and AgentProvider context](../packages/agents/src/react.tsx#L300-L599) and [useAgentState(), AgentContext, and hook utility exports](../packages/agents/src/react.tsx#L600-L863) — the complete file. Also exports `AgentProvider` and `useAgentContext()` for context-based access patterns.
+[`useAgentToolEvents()` hook](../packages/agents/src/react.tsx#L801-L863) — subscribes to `agent-tool-event` WebSocket messages and maintains a deduplicated `AgentToolEventState` (indexed by run ID and tool-call ID). Returns `runsById`, `runsByToolCallId`, `unboundRuns`, `getRunsForToolCall()`, and `resetLocalState()`.

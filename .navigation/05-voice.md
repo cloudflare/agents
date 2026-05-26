@@ -146,13 +146,13 @@ Each provider is a small package implementing the `Transcriber` or `TTSProvider`
 
 ### Twilio (`voice-providers/twilio/`)
 
-[`TwilioAdapter` class — overview](../voice-providers/twilio/src/index.ts#L1-L100) — bridges Twilio Media Streams (which send μ-law 8 kHz audio over WebSocket) to the `VoiceAgent` protocol (which expects 16 kHz PCM). Includes a full μ-law decode/encode table and translates Twilio lifecycle events (`connected`, `start`, `stop`) to the agent protocol.
+[`TwilioAdapter` class — μ-law codec tables and audio helpers](../voice-providers/twilio/src/index.ts#L1-L100) — bridges Twilio Media Streams (which send μ-law 8 kHz audio over WebSocket) to the `VoiceAgent` protocol (which expects 16 kHz PCM). This range defines the μ-law decode lookup table, the `encodeMulaw` function, `decodeMulawToPCM`, the linear-interpolation `resamplePCM` helper, and the Twilio protocol TypeScript types.
 
-[`TwilioAdapter` implementation — audio and lifecycle](../voice-providers/twilio/src/index.ts#L100-L389) — the full implementation: μ-law codec tables, the bidirectional audio conversion pipeline (Twilio sends μ-law 8 kHz base64-encoded; the pipeline decodes, resamples to 16 kHz, and delivers PCM to the agent), and the outgoing direction (agent audio is downsampled from 16 kHz to 8 kHz μ-law and re-encoded as Twilio Media Stream messages).
+[`TwilioAdapter` implementation — handleRequest() and bidirectional audio routing](../voice-providers/twilio/src/index.ts#L100-L389) — the static `TwilioAdapter.handleRequest()` method creates a WebSocketPair, connects to the target VoiceAgent Durable Object, and bridges messages in both directions: inbound Twilio `media` events are decoded from base64 μ-law, upsampled to 16 kHz PCM, and forwarded to the agent; agent binary audio (expected as 16 kHz PCM) is downsampled to 8 kHz, encoded to μ-law, and sent back to Twilio. Twilio `start`/`stop` events map to `start_call`/`end_call` in the voice protocol.
 
 ### Telnyx (`voice-providers/telnyx/`)
 
-[Telnyx top-level exports](../voice-providers/telnyx/src/index.ts#L1-L20) — re-exports `TelnyxSTT`, `TelnyxTTS`, `TelnyxClient`, and `TelnyxJWTEndpoint`. The `browser` export provides WebRTC-based browser integration via `@telnyx/webrtc`.
+[Telnyx top-level exports](../voice-providers/telnyx/src/index.ts#L1-L20) — the server-safe entry point. Re-exports `TelnyxClient`, `TelnyxSTT`, `TelnyxTTS`, and `TelnyxJWTEndpoint`. Does not export browser/WebRTC code; browser telephony integration is exposed via the separate `@cloudflare/voice-telnyx/browser` entry point (`browser.ts`).
 
 [`TelnyxSTT` class in `providers/stt.ts`](../voice-providers/telnyx/src/providers/stt.ts#L1-L262) — Telnyx's streaming STT provider. Sends audio to the Telnyx WebSocket API and emits `TranscriptEvent` objects. Configurable model, language, and punctuation.
 
