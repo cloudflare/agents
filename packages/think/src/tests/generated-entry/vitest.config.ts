@@ -19,7 +19,7 @@ export default defineConfig({
   },
   plugins: [
     stripNodeModulesSourceMapReferences(),
-    ...think({ routePrefix: "/api/agents", allowNonVirtualMain: true }),
+    think({ routePrefix: "/api/agents", allowNonVirtualMain: true }),
     cloudflareTest({
       wrangler: {
         configPath: path.join(fixtureDir, "wrangler.jsonc")

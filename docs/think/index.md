@@ -197,6 +197,95 @@ request has a `/sub/...` segment that cannot be resolved for the declared parent
 `routeSubAgent()` returns `404`; paths without a `/sub/...` segment continue to
 the parent agent.
 
+### React Router Hosts
+
+React Router framework apps can use Think as an additive Vite plugin while
+React Router owns the app routes, loaders, and SSR.
+
+See `examples/think-react-router` for a complete runnable example.
+
+```typescript
+// vite.config.ts
+import { cloudflare } from "@cloudflare/vite-plugin";
+import { reactRouter } from "@react-router/dev/vite";
+import { think } from "@cloudflare/think/vite";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [
+    cloudflare({ viteEnvironment: { name: "ssr" } }),
+    reactRouter(),
+    think({ routePrefix: "/api/agents", allowNonVirtualMain: true })
+  ]
+});
+```
+
+```typescript
+// react-router.config.ts
+import type { Config } from "@react-router/dev/config";
+
+export default {
+  appDirectory: "app",
+  ssr: true,
+  future: {
+    v8_viteEnvironmentApi: true
+  }
+} satisfies Config;
+```
+
+Point `wrangler.jsonc.main` at a normal Worker entry file and make that file a
+tiny Think shim:
+
+```typescript
+// src/worker.ts
+export { default } from "virtual:think/entry";
+export * from "virtual:think/entry";
+```
+
+Then delegate ordinary app requests to React Router from `src/server.ts` and
+return `null` for Think-owned paths:
+
+```typescript
+// src/server.ts
+import { createRequestHandler } from "react-router";
+import type { ThinkAppContext } from "@cloudflare/think/server-entry";
+import type { ServerBuild } from "react-router";
+
+const reactRouterHandler = createRequestHandler(
+  () =>
+    import("virtual:react-router/server-build").then(
+      (mod) => (mod.default ?? mod) as ServerBuild
+    ),
+  import.meta.env.MODE
+);
+
+export default {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+    _think?: ThinkAppContext
+  ) {
+    const url = new URL(request.url);
+    if (url.pathname.startsWith("/api/agents/")) {
+      return null;
+    }
+
+    return reactRouterHandler(request, {
+      cloudflare: {
+        env,
+        ctx
+      }
+    });
+  }
+};
+```
+
+This is still a normal React Router app: `app/routes.ts`, `app/root.tsx`, and
+route modules stay under React Router's conventions. The Worker shim exists so
+Think can keep exporting generated Durable Object classes while the host
+framework owns app rendering.
+
 ### Diagnostics
 
 During Vite build/startup, Think reads `wrangler.jsonc` or `wrangler.json`,

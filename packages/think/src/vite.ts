@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import agents from "agents/vite";
 import { parse as parseJsonc } from "aywson";
-import type { Plugin, ResolvedConfig } from "vite";
+import type { Plugin, PluginOption, ResolvedConfig } from "vite";
 import {
   createThinkWorkerConfig,
   diagnoseThinkWorkerConfig,
@@ -49,7 +49,7 @@ const WRANGLER_CONFIG_FILES = [
   "wrangler.toml"
 ];
 
-export function think(options: ThinkVitePluginOptions = {}): Plugin[] {
+export function think(options: ThinkVitePluginOptions = {}): PluginOption[] {
   let config: ResolvedConfig | null = null;
   let manifest: ThinkFrameworkManifest | null = options.manifest ?? null;
 

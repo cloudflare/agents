@@ -72,7 +72,7 @@ describe("Think Vite plugin", () => {
   });
 
   it("serves composable virtual modules", async () => {
-    const plugins = think({ files });
+    const plugins = flattenThinkPlugins(think({ files }));
     const frameworkPlugin = plugins.find(
       (plugin): plugin is Plugin => plugin.name === "@cloudflare/think"
     );
@@ -137,7 +137,7 @@ describe("Think Vite plugin", () => {
   });
 
   it("warns with next steps when no agents are discovered", async () => {
-    const plugins = think({ files: {} });
+    const plugins = flattenThinkPlugins(think({ files: {} }));
     const frameworkPlugin = plugins.find(
       (plugin): plugin is Plugin => plugin.name === "@cloudflare/think"
     );
@@ -165,7 +165,7 @@ describe("Think Vite plugin", () => {
   });
 
   it("watches Wrangler config files during build start", async () => {
-    const plugins = think({ files: {} });
+    const plugins = flattenThinkPlugins(think({ files: {} }));
     const frameworkPlugin = plugins.find(
       (plugin): plugin is Plugin => plugin.name === "@cloudflare/think"
     );
@@ -197,7 +197,7 @@ describe("Think Vite plugin", () => {
   });
 
   it("prints a concise manifest summary when agents are discovered", async () => {
-    const plugins = think({ files });
+    const plugins = flattenThinkPlugins(think({ files }));
     const frameworkPlugin = plugins.find(
       (plugin): plugin is Plugin => plugin.name === "@cloudflare/think"
     );
@@ -240,7 +240,7 @@ describe("Think Vite plugin", () => {
         migrations: [{ tag: "v1", new_sqlite_classes: ["ThinkAgent_Support"] }]
       })
     );
-    const plugins = think({ files });
+    const plugins = flattenThinkPlugins(think({ files }));
     const frameworkPlugin = plugins.find(
       (plugin): plugin is Plugin => plugin.name === "@cloudflare/think"
     );
@@ -279,12 +279,14 @@ describe("Think Vite plugin", () => {
   });
 
   it("generates host-style custom server fallthrough", async () => {
-    const plugins = think({
-      files: {
-        ...files,
-        "src/server.ts": "export default { fetch() { return null; } }"
-      }
-    });
+    const plugins = flattenThinkPlugins(
+      think({
+        files: {
+          ...files,
+          "src/server.ts": "export default { fetch() { return null; } }"
+        }
+      })
+    );
     const frameworkPlugin = plugins.find(
       (plugin): plugin is Plugin => plugin.name === "@cloudflare/think"
     );
@@ -345,3 +347,20 @@ const minimalPluginContext = {
   setAssetSource() {},
   warn(_message?: unknown) {}
 };
+
+function flattenThinkPlugins(options: ReturnType<typeof think>): Plugin[] {
+  const plugins: Plugin[] = [];
+  const visit = (option: unknown) => {
+    if (!option) return;
+    if (Array.isArray(option)) {
+      for (const item of option) visit(item);
+      return;
+    }
+    if (typeof option === "object" && "name" in option) {
+      plugins.push(option as Plugin);
+    }
+  };
+
+  visit(options);
+  return plugins;
+}
