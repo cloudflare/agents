@@ -164,12 +164,12 @@ Each provider is a small package implementing the `Transcriber` or `TTSProvider`
 
 [`TelnyxJWTEndpoint` class in `server/jwt-endpoint.ts`](../voice-providers/telnyx/src/server/jwt-endpoint.ts#L1-L288) — generates short-lived JWTs for the browser WebRTC client. Browsers need a credential before they can connect to Telnyx's WebRTC infrastructure.
 
-[Transport config helpers in `helpers/transport-config.ts`](../voice-providers/telnyx/src/helpers/transport-config.ts#L1-L119) — utility functions that build the correct WebSocket URL, credentials, and codec settings for different Telnyx transport modes.
+[Transport config helpers in `helpers/transport-config.ts`](../voice-providers/telnyx/src/helpers/transport-config.ts#L1-L119) — the `createTelnyxVoiceConfig(options)` factory function. Fetches a short-lived JWT from the server-side `TelnyxJWTEndpoint`, constructs a `TelnyxCallBridge` with that credential, and returns `{ bridge, audioInput, credentialId, sipUsername, cleanup }` — a ready-to-use bundle for passing to `VoiceClient` or `TelnyxPhoneClient`.
 
-[Phone transport in `transport/phone-transport.ts`](../voice-providers/telnyx/src/transport/phone-transport.ts#L1-L154) — the lower-level transport class used by `TelnyxCallBridge` to send and receive audio over Telnyx's media streams.
+[Phone transport in `transport/phone-transport.ts`](../voice-providers/telnyx/src/transport/phone-transport.ts#L1-L154) — `TelnyxPhoneTransport`, a `VoiceTransport` wrapper that intercepts binary audio from the server and routes it to a `TelnyxCallBridge` for PSTN playback, while forwarding all other messages to the underlying transport (typically `WebSocketVoiceTransport`). Requires the server to use `audioFormat: "pcm16"`.
 
-[Audio utilities in `audio/utils.ts`](../voice-providers/telnyx/src/audio/utils.ts#L1-L110) — audio format conversion helpers specific to Telnyx's requirements (sample rate conversion, codec negotiation).
+[Audio utilities in `audio/utils.ts`](../voice-providers/telnyx/src/audio/utils.ts#L1-L110) — `float32ToInt16`, `computeRMS`, and two AudioWorklet processor source strings: `PCM_CAPTURE_PROCESSOR_SOURCE` (captures mic input at 16 kHz for STT) and `PCM_PLAYBACK_PROCESSOR_SOURCE` (plays back agent audio at 48 kHz into the WebRTC stream).
 
-[Browser WebRTC client in `browser.ts`](../voice-providers/telnyx/src/browser.ts#L1-L27) — thin re-export of the `@telnyx/webrtc` browser SDK with Telnyx-specific defaults applied.
+[Browser WebRTC entry point in `browser.ts`](../voice-providers/telnyx/src/browser.ts#L1-L27) — the `@cloudflare/voice-telnyx/browser` entry point. Re-exports `TelnyxCallBridge`, `TelnyxPhoneClient`, `TelnyxPhoneTransport`, and `createTelnyxVoiceConfig` — the four browser-side building blocks for Telnyx PSTN telephony integration.
 
-[`TelnyxClient` class in `client.ts`](../voice-providers/telnyx/src/client.ts#L1-L22) — REST API client for Telnyx account management operations (creating SIP connections, configuring phone numbers, etc.).
+[`TelnyxClient` class in `client.ts`](../voice-providers/telnyx/src/client.ts#L1-L22) — minimal shared configuration class holding `apiKey` and `baseUrl`. Extended by `TelnyxSTT` and `TelnyxTTS` to inherit authentication config; not a full REST API client.
