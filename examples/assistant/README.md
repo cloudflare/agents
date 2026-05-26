@@ -105,21 +105,24 @@ operations and MCP tool invocations back to the directory.
 
 The browser never chooses a DO name. It connects to `/chat` (the
 directory) and `/chat/sub/my-assistant/<chatId>` (a specific chat), and
-the Worker resolves the `AssistantDirectory` instance from the
-authenticated GitHub cookie:
+the Think generated Worker entry calls `src/server.ts`, where the app resolves
+the `AssistantDirectory` instance from the authenticated GitHub cookie:
 
 ```ts
 if (url.pathname === "/chat" || url.pathname.startsWith("/chat/")) {
   const user = await getGitHubUserFromRequest(request);
   if (!user) return createUnauthorizedResponse(request);
   const directory = await getAgentByName(env.AssistantDirectory, user.login);
-  return directory.fetch(request);
+  return think.router.routeSubAgent(request, directory, {
+    parent: "assistant"
+  });
 }
 ```
 
-The directory's built-in sub-agent router picks up the
-`/sub/my-assistant/<chatId>` tail — no per-chat plumbing lives in the
-Worker. Access control lives on the parent via `onBeforeSubAgent` as a
+Think's router resolves the friendly `/sub/my-assistant/<chatId>` tail through
+the generated manifest before handing off to the directory's built-in sub-agent
+router. No per-chat plumbing or generated class URL segment knowledge lives in
+the Worker. Access control lives on the parent via `onBeforeSubAgent` as a
 strict registry gate:
 
 ```ts
