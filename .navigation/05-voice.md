@@ -60,19 +60,19 @@ LLM output arrives as a stream of tokens. Feeding every token to TTS would produ
 
 [`VoiceClientEventMap` interface](../packages/voice/src/voice-client.ts#L87-L97) — the events you listen to: `statuschange` (idle/listening/thinking/speaking), `transcriptchange` (final transcript array updated), `interimtranscript` (partial STT result), `metricschange` (latency stats), `audiolevelchange` (mic RMS), `connectionchange` (WebSocket open/close), `mutechange`, `error`, `custommessage` (non-protocol server messages).
 
-[WebSocket connection and audio capture](../packages/voice/src/voice-client.ts#L200-L450) — the `connect()` method: opens the WebSocket, sends a `hello` message with the protocol version, starts the microphone stream, and sets up the VAD. Audio is chunked into fixed-size frames and sent as binary WebSocket messages. The VAD detects silence gaps to decide when an utterance ends.
+[VoiceClient — public getters, event system, and connect()/disconnect()](../packages/voice/src/voice-client.ts#L200-L450) — public read-only getters (`status`, `transcript`, `metrics`, `audioLevel`, `isMuted`, `connected`, `error`, `interimTranscript`), the `addEventListener`/`removeEventListener`/`#emit` event system, and the `connect()` method which wires transport callbacks and handles reconnect recovery. `disconnect()` also lives here.
 
-[Playback and interrupt handling](../packages/voice/src/voice-client.ts#L450-L700) — the `_handleServerMessage()` method: routes incoming binary audio frames to the audio context for playback, handles `transcript` messages to update the transcript state, and handles `status` changes (idle/listening/thinking/speaking). When the user starts speaking while the agent is speaking, a `CF_VOICE_INTERRUPT` message is sent to stop TTS.
+[VoiceClient — startCall(), endCall(), toggleMute(), sendText(), sendJSON(), and #handleJSONMessage()](../packages/voice/src/voice-client.ts#L450-L700) — `startCall()` sends `start_call`, starts the mic (or custom `audioInput`), and forwards audio to the server; `endCall()` tears everything down; `toggleMute()` gates audio and flushes a pending utterance; `sendText()` and `sendJSON()` allow non-audio input. `#handleJSONMessage()` dispatches all incoming JSON protocol messages — routing `status`, `transcript_*`, `metrics`, `error`, and custom app messages to the appropriate state updates and events.
 
-[Metrics collection and disconnect](../packages/voice/src/voice-client.ts#L700-L906) — latency metrics (time-to-first-audio, round-trip time) are calculated per utterance and exposed via the `metricschange` event. The `disconnect()` method closes the microphone stream, stops the audio context, and closes the WebSocket cleanly.
+[VoiceClient — audio context, playback queue, mic capture, and audio-level processing](../packages/voice/src/voice-client.ts#L700-L906) — `#getAudioContext`/`#closeAudioContext` manage the shared Web Audio context; `#playAudio`/`#processPlaybackQueue`/`#stopPlayback` implement a serialised playback queue that decodes incoming audio (PCM16 or browser-native formats); `#startMic`/`#stopMic` set up the AudioWorklet pipeline for mic capture and resampling; `#processAudioLevel` runs both silence detection (end-of-speech timer) and interrupt detection (consecutive high-RMS chunks during agent playback).
 
 ---
 
 ## React hooks (`src/voice-react.tsx`)
 
-[`useVoiceAgent(options)` hook](../packages/voice/src/voice-react.tsx#L1-L150) — wraps `VoiceClient` for React. Returns `{ status, transcript, interimTranscript, audioLevel, start, stop }`. Cleans up the client on unmount.
+[`useVoiceInput(options)` hook](../packages/voice/src/voice-react.tsx#L1-L150) — a lightweight hook for voice-to-text dictation (no TTS, no full agent turn). Accumulates user transcript text as a plain string. Returns `{ transcript, interimTranscript, isListening, audioLevel, isMuted, error, start, stop, toggleMute, clear }`. Reconnects automatically when connection identity changes.
 
-[`useVoiceInput(options)` hook](../packages/voice/src/voice-react.tsx#L150-L250) — a lighter hook for voice-to-text dictation only (no TTS, no full agent connection). Useful for adding speech input to a regular chat UI.
+[`useVoiceAgent(options)` hook](../packages/voice/src/voice-react.tsx#L150-L250) — wraps `VoiceClient` for React, bridging all client events into React state. Returns `{ status, transcript, interimTranscript, metrics, audioLevel, isMuted, connected, error, startCall, endCall, toggleMute, sendText, sendJSON, lastCustomMessage }`. Tears down and recreates the client when connection identity changes, firing `onReconnect` if provided.
 
 ---
 

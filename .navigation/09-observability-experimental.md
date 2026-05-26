@@ -86,7 +86,7 @@ Key methods:
 
 [AgentSessionProvider — SQL schema, getMessage(), getHistory(), and getLatestLeaf()](../packages/agents/src/experimental/memory/session/providers/agent.ts#L1-L200) and [AgentSessionProvider — appendMessage(), updateMessage(), searchMessages(), and addCompaction()](../packages/agents/src/experimental/memory/session/providers/agent.ts#L200-L397) — stores sessions in the agent's own SQLite. The simplest option; zero external dependencies.
 
-[`AgentContextProvider` in `providers/agent-context.ts`](../packages/agents/src/experimental/memory/session/providers/agent-context.ts#L1-L55) — read-only context provider backed by agent state. Useful for exposing agent state as a context block.
+[`AgentContextProvider` in `providers/agent-context.ts`](../packages/agents/src/experimental/memory/session/providers/agent-context.ts#L1-L55) — a `WritableContextProvider` backed by the agent's own SQLite (`cf_agents_context_blocks` table). Used by the `Session` builder to auto-wire context blocks and the system prompt store when no explicit provider is given.
 
 [PostgresSessionProvider — connection setup, schema creation, and read methods](../packages/agents/src/experimental/memory/session/providers/postgres.ts#L1-L180) and [PostgresSessionProvider — write methods, compaction, and transaction helpers](../packages/agents/src/experimental/memory/session/providers/postgres.ts#L180-L340) — stores sessions in a Postgres database. Enables shared history across multiple agent instances or geographic regions.
 
@@ -96,7 +96,7 @@ Key methods:
 
 ### Compaction utilities (`utils/`)
 
-[`estimateTokens(text)` in `utils/tokens.ts`](../packages/agents/src/experimental/memory/utils/tokens.ts#L1-L84) — a fast (no model call) token count estimate. Uses a word-count heuristic calibrated against common LLM tokenisers.
+[`estimateStringTokens(text)` and `estimateMessageTokens(messages)` in `utils/tokens.ts`](../packages/agents/src/experimental/memory/utils/tokens.ts#L1-L84) — fast (no model call) token count estimates. `estimateStringTokens` uses a hybrid heuristic (max of character-based and word-based estimates) to handle both dense content and prose. `estimateMessageTokens` walks an array of `SessionMessage` objects, summing per-part estimates plus a per-message overhead constant. Avoids real tokenizers (e.g. tiktoken) because they cost ~80-120MB of heap, which exceeds Cloudflare Worker memory limits.
 
 [`compactMessages()` in `utils/compaction.ts`](../packages/agents/src/experimental/memory/utils/compaction.ts#L1-L101) — takes a message array and returns a summarised version that fits within a token budget, preserving the most recent messages verbatim.
 

@@ -173,7 +173,7 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 [`queryJsonValue(value, query)` and JSON path helpers](../packages/shell/src/extras.ts#L1-L200) — JSONPath-style querying into nested objects. Used by workspace tools that need to read or update specific fields in JSON files without rewriting them entirely.
 
-[extras.ts — extractTar() and archive utilities](../packages/shell/src/extras.ts#L200-L430) and [extras.ts — parseJsonPath(), setJsonPathValue(), and deleteJsonPathValue()](../packages/shell/src/extras.ts#L430-L630) — builds a directory tree summary (`StateTreeNode`) with sizes and hashes. Used to give the LLM a compact overview of the workspace structure and to detect which files changed between turns.
+[extras.ts — extractTar(), TarInputEntry type, and parseJsonPath()/setJsonPathValue()/deleteJsonPathValue()](../packages/shell/src/extras.ts#L200-L430) and [extras.ts — matchesFind(), transformBytes(), concatBytes(), createTarHeader(), parseTar(), and file-type utilities](../packages/shell/src/extras.ts#L430-L629) — the middle section contains the JSON path mutation helpers (`parseJsonPath` tokenises dot/bracket notation; `setJsonPathValue`/`deleteJsonPathValue` mutate a cloned object in-place). The lower section is the raw tar encoding/decoding engine: `createTarHeader()` builds the 512-byte POSIX ustar block, `parseTar()` reads it back, and `transformBytes()` streams data through `CompressionStream`/`DecompressionStream` for the gzip helpers. `detectFile()` and `hashBytes()` round out the utility exports.
 
 ### Prompt generation (`src/prompt.ts`)
 
@@ -181,7 +181,7 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 ### Workers entry point (`src/workers.ts`)
 
-[`WorkersShellBackend` class and Workers-specific helpers](../packages/shell/src/workers.ts#L1-L67) — a thin wrapper that creates a `Workspace` backed by the Durable Object's `SqlStorage` and optionally an R2 bucket binding. Use this in your agent's `onStart()` as the simplest way to get a persistent workspace.
+[`stateTools(workspace)` and `stateToolsFromBackend(backend)` in `src/workers.ts`](../packages/shell/src/workers.ts#L1-L67) — convenience functions that create a codemode `ToolProvider` exposing all `StateBackend` methods as `state.*` inside a sandbox. `stateTools(workspace)` is the common path: it wraps a `Workspace` in `createWorkspaceStateBackend()` then registers every method from `STATE_METHOD_NAMES`. The provider includes `STATE_TYPES` as its type declarations so the LLM's generated code is fully typed.
 
 ### FileSystem primitives (`src/fs/`)
 
