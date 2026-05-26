@@ -51,7 +51,7 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 [`createGlobMatcher(pattern)` function](../packages/shell/src/helpers.ts#L54-L104) — converts a glob pattern to a `RegExp`. Handles `**`, `*`, `?`, and `[...]` character classes correctly, including the tricky `**/` prefix case.
 
-[`searchTextContent(content, options)` function](../packages/shell/src/helpers.ts#L145-L201) — line-by-line text search with context lines. Returns an array of `{lineNumber, line, contextBefore, contextAfter}` matches.
+[`searchTextContent(content, options)` function](../packages/shell/src/helpers.ts#L145-L201) — line-by-line text search with context lines. Returns an array of `StateTextMatch` objects: `{line, column, match, lineText, beforeLines?, afterLines?}`. Supports regex, case-insensitive, whole-word, and `maxMatches` via `createTextMatcher()`.
 
 [`replaceTextContent(content, search, replacement)` function](../packages/shell/src/helpers.ts#L203-L220) — search-and-replace using the same `createTextMatcher()` regex builder as `searchTextContent`. Returns `{replaced: number, content: string}` — the replacement count and the updated string. Used by `replaceInFile()` and `replaceInFiles()` in `FileSystemStateBackend`.
 
