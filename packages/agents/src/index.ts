@@ -39,6 +39,7 @@ import {
   routePartykitRequest
 } from "partyserver";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
+export { camelCaseToKebabCase } from "./utils";
 import {
   type RetryOptions,
   tryN,
