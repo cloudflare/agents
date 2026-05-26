@@ -193,7 +193,7 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 ### Git operations (`src/git/`)
 
-[createGit() — clone(), status(), add(), commit(), and push()](../packages/shell/src/git/index.ts#L1-L200) and [createGit() — pull(), log(), diff(), branch(), checkout(), and GitStatusEntry types](../packages/shell/src/git/index.ts#L200-L407) — the main git integration. Wraps `isomorphic-git` to provide a high-level API: `clone(url)`, `status()`, `add(path)`, `commit(message)`, `push()`, `pull()`, `log()`, `diff()`, `branch()`, `checkout()`. Returns `GitStatusEntry[]` (file path, working-tree status, index status) and `GitLogEntry[]` (hash, message, author, date).
+[createGit() — types, clone(), status(), add(), rm(), commit(), and log()](../packages/shell/src/git/index.ts#L1-L200) and [createGit() — branch(), checkout(), fetch(), pull(), push(), diff(), init(), remote(), and Git type](../packages/shell/src/git/index.ts#L200-L407) — the main git integration. Wraps `isomorphic-git` to provide a high-level API bound to a `FileSystem`. The first half covers `clone`, `status`, `add`/`rm`, `commit`, and `log`. The second half covers `branch`, `checkout`, `fetch`, `pull`, `push`, `diff` (change list via `statusMatrix`), `init`, and `remote` management. Returns `GitStatusEntry[]` (file path, working-tree status, index status) and `GitLogEntry[]` (hash, message, author, date). Authentication is handled inline via `onAuth` callbacks.
 
 [`createGitFs(filesystem)` adapter in `src/git/fs-adapter.ts`](../packages/shell/src/git/fs-adapter.ts#L1-L183) — adapts the `FileSystem` interface to the shape `isomorphic-git` expects. `isomorphic-git` uses a custom `fs` object with a specific callback-style API; this adapter bridges the gap.
 
