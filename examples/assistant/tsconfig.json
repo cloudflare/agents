@@ -1,24 +1,4 @@
 {
   "extends": "agents/tsconfig",
-  "exclude": ["src/tests/**/*.ts"],
-  "compilerOptions": {
-    "paths": {
-      "@cloudflare/think": ["../../packages/think/src/think.ts"],
-      "@cloudflare/think/session": [
-        "../../packages/think/src/session/index.ts"
-      ],
-      "@cloudflare/think/extensions": [
-        "../../packages/think/src/extensions/index.ts"
-      ],
-      "@cloudflare/think/tools/workspace": [
-        "../../packages/think/src/tools/workspace.ts"
-      ],
-      "@cloudflare/think/tools/execute": [
-        "../../packages/think/src/tools/execute.ts"
-      ],
-      "@cloudflare/think/tools/extensions": [
-        "../../packages/think/src/tools/extensions.ts"
-      ]
-    }
-  }
+  "exclude": ["src/tests/**/*.ts"]
 }

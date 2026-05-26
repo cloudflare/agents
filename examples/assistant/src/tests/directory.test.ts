@@ -25,7 +25,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import { readDirectoryState, uniqueDirectoryName } from "./helpers";
-import type { AssistantDirectory } from "../server";
+import type { AssistantDirectory } from "../../agents/assistant/agent";
 
 async function freshDirectory(): Promise<{
   directory: DurableObjectStub<AssistantDirectory>;
