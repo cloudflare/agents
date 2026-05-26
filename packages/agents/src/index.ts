@@ -872,6 +872,13 @@ export type AddRpcMcpServerOptions = {
 };
 
 const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
+const SUB_AGENT_IDENTITY_VERSION_LEGACY = "legacy";
+const SUB_AGENT_IDENTITY_VERSION_PATH_V2 = "path-v2";
+const SUB_AGENT_IDENTITY_PATH_V2_PREFIX = "cf-agents:v2:";
+
+type SubAgentIdentityVersion =
+  | typeof SUB_AGENT_IDENTITY_VERSION_LEGACY
+  | typeof SUB_AGENT_IDENTITY_VERSION_PATH_V2;
 
 /**
  * Schema version for the Agent's internal SQLite tables.
@@ -888,6 +895,33 @@ const STATE_ROW_ID = "cf_state_row_id";
 const STATE_WAS_CHANGED = "cf_state_was_changed";
 
 const DEFAULT_STATE = {} as unknown;
+
+async function sha256Hex(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function pathV2IdentityName(logicalName: string, digest: string): string {
+  return `${SUB_AGENT_IDENTITY_PATH_V2_PREFIX}${encodeURIComponent(logicalName)}:${digest}`;
+}
+
+function logicalNameFromPathV2Identity(identityName: string): string | null {
+  if (!identityName.startsWith(SUB_AGENT_IDENTITY_PATH_V2_PREFIX)) {
+    return null;
+  }
+  const rest = identityName.slice(SUB_AGENT_IDENTITY_PATH_V2_PREFIX.length);
+  const separator = rest.lastIndexOf(":");
+  if (separator === -1) return null;
+
+  try {
+    return decodeURIComponent(rest.slice(0, separator));
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Validate that a stored `parentPath` has the expected shape. Used
@@ -1239,6 +1273,14 @@ export class Agent<
     string,
     StoredSubAgentConnection
   >();
+
+  /**
+   * User-facing facet name. For legacy facets this is the same as
+   * `ctx.id.name`; path-scoped facets use an internal routing id and
+   * keep the logical name here instead.
+   * @internal
+   */
+  private _facetName?: string;
 
   /**
    * Ancestor chain, root-first. Empty for top-level DOs; populated at
@@ -2129,6 +2171,13 @@ export class Agent<
           const isFacet =
             await this.ctx.storage.get<boolean>("cf_agents_is_facet");
           if (isFacet) this._isFacet = true;
+
+          const storedFacetName = await this.ctx.storage.get<string>(
+            "cf_agents_facet_name"
+          );
+          if (typeof storedFacetName === "string") {
+            this._facetName = storedFacetName;
+          }
 
           const storedParentPath = await this.ctx.storage.get<
             Array<{ className: string; name: string }>
@@ -3227,6 +3276,19 @@ export class Agent<
       binding as DurableObjectNamespace<Agent>,
       root.name
     )) as unknown as RootFacetRpcSurface;
+  }
+
+  private _cf_rootResolvesToSelf(): boolean {
+    const root = this._parentPath[0];
+    if (!root) return false;
+
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    const binding = ctx.exports?.[root.className] as
+      | DurableObjectNamespace
+      | undefined;
+    if (!binding?.idFromName) return false;
+
+    return binding.idFromName(root.name).equals(this.ctx.id);
   }
 
   private _validateScheduleCallback(
@@ -6225,6 +6287,13 @@ export class Agent<
   protected async _cf_hydrateSubAgentConnectionsFromRoot(): Promise<void> {
     if (!this._isFacet || this._parentPath.length === 0) return;
 
+    if (this._cf_rootResolvesToSelf()) {
+      // The root stub would resolve back to this blocked Durable Object
+      // during startup. The facet view cannot see root-owned hibernated
+      // sockets locally, so preserve liveness and skip best-effort hydration.
+      return;
+    }
+
     const root = await this._rootAlarmOwner();
     const metas = await root._cf_subAgentConnectionMetas(this.selfPath);
     for (const meta of metas) {
@@ -6458,41 +6527,33 @@ export class Agent<
    * broadcast to their own WebSocket clients reached via sub-agent
    * routing.
    *
-   * The facet's name (and `this.name` getter) is handled entirely by
-   * partyserver via `ctx.id.name`, which is populated because the
-   * parent passed an explicit named Durable Object id to
-   * `ctx.facets.get()` — see {@link _cf_resolveSubAgent}. No
-   * `setName()` call or `__ps_name` storage write is needed; the
-   * facet's name survives cold wake automatically because the factory
-   * re-runs and `idFromName` is deterministic.
+   * The facet's logical name is persisted separately from its routing id.
+   * Legacy facets used the logical name directly as `ctx.id.name`; newer
+   * facets can use path-scoped routing ids while preserving `this.name`.
    *
    * @internal Called by {@link subAgent}.
    */
   async _cf_initAsFacet(
     name: string,
-    parentPath: ReadonlyArray<{ className: string; name: string }> = []
+    parentPath: ReadonlyArray<{ className: string; name: string }> = [],
+    identityName = name
   ): Promise<void> {
-    // Defense in depth: the parent is supposed to construct the
-    // facet with a named Durable Object id via `_cf_resolveSubAgent`,
-    // which makes `this.name` resolve to `name` automatically
-    // through partyserver's `ctx.id.name`. If
-    // it didn't (e.g. someone bypassed `_cf_resolveSubAgent`, or
-    // the parent's id construction has a bug), `this.name` would
-    // silently report the parent's name instead of the facet's
-    // name. Fail loud instead of letting a misconfigured facet
-    // operate with the wrong identity.
-    if (this.name !== name) {
+    const routedName = super.name;
+    if (routedName !== identityName) {
       throw new Error(
-        `Facet bootstrap mismatch: expected this.name === "${name}" but got "${this.name}". ` +
-          `This usually means the parent passed the wrong (or no) id to ctx.facets.get(). ` +
+        `Facet bootstrap mismatch: expected routed identity "${identityName}" but got "${routedName}". ` +
+          `This usually means the parent passed the wrong id to ctx.facets.get(). ` +
           `See _cf_resolveSubAgent.`
       );
     }
+
     this._isFacet = true;
+    this._facetName = name;
     this._parentPath = parentPath;
     // Persist the agent-specific facet keys in parallel.
     await Promise.all([
       this.ctx.storage.put("cf_agents_is_facet", true),
+      this.ctx.storage.put("cf_agents_facet_name", name),
       this.ctx.storage.put("cf_agents_parent_path", parentPath)
     ]);
     // Fire onStart() now since this RPC bypasses Server.fetch(),
@@ -6505,6 +6566,12 @@ export class Agent<
     } finally {
       this._suppressProtocolBroadcasts = false;
     }
+  }
+
+  override get name(): string {
+    return (
+      this._facetName ?? logicalNameFromPathV2Identity(super.name) ?? super.name
+    );
   }
 
   /**
@@ -7689,18 +7756,17 @@ export class Agent<
     // Composite key: class name + NUL + facet name, so two different
     // classes can share the same user-facing name.
     const facetKey = `${className}\0${name}`;
-    // Pass an explicit named `id` in FacetStartupOptions so the
-    // facet has its own `ctx.id.name === name` (not the parent's
-    // name). Without this, facets inherit the parent DO's `ctx.id`
-    // and `this.name` on the facet would silently return the
-    // parent's name. See:
-    // https://developers.cloudflare.com/dynamic-workers/usage/durable-object-facets/
-    //
+
+    // Derive the child's ancestor chain: our own `parentPath` +
+    // `{ class: this.constructor.name, name: this.name }`. Inductive
+    // across recursive nesting.
+    const childParentPath = this.selfPath;
+    const childPath = [...childParentPath, { className, name }];
+
     // For nested facets, the immediate parent is itself facet-only
     // and is not expected to expose namespace helpers. Use the root
-    // supervisor namespace instead; the id is opaque for facet
-    // routing, but `idFromName(name)` gives PartyServer a stable
-    // `ctx.id.name`.
+    // supervisor namespace instead; path-v2 identities are scoped to
+    // the full logical path while legacy rows continue using bare names.
     const rootClassName =
       this._parentPath[0]?.className ??
       (this.constructor as { name: string }).name;
@@ -7726,16 +7792,21 @@ export class Agent<
         `Sub-agent bootstrap requires the root agent class "${rootClassName}" to be available as a Durable Object namespace, but ctx.exports["${rootClassName}"] is missing or doesn't expose idFromName.${minificationHint} Make sure the root agent class is exported under that class name and registered in your wrangler.jsonc durable_objects.bindings.`
       );
     }
-    const facetId = rootNs.idFromName(name);
+    const identity = await this._cf_subAgentIdentity(
+      className,
+      name,
+      childPath
+    );
+    const facetId = rootNs.idFromName(identity.name);
     const stub = ctx.facets.get(facetKey, () => ({
       class: Cls as DurableObjectClass,
       id: facetId
     }));
 
-    // Derive the child's ancestor chain: our own `parentPath` +
-    // `{ class: this.constructor.name, name: this.name }`. Inductive
-    // across recursive nesting.
-    const childParentPath = this.selfPath;
+    // Record before initialization so a successfully-initialized facet is
+    // not left without identity metadata if the parent is interrupted after
+    // the child RPC returns. Roll back only rows this call created.
+    this._recordSubAgent(className, name, identity);
 
     // Initialize the child as a facet via a single RPC that runs
     // inside the child's isolate. Avoids the cross-DO I/O error that
@@ -7745,28 +7816,32 @@ export class Agent<
     // The parent may be inside a WebSocket/message request context here.
     // Clear native context handles before the child facet RPC so workerd
     // never sees parent-owned I/O attached to child initialization.
-    await agentContext.run(
-      {
-        agent: this,
-        connection: undefined,
-        request: undefined,
-        email: undefined
-      },
-      async () => {
-        await (
-          stub as unknown as {
-            _cf_initAsFacet(
-              name: string,
-              parentPath: ReadonlyArray<{ className: string; name: string }>
-            ): Promise<void>;
-          }
-        )._cf_initAsFacet(name, childParentPath);
+    try {
+      await agentContext.run(
+        {
+          agent: this,
+          connection: undefined,
+          request: undefined,
+          email: undefined
+        },
+        async () => {
+          await (
+            stub as unknown as {
+              _cf_initAsFacet(
+                name: string,
+                parentPath: ReadonlyArray<{ className: string; name: string }>,
+                identityName: string
+              ): Promise<void>;
+            }
+          )._cf_initAsFacet(name, childParentPath, identity.name);
+        }
+      );
+    } catch (error) {
+      if (!identity.existing) {
+        this._forgetSubAgent(className, name);
       }
-    );
-
-    // Record in the parent's sub-agent registry so `hasSubAgent` /
-    // `listSubAgents` reflect the spawn. Idempotent.
-    this._recordSubAgent(className, name);
+      throw error;
+    }
 
     return stub;
   }
@@ -7841,27 +7916,116 @@ export class Agent<
   /** @internal */
   private _subAgentRegistryReady = false;
 
+  private _addColumnIfNotExists(sql: string): void {
+    try {
+      this.ctx.storage.sql.exec(sql);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (!message.toLowerCase().includes("duplicate column")) {
+        throw e;
+      }
+    }
+  }
+
   /** @internal */
   private _ensureSubAgentRegistry(): void {
     if (this._subAgentRegistryReady) return;
+    // This registry is lazy because older agents may never create sub-agents.
+    // Keep its additive column migrations here instead of the global schema
+    // gate so first sub-agent access upgrades legacy registry tables in place.
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_sub_agents (
         class TEXT NOT NULL,
         name TEXT NOT NULL,
         created_at INTEGER NOT NULL,
+        identity_version TEXT,
+        identity_name TEXT,
         PRIMARY KEY (class, name)
       )
     `;
+    this._addColumnIfNotExists(
+      "ALTER TABLE cf_agents_sub_agents ADD COLUMN identity_version TEXT"
+    );
+    this._addColumnIfNotExists(
+      "ALTER TABLE cf_agents_sub_agents ADD COLUMN identity_name TEXT"
+    );
     this._subAgentRegistryReady = true;
   }
 
   /** @internal */
-  private _recordSubAgent(className: string, name: string): void {
+  private _recordSubAgent(
+    className: string,
+    name: string,
+    identity: { version: SubAgentIdentityVersion; name: string }
+  ): void {
     this._ensureSubAgentRegistry();
     this.sql`
-      INSERT OR IGNORE INTO cf_agents_sub_agents (class, name, created_at)
-      VALUES (${className}, ${name}, ${Date.now()})
+      INSERT OR IGNORE INTO cf_agents_sub_agents
+        (class, name, created_at, identity_version, identity_name)
+      VALUES
+        (${className}, ${name}, ${Date.now()}, ${identity.version}, ${identity.name})
     `;
+  }
+
+  /** @internal */
+  private _subAgentRegistryRow(
+    className: string,
+    name: string
+  ): {
+    identity_version: string | null;
+    identity_name: string | null;
+  } | null {
+    this._ensureSubAgentRegistry();
+    const rows = this.sql<{
+      identity_version: string | null;
+      identity_name: string | null;
+    }>`
+      SELECT identity_version, identity_name
+      FROM cf_agents_sub_agents
+      WHERE class = ${className} AND name = ${name}
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  }
+
+  private async _cf_subAgentIdentity(
+    className: string,
+    name: string,
+    childPath: ReadonlyArray<AgentPathStep>
+  ): Promise<{
+    version: SubAgentIdentityVersion;
+    name: string;
+    existing: boolean;
+  }> {
+    const row = this._subAgentRegistryRow(className, name);
+    if (row) {
+      if (
+        row.identity_version === SUB_AGENT_IDENTITY_VERSION_PATH_V2 &&
+        typeof row.identity_name === "string"
+      ) {
+        return {
+          version: SUB_AGENT_IDENTITY_VERSION_PATH_V2,
+          name: row.identity_name,
+          existing: true
+        };
+      }
+      return {
+        version: SUB_AGENT_IDENTITY_VERSION_LEGACY,
+        name,
+        existing: true
+      };
+    }
+
+    // Do not probe the legacy bare-name facet here. `ctx.facets.get()` is
+    // create-on-access, so probing would create or wake legacy storage as a
+    // side effect and could reintroduce old id collisions. Existing registry
+    // rows remain the compatibility signal; new rows use path-v2.
+    const digest = await sha256Hex(JSON.stringify(childPath));
+    return {
+      version: SUB_AGENT_IDENTITY_VERSION_PATH_V2,
+      name: pathV2IdentityName(name, digest),
+      existing: false
+    };
   }
 
   /** @internal */

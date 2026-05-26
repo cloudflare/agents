@@ -157,6 +157,15 @@ describe("SubAgent", () => {
     expect(otherName).toBe("other-counter");
   });
 
+  it("should expose the logical facet name during construction", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    expect(await agent.subAgentGetConstructorName("constructor-counter")).toBe(
+      "constructor-counter"
+    );
+  });
+
   it("should throw descriptive error for non-exported sub-agent class", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
@@ -331,6 +340,38 @@ describe("SubAgent", () => {
 
       expect(a).toBe("value-a");
       expect(b).toBe("value-b");
+    });
+
+    it("should isolate nested sub-agents that share the same logical name", async () => {
+      const name = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+      await agent.nestedSetValue("same-name", "same-name", "key", "value");
+
+      expect(await agent.nestedGetValue("same-name", "same-name", "key")).toBe(
+        "value"
+      );
+      expect(
+        await agent.subAgentNestedParentPath("same-name", "same-name")
+      ).toEqual([
+        { className: "TestSubAgentParent", name },
+        { className: "OuterSubAgent", name: "same-name" }
+      ]);
+    });
+
+    it("should isolate same-class nested sub-agents under different parents", async () => {
+      const name = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+      await agent.nestedSetValue("outer-a", "shared-inner", "key", "value-a");
+      await agent.nestedSetValue("outer-b", "shared-inner", "key", "value-b");
+
+      expect(await agent.nestedGetValue("outer-a", "shared-inner", "key")).toBe(
+        "value-a"
+      );
+      expect(await agent.nestedGetValue("outer-b", "shared-inner", "key")).toBe(
+        "value-b"
+      );
     });
 
     it("should call methods on outer sub-agent directly", async () => {
@@ -1391,6 +1432,32 @@ describe("SubAgent", () => {
     // re-accesses it. The _isFacet flag must survive via storage.
     const error = await agent.subAgentTryScheduleAfterAbort("persist-flag");
     expect(error).toBe("");
+  });
+
+  it("should restart a new same-name sub-agent with a path-scoped identity", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    expect(await agent.subAgentPing(name)).toBe("pong");
+    await agent.subAgentAbort(name);
+
+    // New same-name facets use path-v2 identity rows, so they avoid the
+    // same-id root/facet shape while preserving the logical name.
+    expect(await agent.subAgentPing(name)).toBe("pong");
+  });
+
+  it("should restart a legacy same-id sub-agent without self-deadlocking startup", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.seedLegacyCounterSubAgentRegistry(name);
+    expect(await agent.subAgentPing(name)).toBe("pong");
+    await agent.subAgentAbort(name);
+
+    // Existing deployments have registry rows without identity metadata.
+    // Those must keep using the legacy bare-name id and rely on the
+    // self-root hydration guard to avoid wedging on wake.
+    expect(await agent.subAgentPing(name)).toBe("pong");
   });
 
   it("should spawn a sub-agent from a WebSocket onMessage turn", async () => {

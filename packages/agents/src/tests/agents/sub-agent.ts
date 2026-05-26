@@ -11,6 +11,7 @@ import { RpcTarget } from "cloudflare:workers";
 
 export class CounterSubAgent extends Agent {
   private _heldKeepAliveDisposers: Array<() => void> = [];
+  private _constructorName = this.name;
 
   onStart() {
     this.sql`
@@ -252,6 +253,10 @@ export class CounterSubAgent extends Agent {
 
   getName(): string {
     return this.name;
+  }
+
+  getConstructorName(): string {
+    return this._constructorName;
   }
 
   /** Return the facet's own `parentPath` (root-first ancestor chain). */
@@ -1118,6 +1123,14 @@ export class TestSubAgentParent extends Agent {
     return child.ping();
   }
 
+  async seedLegacyCounterSubAgentRegistry(subAgentName: string): Promise<void> {
+    this.hasSubAgent("CounterSubAgent", subAgentName);
+    this.sql`
+      INSERT OR IGNORE INTO cf_agents_sub_agents (class, name, created_at)
+      VALUES (${"CounterSubAgent"}, ${subAgentName}, ${Date.now()})
+    `;
+  }
+
   async subAgentIncrement(
     subAgentName: string,
     counterId: string
@@ -1429,6 +1442,11 @@ export class TestSubAgentParent extends Agent {
   async subAgentGetName(subAgentName: string): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.getName();
+  }
+
+  async subAgentGetConstructorName(subAgentName: string): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.getConstructorName();
   }
 
   // ── Error tests ───────────────────────────────────────────────
