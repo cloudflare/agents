@@ -72,7 +72,7 @@ Four transport classes sit between the `McpServer` and the network. They share t
 
 Your agent connects to external MCP servers through `MCPClientManager`. An instance lives at `this.mcp` on every `Agent` that has used `addMcpServer()`.
 
-[MCPClientManager — constructor, SQL helpers, storage operations, connection filtering, and OAuth/auth-provider helpers](../packages/agents/src/mcp/client.ts#L266-L520) and [MCPClientManager — restoreConnectionsFromStorage(), _trackConnection(), and waitForConnections()](../packages/agents/src/mcp/client.ts#L520-L620) — manages a registry of named server connections backed by SQLite. Connections survive agent hibernation.
+[MCPClientManager — constructor, SQL helpers, storage operations, connection filtering, and OAuth/auth-provider helpers](../packages/agents/src/mcp/client.ts#L266-L520) and [MCPClientManager — restoreConnectionsFromStorage()](../packages/agents/src/mcp/client.ts#L520-L620) — manages a registry of named server connections backed by SQLite. Connections survive agent hibernation.
 
 [`isBlockedUrl()` — SSRF protection](../packages/agents/src/mcp/client.ts#L133-L161) — blocks connections to private IPv4/IPv6 ranges, link-local addresses, loopback, and cloud metadata endpoints. Always called before opening a transport connection to a user-supplied URL.
 
@@ -116,11 +116,7 @@ X402 is a micro-payment protocol that lets you gate tool calls behind a payment.
 
 [`withX402(server, options)` augmentation](../packages/agents/src/mcp/x402.ts#L98-L294) — wraps an `McpServer` and adds a `paidTool()` method. When a paid tool is called without a valid payment receipt, it returns an `x402/error` response with payment instructions. After payment, the tool call is retried and the receipt is verified before execution.
 
-[Payment verification and settlement](../packages/agents/src/mcp/x402.ts#L294-L502) — the full payment flow: extract the payment receipt from the MCP request `_meta` field, verify it against the payment processor, call the underlying tool if valid, and record the settlement. Network IDs are normalised via `normalizeNetwork()` (converts v1 names to CAIP-2 identifiers like `eip155:1`).
-
-X402 is a micro-payment protocol that lets you gate tool calls behind a payment.
-
-[`withX402(server, options)` augmentation](../packages/agents/src/mcp/x402.ts#L98-L294) — wraps an `McpServer` and adds a `paidTool()` method. When a paid tool is called without a valid payment receipt, it returns an `x402/error` response with payment instructions. After payment, the tool call is retried and the receipt is verified before execution.
+[`withX402Client()` — X402 client-side payment handling](../packages/agents/src/mcp/x402.ts#L294-L502) — wraps an MCP `Client` to intercept `x402/error` responses. On a payment-required error, it builds a v2 payment payload (EVM signature via viem), re-calls the tool with the token in `_meta`, and enforces a configurable `maxPaymentValue` cap. Also wraps `listTools()` to annotate paid tools' descriptions with their USD price.
 
 ---
 
@@ -128,13 +124,15 @@ X402 is a micro-payment protocol that lets you gate tool calls behind a payment.
 
 The `MCPClientManager` is the most complex part of the client side. This section covers the parts not already described above.
 
-[`callTool()` method with retry logic](../packages/agents/src/mcp/client.ts#L618-L900) — executes a named tool on a connected server. Wraps the raw MCP `client.callTool()` call with configurable retry (default 3 attempts, exponential backoff). Returns the tool result or throws after all retries are exhausted.
+[deprecated `connect()`, `createConnection()`, and connection tracking helpers](../packages/agents/src/mcp/client.ts#L618-L900) — the legacy `connect()` combines register + connect + discover in one call and is kept for backwards compatibility; `createConnection()` is the internal factory that creates an `MCPClientConnection` object and wires up observability events; `_restoreServer()`, `_trackConnection()`, and `waitForConnections()` manage the in-flight connection map used by hibernation recovery.
 
-[`getTools()` and per-server tool namespacing](../packages/agents/src/mcp/client.ts#L900-L1100) — aggregates tools from all `READY` servers. By default tools are namespaced with the server name (`serverName_toolName`) to avoid collisions. The `stripNamespace` option removes the prefix if you control the tool names.
+[`connectToServer()`, `isCallbackRequest()`, and `validateCallbackRequest()`](../packages/agents/src/mcp/client.ts#L900-L1100) — `connectToServer()` initiates transport connection on an already-registered server and returns a discriminated-union result (`connected`, `authenticating`, or `failed`); `isCallbackRequest()` and `validateCallbackRequest()` match and validate incoming OAuth redirect requests before the token exchange.
 
-[MCPClientManager — OAuth state storage and completeAuthorization()](../packages/agents/src/mcp/client.ts#L1100-L1300) and [MCPClientManager — getTools() and per-server tool namespacing](../packages/agents/src/mcp/client.ts#L1300-L1400) — stores and retrieves per-server OAuth state. When a server requires auth, `registerServer()` stores an `AUTHENTICATING` state and returns an `authorizationUrl`. After the user authorises, `completeAuthorization()` is called with the callback URL.
+[`handleCallbackRequest()`, `discoverIfConnected()`, and `establishConnection()`](../packages/agents/src/mcp/client.ts#L1100-L1300) — `handleCallbackRequest()` completes the OAuth flow after the user returns from the provider; `discoverIfConnected()` triggers capability discovery and transitions the connection to `READY`; `establishConnection()` is a convenience wrapper for post-OAuth reconnect.
 
-[SQLite persistence schema](../packages/agents/src/mcp/client.ts#L1400-L1617) — the `cf_agents_mcp_servers` table schema and the read/write helpers. Each row stores: server name, transport type, URL, auth state, capabilities, and the last-connected timestamp.
+[`getOAuthCallbackConfig()`, `listTools()`, and `getAITools()`](../packages/agents/src/mcp/client.ts#L1300-L1400) — configuration accessor for OAuth callbacks and tool aggregation entry points. `getAITools()` is the main method consumers call; `listTools()` returns raw tool metadata without the AI SDK wrapper.
+
+[Connection teardown and namespaced capability accessors](../packages/agents/src/mcp/client.ts#L1400-L1617) — `cleanupClosedConnection()`, `closeAllConnections()`, `closeConnection()`, `removeServer()`, `listServers()`, and `dispose()` manage the connection lifecycle; `listPrompts()`, `listResources()`, `listResourceTemplates()`, `callTool()`, `readResource()`, and `getPrompt()` are the namespaced per-capability accessors; `getNamespacedData()` is the shared helper that attaches `serverId` to every capability item.
 
 [`MCPServerRow` type in `client-storage.ts`](../packages/agents/src/mcp/client-storage.ts#L1-L12) — the TypeScript type for the SQLite row above. A single flat object with all the persisted fields.
 
