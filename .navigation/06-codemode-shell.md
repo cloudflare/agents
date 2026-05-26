@@ -73,13 +73,11 @@ The typical flow: the LLM calls the `execute` tool → codemode runs the generat
 
 ### Executor abstraction (`src/executor.ts`)
 
-[`Executor` interface](../packages/codemode/src/executor.ts#L1-L50) — the single abstraction that hides *how* code runs. Implementations include a Cloudflare Workers sandbox, a browser `<iframe>` sandbox, and (outside Workers) Node.js `vm`. All the higher-level tooling is written against this interface.
-
-[Binary codec helpers](../packages/codemode/src/executor.ts#L24-L139) — base64 encode/decode utilities for `Uint8Array`, `ArrayBuffer`, and `ArrayBufferView`. Needed because structured-clone doesn't cross the sandbox boundary; binary data is base64-encoded before transfer and decoded on the other side. The codec string (`SANDBOX_CODEC`) is injected into the sandbox at startup.
+[executor.ts — imports, re-exports, and binary codec helpers](../packages/codemode/src/executor.ts#L1-L139) — the file re-exports `Executor`, `ExecuteResult`, and `ResolvedProvider` from `executor-types.ts` (the actual interface definitions live there). The first ~140 lines then define the binary codec: `encodeCodemodeValue`/`decodeCodemodeValue` handle `Uint8Array`, `ArrayBuffer`, and `ArrayBufferView` as tagged objects, and `SANDBOX_CODEC` is the serialised JavaScript string of these functions that gets injected into every sandbox at startup (since the sandbox cannot import anything from the host).
 
 ### Workers sandbox executor (`src/executor.ts` continued)
 
-[`ToolProvider` interface](../packages/codemode/src/executor.ts#L177-L195) — the shape of a tool provider as seen by the executor: a `name` (namespace prefix in the sandbox), and a `tools` record (name → function). Providers are available inside generated code as `namespace.toolName(args)`.
+[`ToolProvider` interface](../packages/codemode/src/executor.ts#L177-L195) — the shape of a tool provider as seen by the executor: an optional `name` (namespace prefix in the sandbox, defaults to `"codemode"`), a `tools` record accepting `ToolDescriptors`, `ToolSet`, or `SimpleToolRecord`, and an optional `types` string for LLM type declarations. Providers are available inside generated code as `namespace.toolName(args)`.
 
 [`ToolDispatcher` class](../packages/codemode/src/executor.ts#L195-L221) — a `RpcTarget` subclass that dispatches tool calls from the sandbox Worker to the host Worker. The host holds the real tool implementations; the sandbox calls them over RPC via `ToolDispatcher`.
 

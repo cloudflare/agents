@@ -132,7 +132,7 @@ The asset handler is more involved than it first appears — it implements a pro
 
 ## Experimental features (`src/experimental.ts`)
 
-[Experimental bundler features](../packages/worker-bundler/src/experimental.ts#L1-L11) — a small file that exports experimental APIs not yet in the stable surface. Currently minimal; check here for WIP features.
+[Experimental warning in `experimental.ts`](../packages/worker-bundler/src/experimental.ts#L1-L11) — exports `showExperimentalWarning(fn)`, a one-shot `console.warn` emitted the first time `createWorker()` or `createApp()` is called, alerting callers that the package's API is unstable. Contains no experimental feature flags or WIP APIs; the file is purely about the warning mechanism.
 
 ---
 
