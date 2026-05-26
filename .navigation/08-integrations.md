@@ -67,10 +67,11 @@ Cloudflare Workflows are durable, multi-step async processes that can pause and 
 ### Implementation
 
 [AgentWorkflow — class fields, constructor, and `_initAgent()`/`_wrapStep()`](../packages/agents/src/workflows.ts#L62-L250) and [AgentWorkflow — `agent` getter, `reportProgress()`, `broadcastToClients()`, `waitForApproval()`, and re-exports](../packages/agents/src/workflows.ts#L250-L437) — extend this instead of the raw Cloudflare `WorkflowEntrypoint` to get:
-- Automatic tracking of workflow state in the agent's SQLite
-- `this.waitForApproval(options)` — pause the step and wait for a human decision
-- `this.progress(data)` — broadcast progress updates to the agent's connected clients
-- `this.complete(result)` / `this.error(err)` — terminal callbacks
+- Automatic tracking of workflow state in the agent's SQLite (via `runWorkflow`)
+- `this.waitForApproval(step, options)` — pause the step and wait for a human decision; throws `WorkflowRejectedError` if rejected
+- `this.reportProgress(progress)` — send a typed progress update to the agent
+- `this.broadcastToClients(message)` — non-durable broadcast to all connected WebSocket clients
+- `step.reportComplete(result)` / `step.reportError(err)` — durable terminal callbacks added to the wrapped `AgentWorkflowStep`
 
 [`runWorkflow()` method on `Agent`](../packages/agents/src/index.ts#L8235-L8300) — start a workflow from within an agent. Injects the agent's name, binding name, and workflow name into the workflow params so `AgentWorkflow` can call back. Tracks the new instance in the `cf_agents_workflows` SQLite table with status `"queued"`. Returns a `Promise<string>` resolving to the workflow instance ID.
 
@@ -116,7 +117,7 @@ The Chat SDK state adapter bridges the Agent storage layer to the `@cloudflare/a
 
 [`createChatSdkState()` factory in `index.ts`](../packages/agents/src/chat-sdk/index.ts#L1-L16) — the public entry point. Takes a config object and returns a ready-to-use `ChatSdkStateAdapter`.
 
-[`defaultThreadShard()` and `defaultKeyShard()` sharding strategies](../packages/agents/src/chat-sdk/adapter.ts#L1-L215) — determine which shard (Durable Object instance) stores a given key. The defaults distribute by thread ID and by key prefix respectively.
+[`defaultThreadShard()` and `defaultKeyShard()` sharding strategies](../packages/agents/src/chat-sdk/adapter.ts#L29-L49) — `defaultThreadShard` extracts the first two colon-separated components of a thread ID to use as the shard name. `defaultKeyShard` matches well-known key prefixes (`thread-state:`, `channel-state:`, `msg-history:`, `transcripts:user:`) and delegates to `defaultThreadShard` for the remainder, returning `undefined` for unrecognised keys.
 
 ---
 

@@ -138,6 +138,6 @@ The asset handler is more involved than it first appears — it implements a pro
 
 ## Build scripts
 
-[Main build script in `scripts/build.ts`](../packages/worker-bundler/scripts/build.ts#L1-L66) — how the package itself is built: runs `tsc` for type declarations and esbuild for the JS output. Uses the same bundler package it's building (bootstrapped from the published version).
+[Main build script in `scripts/build.ts`](../packages/worker-bundler/scripts/build.ts#L1-L66) — how the package itself is built: first calls `bundleTypeScriptForWorkers()` to produce the vendor TypeScript bundle, then uses `tsdown` (not `tsc` directly) to compile both `src/index.ts` and `src/typescript.ts` entries to ESM with type declarations, copies `esbuild.wasm` from the installed `esbuild-wasm` package into `dist/`, and runs `formatDeclarationFiles()` on the generated `.d.ts` files.
 
-[TypeScript browser bundle script](../packages/worker-bundler/scripts/typescript-browser-bundle.ts#L1-L47) — bundles the TypeScript compiler itself for use in the browser. This is the `"./typescript"` export of the package — it lets you run type checking inside a Worker.
+[TypeScript browser bundle script](../packages/worker-bundler/scripts/typescript-browser-bundle.ts#L1-L47) — `bundleTypeScriptForWorkers()` uses esbuild (at build time, in Node.js) to bundle `typescript/lib/typescript.js` into `src/vendor/typescript.browser.js` as a browser-targeted ESM module with `process.browser: true`. This vendor file is what `typescript.ts` imports so the TypeScript compiler API works inside Workers (the published `typescript` package's entry point is Node/CJS-oriented and fails in workerd). `removeBundledTypeScript()` deletes the vendor file after the main build completes.
