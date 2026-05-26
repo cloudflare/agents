@@ -2,15 +2,15 @@
  * Deprecated transport wrappers
  */
 
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { StreamableHTTPClientTransportOptions } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { SSEClientTransport } from "@modelcontextprotocol/client";
+import type { SSEClientTransportOptions } from "@modelcontextprotocol/client";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import type { StreamableHTTPClientTransportOptions } from "@modelcontextprotocol/client";
 
 let didWarnAboutSSEEdgeClientTransport = false;
 
 /**
- * @deprecated Use SSEClientTransport from @modelcontextprotocol/sdk/client/sse.js instead. This alias will be removed in the next major version.
+ * @deprecated Use SSEClientTransport from @modelcontextprotocol/client instead. This alias will be removed in the next major version.
  */
 export class SSEEdgeClientTransport extends SSEClientTransport {
   constructor(url: URL, options: SSEClientTransportOptions) {
@@ -18,7 +18,7 @@ export class SSEEdgeClientTransport extends SSEClientTransport {
     if (!didWarnAboutSSEEdgeClientTransport) {
       didWarnAboutSSEEdgeClientTransport = true;
       console.warn(
-        "SSEEdgeClientTransport is deprecated. Use SSEClientTransport from @modelcontextprotocol/sdk/client/sse.js instead. SSEEdgeClientTransport will be removed in the next major version."
+        "SSEEdgeClientTransport is deprecated. Use SSEClientTransport from @modelcontextprotocol/client instead. SSEEdgeClientTransport will be removed in the next major version."
       );
     }
   }
@@ -27,7 +27,7 @@ export class SSEEdgeClientTransport extends SSEClientTransport {
 let didWarnAboutStreamableHTTPEdgeClientTransport = false;
 
 /**
- * @deprecated Use StreamableHTTPClientTransport from @modelcontextprotocol/sdk/client/streamableHttp.js instead. This alias will be removed in the next major version.
+ * @deprecated Use StreamableHTTPClientTransport from @modelcontextprotocol/client instead. This alias will be removed in the next major version.
  */
 export class StreamableHTTPEdgeClientTransport extends StreamableHTTPClientTransport {
   constructor(url: URL, options: StreamableHTTPClientTransportOptions) {
@@ -35,7 +35,7 @@ export class StreamableHTTPEdgeClientTransport extends StreamableHTTPClientTrans
     if (!didWarnAboutStreamableHTTPEdgeClientTransport) {
       didWarnAboutStreamableHTTPEdgeClientTransport = true;
       console.warn(
-        "StreamableHTTPEdgeClientTransport is deprecated. Use StreamableHTTPClientTransport from @modelcontextprotocol/sdk/client/streamableHttp.js instead. StreamableHTTPEdgeClientTransport will be removed in the next major version."
+        "StreamableHTTPEdgeClientTransport is deprecated. Use StreamableHTTPClientTransport from @modelcontextprotocol/client instead. StreamableHTTPEdgeClientTransport will be removed in the next major version."
       );
     }
   }

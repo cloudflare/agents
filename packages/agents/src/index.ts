@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client } from "@modelcontextprotocol/client";
 import {
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
   type AgentEmail
@@ -16,7 +16,7 @@ export {
   SUB_PREFIX
 } from "./sub-routing";
 export type { SubAgentPathMatch } from "./sub-routing";
-import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
+import type { SSEClientTransportOptions } from "@modelcontextprotocol/client";
 import { signAgentHeaders } from "./email";
 
 import type {
@@ -24,7 +24,7 @@ import type {
   Resource,
   ServerCapabilities,
   Tool
-} from "@modelcontextprotocol/sdk/types.js";
+} from "@modelcontextprotocol/server";
 import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
 import { EmailMessage } from "cloudflare:email";

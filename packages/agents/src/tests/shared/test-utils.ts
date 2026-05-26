@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/server";
 import { expect } from "vitest";
 import worker from "../worker";
 import { MCPClientConnection } from "../../mcp/client-connection";

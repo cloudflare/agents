@@ -1,4 +1,4 @@
-import type { Client } from "@modelcontextprotocol/sdk/client";
+import type { Client } from "@modelcontextprotocol/client";
 
 export type MaybePromise<T> = T | Promise<T>;
 export type MaybeConnectionTag = { role: string } | undefined;
@@ -13,13 +13,6 @@ export interface CORSOptions {
   headers?: string;
   maxAge?: number;
   exposeHeaders?: string;
-}
-
-export interface ServeOptions {
-  binding?: string;
-  corsOptions?: CORSOptions;
-  transport?: TransportType;
-  jurisdiction?: DurableObjectJurisdiction;
 }
 
 export type McpClientOptions = ConstructorParameters<typeof Client>[1];

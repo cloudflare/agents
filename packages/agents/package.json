@@ -26,7 +26,8 @@
   "dependencies": {
     "@babel/plugin-proposal-decorators": "^7.29.0",
     "@cfworker/json-schema": "^4.1.1",
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/client": "^2.0.0-alpha.2",
+    "@modelcontextprotocol/server": "^2.0.0-alpha.2",
     "@rolldown/plugin-babel": "^0.2.3",
     "cron-schedule": "^6.0.0",
     "mimetext": "^3.0.28",

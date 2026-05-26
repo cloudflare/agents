@@ -58,10 +58,8 @@
  * @experimental This API is not yet stable and may change.
  */
 
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
-
+import { Client } from "@modelcontextprotocol/client";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 // ── WebMCP browser API surface (Chrome's navigator.modelContext) ─────
 
 interface ModelContextToolAnnotations {
@@ -193,7 +191,7 @@ class McpHttpClient {
     await this._client.connect(this._transport);
 
     this._client.setNotificationHandler(
-      ToolListChangedNotificationSchema,
+      "notifications/tools/list_changed",
       async () => {
         if (signal?.aborted) return;
         this._onToolsChanged?.();

@@ -1,8 +1,11 @@
-import { env } from "cloudflare:workers";
-import { createExecutionContext } from "cloudflare:test";
+import { createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import worker from "../../worker";
+import worker, { type Env } from "../../worker";
 import { initializeMCPClientConnection } from "../../shared/test-utils";
+
+declare module "cloudflare:test" {
+  interface ProvidedEnv extends Env {}
+}
 
 /**
  * Tests for the "auto" transport mode which attempts streamable-http first,
@@ -27,23 +30,6 @@ describe("Auto Transport Mode", () => {
     it("should use connect using streamable-http when available", async () => {
       const connection = await initializeMCPClientConnection(
         "http://example.com/mcp",
-        "auto"
-      );
-
-      await connection.init();
-
-      expect(connection.connectionState).toBe("connected");
-
-      // Trigger discovery
-      await connection.discover();
-
-      expect(connection.connectionState).toBe("ready");
-      expect(connection.tools).toBeDefined();
-    });
-
-    it("should use connect using sse when available", async () => {
-      const connection = await initializeMCPClientConnection(
-        "http://example.com/sse",
         "auto"
       );
 

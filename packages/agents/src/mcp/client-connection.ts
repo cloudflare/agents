@@ -1,33 +1,25 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { Client } from "@modelcontextprotocol/client";
 import {
   SSEClientTransport,
   type SSEClientTransportOptions
-} from "@modelcontextprotocol/sdk/client/sse.js";
+} from "@modelcontextprotocol/client";
 import {
   StreamableHTTPClientTransport,
   type StreamableHTTPClientTransportOptions
-} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+} from "@modelcontextprotocol/client";
 // Import types directly from MCP SDK
-import type {
-  Prompt,
-  Resource,
-  Tool
-} from "@modelcontextprotocol/sdk/types.js";
+import type { Prompt, Resource, Tool } from "@modelcontextprotocol/client";
 import {
   type ClientCapabilities,
   type ElicitRequest,
-  ElicitRequestSchema,
   type ElicitResult,
   type ListPromptsResult,
   type ListResourceTemplatesResult,
   type ListResourcesResult,
   type ListToolsResult,
-  PromptListChangedNotificationSchema,
-  ResourceListChangedNotificationSchema,
   type ResourceTemplate,
-  type ServerCapabilities,
-  ToolListChangedNotificationSchema
-} from "@modelcontextprotocol/sdk/types.js";
+  type ServerCapabilities
+} from "@modelcontextprotocol/client";
 import { Emitter, type Event } from "../core/events";
 import type { MCPObservabilityEvent } from "../observability/mcp";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
@@ -168,7 +160,7 @@ export class MCPClientConnection {
     if (res.state === MCPConnectionState.CONNECTED && res.transport) {
       // Set up elicitation request handler after successful connection
       this.client.setRequestHandler(
-        ElicitRequestSchema,
+        "elicitation/create",
         async (request: ElicitRequest) => {
           return await this.handleElicitationRequest(request);
         }
@@ -492,7 +484,7 @@ export class MCPClientConnection {
       this._probingCapabilities
     ) {
       this.client.setNotificationHandler(
-        ToolListChangedNotificationSchema,
+        "notifications/tools/list_changed",
         async (_notification) => {
           this.tools = await this.fetchTools();
         }
@@ -512,7 +504,7 @@ export class MCPClientConnection {
       this._probingCapabilities
     ) {
       this.client.setNotificationHandler(
-        ResourceListChangedNotificationSchema,
+        "notifications/resources/list_changed",
         async (_notification) => {
           this.resources = await this.fetchResources();
         }
@@ -532,7 +524,7 @@ export class MCPClientConnection {
       this._probingCapabilities
     ) {
       this.client.setNotificationHandler(
-        PromptListChangedNotificationSchema,
+        "notifications/prompts/list_changed",
         async (_notification) => {
           this.prompts = await this.fetchPrompts();
         }
@@ -619,7 +611,7 @@ export class MCPClientConnection {
     _request: ElicitRequest
   ): Promise<ElicitResult> {
     // Elicitation handling must be implemented by the platform
-    // For MCP servers, this should be handled by McpAgent.elicitInput()
+    // For MCP servers, this should be handled by server.server.elicitInput()
     throw new Error(
       "Elicitation handler must be implemented for your platform. Override handleElicitationRequest method."
     );

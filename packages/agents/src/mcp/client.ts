@@ -1,17 +1,15 @@
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type { Client } from "@modelcontextprotocol/client";
+import type { RequestOptions } from "@modelcontextprotocol/server";
 import type {
   CallToolRequest,
-  CallToolResultSchema,
-  CompatibilityCallToolResultSchema,
   GetPromptRequest,
   Prompt,
   ReadResourceRequest,
   Resource,
   ResourceTemplate,
   Tool
-} from "@modelcontextprotocol/sdk/types.js";
-import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
+} from "@modelcontextprotocol/server";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/server/validators/cf-worker";
 import { type RetryOptions, tryN } from "../retries";
 import type { ToolSet } from "ai";
 import { z } from "zod";
@@ -1544,9 +1542,6 @@ export class MCPClientManager {
    */
   async callTool(
     params: CallToolRequest["params"] & { serverId: string },
-    resultSchema?:
-      | typeof CallToolResultSchema
-      | typeof CompatibilityCallToolResultSchema,
     options?: RequestOptions
   ) {
     const { serverId, ...mcpParams } = params;
@@ -1556,7 +1551,6 @@ export class MCPClientManager {
         ...mcpParams,
         name: unqualifiedName
       },
-      resultSchema,
       options
     );
   }
