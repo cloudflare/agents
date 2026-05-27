@@ -45,7 +45,11 @@ import {
   isErrorRetryable,
   validateRetryOptions
 } from "./retries";
-import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
+import {
+  MCPClientManager,
+  normalizeServerId,
+  type MCPClientOAuthResult
+} from "./mcp/client";
 import type {
   WorkflowCallback,
   WorkflowTrackingRow,
@@ -796,6 +800,7 @@ function getNextCronTime(cron: string) {
 
 export type { TransportType } from "./mcp/types";
 export type { RetryOptions } from "./retries";
+export { normalizeServerId, MCP_SERVER_ID_MAX_LENGTH } from "./mcp/client";
 export {
   DurableObjectOAuthClientProvider,
   type AgentMcpOAuthProvider,
@@ -838,6 +843,17 @@ export type MCPServer = {
  * Options for adding an MCP server
  */
 export type AddMcpServerOptions = {
+  /**
+   * Optional caller-supplied stable server id. When provided, this id is used
+   * for storage, restore, and tool-name namespacing instead of a generated
+   * `nanoid`. The value is normalized via {@link normalizeServerId} — for
+   * connector-style integrations this lets `addMcpServer` keep producing
+   * keys like `tool_github_create_pull_request`.
+   *
+   * Throws if an existing server already uses the same (normalized) id but a
+   * different name or url.
+   */
+  id?: string;
   /** OAuth callback host (auto-derived from request if omitted) */
   callbackHost?: string;
   /**
@@ -867,6 +883,15 @@ export type AddMcpServerOptions = {
  * Options for adding an MCP server via RPC (Durable Object binding)
  */
 export type AddRpcMcpServerOptions = {
+  /**
+   * Optional caller-supplied stable server id. When provided, this id is used
+   * for storage, restore, and tool-name namespacing instead of a generated
+   * `nanoid`. The value is normalized via {@link normalizeServerId}.
+   *
+   * Throws if an existing server already uses the same (normalized) id but a
+   * different name or url.
+   */
+  id?: string;
   /** Props to pass to the McpAgent instance */
   props?: Record<string, unknown>;
 };
@@ -9394,13 +9419,46 @@ export class Agent<
     const normalizedUrl = isHttpTransport
       ? new URL(urlOrBinding).href
       : undefined;
-    const existingServer = this.mcp
-      .listServers()
-      .find(
-        (s) =>
-          s.name === serverName &&
-          (!isHttpTransport || new URL(s.server_url).href === normalizedUrl)
-      );
+
+    // Extract and normalize a caller-supplied stable id, if any. The same
+    // option field is accepted on both the HTTP and RPC option shapes.
+    let requestedId: string | undefined;
+    if (
+      typeof callbackHostOrOptions === "object" &&
+      callbackHostOrOptions !== null &&
+      typeof (callbackHostOrOptions as { id?: unknown }).id === "string"
+    ) {
+      const rawId = (callbackHostOrOptions as { id: string }).id;
+      requestedId = normalizeServerId(rawId);
+    }
+
+    const allServers = this.mcp.listServers();
+
+    // Collision check: a caller-supplied id may only re-resolve to an existing
+    // server when the (name, url) also matches. Otherwise this would silently
+    // overwrite the existing row (storage uses INSERT OR REPLACE on id).
+    if (requestedId) {
+      const conflict = allServers.find((s) => {
+        if (s.id !== requestedId) return false;
+        if (s.name !== serverName) return true;
+        if (isHttpTransport) {
+          return new URL(s.server_url).href !== normalizedUrl;
+        }
+        return false;
+      });
+      if (conflict) {
+        throw new Error(
+          `MCP server id "${requestedId}" is already in use by server "${conflict.name}" (${conflict.server_url}). ` +
+            `Stable ids must be unique per (name, url).`
+        );
+      }
+    }
+
+    const existingServer = allServers.find(
+      (s) =>
+        s.name === serverName &&
+        (!isHttpTransport || new URL(s.server_url).href === normalizedUrl)
+    );
     if (existingServer && this.mcp.mcpConnections[existingServer.id]) {
       const conn = this.mcp.mcpConnections[existingServer.id];
       if (
@@ -9429,7 +9487,9 @@ export class Agent<
 
       const normalizedName = serverName.toLowerCase().replace(/\s+/g, "-");
 
-      const reconnectId = existingServer?.id;
+      // Prefer the caller-supplied stable id, falling back to the existing
+      // server's id (for restore-through-addMcpServer), then to a generated id.
+      const reconnectId = requestedId ?? existingServer?.id;
       const { id } = await this.mcp.connect(
         `${RPC_DO_PREFIX}${normalizedName}`,
         {
@@ -9544,7 +9604,7 @@ export class Agent<
         : `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
     }
 
-    const id = nanoid(8);
+    const id = requestedId ?? nanoid(8);
 
     // Only create authProvider if we have a callbackUrl (needed for OAuth servers)
     let authProvider:

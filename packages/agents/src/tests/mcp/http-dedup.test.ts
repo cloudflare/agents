@@ -63,3 +63,38 @@ describe("addMcpServer HTTP dedup (name + URL)", () => {
     expect(result.deduped).toBe(false);
   });
 });
+
+describe("addMcpServer HTTP — stable supplied ids", () => {
+  it("normalizes a caller-supplied id and uses it as the new server id", async () => {
+    const agentStub = await getAgentByName(
+      env.TestHttpMcpDedupAgent,
+      "test-http-stable-id"
+    );
+    const result = (await agentStub.testHttpSuppliedIdIsUsed()) as unknown as {
+      ok: boolean;
+      id: string | null;
+      error?: string;
+    };
+
+    // connectToServer is mocked to fail, but we still expect the row to be
+    // registered with the normalized id.
+    expect(result.id).toBe("github-mcp");
+  });
+
+  it("throws when a caller-supplied id collides with a different (name,url)", async () => {
+    const agentStub = await getAgentByName(
+      env.TestHttpMcpDedupAgent,
+      "test-http-collide-id"
+    );
+    const result =
+      (await agentStub.testHttpSuppliedIdCollision()) as unknown as {
+        seededId: string;
+        threw: boolean;
+        message: string;
+      };
+
+    expect(result.seededId).toBe("collide");
+    expect(result.threw).toBe(true);
+    expect(result.message).toContain("already in use");
+  });
+});

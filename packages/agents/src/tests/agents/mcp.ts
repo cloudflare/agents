@@ -486,6 +486,91 @@ export class TestRpcMcpClientAgent extends Agent {
     }
   }
 
+  async testRpcStableSuppliedId() {
+    try {
+      const { id } = await this.addMcpServer(
+        "rpc-stable-id-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          id: "my-supplied-id",
+          props: { testValue: "stable-id" }
+        }
+      );
+
+      const toolNames = this.mcp.listTools().map((t) => t.name);
+      const saved = this.mcp
+        .getRpcServersFromStorage()
+        .find((s) => s.id === id);
+
+      return {
+        success: true,
+        id,
+        savedId: saved?.id ?? null,
+        toolNames
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async testRpcNormalizesSuppliedId() {
+    try {
+      const { id } = await this.addMcpServer(
+        "rpc-normalize-id-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          id: "GitHub MCP!",
+          props: { testValue: "normalized" }
+        }
+      );
+      return { success: true, id };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async testRpcSuppliedIdCollision() {
+    try {
+      const first = await this.addMcpServer(
+        "rpc-collide-a",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          id: "collide",
+          props: { testValue: "a" }
+        }
+      );
+
+      let threw = false;
+      let message = "";
+      try {
+        await this.addMcpServer(
+          "rpc-collide-b",
+          this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+          {
+            id: "collide",
+            props: { testValue: "b" }
+          }
+        );
+      } catch (e) {
+        threw = true;
+        message = e instanceof Error ? e.message : String(e);
+      }
+
+      return { success: true, firstId: first.id, threw, message };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
   async testRemoveRpcMcpServer() {
     try {
       const { id } = await this.addMcpServer(
@@ -620,8 +705,12 @@ export class TestHttpMcpDedupAgent extends Agent {
   }
 
   // Set up a fake "ready" server so the dedup check has something to find
-  private async _seedServer(name: string, url: string): Promise<string> {
-    const id = `test-${name}-${Date.now()}`;
+  private async _seedServer(
+    name: string,
+    url: string,
+    overrideId?: string
+  ): Promise<string> {
+    const id = overrideId ?? `test-${name}-${Date.now()}`;
 
     // Register in storage
     await this.mcp.registerServer(id, {
@@ -700,6 +789,49 @@ export class TestHttpMcpDedupAgent extends Agent {
       returnedId: result.id,
       deduped: result.id === seededId
     };
+  }
+
+  // Test: caller-supplied id is normalized and used for the new server
+  async testHttpSuppliedIdIsUsed() {
+    try {
+      const result = await this.addMcpServer(
+        "http-stable",
+        "https://mcp.example.com/stable",
+        { id: "GitHub MCP!" }
+      );
+      return { ok: true, id: result.id };
+    } catch (e) {
+      // connectToServer is mocked to fail. The registered server still gets
+      // the requested id; we can read it back from storage.
+      const servers = this.mcp.listServers();
+      const server = servers.find((s) => s.name === "http-stable") ?? null;
+      return {
+        ok: false,
+        id: server?.id ?? null,
+        error: e instanceof Error ? e.message : String(e)
+      };
+    }
+  }
+
+  // Test: caller-supplied id colliding with a different (name,url) throws
+  async testHttpSuppliedIdCollision() {
+    const seededId = await this._seedServer(
+      "http-collide-a",
+      "https://mcp.example.com/a",
+      "collide"
+    );
+
+    let threw = false;
+    let message = "";
+    try {
+      await this.addMcpServer("http-collide-b", "https://mcp.example.com/b", {
+        id: "collide"
+      });
+    } catch (e) {
+      threw = true;
+      message = e instanceof Error ? e.message : String(e);
+    }
+    return { seededId, threw, message };
   }
 
   // Test: different name + same URL should NOT dedup

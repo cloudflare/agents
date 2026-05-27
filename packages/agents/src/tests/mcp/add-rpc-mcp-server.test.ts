@@ -2,6 +2,72 @@ import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:workers";
 import { getAgentByName } from "../..";
 
+describe("addMcpServer with RPC binding — stable supplied ids", () => {
+  it("uses a caller-supplied stable id as the server id", async () => {
+    const agentStub = await getAgentByName(
+      env.TestRpcMcpClientAgent,
+      "test-rpc-stable-id"
+    );
+    const result = (await agentStub.testRpcStableSuppliedId()) as unknown as {
+      success: boolean;
+      id?: string;
+      savedId?: string | null;
+      toolNames?: string[];
+      error?: string;
+    };
+
+    if (!result.success) {
+      throw new Error(`Test failed: ${result.error}`);
+    }
+
+    expect(result.id).toBe("my-supplied-id");
+    expect(result.savedId).toBe("my-supplied-id");
+    expect(result.toolNames!.length).toBeGreaterThan(0);
+  });
+
+  it("normalizes a caller-supplied id (e.g. 'GitHub MCP!' → 'github-mcp')", async () => {
+    const agentStub = await getAgentByName(
+      env.TestRpcMcpClientAgent,
+      "test-rpc-normalize-id"
+    );
+    const result =
+      (await agentStub.testRpcNormalizesSuppliedId()) as unknown as {
+        success: boolean;
+        id?: string;
+        error?: string;
+      };
+
+    if (!result.success) {
+      throw new Error(`Test failed: ${result.error}`);
+    }
+
+    expect(result.id).toBe("github-mcp");
+  });
+
+  it("throws when a caller-supplied id collides with a different server", async () => {
+    const agentStub = await getAgentByName(
+      env.TestRpcMcpClientAgent,
+      "test-rpc-collide-id"
+    );
+    const result =
+      (await agentStub.testRpcSuppliedIdCollision()) as unknown as {
+        success: boolean;
+        firstId?: string;
+        threw?: boolean;
+        message?: string;
+        error?: string;
+      };
+
+    if (!result.success) {
+      throw new Error(`Test failed: ${result.error}`);
+    }
+
+    expect(result.firstId).toBe("collide");
+    expect(result.threw).toBe(true);
+    expect(result.message).toContain("already in use");
+  });
+});
+
 describe("addMcpServer with RPC binding", () => {
   it("should connect to McpAgent via RPC and discover tools", async () => {
     const agentStub = await getAgentByName(

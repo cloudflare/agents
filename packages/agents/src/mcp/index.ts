@@ -544,6 +544,8 @@ export type {
   MCPDiscoverResult
 } from "./client";
 
+export { normalizeServerId, MCP_SERVER_ID_MAX_LENGTH } from "./client";
+
 export type { McpClientOptions } from "./types";
 
 export {
