@@ -50,6 +50,9 @@ production Wrangler bindings or migrations. Apps with auth or custom routing can
 add `src/server.ts`; the generated entry still wraps it and injects
 `think.router` for manifest-aware routing.
 
+The framework supports one sub-agent layer today. If you need nested sub-agents,
+please reach out with your use case so we can design that model deliberately.
+
 See the full Think framework docs in `docs/think/index.md` for conventions,
 custom server handlers, diagnostics, and route-prefix configuration.
 

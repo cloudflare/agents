@@ -56,7 +56,7 @@ export function generateThinkRouterModule(
   return [
     `import { createThinkRouter } from "@cloudflare/think/server-entry";`,
     `import thinkManifest from "virtual:think/manifest";`,
-    `export { buildThinkAgentPath, createThinkRouter, parseThinkAgentPath, rewriteThinkSubAgentRequest, routeThinkRequest, resolveThinkAgentName, resolveThinkSubAgentName } from "@cloudflare/think/server-entry";`,
+    `export { buildThinkAgentPath, createThinkRouter, parseThinkAgentPath, routeThinkRequest, resolveThinkAgentName, resolveThinkSubAgentName } from "@cloudflare/think/server-entry";`,
     `export const thinkRouter = createThinkRouter({ routePrefix: ${JSON.stringify(manifest.routePrefix)}, manifest: thinkManifest });`,
     ""
   ].join("\n");
@@ -64,7 +64,7 @@ export function generateThinkRouterModule(
 
 export function generateThinkServerEntryModule(): string {
   return [
-    `export { buildThinkAgentPath, createThinkRouter, createThinkWorkerEntry, parseThinkAgentPath, rewriteThinkSubAgentRequest, routeThinkRequest } from "@cloudflare/think/server-entry";`,
+    `export { buildThinkAgentPath, createThinkRouter, createThinkWorkerEntry, parseThinkAgentPath, routeThinkRequest } from "@cloudflare/think/server-entry";`,
     ""
   ].join("\n");
 }

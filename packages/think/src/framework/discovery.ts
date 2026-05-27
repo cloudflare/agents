@@ -1,5 +1,6 @@
 import type {
   ThinkFrameworkAgent,
+  ThinkFrameworkFeatureSource,
   ThinkFrameworkFeature,
   ThinkFrameworkManifest
 } from "./manifest";
@@ -29,7 +30,7 @@ export function discoverThinkApp(
   const routePrefix = normalizeRoutePrefix(options.routePrefix ?? "/agents");
   const files = normalizeFiles(options.files);
   const candidates = discoverAgentCandidates(files);
-  const agents = candidates.map((candidate) => discoverAgent(candidate));
+  const agents = candidates.map(discoverAgent);
 
   const topLevelAgents = agents.filter((agent) => agent.kind === "top-level");
   const bindings = topLevelAgents.map((agent) => ({
@@ -43,6 +44,12 @@ export function discoverThinkApp(
     pattern: `${routePrefix}/${agent.id}/*`,
     agent: agent.className
   }));
+  const routeSurfaces = discoverRouteSurfaces({
+    routePrefix,
+    agents
+  });
+  const platformRequirements =
+    discoverDeterministicPlatformRequirements(agents);
 
   return {
     root,
@@ -50,6 +57,11 @@ export function discoverThinkApp(
     agents,
     bindings,
     routes,
+    routeSurfaces,
+    schedules: [],
+    messengers: [],
+    tools: [],
+    platformRequirements,
     env: [],
     features: sortedFeatures(agents.flatMap((agent) => agent.features)),
     appEntrypoint: files["src/server.ts"] ? "src/server.ts" : undefined
@@ -99,7 +111,7 @@ function discoverAgentCandidates(
         sourcePath.endsWith("/agent.js") ||
         sourcePath.endsWith("/agent.mjs")
           ? `${directory}/`
-          : "";
+          : `${sourcePath.replace(/\.(?:ts|tsx|js|mjs)$/, "")}/`;
       return {
         sourcePath,
         importPath: rootImportPath(sourcePath),
@@ -139,6 +151,7 @@ function rootImportPath(path: string): string {
 }
 
 function discoverAgent(candidate: AgentCandidate): ThinkFrameworkAgent {
+  const featureSources = discoverConventionFeatureSources(candidate);
   return {
     id: candidate.id,
     className: candidate.className,
@@ -147,7 +160,8 @@ function discoverAgent(candidate: AgentCandidate): ThinkFrameworkAgent {
     sourcePath: candidate.sourcePath,
     kind: candidate.kind,
     parentId: candidate.parentId,
-    features: discoverFeatures(candidate.colocatedPaths),
+    features: sortedFeatures(featureSources.map((source) => source.feature)),
+    featureSources,
     env: []
   };
 }
@@ -210,14 +224,6 @@ function agentSegmentsFromPath(path: string): string[] {
   return segments.map(kebabCase);
 }
 
-function discoverFeatures(colocatedPaths: string[]): ThinkFrameworkFeature[] {
-  const features: ThinkFrameworkFeature[] = [];
-  if (colocatedPaths.some((path) => path.includes("/skills/"))) {
-    features.push("skills");
-  }
-  return sortedFeatures(features);
-}
-
 function sortedFeatures(
   features: ThinkFrameworkFeature[]
 ): ThinkFrameworkFeature[] {
@@ -229,6 +235,96 @@ function sortedFeatures(
   ];
   const present = new Set(features);
   return order.filter((feature) => present.has(feature));
+}
+
+function discoverConventionFeatureSources(
+  candidate: AgentCandidate
+): ThinkFrameworkFeatureSource[] {
+  const skillsPrefix = `${sourceRootDirectory(candidate.sourcePath)}/skills/`;
+  const skillConventionPaths = candidate.colocatedPaths.filter((path) =>
+    path.startsWith(skillsPrefix)
+  );
+  return skillConventionPaths.map((path) => ({
+    feature: "skills",
+    sourcePath: path,
+    signal: "colocated-skills"
+  }));
+}
+
+function sourceRootDirectory(sourcePath: string): string {
+  const directory = sourcePath.slice(0, sourcePath.lastIndexOf("/"));
+  return sourcePath.match(/\/agent\.(?:ts|tsx|js|mjs)$/)
+    ? directory
+    : sourcePath.replace(/\.(?:ts|tsx|js|mjs)$/, "");
+}
+
+function discoverRouteSurfaces(options: {
+  routePrefix: string;
+  agents: ThinkFrameworkAgent[];
+}): ThinkFrameworkManifest["routeSurfaces"] {
+  const surfaces: ThinkFrameworkManifest["routeSurfaces"] = [];
+  const topLevelIds = new Set(
+    options.agents
+      .filter((agent) => agent.kind === "top-level")
+      .map((agent) => agent.id)
+  );
+
+  for (const agent of options.agents) {
+    if (agent.kind === "top-level") {
+      surfaces.push({
+        id: `agent:${agent.id}`,
+        kind: "agent",
+        pattern: `${options.routePrefix}/${agent.id}/*`,
+        owner: agent.id,
+        sourcePath: agent.sourcePath,
+        requiredRunWorkerFirst: true
+      });
+      continue;
+    }
+    if (
+      agent.id.split("/").length !== 2 ||
+      !agent.parentId ||
+      !topLevelIds.has(agent.parentId)
+    ) {
+      continue;
+    }
+    const localId = agent.id.split("/").at(-1) ?? agent.id;
+    surfaces.push({
+      id: `subagent:${agent.id}`,
+      kind: "subagent",
+      pattern: `${options.routePrefix}/${agent.parentId}/{name}/sub/${localId}/{subName}`,
+      owner: agent.id,
+      parent: agent.parentId,
+      sourcePath: agent.sourcePath,
+      requiredRunWorkerFirst: true
+    });
+  }
+
+  surfaces.push({
+    id: "internal:think",
+    kind: "internal",
+    pattern: "/__think/*",
+    owner: "think",
+    requiredRunWorkerFirst: true
+  });
+
+  return surfaces;
+}
+
+function discoverDeterministicPlatformRequirements(
+  agents: ThinkFrameworkAgent[]
+): ThinkFrameworkManifest["platformRequirements"] {
+  const skillsAgent = agents.find((agent) => agent.features.includes("skills"));
+  if (!skillsAgent) return [];
+  return [
+    {
+      kind: "worker_loader",
+      binding: "LOADER",
+      reason: "Agents with colocated skills need a Worker Loader binding.",
+      sourcePath: skillsAgent.sourcePath,
+      agent: skillsAgent.id
+    }
+  ];
 }
 
 function pascalCase(value: string): string {

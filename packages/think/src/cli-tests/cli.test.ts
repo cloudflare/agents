@@ -40,6 +40,29 @@ describe("think CLI", () => {
     expect(output).toContain("Route prefix: /agents");
   });
 
+  it("prints deterministic inspect facts for features and route surfaces", async () => {
+    const root = await createFixture();
+    await mkdir(path.join(root, "agents/host/skills/review"), {
+      recursive: true
+    });
+    await writeFile(
+      path.join(root, "agents/host/skills/review/SKILL.md"),
+      "# Review",
+      "utf8"
+    );
+    const cli = createCli(["node", "think", "inspect", "--root", root]);
+
+    await cli.exitProcess(false).parse();
+
+    const output = consoleOutput.join("\n");
+    expect(output).toContain("Route surfaces:");
+    expect(output).toContain("agent:host");
+    expect(output).toContain("features skills");
+    expect(output).toContain("Messengers:\n- none");
+    expect(output).toContain("Platform requirements:");
+    expect(output).toContain("worker_loader LOADER");
+  });
+
   it("prints inspect JSON output", async () => {
     const root = await createFixture();
     const cli = createCli([

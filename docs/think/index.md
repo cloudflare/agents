@@ -96,6 +96,12 @@ Worker entry exports their classes so parent agents can use `ctx.exports`, but
 production `wrangler.jsonc` does not need facet-only Durable Object bindings,
 migrations, or public routes.
 
+Think currently supports top-level agents and one layer of sub-agents. Nested
+sub-agent conventions, such as
+`agents/assistant/agents/researcher/agents/coder.ts`, are intentionally not
+supported yet. If your app needs deeper nesting, please reach out with the use
+case so we can design the routing and lifecycle model deliberately.
+
 ### Friendly Routes
 
 Generated class names are stable, but URLs stay friendly. A request can use:

@@ -237,6 +237,54 @@ describe("Think host embedding helpers", () => {
     );
   });
 
+  it("normalizes friendly subagent segments before forwarding to the parent", async () => {
+    const manifest = {
+      agents: [
+        {
+          id: "support",
+          className: "ThinkAgent_Support",
+          aliases: ["support", "Support", "ThinkAgent_Support"],
+          kind: "top-level",
+          importPath: "/agents/support.ts",
+          sourcePath: "agents/support.ts",
+          features: [],
+          env: []
+        },
+        {
+          id: "support/researcher",
+          className: "ThinkSubAgent_Support_Researcher",
+          aliases: ["support/researcher", "researcher", "Researcher"],
+          kind: "subagent",
+          parentId: "support",
+          importPath: "/agents/support/agents/researcher.ts",
+          sourcePath: "agents/support/agents/researcher.ts",
+          features: [],
+          env: []
+        }
+      ]
+    } satisfies Pick<ThinkFrameworkManifest, "agents">;
+    const router = createThinkRouter({ manifest });
+    const original = new Request(
+      "https://example.com/chat/sub/researcher/child"
+    );
+
+    const response = await router.routeSubAgent(
+      original,
+      {
+        async fetch(request) {
+          return Response.json({
+            url: request.url
+          });
+        }
+      },
+      { parent: "support" }
+    );
+
+    expect(await response.json()).toEqual({
+      url: "https://example.com/chat/sub/think-sub-agent--support--researcher/child"
+    });
+  });
+
   it("returns 404 for unresolved user-addressed subagent routes", async () => {
     const manifest = {
       agents: [
