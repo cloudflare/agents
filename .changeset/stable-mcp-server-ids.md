@@ -10,7 +10,7 @@ The supplied id is normalized via the exported `normalizeServerId` helper so tha
 
 **Fully additive — no user code breaks.** If you add `{ id: "github" }` to an existing `addMcpServer` call for a server that's already registered under an auto-generated nanoid, the SDK transparently migrates the existing storage row, in-memory connection, and OAuth-related DO storage keys to the new stable id. No `removeMcpServer` step required, no stale rows, no broken hibernation restore.
 
-`addMcpServer` only throws on a genuinely ambiguous collision: the same stable id already belongs to a *different* `(name, url)` server.
+`addMcpServer` only throws on a genuinely ambiguous collision: the same stable id already belongs to a _different_ `(name, url)` server.
 
 ```ts
 await this.addMcpServer("GitHub", env.MCP_SESSION, {
