@@ -1,5 +1,6 @@
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
+import { initCommand } from "./init";
 import { inspectCommand } from "./inspect";
 import { typesCommand } from "./types";
 
@@ -8,6 +9,57 @@ export function createCli(argv = process.argv) {
     .parserConfiguration({ "populate--": true })
     .scriptName("think")
     .usage("$0 <command> [options]")
+    .command(
+      "init [directory]",
+      "Create a new Think app or initialize a lightly prepared npm project",
+      (cmd) =>
+        cmd
+          .positional("directory", {
+            type: "string",
+            describe:
+              "Target directory to initialize. Omit to choose interactively."
+          })
+          .option("root", {
+            type: "string",
+            describe: "Base directory for initialization",
+            default: process.cwd()
+          })
+          .option("name", {
+            type: "string",
+            describe: "Package and Worker name for the generated app"
+          })
+          .option("route-prefix", {
+            type: "string",
+            describe: "Think route prefix for generated config"
+          })
+          .option("yes", {
+            alias: "y",
+            type: "boolean",
+            describe: "Use defaults and skip prompts",
+            default: false
+          })
+          .option("install", {
+            type: "boolean",
+            describe: "Run npm install after writing files",
+            default: true
+          })
+          .option("dry-run", {
+            type: "boolean",
+            describe: "Print files that would be written without writing them",
+            default: false
+          }),
+      async (args) => {
+        await initCommand({
+          root: args.root,
+          directory: args.directory,
+          name: args.name,
+          routePrefix: args.routePrefix,
+          yes: args.yes,
+          install: args.install,
+          dryRun: args.dryRun
+        });
+      }
+    )
     .command(
       "inspect",
       "Inspect the Think app manifest, routing, bindings, and diagnostics",

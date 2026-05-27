@@ -1,8 +1,16 @@
-import { chmod, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCli } from "../cli/create";
+import { initCommand } from "../cli/init";
 
 describe("think CLI", () => {
   let originalConsoleLog: typeof console.log;
@@ -221,12 +229,331 @@ describe("think CLI", () => {
     );
   });
 
+  it("initializes a generated default target with --yes", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+    const cli = createCli([
+      "node",
+      "think",
+      "init",
+      "--root",
+      root,
+      "--yes",
+      "--no-install"
+    ]);
+
+    await cli.exitProcess(false).parse();
+
+    const entries = await readdir(root);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatch(/^think-agent-/);
+    const appRoot = path.join(root, entries[0] ?? "");
+    const agentSource = await readFile(
+      path.join(appRoot, "agents/assistant/agent.ts"),
+      "utf8"
+    );
+    expect(agentSource).toContain("createWorkersAI");
+    expect(agentSource).toContain("@cf/moonshotai/kimi-k2.6");
+    expect(agentSource).toContain("override getSystemPrompt()");
+    expect(agentSource).toContain("override getScheduledTasks()");
+    expect(agentSource).toContain("override getSkills()");
+    expect(await readFile(path.join(appRoot, "think.d.ts"), "utf8")).toContain(
+      `declare module "virtual:think/entry"`
+    );
+    expect(
+      await readFile(
+        path.join(appRoot, "agents/assistant/skills/project-helper/SKILL.md"),
+        "utf8"
+      )
+    ).toContain("Project Helper");
+    expect(
+      await readFile(path.join(appRoot, "agents/assistant/skills.d.ts"), "utf8")
+    ).toContain("SkillSource");
+    expect(consoleOutput.join("\n")).toContain("Created Think app");
+  });
+
+  it("prompts for current-directory initialization", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+
+    await initCommand({
+      root,
+      install: false,
+      promptTargetDirectory: async () => "."
+    });
+
+    expect(await readFile(path.join(root, "package.json"), "utf8")).toContain(
+      `"@cloudflare/think"`
+    );
+    expect(await readFile(path.join(root, "vite.config.ts"), "utf8")).toContain(
+      "think()"
+    );
+  });
+
+  it("initializes a named target directory", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+    const cli = createCli([
+      "node",
+      "think",
+      "init",
+      "my-app",
+      "--root",
+      root,
+      "--no-install"
+    ]);
+
+    await cli.exitProcess(false).parse();
+
+    const packageJson = JSON.parse(
+      await readFile(path.join(root, "my-app/package.json"), "utf8")
+    ) as {
+      name: string;
+      scripts: Record<string, string>;
+    };
+    expect(packageJson.name).toBe("my-app");
+    expect(packageJson.scripts.dev).toBe("vite dev");
+  });
+
+  it("initializes a lightly prepared npm project", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+    await mkdir(path.join(root, "prepared"), { recursive: true });
+    await writeFile(
+      path.join(root, "prepared/package.json"),
+      JSON.stringify({
+        name: "prepared",
+        scripts: { test: "vitest" },
+        dependencies: { zod: "^4.0.0" }
+      }),
+      "utf8"
+    );
+
+    await initCommand({
+      root,
+      directory: "prepared",
+      install: false
+    });
+
+    const packageJson = JSON.parse(
+      await readFile(path.join(root, "prepared/package.json"), "utf8")
+    ) as {
+      name: string;
+      scripts: Record<string, string>;
+      dependencies: Record<string, string>;
+    };
+    expect(packageJson.name).toBe("prepared");
+    expect(packageJson.scripts.test).toBe("vitest");
+    expect(packageJson.scripts.dev).toBe("vite dev");
+    expect(packageJson.dependencies.zod).toBe("^4.0.0");
+    expect(packageJson.dependencies["@cloudflare/think"]).toBe("latest");
+    expect(packageJson.dependencies["workers-ai-provider"]).toBe("latest");
+  });
+
+  it("initializes a prepared project that already has the Think dependency", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+    await mkdir(path.join(root, "prepared"), { recursive: true });
+    await writeFile(
+      path.join(root, "prepared/package.json"),
+      JSON.stringify({
+        name: "prepared",
+        dependencies: { "@cloudflare/think": "^0.7.0" }
+      }),
+      "utf8"
+    );
+
+    await initCommand({
+      root,
+      directory: "prepared",
+      install: false
+    });
+
+    expect(
+      await readFile(
+        path.join(root, "prepared/agents/assistant/agent.ts"),
+        "utf8"
+      )
+    ).toContain("export class Assistant");
+  });
+
+  it("rejects target directories outside the root", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+
+    await expect(
+      initCommand({
+        root,
+        directory: "../outside",
+        install: false
+      })
+    ).rejects.toThrow("inside the project root");
+  });
+
+  it("applies a custom route prefix to generated config", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+
+    await initCommand({
+      root,
+      directory: "route-app",
+      routePrefix: "/api/agents",
+      install: false
+    });
+
+    expect(
+      await readFile(path.join(root, "route-app/vite.config.ts"), "utf8")
+    ).toContain(`routePrefix: "/api/agents"`);
+    expect(
+      await readFile(path.join(root, "route-app/wrangler.jsonc"), "utf8")
+    ).toContain(`"/api/agents/*"`);
+    expect(
+      await readFile(path.join(root, "route-app/wrangler.jsonc"), "utf8")
+    ).toContain(`"binding": "AI"`);
+    expect(
+      await readFile(path.join(root, "route-app/wrangler.jsonc"), "utf8")
+    ).toContain(`"binding": "LOADER"`);
+  });
+
+  it("no-ops for existing Think apps", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+    await mkdir(path.join(root, "app/agents/assistant"), { recursive: true });
+    await writeFile(
+      path.join(root, "app/package.json"),
+      JSON.stringify({
+        name: "app",
+        dependencies: { "@cloudflare/think": "latest" }
+      }),
+      "utf8"
+    );
+
+    await initCommand({
+      root,
+      directory: "app",
+      install: false
+    });
+
+    expect(consoleOutput.join("\n")).toContain(
+      "This already looks like a Think app."
+    );
+  });
+
+  it("refuses existing non-Think Vite or Wrangler apps", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+    await mkdir(path.join(root, "app"), { recursive: true });
+    await writeFile(
+      path.join(root, "app/vite.config.ts"),
+      "export default {};",
+      "utf8"
+    );
+
+    await expect(
+      initCommand({
+        root,
+        directory: "app",
+        install: false
+      })
+    ).rejects.toThrow("will not migrate it automatically");
+  });
+
+  it("refuses to overwrite user-owned files without partial writes", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+    await mkdir(path.join(root, "app/agents/assistant"), { recursive: true });
+    await writeFile(
+      path.join(root, "app/package.json"),
+      JSON.stringify({ name: "app", scripts: { test: "vitest" } }),
+      "utf8"
+    );
+    await writeFile(
+      path.join(root, "app/agents/assistant/agent.ts"),
+      "export const userOwned = true;",
+      "utf8"
+    );
+
+    await expect(
+      initCommand({
+        root,
+        directory: "app",
+        install: false
+      })
+    ).rejects.toThrow("Refusing to overwrite");
+
+    const packageJson = JSON.parse(
+      await readFile(path.join(root, "app/package.json"), "utf8")
+    ) as { scripts: Record<string, string> };
+    expect(packageJson.scripts).toEqual({ test: "vitest" });
+  });
+
+  it("prints init dry-run output without writing", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+
+    await initCommand({
+      root,
+      directory: "dry-app",
+      dryRun: true
+    });
+
+    expect(await readdir(root)).toEqual([]);
+    const output = consoleOutput.join("\n");
+    expect(output).toContain("Think init would create:");
+    expect(output).toContain("package.json");
+    expect(output).toContain("Would run: npm install");
+  });
+
+  it("generates an app that inspect and types check can read", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+    const appRoot = path.join(root, "ready-app");
+
+    await initCommand({
+      root,
+      directory: "ready-app",
+      install: false
+    });
+
+    const inspectCli = createCli([
+      "node",
+      "think",
+      "inspect",
+      "--root",
+      appRoot
+    ]);
+    await inspectCli.exitProcess(false).parse();
+    expect(consoleOutput.join("\n")).toContain(
+      "assistant | class ThinkAgent_Assistant"
+    );
+
+    const typesCli = createCli([
+      "node",
+      "think",
+      "types",
+      "--root",
+      appRoot,
+      "--check"
+    ]);
+    await typesCli.exitProcess(false).parse();
+    expect(consoleOutput.join("\n")).toContain(
+      "Think generated types are up to date."
+    );
+  });
+
+  it("runs installer through an injectable runner", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+    const installedRoots: string[] = [];
+
+    await initCommand({
+      root,
+      directory: "install-app",
+      installRunner: async (installRoot) => {
+        installedRoots.push(installRoot);
+      }
+    });
+
+    expect(installedRoots).toEqual([path.join(root, "install-app")]);
+    expect(consoleOutput.join("\n")).toContain(
+      "Edit agents/assistant/agent.ts to customize the model, prompt, skills, and schedules"
+    );
+  });
+
   it("shows help", async () => {
     const cli = createCli(["node", "think", "--help"]);
 
     await cli.exitProcess(false).parse();
 
     const output = [...consoleOutput, ...consoleError].join("\n");
+    expect(output).toContain("init");
     expect(output).toContain("inspect");
     expect(output).toContain("types");
   });
