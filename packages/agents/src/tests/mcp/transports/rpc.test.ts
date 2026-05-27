@@ -177,6 +177,51 @@ describe("RPC Transport", () => {
       expect(result).toEqual(expectedResponse);
     });
 
+    it("should not resolve a request with another request's earlier response", async () => {
+      const transport = new RPCServerTransport();
+      await transport.start();
+
+      transport.onmessage = (msg) => {
+        const req = msg as JSONRPCRequest;
+        if (req.id === 1) return;
+        void transport.send({
+          jsonrpc: "2.0",
+          id: req.id,
+          result: { method: req.method }
+        });
+      };
+
+      const first = transport.handle({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "first",
+        params: {}
+      });
+      const second = transport.handle({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "second",
+        params: {}
+      });
+
+      await expect(second).resolves.toEqual({
+        jsonrpc: "2.0",
+        id: 2,
+        result: { method: "second" }
+      });
+
+      await transport.send({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { method: "first" }
+      });
+      await expect(first).resolves.toEqual({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { method: "first" }
+      });
+    });
+
     it("should route overlapping responses by request id", async () => {
       const transport = new RPCServerTransport();
       await transport.start();
@@ -397,7 +442,7 @@ describe("RPC Transport", () => {
       expect(result).toEqual(finalResponse);
     });
 
-    it("should not steal an id-routed response while _awaitPendingResponse is pending", async () => {
+    it("should keep an id-routed response from completing a continuation", async () => {
       const transport = new RPCServerTransport();
       await transport.start();
 
@@ -430,6 +475,33 @@ describe("RPC Transport", () => {
         id: 2,
         result: { continuation: true }
       });
+    });
+
+    it("should reject all pending request waiters on close", async () => {
+      const transport = new RPCServerTransport();
+      await transport.start();
+
+      const first = expect(
+        transport.handle({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "slow-one",
+          params: {}
+        })
+      ).rejects.toThrow("Transport closed");
+      const second = expect(
+        transport.handle({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "slow-two",
+          params: {}
+        })
+      ).rejects.toThrow("Transport closed");
+
+      await transport.close();
+
+      await first;
+      await second;
     });
 
     it("should reject pending waiters on close", async () => {
@@ -547,6 +619,38 @@ describe("RPC Transport", () => {
         id: "tools-1",
         result
       });
+    });
+
+    it("should invoke concurrent tools via RPC", async () => {
+      const { connection } = await establishRPCConnection();
+
+      const [first, second] = await Promise.all([
+        connection.client.callTool({
+          name: "greet",
+          arguments: { name: "Concurrent One" }
+        }),
+        connection.client.callTool({
+          name: "greet",
+          arguments: { name: "Concurrent Two" }
+        })
+      ]);
+
+      expectValidGreetResult(
+        {
+          jsonrpc: "2.0",
+          id: "concurrent-1",
+          result: first
+        },
+        "Concurrent One"
+      );
+      expectValidGreetResult(
+        {
+          jsonrpc: "2.0",
+          id: "concurrent-2",
+          result: second
+        },
+        "Concurrent Two"
+      );
     });
 
     it("should invoke greet tool via RPC", async () => {

@@ -331,6 +331,33 @@ describe("McpAgent.elicitInput() in-memory resolver", () => {
   });
 
   describe("RPC Transport", () => {
+    it("should keep a normal concurrent tool call separate from an eliciting tool call via RPC", async () => {
+      const { connection } = await establishRPCConnection();
+
+      connection.handleElicitationRequest = async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return { action: "accept", content: { name: "Alice" } };
+      };
+
+      const [elicitResult, greetResult] = await Promise.all([
+        connection.client.callTool({
+          name: "elicitNameCustom",
+          arguments: {}
+        }),
+        connection.client.callTool({
+          name: "greet",
+          arguments: { name: "Concurrent" }
+        })
+      ]);
+
+      expect(elicitResult.content).toEqual([
+        { type: "text", text: "Custom elicit: Alice" }
+      ]);
+      expect(greetResult.content).toEqual([
+        { type: "text", text: "Hello, Concurrent!" }
+      ]);
+    });
+
     it("should complete elicitation accept round-trip via RPC", async () => {
       const { connection } = await establishRPCConnection();
 
