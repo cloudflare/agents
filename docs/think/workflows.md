@@ -1,6 +1,6 @@
 # Think Workflows
 
-`ThinkAgentWorkflow` connects Think to Cloudflare Workflows when a durable job
+`ThinkWorkflow` connects Think to Cloudflare Workflows when a durable job
 needs one model-driven reasoning step.
 
 Use it when the Workflow owns the process:
@@ -18,15 +18,15 @@ turns on `submitMessages()`. Workflows are for jobs where the steps matter.
 Import from `@cloudflare/think/workflows`:
 
 ```typescript
-import { ThinkAgentWorkflow } from "@cloudflare/think/workflows";
+import { ThinkWorkflow } from "@cloudflare/think/workflows";
 ```
 
-Extend `ThinkAgentWorkflow` and call `step.prompt()` inside `run()`:
+Extend `ThinkWorkflow` and call `step.prompt()` inside `run()`:
 
 ```typescript
 import { z } from "zod";
-import { ThinkAgentWorkflow } from "@cloudflare/think/workflows";
-import type { ThinkAgentWorkflowStep } from "@cloudflare/think/workflows";
+import { ThinkWorkflow } from "@cloudflare/think/workflows";
+import type { ThinkWorkflowStep } from "@cloudflare/think/workflows";
 import type { AgentWorkflowEvent } from "agents/workflows";
 
 const draftSchema = z.object({
@@ -35,8 +35,8 @@ const draftSchema = z.object({
   labels: z.array(z.string())
 });
 
-export class TriageWorkflow extends ThinkAgentWorkflow<TriageAgent, Params> {
-  async run(event: AgentWorkflowEvent<Params>, step: ThinkAgentWorkflowStep) {
+export class TriageWorkflow extends ThinkWorkflow<TriageAgent, Params> {
+  async run(event: AgentWorkflowEvent<Params>, step: ThinkWorkflowStep) {
     const draft = await step.prompt("triage-issue", {
       prompt: `Triage issue #${event.payload.issueNumber}`,
       output: draftSchema,
@@ -65,7 +65,7 @@ export class TriageAgent extends Think<Env> {
 ```
 
 `runWorkflow()` creates the Workflow instance and injects the Agent identity that
-`ThinkAgentWorkflow` needs to reconnect to `this.agent` inside `run()`. Prefer it
+`ThinkWorkflow` needs to reconnect to `this.agent` inside `run()`. Prefer it
 over calling the Workflows binding directly:
 
 ```typescript

@@ -1,6 +1,6 @@
 # Think Workflows
 
-This example shows how `ThinkAgentWorkflow` lets a Workflow run one durable
+This example shows how `ThinkWorkflow` lets a Workflow run one durable
 Think reasoning step, wait for human approval, then apply a deterministic side
 effect.
 

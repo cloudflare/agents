@@ -265,7 +265,7 @@ Think's `this.messages` getter reads directly from Session's tree-structured sto
 | `@cloudflare/think/tools/execute`    | `createExecuteTool()` — sandboxed code execution via codemode |
 | `@cloudflare/think/tools/extensions` | `createExtensionTools()` — LLM-driven extension loading       |
 | `@cloudflare/think/extensions`       | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
-| `@cloudflare/think/workflows`        | `ThinkAgentWorkflow`, `step.prompt()` — Workflow prompts      |
+| `@cloudflare/think/workflows`        | `ThinkWorkflow`, `step.prompt()` — Workflow prompts           |
 
 ## Peer Dependencies
 
@@ -285,4 +285,4 @@ Think's `this.messages` getter reads directly from Session's tree-structured sto
 - [Client Tools](./client-tools.md) — Browser-side tools, approvals, and concurrency
 - [Sub-agents and Programmatic Turns](./sub-agents.md) — RPC streaming, `saveMessages`, recovery
 - [Programmatic Submissions](./programmatic-submissions.md) — durable acceptance, idempotent retry, cancellation, and status inspection
-- [Workflows](./workflows.md) — `ThinkAgentWorkflow`, `step.prompt()`, structured output, and long-running workflow steps
+- [Workflows](./workflows.md) — `ThinkWorkflow`, `step.prompt()`, structured output, and long-running workflow steps

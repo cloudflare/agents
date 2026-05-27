@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/agents-think-workflows-example",
-  "description": "ThinkAgentWorkflow example with durable prompts, approval, and deterministic side effects",
+  "description": "ThinkWorkflow example with durable prompts, approval, and deterministic side effects",
   "private": true,
   "type": "module",
   "version": "0.0.0",

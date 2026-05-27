@@ -3,4 +3,4 @@
 "agents": minor
 ---
 
-Add `ThinkAgentWorkflow` with durable `step.prompt()` support for Workflow-owned Think reasoning steps.
+Add `ThinkWorkflow` with durable `step.prompt()` support for Workflow-owned Think reasoning steps.

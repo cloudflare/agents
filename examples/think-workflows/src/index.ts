@@ -2,8 +2,8 @@ import { getAgentByName, routeAgentRequest } from "agents";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 import { Think } from "@cloudflare/think";
-import { ThinkAgentWorkflow } from "@cloudflare/think/workflows";
-import type { ThinkAgentWorkflowStep } from "@cloudflare/think/workflows";
+import { ThinkWorkflow } from "@cloudflare/think/workflows";
+import type { ThinkWorkflowStep } from "@cloudflare/think/workflows";
 import type { AgentWorkflowEvent } from "agents/workflows";
 
 type Env = {
@@ -97,13 +97,10 @@ export class ReportAgent extends Think<Env> {
   }
 }
 
-export class ReportWorkflow extends ThinkAgentWorkflow<
-  ReportAgent,
-  ReportParams
-> {
+export class ReportWorkflow extends ThinkWorkflow<ReportAgent, ReportParams> {
   async run(
     event: AgentWorkflowEvent<ReportParams>,
-    step: ThinkAgentWorkflowStep
+    step: ThinkWorkflowStep
   ): Promise<void> {
     const draft = await step.prompt("draft-report", {
       prompt: `Draft an operational report about: ${event.payload.topic}`,

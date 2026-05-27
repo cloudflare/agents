@@ -32,7 +32,7 @@ export type ThinkPromptOptions<Schema extends ZodObject> = {
   cancelOnTimeout?: boolean;
 };
 
-export interface ThinkAgentWorkflowStep extends AgentWorkflowStep {
+export interface ThinkWorkflowStep extends AgentWorkflowStep {
   prompt<Schema extends ZodObject>(
     name: string,
     options: ThinkPromptOptions<Schema>
@@ -84,7 +84,7 @@ export class ThinkPromptValidationError extends ThinkPromptError {
   }
 }
 
-export class ThinkAgentWorkflow<
+export class ThinkWorkflow<
   AgentType extends Think = Think,
   Params = unknown,
   ProgressType = DefaultProgress,
@@ -93,8 +93,8 @@ export class ThinkAgentWorkflow<
   protected extendStep(
     step: AgentWorkflowStep,
     event: WorkflowEvent<Params>
-  ): ThinkAgentWorkflowStep {
-    const workflowStep = step as ThinkAgentWorkflowStep;
+  ): ThinkWorkflowStep {
+    const workflowStep = step as ThinkWorkflowStep;
     workflowStep.prompt = async <Schema extends ZodObject>(
       name: string,
       options: ThinkPromptOptions<Schema>
