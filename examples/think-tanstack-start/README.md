@@ -23,6 +23,15 @@ Run the example's e2e check with:
 npm run test:e2e
 ```
 
+Regenerate the Think virtual module and typed Env declarations with:
+
+```bash
+npm exec -- think types
+```
+
+Use `npm exec -- think types --all -- <wrangler types flags>` when you also
+want to refresh Wrangler's platform declarations.
+
 ## Key Pattern
 
 Use the Cloudflare Vite plugin for TanStack Start's SSR environment, then add the
@@ -75,8 +84,6 @@ can smooth over the repeated pieces:
 - `src/worker.ts` only re-exports `virtual:think/entry`.
 - `src/server.ts` manually checks `/api/agents/*` and returns `null` so Think can
   handle those routes.
-- `env.d.ts` declares the virtual module by hand. This belongs in future
-  framework type generation.
 
 TanStack Start also recommends disabling `verbatimModuleSyntax`, so this example
 overrides that setting from the repo's base TypeScript config.

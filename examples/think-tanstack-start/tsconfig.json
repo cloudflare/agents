@@ -6,7 +6,7 @@
   },
   "include": [
     "agents/**/*.ts",
-    "env.d.ts",
+    "think.d.ts",
     "src/**/*.ts",
     "src/**/*.tsx",
     "vite.config.ts"

@@ -9,6 +9,7 @@ import {
   discoverThinkApp,
   generateThinkAgentsModule,
   generateThinkEntry,
+  generateThinkTypes,
   mergeThinkWorkerConfig,
   summarizeThinkManifest
 } from "../framework";
@@ -45,6 +46,41 @@ describe("Think framework discovery", () => {
     ]);
     expect(manifest.routes[0]?.pattern).toBe("/agents/support/*");
     expect(manifest.routePrefix).toBe("/agents");
+  });
+
+  it("generates Think type declarations for class and declarative agents", () => {
+    const files = {
+      "agents/host/agent.ts": "export class HostAgent {}",
+      "agents/researcher/agent.ts": `
+        import { agent } from "@cloudflare/think/framework";
+        export default agent({ model });
+      `,
+      "agents/host/skills/review/SKILL.md": "# Review"
+    };
+    const manifest = discoverThinkApp({ files });
+    manifest.agents[0]!.bindingName = "Host";
+    manifest.agents[1]!.bindingName = "Researcher";
+
+    const generated = generateThinkTypes(manifest, { files });
+
+    expect(
+      generated.find((file) => file.path === "think.d.ts")?.content
+    ).toContain(
+      `export const ThinkAgent_Host: (typeof import("./agents/host/agent"))["HostAgent"];`
+    );
+    expect(
+      generated.find((file) => file.path === "think.d.ts")?.content
+    ).toContain(
+      `export const ThinkAgent_Researcher: typeof import("@cloudflare/think").Think<Cloudflare.Env>;`
+    );
+    expect(
+      generated.find((file) => file.path === "think.d.ts")?.content
+    ).toContain(
+      `InstanceType<(typeof import("./agents/host/agent"))["HostAgent"]>`
+    );
+    expect(
+      generated.find((file) => file.path === "agents/host/skills.d.ts")
+    ).toBeDefined();
   });
 
   it("builds folder-style top-level agents and nested subagents", () => {

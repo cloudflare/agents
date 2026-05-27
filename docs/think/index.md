@@ -378,6 +378,38 @@ think({ allowNonVirtualMain: true });
 Use that only when another wrapper still re-exports Think's generated Durable
 Object classes.
 
+### CLI Type Generation
+
+Use `think types` to keep Think-specific TypeScript declarations in sync with the
+discovered manifest:
+
+```bash
+npx @cloudflare/think types
+```
+
+By default, the command only writes Think-owned declarations to `think.d.ts`:
+`virtual:think/entry`, `virtual:think/router`, generated Durable Object exports,
+skill stubs, and the generated Durable Object bindings on `Cloudflare.Env`.
+
+When you also want Wrangler platform declarations, use `--all`. Wrangler flags
+can be passed through after `--`:
+
+```bash
+npx @cloudflare/think types --all -- --env production
+```
+
+With `--all`, Think runs `wrangler types env.d.ts --include-runtime false` before
+generating `think.d.ts`. Pass `--wrangler-env-file` to change Wrangler's output
+path, or pass `-- --include-runtime true` when you intentionally want Wrangler's
+runtime declarations included.
+
+`think types` does not generate an importable Env module. App code can use the
+augmented `Cloudflare.Env` directly, or define its own local alias if it prefers
+imported types.
+
+Use `think types --check` in CI to verify Think-generated files are current
+without modifying the working tree.
+
 ## Messengers
 
 Think agents can receive and reply to messenger webhooks directly. Messenger

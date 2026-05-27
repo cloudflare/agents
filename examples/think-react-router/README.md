@@ -23,6 +23,15 @@ Run the example's e2e check with:
 npm run test:e2e
 ```
 
+Regenerate the Think virtual module and typed Env declarations with:
+
+```bash
+npm exec -- think types
+```
+
+Use `npm exec -- think types --all -- <wrangler types flags>` when you also
+want to refresh Wrangler's platform declarations.
+
 ## Key Pattern
 
 Use the Cloudflare Vite plugin for React Router's SSR environment, then add the
@@ -75,8 +84,6 @@ should become nicer before this becomes the final framework ergonomics:
 - `src/server.ts` manually checks `/api/agents/*` and returns `null` so Think can
   handle those routes. A small helper such as `think.router.owns(request)` may be
   useful once we compare this against another host framework.
-- `env.d.ts` declares the virtual modules by hand. This belongs in future
-  framework type generation.
 - The React Router `server-build` import handles both module shapes with
   `(mod.default ?? mod)`. A React Router adapter helper could hide that detail.
 
