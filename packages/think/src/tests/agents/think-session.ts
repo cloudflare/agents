@@ -1697,6 +1697,7 @@ export class ThinkProgrammaticTestAgent extends Think {
   private _delayedChunks: { chunks: string[]; delayMs: number } | null = null;
   private _throwBeforeTurnError: string | null = null;
   private _submissionStatusDelayMs = 0;
+  private _programmaticResponse = "Programmatic response";
   private _inBandErrorResponse: {
     errorText: string;
     textChunks: string[];
@@ -1715,7 +1716,7 @@ export class ThinkProgrammaticTestAgent extends Think {
         this._delayedChunks.delayMs
       );
     }
-    return createMockModel("Programmatic response");
+    return createMockModel(this._programmaticResponse);
   }
 
   override onChatResponse(result: ChatResponseResult): void {
@@ -1827,6 +1828,10 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async setSubmissionStatusDelayForTest(delayMs: number): Promise<void> {
     this._submissionStatusDelayMs = delayMs;
+  }
+
+  async setProgrammaticResponseForTest(response: string): Promise<void> {
+    this._programmaticResponse = response;
   }
 
   async setWorkflowEventFailuresForTest(count: number): Promise<void> {

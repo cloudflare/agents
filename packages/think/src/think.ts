@@ -1623,6 +1623,7 @@ export class Think<
     const finalTools: ToolSet = this._wrapToolsWithDecision(mergedTools);
     const finalMaxSteps = config.maxSteps ?? this.maxSteps;
     const finalSendReasoning = config.sendReasoning ?? this.sendReasoning;
+    const finalOutput = workflowOutput ?? config.output;
     const finalStopWhen = [
       stepCountIs(finalMaxSteps),
       ...(Array.isArray(config.stopWhen)
@@ -1658,7 +1659,7 @@ export class Think<
       // Forward the per-turn structured-output spec from TurnConfig so
       // callers can use AI SDK `Output.object({ schema })` / `Output.text()`
       // on the terminal turn without dropping tools at model construction.
-      output: workflowOutput ?? config.output,
+      output: finalOutput,
       abortSignal: input.signal,
       // Forward the AI SDK's `prepareStep` callback unchanged so subclasses
       // can make per-step decisions from the previous steps, current
@@ -1717,9 +1718,19 @@ export class Think<
       }) satisfies StreamTextOnToolCallFinishCallback<ToolSet>
     });
 
+    const outputPromise =
+      finalOutput && result.output ? Promise.resolve(result.output) : undefined;
+    if (outputPromise) {
+      // Attach a rejection observer immediately. `_streamResult()` will still
+      // await this promise when captureOutput is enabled, but aborted streams can
+      // reject before the stream consumer reaches that point.
+      void outputPromise.catch(() => {});
+    }
+
     const streamResult = {
       toUIMessageStream: () =>
-        result.toUIMessageStream({ sendReasoning: finalSendReasoning })
+        result.toUIMessageStream({ sendReasoning: finalSendReasoning }),
+      output: outputPromise
     } satisfies StreamableResult;
 
     return this._transformInferenceResult(streamResult);
@@ -3347,9 +3358,8 @@ export class Think<
     let output: unknown;
     try {
       const messages = this._parseSubmissionMessages(row.messages_json);
-      const workflowPrompt = this._readWorkflowPromptContext(
-        this._parseJsonObject(row.metadata_json)
-      );
+      const metadata = this._parseJsonObject(row.metadata_json);
+      const workflowPrompt = this._readWorkflowPromptContext(metadata);
       const result = await this._runProgrammaticMessagesTurn(
         requestId,
         messages,
@@ -3357,11 +3367,7 @@ export class Think<
           signal: controller.signal,
           captureProgrammaticStreamError: true,
           captureOutput: Boolean(workflowPrompt?.output),
-          body: workflowPrompt
-            ? {
-                workflowPrompt
-              }
-            : undefined,
+          body: workflowPrompt ? (metadata ?? undefined) : undefined,
           onMessagesApplied: () => {
             this.sql`
               UPDATE cf_think_submissions
