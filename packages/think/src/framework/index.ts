@@ -49,8 +49,16 @@ export type {
   ThinkFrameworkAgent,
   ThinkFrameworkBinding,
   ThinkFrameworkFeature,
+  ThinkFrameworkFeatureSource,
   ThinkFrameworkManifest,
+  ThinkFrameworkMessenger,
   ThinkFrameworkRoute,
+  ThinkFrameworkRouteSurface,
+  ThinkFrameworkRouteSurfaceKind,
+  ThinkFrameworkSchedule,
+  ThinkFrameworkTool,
+  ThinkPlatformRequirement,
+  ThinkPlatformRequirementKind,
   ThinkWorkerConfig,
   ThinkWorkerConfigOptions
 } from "./manifest";

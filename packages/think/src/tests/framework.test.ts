@@ -34,6 +34,7 @@ describe("Think framework discovery", () => {
         sourcePath: "agents/support.ts",
         kind: "top-level",
         features: [],
+        featureSources: [],
         env: []
       }
     ]);
@@ -212,6 +213,86 @@ describe("Think framework discovery", () => {
       "/messengers/*",
       "/__think/*"
     ]);
+  });
+
+  it("models deterministic route surfaces for agents, subagents, and internals", () => {
+    const manifest = discoverThinkApp({
+      files: {
+        "agents/support/agent.ts": "export class SupportAgent {}",
+        "agents/support/agents/researcher.ts": "export class Researcher {}"
+      }
+    });
+
+    expect(manifest.routeSurfaces).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "agent:support",
+          kind: "agent",
+          pattern: "/agents/support/*"
+        }),
+        expect.objectContaining({
+          id: "subagent:support/researcher",
+          kind: "subagent",
+          pattern: "/agents/support/{name}/sub/researcher/{subName}"
+        }),
+        expect.objectContaining({
+          id: "internal:think",
+          kind: "internal",
+          pattern: "/__think/*"
+        })
+      ])
+    );
+    expect(manifest.routeSurfaces).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: "messenger" })])
+    );
+  });
+
+  it("keeps source text out of manifest inference", () => {
+    const manifest = discoverThinkApp({
+      files: {
+        "agents/support/agent.ts": `
+          export default agent({
+            schedules: [],
+            tools: [createExecuteTool()],
+            model: () => this.env.AI
+          });
+        `,
+        "agents/support/skills/review/SKILL.md": "# Review"
+      }
+    });
+
+    expect(manifest.features).toEqual(["skills"]);
+    expect(manifest.agents[0]).toMatchObject({
+      id: "support",
+      features: ["skills"],
+      env: []
+    });
+    expect(manifest.tools).toEqual([]);
+    expect(manifest.schedules).toEqual([]);
+    expect(manifest.platformRequirements).toEqual([
+      expect.objectContaining({
+        kind: "worker_loader",
+        binding: "LOADER",
+        agent: "support"
+      })
+    ]);
+  });
+
+  it("does not follow local imports for manifest facts", () => {
+    const manifest = discoverThinkApp({
+      files: {
+        "agents/support/agent.ts": `
+          import "./tools";
+          export default agent({});
+        `,
+        "agents/support/tools.ts": "export const tools = [createExecuteTool()]"
+      }
+    });
+
+    expect(manifest.features).toEqual([]);
+    expect(manifest.env).toEqual([]);
+    expect(manifest.messengers).toEqual([]);
+    expect(manifest.platformRequirements).toEqual([]);
   });
 
   it("generates a Worker entrypoint with runtime export validation", () => {
@@ -426,6 +507,35 @@ describe("Think framework discovery", () => {
           code: "orphan-subagent",
           severity: "error",
           path: "agents/support/agents/researcher.ts"
+        })
+      ])
+    );
+  });
+
+  it("diagnoses unsupported nested subagent topology", () => {
+    const manifest = discoverThinkApp({
+      files: {
+        "agents/support/agent.ts": "export class SupportAgent {}",
+        "agents/support/agents/researcher/agent.ts":
+          "export class ResearcherAgent {}",
+        "agents/support/agents/researcher/agents/coder.ts":
+          "export class CoderAgent {}"
+      }
+    });
+
+    expect(diagnoseThinkWorkerConfig(manifest, {})).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "unsupported-nested-subagent",
+          severity: "error",
+          path: "agents/support/agents/researcher/agents/coder.ts"
+        })
+      ])
+    );
+    expect(manifest.routeSurfaces).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "subagent:support/researcher/coder"
         })
       ])
     );

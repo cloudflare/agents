@@ -140,6 +140,12 @@ export function diagnoseThinkManifest(
       "duplicate-route-id",
       "Generated route ids must be unique."
     ),
+    ...findDuplicates(
+      manifest.routeSurfaces.map((surface) => surface.id),
+      "duplicate-route-surface-id",
+      "Generated route surface ids must be unique."
+    ),
+    ...findUnsupportedNestedSubAgents(manifest),
     ...findOrphanSubAgents(manifest)
   ];
 }
@@ -214,7 +220,7 @@ export function diagnoseThinkWorkerConfig(
         path: "worker_loaders",
         message:
           `Missing worker_loaders binding "${required.binding}". ${required.reason} ` +
-          `Add { "binding": "${required.binding}" } to worker_loaders, or remove colocated skills.`
+          `Add { "binding": "${required.binding}" } to worker_loaders, or remove the feature that needs dynamic Workers.`
       });
     }
   }
@@ -237,6 +243,25 @@ export function diagnoseThinkWorkerConfig(
         `This Worker has Think agents but assets.run_worker_first does not include "${expectedAgentsRoute}". ` +
         `That is valid for auth-gated custom routing, but direct ${manifest.routePrefix}/* routes will not reach Think. ` +
         `Add "${expectedAgentsRoute}" or route requests explicitly with the injected Think router.`
+    });
+  }
+
+  const uncoveredRouteSurfaces = manifest.routeSurfaces.filter(
+    (surface) =>
+      surface.requiredRunWorkerFirst &&
+      surface.kind !== "agent" &&
+      surface.kind !== "internal" &&
+      runWorkerFirst.length > 0 &&
+      !isRouteSurfaceCovered(surface.pattern, runWorkerFirst)
+  );
+  if (uncoveredRouteSurfaces.length > 0) {
+    diagnostics.push({
+      code: "custom-think-route-surface-routing",
+      severity: manifest.appEntrypoint ? "info" : "warning",
+      path: "assets.run_worker_first",
+      message:
+        `Some Think-owned routes will not reach the Worker with the current assets.run_worker_first setting: ` +
+        `${uncoveredRouteSurfaces.map((surface) => surface.pattern).join(", ")}.`
     });
   }
 
@@ -280,14 +305,29 @@ export function summarizeThinkManifest(
 export function inferRequiredBindings(
   manifest: ThinkFrameworkManifest
 ): ThinkRequiredBinding[] {
-  if (!manifest.features.includes("skills")) return [];
-  return [
-    {
+  const requirements = manifest.platformRequirements.filter(
+    (requirement) => requirement.kind === "worker_loader"
+  );
+  if (requirements.length === 0 && manifest.features.includes("skills")) {
+    requirements.push({
       kind: "worker_loader",
       binding: "LOADER",
       reason: "Agents with colocated skills need a Worker Loader binding."
-    }
-  ];
+    });
+  }
+  const seen = new Set<string>();
+  return requirements.flatMap((requirement) => {
+    if (seen.has(requirement.binding)) return [];
+    seen.add(requirement.binding);
+    return [
+      {
+        kind: "worker_loader" as const,
+        binding: requirement.binding,
+        reason: requirement.reason,
+        sourcePath: requirement.sourcePath
+      }
+    ];
+  });
 }
 
 function mergeDurableObjectBindings(
@@ -423,6 +463,18 @@ function hasWorkerLoader(config: UnknownRecord, binding: string): boolean {
   );
 }
 
+function isRouteSurfaceCovered(
+  pattern: string,
+  runWorkerFirst: string[]
+): boolean {
+  return runWorkerFirst.some((entry) => {
+    if (entry === pattern) return true;
+    if (!entry.endsWith("/*")) return false;
+    const prefix = entry.slice(0, -1);
+    return pattern.startsWith(prefix);
+  });
+}
+
 function findDuplicates(
   values: string[],
   code: string,
@@ -447,6 +499,7 @@ function findOrphanSubAgents(
     .filter(
       (agent) =>
         agent.kind === "subagent" &&
+        agent.id.split("/").length <= 2 &&
         (agent.parentId === undefined || !topLevelIds.has(agent.parentId))
     )
     .map((agent) => ({
@@ -456,6 +509,23 @@ function findOrphanSubAgents(
       message:
         `Subagent "${agent.id}" has no top-level parent agent at "${agent.parentId ?? "<missing>"}". ` +
         `Add a parent agent module or move the subagent under an existing agents/<parent>/agents folder.`
+    }));
+}
+
+function findUnsupportedNestedSubAgents(
+  manifest: ThinkFrameworkManifest
+): ThinkWorkerConfigDiagnostic[] {
+  return manifest.agents
+    .filter(
+      (agent) => agent.kind === "subagent" && agent.id.split("/").length > 2
+    )
+    .map((agent) => ({
+      code: "unsupported-nested-subagent",
+      severity: "error" as const,
+      path: agent.sourcePath,
+      message:
+        `Nested subagents are not supported yet: "${agent.id}". ` +
+        `Think currently supports top-level agents and one subagent layer; move this agent under agents/<parent>/agents/ or make it top-level.`
     }));
 }
 

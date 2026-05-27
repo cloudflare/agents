@@ -63,12 +63,14 @@ describe("Think Vite plugin", () => {
       { tag: "v1", new_sqlite_classes: ["LegacyAgent"] },
       { tag: "think-generated-v1", new_sqlite_classes: ["ThinkAgent_Support"] }
     ]);
-    expect(result.diagnostics).toEqual([
-      expect.objectContaining({
-        code: "custom-agent-routing",
-        severity: "warning"
-      })
-    ]);
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "custom-agent-routing",
+          severity: "warning"
+        })
+      ])
+    );
   });
 
   it("serves composable virtual modules", async () => {
