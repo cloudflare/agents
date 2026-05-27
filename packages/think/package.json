@@ -46,6 +46,10 @@
       "types": "./dist/extensions/index.d.ts",
       "import": "./dist/extensions/index.js"
     },
+    "./workflows": {
+      "types": "./dist/workflows.d.ts",
+      "import": "./dist/workflows.js"
+    },
     "./tools/workspace": {
       "types": "./dist/tools/workspace.d.ts",
       "import": "./dist/tools/workspace.js"

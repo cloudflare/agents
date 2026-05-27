@@ -1,0 +1,29 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "think-workflows-example",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI", "remote": true },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ReportAgent",
+        "class_name": "ReportAgent"
+      }
+    ]
+  },
+  "workflows": [
+    {
+      "name": "report-workflow",
+      "binding": "REPORT_WORKFLOW",
+      "class_name": "ReportWorkflow"
+    }
+  ],
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ReportAgent"]
+    }
+  ]
+}

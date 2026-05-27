@@ -93,7 +93,13 @@ import type {
   TypedToolCall,
   UIMessage
 } from "ai";
-import { convertToModelMessages, stepCountIs, streamText } from "ai";
+import {
+  convertToModelMessages,
+  jsonSchema,
+  Output,
+  stepCountIs,
+  streamText
+} from "ai";
 
 // Re-export AI SDK types that appear on Think's public lifecycle hooks
 // so users can import them from a single place.
@@ -187,6 +193,11 @@ function shouldMarkSkippedAfterGenerationChange(
 type StreamResultStatus = {
   status: Exclude<SaveMessagesResult["status"], "skipped">;
   error?: string;
+  output?: unknown;
+};
+
+type ProgrammaticMessagesResult = SaveMessagesResult & {
+  output?: unknown;
 };
 
 type ChatRecoveryRetryData = {
@@ -230,6 +241,7 @@ export interface StreamableResult {
   toUIMessageStream(options?: {
     sendReasoning?: boolean;
   }): AsyncIterable<unknown>;
+  output?: PromiseLike<unknown>;
 }
 
 /**
@@ -289,6 +301,19 @@ export type SubmitMessagesOptions = {
   metadata?: Record<string, unknown>;
 };
 
+type ThinkWorkflowPromptContext = {
+  workflow: {
+    name: string;
+    id: string;
+    stepName: string;
+    eventType: string;
+  };
+  output?: {
+    schema: unknown;
+  };
+  fingerprint?: string;
+};
+
 export type ThinkSubmissionInspection = {
   submissionId: string;
   idempotencyKey?: string;
@@ -329,6 +354,20 @@ type ThinkSubmissionRow = {
   messages_applied_at: number | null;
   started_at: number | null;
   completed_at: number | null;
+};
+
+type ThinkWorkflowNotificationRow = {
+  notification_id: string;
+  submission_id: string;
+  workflow_name: string;
+  workflow_id: string;
+  event_type: string;
+  payload_json: string;
+  attempts: number;
+  last_error: string | null;
+  created_at: number;
+  updated_at: number;
+  delivered_at: number | null;
 };
 
 // Lifecycle / result types are shared with `@cloudflare/ai-chat` via
@@ -793,7 +832,9 @@ export class Think<
       // 9. Durable submissions may run user-defined model/hooks, so start them
       // after subclass initialization has completed.
       await this._recoverSubmissionsOnStart();
+      this._recoverWorkflowNotifications();
       this._startSubmissionDrain();
+      this._startWorkflowNotificationDrain();
     };
   }
 
@@ -921,7 +962,9 @@ export class Think<
   private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
   private _agentToolLiveSequences = new Map<string, number>();
   private _submissionTableEnsured = false;
+  private _workflowNotificationTableEnsured = false;
   private _drainingSubmissions = false;
+  private _drainingWorkflowNotifications = false;
   private _submissionAbortControllers = new Map<string, AbortController>();
   private _programmaticStreamErrors = new Map<string, string>();
   protected static submissionRecoveryStaleMs = 15 * 60 * 1000;
@@ -959,6 +1002,11 @@ export class Think<
       }
     }
     super.broadcast(msg, without);
+  }
+
+  override async alarm(): Promise<void> {
+    await super.alarm();
+    this._startWorkflowNotificationDrain();
   }
 
   // ── Dynamic config ──────────────────────────────────────────────
@@ -1549,6 +1597,12 @@ export class Think<
 
     const subclassConfig = (await this.beforeTurn(ctx)) ?? {};
     const config = await this._pipelineExtensionBeforeTurn(ctx, subclassConfig);
+    const workflowPrompt = this._readWorkflowPromptContext(input.body ?? null);
+    const workflowOutput = workflowPrompt?.output
+      ? Output.object({
+          schema: jsonSchema(workflowPrompt.output.schema as never)
+        })
+      : undefined;
 
     const finalModel = config.model ?? model;
     const finalSystem =
@@ -1604,7 +1658,7 @@ export class Think<
       // Forward the per-turn structured-output spec from TurnConfig so
       // callers can use AI SDK `Output.object({ schema })` / `Output.text()`
       // on the terminal turn without dropping tools at model construction.
-      output: config.output,
+      output: workflowOutput ?? config.output,
       abortSignal: input.signal,
       // Forward the AI SDK's `prepareStep` callback unchanged so subclasses
       // can make per-step decisions from the previous steps, current
@@ -2577,6 +2631,40 @@ export class Think<
     this._submissionTableEnsured = true;
   }
 
+  private _ensureWorkflowNotificationTable(): void {
+    if (this._workflowNotificationTableEnsured) return;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_think_workflow_notifications (
+        notification_id TEXT PRIMARY KEY,
+        submission_id TEXT NOT NULL,
+        workflow_name TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        delivered_at INTEGER
+      )
+    `;
+    try {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE cf_think_workflow_notifications ADD COLUMN delivered_at INTEGER"
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.toLowerCase().includes("duplicate column")) {
+        throw error;
+      }
+    }
+    this.sql`
+      CREATE INDEX IF NOT EXISTS cf_think_workflow_notifications_created_idx
+      ON cf_think_workflow_notifications (delivered_at, created_at, notification_id)
+    `;
+    this._workflowNotificationTableEnsured = true;
+  }
+
   private _readSubmission(submissionId: string): ThinkSubmissionRow | null {
     this._ensureSubmissionTable();
     const rows = this.sql<ThinkSubmissionRow>`
@@ -2711,7 +2799,60 @@ export class Think<
     return metadata === undefined ? null : JSON.stringify(metadata);
   }
 
-  private async _emitSubmissionStatus(row: ThinkSubmissionRow): Promise<void> {
+  private _readWorkflowPromptContext(
+    metadata: Record<string, unknown> | null
+  ): ThinkWorkflowPromptContext | null {
+    const workflowPromptValue = metadata?.workflowPrompt;
+    const workflowValue = metadata?.workflow;
+    if (
+      workflowPromptValue === null ||
+      typeof workflowPromptValue !== "object" ||
+      Array.isArray(workflowPromptValue) ||
+      workflowValue === null ||
+      typeof workflowValue !== "object" ||
+      Array.isArray(workflowValue)
+    ) {
+      return null;
+    }
+    const workflowPrompt = workflowPromptValue as Record<string, unknown>;
+    const workflowRecord = workflowValue as Record<string, unknown>;
+    if (
+      typeof workflowRecord.name !== "string" ||
+      typeof workflowRecord.id !== "string" ||
+      typeof workflowRecord.stepName !== "string" ||
+      typeof workflowRecord.eventType !== "string"
+    ) {
+      return null;
+    }
+    const output = workflowPrompt.output;
+    const outputRecord =
+      output !== null && typeof output === "object" && !Array.isArray(output)
+        ? (output as Record<string, unknown>)
+        : null;
+    return {
+      workflow: {
+        name: workflowRecord.name,
+        id: workflowRecord.id,
+        stepName: workflowRecord.stepName,
+        eventType: workflowRecord.eventType
+      },
+      ...(outputRecord
+        ? {
+            output: {
+              schema: outputRecord.schema
+            }
+          }
+        : {}),
+      ...(typeof workflowPrompt.fingerprint === "string" && {
+        fingerprint: workflowPrompt.fingerprint
+      })
+    };
+  }
+
+  private async _emitSubmissionStatus(
+    row: ThinkSubmissionRow,
+    output?: unknown
+  ): Promise<void> {
     const inspection = this._inspectionFromSubmissionRow(row);
     this._emit("submission:status", {
       submissionId: inspection.submissionId,
@@ -2725,6 +2866,9 @@ export class Think<
         error: inspection.error
       });
     }
+    if (this._isTerminalSubmissionStatus(inspection.status)) {
+      await this._enqueueWorkflowNotification(inspection, output);
+    }
     await this.keepAliveWhile(async () => {
       try {
         await this.onSubmissionStatus(inspection);
@@ -2737,6 +2881,175 @@ export class Think<
   protected onSubmissionStatus(
     _submission: ThinkSubmissionInspection
   ): void | Promise<void> {}
+
+  private async _enqueueWorkflowNotification(
+    submission: ThinkSubmissionInspection,
+    output?: unknown
+  ): Promise<void> {
+    this._insertWorkflowNotification(submission, output);
+    this._startWorkflowNotificationDrain();
+  }
+
+  private _insertWorkflowNotification(
+    submission: ThinkSubmissionInspection,
+    output?: unknown,
+    override?: { status: ThinkSubmissionStatus; error: string }
+  ): boolean {
+    const workflowPrompt = this._readWorkflowPromptContext(
+      submission.metadata ?? null
+    );
+    if (!workflowPrompt) return false;
+
+    this._ensureWorkflowNotificationTable();
+    const now = Date.now();
+    const status = override?.status ?? submission.status;
+    const error = override?.error ?? submission.error;
+    const payload = {
+      submissionId: submission.submissionId,
+      status,
+      ...(status === "completed" && { output }),
+      ...(error && { error })
+    };
+    this.sql`
+      INSERT OR IGNORE INTO cf_think_workflow_notifications (
+        notification_id, submission_id, workflow_name, workflow_id, event_type,
+        payload_json, attempts, last_error, created_at, updated_at, delivered_at
+      )
+      VALUES (
+        ${`${submission.submissionId}:${workflowPrompt.workflow.eventType}`},
+        ${submission.submissionId},
+        ${workflowPrompt.workflow.name},
+        ${workflowPrompt.workflow.id},
+        ${workflowPrompt.workflow.eventType},
+        ${JSON.stringify(payload)},
+        0,
+        NULL,
+        ${now},
+        ${now},
+        NULL
+      )
+    `;
+    return true;
+  }
+
+  private _recoverWorkflowNotifications(): void {
+    this._ensureSubmissionTable();
+    this._ensureWorkflowNotificationTable();
+    const terminalRows = this.sql<ThinkSubmissionRow>`
+      SELECT submission_id, idempotency_key, request_id, stream_id, status,
+             messages_json, metadata_json, error_message, created_at,
+             messages_applied_at, started_at, completed_at
+      FROM cf_think_submissions
+      WHERE status IN ('aborted', 'skipped', 'error')
+      ORDER BY completed_at DESC, created_at DESC
+      LIMIT 100
+    `;
+
+    let recovered = false;
+    for (const row of terminalRows) {
+      const inspection = this._inspectionFromSubmissionRow(row);
+      const workflowPrompt = this._readWorkflowPromptContext(
+        inspection.metadata ?? null
+      );
+      if (!workflowPrompt) continue;
+      const notificationId = `${inspection.submissionId}:${workflowPrompt.workflow.eventType}`;
+      const existing = this.sql<{ notification_id: string }>`
+        SELECT notification_id
+        FROM cf_think_workflow_notifications
+        WHERE notification_id = ${notificationId}
+        LIMIT 1
+      `;
+      if (existing[0]) continue;
+
+      recovered = this._insertWorkflowNotification(inspection) || recovered;
+    }
+    if (recovered) this._startWorkflowNotificationDrain();
+  }
+
+  private _startWorkflowNotificationDrain(): void {
+    void this.keepAliveWhile(() => this._drainWorkflowNotifications()).catch(
+      (error) => {
+        console.error("[Think] Failed to drain workflow notifications", error);
+        void this._scheduleWorkflowNotificationAlarm();
+      }
+    );
+  }
+
+  private async _drainWorkflowNotifications(): Promise<void> {
+    if (this._drainingWorkflowNotifications) return;
+    this._ensureWorkflowNotificationTable();
+    this._drainingWorkflowNotifications = true;
+    try {
+      const rows = this.sql<ThinkWorkflowNotificationRow>`
+        SELECT notification_id, submission_id, workflow_name, workflow_id,
+               event_type, payload_json, attempts, last_error, created_at,
+               updated_at, delivered_at
+        FROM cf_think_workflow_notifications
+        WHERE delivered_at IS NULL
+        ORDER BY created_at ASC, notification_id ASC
+        LIMIT 25
+      `;
+      for (const row of rows) {
+        try {
+          const payload = JSON.parse(row.payload_json) as unknown;
+          await this.retry(
+            async () => {
+              await this.sendWorkflowEvent(
+                row.workflow_name as string & {},
+                row.workflow_id,
+                {
+                  type: row.event_type,
+                  payload
+                }
+              );
+            },
+            { maxAttempts: 5 }
+          );
+          this.sql`
+            UPDATE cf_think_workflow_notifications
+            SET payload_json = '{}',
+                last_error = NULL,
+                updated_at = ${Date.now()},
+                delivered_at = ${Date.now()}
+            WHERE notification_id = ${row.notification_id}
+              AND delivered_at IS NULL
+          `;
+        } catch (error) {
+          this.sql`
+            UPDATE cf_think_workflow_notifications
+            SET attempts = attempts + 1,
+                last_error = ${error instanceof Error ? error.message : String(error)},
+                updated_at = ${Date.now()}
+            WHERE notification_id = ${row.notification_id}
+          `;
+        }
+      }
+    } finally {
+      this._drainingWorkflowNotifications = false;
+    }
+    await this._scheduleWorkflowNotificationAlarm();
+  }
+
+  private async _scheduleWorkflowNotificationAlarm(): Promise<void> {
+    this._ensureWorkflowNotificationTable();
+    const pending = this.sql<{ attempts: number }>`
+      SELECT attempts
+      FROM cf_think_workflow_notifications
+      WHERE delivered_at IS NULL
+      ORDER BY created_at ASC, notification_id ASC
+      LIMIT 1
+    `;
+    if (!pending[0]) return;
+    const delayMs = Math.min(
+      5 * 60 * 1000,
+      1000 * 2 ** Math.min(pending[0].attempts, 8)
+    );
+    const nextAlarm = Date.now() + delayMs;
+    const existingAlarm = await this.ctx.storage.getAlarm();
+    if (existingAlarm === null || existingAlarm > nextAlarm) {
+      await this.ctx.storage.setAlarm(nextAlarm);
+    }
+  }
 
   async inspectSubmission(
     submissionId: string
@@ -3031,14 +3344,24 @@ export class Think<
 
     const controller = new AbortController();
     this._submissionAbortControllers.set(row.submission_id, controller);
+    let output: unknown;
     try {
       const messages = this._parseSubmissionMessages(row.messages_json);
+      const workflowPrompt = this._readWorkflowPromptContext(
+        this._parseJsonObject(row.metadata_json)
+      );
       const result = await this._runProgrammaticMessagesTurn(
         requestId,
         messages,
         {
           signal: controller.signal,
           captureProgrammaticStreamError: true,
+          captureOutput: Boolean(workflowPrompt?.output),
+          body: workflowPrompt
+            ? {
+                workflowPrompt
+              }
+            : undefined,
           onMessagesApplied: () => {
             this.sql`
               UPDATE cf_think_submissions
@@ -3050,6 +3373,7 @@ export class Think<
           }
         }
       );
+      output = result.output;
       const streamId =
         this._resumableStream
           .getAllStreamMetadata()
@@ -3061,31 +3385,56 @@ export class Think<
         result.error ?? streamError
       );
       const errorMessage = result.error ?? streamError ?? null;
-      this.sql`
-        UPDATE cf_think_submissions
-        SET status = ${finalStatus},
-            request_id = ${result.requestId},
-            stream_id = ${streamId},
-            error_message = ${finalStatus === "error" ? errorMessage : null},
-            completed_at = ${Date.now()}
-        WHERE submission_id = ${row.submission_id}
-          AND status = 'running'
-      `;
+      const completedAt = Date.now();
+      this.ctx.storage.transactionSync(() => {
+        this.sql`
+          UPDATE cf_think_submissions
+          SET status = ${finalStatus},
+              request_id = ${result.requestId},
+              stream_id = ${streamId},
+              error_message = ${finalStatus === "error" ? errorMessage : null},
+              completed_at = ${completedAt}
+          WHERE submission_id = ${row.submission_id}
+            AND status = 'running'
+        `;
+        this._insertWorkflowNotification(
+          {
+            ...this._inspectionFromSubmissionRow(claimed),
+            requestId: result.requestId,
+            status: finalStatus,
+            error:
+              finalStatus === "error" ? (errorMessage ?? undefined) : undefined,
+            completedAt
+          },
+          output
+        );
+      });
     } catch (error) {
-      this.sql`
-        UPDATE cf_think_submissions
-        SET status = 'error',
-            error_message = ${error instanceof Error ? error.message : String(error)},
-            completed_at = ${Date.now()}
-        WHERE submission_id = ${row.submission_id}
-          AND status = 'running'
-      `;
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      const completedAt = Date.now();
+      this.ctx.storage.transactionSync(() => {
+        this.sql`
+          UPDATE cf_think_submissions
+          SET status = 'error',
+              error_message = ${errorMessage},
+              completed_at = ${completedAt}
+          WHERE submission_id = ${row.submission_id}
+            AND status = 'running'
+        `;
+        this._insertWorkflowNotification({
+          ...this._inspectionFromSubmissionRow(claimed),
+          status: "error",
+          error: errorMessage,
+          completedAt
+        });
+      });
     } finally {
       this._programmaticStreamErrors.delete(requestId);
       this._submissionAbortControllers.delete(row.submission_id);
       const updated = this._readSubmission(row.submission_id);
       if (updated && this._isTerminalSubmissionStatus(updated.status)) {
-        await this._emitSubmissionStatus(updated);
+        await this._emitSubmissionStatus(updated, output);
       }
     }
   }
@@ -3350,13 +3699,16 @@ export class Think<
     options?: SaveMessagesOptions & {
       onMessagesApplied?: () => void;
       captureProgrammaticStreamError?: boolean;
+      captureOutput?: boolean;
+      body?: Record<string, unknown>;
     }
-  ): Promise<SaveMessagesResult> {
+  ): Promise<ProgrammaticMessagesResult> {
     const clientTools = this._lastClientTools;
-    const body = this._lastBody;
+    const body = options?.body ?? this._lastBody;
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
+    let output: unknown;
     let wasAborted = false;
 
     await this.keepAliveWhile(async () => {
@@ -3416,11 +3768,13 @@ export class Think<
                 abortSignal,
                 {
                   captureProgrammaticStreamError:
-                    options?.captureProgrammaticStreamError
+                    options?.captureProgrammaticStreamError,
+                  captureOutput: options?.captureOutput
                 }
               );
               status = streamResult.status;
               error = streamResult.error;
+              output = streamResult.output;
             }
           };
 
@@ -3450,7 +3804,12 @@ export class Think<
       status = "aborted";
     }
 
-    return { requestId, status, ...(error !== undefined && { error }) };
+    return {
+      requestId,
+      status,
+      ...(error !== undefined && { error }),
+      ...(output !== undefined && { output })
+    };
   }
 
   /**
@@ -4387,6 +4746,7 @@ export class Think<
       continuation?: boolean;
       parentId?: string;
       captureProgrammaticStreamError?: boolean;
+      captureOutput?: boolean;
     }
   ): Promise<StreamResultStatus> {
     const clearGen = this._turnQueue.generation;
@@ -4408,6 +4768,7 @@ export class Think<
     let doneSent = false;
     let streamAborted = false;
     let streamError: string | undefined;
+    let output: unknown;
 
     try {
       this._insideInferenceLoop = true;
@@ -4494,6 +4855,23 @@ export class Think<
       }
     }
 
+    if (
+      options?.captureOutput &&
+      result.output &&
+      !streamError &&
+      !streamAborted
+    ) {
+      try {
+        output = await result.output;
+      } catch (error) {
+        streamError =
+          error instanceof Error ? error.message : "Structured output error";
+        if (options.captureProgrammaticStreamError) {
+          this._programmaticStreamErrors.set(requestId, streamError);
+        }
+      }
+    }
+
     if (this._turnQueue.generation === clearGen) {
       try {
         const assistantMsg = accumulator.toMessage();
@@ -4521,7 +4899,10 @@ export class Think<
 
     return streamError
       ? { status: "error", error: streamError }
-      : { status: streamAborted ? "aborted" : "completed" };
+      : {
+          status: streamAborted ? "aborted" : "completed",
+          ...(output !== undefined && { output })
+        };
   }
 
   // ── Session-backed persistence ──────────────────────────────────

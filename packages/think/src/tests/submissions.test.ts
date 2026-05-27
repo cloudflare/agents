@@ -25,6 +25,14 @@ type ThinkSubmissionTestStub = {
   runNonSubmissionStreamFailureForTest(requestId: string): Promise<void>;
   setSubmissionStatusDelayForTest(delayMs: number): Promise<void>;
   setSubmissionRecoveryStaleMsForTest(ms: number): Promise<void>;
+  setWorkflowEventFailuresForTest(count: number): Promise<void>;
+  getWorkflowEventsForTest(): Promise<
+    Array<{
+      workflowName: string;
+      workflowId: string;
+      event: { type: string; payload?: unknown };
+    }>
+  >;
   testSubmitMessages(
     text: string,
     options?: {
@@ -70,6 +78,8 @@ type ThinkSubmissionTestStub = {
     submissionId: string;
     status?: ThinkSubmissionStatus;
     requestId?: string;
+    metadata?: Record<string, unknown>;
+    errorMessage?: string | null;
     messagesAppliedAt?: number | null;
     completedAt?: number | null;
     createdAt?: number;
@@ -83,6 +93,29 @@ type ThinkSubmissionTestStub = {
     requestId: string,
     createdAt: number
   ): Promise<void>;
+  recoverWorkflowNotificationsForTest(): Promise<void>;
+  drainWorkflowNotificationsForTest(): Promise<void>;
+  insertWorkflowNotificationForTest(options: {
+    notificationId: string;
+    submissionId: string;
+    workflowName?: string;
+    workflowId?: string;
+    eventType?: string;
+    payload?: unknown;
+  }): Promise<void>;
+  listWorkflowNotificationsForTest(): Promise<
+    Array<{
+      notificationId: string;
+      submissionId: string;
+      workflowName: string;
+      workflowId: string;
+      eventType: string;
+      payloadJson: string;
+      attempts: number;
+      lastError: string | null;
+      deliveredAt: number | null;
+    }>
+  >;
   getStoredMessages(): Promise<
     Array<{ id: string; role: string; parts?: unknown[] }>
   >;
@@ -323,6 +356,125 @@ describe("Think durable submissions", () => {
       error: "not needed"
     });
     await expect(agent.getStoredMessages()).resolves.toHaveLength(0);
+  });
+
+  it("recovers terminal workflow submissions into workflow notifications", async () => {
+    const agent = await freshAgent();
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-workflow-error",
+      status: "error",
+      completedAt: Date.now(),
+      errorMessage: "model failed",
+      metadata: {
+        workflow: {
+          name: "TEST_WORKFLOW",
+          id: "workflow-recover",
+          stepName: "draft-report",
+          eventType: "think-prompt-recover"
+        },
+        workflowPrompt: {
+          output: { schema: { type: "object" } },
+          fingerprint: "fingerprint"
+        }
+      }
+    });
+
+    await agent.recoverWorkflowNotificationsForTest();
+    const notifications = await agent.listWorkflowNotificationsForTest();
+
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]).toMatchObject({
+      notificationId: "sub-workflow-error:think-prompt-recover",
+      submissionId: "sub-workflow-error",
+      workflowName: "TEST_WORKFLOW",
+      workflowId: "workflow-recover",
+      eventType: "think-prompt-recover",
+      attempts: 0,
+      payloadJson: "{}"
+    });
+    expect(notifications[0].deliveredAt).toBeTypeOf("number");
+    await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([
+      {
+        workflowName: "TEST_WORKFLOW",
+        workflowId: "workflow-recover",
+        event: {
+          type: "think-prompt-recover",
+          payload: {
+            submissionId: "sub-workflow-error",
+            status: "error",
+            error: "model failed"
+          }
+        }
+      }
+    ]);
+  });
+
+  it("drains workflow notifications and clears delivered payloads", async () => {
+    const agent = await freshAgent();
+    await agent.insertWorkflowNotificationForTest({
+      notificationId: "notification-deliver",
+      submissionId: "sub-deliver",
+      workflowName: "TEST_WORKFLOW",
+      workflowId: "workflow-deliver",
+      eventType: "think-prompt-deliver",
+      payload: {
+        submissionId: "sub-deliver",
+        status: "completed",
+        output: { title: "Done" }
+      }
+    });
+
+    await agent.drainWorkflowNotificationsForTest();
+
+    await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([
+      {
+        workflowName: "TEST_WORKFLOW",
+        workflowId: "workflow-deliver",
+        event: {
+          type: "think-prompt-deliver",
+          payload: {
+            submissionId: "sub-deliver",
+            status: "completed",
+            output: { title: "Done" }
+          }
+        }
+      }
+    ]);
+    const notifications = await agent.listWorkflowNotificationsForTest();
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]).toMatchObject({
+      notificationId: "notification-deliver",
+      attempts: 0,
+      lastError: null,
+      payloadJson: "{}"
+    });
+    expect(notifications[0].deliveredAt).toBeTypeOf("number");
+  });
+
+  it("keeps workflow notifications pending when delivery fails", async () => {
+    const agent = await freshAgent();
+    await agent.insertWorkflowNotificationForTest({
+      notificationId: "notification-retry",
+      submissionId: "sub-retry",
+      workflowName: "TEST_WORKFLOW",
+      workflowId: "workflow-retry",
+      eventType: "think-prompt-retry"
+    });
+    await agent.setWorkflowEventFailuresForTest(5);
+
+    await agent.drainWorkflowNotificationsForTest();
+
+    const notifications = await agent.listWorkflowNotificationsForTest();
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]).toMatchObject({
+      notificationId: "notification-retry",
+      attempts: 1,
+      deliveredAt: null
+    });
+    expect(notifications[0].lastError).toContain(
+      "simulated workflow event failure"
+    );
+    await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([]);
   });
 
   it("runs durable pending rows through the scheduled drain callback path", async () => {

@@ -1684,6 +1684,12 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   private _responseLog: ChatResponseResult[] = [];
   private _submissionLog: ThinkSubmissionInspection[] = [];
+  private _workflowEventLog: Array<{
+    workflowName: string;
+    workflowId: string;
+    event: { type: string; payload?: unknown };
+  }> = [];
+  private _workflowEventFailuresRemaining = 0;
   private _capturedTurnContexts: Array<{
     continuation?: boolean;
     body?: RpcJsonObject;
@@ -1714,6 +1720,18 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   override onChatResponse(result: ChatResponseResult): void {
     this._responseLog.push(result);
+  }
+
+  override async sendWorkflowEvent(
+    workflowName: string & {},
+    workflowId: string,
+    event: { type: string; payload?: unknown }
+  ): Promise<void> {
+    if (this._workflowEventFailuresRemaining > 0) {
+      this._workflowEventFailuresRemaining--;
+      throw new Error("simulated workflow event failure");
+    }
+    this._workflowEventLog.push({ workflowName, workflowId, event });
   }
 
   override async onSubmissionStatus(
@@ -1809,6 +1827,20 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async setSubmissionStatusDelayForTest(delayMs: number): Promise<void> {
     this._submissionStatusDelayMs = delayMs;
+  }
+
+  async setWorkflowEventFailuresForTest(count: number): Promise<void> {
+    this._workflowEventFailuresRemaining = count;
+  }
+
+  async getWorkflowEventsForTest(): Promise<
+    Array<{
+      workflowName: string;
+      workflowId: string;
+      event: { type: string; payload?: unknown };
+    }>
+  > {
+    return this._workflowEventLog;
   }
 
   async setSubmissionRecoveryStaleMsForTest(ms: number): Promise<void> {
@@ -1959,6 +1991,8 @@ export class ThinkProgrammaticTestAgent extends Think {
     submissionId: string;
     status?: ThinkSubmissionStatus;
     requestId?: string;
+    metadata?: Record<string, unknown>;
+    errorMessage?: string | null;
     messagesAppliedAt?: number | null;
     completedAt?: number | null;
     createdAt?: number;
@@ -1977,6 +2011,10 @@ export class ThinkProgrammaticTestAgent extends Think {
     const startedAt = status === "running" ? now : null;
     const completedAt =
       options.completedAt === undefined ? null : options.completedAt;
+    const metadataJson =
+      options.metadata === undefined ? null : JSON.stringify(options.metadata);
+    const errorMessage =
+      options.errorMessage === undefined ? null : options.errorMessage;
     const messageIds = options.messageIds ?? [crypto.randomUUID()];
     const messagesJson = JSON.stringify(
       messageIds.map((id) => ({
@@ -1993,10 +2031,99 @@ export class ThinkProgrammaticTestAgent extends Think {
       )
       VALUES (
         ${options.submissionId}, NULL, ${requestId}, NULL, ${status},
-        ${messagesJson}, NULL, NULL, ${now}, ${messagesAppliedAt},
+        ${messagesJson}, ${metadataJson}, ${errorMessage}, ${now}, ${messagesAppliedAt},
         ${startedAt}, ${completedAt}
       )
     `;
+  }
+
+  async recoverWorkflowNotificationsForTest(): Promise<void> {
+    (
+      this as unknown as { _recoverWorkflowNotifications: () => void }
+    )._recoverWorkflowNotifications();
+  }
+
+  async drainWorkflowNotificationsForTest(): Promise<void> {
+    await (
+      this as unknown as { _drainWorkflowNotifications: () => Promise<void> }
+    )._drainWorkflowNotifications();
+  }
+
+  async insertWorkflowNotificationForTest(options: {
+    notificationId: string;
+    submissionId: string;
+    workflowName?: string;
+    workflowId?: string;
+    eventType?: string;
+    payload?: unknown;
+  }): Promise<void> {
+    (
+      this as unknown as { _ensureWorkflowNotificationTable: () => void }
+    )._ensureWorkflowNotificationTable();
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_think_workflow_notifications (
+        notification_id, submission_id, workflow_name, workflow_id, event_type,
+        payload_json, attempts, last_error, created_at, updated_at, delivered_at
+      )
+      VALUES (
+        ${options.notificationId},
+        ${options.submissionId},
+        ${options.workflowName ?? "TEST_WORKFLOW"},
+        ${options.workflowId ?? "workflow-1"},
+        ${options.eventType ?? "think-prompt-test"},
+        ${JSON.stringify(options.payload ?? { submissionId: options.submissionId, status: "error" })},
+        0,
+        NULL,
+        ${now},
+        ${now},
+        NULL
+      )
+    `;
+  }
+
+  async listWorkflowNotificationsForTest(): Promise<
+    Array<{
+      notificationId: string;
+      submissionId: string;
+      workflowName: string;
+      workflowId: string;
+      eventType: string;
+      payloadJson: string;
+      attempts: number;
+      lastError: string | null;
+      deliveredAt: number | null;
+    }>
+  > {
+    (
+      this as unknown as { _ensureWorkflowNotificationTable: () => void }
+    )._ensureWorkflowNotificationTable();
+    return this.sql<{
+      notification_id: string;
+      submission_id: string;
+      workflow_name: string;
+      workflow_id: string;
+      event_type: string;
+      payload_json: string;
+      attempts: number;
+      last_error: string | null;
+      delivered_at: number | null;
+    }>`
+      SELECT notification_id, submission_id, workflow_name, workflow_id,
+             event_type, payload_json, attempts, last_error, delivered_at
+      FROM cf_think_workflow_notifications
+      ORDER BY created_at ASC, notification_id ASC
+    `.map((row) => ({
+      notificationId: row.notification_id,
+      submissionId: row.submission_id,
+      workflowName: row.workflow_name,
+      workflowId: row.workflow_id,
+      eventType: row.event_type,
+      payloadJson: row.payload_json,
+      attempts: row.attempts,
+      lastError: row.last_error,
+      deliveredAt: row.delivered_at
+    }));
   }
 
   async insertMalformedSubmissionForTest(options: {

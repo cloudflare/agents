@@ -8,6 +8,7 @@ async function main() {
     target: "es2021",
     entry: [
       "src/think.ts",
+      "src/workflows.ts",
       "src/extensions/index.ts",
       "src/tools/workspace.ts",
       "src/tools/execute.ts",
