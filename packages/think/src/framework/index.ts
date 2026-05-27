@@ -29,6 +29,21 @@ export {
   generateThinkRouterModule,
   generateThinkServerEntryModule
 } from "./codegen";
+export {
+  applyUserBindingNames,
+  createThinkProject,
+  createThinkProjectWorkerConfigResult,
+  readProjectFiles,
+  readWranglerConfig,
+  resolveThinkManifest,
+  watchWranglerConfigFiles
+} from "./project";
+export type { ThinkProjectOptions, ThinkWranglerConfigResult } from "./project";
+export { generateThinkTypes, isThinkGeneratedFile } from "./types-codegen";
+export type {
+  ThinkGeneratedFile,
+  ThinkTypesCodegenOptions
+} from "./types-codegen";
 export type {
   ThinkAgentDeclarationKind,
   ThinkFrameworkAgent,

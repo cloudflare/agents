@@ -19,6 +19,7 @@ async function main() {
       "src/tools/extensions.ts",
       "src/tools/browser.ts",
       "src/tools/sandbox.ts",
+      "src/cli/index.ts",
       "src/vite.ts"
     ],
     deps: {

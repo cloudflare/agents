@@ -1,7 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
-import path from "node:path";
 import agents from "agents/vite";
-import { parse as parseJsonc } from "aywson";
 import type { Plugin, PluginOption, ResolvedConfig } from "vite";
 import {
   createThinkWorkerConfig,
@@ -21,12 +18,17 @@ import {
   generateThinkServerEntryModule
 } from "./framework/codegen";
 import { createVirtualModule } from "./framework/virtual";
-import { discoverThinkApp } from "./framework/discovery";
 import type {
   ThinkFrameworkManifest,
   ThinkWorkerConfig,
   ThinkWorkerConfigOptions
 } from "./framework/manifest";
+import {
+  applyUserBindingNames,
+  readWranglerConfig,
+  resolveThinkManifest,
+  watchWranglerConfigFiles
+} from "./framework/project";
 
 export interface ThinkVitePluginOptions extends ThinkWorkerConfigOptions {
   files?: Record<string, string>;
@@ -43,12 +45,6 @@ const virtualModules = {
   serverEntry: createVirtualModule("virtual:think/server-entry")
 };
 
-const WRANGLER_CONFIG_FILES = [
-  "wrangler.jsonc",
-  "wrangler.json",
-  "wrangler.toml"
-];
-
 export function think(options: ThinkVitePluginOptions = {}): PluginOption[] {
   let config: ResolvedConfig | null = null;
   let manifest: ThinkFrameworkManifest | null = options.manifest ?? null;
@@ -61,7 +57,7 @@ export function think(options: ThinkVitePluginOptions = {}): PluginOption[] {
     },
     async buildStart() {
       const root = config?.root ?? process.cwd();
-      manifest = await resolveManifest(options, root, (file) =>
+      manifest = await resolveThinkManifest(options, root, (file) =>
         this.addWatchFile(file)
       );
       watchWranglerConfigFiles(root, (file) => this.addWatchFile(file));
@@ -127,7 +123,7 @@ export function think(options: ThinkVitePluginOptions = {}): PluginOption[] {
     async load(id) {
       const current =
         manifest ??
-        (await resolveManifest(options, config?.root ?? process.cwd()));
+        (await resolveThinkManifest(options, config?.root ?? process.cwd()));
       if (virtualModules.agents.matches(id)) {
         return generateThinkAgentsModule(current);
       }
@@ -159,7 +155,7 @@ export async function createThinkViteManifest(
   options: ThinkVitePluginOptions = {},
   root = process.cwd()
 ): Promise<ThinkFrameworkManifest> {
-  return resolveManifest(options, root);
+  return resolveThinkManifest(options, root);
 }
 
 export async function createThinkViteWorkerConfig(
@@ -173,7 +169,7 @@ export async function createThinkViteWorkerConfigResult(
   options: ThinkVitePluginOptions = {},
   root = process.cwd()
 ): Promise<ThinkConfigMergeResult> {
-  const manifest = await resolveManifest(options, root);
+  const manifest = await resolveThinkManifest(options, root);
   const userConfig = await readWranglerConfig(root);
   if (!userConfig.config) {
     const config = createThinkWorkerConfig(manifest, options);
@@ -199,174 +195,6 @@ export async function createThinkViteWorkerConfigResult(
       })
     ]
   };
-}
-
-async function resolveManifest(
-  options: ThinkVitePluginOptions,
-  root: string,
-  watchFile?: (file: string) => void
-): Promise<ThinkFrameworkManifest> {
-  if (options.manifest) return options.manifest;
-  if (options.files) {
-    return discoverThinkApp({
-      root,
-      files: options.files,
-      routePrefix: options.routePrefix
-    });
-  }
-  return discoverThinkApp({
-    root,
-    routePrefix: options.routePrefix,
-    files: await readProjectFiles(root, "agents", watchFile)
-  });
-}
-
-async function readProjectFiles(
-  root: string,
-  directory: string,
-  watchFile?: (file: string) => void
-): Promise<Record<string, string>> {
-  const absolute = path.join(root, directory);
-  const files: Record<string, string> = {};
-  watchFile?.(absolute);
-  await readDirectory(root, absolute, files, watchFile);
-  await readOptionalProjectFile(root, "src/server.ts", files, watchFile);
-  return files;
-}
-
-function watchWranglerConfigFiles(
-  root: string,
-  watchFile: (file: string) => void
-): void {
-  for (const file of WRANGLER_CONFIG_FILES) {
-    watchFile(path.join(root, file));
-  }
-}
-
-async function readOptionalProjectFile(
-  root: string,
-  relativePath: string,
-  files: Record<string, string>,
-  watchFile?: (file: string) => void
-): Promise<void> {
-  try {
-    const absolute = path.join(root, relativePath);
-    files[relativePath] = await readFile(absolute, "utf8");
-    watchFile?.(absolute);
-  } catch (error) {
-    if (isMissingFileError(error)) return;
-    throw error;
-  }
-}
-
-async function readDirectory(
-  root: string,
-  directory: string,
-  files: Record<string, string>,
-  watchFile?: (file: string) => void
-): Promise<void> {
-  let entries: Array<{
-    isDirectory(): boolean;
-    isFile(): boolean;
-    name: string;
-  }>;
-  try {
-    watchFile?.(directory);
-    entries = await readdir(directory, {
-      withFileTypes: true,
-      encoding: "utf8"
-    });
-  } catch (error) {
-    if (isMissingDirectoryError(error)) return;
-    throw error;
-  }
-
-  for (const entry of entries) {
-    const absolute = path.join(directory, entry.name);
-    if (entry.isDirectory()) {
-      await readDirectory(root, absolute, files, watchFile);
-      continue;
-    }
-    if (!entry.isFile()) continue;
-    const relative = path.relative(root, absolute).replace(/\\/g, "/");
-    watchFile?.(absolute);
-    files[relative] = await readFile(absolute, "utf8");
-  }
-}
-
-function applyUserBindingNames(
-  manifest: ThinkFrameworkManifest,
-  userConfig: Record<string, unknown>
-): void {
-  const bindings = readBindingArray(
-    asRecord(asRecord(userConfig).durable_objects).bindings
-  );
-  for (const agent of manifest.agents) {
-    if (agent.kind !== "top-level") continue;
-    const binding = bindings.find(
-      (candidate) => candidate.class_name === agent.className
-    );
-    agent.bindingName = binding?.name ?? agent.className;
-  }
-}
-
-function readBindingArray(
-  value: unknown
-): Array<{ name: string; class_name: string }> {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((entry) => {
-    const record = asRecord(entry);
-    if (
-      typeof record.name !== "string" ||
-      typeof record.class_name !== "string"
-    ) {
-      return [];
-    }
-    return [{ name: record.name, class_name: record.class_name }];
-  });
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function isMissingDirectoryError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: unknown }).code === "ENOENT"
-  );
-}
-
-function isMissingFileError(error: unknown): boolean {
-  return isMissingDirectoryError(error);
-}
-
-async function readWranglerConfig(
-  root: string
-): Promise<{ config: Record<string, unknown> | null; error?: string }> {
-  for (const file of ["wrangler.jsonc", "wrangler.json"]) {
-    try {
-      const source = await readFile(path.join(root, file), "utf8");
-      return { config: parseJsonc(source) as Record<string, unknown> };
-    } catch (error) {
-      if (isMissingFileError(error)) continue;
-      if (error instanceof SyntaxError) {
-        return {
-          config: null,
-          error:
-            `Could not parse ${file} for Think diagnostics: ${error.message}. ` +
-            `Fix the JSONC syntax to enable binding and route diagnostics.`
-        };
-      }
-      throw error;
-    }
-  }
-
-  return { config: null };
 }
 
 function reportDiagnostic(

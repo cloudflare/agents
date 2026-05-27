@@ -1,6 +1,5 @@
 import { createRequestHandler } from "react-router";
 import type { ThinkAppContext } from "@cloudflare/think/server-entry";
-import type { Env } from "./env";
 import type { ServerBuild } from "react-router";
 
 const reactRouterHandler = createRequestHandler(
@@ -14,7 +13,7 @@ const reactRouterHandler = createRequestHandler(
 export default {
   async fetch(
     request: Request,
-    env: Env,
+    env: Cloudflare.Env,
     ctx: ExecutionContext,
     _think?: ThinkAppContext
   ) {

@@ -1,10 +1,9 @@
 import "react-router";
-import type { Env } from "./src/env";
 
 declare module "react-router" {
   interface AppLoadContext {
     cloudflare: {
-      env: Env;
+      env: Cloudflare.Env;
       ctx: ExecutionContext;
     };
   }

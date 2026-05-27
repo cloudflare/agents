@@ -20,15 +20,20 @@
   "bugs": {
     "url": "https://github.com/cloudflare/agents/issues"
   },
+  "bin": {
+    "think": "dist/cli/index.js"
+  },
   "dependencies": {
     "@cloudflare/codemode": ">=0.3.4 <1.0.0",
     "@cloudflare/shell": ">=0.3.4 <1.0.0",
     "aywson": "^0.0.16",
     "chat": "^4.29.0",
-    "just-bash": "^3.0.1"
+    "just-bash": "^3.0.1",
+    "yargs": "^18.0.0"
   },
   "devDependencies": {
     "@chat-adapter/telegram": "^4.29.0",
+    "@types/yargs": "^17.0.35",
     "ai": "^6.0.185",
     "zod": "^4.4.3"
   },
@@ -107,7 +112,8 @@
   ],
   "scripts": {
     "build": "tsx ./scripts/build.ts",
-    "test": "npm run test:workers && npm run test:generated-entry && npm run test:vite",
+    "test": "npm run test:workers && npm run test:generated-entry && npm run test:vite && npm run test:cli",
+    "test:cli": "vitest --run -c src/cli-tests/vitest.config.ts",
     "test:workers": "vitest --run -c src/tests/vitest.config.ts",
     "test:generated-entry": "vitest --run -c src/tests/generated-entry/vitest.config.ts",
     "test:vite": "vitest --run src/vite-tests",
