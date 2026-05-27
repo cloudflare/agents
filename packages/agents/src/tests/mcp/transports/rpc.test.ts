@@ -356,14 +356,41 @@ describe("RPC Transport", () => {
       const transport = new RPCServerTransport();
       await transport.start();
 
+      const firstResponse: JSONRPCMessage = {
+        jsonrpc: "2.0",
+        id: "elicit_abc",
+        method: "elicitation/create",
+        params: { message: "Approve?" }
+      };
+
       const finalResponse: JSONRPCMessage = {
         jsonrpc: "2.0",
-        id: 2,
+        id: 1,
         result: { content: [{ type: "text", text: "done" }] }
       };
 
+      // Simulate: onmessage dispatches async tool handler that sends
+      // an intermediate server-to-client request first. In the MCP SDK this
+      // is sent with relatedRequestId so it routes to the originating request.
+      transport.onmessage = (msg) => {
+        const req = msg as JSONRPCRequest;
+        void transport.send(firstResponse, { relatedRequestId: req.id });
+      };
+
+      // handle() returns the intermediate elicitation request
+      const handleResult = await transport.handle({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "test" }
+      });
+
+      expect(handleResult).toEqual(firstResponse);
+
+      // Now await the next send() — simulates waiting for the resumed tool result
       const pendingPromise = transport._awaitPendingResponse();
 
+      // Tool handler resumes and sends the final result for the original request id
       await transport.send(finalResponse);
 
       const result = await pendingPromise;
