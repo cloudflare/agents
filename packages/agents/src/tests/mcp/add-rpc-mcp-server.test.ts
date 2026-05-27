@@ -44,6 +44,54 @@ describe("addMcpServer with RPC binding — stable supplied ids", () => {
     expect(result.id).toBe("github-mcp");
   });
 
+  it("throws when re-registering an existing (name,url) under a new stable id", async () => {
+    const agentStub = await getAgentByName(
+      env.TestRpcMcpClientAgent,
+      "test-rpc-migrate-id"
+    );
+    const result =
+      (await agentStub.testRpcSuppliedIdRejectsExistingNanoid()) as unknown as {
+        success: boolean;
+        firstId?: string;
+        threw?: boolean;
+        message?: string;
+        storedIds?: string[];
+        error?: string;
+      };
+
+    if (!result.success) {
+      throw new Error(`Test failed: ${result.error}`);
+    }
+
+    expect(result.threw).toBe(true);
+    expect(result.message).toContain("already registered with id");
+    expect(result.message).toContain("removeMcpServer");
+    // Crucially: no stale row created under the new stable id.
+    expect(result.storedIds).toEqual([result.firstId]);
+  });
+
+  it("dedups when the same stable id is re-supplied for the same (name,url)", async () => {
+    const agentStub = await getAgentByName(
+      env.TestRpcMcpClientAgent,
+      "test-rpc-dedup-stable"
+    );
+    const result =
+      (await agentStub.testRpcSuppliedIdDedupsOnRepeat()) as unknown as {
+        success: boolean;
+        firstId?: string;
+        secondId?: string;
+        sameId?: boolean;
+        error?: string;
+      };
+
+    if (!result.success) {
+      throw new Error(`Test failed: ${result.error}`);
+    }
+
+    expect(result.firstId).toBe("stable");
+    expect(result.sameId).toBe(true);
+  });
+
   it("throws when a caller-supplied id collides with a different server", async () => {
     const agentStub = await getAgentByName(
       env.TestRpcMcpClientAgent,

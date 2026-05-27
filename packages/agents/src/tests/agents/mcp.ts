@@ -571,6 +571,81 @@ export class TestRpcMcpClientAgent extends Agent {
     }
   }
 
+  async testRpcSuppliedIdRejectsExistingNanoid() {
+    try {
+      // First call: no supplied id — gets an auto-generated nanoid.
+      const first = await this.addMcpServer(
+        "rpc-migrate-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        { props: { testValue: "first" } }
+      );
+
+      // Second call: same (name, url) but now supplying a stable id should
+      // throw and tell the caller how to migrate, NOT silently return the old
+      // id and NOT leave a stale row in storage.
+      let threw = false;
+      let message = "";
+      try {
+        await this.addMcpServer(
+          "rpc-migrate-test",
+          this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+          { id: "migrated", props: { testValue: "second" } }
+        );
+      } catch (e) {
+        threw = true;
+        message = e instanceof Error ? e.message : String(e);
+      }
+
+      // After throwing, only the original row should exist.
+      const storedIds = this.mcp
+        .getRpcServersFromStorage()
+        .filter((s) => s.name === "rpc-migrate-test")
+        .map((s) => s.id);
+
+      return {
+        success: true,
+        firstId: first.id,
+        threw,
+        message,
+        storedIds
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async testRpcSuppliedIdDedupsOnRepeat() {
+    try {
+      const first = await this.addMcpServer(
+        "rpc-dedup-stable",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        { id: "stable", props: { testValue: "first" } }
+      );
+
+      // Calling again with the same id + (name, url) should dedup, not throw.
+      const second = await this.addMcpServer(
+        "rpc-dedup-stable",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        { id: "stable", props: { testValue: "second" } }
+      );
+
+      return {
+        success: true,
+        firstId: first.id,
+        secondId: second.id,
+        sameId: first.id === second.id
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
   async testRemoveRpcMcpServer() {
     try {
       const { id } = await this.addMcpServer(

@@ -9434,11 +9434,17 @@ export class Agent<
 
     const allServers = this.mcp.listServers();
 
-    // Collision check: a caller-supplied id may only re-resolve to an existing
-    // server when the (name, url) also matches. Otherwise this would silently
-    // overwrite the existing row (storage uses INSERT OR REPLACE on id).
+    const existingServer = allServers.find(
+      (s) =>
+        s.name === serverName &&
+        (!isHttpTransport || new URL(s.server_url).href === normalizedUrl)
+    );
+
     if (requestedId) {
-      const conflict = allServers.find((s) => {
+      // Collision check 1: a caller-supplied id may only re-resolve to an
+      // existing server when the (name, url) also matches. Otherwise storage
+      // (INSERT OR REPLACE on id) would silently overwrite the existing row.
+      const idConflict = allServers.find((s) => {
         if (s.id !== requestedId) return false;
         if (s.name !== serverName) return true;
         if (isHttpTransport) {
@@ -9446,19 +9452,28 @@ export class Agent<
         }
         return false;
       });
-      if (conflict) {
+      if (idConflict) {
         throw new Error(
-          `MCP server id "${requestedId}" is already in use by server "${conflict.name}" (${conflict.server_url}). ` +
+          `MCP server id "${requestedId}" is already in use by server "${idConflict.name}" (${idConflict.server_url}). ` +
             `Stable ids must be unique per (name, url).`
+        );
+      }
+
+      // Collision check 2: the same (name, url) is already registered under a
+      // different id (typically an auto-generated nanoid from a previous call
+      // that didn't supply `id`). Honouring `requestedId` here would either
+      // silently return the old id (violating the caller's contract) or leave
+      // a stale row in storage after INSERT OR REPLACE on the new id. Require
+      // an explicit migration via removeMcpServer().
+      if (existingServer && existingServer.id !== requestedId) {
+        throw new Error(
+          `MCP server "${serverName}" is already registered with id "${existingServer.id}", ` +
+            `cannot re-register with stable id "${requestedId}". ` +
+            `Call removeMcpServer("${existingServer.id}") first to migrate to a stable id.`
         );
       }
     }
 
-    const existingServer = allServers.find(
-      (s) =>
-        s.name === serverName &&
-        (!isHttpTransport || new URL(s.server_url).href === normalizedUrl)
-    );
     if (existingServer && this.mcp.mcpConnections[existingServer.id]) {
       const conn = this.mcp.mcpConnections[existingServer.id];
       if (
