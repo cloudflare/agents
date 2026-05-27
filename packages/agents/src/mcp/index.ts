@@ -32,7 +32,6 @@ export abstract class McpAgent<
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Agent<Env, State, Props> {
-  private _rpcMessageQueue: Promise<void> = Promise.resolve();
   private _transport?: Transport;
   private _pendingElicitations = new Map<
     string,
@@ -420,13 +419,7 @@ export abstract class McpAgent<
       }
     }
 
-    const transport = this._transport;
-    const run = this._rpcMessageQueue.then(() => transport.handle(message));
-    this._rpcMessageQueue = run.then(
-      () => undefined,
-      () => undefined
-    );
-    return await run;
+    return await this._transport.handle(message);
   }
 
   /** Return a handler for the given path for this MCP.
