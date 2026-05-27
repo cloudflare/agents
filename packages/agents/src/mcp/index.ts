@@ -405,6 +405,10 @@ export abstract class McpAgent<
 
     const transport = this._transport;
 
+    // RPC waits are intentionally in-memory. While a request/continuation is
+    // pending, keep the object alive so hibernation does not drop the resolver
+    // maps or the suspended tool stack. Making this sleep/resume across
+    // hibernation would require a durable continuation model instead.
     return await this.keepAliveWhile(async () => {
       // Intercept elicitation responses before they reach the transport.
       // Mirrors what onSSEMcpMessage() and StreamableHTTPServerTransport's
