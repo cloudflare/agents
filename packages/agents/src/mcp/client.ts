@@ -385,6 +385,113 @@ export class MCPClientManager {
     this.sql("DELETE FROM cf_agents_mcp_servers WHERE id = ?", serverId);
   }
 
+  /**
+   * Rename a server's id, in-place, across every place the id is used as a
+   * key. Used to JIT-migrate servers that were originally registered under an
+   * auto-generated nanoid to a caller-supplied stable id (see
+   * `Agent.addMcpServer`'s `{ id }` option).
+   *
+   * Migrates:
+   *  - the `cf_agents_mcp_servers` row (primary key)
+   *  - the in-memory `mcpConnections` map key
+   *  - the connection disposables map key
+   *  - the attached `authProvider.serverId`, if any
+   *  - OAuth-related storage keys under `/{clientName}/{oldId}/...`
+   *
+   * Safe to call when no OAuth keys exist (RPC / bearer-token HTTP servers).
+   * If `oldId === newId` this is a no-op. If a row already exists under
+   * `newId`, throws — the caller is expected to have verified uniqueness.
+   *
+   * @internal Exposed for `Agent.addMcpServer` JIT-migration.
+   */
+  async migrateServerId(
+    oldId: string,
+    newId: string,
+    clientName: string
+  ): Promise<void> {
+    if (oldId === newId) return;
+
+    const existing = this.sql<MCPServerRow>(
+      "SELECT id FROM cf_agents_mcp_servers WHERE id = ?",
+      oldId
+    );
+    if (existing.length === 0) {
+      // Nothing in storage to rename; just rename the in-memory connection if any.
+      this._renameInMemoryConnection(oldId, newId);
+      return;
+    }
+
+    const collision = this.sql<MCPServerRow>(
+      "SELECT id FROM cf_agents_mcp_servers WHERE id = ?",
+      newId
+    );
+    if (collision.length > 0) {
+      throw new Error(
+        `Cannot migrate MCP server id "${oldId}" → "${newId}": new id is already in use.`
+      );
+    }
+
+    // 1. Storage: rename the SQL row.
+    this.sql(
+      "UPDATE cf_agents_mcp_servers SET id = ? WHERE id = ?",
+      newId,
+      oldId
+    );
+
+    // 2. OAuth-related storage keys. The DurableObjectOAuthClientProvider
+    //    keys everything under `/{clientName}/{serverId}/...`. Other servers
+    //    won't have any keys with this prefix, so the list will be empty and
+    //    this is a no-op for them.
+    const oldPrefix = `/${clientName}/${oldId}/`;
+    const newPrefix = `/${clientName}/${newId}/`;
+    try {
+      const keys = await this._storage.list({ prefix: oldPrefix });
+      if (keys.size > 0) {
+        const writes: Record<string, unknown> = {};
+        const deletes: string[] = [];
+        for (const [oldKey, value] of keys) {
+          const newKey = newPrefix + oldKey.slice(oldPrefix.length);
+          writes[newKey] = value;
+          deletes.push(oldKey);
+        }
+        await this._storage.put(writes);
+        await this._storage.delete(deletes);
+      }
+    } catch (error) {
+      // Best-effort: storage rename failures shouldn't break the SQL-level
+      // rename that already succeeded. Log and continue.
+      console.warn(
+        `[MCPClientManager] OAuth key migration ${oldPrefix} → ${newPrefix} failed:`,
+        error
+      );
+    }
+
+    // 3. In-memory connection + disposables + authProvider.
+    this._renameInMemoryConnection(oldId, newId);
+
+    this._onServerStateChanged.fire();
+  }
+
+  private _renameInMemoryConnection(oldId: string, newId: string): void {
+    if (oldId === newId) return;
+
+    const conn = this.mcpConnections[oldId];
+    if (conn) {
+      this.mcpConnections[newId] = conn;
+      delete this.mcpConnections[oldId];
+      const authProvider = conn.options.transport.authProvider;
+      if (authProvider) {
+        authProvider.serverId = newId;
+      }
+    }
+
+    const disposables = this._connectionDisposables.get(oldId);
+    if (disposables) {
+      this._connectionDisposables.set(newId, disposables);
+      this._connectionDisposables.delete(oldId);
+    }
+  }
+
   private getServersFromStorage(): MCPServerRow[] {
     return this.sql<MCPServerRow>(
       "SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers"

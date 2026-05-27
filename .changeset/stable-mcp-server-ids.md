@@ -8,10 +8,9 @@ Both the HTTP and RPC overloads of `addMcpServer` now accept an optional `id` fi
 
 The supplied id is normalized via the exported `normalizeServerId` helper so that values like `"GitHub MCP!"` become `"github-mcp"` — guaranteeing the id is safe to embed in AI SDK tool names and storage keys.
 
-`addMcpServer` now throws explicitly when a stable id would conflict with existing storage:
+**Fully additive — no user code breaks.** If you add `{ id: "github" }` to an existing `addMcpServer` call for a server that's already registered under an auto-generated nanoid, the SDK transparently migrates the existing storage row, in-memory connection, and OAuth-related DO storage keys to the new stable id. No `removeMcpServer` step required, no stale rows, no broken hibernation restore.
 
-- the supplied id already belongs to a different `(name, url)` server, or
-- the same `(name, url)` is already registered under a different id (e.g. an auto-generated nanoid from a previous call). The error message points the caller at `removeMcpServer(oldId)` to migrate. This avoids silently returning the old id or leaving a stale storage row after `INSERT OR REPLACE`.
+`addMcpServer` only throws on a genuinely ambiguous collision: the same stable id already belongs to a *different* `(name, url)` server.
 
 ```ts
 await this.addMcpServer("GitHub", env.MCP_SESSION, {

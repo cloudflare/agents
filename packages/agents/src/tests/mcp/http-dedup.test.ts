@@ -65,6 +65,29 @@ describe("addMcpServer HTTP dedup (name + URL)", () => {
 });
 
 describe("addMcpServer HTTP — stable supplied ids", () => {
+  it("JIT-migrates an existing nanoid row + OAuth keys to the supplied stable id", async () => {
+    const agentStub = await getAgentByName(
+      env.TestHttpMcpDedupAgent,
+      "test-http-migrate-id"
+    );
+    const result =
+      (await agentStub.testHttpSuppliedIdMigratesNanoid()) as unknown as {
+        oldId: string;
+        resultId: string | null;
+        storedIds: string[];
+        oldKeyCount: number;
+        newKeyCount: number;
+      };
+
+    // The server row is now keyed under the stable id, not the old nanoid.
+    expect(result.resultId).toBe("stable-migrated");
+    expect(result.storedIds).toEqual(["stable-migrated"]);
+
+    // OAuth-style storage keys have been moved off the old prefix.
+    expect(result.oldKeyCount).toBe(0);
+    expect(result.newKeyCount).toBe(2);
+  });
+
   it("normalizes a caller-supplied id and uses it as the new server id", async () => {
     const agentStub = await getAgentByName(
       env.TestHttpMcpDedupAgent,

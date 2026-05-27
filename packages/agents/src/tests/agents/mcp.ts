@@ -571,7 +571,7 @@ export class TestRpcMcpClientAgent extends Agent {
     }
   }
 
-  async testRpcSuppliedIdRejectsExistingNanoid() {
+  async testRpcSuppliedIdMigratesExistingNanoid() {
     try {
       // First call: no supplied id — gets an auto-generated nanoid.
       const first = await this.addMcpServer(
@@ -580,34 +580,46 @@ export class TestRpcMcpClientAgent extends Agent {
         { props: { testValue: "first" } }
       );
 
-      // Second call: same (name, url) but now supplying a stable id should
-      // throw and tell the caller how to migrate, NOT silently return the old
-      // id and NOT leave a stale row in storage.
-      let threw = false;
-      let message = "";
-      try {
-        await this.addMcpServer(
-          "rpc-migrate-test",
-          this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
-          { id: "migrated", props: { testValue: "second" } }
-        );
-      } catch (e) {
-        threw = true;
-        message = e instanceof Error ? e.message : String(e);
-      }
+      const connectionsBefore = Object.keys(this.mcp.mcpConnections).length;
 
-      // After throwing, only the original row should exist.
+      // Second call: same (name, url) but now supplying a stable id. This is
+      // the natural upgrade path (user adds `{ id }` to existing code) — the
+      // existing row + connection should be migrated in place, NOT thrown.
+      const second = await this.addMcpServer(
+        "rpc-migrate-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        { id: "migrated", props: { testValue: "second" } }
+      );
+
+      // After migration: only the new stable id should exist in storage.
       const storedIds = this.mcp
         .getRpcServersFromStorage()
         .filter((s) => s.name === "rpc-migrate-test")
         .map((s) => s.id);
 
+      const connectionsAfter = Object.keys(this.mcp.mcpConnections).length;
+      const stableConnectionExists =
+        this.mcp.mcpConnections[second.id] !== undefined;
+      const nanoidConnectionGone =
+        this.mcp.mcpConnections[first.id] === undefined;
+
+      // Tool calls should still work against the migrated id.
+      const callResult = await this.mcp.callTool({
+        serverId: second.id,
+        name: "greet",
+        arguments: { name: "Migrated User" }
+      });
+
       return {
         success: true,
         firstId: first.id,
-        threw,
-        message,
-        storedIds
+        secondId: second.id,
+        storedIds,
+        connectionsBefore,
+        connectionsAfter,
+        stableConnectionExists,
+        nanoidConnectionGone,
+        callOk: !callResult.isError
       };
     } catch (error) {
       return {
@@ -863,6 +875,66 @@ export class TestHttpMcpDedupAgent extends Agent {
       seededId,
       returnedId: result.id,
       deduped: result.id === seededId
+    };
+  }
+
+  // Test: a server first registered without `id` (under a nanoid) gets
+  // migrated in place when the caller adds `{ id }` on the next call.
+  async testHttpSuppliedIdMigratesNanoid() {
+    // Seed an existing server under a nanoid-ish id, exactly as if the user
+    // had called addMcpServer(name, url) previously without { id }.
+    const oldId = await this._seedServer(
+      "http-migrate-server",
+      "https://mcp.example.com/migrate",
+      "old-nanoid-aaaa"
+    );
+
+    // Drop fake OAuth-style keys under the old prefix to verify the manager
+    // also migrates DO-storage-backed OAuth state, not just the SQL row.
+    const ctx = (this as unknown as { ctx: { storage: DurableObjectStorage } })
+      .ctx;
+    await ctx.storage.put(`/${this.name}/${oldId}/test-client/client_info/`, {
+      client_id: "abc"
+    });
+    await ctx.storage.put(`/${this.name}/${oldId}/test-client/token`, {
+      access_token: "t"
+    });
+
+    let resultId: string | null = null;
+    try {
+      const r = await this.addMcpServer(
+        "http-migrate-server",
+        "https://mcp.example.com/migrate",
+        { id: "stable-migrated" }
+      );
+      resultId = r.id;
+    } catch (_e) {
+      // The mocked connectToServer always fails; that's expected. What we
+      // care about is the storage-level migration that ran before connect.
+      const servers = this.mcp.listServers();
+      resultId =
+        servers.find((s) => s.name === "http-migrate-server")?.id ?? null;
+    }
+
+    const storedIds = this.mcp
+      .listServers()
+      .filter((s) => s.name === "http-migrate-server")
+      .map((s) => s.id);
+
+    // OAuth keys should have moved from old prefix to new prefix.
+    const oldKeys = await ctx.storage.list({
+      prefix: `/${this.name}/${oldId}/`
+    });
+    const newKeys = await ctx.storage.list({
+      prefix: `/${this.name}/stable-migrated/`
+    });
+
+    return {
+      oldId,
+      resultId,
+      storedIds,
+      oldKeyCount: oldKeys.size,
+      newKeyCount: newKeys.size
     };
   }
 

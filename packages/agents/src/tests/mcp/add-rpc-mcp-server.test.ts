@@ -44,18 +44,22 @@ describe("addMcpServer with RPC binding — stable supplied ids", () => {
     expect(result.id).toBe("github-mcp");
   });
 
-  it("throws when re-registering an existing (name,url) under a new stable id", async () => {
+  it("JIT-migrates an existing (name,url) row to a newly supplied stable id", async () => {
     const agentStub = await getAgentByName(
       env.TestRpcMcpClientAgent,
       "test-rpc-migrate-id"
     );
     const result =
-      (await agentStub.testRpcSuppliedIdRejectsExistingNanoid()) as unknown as {
+      (await agentStub.testRpcSuppliedIdMigratesExistingNanoid()) as unknown as {
         success: boolean;
         firstId?: string;
-        threw?: boolean;
-        message?: string;
+        secondId?: string;
         storedIds?: string[];
+        connectionsBefore?: number;
+        connectionsAfter?: number;
+        stableConnectionExists?: boolean;
+        nanoidConnectionGone?: boolean;
+        callOk?: boolean;
         error?: string;
       };
 
@@ -63,11 +67,20 @@ describe("addMcpServer with RPC binding — stable supplied ids", () => {
       throw new Error(`Test failed: ${result.error}`);
     }
 
-    expect(result.threw).toBe(true);
-    expect(result.message).toContain("already registered with id");
-    expect(result.message).toContain("removeMcpServer");
-    // Crucially: no stale row created under the new stable id.
-    expect(result.storedIds).toEqual([result.firstId]);
+    // Original call got a nanoid; second call asked for "migrated".
+    expect(result.secondId).toBe("migrated");
+    expect(result.firstId).not.toBe("migrated");
+
+    // Exactly one row remains — the migrated one. No stale nanoid row.
+    expect(result.storedIds).toEqual(["migrated"]);
+
+    // Connection count unchanged; in-memory map renamed from nanoid → stable.
+    expect(result.connectionsBefore).toBe(result.connectionsAfter);
+    expect(result.stableConnectionExists).toBe(true);
+    expect(result.nanoidConnectionGone).toBe(true);
+
+    // Tool calls still route correctly post-migration.
+    expect(result.callOk).toBe(true);
   });
 
   it("dedups when the same stable id is re-supplied for the same (name,url)", async () => {

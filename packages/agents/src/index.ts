@@ -9459,18 +9459,20 @@ export class Agent<
         );
       }
 
-      // Collision check 2: the same (name, url) is already registered under a
-      // different id (typically an auto-generated nanoid from a previous call
-      // that didn't supply `id`). Honouring `requestedId` here would either
-      // silently return the old id (violating the caller's contract) or leave
-      // a stale row in storage after INSERT OR REPLACE on the new id. Require
-      // an explicit migration via removeMcpServer().
+      // JIT-migrate: the same (name, url) is already registered under a
+      // different id (typically an auto-generated nanoid from a previous
+      // call that didn't supply `id`). This is the natural upgrade path —
+      // a user adds `{ id: "github" }` to an existing `addMcpServer` call.
+      // Rename the existing row + connection + OAuth keys to the new id in
+      // place so the caller's contract ("the id I get back is the id I
+      // asked for") holds and no stale storage rows are left behind.
       if (existingServer && existingServer.id !== requestedId) {
-        throw new Error(
-          `MCP server "${serverName}" is already registered with id "${existingServer.id}", ` +
-            `cannot re-register with stable id "${requestedId}". ` +
-            `Call removeMcpServer("${existingServer.id}") first to migrate to a stable id.`
+        await this.mcp.migrateServerId(
+          existingServer.id,
+          requestedId,
+          this.name
         );
+        existingServer.id = requestedId;
       }
     }
 
