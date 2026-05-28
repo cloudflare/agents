@@ -1,6 +1,15 @@
 import type { LanguageModel, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
-import { Think } from "../../think";
+import { defineScheduledTasks, Think } from "../../think";
+import { Agent } from "agents";
+import type {
+  AgentToolEventMessage,
+  AgentToolLifecycleResult,
+  AgentToolRunInfo,
+  AgentToolRunInspection,
+  AgentToolStoredChunk,
+  RunAgentToolResult
+} from "agents";
 import type {
   StreamCallback,
   StreamableResult,
@@ -12,6 +21,9 @@ import type {
   ThinkSubmissionInspection,
   ThinkSubmissionStatus,
   SubmitMessagesResult,
+  ThinkScheduledTask,
+  ThinkScheduledTaskContext,
+  ThinkScheduledTasks,
   TurnContext,
   TurnConfig,
   PrepareStepContext,
@@ -24,6 +36,7 @@ import type {
 } from "../../think";
 import { sanitizeMessage, enforceRowSizeLimit } from "agents/chat";
 import type { ClientToolSchema } from "agents/chat";
+import type { Schedule } from "agents";
 import { Session } from "agents/experimental/memory/session";
 import { z } from "zod";
 
@@ -728,10 +741,14 @@ export class ThinkTestAgent extends Think {
     };
   }
 
-  async testChatWithoutErrorCallback(message: string): Promise<string> {
+  async testChatWithRethrowingErrorCallback(message: string): Promise<string> {
     const cb: StreamCallback = {
+      onStart() {},
       onEvent() {},
-      onDone() {}
+      onDone() {},
+      onError(error: string) {
+        throw new Error(error);
+      }
     };
     try {
       await this.chat(message, cb);
@@ -743,6 +760,7 @@ export class ThinkTestAgent extends Think {
 
   async testChatWithThrowingErrorCallback(message: string): Promise<string> {
     const cb: StreamCallback = {
+      onStart() {},
       onEvent() {},
       onDone() {},
       onError() {
@@ -898,9 +916,13 @@ export class ThinkTestAgent extends Think {
       crypto.randomUUID(),
       createEmptyStreamResult(),
       {
+        onStart() {},
         onEvent() {},
         onDone() {
           doneCalled = true;
+        },
+        onError(error: string) {
+          throw new Error(error);
         }
       }
     );
@@ -916,6 +938,7 @@ export class ThinkTestAgent extends Think {
     const controller = new AbortController();
 
     const cb: StreamCallback = {
+      onStart() {},
       onEvent(json: string) {
         events.push(json);
         if (events.length >= abortAfterEvents) {
@@ -1160,6 +1183,402 @@ export class ThinkTestAgent extends Think {
   async getLastBeforeTurnSystem(): Promise<string | null> {
     const log = this._beforeTurnLog;
     return log.length > 0 ? log[log.length - 1].system : null;
+  }
+}
+
+type AgentToolFinishForTest = {
+  run: AgentToolRunInfo;
+  result: AgentToolLifecycleResult;
+};
+
+export class StuckThinkAgentToolChild extends Agent {
+  override async _cf_initAsFacet(
+    _name: string,
+    _parentPath: ReadonlyArray<{ className: string; name: string }> = [],
+    _identityName = _name
+  ): Promise<void> {
+    await new Promise<void>(() => {
+      // Intentionally never resolves: simulates a child facet wedged in startup.
+    });
+  }
+
+  async startAgentToolRun(): Promise<AgentToolRunInspection> {
+    throw new Error("stuck Think child should never start");
+  }
+
+  async cancelAgentToolRun(): Promise<void> {}
+
+  async inspectAgentToolRun(): Promise<AgentToolRunInspection | null> {
+    throw new Error("stuck Think child should never be inspected");
+  }
+
+  async getAgentToolChunks(): Promise<AgentToolStoredChunk[]> {
+    return [];
+  }
+}
+
+export class ThinkAgentToolParent extends Agent {
+  private events: AgentToolEventMessage[] = [];
+  private finishes: AgentToolFinishForTest[] = [];
+  private startupObservedStatuses: string[][] = [];
+  private insertRunDuringOnStartId: string | null = null;
+
+  override broadcast(
+    msg: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    if (typeof msg === "string") {
+      try {
+        const parsed = JSON.parse(msg) as AgentToolEventMessage;
+        if (parsed.type === "agent-tool-event") {
+          this.events.push(parsed);
+        }
+      } catch {
+        // Ignore non-agent-tool frames.
+      }
+    }
+    super.broadcast(msg, without);
+  }
+
+  override async onAgentToolFinish(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): Promise<void> {
+    this.finishes.push({ run, result });
+  }
+
+  override onStart(): void {
+    const rows = this.sql<{ status: string }>`
+      SELECT status FROM cf_agent_tool_runs ORDER BY started_at ASC
+    `;
+    this.startupObservedStatuses.push(rows.map((row) => row.status));
+    if (this.insertRunDuringOnStartId) {
+      this.insertRecoverableParentRunForTest(
+        this.insertRunDuringOnStartId,
+        "StuckThinkAgentToolChild",
+        "created during onStart",
+        Date.now()
+      );
+    }
+  }
+
+  async runThinkChild(
+    input: string,
+    runId = crypto.randomUUID()
+  ): Promise<RunAgentToolResult> {
+    this.events = [];
+    this.finishes = [];
+    return this.runAgentTool(ThinkTestAgent, {
+      runId,
+      parentToolCallId: "think-tool-call",
+      input,
+      inputPreview: input
+    });
+  }
+
+  private insertRecoverableParentRunForTest(
+    runId: string,
+    agentType: string,
+    inputPreview: string,
+    startedAt: number,
+    status: "starting" | "running" = "running"
+  ): void {
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, input_preview,
+        input_redacted, status, display_metadata, display_order, started_at
+      ) VALUES (
+        ${runId}, 'think-tool-call', ${agentType},
+        ${JSON.stringify(inputPreview)}, 1, ${status},
+        ${JSON.stringify({ name: "think child" })}, 0, ${startedAt}
+      )
+    `;
+  }
+
+  private async waitForTerminalInspectionForTest(
+    child: {
+      inspectAgentToolRun(
+        runId: string
+      ): Promise<AgentToolRunInspection | null>;
+    },
+    runId: string
+  ): Promise<AgentToolRunInspection> {
+    let inspection = await child.inspectAgentToolRun(runId);
+    for (let attempt = 0; attempt < 50; attempt++) {
+      if (
+        inspection &&
+        inspection.status !== "running" &&
+        inspection.status !== "starting"
+      ) {
+        return inspection;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      inspection = await child.inspectAgentToolRun(runId);
+    }
+    throw new Error("Timed out waiting for Think child completion");
+  }
+
+  private async reconcileAgentToolRunsForTest(options?: {
+    deferFinishHooks?: boolean;
+    childInspectionTimeoutMs?: number;
+  }): Promise<Array<() => Promise<void>>> {
+    return (
+      this as unknown as {
+        _reconcileAgentToolRuns(options?: {
+          deferFinishHooks?: boolean;
+          childInspectionTimeoutMs?: number;
+        }): Promise<Array<() => Promise<void>>>;
+      }
+    )._reconcileAgentToolRuns(options);
+  }
+
+  private async scheduleAgentToolRunRecoveryForTest(options?: {
+    childInspectionTimeoutMs?: number;
+  }): Promise<void> {
+    await (
+      this as unknown as {
+        _scheduleAgentToolRunRecovery(options?: {
+          childInspectionTimeoutMs?: number;
+        }): Promise<void>;
+      }
+    )._scheduleAgentToolRunRecovery(options);
+  }
+
+  async reconcileCompletedThinkChildForTest(
+    input: string,
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    inspection: AgentToolRunInspection;
+    status: string | null;
+  }> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    const started = await child.startAgentToolRun(input, { runId });
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "ThinkTestAgent",
+      input,
+      started.startedAt
+    );
+    const inspection = await this.waitForTerminalInspectionForTest(
+      child,
+      runId
+    );
+
+    this.events = [];
+    this.finishes = [];
+    await this.reconcileAgentToolRunsForTest();
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      inspection,
+      status: this.getParentAgentToolStatusForTest(runId)
+    };
+  }
+
+  async reconcileRunningThinkChildForTest(
+    input: string,
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    status: string | null;
+  }> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.setBeforeStepAsyncDelay(10_000);
+    const started = await child.startAgentToolRun(input, { runId });
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "ThinkTestAgent",
+      input,
+      started.startedAt
+    );
+
+    this.events = [];
+    this.finishes = [];
+    try {
+      await this.reconcileAgentToolRunsForTest();
+    } finally {
+      await child.cancelAgentToolRun(runId, "test cleanup");
+    }
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      status: this.getParentAgentToolStatusForTest(runId)
+    };
+  }
+
+  async reconcileStuckThinkChildWithTimeoutForTest(
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    elapsedMs: number;
+    status: string | null;
+  }> {
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "StuckThinkAgentToolChild",
+      "stuck Think child",
+      Date.now()
+    );
+
+    this.events = [];
+    this.finishes = [];
+    const startedAt = Date.now();
+    await this.reconcileAgentToolRunsForTest({ childInspectionTimeoutMs: 10 });
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      elapsedMs: Date.now() - startedAt,
+      status: this.getParentAgentToolStatusForTest(runId)
+    };
+  }
+
+  async scheduleStuckThinkChildRecoveryForTest(
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    status: string | null;
+  }> {
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "StuckThinkAgentToolChild",
+      "scheduled stuck Think child",
+      Date.now()
+    );
+
+    this.events = [];
+    this.finishes = [];
+    await this.scheduleAgentToolRunRecoveryForTest({
+      childInspectionTimeoutMs: 10
+    });
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      status: this.getParentAgentToolStatusForTest(runId)
+    };
+  }
+
+  async scheduleStuckThinkChildRecoveryTwiceForTest(
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    status: string | null;
+  }> {
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "StuckThinkAgentToolChild",
+      "single flight stuck Think child",
+      Date.now()
+    );
+
+    this.events = [];
+    this.finishes = [];
+    const first = this.scheduleAgentToolRunRecoveryForTest({
+      childInspectionTimeoutMs: 10
+    });
+    const second = this.scheduleAgentToolRunRecoveryForTest({
+      childInspectionTimeoutMs: 10
+    });
+    await Promise.all([first, second]);
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      status: this.getParentAgentToolStatusForTest(runId)
+    };
+  }
+
+  async startupDefersStaleThinkRecoveryForTest(
+    runId = crypto.randomUUID()
+  ): Promise<{
+    statusesDuringStartup: string[];
+    statusAfterStartup: string | null;
+    finalStatus: string | null;
+    startupElapsedMs: number;
+    finishes: AgentToolFinishForTest[];
+    events: AgentToolEventMessage[];
+  }> {
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "StuckThinkAgentToolChild",
+      "startup stuck Think child",
+      Date.now()
+    );
+
+    this.events = [];
+    this.finishes = [];
+    this.startupObservedStatuses = [];
+    const startedAt = Date.now();
+    await this.onStart();
+    const startupElapsedMs = Date.now() - startedAt;
+    const statusAfterStartup = this.getParentAgentToolStatusForTest(runId);
+
+    for (let attempt = 0; attempt < 40; attempt++) {
+      if (this.getParentAgentToolStatusForTest(runId) === "interrupted") {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    return {
+      statusesDuringStartup: this.startupObservedStatuses[0] ?? [],
+      statusAfterStartup,
+      finalStatus: this.getParentAgentToolStatusForTest(runId),
+      startupElapsedMs,
+      finishes: this.finishes,
+      events: this.events
+    };
+  }
+
+  async startupRecoveryIgnoresRunsCreatedDuringOnStartForTest(): Promise<{
+    staleStatus: string | null;
+    onStartRunStatus: string | null;
+    finishes: AgentToolFinishForTest[];
+    events: AgentToolEventMessage[];
+  }> {
+    const staleRunId = crypto.randomUUID();
+    const onStartRunId = crypto.randomUUID();
+    this.insertRecoverableParentRunForTest(
+      staleRunId,
+      "StuckThinkAgentToolChild",
+      "startup snapshot stale child",
+      Date.now()
+    );
+
+    this.events = [];
+    this.finishes = [];
+    this.startupObservedStatuses = [];
+    this.insertRunDuringOnStartId = onStartRunId;
+    try {
+      await this.onStart();
+    } finally {
+      this.insertRunDuringOnStartId = null;
+    }
+
+    for (let attempt = 0; attempt < 40; attempt++) {
+      if (this.getParentAgentToolStatusForTest(staleRunId) === "interrupted") {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    return {
+      staleStatus: this.getParentAgentToolStatusForTest(staleRunId),
+      onStartRunStatus: this.getParentAgentToolStatusForTest(onStartRunId),
+      finishes: this.finishes,
+      events: this.events
+    };
+  }
+
+  getParentAgentToolStatusForTest(runId: string): string | null {
+    const rows = this.sql<{ status: string }>`
+      SELECT status FROM cf_agent_tool_runs WHERE run_id = ${runId} LIMIT 1
+    `;
+    return rows[0]?.status ?? null;
   }
 }
 
@@ -1684,6 +2103,12 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   private _responseLog: ChatResponseResult[] = [];
   private _submissionLog: ThinkSubmissionInspection[] = [];
+  private _workflowEventLog: Array<{
+    workflowName: string;
+    workflowId: string;
+    event: { type: string; payload?: unknown };
+  }> = [];
+  private _workflowEventFailuresRemaining = 0;
   private _capturedTurnContexts: Array<{
     continuation?: boolean;
     body?: RpcJsonObject;
@@ -1691,6 +2116,7 @@ export class ThinkProgrammaticTestAgent extends Think {
   private _delayedChunks: { chunks: string[]; delayMs: number } | null = null;
   private _throwBeforeTurnError: string | null = null;
   private _submissionStatusDelayMs = 0;
+  private _programmaticResponse = "Programmatic response";
   private _inBandErrorResponse: {
     errorText: string;
     textChunks: string[];
@@ -1709,11 +2135,23 @@ export class ThinkProgrammaticTestAgent extends Think {
         this._delayedChunks.delayMs
       );
     }
-    return createMockModel("Programmatic response");
+    return createMockModel(this._programmaticResponse);
   }
 
   override onChatResponse(result: ChatResponseResult): void {
     this._responseLog.push(result);
+  }
+
+  override async sendWorkflowEvent(
+    workflowName: string & {},
+    workflowId: string,
+    event: { type: string; payload?: unknown }
+  ): Promise<void> {
+    if (this._workflowEventFailuresRemaining > 0) {
+      this._workflowEventFailuresRemaining--;
+      throw new Error("simulated workflow event failure");
+    }
+    this._workflowEventLog.push({ workflowName, workflowId, event });
   }
 
   override async onSubmissionStatus(
@@ -1809,6 +2247,30 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async setSubmissionStatusDelayForTest(delayMs: number): Promise<void> {
     this._submissionStatusDelayMs = delayMs;
+  }
+
+  async setProgrammaticResponseForTest(response: string): Promise<void> {
+    this._programmaticResponse = response;
+  }
+
+  async setLastBodyForTest(body: Record<string, unknown>): Promise<void> {
+    (
+      this as unknown as { _lastBody: Record<string, unknown> | undefined }
+    )._lastBody = body;
+  }
+
+  async setWorkflowEventFailuresForTest(count: number): Promise<void> {
+    this._workflowEventFailuresRemaining = count;
+  }
+
+  async getWorkflowEventsForTest(): Promise<
+    Array<{
+      workflowName: string;
+      workflowId: string;
+      event: { type: string; payload?: unknown };
+    }>
+  > {
+    return this._workflowEventLog;
   }
 
   async setSubmissionRecoveryStaleMsForTest(ms: number): Promise<void> {
@@ -1959,6 +2421,8 @@ export class ThinkProgrammaticTestAgent extends Think {
     submissionId: string;
     status?: ThinkSubmissionStatus;
     requestId?: string;
+    metadata?: Record<string, unknown>;
+    errorMessage?: string | null;
     messagesAppliedAt?: number | null;
     completedAt?: number | null;
     createdAt?: number;
@@ -1977,6 +2441,10 @@ export class ThinkProgrammaticTestAgent extends Think {
     const startedAt = status === "running" ? now : null;
     const completedAt =
       options.completedAt === undefined ? null : options.completedAt;
+    const metadataJson =
+      options.metadata === undefined ? null : JSON.stringify(options.metadata);
+    const errorMessage =
+      options.errorMessage === undefined ? null : options.errorMessage;
     const messageIds = options.messageIds ?? [crypto.randomUUID()];
     const messagesJson = JSON.stringify(
       messageIds.map((id) => ({
@@ -1993,10 +2461,99 @@ export class ThinkProgrammaticTestAgent extends Think {
       )
       VALUES (
         ${options.submissionId}, NULL, ${requestId}, NULL, ${status},
-        ${messagesJson}, NULL, NULL, ${now}, ${messagesAppliedAt},
+        ${messagesJson}, ${metadataJson}, ${errorMessage}, ${now}, ${messagesAppliedAt},
         ${startedAt}, ${completedAt}
       )
     `;
+  }
+
+  async recoverWorkflowNotificationsForTest(): Promise<void> {
+    (
+      this as unknown as { _recoverWorkflowNotifications: () => void }
+    )._recoverWorkflowNotifications();
+  }
+
+  async drainWorkflowNotificationsForTest(): Promise<void> {
+    await (
+      this as unknown as { _drainWorkflowNotifications: () => Promise<void> }
+    )._drainWorkflowNotifications();
+  }
+
+  async insertWorkflowNotificationForTest(options: {
+    notificationId: string;
+    submissionId: string;
+    workflowName?: string;
+    workflowId?: string;
+    eventType?: string;
+    payload?: unknown;
+  }): Promise<void> {
+    (
+      this as unknown as { _ensureWorkflowNotificationTable: () => void }
+    )._ensureWorkflowNotificationTable();
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_think_workflow_notifications (
+        notification_id, submission_id, workflow_name, workflow_id, event_type,
+        payload_json, attempts, last_error, created_at, updated_at, delivered_at
+      )
+      VALUES (
+        ${options.notificationId},
+        ${options.submissionId},
+        ${options.workflowName ?? "TEST_WORKFLOW"},
+        ${options.workflowId ?? "workflow-1"},
+        ${options.eventType ?? "think-prompt-test"},
+        ${JSON.stringify(options.payload ?? { submissionId: options.submissionId, status: "error" })},
+        0,
+        NULL,
+        ${now},
+        ${now},
+        NULL
+      )
+    `;
+  }
+
+  async listWorkflowNotificationsForTest(): Promise<
+    Array<{
+      notificationId: string;
+      submissionId: string;
+      workflowName: string;
+      workflowId: string;
+      eventType: string;
+      payloadJson: string;
+      attempts: number;
+      lastError: string | null;
+      deliveredAt: number | null;
+    }>
+  > {
+    (
+      this as unknown as { _ensureWorkflowNotificationTable: () => void }
+    )._ensureWorkflowNotificationTable();
+    return this.sql<{
+      notification_id: string;
+      submission_id: string;
+      workflow_name: string;
+      workflow_id: string;
+      event_type: string;
+      payload_json: string;
+      attempts: number;
+      last_error: string | null;
+      delivered_at: number | null;
+    }>`
+      SELECT notification_id, submission_id, workflow_name, workflow_id,
+             event_type, payload_json, attempts, last_error, delivered_at
+      FROM cf_think_workflow_notifications
+      ORDER BY created_at ASC, notification_id ASC
+    `.map((row) => ({
+      notificationId: row.notification_id,
+      submissionId: row.submission_id,
+      workflowName: row.workflow_name,
+      workflowId: row.workflow_id,
+      eventType: row.event_type,
+      payloadJson: row.payload_json,
+      attempts: row.attempts,
+      lastError: row.last_error,
+      deliveredAt: row.delivered_at
+    }));
   }
 
   async insertMalformedSubmissionForTest(options: {
@@ -2208,6 +2765,303 @@ export class ThinkProgrammaticTestAgent extends Think {
       done: cb.doneCalled,
       error: cb.errorMessage
     };
+  }
+}
+
+type ScheduledTaskConfigForTest = {
+  schedule: string;
+  timezone?: string;
+  prompt?: string;
+  handler?: "record" | "throw" | "throw-once";
+  retry?: ThinkScheduledTask["retry"];
+  metadata?: Record<string, unknown>;
+};
+
+type DeclaredScheduledTaskRowForTest = {
+  owner_key: string;
+  task_id: string;
+  schedule_hash: string;
+  task_hash: string;
+  schedule_id: string | null;
+  next_run_at: number | null;
+  created_at: number;
+  updated_at: number;
+};
+
+type DeclaredScheduledTaskPayloadForTest = {
+  taskId: string;
+  scheduleHash: string;
+  scheduledFor: number;
+};
+
+type ScheduledTaskHandlerEventForTest = {
+  taskId: string;
+  scheduledFor: number;
+  scheduledForIso: string;
+  occurrenceKey: string;
+  idempotencyKey: string;
+  schedule: string;
+  scheduleKind: string;
+  timezone: string | null;
+  metadataJson: string | null;
+};
+
+export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
+  override async getDefaultTimezone(): Promise<string | undefined> {
+    return this.ctx.storage.get<string>("scheduledTasksDefaultTimezone");
+  }
+
+  override async getScheduledTasks(): Promise<ThinkScheduledTasks> {
+    const config =
+      (await this.ctx.storage.get<Record<string, ScheduledTaskConfigForTest>>(
+        "scheduledTasksConfig"
+      )) ?? {};
+    const tasks: ThinkScheduledTasks = {};
+    for (const [taskId, task] of Object.entries(config)) {
+      const base = {
+        schedule: task.schedule as ThinkScheduledTask["schedule"],
+        ...(task.timezone !== undefined && { timezone: task.timezone }),
+        ...(task.retry !== undefined && { retry: task.retry }),
+        ...(task.metadata !== undefined && { metadata: task.metadata })
+      };
+      if (task.handler) {
+        tasks[taskId] = {
+          ...base,
+          handler: async (ctx: ThinkScheduledTaskContext) => {
+            const events =
+              (await this.ctx.storage.get<ScheduledTaskHandlerEventForTest[]>(
+                "scheduledTaskHandlerEvents"
+              )) ?? [];
+            events.push({
+              taskId: ctx.taskId,
+              scheduledFor: ctx.scheduledFor,
+              scheduledForIso: ctx.scheduledForDate.toISOString(),
+              occurrenceKey: ctx.occurrenceKey,
+              idempotencyKey: ctx.idempotencyKey,
+              schedule: ctx.schedule,
+              scheduleKind: ctx.scheduleKind,
+              timezone: ctx.timezone ?? null,
+              metadataJson:
+                ctx.metadata === undefined ? null : JSON.stringify(ctx.metadata)
+            });
+            await this.ctx.storage.put("scheduledTaskHandlerEvents", events);
+            if (
+              task.handler === "throw" ||
+              (task.handler === "throw-once" &&
+                events.filter((event) => event.taskId === ctx.taskId).length ===
+                  1)
+            ) {
+              throw new Error("scheduled handler failed");
+            }
+          }
+        } as ThinkScheduledTask;
+        continue;
+      }
+      const prompt: ThinkScheduledTask["prompt"] =
+        task.prompt === "__throw__"
+          ? () => {
+              throw new Error("scheduled prompt failed");
+            }
+          : (task.prompt ?? "");
+      tasks[taskId] = {
+        ...base,
+        prompt
+      } as ThinkScheduledTask;
+    }
+    return defineScheduledTasks(tasks);
+  }
+
+  async setScheduledTasksForTest(
+    config: Record<string, ScheduledTaskConfigForTest>
+  ): Promise<void> {
+    await this.ctx.storage.put("scheduledTasksConfig", config);
+  }
+
+  async setDefaultTimezoneForTest(timezone?: string): Promise<void> {
+    if (timezone === undefined) {
+      await this.ctx.storage.delete("scheduledTasksDefaultTimezone");
+      return;
+    }
+    await this.ctx.storage.put("scheduledTasksDefaultTimezone", timezone);
+  }
+
+  async reconcileScheduledTasksForTest(): Promise<void> {
+    await this.internal_reconcileScheduledTasks();
+  }
+
+  async reconcileScheduledTasksErrorForTest(): Promise<string> {
+    try {
+      await this.reconcileScheduledTasksForTest();
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async validateScheduleForTest(
+    schedule: string,
+    options: { timezone?: string; defaultTimezone?: string } = {}
+  ): Promise<string | null> {
+    return (
+      this as unknown as {
+        _declaredScheduleValidationError: (
+          schedule: string,
+          timezone?: string,
+          defaultTimezone?: string
+        ) => string | null;
+      }
+    )._declaredScheduleValidationError(
+      schedule,
+      options.timezone,
+      options.defaultTimezone
+    );
+  }
+
+  async nextScheduleTimeForTest(
+    schedule: string,
+    nowIso: string,
+    options: {
+      timezone?: string;
+      defaultTimezone?: string;
+      previousScheduledFor?: number;
+    } = {}
+  ): Promise<number> {
+    return (
+      this as unknown as {
+        _nextDeclaredScheduleTimeForConfig: (
+          schedule: string,
+          now: Date,
+          options?: {
+            taskTimezone?: string;
+            defaultTimezone?: string;
+            previousScheduledFor?: number;
+          }
+        ) => Date;
+      }
+    )
+      ._nextDeclaredScheduleTimeForConfig(schedule, new Date(nowIso), {
+        taskTimezone: options.timezone,
+        defaultTimezone: options.defaultTimezone,
+        previousScheduledFor: options.previousScheduledFor
+      })
+      .getTime();
+  }
+
+  async listDeclaredScheduledTaskRowsForTest(): Promise<
+    DeclaredScheduledTaskRowForTest[]
+  > {
+    const ownerKey = (
+      this as unknown as { _declaredScheduleOwnerKey(): string }
+    )._declaredScheduleOwnerKey();
+    return this.sql<DeclaredScheduledTaskRowForTest>`
+      SELECT owner_key, task_id, schedule_hash, task_hash, schedule_id,
+             next_run_at, created_at, updated_at
+      FROM cf_think_scheduled_tasks
+      WHERE owner_key = ${ownerKey}
+      ORDER BY task_id ASC
+    `;
+  }
+
+  async listSchedulesForTest(): Promise<Schedule<unknown>[]> {
+    return this.listSchedules();
+  }
+
+  async listScheduledTaskHandlerEventsForTest(): Promise<
+    ScheduledTaskHandlerEventForTest[]
+  > {
+    return (
+      (await this.ctx.storage.get<ScheduledTaskHandlerEventForTest[]>(
+        "scheduledTaskHandlerEvents"
+      )) ?? []
+    );
+  }
+
+  async clearDeclaredScheduleIdForTest(taskId: string): Promise<void> {
+    const row = (
+      this as unknown as {
+        _readDeclaredScheduledTaskRow(
+          taskId: string
+        ): DeclaredScheduledTaskRowForTest | null;
+      }
+    )._readDeclaredScheduledTaskRow(taskId);
+    if (!row) throw new Error("No declared schedule row");
+    if (row.schedule_id) await this.cancelSchedule(row.schedule_id);
+    this.sql`
+      UPDATE cf_think_scheduled_tasks
+      SET schedule_id = NULL
+      WHERE owner_key = ${row.owner_key}
+        AND task_id = ${taskId}
+    `;
+  }
+
+  async createUnrelatedScheduleForTest(): Promise<string> {
+    const schedule = await this.schedule(
+      new Date(Date.now() + 60 * 60_000),
+      "noopScheduledTaskForTest",
+      { source: "unrelated" },
+      { idempotent: true }
+    );
+    return schedule.id;
+  }
+
+  async noopScheduledTaskForTest(): Promise<void> {}
+
+  async getFirstDeclaredPayloadForTest(): Promise<DeclaredScheduledTaskPayloadForTest> {
+    const [row] = await this.listDeclaredScheduledTaskRowsForTest();
+    if (!row?.schedule_id) throw new Error("No declared schedule row");
+    const schedule = await this.getScheduleById(row.schedule_id);
+    if (!schedule) throw new Error("Declared schedule row has no schedule");
+    return schedule.payload as DeclaredScheduledTaskPayloadForTest;
+  }
+
+  async runDeclaredPayloadForTest(
+    payload: DeclaredScheduledTaskPayloadForTest
+  ): Promise<void> {
+    await this._runDeclaredScheduledTask(payload);
+  }
+
+  async runDeclaredPayloadErrorForTest(
+    payload: DeclaredScheduledTaskPayloadForTest
+  ): Promise<string> {
+    try {
+      await this.runDeclaredPayloadForTest(payload);
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async setChildScheduledTasksForTest(
+    name: string,
+    config: Record<string, ScheduledTaskConfigForTest>
+  ): Promise<void> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    await child.setScheduledTasksForTest(config);
+  }
+
+  async setChildDefaultTimezoneForTest(
+    name: string,
+    timezone?: string
+  ): Promise<void> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    await child.setDefaultTimezoneForTest(timezone);
+  }
+
+  async reconcileChildScheduledTasksForTest(name: string): Promise<void> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    await child.reconcileScheduledTasksForTest();
+  }
+
+  async listChildDeclaredScheduledTaskRowsForTest(
+    name: string
+  ): Promise<DeclaredScheduledTaskRowForTest[]> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    return child.listDeclaredScheduledTaskRowsForTest();
+  }
+
+  async listChildSchedulesForTest(name: string): Promise<Schedule<unknown>[]> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    return child.listSchedulesForTest();
   }
 }
 

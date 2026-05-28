@@ -6,7 +6,11 @@ import type {
   JSONRPCMessage,
   MessageExtraInfo
 } from "@modelcontextprotocol/sdk/types.js";
-import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
+import {
+  isJSONRPCErrorResponse,
+  isJSONRPCResultResponse,
+  JSONRPCMessageSchema
+} from "@modelcontextprotocol/sdk/types.js";
 import { getServerByName } from "partyserver";
 import type { McpAgent } from ".";
 
@@ -118,12 +122,19 @@ export interface RPCServerTransportOptions {
   timeout?: number;
 }
 
+type PendingRPCResponse = {
+  messages: JSONRPCMessage[];
+  resolve: (response: JSONRPCMessage | JSONRPCMessage[] | undefined) => void;
+  reject: (error: Error) => void;
+  timeoutId: ReturnType<typeof setTimeout>;
+};
+
 export class RPCServerTransport implements Transport {
   private _started = false;
-  private _pendingResponse: JSONRPCMessage | JSONRPCMessage[] | null = null;
-  private _responseResolver: (() => void) | null = null;
   private _protocolVersion?: string;
   private _timeout: number;
+  private _pendingRequests = new Map<string, PendingRPCResponse>();
+  private _pendingContinuations: PendingRPCResponse[] = [];
 
   sessionId?: string;
   onclose?: () => void;
@@ -152,44 +163,146 @@ export class RPCServerTransport implements Transport {
   async close(): Promise<void> {
     this._started = false;
     this.onclose?.();
-    if (this._responseResolver) {
-      this._responseResolver();
-      this._responseResolver = null;
+
+    const error = new Error("Transport closed");
+    for (const pending of this._pendingRequests.values()) {
+      clearTimeout(pending.timeoutId);
+      pending.reject(error);
     }
+    this._pendingRequests.clear();
+
+    for (const pending of this._pendingContinuations) {
+      clearTimeout(pending.timeoutId);
+      pending.reject(error);
+    }
+    this._pendingContinuations = [];
+  }
+
+  private _makeTimeout(onTimeout: () => void): ReturnType<typeof setTimeout> {
+    return setTimeout(onTimeout, this._timeout);
+  }
+
+  private _appendPending(
+    pending: PendingRPCResponse,
+    message: JSONRPCMessage
+  ): void {
+    pending.messages.push(message);
+  }
+
+  private _completePending(
+    pending: PendingRPCResponse,
+    message: JSONRPCMessage
+  ): void {
+    pending.messages.push(message);
+    clearTimeout(pending.timeoutId);
+
+    const messages = pending.messages;
+    queueMicrotask(() => {
+      pending.resolve(messages.length === 1 ? messages[0] : messages);
+    });
+  }
+
+  private _completeRequest(key: string, message: JSONRPCMessage): boolean {
+    const pending = this._pendingRequests.get(key);
+    if (!pending) return false;
+
+    this._pendingRequests.delete(key);
+    this._completePending(pending, message);
+    return true;
+  }
+
+  private _appendRequest(key: string, message: JSONRPCMessage): boolean {
+    const pending = this._pendingRequests.get(key);
+    if (!pending) return false;
+
+    this._appendPending(pending, message);
+    return true;
+  }
+
+  private _completeContinuation(message: JSONRPCMessage): boolean {
+    const pending = this._pendingContinuations.shift();
+    if (!pending) return false;
+
+    this._completePending(pending, message);
+    return true;
+  }
+
+  private _appendContinuation(message: JSONRPCMessage): boolean {
+    const pending = this._pendingContinuations[0];
+    if (!pending) return false;
+
+    this._appendPending(pending, message);
+    return true;
   }
 
   async send(
     message: JSONRPCMessage,
-    _options?: TransportSendOptions
+    options?: TransportSendOptions
   ): Promise<void> {
     if (!this._started) {
       throw new Error("Transport not started");
     }
 
-    if (!this._pendingResponse) {
-      this._pendingResponse = message;
-    } else if (Array.isArray(this._pendingResponse)) {
-      this._pendingResponse.push(message);
-    } else {
-      this._pendingResponse = [this._pendingResponse, message];
+    if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
+      const id = message.id;
+      if (id === undefined) {
+        this.onerror?.(
+          new Error(`RPC response missing id: ${JSON.stringify(message)}`)
+        );
+        return;
+      }
+
+      if (this._completeRequest(id.toString(), message)) {
+        return;
+      }
+
+      if (this._completeContinuation(message)) {
+        return;
+      }
+
+      this.onerror?.(
+        new Error(
+          `No pending RPC request found for response: ${JSON.stringify(message)}`
+        )
+      );
+      return;
     }
 
-    if (this._responseResolver) {
-      const resolver = this._responseResolver;
-      queueMicrotask(() => resolver());
+    const relatedRequestId = options?.relatedRequestId?.toString();
+    const expectsResponse = "id" in message;
+
+    if (relatedRequestId) {
+      if (expectsResponse) {
+        if (this._completeRequest(relatedRequestId, message)) return;
+      } else if (this._appendRequest(relatedRequestId, message)) {
+        return;
+      }
     }
+
+    if (expectsResponse) {
+      if (this._completeContinuation(message)) return;
+    } else if (this._appendContinuation(message)) {
+      return;
+    }
+
+    this.onerror?.(
+      new Error(
+        `No pending RPC request found for message: ${JSON.stringify(message)}`
+      )
+    );
   }
 
   /**
    * @internal Called by McpAgent.handleMcpMessage() — not for external use.
    *
-   * Wait for the next send() call and return whatever it produces.
+   * Wait for the next unmatched send() call that expects a client response or
+   * completes a resumed tool call.
    *
-   * Used after resolving an elicitation response: the tool handler is still
-   * running and will eventually call send() with either another elicitation
-   * request or the final tool result. This method captures that send() using
-   * the same _responseResolver / _pendingResponse / timeout mechanism as
-   * handle().
+   * Used after resolving an elicitation response: the original tool call has
+   * already returned the elicitation request to the RPC client, and the resumed
+   * tool handler will eventually send the final tool result. That final response
+   * has the original tool request id, so there is no active handle() waiter left
+   * for id-based routing; this continuation waiter receives it instead.
    */
   async _awaitPendingResponse(): Promise<
     JSONRPCMessage | JSONRPCMessage[] | undefined
@@ -198,41 +311,27 @@ export class RPCServerTransport implements Transport {
       throw new Error("Transport not started");
     }
 
-    this._pendingResponse = null;
-
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    const responsePromise = new Promise<void>((resolve, reject) => {
-      timeoutId = setTimeout(() => {
-        this._responseResolver = null;
-        reject(
-          new Error(
-            `Request timeout: No response received within ${this._timeout}ms`
-          )
-        );
-      }, this._timeout);
-
-      this._responseResolver = () => {
-        if (timeoutId) {
-          clearTimeout(timeoutId);
-          timeoutId = null;
-        }
-        this._responseResolver = null;
-        resolve();
-      };
-    });
-
-    try {
-      await responsePromise;
-    } catch (error) {
-      this._pendingResponse = null;
-      this._responseResolver = null;
-      throw error;
-    }
-
-    const response = this._pendingResponse;
-    this._pendingResponse = null;
-
-    return response ?? undefined;
+    return await new Promise<JSONRPCMessage | JSONRPCMessage[] | undefined>(
+      (resolve, reject) => {
+        const pending: PendingRPCResponse = {
+          messages: [],
+          resolve,
+          reject,
+          timeoutId: this._makeTimeout(() => {
+            const index = this._pendingContinuations.indexOf(pending);
+            if (index !== -1) {
+              this._pendingContinuations.splice(index, 1);
+            }
+            reject(
+              new Error(
+                `Request timeout: No response received within ${this._timeout}ms`
+              )
+            );
+          })
+        };
+        this._pendingContinuations.push(pending);
+      }
+    );
   }
 
   async handle(
@@ -245,19 +344,15 @@ export class RPCServerTransport implements Transport {
     if (Array.isArray(message)) {
       validateBatch(message);
 
-      const responses: JSONRPCMessage[] = [];
-      for (const msg of message) {
-        const response = await this.handle(msg);
-        if (response !== undefined) {
-          if (Array.isArray(response)) {
-            responses.push(...response);
-          } else {
-            responses.push(response);
-          }
-        }
-      }
+      const responses = await Promise.all(
+        message.map((msg) => this.handle(msg))
+      );
+      const flattened = responses.flatMap((response) => {
+        if (response === undefined) return [];
+        return Array.isArray(response) ? response : [response];
+      });
 
-      return responses.length === 0 ? undefined : responses;
+      return flattened.length === 0 ? undefined : flattened;
     }
 
     try {
@@ -270,48 +365,43 @@ export class RPCServerTransport implements Transport {
       return makeInvalidRequestError(id);
     }
 
-    this._pendingResponse = null;
-
     const isNotification = !("id" in message);
     if (isNotification) {
       this.onmessage?.(message);
       return undefined;
     }
 
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    const responsePromise = new Promise<void>((resolve, reject) => {
-      timeoutId = setTimeout(() => {
-        this._responseResolver = null;
-        reject(
-          new Error(
-            `Request timeout: No response received within ${this._timeout}ms`
-          )
-        );
-      }, this._timeout);
+    const id = message.id?.toString();
+    if (!id) {
+      return makeInvalidRequestError(message.id);
+    }
 
-      this._responseResolver = () => {
-        if (timeoutId) {
-          clearTimeout(timeoutId);
-          timeoutId = null;
-        }
-        this._responseResolver = null;
-        resolve();
+    if (this._pendingRequests.has(id)) {
+      throw new Error(`Duplicate pending RPC request id: ${id}`);
+    }
+
+    const responsePromise = new Promise<
+      JSONRPCMessage | JSONRPCMessage[] | undefined
+    >((resolve, reject) => {
+      const pending: PendingRPCResponse = {
+        messages: [],
+        resolve,
+        reject,
+        timeoutId: this._makeTimeout(() => {
+          this._pendingRequests.delete(id);
+          reject(
+            new Error(
+              `Request timeout: No response received within ${this._timeout}ms`
+            )
+          );
+        })
       };
+
+      this._pendingRequests.set(id, pending);
     });
 
     this.onmessage?.(message);
 
-    try {
-      await responsePromise;
-    } catch (error) {
-      this._pendingResponse = null;
-      this._responseResolver = null;
-      throw error;
-    }
-
-    const response = this._pendingResponse;
-    this._pendingResponse = null;
-
-    return response ?? undefined;
+    return await responsePromise;
   }
 }

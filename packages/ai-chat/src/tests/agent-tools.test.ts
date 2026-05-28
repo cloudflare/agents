@@ -69,6 +69,22 @@ type ParentStub = DurableObjectStub & {
     events: AgentToolEventMessage[];
     finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
   }>;
+  reconcileStuckChildWithTimeoutForTest(runId?: string): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
+    elapsedMs: number;
+    status: string | null;
+  }>;
+  scheduleStuckChildRecoveryForTest(runId?: string): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
+    status: string | null;
+  }>;
+  scheduleStuckChildRecoveryTwiceForTest(runId?: string): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
+    status: string | null;
+  }>;
   reconcileCompletedChildWithDeferredFinishForTest(
     input: {
       prompt: string;
@@ -313,6 +329,79 @@ describe("AIChatAgent as an agent-tool child", () => {
         error: "Agent tool run could not be inspected during parent recovery."
       }
     });
+  });
+
+  it("bounds recovery when child facet startup never completes", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    const { events, finishes, elapsedMs, status } =
+      await parent.reconcileStuckChildWithTimeoutForTest(runId);
+
+    expect(elapsedMs).toBeLessThan(1000);
+    expect(status).toBe("interrupted");
+    expect(finishes).toEqual([
+      {
+        run: expect.objectContaining({
+          runId,
+          parentToolCallId: "test-tool-call",
+          agentType: "StuckAgentToolChild",
+          status: "interrupted",
+          inputPreview: "stuck child"
+        }),
+        result: expect.objectContaining({
+          status: "interrupted",
+          error: "Agent tool run inspection timed out during parent recovery."
+        })
+      }
+    ]);
+    expect(events.at(-1)).toMatchObject({
+      parentToolCallId: "test-tool-call",
+      event: {
+        kind: "interrupted",
+        runId,
+        error: "Agent tool run inspection timed out during parent recovery."
+      }
+    });
+  });
+
+  it("runs scheduled startup recovery in the background and finalizes stale rows", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    const { events, finishes, status } =
+      await parent.scheduleStuckChildRecoveryForTest(runId);
+
+    expect(status).toBe("interrupted");
+    expect(finishes).toHaveLength(1);
+    expect(finishes[0]).toMatchObject({
+      run: expect.objectContaining({
+        runId,
+        agentType: "StuckAgentToolChild",
+        status: "interrupted"
+      }),
+      result: expect.objectContaining({
+        status: "interrupted",
+        error: "Agent tool run inspection timed out during parent recovery."
+      })
+    });
+    expect(events.at(-1)).toMatchObject({
+      event: { kind: "interrupted", runId }
+    });
+  });
+
+  it("keeps scheduled startup recovery single-flight", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    const { events, finishes, status } =
+      await parent.scheduleStuckChildRecoveryTwiceForTest(runId);
+
+    expect(status).toBe("interrupted");
+    expect(finishes).toHaveLength(1);
+    expect(
+      events.filter((event) => event.event.kind === "interrupted")
+    ).toHaveLength(1);
   });
 
   it("defers recovered finish hooks until after startup work", async () => {

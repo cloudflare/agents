@@ -14,9 +14,12 @@ export {
   ThinkLegacyConfigMigrationAgent,
   ThinkConfigInSessionAgent,
   ThinkProgrammaticTestAgent,
+  ThinkScheduledTasksTestAgent,
   ThinkAsyncHookTestAgent,
   ThinkRecoveryTestAgent,
-  ThinkNonRecoveryTestAgent
+  ThinkNonRecoveryTestAgent,
+  ThinkAgentToolParent,
+  StuckThinkAgentToolChild
 } from "./think-session";
 export { ThinkFiberTestAgent } from "./fiber";
 export { ThinkClientToolsAgent } from "./client-tools";

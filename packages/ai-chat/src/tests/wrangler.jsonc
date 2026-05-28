@@ -109,9 +109,13 @@
       {
         "class_name": "AIChatAgentToolChild",
         "name": "AIChatAgentToolChild"
+      },
+      {
+        "class_name": "StuckAgentToolChild",
+        "name": "StuckAgentToolChild"
       }
-      // `AIChatAgentToolChild` is addressed as a facet of
-      // `AIChatAgentToolParent`, so it does not need a migration entry.
+      // Agent-tool children are addressed as facets of
+      // `AIChatAgentToolParent`, so they do not need migration entries.
     ]
   },
   "main": "worker.ts",

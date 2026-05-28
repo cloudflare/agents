@@ -4,6 +4,7 @@ import fg from "fast-glob";
 import os from "node:os";
 
 const execAsync = promisify(exec);
+const maxRetries = 3;
 
 const filter = process.argv[2];
 
@@ -23,18 +24,30 @@ console.log(
 type Result = {
   tsconfig: string;
   success: boolean;
+  attempts: number;
   output: string;
 };
 
 async function checkProject(tsconfig: string): Promise<Result> {
-  try {
-    await execAsync(`tsgo -p ${tsconfig}`);
-    return { tsconfig, success: true, output: "" };
-  } catch (rawError: unknown) {
-    const error = rawError as { stdout?: string; stderr?: string };
-    const output = error.stdout || error.stderr || "";
-    return { tsconfig, success: false, output };
+  let output = "";
+
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    try {
+      await execAsync(`tsgo -p ${tsconfig}`);
+      return { tsconfig, success: true, attempts: attempt, output: "" };
+    } catch (rawError: unknown) {
+      const error = rawError as { stdout?: string; stderr?: string };
+      output = error.stdout || error.stderr || "";
+
+      if (attempt <= maxRetries) {
+        console.warn(
+          `  ⚠️  ${tsconfig} failed attempt ${attempt}; retrying (${attempt}/${maxRetries})...`
+        );
+      }
+    }
   }
+
+  return { tsconfig, success: false, attempts: maxRetries + 1, output };
 }
 
 // Run with concurrency limit
@@ -48,9 +61,13 @@ async function runNext(): Promise<void> {
     const result = await checkProject(tsconfig);
     results.push(result);
     if (result.success) {
-      console.log(`  ✅ ${result.tsconfig}`);
+      const retrySuffix =
+        result.attempts > 1 ? ` after ${result.attempts} attempts` : "";
+      console.log(`  ✅ ${result.tsconfig}${retrySuffix}`);
     } else {
-      console.error(`  ❌ ${result.tsconfig}`);
+      console.error(
+        `  ❌ ${result.tsconfig} after ${result.attempts} attempts`
+      );
     }
   }
 }

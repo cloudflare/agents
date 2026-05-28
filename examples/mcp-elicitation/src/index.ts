@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   createMcpHandler,
+  DurableObjectEventStore,
   type TransportState,
   WorkerTransport
 } from "agents/mcp";
@@ -35,7 +36,13 @@ export class MyAgent extends Agent<Cloudflare.Env, State> {
       set: (state: TransportState) => {
         this.ctx.storage.kv.put<TransportState>(STATE_KEY, state);
       }
-    }
+    },
+    // Persist SSE events to DO storage so clients can reconnect with
+    // `Last-Event-ID` and replay missed messages after the Cloudflare
+    // edge closes an idle stream. Also disables the server-side
+    // keepalive on the standalone GET stream — reconnect is the
+    // recovery path, no bytes burnt while idle.
+    eventStore: new DurableObjectEventStore(this.ctx.storage)
   });
 
   initialState = {

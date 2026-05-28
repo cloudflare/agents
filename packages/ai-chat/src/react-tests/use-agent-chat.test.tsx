@@ -14,6 +14,17 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sawActiveResponseError(spy: { mock: { calls: unknown[][] } }) {
+  return spy.mock.calls.some((args) =>
+    args.some((arg) =>
+      arg instanceof Error
+        ? arg.message.includes("Cannot read properties of undefined")
+        : typeof arg === "string" &&
+          arg.includes("Cannot read properties of undefined")
+    )
+  );
+}
+
 function createAgent({
   name,
   url,
@@ -2163,6 +2174,232 @@ describe("useAgentChat tool continuation status (issue #1157)", () => {
     await expect
       .element(screen.getByTestId("status"))
       .toHaveTextContent("ready");
+  });
+
+  it("defers tool continuation resume until the active request settles", async () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "tool-cont-single-flight",
+      url: "ws://localhost:3000/agents/chat/tool-cont-single-flight?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+    let sendPromise: Promise<void> | undefined;
+
+    const sentTypes = () =>
+      sentMessages.map((message) => JSON.parse(message).type as string);
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false,
+        onToolCall: ({ toolCall, addToolOutput }) => {
+          addToolOutput({
+            toolCallId: toolCall.toolCallId,
+            output: { lat: 51.5, lng: -0.1 }
+          });
+        }
+      });
+      chatInstance = chat;
+      return <div data-testid="status">{chat.status}</div>;
+    };
+
+    await act(async () => {
+      render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      sendPromise = chatInstance!.sendMessage({ text: "Where am I?" });
+      await sleep(10);
+    });
+
+    const request = sentMessages
+      .map((message) => JSON.parse(message))
+      .find((message) => message.type === "cf_agent_use_chat_request");
+    expect(request).toBeDefined();
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: request.id,
+        body: JSON.stringify({
+          type: "tool-input-available",
+          toolCallId: "tc-single-flight",
+          toolName: "getLocation",
+          input: { city: "London" }
+        }),
+        done: false
+      });
+      await sleep(20);
+    });
+
+    expect(sentTypes()).toContain("cf_agent_tool_result");
+    expect(sentTypes()).not.toContain("cf_agent_stream_resume_request");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: request.id,
+        body: "",
+        done: true
+      });
+      await sendPromise;
+      await sleep(20);
+    });
+
+    expect(sentTypes()).toContain("cf_agent_stream_resume_request");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "server-cont-single-flight"
+      });
+      await sleep(5);
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-single-flight",
+        continuation: true,
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+
+    expect(sawActiveResponseError(consoleErrorSpy)).toBe(false);
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("uses the fallback path for early tool continuation announcements", async () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "tool-cont-early-resuming",
+      url: "ws://localhost:3000/agents/chat/tool-cont-early-resuming?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+    let sendPromise: Promise<void> | undefined;
+
+    const sentTypes = () =>
+      sentMessages.map((message) => JSON.parse(message).type as string);
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false,
+        onToolCall: ({ toolCall, addToolOutput }) => {
+          addToolOutput({
+            toolCallId: toolCall.toolCallId,
+            output: { lat: 51.5, lng: -0.1 }
+          });
+        }
+      });
+      chatInstance = chat;
+      return (
+        <div>
+          <div data-testid="status">{chat.status}</div>
+          <div data-testid="isToolContinuation">
+            {String(chat.isToolContinuation)}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await act(async () => {
+      sendPromise = chatInstance!.sendMessage({ text: "Where am I?" });
+      await sleep(10);
+    });
+
+    const request = sentMessages
+      .map((message) => JSON.parse(message))
+      .find((message) => message.type === "cf_agent_use_chat_request");
+    expect(request).toBeDefined();
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: request.id,
+        body: JSON.stringify({
+          type: "tool-input-available",
+          toolCallId: "tc-early-resume",
+          toolName: "getLocation",
+          input: { city: "London" }
+        }),
+        done: false
+      });
+      await sleep(20);
+    });
+
+    expect(sentTypes()).toContain("cf_agent_tool_result");
+    expect(sentTypes()).not.toContain("cf_agent_stream_resume_request");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "server-cont-early"
+      });
+      await sleep(5);
+    });
+
+    expect(sentTypes()).toContain("cf_agent_stream_resume_ack");
+    expect(sentTypes()).not.toContain("cf_agent_stream_resume_request");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: request.id,
+        body: "",
+        done: true
+      });
+      await sendPromise;
+      await sleep(20);
+    });
+
+    expect(sentTypes()).not.toContain("cf_agent_stream_resume_request");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-early",
+        continuation: true,
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("false");
+
+    expect(sawActiveResponseError(consoleErrorSpy)).toBe(false);
+    consoleErrorSpy.mockRestore();
   });
 
   it("should use transport-owned status for approval continuations", async () => {
