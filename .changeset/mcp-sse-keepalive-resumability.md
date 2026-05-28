@@ -22,10 +22,10 @@ keepalive available when resumability isn't configured.
   subsequent tool messages route to the resumed connection.
 - **Storage bounds** — `DurableObjectEventStore` now wraps each event
   with a write timestamp and exposes `sweep(maxAgeMs)`. `McpAgent`
-  schedules a recurring sweep (default every 5 min, 1 hr TTL) so events
-  from abandoned POST streams whose clients never returned don't
-  accumulate forever in Durable Object storage. Streams that close
-  cleanly are cleared in full on the final response.
+  schedules a recurring sweep (default hourly, 24 hr TTL) so events from
+  abandoned POST streams whose clients never returned don't accumulate
+  forever in Durable Object storage. Streams that close cleanly are
+  cleared in full on the final response.
 
 Also fixed: a pre-existing bug where an `McpAgent` GET stream that
 reconnected with `Last-Event-ID` received the replayed backlog but

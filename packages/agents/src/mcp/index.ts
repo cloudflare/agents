@@ -194,27 +194,28 @@ export abstract class McpAgent<
   }
 
   /**
-   * Maximum age (in milliseconds) of an event in the SSE event store. Events
-   * older than this are dropped by the periodic sweep scheduled in
-   * {@link onStart}. Default 1 hour — plenty of room for a client to
-   * reconnect with `Last-Event-ID`, short enough to bound storage growth
-   * from abandoned POST streams whose clients never returned.
+   * Maximum age (in milliseconds) of an event in the SSE event store.
+   * Events older than this are dropped by the periodic sweep scheduled in
+   * {@link onStart}. Default 24 hours — generous enough for clients to
+   * reconnect with `Last-Event-ID` after long pauses, while still bounding
+   * storage growth from abandoned POST streams whose clients never
+   * returned.
    *
    * Override (in conjunction with {@link getEventStore}) to customise.
    * Return `Infinity` to disable the sweep.
    */
   protected getEventStoreMaxAgeMs(): number {
-    return 60 * 60 * 1000; // 1 hour
+    return 24 * 60 * 60 * 1000; // 24 hours
   }
 
   /**
    * Cron expression for the recurring sweep that prunes expired SSE events
-   * from the default {@link DurableObjectEventStore}. Default: every 5
-   * minutes. Override to change the cadence; return `undefined` to disable
-   * scheduling entirely.
+   * from the default {@link DurableObjectEventStore}. Default: every hour,
+   * at minute 0. Override to change the cadence; return `undefined` to
+   * disable scheduling entirely.
    */
   protected getEventStoreSweepCron(): string | undefined {
-    return "*/5 * * * *";
+    return "0 * * * *";
   }
 
   /**
