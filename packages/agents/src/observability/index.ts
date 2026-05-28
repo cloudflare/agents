@@ -41,6 +41,10 @@ export const channels = {
   state: channel("agents:state"),
   rpc: channel("agents:rpc"),
   message: channel("agents:message"),
+  chat: channel("agents:chat"),
+  transcript: channel("agents:transcript"),
+  fiber: channel("agents:fiber"),
+  agent_tool: channel("agents:agent_tool"),
   schedule: channel("agents:schedule"),
   lifecycle: channel("agents:lifecycle"),
   workflow: channel("agents:workflow"),
@@ -54,6 +58,11 @@ export const channels = {
 function getChannel(type: string): Channel {
   if (type.startsWith("mcp:")) return channels.mcp;
   if (type.startsWith("workflow:")) return channels.workflow;
+  if (type.startsWith("fiber:")) return channels.fiber;
+  if (type.startsWith("transcript:") || type.startsWith("chat:transcript:"))
+    return channels.transcript;
+  if (type.startsWith("chat:")) return channels.chat;
+  if (type.startsWith("agent_tool:")) return channels.agent_tool;
   if (type.startsWith("schedule:") || type.startsWith("queue:"))
     return channels.schedule;
   if (
@@ -91,6 +100,13 @@ export type ChannelEventMap = {
     ObservabilityEvent,
     { type: `message:${string}` | `tool:${string}` | `submission:${string}` }
   >;
+  chat: Extract<ObservabilityEvent, { type: `chat:${string}` }>;
+  transcript: Extract<
+    ObservabilityEvent,
+    { type: `transcript:${string}` | `chat:transcript:${string}` }
+  >;
+  fiber: Extract<ObservabilityEvent, { type: `fiber:${string}` }>;
+  agent_tool: Extract<ObservabilityEvent, { type: `agent_tool:${string}` }>;
   schedule: Extract<
     ObservabilityEvent,
     { type: `schedule:${string}` | `queue:${string}` }

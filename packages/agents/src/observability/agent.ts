@@ -51,6 +51,72 @@ export type AgentObservabilityEvent =
       "submission:error",
       { submissionId: string; requestId?: string; error: string }
     >
+  | BaseEvent<
+      "fiber:recovery:failed",
+      {
+        fiberId: string;
+        fiberName: string;
+        error: string;
+        elapsedMs?: number;
+        reason?: string;
+      }
+    >
+  | BaseEvent<
+      "chat:request:failed",
+      {
+        requestId?: string;
+        stage:
+          | "parse"
+          | "persist"
+          | "turn"
+          | "stream"
+          | "recovery"
+          | "transcript";
+        messagesPersisted?: boolean;
+        error: string;
+      }
+    >
+  | BaseEvent<
+      "chat:recovery:attempt",
+      {
+        incidentId: string;
+        requestId: string;
+        attempt: number;
+        maxAttempts: number;
+        recoveryKind: "retry" | "continue";
+      }
+    >
+  | BaseEvent<
+      "chat:recovery:exhausted",
+      {
+        incidentId: string;
+        requestId: string;
+        attempt: number;
+        maxAttempts: number;
+        recoveryKind: "retry" | "continue";
+        reason: string;
+      }
+    >
+  | BaseEvent<
+      "chat:transcript:repaired",
+      {
+        requestId?: string;
+        removedToolCalls: number;
+        removedToolResults: number;
+        normalizedInputs: number;
+        toolCallIds?: string[];
+      }
+    >
+  | BaseEvent<
+      "agent_tool:recovery:row",
+      {
+        runId: string;
+        agentType: string;
+        status: string;
+        reason?: string;
+        elapsedMs?: number;
+      }
+    >
   | BaseEvent<"destroy">
   | BaseEvent<"connect", { connectionId: string }>
   | BaseEvent<
