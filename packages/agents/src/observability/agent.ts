@@ -52,6 +52,78 @@ export type AgentObservabilityEvent =
       { submissionId: string; requestId?: string; error: string }
     >
   | BaseEvent<
+      "fiber:run:started",
+      { fiberId: string; fiberName: string; managed?: boolean }
+    >
+  | BaseEvent<
+      "fiber:run:completed",
+      {
+        fiberId: string;
+        fiberName: string;
+        elapsedMs?: number;
+        managed?: boolean;
+      }
+    >
+  | BaseEvent<
+      "fiber:run:failed",
+      {
+        fiberId: string;
+        fiberName: string;
+        error: string;
+        elapsedMs?: number;
+        managed?: boolean;
+      }
+    >
+  | BaseEvent<
+      "fiber:run:interrupted",
+      {
+        fiberId: string;
+        fiberName: string;
+        elapsedMs?: number;
+        managed?: boolean;
+        recoveryReason: "interrupted";
+      }
+    >
+  | BaseEvent<
+      "fiber:recovery:detected",
+      {
+        fiberId: string;
+        fiberName: string;
+        elapsedMs?: number;
+        managed?: boolean;
+        recoveryReason: "interrupted";
+      }
+    >
+  | BaseEvent<
+      "fiber:recovery:attempt",
+      {
+        fiberId: string;
+        fiberName: string;
+        managed?: boolean;
+        recoveryReason: "interrupted";
+      }
+    >
+  | BaseEvent<
+      "fiber:recovery:handled",
+      {
+        fiberId: string;
+        fiberName: string;
+        status?: string;
+        elapsedMs?: number;
+        managed?: boolean;
+      }
+    >
+  | BaseEvent<
+      "fiber:recovery:skipped",
+      {
+        fiberId: string;
+        fiberName: string;
+        reason: string;
+        elapsedMs?: number;
+        managed?: boolean;
+      }
+    >
+  | BaseEvent<
       "fiber:recovery:failed",
       {
         fiberId: string;

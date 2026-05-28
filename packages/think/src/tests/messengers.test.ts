@@ -436,6 +436,7 @@ describe("think messengers core", () => {
       createdAt: Date.now(),
       id: "fiber-1",
       name: MESSENGER_REPLY_FIBER_NAME,
+      recoveryReason: "interrupted",
       snapshot: messengerReplySnapshot("streaming", fakeEvent, {
         _type: "chat:Thread",
         adapterName: "fake",

@@ -312,7 +312,7 @@ describe("channel routing", () => {
     const fiberEvents: ObservabilityEvent[] = [];
     const agentToolEvents: ObservabilityEvent[] = [];
     const unsubFiber = subscribe("fiber", (event) => fiberEvents.push(event));
-    const unsubAgentTool = subscribe("agent_tool", (event) =>
+    const unsubAgentTool = subscribe("agentTool", (event) =>
       agentToolEvents.push(event)
     );
 

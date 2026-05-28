@@ -44,7 +44,7 @@ export const channels = {
   chat: channel("agents:chat"),
   transcript: channel("agents:transcript"),
   fiber: channel("agents:fiber"),
-  agent_tool: channel("agents:agent_tool"),
+  agentTool: channel("agents:agent_tool"),
   schedule: channel("agents:schedule"),
   lifecycle: channel("agents:lifecycle"),
   workflow: channel("agents:workflow"),
@@ -62,7 +62,7 @@ function getChannel(type: string): Channel {
   if (type.startsWith("transcript:") || type.startsWith("chat:transcript:"))
     return channels.transcript;
   if (type.startsWith("chat:")) return channels.chat;
-  if (type.startsWith("agent_tool:")) return channels.agent_tool;
+  if (type.startsWith("agent_tool:")) return channels.agentTool;
   if (type.startsWith("schedule:") || type.startsWith("queue:"))
     return channels.schedule;
   if (
@@ -106,7 +106,7 @@ export type ChannelEventMap = {
     { type: `transcript:${string}` | `chat:transcript:${string}` }
   >;
   fiber: Extract<ObservabilityEvent, { type: `fiber:${string}` }>;
-  agent_tool: Extract<ObservabilityEvent, { type: `agent_tool:${string}` }>;
+  agentTool: Extract<ObservabilityEvent, { type: `agent_tool:${string}` }>;
   schedule: Extract<
     ObservabilityEvent,
     { type: `schedule:${string}` | `queue:${string}` }
@@ -137,7 +137,8 @@ export function subscribe<K extends keyof ChannelEventMap>(
   channelKey: K,
   callback: (event: ChannelEventMap[K]) => void
 ): () => void {
-  const name = `agents:${channelKey}`;
+  const name =
+    channelKey === "agentTool" ? "agents:agent_tool" : `agents:${channelKey}`;
   const handler = (message: unknown, _name: string | symbol) =>
     callback(message as ChannelEventMap[K]);
   dcSubscribe(name, handler);
