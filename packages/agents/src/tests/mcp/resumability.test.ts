@@ -277,4 +277,87 @@ describe("McpAgent SSE resumability (#1583)", () => {
 
     await resumeResponse.body?.cancel();
   });
+
+  it("replays the tool result after a POST stream is interrupted", async () => {
+    // Regression: the final response to a POST used to be stored in the
+    // event store and then immediately cleared on shouldClose, leaving the
+    // emitted `id:` referencing a deleted event. A client that lost the
+    // POST connection right as the result was in flight could reconnect
+    // with Last-Event-ID and find nothing to replay. This test exercises
+    // the fix: events stay in the store until the TTL sweep evicts them,
+    // so a resumed GET sees the final response.
+    const ctx = createExecutionContext();
+    const sessionId = await initializeStreamableHTTPServer(ctx, baseUrl);
+
+    // Drive the full tool call so the final response lands in the store.
+    const callResponse = await worker.fetch(
+      new Request(baseUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "mcp-session-id": sessionId
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 88,
+          method: "tools/call",
+          params: { name: "greet", arguments: { name: "replay" } }
+        })
+      }),
+      env,
+      ctx
+    );
+    const reader = callResponse.body!.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      if (buf.includes('"result"')) break;
+    }
+    await reader.cancel();
+
+    // The POST response carried an event id; simulate the client never
+    // having seen it by resuming from the id *before* it.
+    const finalEventId = extractEventId(buf);
+    expect(finalEventId).toBeTruthy();
+    const [streamId, seqHex] = finalEventId!.split(":");
+    const priorSeq = (Number.parseInt(seqHex, 16) - 1)
+      .toString(16)
+      .padStart(16, "0");
+    const priorEventId = `${streamId}:${priorSeq}`;
+
+    // Resume with the prior id; the server MUST replay the final
+    // response on the new connection.
+    const resumeResponse = await worker.fetch(
+      new Request(baseUrl, {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          "mcp-session-id": sessionId,
+          "Last-Event-ID": priorEventId
+        }
+      }),
+      env,
+      ctx
+    );
+    expect(resumeResponse.status).toBe(200);
+
+    const resumeReader = resumeResponse.body!.getReader();
+    let resumeBuf = "";
+    // Read a few chunks looking for the replayed result. Bound the loop
+    // so the test can't hang.
+    for (let i = 0; i < 20; i++) {
+      const { value, done } = await resumeReader.read();
+      if (done) break;
+      resumeBuf += decoder.decode(value, { stream: true });
+      if (resumeBuf.includes('"result"')) break;
+    }
+    await resumeReader.cancel();
+
+    expect(resumeBuf).toContain('"result"');
+    expect(resumeBuf).toContain(`id: ${finalEventId}`);
+  });
 });

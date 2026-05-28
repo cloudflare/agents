@@ -153,38 +153,6 @@ describe("DurableObjectEventStore", () => {
     expect(sent).toEqual([]);
   });
 
-  it("evicts the oldest events when the per-stream cap is exceeded", async () => {
-    const small = new DurableObjectEventStore(
-      storage as unknown as DurableObjectStorage,
-      { maxEventsPerStream: 3 }
-    );
-
-    const ids: string[] = [];
-    for (let i = 0; i < 5; i++) {
-      ids.push(await small.storeEvent("s", msg(i)));
-    }
-
-    expect(storage.countWithPrefix("__mcp_event__:s:")).toBe(3);
-
-    // Oldest two ids should no longer replay.
-    const sent: string[] = [];
-    await small.replayEventsAfter(ids[0], {
-      send: async (id) => {
-        sent.push(id);
-      }
-    });
-    // ids[0] is unknown (evicted) → returns the extracted streamId but nothing
-    // to send. Confirm we got the two remaining newest events when replaying
-    // from ids[2] instead.
-    sent.length = 0;
-    await small.replayEventsAfter(ids[2], {
-      send: async (id) => {
-        sent.push(id);
-      }
-    });
-    expect(sent).toEqual([ids[3], ids[4]]);
-  });
-
   it("clearStream removes only that stream's events and resets the counter", async () => {
     await store.storeEvent("a", msg(1));
     await store.storeEvent("a", msg(2));
@@ -237,59 +205,65 @@ describe("DurableObjectEventStore", () => {
   });
 
   describe("sweep", () => {
-    it("deletes events older than maxAgeMs and leaves newer ones", async () => {
+    it("deletes every event of streams quieter than cutoff and leaves the rest", async () => {
       let now = 1_000_000;
       vi.spyOn(Date, "now").mockImplementation(() => now);
       try {
-        await store.storeEvent("s", msg(1));
-        await store.storeEvent("s", msg(2));
+        // Stream `a` writes early then goes idle; stream `b` is recent.
+        await store.storeEvent("a", msg(1));
+        await store.storeEvent("a", msg(2));
         now += 10 * 60_000; // jump 10 minutes
-        const recentId = await store.storeEvent("s", msg(3));
+        const recentBWriteAt = now;
+        const recentBId = await store.storeEvent("b", msg(99));
 
-        // Sweep events older than 5 minutes — first two go, third stays.
-        const deleted = await store.sweep(5 * 60_000);
-        expect(deleted).toBe(2);
-        expect(storage.countWithPrefix("__mcp_event__:s:")).toBe(1);
+        // Cutoff = 5 minutes ago. `a` (10 min old) goes; `b` (just
+        // now) stays.
+        const cutoff = now - 5 * 60_000;
+        const result = await store.sweep(cutoff);
+        expect(result.expiredStreamIds).toEqual(["a"]);
+        expect(result.nextWriteAt).toBe(recentBWriteAt);
+        expect(storage.countWithPrefix("__mcp_event__:a:")).toBe(0);
+        expect(storage.countWithPrefix("__mcp_event__:b:")).toBe(1);
 
-        // The surviving event is still replayable.
+        // The surviving stream's event is still replayable.
         const sent: string[] = [];
-        const seedId = `s:${(0).toString(16).padStart(16, "0")}`;
+        const seedId = `b:${(0).toString(16).padStart(16, "0")}`;
         await store.replayEventsAfter(seedId, {
           send: async (id) => {
             sent.push(id);
           }
         });
-        expect(sent).toEqual([recentId]);
+        expect(sent).toEqual([recentBId]);
       } finally {
         vi.restoreAllMocks();
       }
     });
 
-    it("is a no-op with maxAgeMs <= 0 or non-finite", async () => {
-      await store.storeEvent("s", msg(1));
-      expect(await store.sweep(0)).toBe(0);
-      expect(await store.sweep(-1)).toBe(0);
-      expect(await store.sweep(Number.POSITIVE_INFINITY)).toBe(0);
-      expect(storage.countWithPrefix("__mcp_event__:s:")).toBe(1);
+    it("with no streams in the store, returns empty result", async () => {
+      const result = await store.sweep(Date.now());
+      expect(result.expiredStreamIds).toEqual([]);
+      expect(result.nextWriteAt).toBeUndefined();
     });
 
-    it("respects batchSize when there are more expired events than the limit", async () => {
+    it("with no expired streams, returns the oldest active write time", async () => {
       let now = 1_000_000;
       vi.spyOn(Date, "now").mockImplementation(() => now);
       try {
-        for (let i = 0; i < 10; i++) await store.storeEvent("s", msg(i));
-        now += 10 * 60_000;
+        await store.storeEvent("a", msg(1));
+        const aWriteAt = now;
+        now += 60_000;
+        await store.storeEvent("b", msg(2));
 
-        // Only delete up to 4 per sweep call.
-        const deleted = await store.sweep(60_000, { batchSize: 4 });
-        expect(deleted).toBe(4);
-        expect(storage.countWithPrefix("__mcp_event__:s:")).toBe(6);
+        // Cutoff of 0 — nothing qualifies as expired.
+        const result = await store.sweep(0);
+        expect(result.expiredStreamIds).toEqual([]);
+        expect(result.nextWriteAt).toBe(aWriteAt);
       } finally {
         vi.restoreAllMocks();
       }
     });
 
-    it("after sweeping a stream entirely, next storeEvent restarts seq at 1", async () => {
+    it("after a stream is swept entirely, next storeEvent restarts seq at 1", async () => {
       let now = 1_000_000;
       vi.spyOn(Date, "now").mockImplementation(() => now);
       try {
@@ -297,14 +271,25 @@ describe("DurableObjectEventStore", () => {
         await store.storeEvent("s", msg(2));
         now += 10 * 60_000;
 
-        const deleted = await store.sweep(60_000);
-        expect(deleted).toBe(2);
+        const result = await store.sweep(now - 60_000);
+        expect(result.expiredStreamIds).toEqual(["s"]);
 
         const fresh = await store.storeEvent("s", msg(3));
         expect(fresh).toBe(`s:${(1).toString(16).padStart(16, "0")}`);
       } finally {
         vi.restoreAllMocks();
       }
+    });
+
+    it("fires onStoreEvent after each storeEvent (used by McpAgent to arm sweeps)", async () => {
+      const onStoreEvent = vi.fn(async () => {});
+      const hookedStore = new DurableObjectEventStore(
+        storage as unknown as DurableObjectStorage,
+        { onStoreEvent }
+      );
+      await hookedStore.storeEvent("s", msg(1));
+      await hookedStore.storeEvent("s", msg(2));
+      expect(onStoreEvent).toHaveBeenCalledTimes(2);
     });
   });
 });
