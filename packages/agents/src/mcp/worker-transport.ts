@@ -367,14 +367,14 @@ export class WorkerTransport implements Transport {
     // by clients reconnecting with Last-Event-ID against a configured
     // EventStore; callers who care about long-lived listen streams must
     // wire one up. See cloudflare/agents#1583.
-    this.streamMapping.set(streamId, {
-      writer,
-      encoder,
-      cleanup: () => {
-        this.streamMapping.delete(streamId);
-        writer.close().catch(() => {});
-      }
-    });
+    //
+    // `cleanup` reads `streamId` at teardown time, so it stays correct
+    // across the eventStore remap below.
+    const cleanup = () => {
+      this.streamMapping.delete(streamId);
+      writer.close().catch(() => {});
+    };
+    this.streamMapping.set(streamId, { writer, encoder, cleanup });
 
     // Write priming event with retry interval if configured
     if (this.retryInterval !== undefined) {
@@ -392,18 +392,13 @@ export class WorkerTransport implements Transport {
           }
         }
       );
-      // Update stream ID if different from what we had
+      // Update stream ID if different from what we had. Reuse the same
+      // `cleanup` closure as above so any future teardown work (e.g.
+      // tearing down a keepalive) is impossible to leak in this branch.
       if (replayedStreamId !== streamId) {
         this.streamMapping.delete(streamId);
         streamId = replayedStreamId;
-        this.streamMapping.set(streamId, {
-          writer,
-          encoder,
-          cleanup: () => {
-            this.streamMapping.delete(streamId);
-            writer.close().catch(() => {});
-          }
-        });
+        this.streamMapping.set(streamId, { writer, encoder, cleanup });
       }
     }
 
