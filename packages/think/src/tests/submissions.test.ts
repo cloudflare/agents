@@ -585,7 +585,7 @@ describe("Think durable submissions", () => {
       workflowId: "workflow-retry",
       eventType: "think-prompt-retry"
     });
-    await agent.setWorkflowEventFailuresForTest(5);
+    await agent.setWorkflowEventFailuresForTest(1);
 
     await agent.drainWorkflowNotificationsForTest();
 

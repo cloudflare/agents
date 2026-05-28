@@ -3005,18 +3005,13 @@ export class Think<
       for (const row of rows) {
         try {
           const payload = JSON.parse(row.payload_json) as unknown;
-          await this.retry(
-            async () => {
-              await this.sendWorkflowEvent(
-                row.workflow_name as string & {},
-                row.workflow_id,
-                {
-                  type: row.event_type,
-                  payload
-                }
-              );
-            },
-            { maxAttempts: 5 }
+          await this.sendWorkflowEvent(
+            row.workflow_name as string & {},
+            row.workflow_id,
+            {
+              type: row.event_type,
+              payload
+            }
           );
           this.sql`
             UPDATE cf_think_workflow_notifications
