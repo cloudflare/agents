@@ -14,9 +14,12 @@ Deepgram (`@cloudflare/voice-deepgram`) and ElevenLabs (`@cloudflare/voice-eleve
 are existing examples, and Telnyx (`voice-providers/telnyx`) is a fuller reference
 with a test suite.
 
-This design adds **AssemblyAI as an STT provider**. It is "Step 1" of a broader
-partnership (see the AssemblyAI ↔ Cloudflare call, 2026-04-23): get AssemblyAI in
-as a type-compliant provider via a PR, mirroring the Telnyx/Deepgram example.
+This design adds **AssemblyAI as an STT provider**, locked to the **Universal-3 Pro
+Streaming** model (`u3-rt-pro`) — AssemblyAI's model purpose-built for voice agents
+(sub-300 ms time-to-final, punctuation-based turn detection, barge-in signals,
+promptable, medical-capable). It is "Step 1" of a broader partnership (see the
+AssemblyAI ↔ Cloudflare call, 2026-04-23): get AssemblyAI in as a type-compliant
+provider via a PR, mirroring the Telnyx/Deepgram example.
 
 Key facts established on the call that bound this design:
 
@@ -28,52 +31,58 @@ Key facts established on the call that bound this design:
   API onto Cloudflare's `Transcriber` interface.
 - STT is the only surface needed for this step.
 
+API details below were verified against AssemblyAI's live API reference and the
+Universal-3 Pro Streaming docs (via the AssemblyAI docs MCP), not from memory.
+
 ## 2. Goal
 
 Ship a new workspace package `@cloudflare/voice-assemblyai` exposing an
 `AssemblyAISTT` class that implements the `Transcriber` interface from
-`@cloudflare/voice`, mapping **AssemblyAI Streaming v3** to the voice pipeline.
-The provider runs server-side inside the Agent's Durable Object. Includes a
-`vitest` test file, a README, and documentation/listing updates.
+`@cloudflare/voice`, mapping **AssemblyAI Universal-3 Pro Streaming** to the voice
+pipeline. The provider runs server-side inside the Agent's Durable Object. Includes
+a `vitest` test file, a README, and documentation/listing updates.
 
-**Design stance:** keep the typed surface lean. Expose the handful of common,
-safe options as typed fields and route everything else (advanced / per-model /
-future params) through a single `params` passthrough. Hardcode the values the
-pipeline contract already fixes (16 kHz mono PCM16) rather than expose them as
-footgun knobs.
+**Design stance — opinionated and fully typed.** Lock the model to `u3-rt-pro`
+(the voice-agent model) and expose only the knobs that actually apply to it as
+typed fields. No generic `params` passthrough: with a single model the meaningful
+surface is small and finite, so a curated typed interface is both cleaner and
+safer (every field does something; no model-specific no-ops). Hardcode the values
+the pipeline contract and the model already fix (16 kHz mono PCM16; formatting is
+built into u3-rt-pro's end-of-turn).
 
 ## 3. Scope
 
 ### In scope
 - `AssemblyAISTT` (`Transcriber`) + per-call `AssemblyAISession` (`TranscriberSession`).
-- AssemblyAI Streaming v3 protocol mapping over a WebSocket connection.
-- Configurable endpoint via a single `baseUrl` override (defaults to the AssemblyAI
-  US streaming host). This also enables routing through Cloudflare AI Gateway — the
-  user points `baseUrl` at their gateway endpoint. README documents the EU host and
-  the AI Gateway URL format.
-- Typed options for the common cases (model, Medical Mode, keyterms, turn-format)
-  plus a `params` passthrough for advanced / forward-compat query parameters.
+- AssemblyAI Universal-3 Pro Streaming (`u3-rt-pro`) protocol mapping over a WebSocket.
+- A fully typed options surface (see §7): `domain`, `keyterms`, turn-detection
+  (`minTurnSilence`/`maxTurnSilence`), barge-in (`interruptionDelay`),
+  `continuousPartials`, and a `baseUrl` override.
+- Configurable endpoint via `baseUrl` (defaults to the AssemblyAI US streaming host),
+  which also enables routing through Cloudflare AI Gateway and selecting the EU host.
+  README documents both URL formats.
 - A `vitest` test file, mirroring Telnyx's test setup.
 - README and provider-listing/doc updates.
 
 ### Out of scope (documented as future work)
+- **Model selection.** The provider is locked to `u3-rt-pro`. Other streaming models
+  (`universal-streaming-english`, `universal-streaming-multilingual`, `whisper-rt`)
+  are not selectable in v1. Add a `model` option when there is demand (e.g. for
+  whisper-rt's 99-language coverage). See limitation §11.3.
+- **Generic `params` passthrough.** Intentionally omitted (see Design stance).
+  Niche u3-rt-pro params not typed in v1 — `inactivity_timeout`, `speaker_labels` /
+  `max_speakers` — would be added as typed fields when needed.
+- **`prompt` option.** Cut from v1: u3-rt-pro auto-applies an optimized default
+  prompt (good turn detection out of the box), and a custom prompt is best set via a
+  post-connect `UpdateConfiguration` round-trip. Add when there is a concrete need.
 - **Typed AI Gateway helper** (`buildGatewayUrl`, `gateway: {accountId, gatewayId}`):
-  deferred to a follow-up PR once AssemblyAI-over-AI-Gateway-over-WebSocket is
-  verified end-to-end. AssemblyAI is **not** currently in Cloudflare's
-  `AIGatewayProviders` type. `baseUrl` covers the need in the meantime.
-- **`prompt` option** (natural-language transcription prompt for u3-rt-pro). Cut from
-  v1: it is the only knob requiring a post-connect `UpdateConfiguration` round-trip
-  and the mechanism is unverified. Add when there is a concrete need and a confirmed
-  path; the `params` passthrough does not cover it because it is not a connection
-  query param.
-- **Workers AI self-hosted AssemblyAI models** (running U3 Pro on Cloudflare GPUs).
-  Depends on separate self-hosting work with Cloudflare; once available it is a
-  user config choice (Workers AI + model), not a change to this provider.
-- **On-premises / pharmaceutical deployment** (req #5) — future, depends on the
-  Workers AI self-host path above.
-- **Replicate / unified model catalog merge** (req #4) — Cloudflare-side. Per the
-  2026-04-23 call AssemblyAI is already reachable via AI Gateway (to be verified —
-  see §12.1), so no provider work is expected here.
+  deferred until AssemblyAI-over-AI-Gateway-over-WebSocket is verified end-to-end.
+  AssemblyAI is **not** currently in Cloudflare's `AIGatewayProviders` type. `baseUrl`
+  covers the need in the meantime (see §12.1).
+- **Workers AI self-hosted AssemblyAI models** (running U3 Pro on Cloudflare GPUs),
+  **on-premises / pharmaceutical deployment** (req #5), and the **Replicate / unified
+  catalog merge** (req #4) — all Cloudflare-side / future. Per the 2026-04-23 call
+  AssemblyAI is already reachable via AI Gateway (to be verified — §12.1).
 - TTS (AssemblyAI is STT-only for this integration).
 
 ## 4. Requirements mapping
@@ -112,7 +121,7 @@ Two units, each independently testable:
   until ready, routes inbound events to callbacks, and tears down cleanly. Testable
   with a mock WebSocket.
 
-## 6. AssemblyAI Streaming v3 → Cloudflare mapping (the core)
+## 6. AssemblyAI Universal-3 Pro Streaming → Cloudflare mapping (the core)
 
 Cloudflare interface (from `packages/voice/src/types.ts`):
 - `Transcriber.createSession(options?) → TranscriberSession`
@@ -120,13 +129,13 @@ Cloudflare interface (from `packages/voice/src/types.ts`):
 - `TranscriberSessionOptions` callbacks: `onInterim(text)`, `onSpeechStart(text?)`, `onUtterance(text)`
 - Audio input is **16 kHz mono PCM16 little-endian** (fixed by the pipeline contract).
 
-| Cloudflare side | AssemblyAI Streaming v3 |
+| Cloudflare side | AssemblyAI Universal-3 Pro Streaming |
 | --- | --- |
-| `createSession()` connect | `fetch()` WebSocket-upgrade to the resolved base URL with query params (see §7) |
-| `feed(chunk)` | send binary PCM16 frames to the WS (50 ms chunks, never faster than real-time) |
-| `onSpeechStart()` (barge-in) | `SpeechStarted` event (U3 Pro VAD) |
-| `onInterim(text)` | `Turn` event with `end_of_turn: false` → `transcript` |
-| `onUtterance(text)` | `Turn` event with `end_of_turn: true` → `transcript` |
+| `createSession()` connect | `fetch()` WebSocket-upgrade to the resolved base URL with query params (see §7) and the `Authorization` header |
+| `feed(chunk)` | send binary PCM16 frames to the WS (~50 ms chunks, never faster than real-time) |
+| `onSpeechStart()` (barge-in) | `SpeechStarted` event (VAD). Note: u3-rt-pro's stable early partial (a `Turn` with `end_of_turn:false`) is the more reliable barge-in/eager-inference signal |
+| `onInterim(text)` | `Turn` event with `end_of_turn: false` → `transcript` (stable cumulative partial) |
+| `onUtterance(text)` | `Turn` event with `end_of_turn: true` → `transcript` (always formatted) |
 | `close()` | send `{"type":"Terminate"}`, then close the WS (no await — see below) |
 | (session start) | `Begin` event — confirms session `id`; no callback, optional debug log |
 
@@ -135,53 +144,68 @@ Connection lifecycle reuses the Deepgram/Flux pattern: a `#connect()` that does 
 a `#closed` guard so late events are ignored, and the `resp.webSocket` accept-and-close
 path for the race where `close()` happens before the socket opens.
 
-**Differences from Deepgram to get right:**
-1. **Auth** is via the `?token=<apiKey>` query parameter, **not** an
-   `Authorization: Token` header. (REST endpoints use a bare `Authorization: <key>`
-   header with no `Bearer` prefix, but Streaming v3 uses the token query param.)
-   The provider runs server-side, so passing the API key directly is acceptable; a
-   temporary-token exchange (`GET /v3/token`) is the browser-only alternative and is
-   not needed here.
-2. **Encoding/sample rate are hardcoded** to `pcm_s16le` and `16000` — the pipeline
-   contract fixes them, so they are not exposed as options.
-3. **`close()` does not await `Termination`.** The interface defines `close(): void`
-   (synchronous), and we are tearing the session down regardless. Send
-   `{"type":"Terminate"}` then close the socket — matching Deepgram's send-then-close
-   approach. We do not add a timer/state machine to wait for the `Termination` ack.
-4. Audio must be sent in **50 ms chunks** and not faster than real-time (v3 error 3007).
+**Verified API specifics (differences from Deepgram to get right):**
+1. **Auth is the `Authorization` header**, set to the raw API key with **no prefix**
+   (`Authorization: <apiKey>` — not `Bearer`, not Deepgram's `Token`). Confirmed by
+   every official streaming example. The `?token=` query param is only for browser
+   *temporary tokens* (`GET /v3/token`) and is not used here.
+2. **Hardcoded query params:** `speech_model=u3-rt-pro`, `sample_rate=16000`,
+   `encoding=pcm_s16le`. These are fixed by the model choice and pipeline contract,
+   so they are not options.
+3. **No `format_turns`.** Formatting is built into u3-rt-pro's end-of-turn system
+   ("there is only ever one end-of-turn transcript per turn and it is always
+   formatted"), so the param is unnecessary and is not sent.
+4. **`close()` does not await `Termination`.** The interface defines `close(): void`
+   (synchronous). Send `{"type":"Terminate"}` then close — matching Deepgram's
+   send-then-close. (Billing accrues on connection-open duration and unclosed
+   sessions auto-close after 3 h billed for the full duration, so closing promptly
+   matters — but a graceful `Termination` ack is not worth a teardown-time timer.)
+5. Audio is sent in ~50 ms chunks, not faster than real-time (v3 error 3007).
 
 ## 7. Public API and endpoint resolution
 
 ```typescript
 export interface AssemblyAISTTOptions {
-  /** AssemblyAI API key. Sent as the `?token=` query param on the WS URL (server-side). */
+  /** AssemblyAI API key. Sent as the `Authorization` header (raw key, no prefix). */
   apiKey: string;
-  /** Streaming model. @default "u3-rt-pro" */
-  model?: string;
   /**
-   * Formatted finals (punctuation/casing/ITN). Applies to `universal-streaming-*`
-   * models only; no effect on `u3-rt-pro`, whose finals are already formatted.
-   * @default true
+   * Domain specialization → `domain=<value>`. Mirrors the AssemblyAI param.
+   * `"medical-v1"` enables Medical Mode (en/es/de/fr); more domains (e.g. legal,
+   * finance) may follow. The union keeps autocomplete for known values while
+   * accepting any string for forward-compat.
    */
-  formatTurns?: boolean;
-  /** Enable Medical Mode (`domain=medical-v1`). u3-rt-pro + en/es/de/fr. @default false */
-  medical?: boolean;
+  domain?: "medical-v1" | (string & {});
   /** Domain vocabulary to bias recognition → `keyterms_prompt` (JSON-encoded). */
   keyterms?: string[];
   /**
-   * Full WebSocket base URL override. Use this to select the EU host or to route
-   * through Cloudflare AI Gateway — see README for the gateway URL format.
+   * Turn detection: minimum silence (ms) before a speculative end-of-turn check.
+   * → `min_turn_silence`. Server default 100. Lower = faster partials but more
+   * entity splitting; raise mid-flow for dictation of numbers/addresses.
+   */
+  minTurnSilence?: number;
+  /**
+   * Turn detection: maximum silence (ms) before a turn is forced to end.
+   * → `max_turn_silence`. Server default 1000.
+   */
+  maxTurnSilence?: number;
+  /**
+   * Barge-in / time-to-first-token tuning: how soon the first partial is emitted
+   * (ms, 0–1000; ~300 ms is added server-side). → `interruption_delay`. Server
+   * default 500. Lower = faster barge-in signal; higher = more confident.
+   */
+  interruptionDelay?: number;
+  /**
+   * Emit a steady stream of non-final partials (~every 3 s) during long
+   * uninterrupted turns (e.g. a caller reading a card/address). → `continuous_partials`.
+   * Server default false.
+   */
+  continuousPartials?: boolean;
+  /**
+   * Full WebSocket base URL override. Use to select the EU host or route through
+   * Cloudflare AI Gateway — see README for the gateway URL format.
    * @default "wss://streaming.assemblyai.com/v3/ws"
    */
   baseUrl?: string;
-  /**
-   * Advanced / forward-compat connection query parameters, merged into the WS URL.
-   * Escape hatch for per-model tuning (e.g. end_of_turn_confidence_threshold,
-   * min_turn_silence, speaker_labels, inactivity_timeout) without growing the typed
-   * surface. Values are stringified; provider-managed params (token, speech_model,
-   * encoding, sample_rate) cannot be overridden here.
-   */
-  params?: Record<string, string | number | boolean>;
 }
 ```
 
@@ -189,10 +213,12 @@ export interface AssemblyAISTTOptions {
 `wss://streaming.assemblyai.com/v3/ws`.
 - EU host: pass `baseUrl: "wss://streaming.eu.assemblyai.com/v3/ws"` (documented in README).
 
-**Query parameters appended to the resolved base URL:** `token`, `speech_model`,
-`sample_rate=16000`, `encoding=pcm_s16le`, `format_turns`, conditionally
-`domain=medical-v1` and `keyterms_prompt` (JSON-stringified array), then any
-`params` entries (which cannot override the provider-managed params above).
+**Query-string construction:** always append `speech_model=u3-rt-pro`,
+`sample_rate=16000`, `encoding=pcm_s16le`. Then append, **only when the option is
+explicitly set** (so AssemblyAI's server defaults apply otherwise and the URL stays
+minimal): `domain`, `keyterms_prompt` (JSON-stringified array), `min_turn_silence`,
+`max_turn_silence`, `interruption_delay`, `continuous_partials`. The API key is sent
+via the `Authorization` header, not the query string.
 
 ### Usage
 ```typescript
@@ -202,15 +228,19 @@ import { AssemblyAISTT } from "@cloudflare/voice-assemblyai";
 
 const VoiceAgent = withVoice(Agent);
 
-export class MyAgent extends VoiceAgent<Env> {
+export class ClinicalIntakeAgent extends VoiceAgent<Env> {
   transcriber = new AssemblyAISTT({
     apiKey: this.env.ASSEMBLYAI_API_KEY,
-    medical: true // pharma / clinical accuracy
+    domain: "medical-v1",            // pharma / clinical accuracy
+    keyterms: ["metoprolol", "Skyrizi"],
+    // "Patient" preset for entity dictation:
+    minTurnSilence: 200,
+    maxTurnSilence: 2000,
   });
-  tts = new WorkersAITTS(this.env.AI);
+  tts = new WorkersAITTS(this.env.AI); // mix-and-match: AssemblyAI STT + Workers AI TTS
 
   async onTurn(transcript: string, context: VoiceTurnContext) {
-    // LLM logic
+    // your LLM logic; transcript is the finalized utterance (Turn end_of_turn=true)
   }
 }
 ```
@@ -234,13 +264,13 @@ See §11 for the interface limitation on surfacing fatal errors to the agent.
 Single file `tests/index.test.ts` covering both units:
 
 **Config / query-string building:**
-- option defaults (model `u3-rt-pro`, formatTurns true);
-- query-string construction: hardcoded `encoding=pcm_s16le` and `sample_rate=16000`,
-  `format_turns`, `medical → domain=medical-v1`, `keyterms → keyterms_prompt` JSON
-  encoding, `params` entries merged in;
-- `params` cannot override provider-managed params (token/speech_model/encoding/sample_rate);
-- `baseUrl` override replaces the default host;
-- API key is placed in `?token=` and not in headers.
+- always-present params: `speech_model=u3-rt-pro`, `sample_rate=16000`, `encoding=pcm_s16le`;
+- conditional params appear only when set: `domain`, `keyterms → keyterms_prompt`
+  (JSON encoding), `min_turn_silence`, `max_turn_silence`, `interruption_delay`,
+  `continuous_partials`; and are absent when unset (server defaults apply);
+- `format_turns` is never sent;
+- API key is placed in the `Authorization` header (no prefix), not in the query string;
+- `baseUrl` override replaces the default host.
 
 **Session behavior (mock WebSocket):**
 - `SpeechStarted → onSpeechStart`;
@@ -266,11 +296,13 @@ Single file `tests/index.test.ts` covering both units:
    such as an auth error (v3 `1008`) can only be logged — the agent simply goes
    quiet. Fixing this would require extending the shared `@cloudflare/voice`
    interface, which is out of scope here.
-2. **Streaming language is model-determined.** Unlike Deepgram, Streaming v3 has no
-   `language` connection parameter — the selected model drives language behavior.
-   The pipeline's `TranscriberSessionOptions.language` is therefore effectively
-   ignored (a custom value can still be forwarded via `params` if AssemblyAI adds
-   support). Documented in the README to avoid surprise.
+2. **Language is model-determined.** u3-rt-pro silently ignores the `language_code`
+   connection parameter; language is guided via the (cut) `prompt` param. The
+   pipeline's `TranscriberSessionOptions.language` therefore has no effect.
+   Documented in the README to avoid surprise.
+3. **Single model / 6 languages.** Locked to `u3-rt-pro` (en/es/de/fr/pt/it).
+   Use cases needing whisper-rt's 99-language coverage or a different streaming
+   model are not served until a `model` option is added (see §3 out-of-scope).
 
 ## 12. Open items / assumptions to verify
 
@@ -278,7 +310,3 @@ Single file `tests/index.test.ts` covering both units:
    proxies AssemblyAI Streaming v3 WS connections, and the exact URL/path. The
    `baseUrl` override means the provider works regardless; the typed gateway helper
    (out of scope) waits on this verification.
-2. **Default model for `withVoice` vs `withVoiceInput`** — `u3-rt-pro` is the default
-   here (promptable, punctuation turns, medical-capable). Confirm this is the desired
-   default for conversational agents, or whether `withVoiceInput` (dictation) should
-   suggest a different model in docs.
