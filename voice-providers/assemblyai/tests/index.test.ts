@@ -441,3 +441,33 @@ describe("AssemblyAISession — close", () => {
     expect(ws.send).not.toHaveBeenCalled();
   });
 });
+
+describe("AssemblyAISession — robustness", () => {
+  it("ignores non-JSON messages without throwing", async () => {
+    const { ws } = setupMockFetch();
+    const onUtterance = vi.fn();
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    provider.createSession({ onUtterance });
+    await flush();
+
+    expect(() => {
+      ws.dispatchEvent(new MessageEvent("message", { data: "not json {{{" }));
+    }).not.toThrow();
+    expect(onUtterance).not.toHaveBeenCalled();
+  });
+
+  it("ignores binary message frames", async () => {
+    const { ws } = setupMockFetch();
+    const onUtterance = vi.fn();
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    provider.createSession({ onUtterance });
+    await flush();
+
+    expect(() => {
+      ws.dispatchEvent(
+        new MessageEvent("message", { data: new ArrayBuffer(8) })
+      );
+    }).not.toThrow();
+    expect(onUtterance).not.toHaveBeenCalled();
+  });
+});
