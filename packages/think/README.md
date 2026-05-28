@@ -374,10 +374,10 @@ When used as a sub-agent (via `this.subAgent()`), the `chat()` method runs a ful
 
 ```ts
 interface StreamCallback {
-  onStart?(event: { requestId: string }): void | Promise<void>;
+  onStart(event: { requestId: string }): void | Promise<void>;
   onEvent(json: string): void | Promise<void>;
   onDone(): void | Promise<void>;
-  onError?(error: string): void | Promise<void>;
+  onError(error: string): void | Promise<void>;
 }
 
 const agent = await this.subAgent(MyAgent, "thread-1");

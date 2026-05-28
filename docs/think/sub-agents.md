@@ -23,10 +23,10 @@ async chat(
 
 ```typescript
 interface StreamCallback {
-  onStart?(event: { requestId: string }): void | Promise<void>;
+  onStart(event: { requestId: string }): void | Promise<void>;
   onEvent(json: string): void | Promise<void>;
   onDone(): void | Promise<void>;
-  onError?(error: string): void | Promise<void>;
+  onError(error: string): void | Promise<void>;
 }
 ```
 
@@ -35,7 +35,7 @@ interface StreamCallback {
 | `onStart(event)` | Before work starts; exposes the request id for cancellation     |
 | `onEvent(json)`  | For each streaming chunk (JSON-serialized UIMessageChunk)       |
 | `onDone()`       | After the turn completes and the assistant message is persisted |
-| `onError(error)` | On error during the turn (if not provided, the error is thrown) |
+| `onError(error)` | On error during the turn                                        |
 
 ### ChatOptions
 
@@ -67,6 +67,9 @@ export class ParentAgent extends Think<Env> {
 
     const chunks: string[] = [];
     await child.chat(task, {
+      onStart: (event) => {
+        console.log("Child started:", event.requestId);
+      },
       onEvent: (json) => {
         chunks.push(json);
         // Optionally forward to a connected client
