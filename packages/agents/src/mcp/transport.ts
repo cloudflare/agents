@@ -145,18 +145,24 @@ export class StreamableHTTPServerTransport implements Transport {
     if (!connection)
       throw new Error("Connection was not found in handleGetRequest");
 
+    // Tag the connection as the standalone SSE stream so subsequent
+    // server-initiated `send()` calls route to it. We tag *before* any replay
+    // so that, even on a resumed connection, the stream stays wired up for
+    // future notifications — not just the replayed ones. Per the MCP
+    // 2025-03-26 spec, after a client reconnects with `Last-Event-ID` the
+    // server replays missed messages "on the stream that was disconnected"
+    // and continues delivering subsequent messages on that same stream.
+    connection.setState({
+      _standaloneSse: true
+    });
+
     // Handle resumability: check for Last-Event-ID header
     if (this._eventStore) {
       const lastEventId = req.headers.get("last-event-id");
       if (lastEventId) {
         await this.replayEvents(lastEventId);
-        return;
       }
     }
-
-    connection.setState({
-      _standaloneSse: true
-    });
   }
 
   /**

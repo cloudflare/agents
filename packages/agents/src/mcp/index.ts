@@ -25,6 +25,8 @@ import {
   MCP_MESSAGE_HEADER
 } from "./utils";
 import { McpSSETransport, StreamableHTTPServerTransport } from "./transport";
+import type { EventStore } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { DurableObjectEventStore } from "./event-store";
 import { RPCServerTransport, type RPCServerTransportOptions } from "./rpc";
 
 export abstract class McpAgent<
@@ -124,6 +126,21 @@ export abstract class McpAgent<
     return {};
   }
 
+  /**
+   * Returns the {@link EventStore} used for SSE resumability on the streamable
+   * HTTP transport. Defaults to a {@link DurableObjectEventStore} backed by
+   * this agent's storage, which lets clients reconnect with `Last-Event-ID`
+   * after the Cloudflare edge closes an idle SSE stream (~5 minute watchdog)
+   * instead of relying on a server-side keepalive that would block DO
+   * hibernation.
+   *
+   * Override to disable resumability (`return undefined`) or to plug in a
+   * different store.
+   */
+  protected getEventStore(): EventStore | undefined {
+    return new DurableObjectEventStore(this.ctx.storage);
+  }
+
   /** Returns a new transport matching the type of the Agent. */
   private initTransport() {
     switch (this.getTransportType()) {
@@ -131,7 +148,9 @@ export abstract class McpAgent<
         return new McpSSETransport();
       }
       case "streamable-http": {
-        const transport = new StreamableHTTPServerTransport({});
+        const transport = new StreamableHTTPServerTransport({
+          eventStore: this.getEventStore()
+        });
         transport.messageInterceptor = (message) => {
           return Promise.resolve(this._handleElicitationResponse(message));
         };
@@ -553,6 +572,8 @@ export {
 } from "./handler";
 
 export { getMcpAuthContext, type McpAuthContext } from "./auth-context";
+
+export { DurableObjectEventStore } from "./event-store";
 
 export {
   WorkerTransport,
