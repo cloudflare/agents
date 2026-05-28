@@ -639,8 +639,26 @@ export function idempotencyKeyForEvent(event: MessengerEvent): string {
     event.messengerId,
     "message",
     event.thread.id,
-    event.message?.id ?? event.action?.actionId ?? event.kind
+    idempotencyEventPart(event)
   ].join(":");
+}
+
+function idempotencyEventPart(event: MessengerEvent): string {
+  if (event.message) {
+    return event.message.id;
+  }
+
+  if (event.action) {
+    return [
+      "action",
+      stableNamePart(event.action.messageId ?? "unknown-message"),
+      stableNamePart(event.action.actionId),
+      stableNamePart(event.action.user?.userId ?? "unknown-user"),
+      stableNamePart(event.action.value ?? "no-value")
+    ].join(":");
+  }
+
+  return event.kind;
 }
 
 export function defaultChatSdkEvent(

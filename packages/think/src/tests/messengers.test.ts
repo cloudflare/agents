@@ -247,6 +247,30 @@ describe("think messengers core", () => {
     expect(idempotencyKeyForEvent(baseEvent)).toBe(
       "messenger:telegram:message:telegram:-100123:42:message-1"
     );
+
+    const actionEvent: MessengerEvent = {
+      ...baseEvent,
+      kind: "action",
+      message: undefined,
+      action: {
+        actionId: "approve",
+        messageId: "source-message",
+        user: { userId: "user-1" },
+        value: "ship-it"
+      }
+    };
+    expect(idempotencyKeyForEvent(actionEvent)).toBe(
+      "messenger:telegram:message:telegram:-100123:42:action:source-message:approve:user-1:ship-it"
+    );
+    expect(
+      idempotencyKeyForEvent({
+        ...actionEvent,
+        action: {
+          ...actionEvent.action!,
+          user: { userId: "user-2" }
+        }
+      })
+    ).not.toBe(idempotencyKeyForEvent(actionEvent));
   });
 
   it("converts messenger events to Think user messages with attachments", () => {
