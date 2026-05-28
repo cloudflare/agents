@@ -136,10 +136,18 @@ export class AssemblyAISTT implements Transcriber {
   }
 }
 
-/** Per-call AssemblyAI streaming session. Lives for the entire call. */
+/**
+ * Per-call AssemblyAI streaming session. Lives for the entire call. Connects
+ * via a Cloudflare `fetch()` WebSocket upgrade, buffers audio fed before the
+ * socket is ready, and tears down by sending a `Terminate` message and closing.
+ */
 class AssemblyAISession implements TranscriberSession {
   #providerOpts: AssemblyAISTTOptions;
   #sessionOpts: TranscriberSessionOptions | undefined;
+  #ws: WebSocket | null = null;
+  #connected = false;
+  #closed = false;
+  #pendingChunks: ArrayBuffer[] = [];
 
   constructor(
     providerOpts: AssemblyAISTTOptions,
@@ -147,6 +155,57 @@ class AssemblyAISession implements TranscriberSession {
   ) {
     this.#providerOpts = providerOpts;
     this.#sessionOpts = sessionOpts;
+    void this.#connect();
+  }
+
+  async #connect(): Promise<void> {
+    try {
+      const url = _buildConnectionUrl(this.#providerOpts);
+      const resp = await fetch(url, {
+        headers: {
+          Upgrade: "websocket",
+          // AssemblyAI Streaming v3 takes the raw API key — no Bearer/Token prefix.
+          Authorization: this.#providerOpts.apiKey
+        }
+      });
+
+      const ws = (resp as unknown as { webSocket?: WebSocket }).webSocket;
+      if (!ws) {
+        console.error(
+          "[AssemblyAISTT] Failed to establish WebSocket connection"
+        );
+        return;
+      }
+
+      // Race: if close() was called before the socket arrived, accept and
+      // immediately close to release the connection.
+      if (this.#closed) {
+        ws.accept();
+        ws.close();
+        return;
+      }
+
+      ws.accept();
+      this.#ws = ws;
+      this.#connected = true;
+
+      ws.addEventListener("message", (event: MessageEvent) => {
+        this.#handleMessage(event);
+      });
+      ws.addEventListener("close", () => {
+        this.#connected = false;
+      });
+      ws.addEventListener("error", (event: Event) => {
+        console.error("[AssemblyAISTT] WebSocket error:", event);
+        this.#connected = false;
+      });
+
+      // Flush any audio fed before the socket was ready.
+      for (const chunk of this.#pendingChunks) ws.send(chunk);
+      this.#pendingChunks = [];
+    } catch (err) {
+      console.error("[AssemblyAISTT] Connection error:", err);
+    }
   }
 
   feed(_chunk: ArrayBuffer): void {
@@ -154,6 +213,10 @@ class AssemblyAISession implements TranscriberSession {
   }
 
   close(): void {
+    // Wired in a later task.
+  }
+
+  #handleMessage(_event: MessageEvent): void {
     // Wired in a later task.
   }
 }

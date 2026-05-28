@@ -190,3 +190,25 @@ describe("AssemblyAISTT class shape", () => {
     expect(typeof session.close).toBe("function");
   });
 });
+
+describe("AssemblyAISession — connect", () => {
+  it("calls fetch with the built URL and Authorization header, then accepts the WebSocket", async () => {
+    const { ws, calls } = setupMockFetch();
+    const provider = new AssemblyAISTT({ apiKey: "MY_KEY" });
+
+    provider.createSession();
+    await flush();
+
+    expect(calls).toHaveLength(1);
+    const { url, init } = calls[0];
+    expect(url).toBe(_buildConnectionUrl({ apiKey: "MY_KEY" }));
+    const headers = init?.headers as Record<string, string> | undefined;
+    expect(headers?.Upgrade).toBe("websocket");
+    expect(headers?.Authorization).toBe("MY_KEY");
+    // Raw key — no Bearer or Token prefix.
+    expect(headers?.Authorization).not.toMatch(/^Bearer /);
+    expect(headers?.Authorization).not.toMatch(/^Token /);
+
+    expect(ws.accept).toHaveBeenCalledTimes(1);
+  });
+});
