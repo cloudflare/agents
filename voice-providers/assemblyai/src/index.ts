@@ -216,7 +216,29 @@ class AssemblyAISession implements TranscriberSession {
     // Wired in a later task.
   }
 
-  #handleMessage(_event: MessageEvent): void {
-    // Wired in a later task.
+  #handleMessage(event: MessageEvent): void {
+    if (this.#closed) return;
+
+    let data: Record<string, unknown> | null;
+    try {
+      data =
+        typeof event.data === "string"
+          ? (JSON.parse(event.data) as Record<string, unknown>)
+          : null;
+    } catch {
+      return; // ignore malformed JSON
+    }
+    if (!data || typeof data.type !== "string") return;
+
+    if (data.type === "Turn") {
+      const transcript =
+        typeof data.transcript === "string" ? data.transcript : "";
+      if (!transcript) return;
+      if (data.end_of_turn === true) {
+        this.#sessionOpts?.onUtterance?.(transcript);
+      } else {
+        this.#sessionOpts?.onInterim?.(transcript);
+      }
+    }
   }
 }

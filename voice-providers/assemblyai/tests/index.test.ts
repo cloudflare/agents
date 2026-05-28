@@ -212,3 +212,74 @@ describe("AssemblyAISession — connect", () => {
     expect(ws.accept).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("AssemblyAISession — Turn routing", () => {
+  it("routes Turn{end_of_turn:false} to onInterim", async () => {
+    const { ws } = setupMockFetch();
+    const onInterim = vi.fn();
+    const onUtterance = vi.fn();
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+
+    provider.createSession({ onInterim, onUtterance });
+    await flush();
+
+    ws.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "Turn",
+          transcript: "hello",
+          end_of_turn: false
+        })
+      })
+    );
+
+    expect(onInterim).toHaveBeenCalledWith("hello");
+    expect(onUtterance).not.toHaveBeenCalled();
+  });
+
+  it("routes Turn{end_of_turn:true} to onUtterance", async () => {
+    const { ws } = setupMockFetch();
+    const onInterim = vi.fn();
+    const onUtterance = vi.fn();
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+
+    provider.createSession({ onInterim, onUtterance });
+    await flush();
+
+    ws.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "Turn",
+          transcript: "Hello world.",
+          end_of_turn: true
+        })
+      })
+    );
+
+    expect(onUtterance).toHaveBeenCalledWith("Hello world.");
+    expect(onInterim).not.toHaveBeenCalled();
+  });
+
+  it("ignores Turn events with an empty transcript", async () => {
+    const { ws } = setupMockFetch();
+    const onInterim = vi.fn();
+    const onUtterance = vi.fn();
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+
+    provider.createSession({ onInterim, onUtterance });
+    await flush();
+
+    ws.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "Turn",
+          transcript: "",
+          end_of_turn: true
+        })
+      })
+    );
+
+    expect(onInterim).not.toHaveBeenCalled();
+    expect(onUtterance).not.toHaveBeenCalled();
+  });
+});
