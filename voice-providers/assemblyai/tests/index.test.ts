@@ -1,9 +1,59 @@
-import { describe, it, expect } from "vitest";
-import { _buildConnectionUrl, type AssemblyAISTTOptions } from "../src/index";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  AssemblyAISTT,
+  _buildConnectionUrl,
+  type AssemblyAISTTOptions
+} from "../src/index";
 
 function parse(url: string): URLSearchParams {
   return new URL(url).searchParams;
 }
+
+// --- WebSocket / fetch test infrastructure (shared by all session tests) ---
+
+class MockWebSocket extends EventTarget {
+  accept = vi.fn();
+  send = vi.fn();
+  close = vi.fn();
+}
+
+interface MockFetchCall {
+  url: string;
+  init: RequestInit | undefined;
+}
+
+function setupMockFetch(): { ws: MockWebSocket; calls: MockFetchCall[] } {
+  const ws = new MockWebSocket();
+  const calls: MockFetchCall[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      // Cloudflare's fetch-upgrade returns a Response-shaped object with a
+      // webSocket property. Cast to mirror the runtime.
+      return { webSocket: ws } as unknown as Response;
+    })
+  );
+  return { ws, calls };
+}
+
+// Flush microtasks so the session's async #connect() runs.
+const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+beforeEach(() => {
+  // Default no-op fetch so any test that doesn't set up its own mock never
+  // makes a real network call (the session constructor connects on its own).
+  vi.unstubAllGlobals();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      async () => ({ webSocket: new MockWebSocket() }) as unknown as Response
+    )
+  );
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("_buildConnectionUrl — always-present params", () => {
   it("uses the AssemblyAI streaming host by default", () => {
@@ -129,3 +179,14 @@ describe("_buildConnectionUrl — baseUrl override", () => {
 // Type-only check so AssemblyAISTTOptions is used in this file.
 const _typeCheck: AssemblyAISTTOptions = { apiKey: "x" };
 void _typeCheck;
+void flush;
+void setupMockFetch;
+
+describe("AssemblyAISTT class shape", () => {
+  it("createSession returns an object with feed() and close()", () => {
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+    expect(typeof session.feed).toBe("function");
+    expect(typeof session.close).toBe("function");
+  });
+});

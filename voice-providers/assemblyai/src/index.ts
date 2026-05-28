@@ -8,6 +8,12 @@
  * docs/superpowers/plans/2026-05-27-assemblyai-voice-provider.md.
  */
 
+import type {
+  Transcriber,
+  TranscriberSession,
+  TranscriberSessionOptions
+} from "@cloudflare/voice";
+
 export interface AssemblyAISTTOptions {
   /** AssemblyAI API key. Sent as the `Authorization` header (raw key, no prefix). */
   apiKey: string;
@@ -97,4 +103,57 @@ export function _buildConnectionUrl(opts: AssemblyAISTTOptions): string {
   }
 
   return `${base}?${params.toString()}`;
+}
+
+/**
+ * AssemblyAI Universal-3 Pro Streaming STT provider for the Cloudflare Agents
+ * voice pipeline. Connects via WebSocket per call; the model handles turn
+ * detection via punctuation (no client-side speech-boundary signalling needed).
+ *
+ * @example
+ * ```ts
+ * import { Agent } from "agents";
+ * import { withVoice, WorkersAITTS } from "@cloudflare/voice";
+ * import { AssemblyAISTT } from "@cloudflare/voice-assemblyai";
+ *
+ * const VoiceAgent = withVoice(Agent);
+ *
+ * export class MyAgent extends VoiceAgent<Env> {
+ *   transcriber = new AssemblyAISTT({ apiKey: this.env.ASSEMBLYAI_API_KEY });
+ *   tts = new WorkersAITTS(this.env.AI);
+ * }
+ * ```
+ */
+export class AssemblyAISTT implements Transcriber {
+  #options: AssemblyAISTTOptions;
+
+  constructor(options: AssemblyAISTTOptions) {
+    this.#options = options;
+  }
+
+  createSession(options?: TranscriberSessionOptions): TranscriberSession {
+    return new AssemblyAISession(this.#options, options);
+  }
+}
+
+/** Per-call AssemblyAI streaming session. Lives for the entire call. */
+class AssemblyAISession implements TranscriberSession {
+  #providerOpts: AssemblyAISTTOptions;
+  #sessionOpts: TranscriberSessionOptions | undefined;
+
+  constructor(
+    providerOpts: AssemblyAISTTOptions,
+    sessionOpts?: TranscriberSessionOptions
+  ) {
+    this.#providerOpts = providerOpts;
+    this.#sessionOpts = sessionOpts;
+  }
+
+  feed(_chunk: ArrayBuffer): void {
+    // Wired in a later task.
+  }
+
+  close(): void {
+    // Wired in a later task.
+  }
 }
