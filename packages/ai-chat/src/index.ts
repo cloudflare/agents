@@ -52,9 +52,12 @@ import {
 } from "agents/chat";
 import type {
   ChatResponseResult,
+  ChatRecoveryConfig,
   ChatRecoveryContext,
+  ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
   MessageConcurrency,
+  ResolvedChatRecoveryConfig,
   SaveMessagesOptions,
   SaveMessagesResult
 } from "agents/chat";
@@ -65,9 +68,12 @@ import { nanoid } from "nanoid";
 // continue to work.
 export type {
   ChatResponseResult,
+  ChatRecoveryConfig,
   ChatRecoveryContext,
+  ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
   MessageConcurrency,
+  ResolvedChatRecoveryConfig,
   SaveMessagesOptions,
   SaveMessagesResult
 } from "agents/chat";
@@ -75,6 +81,7 @@ export type {
 type ChatRecoveryRetryData = {
   targetUserId?: string;
   originalRequestId?: string;
+  incidentId?: string;
   lastBody?: Record<string, unknown> | null;
   lastClientTools?: ClientToolSchema[] | null;
 };
@@ -82,9 +89,37 @@ type ChatRecoveryRetryData = {
 type ChatRecoveryContinueData = {
   targetAssistantId?: string;
   originalRequestId?: string;
+  incidentId?: string;
   lastBody?: Record<string, unknown> | null;
   lastClientTools?: ClientToolSchema[] | null;
 };
+
+type ChatRecoveryKind = "retry" | "continue";
+
+type ChatRecoveryIncident = {
+  incidentId: string;
+  requestId: string;
+  recoveryKind: ChatRecoveryKind;
+  attempt: number;
+  maxAttempts: number;
+  status:
+    | "detected"
+    | "scheduled"
+    | "attempting"
+    | "completed"
+    | "skipped"
+    | "exhausted"
+    | "failed";
+  firstSeenAt: number;
+  lastAttemptAt: number;
+  reason?: string;
+};
+
+const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
+const DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS = 6;
+const DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS = 10_000;
+const DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE =
+  "The assistant was interrupted and could not recover. Please try again.";
 
 type StreamResultStatus = {
   status: Exclude<SaveMessagesResult["status"], "skipped">;
@@ -316,7 +351,7 @@ export class AIChatAgent<
    * Enables `onChatRecovery` hook and `this.stash()` during streaming.
    * Set to `true` in subclasses to enable durable streaming.
    */
-  chatRecovery = false;
+  chatRecovery: ChatRecoveryConfig = false;
 
   /** First queued overlap message index for merge strategy, keyed by epoch. */
   private _mergeQueuedUserStartIndexByEpoch = new Map<number, number>();
@@ -2904,6 +2939,156 @@ export class AIChatAgent<
    * `onFiberRecovered` hook. Maps to `onChatRecovery`.
    * @internal
    */
+  private _resolveChatRecoveryConfig(): ResolvedChatRecoveryConfig {
+    const raw = this.chatRecovery;
+    const custom = typeof raw === "object" ? raw : undefined;
+    return {
+      enabled: raw !== false,
+      maxAttempts: Math.max(
+        1,
+        Math.floor(custom?.maxAttempts ?? DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS)
+      ),
+      stableTimeoutMs: Math.max(
+        0,
+        Math.floor(
+          custom?.stableTimeoutMs ?? DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS
+        )
+      ),
+      terminalMessage:
+        custom?.terminalMessage ?? DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,
+      ...(custom?.onExhausted ? { onExhausted: custom.onExhausted } : {})
+    };
+  }
+
+  private _chatRecoveryIncidentId(input: {
+    requestId: string;
+    latestUserMessageId?: string | null;
+    targetAssistantId?: string | null;
+    fiberCreatedAt: number;
+    recoveryKind: ChatRecoveryKind;
+  }): string {
+    return [
+      input.recoveryKind,
+      input.requestId,
+      input.latestUserMessageId ?? "",
+      input.targetAssistantId ?? "",
+      input.fiberCreatedAt
+    ].join(":");
+  }
+
+  private _chatRecoveryIncidentKey(incidentId: string): string {
+    return `${CHAT_RECOVERY_INCIDENT_KEY_PREFIX}${encodeURIComponent(incidentId)}`;
+  }
+
+  private async _beginChatRecoveryIncident(input: {
+    requestId: string;
+    latestUserMessageId?: string | null;
+    targetAssistantId?: string | null;
+    fiberCreatedAt: number;
+    recoveryKind: ChatRecoveryKind;
+  }): Promise<{
+    incident: ChatRecoveryIncident;
+    config: ResolvedChatRecoveryConfig;
+    exhausted: boolean;
+  }> {
+    const config = this._resolveChatRecoveryConfig();
+    const incidentId = this._chatRecoveryIncidentId(input);
+    const key = this._chatRecoveryIncidentKey(incidentId);
+    const now = Date.now();
+    const existing = await this.ctx.storage.get<ChatRecoveryIncident>(key);
+    const attempt = (existing?.attempt ?? 0) + 1;
+    const exhausted = attempt > config.maxAttempts;
+    const incident: ChatRecoveryIncident = {
+      incidentId,
+      requestId: input.requestId,
+      recoveryKind: input.recoveryKind,
+      attempt,
+      maxAttempts: config.maxAttempts,
+      status: exhausted ? "exhausted" : "attempting",
+      firstSeenAt: existing?.firstSeenAt ?? now,
+      lastAttemptAt: now,
+      ...(exhausted ? { reason: "max_attempts_exceeded" } : {})
+    };
+    await this.ctx.storage.put(key, incident);
+
+    if (!existing) {
+      this._emit("chat:recovery:detected", {
+        incidentId,
+        requestId: input.requestId,
+        attempt,
+        maxAttempts: config.maxAttempts,
+        recoveryKind: input.recoveryKind
+      });
+    }
+    this._emit("chat:recovery:attempt", {
+      incidentId,
+      requestId: input.requestId,
+      attempt,
+      maxAttempts: config.maxAttempts,
+      recoveryKind: input.recoveryKind
+    });
+
+    return { incident, config, exhausted };
+  }
+
+  private async _updateChatRecoveryIncident(
+    incidentId: string | undefined,
+    status: ChatRecoveryIncident["status"],
+    reason?: string
+  ): Promise<void> {
+    if (!incidentId) return;
+    const key = this._chatRecoveryIncidentKey(incidentId);
+    const incident = await this.ctx.storage.get<ChatRecoveryIncident>(key);
+    if (!incident) return;
+    const updated: ChatRecoveryIncident = {
+      ...incident,
+      status,
+      ...(reason ? { reason } : {})
+    };
+    await this.ctx.storage.put(key, updated);
+    const eventType =
+      status === "completed"
+        ? "chat:recovery:completed"
+        : status === "skipped"
+          ? "chat:recovery:skipped"
+          : status === "failed"
+            ? "chat:recovery:failed"
+            : undefined;
+    if (eventType) {
+      this._emit(eventType, {
+        incidentId,
+        requestId: incident.requestId,
+        attempt: incident.attempt,
+        maxAttempts: incident.maxAttempts,
+        recoveryKind: incident.recoveryKind,
+        ...(reason ? { reason } : {})
+      });
+    }
+  }
+
+  private async _exhaustChatRecovery(
+    incident: ChatRecoveryIncident,
+    config: ResolvedChatRecoveryConfig
+  ): Promise<void> {
+    const ctx: ChatRecoveryExhaustedContext = {
+      incidentId: incident.incidentId,
+      requestId: incident.requestId,
+      attempt: incident.attempt,
+      maxAttempts: incident.maxAttempts,
+      recoveryKind: incident.recoveryKind,
+      reason: incident.reason ?? "max_attempts_exceeded"
+    };
+    this._emit("chat:recovery:exhausted", ctx);
+    await config.onExhausted?.(ctx);
+    this._broadcastChatMessage({
+      body: config.terminalMessage,
+      done: true,
+      error: true,
+      id: incident.requestId,
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+    });
+  }
+
   protected override async _handleInternalFiberRecovery(
     ctx: FiberRecoveryContext
   ): Promise<boolean> {
@@ -2940,8 +3125,37 @@ export class AIChatAgent<
       ? this._getPartialStreamText(streamId)
       : { text: "", parts: [] as MessagePart[] };
 
+    const shouldRetryPreStream = this._shouldRetryRecoveredPreStreamTurn(
+      recoverySnapshot,
+      streamId ?? "",
+      partial
+    );
+    const targetId = shouldRetryPreStream
+      ? undefined
+      : this._findLastAssistantMessage()?.id;
+    const recoveryKind: ChatRecoveryKind = shouldRetryPreStream
+      ? "retry"
+      : "continue";
+    const { incident, config, exhausted } =
+      await this._beginChatRecoveryIncident({
+        requestId,
+        latestUserMessageId: recoverySnapshot?.latestUserMessageId,
+        targetAssistantId: targetId,
+        fiberCreatedAt: ctx.createdAt,
+        recoveryKind
+      });
+
+    if (exhausted) {
+      await this._exhaustChatRecovery(incident, config);
+      return true;
+    }
+
     const options =
       (await this.onChatRecovery({
+        incidentId: incident.incidentId,
+        attempt: incident.attempt,
+        maxAttempts: incident.maxAttempts,
+        recoveryKind,
         streamId: streamId ?? "",
         requestId,
         partialText: partial.text,
@@ -2953,12 +3167,6 @@ export class AIChatAgent<
           recoverySnapshot?.lastClientTools ?? this._lastClientTools,
         createdAt: ctx.createdAt
       })) ?? {};
-
-    const shouldRetryPreStream = this._shouldRetryRecoveredPreStreamTurn(
-      recoverySnapshot,
-      streamId ?? "",
-      partial
-    );
 
     // Only persist and complete if the stream is still active. The ACK
     // handler (client reconnect → replayChunks) may have already persisted
@@ -2979,25 +3187,42 @@ export class AIChatAgent<
     }
 
     if (shouldRetryPreStream && options.continue !== false) {
+      await this._updateChatRecoveryIncident(incident.incidentId, "scheduled");
+      this._emit("chat:recovery:scheduled", {
+        incidentId: incident.incidentId,
+        requestId,
+        attempt: incident.attempt,
+        maxAttempts: incident.maxAttempts,
+        recoveryKind
+      });
       await this.schedule(
         0,
         "_chatRecoveryRetry",
         {
           targetUserId: recoverySnapshot.latestUserMessageId,
           originalRequestId: requestId,
+          incidentId: incident.incidentId,
           lastBody: recoverySnapshot.lastBody ?? null,
           lastClientTools: recoverySnapshot.lastClientTools ?? null
         },
         { idempotent: true }
       );
     } else if (options.continue !== false) {
-      const targetId = this._findLastAssistantMessage()?.id;
+      await this._updateChatRecoveryIncident(incident.incidentId, "scheduled");
+      this._emit("chat:recovery:scheduled", {
+        incidentId: incident.incidentId,
+        requestId,
+        attempt: incident.attempt,
+        maxAttempts: incident.maxAttempts,
+        recoveryKind
+      });
       await this.schedule(
         0,
         "_chatRecoveryContinue",
         {
           ...(targetId ? { targetAssistantId: targetId } : {}),
           originalRequestId: requestId,
+          incidentId: incident.incidentId,
           ...(recoverySnapshot
             ? {
                 lastBody: recoverySnapshot.lastBody ?? null,
@@ -3006,6 +3231,12 @@ export class AIChatAgent<
             : {})
         },
         { idempotent: true }
+      );
+    } else {
+      await this._updateChatRecoveryIncident(
+        incident.incidentId,
+        "skipped",
+        "continue_disabled"
       );
     }
 
@@ -3034,21 +3265,43 @@ export class AIChatAgent<
   }
 
   async _chatRecoveryContinue(data?: ChatRecoveryContinueData): Promise<void> {
-    const ready = await this.waitUntilStable({ timeout: 10_000 });
+    const recoveryConfig = this._resolveChatRecoveryConfig();
+    const ready = await this.waitUntilStable({
+      timeout: recoveryConfig.stableTimeoutMs
+    });
     if (!ready) {
       console.warn(
         "[AIChatAgent] _chatRecoveryContinue timed out waiting for stable state, skipping continuation"
+      );
+      await this._updateChatRecoveryIncident(
+        data?.incidentId,
+        "skipped",
+        "stable_timeout"
       );
       return;
     }
 
     const targetId = data?.targetAssistantId;
     if (targetId && this._findLastAssistantMessage()?.id !== targetId) {
+      await this._updateChatRecoveryIncident(
+        data?.incidentId,
+        "skipped",
+        "conversation_changed"
+      );
       return;
     }
 
     this._applyRecoveredRequestContext(data);
-    await this.continueLastTurn();
+    const result = await this.continueLastTurn();
+    await this._updateChatRecoveryIncident(
+      data?.incidentId,
+      result.status === "completed"
+        ? "completed"
+        : result.status === "skipped"
+          ? "skipped"
+          : "failed",
+      result.error
+    );
   }
 
   private _applyRecoveredRequestContext(
@@ -3093,10 +3346,18 @@ export class AIChatAgent<
   }
 
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {
-    const ready = await this.waitUntilStable({ timeout: 10_000 });
+    const recoveryConfig = this._resolveChatRecoveryConfig();
+    const ready = await this.waitUntilStable({
+      timeout: recoveryConfig.stableTimeoutMs
+    });
     if (!ready) {
       console.warn(
         "[AIChatAgent] _chatRecoveryRetry timed out waiting for stable state, skipping retry"
+      );
+      await this._updateChatRecoveryIncident(
+        data?.incidentId,
+        "skipped",
+        "stable_timeout"
       );
       return;
     }
@@ -3104,15 +3365,37 @@ export class AIChatAgent<
     const lastMessage =
       this.messages.length > 0 ? this.messages[this.messages.length - 1] : null;
     if (!lastMessage || lastMessage.role !== "user") {
+      await this._updateChatRecoveryIncident(
+        data?.incidentId,
+        "skipped",
+        "no_unanswered_user_message"
+      );
       return;
     }
 
     if (data?.targetUserId && lastMessage.id !== data.targetUserId) {
+      await this._updateChatRecoveryIncident(
+        data?.incidentId,
+        "skipped",
+        "conversation_changed"
+      );
       return;
     }
 
     this._applyRecoveredRequestContext(data);
-    await this._retryLastUserTurn(this._lastClientTools, this._lastBody);
+    const result = await this._retryLastUserTurn(
+      this._lastClientTools,
+      this._lastBody
+    );
+    await this._updateChatRecoveryIncident(
+      data?.incidentId,
+      result.status === "completed"
+        ? "completed"
+        : result.status === "skipped"
+          ? "skipped"
+          : "failed",
+      result.error
+    );
   }
 
   /**

@@ -149,6 +149,26 @@ export type AgentObservabilityEvent =
       }
     >
   | BaseEvent<
+      "chat:recovery:detected",
+      {
+        incidentId: string;
+        requestId: string;
+        attempt: number;
+        maxAttempts: number;
+        recoveryKind: "retry" | "continue";
+      }
+    >
+  | BaseEvent<
+      "chat:recovery:scheduled",
+      {
+        incidentId: string;
+        requestId: string;
+        attempt: number;
+        maxAttempts: number;
+        recoveryKind: "retry" | "continue";
+      }
+    >
+  | BaseEvent<
       "chat:recovery:attempt",
       {
         incidentId: string;
@@ -156,6 +176,27 @@ export type AgentObservabilityEvent =
         attempt: number;
         maxAttempts: number;
         recoveryKind: "retry" | "continue";
+      }
+    >
+  | BaseEvent<
+      "chat:recovery:completed",
+      {
+        incidentId: string;
+        requestId: string;
+        attempt: number;
+        maxAttempts: number;
+        recoveryKind: "retry" | "continue";
+      }
+    >
+  | BaseEvent<
+      "chat:recovery:skipped",
+      {
+        incidentId: string;
+        requestId: string;
+        attempt: number;
+        maxAttempts: number;
+        recoveryKind: "retry" | "continue";
+        reason?: string;
       }
     >
   | BaseEvent<
@@ -167,6 +208,17 @@ export type AgentObservabilityEvent =
         maxAttempts: number;
         recoveryKind: "retry" | "continue";
         reason: string;
+      }
+    >
+  | BaseEvent<
+      "chat:recovery:failed",
+      {
+        incidentId: string;
+        requestId: string;
+        attempt: number;
+        maxAttempts: number;
+        recoveryKind: "retry" | "continue";
+        reason?: string;
       }
     >
   | BaseEvent<

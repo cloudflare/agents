@@ -1665,6 +1665,10 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
     const options =
       (await this.onChatRecovery({
+        incidentId: `test:${requestId}`,
+        attempt: 1,
+        maxAttempts: 6,
+        recoveryKind: "continue",
         streamId,
         requestId,
         partialText: partial.text,

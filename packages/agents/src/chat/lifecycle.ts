@@ -86,6 +86,14 @@ export type SaveMessagesResult = {
  * stream is detected after DO restart.
  */
 export type ChatRecoveryContext = {
+  /** Stable identifier for this recovery incident. */
+  incidentId: string;
+  /** Attempt number for this recovery incident, starting at 1. */
+  attempt: number;
+  /** Maximum attempts before the framework terminalizes recovery. */
+  maxAttempts: number;
+  /** Whether this recovery is retrying an unanswered user turn or continuing a partial assistant turn. */
+  recoveryKind: "retry" | "continue";
   /** Stream ID from the interrupted stream. */
   streamId: string;
   /** Request ID from the interrupted stream. */
@@ -118,6 +126,37 @@ export type ChatRecoveryOptions = {
   persist?: boolean;
   /** Schedule a continuation via `continueLastTurn()`. Default: true. */
   continue?: boolean;
+};
+
+/**
+ * Context passed when framework-owned chat recovery exhausts its retry budget.
+ */
+export type ChatRecoveryExhaustedContext = Pick<
+  ChatRecoveryContext,
+  "incidentId" | "requestId" | "attempt" | "maxAttempts" | "recoveryKind"
+> & {
+  reason: string;
+};
+
+/**
+ * Configuration for durable chat recovery. `true` uses these defaults:
+ * `maxAttempts: 6`, `stableTimeoutMs: 10_000`, and a generic terminal message.
+ */
+export type ChatRecoveryConfig =
+  | boolean
+  | {
+      maxAttempts?: number;
+      stableTimeoutMs?: number;
+      terminalMessage?: string;
+      onExhausted?(ctx: ChatRecoveryExhaustedContext): void | Promise<void>;
+    };
+
+export type ResolvedChatRecoveryConfig = {
+  enabled: boolean;
+  maxAttempts: number;
+  stableTimeoutMs: number;
+  terminalMessage: string;
+  onExhausted?: (ctx: ChatRecoveryExhaustedContext) => void | Promise<void>;
 };
 
 /**
