@@ -26,6 +26,7 @@ import type {
   EventStore,
   EventId
 } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { startKeepalive } from "./sse-keepalive";
 
 const MCP_PROTOCOL_VERSION_HEADER = "MCP-Protocol-Version";
 
@@ -76,8 +77,22 @@ export interface WorkerTransportOptions {
    */
   storage?: MCPStorageApi;
   /**
-   * Event store for resumability support.
-   * If provided, enables clients to reconnect and resume messages using Last-Event-ID.
+   * Event store for SSE resumability.
+   *
+   * When set, the transport assigns a globally-unique `id:` to each SSE
+   * event and replays missed events when a client reconnects with the
+   * `Last-Event-ID` header. This is the supported recovery path for the
+   * standalone GET stream, which is allowed to drop at the Cloudflare
+   * edge idle watchdog (~5 min) and never carries a server-side
+   * keepalive.
+   *
+   * POST response streams are scoped to a single request id and can't be
+   * resumed; they get a 25s comment-frame keepalive regardless of this
+   * setting so long-running tool calls survive the idle watchdog.
+   *
+   * Bring your own store. For an Agent / Durable Object–hosted transport,
+   * pass `new DurableObjectEventStore(this.ctx.storage)`. See
+   * cloudflare/agents#1583.
    */
   eventStore?: EventStore;
   /**
@@ -348,19 +363,14 @@ export class WorkerTransport implements Transport {
       headers.set("mcp-session-id", this.sessionId);
     }
 
-    const keepAlive = setInterval(() => {
-      try {
-        writer.write(encoder.encode("event: ping\ndata: \n\n"));
-      } catch {
-        clearInterval(keepAlive);
-      }
-    }, 30000);
-
+    // No keepalive on the standalone GET stream. Idle drops are recovered
+    // by clients reconnecting with Last-Event-ID against a configured
+    // EventStore; callers who care about long-lived listen streams must
+    // wire one up. See cloudflare/agents#1583.
     this.streamMapping.set(streamId, {
       writer,
       encoder,
       cleanup: () => {
-        clearInterval(keepAlive);
         this.streamMapping.delete(streamId);
         writer.close().catch(() => {});
       }
@@ -390,7 +400,6 @@ export class WorkerTransport implements Transport {
           writer,
           encoder,
           cleanup: () => {
-            clearInterval(keepAlive);
             this.streamMapping.delete(streamId);
             writer.close().catch(() => {});
           }
@@ -635,14 +644,11 @@ export class WorkerTransport implements Transport {
       headers.set("mcp-session-id", this.sessionId);
     }
 
-    const keepAlive = setInterval(() => {
-      try {
-        writer.write(encoder.encode("event: ping\ndata: \n\n"));
-      } catch {
-        clearInterval(keepAlive);
-      }
-    }, 30000);
-
+    // POST response streams are scoped to a request id and can't be
+    // resumed via Last-Event-ID, so we keepalive unconditionally so
+    // long-running tool calls survive the ~5min Cloudflare edge idle
+    // watchdog. See cloudflare/agents#1583.
+    const keepAlive = startKeepalive(writer, encoder);
     this.streamMapping.set(streamId, {
       writer,
       encoder,
