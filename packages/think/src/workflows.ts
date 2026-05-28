@@ -161,10 +161,14 @@ export class ThinkWorkflow<
       eventPayload = event.payload as ThinkPromptEventPayload;
     } catch (error) {
       if (options.cancelOnTimeout !== false) {
-        await this.agent.cancelSubmission(
-          submission.submissionId,
-          "Workflow prompt wait timed out"
-        );
+        try {
+          await this.agent.cancelSubmission(
+            submission.submissionId,
+            "Workflow prompt wait timed out"
+          );
+        } catch {
+          // Cancellation is best-effort cleanup; preserve the timeout error.
+        }
       }
       throw new ThinkPromptTimeoutError(submission.submissionId, error);
     }
