@@ -1,2 +1,100 @@
-// Placeholder — filled in by subsequent tasks.
-export const __PACKAGE__ = "@cloudflare/voice-assemblyai";
+/**
+ * @cloudflare/voice-assemblyai — AssemblyAI Universal-3 Pro Streaming STT
+ * provider for the Cloudflare Agents voice pipeline.
+ *
+ * See companion design spec at
+ * docs/superpowers/specs/2026-05-27-assemblyai-voice-provider-design.md
+ * and implementation plan at
+ * docs/superpowers/plans/2026-05-27-assemblyai-voice-provider.md.
+ */
+
+export interface AssemblyAISTTOptions {
+  /** AssemblyAI API key. Sent as the `Authorization` header (raw key, no prefix). */
+  apiKey: string;
+  /**
+   * Domain specialization → `domain=<value>`. `"medical-v1"` enables Medical
+   * Mode (en/es/de/fr); the union keeps autocomplete for the known value while
+   * accepting any string for forward-compat.
+   */
+  domain?: "medical-v1" | (string & {});
+  /** Domain vocabulary to bias recognition → `keyterms_prompt` (JSON-encoded). */
+  keyterms?: string[];
+  /**
+   * Custom transcription prompt → `prompt`, set at connection time. **Omit to
+   * use AssemblyAI's optimized default prompt (recommended — 88% turn-detection
+   * accuracy).** If set, build off the default; prompts that reduce punctuation
+   * degrade the punctuation-based turn detection.
+   */
+  prompt?: string;
+  /** Min silence (ms) before EOT check → `min_turn_silence`. Server default 100. */
+  minTurnSilence?: number;
+  /** Max silence (ms) before forced EOT → `max_turn_silence`. Server default 1000. */
+  maxTurnSilence?: number;
+  /** First-partial timing 0–1000 ms → `interruption_delay`. Server default 500. */
+  interruptionDelay?: number;
+  /** VAD silence-confidence threshold 0–1 → `vad_threshold`. Raise in noisy environments. */
+  vadThreshold?: number;
+  /** Steady ~3 s partials during long uninterrupted turns → `continuous_partials`. */
+  continuousPartials?: boolean;
+  /**
+   * Return language metadata on Turn events → `language_detection`. u3-rt-pro
+   * transcribes multilingual audio regardless; this only toggles the metadata.
+   * Surface it via `onLanguageDetected`.
+   */
+  languageDetection?: boolean;
+  /**
+   * Called when a Turn carries detected-language metadata. Provider-specific
+   * extension, since the pipeline's text-only `onUtterance`/`onInterim` callbacks
+   * cannot carry this.
+   */
+  onLanguageDetected?: (
+    languageCode: string,
+    languageConfidence: number
+  ) => void;
+  /**
+   * Full WebSocket base URL override (e.g. EU host or Cloudflare AI Gateway URL).
+   * @default "wss://streaming.assemblyai.com/v3/ws"
+   */
+  baseUrl?: string;
+}
+
+const DEFAULT_BASE_URL = "wss://streaming.assemblyai.com/v3/ws";
+
+/**
+ * Build the AssemblyAI Streaming v3 WebSocket URL from provider options.
+ * Underscore-prefixed: internal helper, exported only for unit tests.
+ */
+export function _buildConnectionUrl(opts: AssemblyAISTTOptions): string {
+  const base = opts.baseUrl ?? DEFAULT_BASE_URL;
+  const params = new URLSearchParams({
+    speech_model: "u3-rt-pro",
+    sample_rate: "16000",
+    encoding: "pcm_s16le"
+  });
+
+  if (opts.domain !== undefined) params.set("domain", opts.domain);
+  if (opts.keyterms !== undefined) {
+    params.set("keyterms_prompt", JSON.stringify(opts.keyterms));
+  }
+  if (opts.prompt !== undefined) params.set("prompt", opts.prompt);
+  if (opts.minTurnSilence !== undefined) {
+    params.set("min_turn_silence", String(opts.minTurnSilence));
+  }
+  if (opts.maxTurnSilence !== undefined) {
+    params.set("max_turn_silence", String(opts.maxTurnSilence));
+  }
+  if (opts.interruptionDelay !== undefined) {
+    params.set("interruption_delay", String(opts.interruptionDelay));
+  }
+  if (opts.vadThreshold !== undefined) {
+    params.set("vad_threshold", String(opts.vadThreshold));
+  }
+  if (opts.continuousPartials !== undefined) {
+    params.set("continuous_partials", String(opts.continuousPartials));
+  }
+  if (opts.languageDetection !== undefined) {
+    params.set("language_detection", String(opts.languageDetection));
+  }
+
+  return `${base}?${params.toString()}`;
+}
