@@ -1,5 +1,5 @@
 ---
-"agents": minor
+"agents": patch
 ---
 
 Support stable, caller-supplied server ids in `addMcpServer` for connector-style integrations.
