@@ -146,6 +146,7 @@ type FiberRecoveryContext = {
   metadata?: Record<string, unknown> | null;
   snapshot: unknown | null;
   createdAt: number;
+  recoveryReason: "interrupted";
 };
 ```
 
@@ -510,12 +511,13 @@ Checkpoint the current fiber's state. Writes synchronously to SQLite. Each call 
 
 ### `onFiberRecovered(ctx)`
 
-Called once per orphaned fiber row on agent restart. Override to implement recovery. The row is deleted after this hook returns.
+Called once per orphaned fiber row on agent restart. Override to implement recovery. The row is deleted after this hook returns successfully; if recovery throws, the row is left for a later scan so transient failures do not lose the recovery handle.
 
 - **`ctx.id`** — unique fiber ID
 - **`ctx.name`** — the name passed to `runFiber()`
 - **`ctx.snapshot`** — the last `stash()` data, or `null` if `stash()` was never called
 - **`ctx.createdAt`** — epoch milliseconds when `runFiber` started. Compare against `Date.now()` to gate stale recoveries (e.g. skip work that has been orphaned too long to replay safely)
+- **`ctx.recoveryReason`** — why recovery is running. Currently always `"interrupted"` for eviction or restart recovery.
 
 ### `keepAlive()`
 

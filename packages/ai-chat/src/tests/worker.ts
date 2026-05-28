@@ -21,6 +21,7 @@ import type {
 } from "agents";
 import type {
   ClientToolSchema,
+  ChatRecoveryConfig,
   ChatRecoveryContext,
   ChatRecoveryOptions
 } from "../";
@@ -1454,7 +1455,7 @@ export class AgentWithoutSuperCall extends AIChatAgent<Env> {
 // ── ChatRecoveryTestAgent (chat recovery) ─────────────────────────────
 
 export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
-  override chatRecovery = true;
+  override chatRecovery: ChatRecoveryConfig = true;
   recoveryContexts: ChatRecoveryContext[] = [];
   recoveryOverride: ChatRecoveryOptions | null = null;
   onChatMessageCallCount = 0;
@@ -1530,6 +1531,17 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   setRecoveryOverride(options: ChatRecoveryOptions): void {
     this.recoveryOverride = options;
+  }
+
+  setChatRecoveryConfigForTest(config: ChatRecoveryConfig): void {
+    this.chatRecovery = config;
+  }
+
+  async getChatRecoveryIncidentsForTest(): Promise<unknown[]> {
+    const entries = await this.ctx.storage.list({
+      prefix: "cf:chat-recovery:incident:"
+    });
+    return [...entries.values()];
   }
 
   getPersistedMessages(): ChatMessage[] {
@@ -1704,7 +1716,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     name: string,
     snapshot?: unknown
   ): Promise<void> {
-    const id = `fiber-${Date.now()}`;
+    const id = `fiber-${crypto.randomUUID()}`;
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})

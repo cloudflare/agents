@@ -1223,6 +1223,8 @@ export class Think<
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Agent<Env, State, Props> {
+  private _activeChatRecoveryRootRequestId: string | undefined;
+
   private static readonly CONFIG_KEYS = [
     "_think_config",
     "lastClientTools",
@@ -1472,10 +1474,10 @@ export class Think<
         (part) => (part as Record<string, unknown>).type !== "step-start"
       );
       if (
+        messageRemovedToolCalls > 0 &&
         (!hasMeaningfulPart || parts.length === 0) &&
         message.parts.length > 0
       ) {
-        if (messageRemovedToolCalls === 0) removedToolResults++;
         continue;
       }
       repaired.push(
@@ -1909,6 +1911,7 @@ export class Think<
     const snapshot = createChatFiberSnapshot({
       kind: "think-chat-turn",
       requestId,
+      recoveryRootRequestId: this._activeChatRecoveryRootRequestId ?? requestId,
       continuation,
       messages: this.messages,
       lastBody: this._lastBody,
@@ -6452,17 +6455,15 @@ export class Think<
 
   private _chatRecoveryIncidentId(input: {
     requestId: string;
+    recoveryRootRequestId?: string | null;
     latestUserMessageId?: string | null;
     targetAssistantId?: string | null;
-    fiberCreatedAt: number;
     recoveryKind: ChatRecoveryKind;
   }): string {
     return [
       input.recoveryKind,
-      input.requestId,
-      input.latestUserMessageId ?? "",
-      input.targetAssistantId ?? "",
-      input.fiberCreatedAt
+      input.recoveryRootRequestId ?? input.requestId,
+      input.latestUserMessageId ?? ""
     ].join(":");
   }
 
@@ -6472,9 +6473,9 @@ export class Think<
 
   private async _beginChatRecoveryIncident(input: {
     requestId: string;
+    recoveryRootRequestId?: string | null;
     latestUserMessageId?: string | null;
     targetAssistantId?: string | null;
-    fiberCreatedAt: number;
     recoveryKind: ChatRecoveryKind;
   }): Promise<{
     incident: ChatRecoveryIncident;
@@ -6642,22 +6643,16 @@ export class Think<
       partial
     );
     const shouldRetryBase = retryTargetUserId !== null && !streamIsTerminal;
-    const lastLeaf = shouldRetryBase
-      ? null
-      : await this.session.getLatestLeaf();
-    const targetId =
-      lastLeaf?.role === "assistant" && !streamIsTerminal
-        ? lastLeaf.id
-        : undefined;
     const recoveryKind: ChatRecoveryKind = shouldRetryBase
       ? "retry"
       : "continue";
+    const recoveryRootRequestId =
+      recoverySnapshot?.recoveryRootRequestId ?? requestId;
     const { incident, config, exhausted } =
       await this._beginChatRecoveryIncident({
         requestId,
+        recoveryRootRequestId,
         latestUserMessageId: recoverySnapshot?.latestUserMessageId,
-        targetAssistantId: targetId,
-        fiberCreatedAt: ctx.createdAt,
         recoveryKind
       });
 
@@ -6684,10 +6679,14 @@ export class Think<
         createdAt: ctx.createdAt
       })) ?? {};
 
+    const streamAlreadyPersisted =
+      streamIsTerminal &&
+      (await this._hasPersistedRecoveredAssistant(recoverySnapshot));
+
     if (
       options.persist !== false &&
       streamId &&
-      (streamStillActive || streamIsTerminal)
+      (streamStillActive || (streamIsTerminal && !streamAlreadyPersisted))
     ) {
       await this._persistOrphanedStream(streamId);
     }
@@ -6700,6 +6699,11 @@ export class Think<
       retryTargetUserId !== null &&
       options.continue !== false &&
       !streamIsTerminal;
+    const lastLeaf = shouldRetry ? null : await this.session.getLatestLeaf();
+    const targetId =
+      lastLeaf?.role === "assistant" && !streamIsTerminal
+        ? lastLeaf.id
+        : undefined;
     const canContinue =
       !shouldRetry && options.continue !== false && !streamIsTerminal;
     const hasRunningSubmission = this._hasRunningSubmission(requestId);
@@ -6734,7 +6738,7 @@ export class Think<
         "_chatRecoveryRetry",
         {
           targetUserId: retryTargetUserId,
-          originalRequestId: requestId,
+          originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           lastBody: recoverySnapshot?.lastBody ?? null,
           lastClientTools: recoverySnapshot?.lastClientTools ?? null,
@@ -6756,7 +6760,7 @@ export class Think<
         "_chatRecoveryContinue",
         {
           ...(targetId ? { targetAssistantId: targetId } : {}),
-          originalRequestId: requestId,
+          originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           ...(recoverySnapshot
             ? {
@@ -6812,14 +6816,32 @@ export class Think<
       : null;
   }
 
+  private async _hasPersistedRecoveredAssistant(
+    snapshot: ChatFiberSnapshot<"think-chat-turn"> | null
+  ): Promise<boolean> {
+    const lastLeaf = await this.session.getLatestLeaf();
+    return (
+      lastLeaf?.role === "assistant" &&
+      lastLeaf.id !== snapshot?.latestMessageId
+    );
+  }
+
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {
     const recoveredSubmission = data?.recoveredRequestId
       ? this._readRunningSubmissionByRequestId(data.recoveredRequestId)
       : null;
     if (data?.recoveredRequestId && !recoveredSubmission) {
+      await this._updateChatRecoveryIncident(
+        data.incidentId,
+        "skipped",
+        "submission_not_running"
+      );
       return;
     }
 
+    const previousRootRequestId = this._activeChatRecoveryRootRequestId;
+    this._activeChatRecoveryRootRequestId =
+      data?.originalRequestId ?? previousRootRequestId;
     const controller = recoveredSubmission ? new AbortController() : null;
     if (recoveredSubmission && controller) {
       this._submissionAbortControllers.set(
@@ -6836,7 +6858,7 @@ export class Think<
       if (!ready) {
         await this._updateChatRecoveryIncident(
           data?.incidentId,
-          "skipped",
+          "failed",
           "stable_timeout"
         );
         if (data?.recoveredRequestId) {
@@ -6926,6 +6948,7 @@ export class Think<
       }
       throw error;
     } finally {
+      this._activeChatRecoveryRootRequestId = previousRootRequestId;
       if (recoveredSubmission) {
         this._submissionAbortControllers.delete(
           recoveredSubmission.submission_id
@@ -7031,9 +7054,17 @@ export class Think<
       ? this._readRunningSubmissionByRequestId(data.recoveredRequestId)
       : null;
     if (data?.recoveredRequestId && !recoveredSubmission) {
+      await this._updateChatRecoveryIncident(
+        data.incidentId,
+        "skipped",
+        "submission_not_running"
+      );
       return;
     }
 
+    const previousRootRequestId = this._activeChatRecoveryRootRequestId;
+    this._activeChatRecoveryRootRequestId =
+      data?.originalRequestId ?? previousRootRequestId;
     const controller = recoveredSubmission ? new AbortController() : null;
     if (recoveredSubmission && controller) {
       this._submissionAbortControllers.set(
@@ -7053,7 +7084,7 @@ export class Think<
         );
         await this._updateChatRecoveryIncident(
           data?.incidentId,
-          "skipped",
+          "failed",
           "stable_timeout"
         );
         if (data?.recoveredRequestId) {
@@ -7126,6 +7157,7 @@ export class Think<
       }
       throw error;
     } finally {
+      this._activeChatRecoveryRootRequestId = previousRootRequestId;
       if (recoveredSubmission) {
         this._submissionAbortControllers.delete(
           recoveredSubmission.submission_id

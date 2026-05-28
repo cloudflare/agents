@@ -4529,7 +4529,7 @@ export class Agent<
   private async _runFiberRecoveryHook(
     ctx: FiberRecoveryContext,
     managedRow: FiberLedgerRow | null
-  ): Promise<void> {
+  ): Promise<boolean> {
     const startedAt = Date.now();
     this._emit(
       "fiber:recovery:attempt",
@@ -4549,12 +4549,14 @@ export class Agent<
         ...this._fiberRecoveryPayload(ctx, managedRow, startedAt),
         status: handled ? "internal" : managedRow ? "managed" : "user"
       });
+      return true;
     } catch (e) {
       this._recordFiberRecoveryFailure(ctx, managedRow, e, startedAt);
       console.error(
         `[Agent] Fiber recovery failed for "${ctx.name}" (${ctx.id}):`,
         e
       );
+      return false;
     }
   }
 
@@ -5216,8 +5218,10 @@ export class Agent<
           ctx.status = "interrupted";
         }
 
-        await this._runFiberRecoveryHook(ctx, managedRow);
-        this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
+        const recovered = await this._runFiberRecoveryHook(ctx, managedRow);
+        if (recovered || managedRow) {
+          this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
+        }
         if (managedRow) {
           this._notifyManagedFiberTerminal(row.id);
         }

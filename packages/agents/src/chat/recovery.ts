@@ -5,6 +5,7 @@ export type ChatFiberSnapshot<Kind extends string = string> = {
   kind: Kind;
   version: 1;
   requestId: string;
+  recoveryRootRequestId?: string;
   continuation: boolean;
   latestMessageId?: string;
   latestMessageRole?: string;
@@ -17,6 +18,7 @@ export type ChatFiberSnapshot<Kind extends string = string> = {
 export function createChatFiberSnapshot<Kind extends string>({
   kind,
   requestId,
+  recoveryRootRequestId,
   continuation,
   messages,
   lastBody,
@@ -24,6 +26,7 @@ export function createChatFiberSnapshot<Kind extends string>({
 }: {
   kind: Kind;
   requestId: string;
+  recoveryRootRequestId?: string;
   continuation: boolean;
   messages: UIMessage[];
   lastBody?: Record<string, unknown>;
@@ -44,6 +47,7 @@ export function createChatFiberSnapshot<Kind extends string>({
     kind,
     version: 1,
     requestId,
+    recoveryRootRequestId,
     continuation,
     latestMessageId: latestMessage?.id,
     latestMessageRole: latestMessage?.role,

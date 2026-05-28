@@ -286,6 +286,8 @@ describe("channel routing", () => {
 
   it("should route transcript repair events to the transcript channel", () => {
     const received: ObservabilityEvent[] = [];
+    const chatEvents: ObservabilityEvent[] = [];
+    const unsubChat = subscribe("chat", (event) => chatEvents.push(event));
     const unsub = subscribe("transcript", (event) => received.push(event));
 
     genericObservability.emit({
@@ -304,7 +306,9 @@ describe("channel routing", () => {
 
     expect(received).toHaveLength(1);
     expect(received[0].type).toBe("chat:transcript:repaired");
+    expect(chatEvents).toHaveLength(0);
 
+    unsubChat();
     unsub();
   });
 

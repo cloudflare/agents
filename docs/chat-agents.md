@@ -622,17 +622,21 @@ export class ChatAgent extends AIChatAgent {
 
 **`ChatRecoveryContext`:**
 
-| Field             | Type                                   | Description                                                           |
-| ----------------- | -------------------------------------- | --------------------------------------------------------------------- |
-| `streamId`        | `string`                               | ID of the interrupted stream                                          |
-| `requestId`       | `string`                               | ID of the original chat request                                       |
-| `partialText`     | `string`                               | Text generated before eviction                                        |
-| `partialParts`    | `MessagePart[]`                        | Message parts (text, reasoning, tool calls) generated before eviction |
-| `recoveryData`    | `unknown \| null`                      | Data from `this.stash()` — entirely user-controlled                   |
-| `messages`        | `ChatMessage[]`                        | Full conversation history                                             |
-| `lastBody`        | `Record<string, unknown> \| undefined` | The original request body                                             |
-| `lastClientTools` | `ClientToolSchema[] \| undefined`      | Client tool schemas from the original request                         |
-| `createdAt`       | `number`                               | Epoch milliseconds when the underlying fiber started                  |
+| Field             | Type                                   | Description                                                                              |
+| ----------------- | -------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `incidentId`      | `string`                               | Stable ID for this recovery incident                                                     |
+| `attempt`         | `number`                               | Current attempt number for this incident, starting at 1                                  |
+| `maxAttempts`     | `number`                               | Configured attempt cap before terminal exhaustion                                        |
+| `recoveryKind`    | `"retry" \| "continue"`                | Whether recovery will retry an unanswered user turn or continue a partial assistant turn |
+| `streamId`        | `string`                               | ID of the interrupted stream                                                             |
+| `requestId`       | `string`                               | ID of the original chat request                                                          |
+| `partialText`     | `string`                               | Text generated before eviction                                                           |
+| `partialParts`    | `MessagePart[]`                        | Message parts (text, reasoning, tool calls) generated before eviction                    |
+| `recoveryData`    | `unknown \| null`                      | Data from `this.stash()` — entirely user-controlled                                      |
+| `messages`        | `ChatMessage[]`                        | Full conversation history                                                                |
+| `lastBody`        | `Record<string, unknown> \| undefined` | The original request body                                                                |
+| `lastClientTools` | `ClientToolSchema[] \| undefined`      | Client tool schemas from the original request                                            |
+| `createdAt`       | `number`                               | Epoch milliseconds when the underlying fiber started                                     |
 
 **`ChatRecoveryOptions`:**
 
@@ -648,6 +652,19 @@ Common return values:
 - `{ persist: false, continue: false }` — handle everything yourself (e.g., retrieve a completed response from the provider)
 
 When recovery happens before any stream chunks were written, there is no partial assistant message to continue. If the latest persisted message is still the unanswered user message from the interrupted turn, the framework retries that turn automatically unless `continue` is `false`.
+
+`chatRecovery` can also be configured with an attempt cap and terminal behavior:
+
+```typescript
+override chatRecovery = {
+  maxAttempts: 6,
+  stableTimeoutMs: 10_000,
+  terminalMessage: "The assistant was interrupted and could not recover.",
+  async onExhausted(ctx) {
+    console.warn("Chat recovery exhausted", ctx.incidentId);
+  }
+};
+```
 
 #### Guarding against stale recoveries
 
@@ -1544,11 +1561,11 @@ The originating client receives the streaming response. All other clients receiv
 
 ### Exports
 
-| Import path                 | Exports                                                                                     |
-| --------------------------- | ------------------------------------------------------------------------------------------- |
-| `@cloudflare/ai-chat`       | `AIChatAgent`, `createToolsFromClientSchemas`, `ChatRecoveryContext`, `ChatRecoveryOptions` |
-| `@cloudflare/ai-chat/react` | `useAgentChat`                                                                              |
-| `@cloudflare/ai-chat/types` | `MessageType`, `OutgoingMessage`, `IncomingMessage`                                         |
+| Import path                 | Exports                                                                                                                                                                         |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@cloudflare/ai-chat`       | `AIChatAgent`, `createToolsFromClientSchemas`, `ChatRecoveryContext`, `ChatRecoveryOptions`, `ChatRecoveryConfig`, `ChatRecoveryExhaustedContext`, `ResolvedChatRecoveryConfig` |
+| `@cloudflare/ai-chat/react` | `useAgentChat`                                                                                                                                                                  |
+| `@cloudflare/ai-chat/types` | `MessageType`, `OutgoingMessage`, `IncomingMessage`                                                                                                                             |
 
 ### WebSocket Protocol
 

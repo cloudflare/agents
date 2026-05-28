@@ -38,6 +38,11 @@ interface ChatRecoveryTestStub {
     Array<Array<{ name: string; description?: string }> | undefined>
   >;
   getScheduleCountForCallback(callback: string): Promise<number>;
+  setChatRecoveryConfigForTest(config: {
+    maxAttempts?: number;
+    terminalMessage?: string;
+  }): Promise<void>;
+  getChatRecoveryIncidentsForTest(): Promise<unknown[]>;
 }
 
 async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
@@ -150,6 +155,51 @@ describe("onChatRecovery", () => {
     expect(typeof match!.createdAt).toBe("number");
     expect(match!.createdAt).toBeGreaterThanOrEqual(before);
     expect(match!.createdAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("passes incident metadata and exhausts after maxAttempts", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setChatRecoveryConfigForTest({
+      maxAttempts: 1,
+      terminalMessage: "gave up"
+    });
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-cap");
+    await agentStub.triggerFiberRecovery();
+
+    const contexts = (await agentStub.getRecoveryContexts()) as Array<{
+      incidentId: string;
+      attempt: number;
+      maxAttempts: number;
+      recoveryKind: string;
+    }>;
+    expect(contexts.at(-1)).toMatchObject({
+      incidentId: "continue:req-cap:",
+      attempt: 1,
+      maxAttempts: 1,
+      recoveryKind: "continue"
+    });
+
+    await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-cap");
+    await agentStub.triggerFiberRecovery();
+
+    const incidents =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        attempt: number;
+        maxAttempts: number;
+        status: string;
+        reason?: string;
+      }>;
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0]).toMatchObject({
+      attempt: 2,
+      maxAttempts: 1,
+      status: "exhausted",
+      reason: "max_attempts_exceeded"
+    });
   });
 
   it("should persist partial by default (persist !== false)", async () => {

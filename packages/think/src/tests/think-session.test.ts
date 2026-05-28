@@ -422,6 +422,41 @@ describe("Think — error handling", () => {
     expect(errorLog[0]).toContain("Custom error for hook");
   });
 
+  it("emits chat:request:failed when a chat stream fails", async () => {
+    const agent = await freshAgent(`err-event-${crypto.randomUUID()}`);
+    const events: Array<{
+      type: string;
+      payload: {
+        requestId?: string;
+        stage?: string;
+        messagesPersisted?: boolean;
+        error?: string;
+      };
+    }> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:request:failed") {
+        events.push(event);
+      }
+    });
+
+    try {
+      await agent.testChatWithError("Custom event error");
+    } finally {
+      unsubscribe();
+    }
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "chat:request:failed",
+        payload: expect.objectContaining({
+          stage: "stream",
+          messagesPersisted: true,
+          error: "Custom event error"
+        })
+      })
+    );
+  });
+
   it("should recover and continue chatting after error", async () => {
     const agent = await freshAgent("err-recover");
 
@@ -1973,11 +2008,49 @@ describe("Think — onChatRecovery", () => {
     expect(contexts.length).toBeGreaterThanOrEqual(1);
 
     const ctx = contexts[contexts.length - 1];
+    expect(ctx).toMatchObject({
+      incidentId: "continue:req-1:",
+      attempt: 1,
+      maxAttempts: 6,
+      recoveryKind: "continue"
+    });
     expect(ctx.partialText).toBe("Partial text");
     expect(ctx.streamId).toBe("stream-1");
     expect(typeof ctx.createdAt).toBe("number");
     expect(ctx.createdAt).toBeGreaterThanOrEqual(before);
     expect(ctx.createdAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("exhausts chat recovery after the configured max attempts", async () => {
+    const agent = await freshRecoveryAgent("recovery-exhaustion");
+
+    await agent.setChatRecoveryConfigForTest({
+      maxAttempts: 1,
+      terminalMessage: "gave up"
+    });
+    await agent.setRecoveryOverride({ continue: false });
+
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-exhaust");
+    await agent.triggerFiberRecovery();
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-exhaust");
+    await agent.triggerFiberRecovery();
+
+    const contexts = await agent.getRecoveryContexts();
+    expect(contexts).toHaveLength(1);
+
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      attempt: number;
+      maxAttempts: number;
+      status: string;
+      reason?: string;
+    }>;
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0]).toMatchObject({
+      attempt: 2,
+      maxAttempts: 1,
+      status: "exhausted",
+      reason: "max_attempts_exceeded"
+    });
   });
 
   it("stashed data round-trips through fiber recovery", async () => {

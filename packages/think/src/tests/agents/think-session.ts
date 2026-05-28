@@ -16,6 +16,7 @@ import type {
   ChatOptions,
   ChatResponseResult,
   SaveMessagesResult,
+  ChatRecoveryConfig,
   ChatRecoveryContext,
   ChatRecoveryOptions,
   ThinkSubmissionInspection,
@@ -3109,9 +3110,13 @@ export class ThinkAsyncHookTestAgent extends Think {
 // Tests chatRecovery, fiber wrapping, onChatRecovery hook.
 
 export class ThinkRecoveryTestAgent extends Think {
-  override chatRecovery = true;
+  override chatRecovery: ChatRecoveryConfig = true;
 
   private _recoveryContexts: Array<{
+    incidentId: string;
+    attempt: number;
+    maxAttempts: number;
+    recoveryKind: "retry" | "continue";
     recoveryData: unknown;
     partialText: string;
     streamId: string;
@@ -3152,6 +3157,10 @@ export class ThinkRecoveryTestAgent extends Think {
     ctx: ChatRecoveryContext
   ): Promise<ChatRecoveryOptions> {
     this._recoveryContexts.push({
+      incidentId: ctx.incidentId,
+      attempt: ctx.attempt,
+      maxAttempts: ctx.maxAttempts,
+      recoveryKind: ctx.recoveryKind,
       recoveryData: ctx.recoveryData,
       partialText: ctx.partialText,
       streamId: ctx.streamId,
@@ -3188,6 +3197,10 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async getRecoveryContexts(): Promise<
     Array<{
+      incidentId: string;
+      attempt: number;
+      maxAttempts: number;
+      recoveryKind: "retry" | "continue";
       recoveryData: unknown;
       partialText: string;
       streamId: string;
@@ -3209,6 +3222,19 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async setRecoveryOverride(options: ChatRecoveryOptions): Promise<void> {
     this._recoveryOverride = options;
+  }
+
+  async setChatRecoveryConfigForTest(
+    config: ChatRecoveryConfig
+  ): Promise<void> {
+    this.chatRecovery = config;
+  }
+
+  async getChatRecoveryIncidentsForTest(): Promise<unknown[]> {
+    const entries = await this.ctx.storage.list({
+      prefix: "cf:chat-recovery:incident:"
+    });
+    return [...entries.values()];
   }
 
   async setStashData(data: unknown): Promise<void> {
@@ -3371,7 +3397,7 @@ export class ThinkRecoveryTestAgent extends Think {
     name: string,
     snapshot?: unknown
   ): Promise<void> {
-    const id = `fiber-${Date.now()}`;
+    const id = `fiber-${crypto.randomUUID()}`;
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})

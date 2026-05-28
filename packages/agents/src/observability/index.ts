@@ -100,7 +100,10 @@ export type ChannelEventMap = {
     ObservabilityEvent,
     { type: `message:${string}` | `tool:${string}` | `submission:${string}` }
   >;
-  chat: Extract<ObservabilityEvent, { type: `chat:${string}` }>;
+  chat: Exclude<
+    Extract<ObservabilityEvent, { type: `chat:${string}` }>,
+    { type: `chat:transcript:${string}` }
+  >;
   transcript: Extract<
     ObservabilityEvent,
     { type: `transcript:${string}` | `chat:transcript:${string}` }
