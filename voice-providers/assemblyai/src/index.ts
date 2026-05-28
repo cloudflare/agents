@@ -233,12 +233,31 @@ class AssemblyAISession implements TranscriberSession {
     if (data.type === "Turn") {
       const transcript =
         typeof data.transcript === "string" ? data.transcript : "";
+
+      // Language metadata travels alongside the transcript. Surface it
+      // independently because the pipeline callbacks are text-only.
+      const code =
+        typeof data.language_code === "string" ? data.language_code : undefined;
+      const confidence =
+        typeof data.language_confidence === "number"
+          ? data.language_confidence
+          : undefined;
+      if (code !== undefined && confidence !== undefined) {
+        this.#providerOpts.onLanguageDetected?.(code, confidence);
+      }
+
       if (!transcript) return;
       if (data.end_of_turn === true) {
         this.#sessionOpts?.onUtterance?.(transcript);
       } else {
         this.#sessionOpts?.onInterim?.(transcript);
       }
+      return;
+    }
+
+    if (data.type === "SpeechStarted") {
+      this.#sessionOpts?.onSpeechStart?.();
+      return;
     }
   }
 }

@@ -283,3 +283,67 @@ describe("AssemblyAISession — Turn routing", () => {
     expect(onUtterance).not.toHaveBeenCalled();
   });
 });
+
+describe("AssemblyAISession — SpeechStarted and language metadata", () => {
+  it("routes SpeechStarted to onSpeechStart", async () => {
+    const { ws } = setupMockFetch();
+    const onSpeechStart = vi.fn();
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    provider.createSession({ onSpeechStart });
+    await flush();
+
+    ws.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({ type: "SpeechStarted" })
+      })
+    );
+
+    expect(onSpeechStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires onLanguageDetected when a Turn carries language metadata", async () => {
+    const { ws } = setupMockFetch();
+    const onLanguageDetected = vi.fn();
+    const provider = new AssemblyAISTT({
+      apiKey: "k",
+      languageDetection: true,
+      onLanguageDetected
+    });
+    provider.createSession({});
+    await flush();
+
+    ws.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "Turn",
+          transcript: "hola",
+          end_of_turn: true,
+          language_code: "es",
+          language_confidence: 0.97
+        })
+      })
+    );
+
+    expect(onLanguageDetected).toHaveBeenCalledWith("es", 0.97);
+  });
+
+  it("does not fire onLanguageDetected when metadata is absent", async () => {
+    const { ws } = setupMockFetch();
+    const onLanguageDetected = vi.fn();
+    const provider = new AssemblyAISTT({ apiKey: "k", onLanguageDetected });
+    provider.createSession({});
+    await flush();
+
+    ws.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "Turn",
+          transcript: "hi",
+          end_of_turn: true
+        })
+      })
+    );
+
+    expect(onLanguageDetected).not.toHaveBeenCalled();
+  });
+});
