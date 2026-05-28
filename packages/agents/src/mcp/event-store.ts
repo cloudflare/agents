@@ -6,7 +6,9 @@ import type {
 } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 /**
- * Durable Object–backed implementation of {@link EventStore}.
+ * Durable Object–backed implementation of {@link EventStore}, used as the
+ * default resumability store for `McpAgent`. Internal — not exported from
+ * `agents/mcp`. Override `McpAgent.getEventStore()` to swap or disable.
  *
  * Events are stored under keys of the form `__mcp_event__:<streamId>:<seqHex>`,
  * where `seqHex` is a fixed-width hexadecimal counter that preserves
@@ -17,14 +19,10 @@ import type {
  * The store is bounded per stream by `maxEventsPerStream` (default 256). When
  * the bound is exceeded the oldest events for that stream are evicted.
  *
- * This default implementation supports SSE resumption via `Last-Event-ID`,
- * which lets clients reconnect after the Cloudflare edge closes an idle stream
- * (~5 minute watchdog) instead of relying on a server-side keepalive that
- * would prevent the Durable Object from hibernating.
- *
- * @remarks
  * Tied to the lifecycle of the owning Durable Object. When the DO is
  * destroyed, the event log is destroyed with it.
+ *
+ * @internal
  */
 export class DurableObjectEventStore implements EventStore {
   private static readonly KEY_PREFIX = "__mcp_event__:";

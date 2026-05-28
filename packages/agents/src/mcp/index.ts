@@ -573,8 +573,6 @@ export {
 
 export { getMcpAuthContext, type McpAuthContext } from "./auth-context";
 
-export { DurableObjectEventStore } from "./event-store";
-
 export {
   WorkerTransport,
   type WorkerTransportOptions,

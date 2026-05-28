@@ -90,8 +90,7 @@ export interface WorkerTransportOptions {
    * resumed; they get a 25s comment-frame keepalive regardless of this
    * setting so long-running tool calls survive the idle watchdog.
    *
-   * Bring your own store. For an Agent / Durable Object–hosted transport,
-   * pass `new DurableObjectEventStore(this.ctx.storage)`. See
+   * Bring your own {@link EventStore} implementation. See
    * cloudflare/agents#1583.
    */
   eventStore?: EventStore;
