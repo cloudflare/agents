@@ -1065,6 +1065,70 @@ describe("resume coordination during pending continuation", () => {
     await closeWS(ws);
   });
 
+  it("continues when the initiating connection closes before coalescing finishes", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await delay(100);
+
+    const userMsg: UIMessage = {
+      id: "msg-close-before-coalesce-user",
+      role: "user",
+      parts: [{ type: "text", text: "hi" }]
+    } as UIMessage;
+
+    const initialDone = waitForDone(ws, 10000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_CHAT_REQUEST,
+        id: "req-close-before-coalesce",
+        init: {
+          method: "POST",
+          body: JSON.stringify({ messages: [userMsg] })
+        }
+      })
+    );
+    await initialDone;
+
+    await agent.clearResponseLog();
+    await agent.persistToolCallMessage([
+      userMsg,
+      {
+        id: "assistant-close-before-coalesce",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-close-before-coalesce",
+            state: "input-available",
+            input: { action: "test" }
+          }
+        ]
+      } as unknown as UIMessage
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-close-before-coalesce",
+        toolName: "client_action",
+        output: "done",
+        autoContinue: true
+      })
+    );
+
+    await delay(10);
+    await closeWS(ws);
+
+    await waitUntil(async () => {
+      const log = (await agent.getResponseLog()) as ChatResponseResult[];
+      return log.some((entry) => entry.continuation);
+    }, 10000);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.some((entry) => entry.continuation)).toBe(true);
+  });
+
   it("holds STREAM_RESUME_REQUEST while continuation is pending", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

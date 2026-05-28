@@ -595,13 +595,7 @@ export class AIChatAgent<
     ) => {
       // Clean up pending resume state for this connection
       this._pendingResumeConnections.delete(connection.id);
-      this._continuation.awaitingConnections.delete(connection.id);
-      if (this._continuation.pending?.connectionId === connection.id) {
-        this._continuation.pending = null;
-      }
-      if (this._continuation.activeConnectionId === connection.id) {
-        this._continuation.activeConnectionId = null;
-      }
+      this._continuation.releaseConnection(connection.id);
       // Call consumer's onClose
       return _onClose(connection, code, reason, wasClean);
     };
@@ -907,7 +901,8 @@ export class AIChatAgent<
             }
           } else if (
             this._continuation.pending !== null &&
-            this._continuation.pending.connectionId === connection.id
+            (this._continuation.pending.connectionId === null ||
+              this._continuation.pending.connectionId === connection.id)
           ) {
             this._continuation.awaitingConnections.set(
               connection.id,

@@ -50,7 +50,7 @@ export interface ContinuationPending<
   TConnection extends ContinuationConnection = ContinuationConnection
 > {
   connection: TConnection;
-  connectionId: string;
+  connectionId: string | null;
   requestId: string;
   clientTools?: ClientToolSchema[];
   body?: Record<string, unknown>;
@@ -63,7 +63,7 @@ export interface ContinuationDeferred<
   TConnection extends ContinuationConnection = ContinuationConnection
 > {
   connection: TConnection;
-  connectionId: string;
+  connectionId: string | null;
   clientTools?: ClientToolSchema[];
   body?: Record<string, unknown>;
   errorPrefix: string;
@@ -94,6 +94,23 @@ export class ContinuationState<
     this.clearDeferred();
     this.activeRequestId = null;
     this.activeConnectionId = null;
+  }
+
+  /**
+   * Mark a connection as no longer available without canceling the
+   * continuation it initiated.
+   */
+  releaseConnection(connectionId: string): void {
+    this.awaitingConnections.delete(connectionId);
+    if (this.pending?.connectionId === connectionId) {
+      this.pending = { ...this.pending, connectionId: null };
+    }
+    if (this.deferred?.connectionId === connectionId) {
+      this.deferred = { ...this.deferred, connectionId: null };
+    }
+    if (this.activeConnectionId === connectionId) {
+      this.activeConnectionId = null;
+    }
   }
 
   /**
@@ -159,7 +176,9 @@ export class ContinuationState<
       pastCoalesce: false
     };
 
-    this.awaitingConnections.set(d.connectionId, d.connection);
+    if (d.connectionId !== null) {
+      this.awaitingConnections.set(d.connectionId, d.connection);
+    }
     return this.pending;
   }
 }
