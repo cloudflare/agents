@@ -260,7 +260,10 @@ export function messengerReplyFailureMode(
 }
 
 export interface MessengerDeliveryTarget {
-  cancelChat(requestId: string, reason?: string): Promise<boolean>;
+  cancelChat(
+    requestId: string,
+    reason?: string
+  ): boolean | void | Promise<boolean | void>;
   chat(
     userMessage: string | UIMessage,
     callback: StreamCallback
@@ -341,9 +344,9 @@ export async function deliverMessengerReply(
 
       const requestId = callback.requestId();
       if (requestId) {
-        await options.target
-          .cancelChat(requestId, toError(error).message)
-          .catch(() => undefined);
+        await Promise.resolve(
+          options.target.cancelChat(requestId, toError(error).message)
+        ).catch(() => undefined);
       }
       callback.fail(error);
       throw error;

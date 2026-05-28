@@ -115,7 +115,10 @@ export interface ChatSdkMessengerEventInput {
 }
 
 export interface MessengerThinkTarget {
-  cancelChat(requestId: string, reason?: string): Promise<boolean>;
+  cancelChat(
+    requestId: string,
+    reason?: string
+  ): boolean | void | Promise<boolean | void>;
   chat(
     userMessage: string | UIMessage,
     callback: StreamCallback

@@ -551,6 +551,49 @@ describe("think messengers core", () => {
     expect(JSON.stringify(posts)).not.toContain("secret database hostname");
   });
 
+  it("preserves delivery errors when cancelling local self targets", async () => {
+    const policyErrors: string[] = [];
+    const posts: unknown[] = [];
+
+    await deliverMessengerReply({
+      event: baseEvent,
+      policy: {
+        isExpectedDeliveryCompletion(error) {
+          policyErrors.push(
+            error instanceof Error ? error.message : String(error)
+          );
+          return false;
+        }
+      },
+      surface: {
+        async post(message) {
+          if (isAsyncIterable(message)) {
+            for await (const chunk of message) {
+              posts.push(chunk);
+            }
+            throw new Error("delivery failed");
+          }
+          posts.push(message);
+        }
+      },
+      target: {
+        cancelChat() {
+          return undefined;
+        },
+        chat(_message, callback) {
+          callback.onStart({ requestId: "request-1" });
+          callback.onEvent(
+            JSON.stringify({ type: "text-delta", delta: "hello" })
+          );
+          return Promise.resolve();
+        }
+      }
+    });
+
+    expect(policyErrors).toEqual(["delivery failed", "delivery failed"]);
+    expect(posts).toEqual(["hello", { markdown: ERROR_MESSENGER_RESPONSE }]);
+  });
+
   it("classifies messenger delivery failures", () => {
     expect(messengerReplyFailureMode(false)).toBe("error");
     expect(messengerReplyFailureMode(true)).toBe("apologize");
