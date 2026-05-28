@@ -17,6 +17,19 @@ const validScheduledTasks = defineScheduledTasks({
   wallClockInlineTimezone: {
     schedule: "every weekday at 09:00 in Europe/London",
     prompt: "Run inline timezone task"
+  },
+  handler: {
+    schedule: "every 1 hour",
+    handler: (ctx) => {
+      const idempotencyKey: string = ctx.idempotencyKey;
+      const scheduledFor: number = ctx.scheduledFor;
+      const scheduleKind: "interval" | "wall-clock" = ctx.scheduleKind;
+      const timezone: string | undefined = ctx.timezone;
+      void idempotencyKey;
+      void scheduledFor;
+      void scheduleKind;
+      void timezone;
+    }
   }
 });
 
@@ -37,5 +50,14 @@ defineScheduledTasks({
     schedule: "every 5 minutes",
     timezone: "UTC",
     prompt: "Interval with timezone"
+  }
+});
+
+defineScheduledTasks({
+  // @ts-expect-error scheduled tasks must define prompt or handler, not both
+  promptAndHandler: {
+    schedule: "every 5 minutes",
+    prompt: "Run prompt",
+    handler: () => {}
   }
 });

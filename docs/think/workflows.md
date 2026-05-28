@@ -148,11 +148,29 @@ continue after the Workflow stops waiting.
 
 ## Boundary With Other Primitives
 
-Use scheduled tasks for recurring prompts:
+Use `getScheduledTasks()` for recurring prompt submissions or deterministic
+scheduled handlers:
 
 ```typescript
-async onScheduled() {
-  await this.saveMessages([{ role: "user", parts: [{ type: "text", text: "Daily summary" }] }]);
+getScheduledTasks() {
+  return {
+    dailySummary: {
+      schedule: "every day at 09:00",
+      timezone: "UTC",
+      prompt: "Generate the daily report."
+    },
+    dailyWorkflow: {
+      schedule: "every day at 09:00",
+      timezone: "UTC",
+      retry: { maxAttempts: 3 },
+      handler: async ({ idempotencyKey, scheduledFor, timezone }) => {
+        await this.env.REPORT_WORKFLOW.create({
+          id: idempotencyKey,
+          params: { scheduledFor, timezone }
+        });
+      }
+    }
+  };
 }
 ```
 

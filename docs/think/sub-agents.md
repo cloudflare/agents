@@ -211,7 +211,7 @@ await this.saveMessages((current) => [
 
 ### Scheduled responses
 
-Trigger a turn from a cron schedule:
+Trigger a recurring prompt turn with `getScheduledTasks()`:
 
 ```typescript
 export class MyAgent extends Think<Env> {
@@ -219,14 +219,14 @@ export class MyAgent extends Think<Env> {
     /* ... */
   }
 
-  async onScheduled() {
-    await this.saveMessages([
-      {
-        id: crypto.randomUUID(),
-        role: "user",
-        parts: [{ type: "text", text: "Generate the daily report." }]
+  getScheduledTasks() {
+    return {
+      dailyReport: {
+        schedule: "every day at 09:00",
+        timezone: "UTC",
+        prompt: "Generate the daily report."
       }
-    ]);
+    };
   }
 }
 ```

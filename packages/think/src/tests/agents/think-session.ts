@@ -22,6 +22,7 @@ import type {
   ThinkSubmissionStatus,
   SubmitMessagesResult,
   ThinkScheduledTask,
+  ThinkScheduledTaskContext,
   ThinkScheduledTasks,
   TurnContext,
   TurnConfig,
@@ -2770,7 +2771,10 @@ export class ThinkProgrammaticTestAgent extends Think {
 type ScheduledTaskConfigForTest = {
   schedule: string;
   timezone?: string;
-  prompt: string;
+  prompt?: string;
+  handler?: "record" | "throw" | "throw-once";
+  retry?: ThinkScheduledTask["retry"];
+  metadata?: Record<string, unknown>;
 };
 
 type DeclaredScheduledTaskRowForTest = {
@@ -2790,6 +2794,18 @@ type DeclaredScheduledTaskPayloadForTest = {
   scheduledFor: number;
 };
 
+type ScheduledTaskHandlerEventForTest = {
+  taskId: string;
+  scheduledFor: number;
+  scheduledForIso: string;
+  occurrenceKey: string;
+  idempotencyKey: string;
+  schedule: string;
+  scheduleKind: string;
+  timezone: string | null;
+  metadataJson: string | null;
+};
+
 export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
   override async getDefaultTimezone(): Promise<string | undefined> {
     return this.ctx.storage.get<string>("scheduledTasksDefaultTimezone");
@@ -2802,15 +2818,53 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
       )) ?? {};
     const tasks: ThinkScheduledTasks = {};
     for (const [taskId, task] of Object.entries(config)) {
+      const base = {
+        schedule: task.schedule as ThinkScheduledTask["schedule"],
+        ...(task.timezone !== undefined && { timezone: task.timezone }),
+        ...(task.retry !== undefined && { retry: task.retry }),
+        ...(task.metadata !== undefined && { metadata: task.metadata })
+      };
+      if (task.handler) {
+        tasks[taskId] = {
+          ...base,
+          handler: async (ctx: ThinkScheduledTaskContext) => {
+            const events =
+              (await this.ctx.storage.get<ScheduledTaskHandlerEventForTest[]>(
+                "scheduledTaskHandlerEvents"
+              )) ?? [];
+            events.push({
+              taskId: ctx.taskId,
+              scheduledFor: ctx.scheduledFor,
+              scheduledForIso: ctx.scheduledForDate.toISOString(),
+              occurrenceKey: ctx.occurrenceKey,
+              idempotencyKey: ctx.idempotencyKey,
+              schedule: ctx.schedule,
+              scheduleKind: ctx.scheduleKind,
+              timezone: ctx.timezone ?? null,
+              metadataJson:
+                ctx.metadata === undefined ? null : JSON.stringify(ctx.metadata)
+            });
+            await this.ctx.storage.put("scheduledTaskHandlerEvents", events);
+            if (
+              task.handler === "throw" ||
+              (task.handler === "throw-once" &&
+                events.filter((event) => event.taskId === ctx.taskId).length ===
+                  1)
+            ) {
+              throw new Error("scheduled handler failed");
+            }
+          }
+        } as ThinkScheduledTask;
+        continue;
+      }
       const prompt: ThinkScheduledTask["prompt"] =
         task.prompt === "__throw__"
           ? () => {
               throw new Error("scheduled prompt failed");
             }
-          : task.prompt;
+          : (task.prompt ?? "");
       tasks[taskId] = {
-        schedule: task.schedule as ThinkScheduledTask["schedule"],
-        ...(task.timezone !== undefined && { timezone: task.timezone }),
+        ...base,
         prompt
       } as ThinkScheduledTask;
     }
@@ -2832,11 +2886,7 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
   }
 
   async reconcileScheduledTasksForTest(): Promise<void> {
-    await (
-      this as unknown as {
-        _reconcileDeclaredScheduledTasks: () => Promise<void>;
-      }
-    )._reconcileDeclaredScheduledTasks();
+    await this.internal_reconcileScheduledTasks();
   }
 
   async reconcileScheduledTasksErrorForTest(): Promise<string> {
@@ -2914,6 +2964,34 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
 
   async listSchedulesForTest(): Promise<Schedule<unknown>[]> {
     return this.listSchedules();
+  }
+
+  async listScheduledTaskHandlerEventsForTest(): Promise<
+    ScheduledTaskHandlerEventForTest[]
+  > {
+    return (
+      (await this.ctx.storage.get<ScheduledTaskHandlerEventForTest[]>(
+        "scheduledTaskHandlerEvents"
+      )) ?? []
+    );
+  }
+
+  async clearDeclaredScheduleIdForTest(taskId: string): Promise<void> {
+    const row = (
+      this as unknown as {
+        _readDeclaredScheduledTaskRow(
+          taskId: string
+        ): DeclaredScheduledTaskRowForTest | null;
+      }
+    )._readDeclaredScheduledTaskRow(taskId);
+    if (!row) throw new Error("No declared schedule row");
+    if (row.schedule_id) await this.cancelSchedule(row.schedule_id);
+    this.sql`
+      UPDATE cf_think_scheduled_tasks
+      SET schedule_id = NULL
+      WHERE owner_key = ${row.owner_key}
+        AND task_id = ${taskId}
+    `;
   }
 
   async createUnrelatedScheduleForTest(): Promise<string> {

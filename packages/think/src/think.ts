@@ -645,8 +645,32 @@ export type ThinkScheduledTaskSchedule =
   | ThinkWallClockSchedule
   | `${ThinkWallClockSchedule} in ${string}`;
 
-type ThinkScheduledTaskBase = {
+export type ThinkScheduledTaskContext = {
+  taskId: string;
+  scheduledFor: number;
+  scheduledForDate: Date;
+  occurrenceKey: string;
+  idempotencyKey: string;
+  schedule: string;
+  scheduleKind: "interval" | "wall-clock";
+  timezone?: string;
+  metadata?: Record<string, unknown>;
+};
+
+type ThinkScheduledTaskPromptAction = {
   prompt: string | (() => string | Promise<string>);
+  handler?: never;
+};
+
+type ThinkScheduledTaskHandlerAction = {
+  handler: (ctx: ThinkScheduledTaskContext) => void | Promise<void>;
+  prompt?: never;
+};
+
+type ThinkScheduledTaskBase = (
+  | ThinkScheduledTaskPromptAction
+  | ThinkScheduledTaskHandlerAction
+) & {
   retry?: RetryOptions;
   metadata?: Record<string, unknown>;
 };
@@ -694,7 +718,8 @@ type ParseDeclaredScheduleResult =
 
 type NormalizedDeclaredTask = {
   taskId: string;
-  prompt: ThinkScheduledTask["prompt"];
+  prompt?: ThinkScheduledTaskPromptAction["prompt"];
+  handler?: ThinkScheduledTaskHandlerAction["handler"];
   schedule: ParsedDeclaredSchedule;
   retry?: RetryOptions;
   metadata?: Record<string, unknown>;
@@ -1613,6 +1638,15 @@ export class Think<
   /** Return code-declared scheduled tasks for this agent. */
   getScheduledTasks(): ThinkScheduledTasks | Promise<ThinkScheduledTasks> {
     return {};
+  }
+
+  /**
+   * Reconcile code-declared scheduled tasks immediately.
+   * Static declarations are reconciled on startup automatically; call this
+   * after changing app-owned data that `getScheduledTasks()` reads.
+   */
+  async internal_reconcileScheduledTasks(): Promise<void> {
+    await this._reconcileDeclaredScheduledTasks();
   }
 
   /**
@@ -3121,6 +3155,24 @@ export class Think<
     `;
   }
 
+  private _updateDeclaredScheduledTaskSchedule(
+    task: NormalizedDeclaredTask,
+    ownerKey: string,
+    scheduled: { scheduleId: string; scheduledFor: number },
+    updatedAt = Date.now()
+  ): void {
+    this.sql`
+      UPDATE cf_think_scheduled_tasks
+      SET schedule_hash = ${task.scheduleHash},
+          task_hash = ${task.taskHash},
+          schedule_id = ${scheduled.scheduleId},
+          next_run_at = ${scheduled.scheduledFor},
+          updated_at = ${updatedAt}
+      WHERE owner_key = ${ownerKey}
+        AND task_id = ${task.taskId}
+    `;
+  }
+
   private async _normalizeDeclaredScheduledTasks(
     tasks: ThinkScheduledTasks,
     defaultTimezone: string | undefined
@@ -3137,18 +3189,32 @@ export class Think<
         task.timezone,
         defaultTimezone
       );
+      const hasPrompt = "prompt" in task && task.prompt !== undefined;
+      const hasHandler = "handler" in task && task.handler !== undefined;
+      if (hasPrompt === hasHandler) {
+        throw new Error(
+          `Scheduled task "${taskId}" must define exactly one of prompt or handler`
+        );
+      }
       const scheduleHash = stableHash({
         schedule,
         retry: task.retry
       });
+      const actionHash = hasPrompt
+        ? {
+            type: "prompt",
+            value: typeof task.prompt === "string" ? task.prompt : "<function>"
+          }
+        : { type: "handler" };
       const taskHash = stableHash({
         scheduleHash,
-        prompt: typeof task.prompt === "string" ? task.prompt : "<function>",
+        action: actionHash,
         metadata: task.metadata
       });
       normalized.set(taskId, {
         taskId,
-        prompt: task.prompt,
+        ...(hasPrompt ? { prompt: task.prompt } : {}),
+        ...(hasHandler ? { handler: task.handler } : {}),
         schedule,
         retry: task.retry,
         metadata: task.metadata,
@@ -3230,10 +3296,6 @@ export class Think<
       seen.add(taskId);
       const row = existing.find((candidate) => candidate.task_id === taskId);
       if (!row) {
-        const scheduled = await this._scheduleDeclaredTaskOccurrence(
-          task,
-          new Date(now)
-        );
         this.sql`
           INSERT INTO cf_think_scheduled_tasks (
             owner_key, task_id, schedule_hash, task_hash, schedule_id,
@@ -3241,49 +3303,80 @@ export class Think<
           )
           VALUES (
             ${ownerKey}, ${taskId}, ${task.scheduleHash}, ${task.taskHash},
-            ${scheduled.scheduleId}, ${scheduled.scheduledFor},
-            ${now}, ${now}
+            NULL, NULL, ${now}, ${now}
           )
         `;
+        const scheduled = await this._scheduleDeclaredTaskOccurrence(
+          task,
+          new Date(now)
+        );
+        this._updateDeclaredScheduledTaskSchedule(
+          task,
+          ownerKey,
+          scheduled,
+          now
+        );
         continue;
       }
 
       if (row.schedule_hash !== task.scheduleHash) {
         if (row.schedule_id) await this.cancelSchedule(row.schedule_id);
-        const scheduled = await this._scheduleDeclaredTaskOccurrence(
-          task,
-          new Date(now)
-        );
         this.sql`
           UPDATE cf_think_scheduled_tasks
           SET schedule_hash = ${task.scheduleHash},
               task_hash = ${task.taskHash},
-              schedule_id = ${scheduled.scheduleId},
-              next_run_at = ${scheduled.scheduledFor},
+              schedule_id = NULL,
+              next_run_at = NULL,
               updated_at = ${now}
           WHERE owner_key = ${ownerKey}
             AND task_id = ${taskId}
         `;
+        const scheduled = await this._scheduleDeclaredTaskOccurrence(
+          task,
+          new Date(now)
+        );
+        this._updateDeclaredScheduledTaskSchedule(
+          task,
+          ownerKey,
+          scheduled,
+          now
+        );
+        continue;
+      }
+
+      if (!row.schedule_id) {
+        const scheduled =
+          row.next_run_at === null
+            ? await this._scheduleDeclaredTaskOccurrence(task, new Date(now))
+            : await this._scheduleDeclaredTaskOccurrenceAt(
+                task,
+                row.next_run_at
+              );
+        this._updateDeclaredScheduledTaskSchedule(
+          task,
+          ownerKey,
+          scheduled,
+          now
+        );
         continue;
       }
 
       if (row.schedule_id) {
         const schedule = await this.getScheduleById(row.schedule_id);
         if (!schedule) {
-          const scheduled = await this._scheduleDeclaredTaskOccurrence(
+          const scheduled =
+            row.next_run_at === null
+              ? await this._scheduleDeclaredTaskOccurrence(task, new Date(now))
+              : await this._scheduleDeclaredTaskOccurrenceAt(
+                  task,
+                  row.next_run_at
+                );
+          this._updateDeclaredScheduledTaskSchedule(
             task,
-            new Date(now),
-            row.next_run_at ?? undefined
+            ownerKey,
+            scheduled,
+            now
           );
-          this.sql`
-            UPDATE cf_think_scheduled_tasks
-            SET task_hash = ${task.taskHash},
-                schedule_id = ${scheduled.scheduleId},
-                next_run_at = ${scheduled.scheduledFor},
-                updated_at = ${now}
-            WHERE owner_key = ${ownerKey}
-              AND task_id = ${taskId}
-          `;
           continue;
         }
       }
@@ -3319,18 +3412,58 @@ export class Think<
       now,
       previousScheduledFor
     );
-    const scheduledFor = next.getTime();
+    return this._scheduleDeclaredTaskOccurrenceAt(task, next.getTime());
+  }
+
+  private async _scheduleDeclaredTaskOccurrenceAt(
+    task: NormalizedDeclaredTask,
+    scheduledFor: number
+  ): Promise<{ scheduleId: string; scheduledFor: number }> {
     const schedule = await this.schedule<DeclaredScheduledTaskPayload>(
-      next,
+      new Date(scheduledFor),
       "_runDeclaredScheduledTask",
       {
         taskId: task.taskId,
         scheduleHash: task.scheduleHash,
         scheduledFor
       },
-      { retry: task.retry, idempotent: true }
+      { idempotent: true }
     );
     return { scheduleId: schedule.id, scheduledFor };
+  }
+
+  private async _advanceDeclaredScheduledTask(
+    task: NormalizedDeclaredTask,
+    payload: DeclaredScheduledTaskPayload,
+    ownerKey: string
+  ): Promise<void> {
+    const scheduled = await this._scheduleDeclaredTaskOccurrence(
+      task,
+      new Date(),
+      payload.scheduledFor
+    );
+    this._updateDeclaredScheduledTaskSchedule(task, ownerKey, scheduled);
+  }
+
+  private _declaredScheduledTaskContext(
+    task: NormalizedDeclaredTask,
+    payload: DeclaredScheduledTaskPayload,
+    ownerKey: string
+  ): ThinkScheduledTaskContext {
+    const occurrenceKey = `${payload.taskId}:${payload.scheduledFor}`;
+    return {
+      taskId: payload.taskId,
+      scheduledFor: payload.scheduledFor,
+      scheduledForDate: new Date(payload.scheduledFor),
+      occurrenceKey,
+      idempotencyKey: `think-schedule:${ownerKey}:${occurrenceKey}`,
+      schedule: task.schedule.normalizedSchedule,
+      scheduleKind: task.schedule.kind,
+      ...(task.schedule.kind === "wall-clock" && {
+        timezone: task.schedule.timezone
+      }),
+      ...(task.metadata !== undefined && { metadata: task.metadata })
+    };
   }
 
   async _runDeclaredScheduledTask(
@@ -3347,50 +3480,66 @@ export class Think<
 
     const row = this._readDeclaredScheduledTaskRow(payload.taskId);
     if (!row || row.schedule_hash !== payload.scheduleHash) return;
+    if (row.next_run_at !== null && row.next_run_at > payload.scheduledFor) {
+      return;
+    }
 
     const tasks = await this._declaredScheduledTasksForNow();
     const task = tasks.get(payload.taskId);
     if (!task || task.scheduleHash !== payload.scheduleHash) return;
 
-    const prompt =
-      typeof task.prompt === "function" ? await task.prompt() : task.prompt;
     const ownerKey = this._declaredScheduleOwnerKey();
-    await this.submitMessages(
-      [
-        {
-          id: crypto.randomUUID(),
-          role: "user",
-          parts: [{ type: "text", text: prompt }]
-        }
-      ],
-      {
-        idempotencyKey: `think-schedule:${ownerKey}:${payload.taskId}:${payload.scheduledFor}`,
-        metadata: {
-          ...task.metadata,
-          source: "scheduled-task",
-          ownerKey,
-          taskId: payload.taskId,
-          scheduledFor: payload.scheduledFor,
-          schedule: task.schedule.normalizedSchedule
-        }
-      }
-    );
+    const context = this._declaredScheduledTaskContext(task, payload, ownerKey);
 
-    const scheduled = await this._scheduleDeclaredTaskOccurrence(
-      task,
-      new Date(),
-      payload.scheduledFor
-    );
-    this.sql`
-      UPDATE cf_think_scheduled_tasks
-      SET schedule_id = ${scheduled.scheduleId},
-          next_run_at = ${scheduled.scheduledFor},
-          task_hash = ${task.taskHash},
-          updated_at = ${Date.now()}
-      WHERE owner_key = ${ownerKey}
-        AND task_id = ${payload.taskId}
-        AND schedule_hash = ${payload.scheduleHash}
-    `;
+    let actionError: unknown;
+    try {
+      await this.retry(async () => {
+        if (task.prompt !== undefined) {
+          const prompt =
+            typeof task.prompt === "function"
+              ? await task.prompt()
+              : task.prompt;
+          await this.submitMessages(
+            [
+              {
+                id: crypto.randomUUID(),
+                role: "user",
+                parts: [{ type: "text", text: prompt }]
+              }
+            ],
+            {
+              idempotencyKey: context.idempotencyKey,
+              metadata: {
+                ...task.metadata,
+                source: "scheduled-task",
+                ownerKey,
+                taskId: payload.taskId,
+                scheduledFor: payload.scheduledFor,
+                schedule: task.schedule.normalizedSchedule
+              }
+            }
+          );
+        } else {
+          await task.handler?.(context);
+        }
+      }, task.retry);
+    } catch (error) {
+      actionError = error;
+    } finally {
+      await this._advanceDeclaredScheduledTask(task, payload, ownerKey);
+    }
+
+    if (actionError !== undefined) {
+      console.error(
+        `[Think] Scheduled task "${payload.taskId}" failed; next occurrence was still scheduled`,
+        actionError
+      );
+      try {
+        await this.onError(actionError);
+      } catch {
+        // Preserve recurrence even if user error handling fails.
+      }
+    }
   }
 
   // ── Durable programmatic submissions ───────────────────────────

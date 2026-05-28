@@ -121,10 +121,10 @@ On each turn, Think appends a small capability block to the assembled system pro
 
 ### Scheduled tasks
 
-Use `getScheduledTasks()` for code-declared recurring prompts. Think reconciles
-these declarations on startup, stores durable one-shot schedules for the next
-occurrence, and runs each occurrence through `submitMessages()` with an
-idempotency key.
+Use `getScheduledTasks()` for code-declared recurring prompts or deterministic
+scheduled handlers. Think reconciles these declarations on startup, stores
+durable one-shot schedules for the next occurrence, and re-arms the next
+occurrence after each run.
 
 ```ts
 import { Think } from "@cloudflare/think";
@@ -140,11 +140,28 @@ export class Assistant extends Think<Env> {
       weeklyCommitReport: {
         schedule: "every week on monday at 09:00",
         prompt:
-          "Compile all my GitHub commits for the last week and send an email to my boss."
+          "Compile all my GitHub commits for the last week and write a concise summary."
       },
       workout: {
         schedule: "every day at 08:00 in Europe/London",
         prompt: "Start my workout."
+      },
+      customerDigest: {
+        schedule: "every day at 09:00",
+        timezone: "America/New_York",
+        metadata: { workflowName: "customer-digest" },
+        retry: { maxAttempts: 3 },
+        handler: async ({
+          idempotencyKey,
+          scheduledFor,
+          scheduleKind,
+          timezone
+        }) => {
+          await this.env.DIGEST_WORKFLOW.create({
+            id: idempotencyKey,
+            params: { scheduledFor, scheduleKind, timezone }
+          });
+        }
       }
     };
   }
@@ -163,6 +180,24 @@ If you prefer not to annotate the method, wrap the object with
 `defineScheduledTasks(...)` to keep the same checks. Think also validates
 scheduled tasks at runtime during startup reconciliation, so dynamically built
 objects still fail before schedules are persisted.
+
+Each task must define exactly one of `prompt` or `handler`. Prompt tasks create a
+durable submission with `submitMessages()`. Handler tasks receive
+`{ taskId, scheduledFor, scheduledForDate, occurrenceKey, idempotencyKey,
+schedule, scheduleKind, timezone, metadata }` and are intended for app-owned
+work such as creating a Workflow run or writing a run ledger. Delivery is
+at-least-once; use `idempotencyKey` or `occurrenceKey` for your own durable
+idempotency.
+
+Static declarations reconcile on startup. If `getScheduledTasks()` reads
+product-owned data that can change while the Durable Object is live, call
+`internal_reconcileScheduledTasks()` after updating that data. During
+reconciliation Think records the task row before creating the underlying Agent
+schedule, so a `schedule_id` may be temporarily empty if the object is
+interrupted mid-reconcile; the next reconcile repairs that pending row. The
+task `retry` option retries the prompt or handler action before the failure is
+logged. The next occurrence is still scheduled after the action succeeds or
+exhausts its retries, so failed occurrences do not block future runs.
 
 ### Lifecycle hooks
 
@@ -399,6 +434,8 @@ Use browser chat through `useAgentChat` when a user drives the conversation. Use
 `saveMessages()` when server code controls the trigger and can wait for the
 model response. Use `submitMessages()` when a caller needs fast durable
 acceptance, idempotent retries, cancellation, and later status inspection.
+Use `getScheduledTasks()` when code should create recurring prompt submissions
+or deterministic scheduled handlers.
 
 Use `subAgent(...).chat()` for direct streaming RPC to a specific child when
 your code owns forwarding and replay policy. Use `agentTool()` or

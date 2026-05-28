@@ -7,7 +7,10 @@ import type { ThinkSubmissionInspection } from "../think";
 type ScheduledTaskConfigForTest = {
   schedule: string;
   timezone?: string;
-  prompt: string;
+  prompt?: string;
+  handler?: "record" | "throw" | "throw-once";
+  retry?: { maxAttempts?: number; baseDelayMs?: number; maxDelayMs?: number };
+  metadata?: Record<string, unknown>;
 };
 
 type DeclaredScheduledTaskRowForTest = {
@@ -22,6 +25,18 @@ type DeclaredScheduledTaskPayloadForTest = {
   taskId: string;
   scheduleHash: string;
   scheduledFor: number;
+};
+
+type ScheduledTaskHandlerEventForTest = {
+  taskId: string;
+  scheduledFor: number;
+  scheduledForIso: string;
+  occurrenceKey: string;
+  idempotencyKey: string;
+  schedule: string;
+  scheduleKind: string;
+  timezone: string | null;
+  metadataJson: string | null;
 };
 
 type ThinkScheduledTasksTestStub = {
@@ -48,6 +63,10 @@ type ThinkScheduledTasksTestStub = {
     DeclaredScheduledTaskRowForTest[]
   >;
   listSchedulesForTest(): Promise<Array<{ id: string; payload: unknown }>>;
+  listScheduledTaskHandlerEventsForTest(): Promise<
+    ScheduledTaskHandlerEventForTest[]
+  >;
+  clearDeclaredScheduleIdForTest(taskId: string): Promise<void>;
   createUnrelatedScheduleForTest(): Promise<string>;
   getFirstDeclaredPayloadForTest(): Promise<DeclaredScheduledTaskPayloadForTest>;
   runDeclaredPayloadForTest(
@@ -96,6 +115,20 @@ async function waitForSubmissionCount(
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   return agent.listSubmissionsForTest({ limit: 10 });
+}
+
+function declaredTaskScheduleIds(
+  schedules: Array<{ id: string; payload: unknown }>
+): string[] {
+  return schedules
+    .filter(
+      (schedule): schedule is { id: string; payload: { taskId: string } } =>
+        schedule.payload != null &&
+        typeof schedule.payload === "object" &&
+        "taskId" in schedule.payload
+    )
+    .map((schedule) => schedule.id)
+    .sort();
 }
 
 describe("Think scheduled tasks", () => {
@@ -242,6 +275,9 @@ describe("Think scheduled tasks", () => {
     const payload = await agent.getFirstDeclaredPayloadForTest();
 
     await agent.runDeclaredPayloadForTest(payload);
+    const schedulesAfterFirst = declaredTaskScheduleIds(
+      await agent.listSchedulesForTest()
+    );
     await agent.runDeclaredPayloadForTest(payload);
 
     const submissions = await waitForSubmissionCount(agent, 1);
@@ -262,9 +298,12 @@ describe("Think scheduled tasks", () => {
     );
     const [row] = await agent.listDeclaredScheduledTaskRowsForTest();
     expect(row.next_run_at).toBeGreaterThan(payload.scheduledFor);
+    expect(declaredTaskScheduleIds(await agent.listSchedulesForTest())).toEqual(
+      schedulesAfterFirst
+    );
   });
 
-  it("leaves the current occurrence in place when prompt resolution fails", async () => {
+  it("re-arms the next occurrence when prompt resolution fails", async () => {
     const agent = await freshAgent();
     await agent.setScheduledTasksForTest({
       broken: {
@@ -275,13 +314,94 @@ describe("Think scheduled tasks", () => {
     await agent.reconcileScheduledTasksForTest();
     const before = await agent.getFirstDeclaredPayloadForTest();
 
-    await expect(agent.runDeclaredPayloadErrorForTest(before)).resolves.toMatch(
-      /scheduled prompt failed/
+    await expect(agent.runDeclaredPayloadErrorForTest(before)).resolves.toBe(
+      ""
     );
 
     const [row] = await agent.listDeclaredScheduledTaskRowsForTest();
-    expect(row.next_run_at).toBe(before.scheduledFor);
+    expect(row.next_run_at).toBeGreaterThan(before.scheduledFor);
     expect(await agent.listSubmissionsForTest({ limit: 10 })).toHaveLength(0);
+  });
+
+  it("runs scheduled task handlers with stable occurrence context", async () => {
+    const agent = await freshAgent();
+    await agent.setScheduledTasksForTest({
+      workflow: {
+        schedule: "every 1 minute",
+        handler: "record",
+        metadata: { workflowName: "daily-digest" }
+      }
+    });
+    await agent.reconcileScheduledTasksForTest();
+    const payload = await agent.getFirstDeclaredPayloadForTest();
+
+    await agent.runDeclaredPayloadForTest(payload);
+
+    const events = await agent.listScheduledTaskHandlerEventsForTest();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      taskId: "workflow",
+      scheduledFor: payload.scheduledFor,
+      scheduledForIso: new Date(payload.scheduledFor).toISOString(),
+      occurrenceKey: `workflow:${payload.scheduledFor}`,
+      schedule: "every 1 minute",
+      scheduleKind: "interval",
+      timezone: null,
+      metadataJson: JSON.stringify({ workflowName: "daily-digest" })
+    });
+    expect(events[0].idempotencyKey).toContain(
+      `workflow:${payload.scheduledFor}`
+    );
+    expect(await agent.listSubmissionsForTest({ limit: 10 })).toHaveLength(0);
+
+    const [row] = await agent.listDeclaredScheduledTaskRowsForTest();
+    expect(row.next_run_at).toBeGreaterThan(payload.scheduledFor);
+  });
+
+  it("retries scheduled task handlers before recording failure", async () => {
+    const agent = await freshAgent();
+    await agent.setScheduledTasksForTest({
+      workflow: {
+        schedule: "every day at 09:00",
+        timezone: "UTC",
+        handler: "throw-once",
+        retry: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1 }
+      }
+    });
+    await agent.reconcileScheduledTasksForTest();
+    const payload = await agent.getFirstDeclaredPayloadForTest();
+
+    await agent.runDeclaredPayloadForTest(payload);
+
+    const events = await agent.listScheduledTaskHandlerEventsForTest();
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
+      scheduleKind: "wall-clock",
+      timezone: "UTC"
+    });
+    const [row] = await agent.listDeclaredScheduledTaskRowsForTest();
+    expect(row.next_run_at).toBeGreaterThanOrEqual(payload.scheduledFor);
+  });
+
+  it("re-arms the next occurrence when scheduled task handlers fail", async () => {
+    const agent = await freshAgent();
+    await agent.setScheduledTasksForTest({
+      workflow: {
+        schedule: "every 1 minute",
+        handler: "throw"
+      }
+    });
+    await agent.reconcileScheduledTasksForTest();
+    const payload = await agent.getFirstDeclaredPayloadForTest();
+
+    await expect(agent.runDeclaredPayloadErrorForTest(payload)).resolves.toBe(
+      ""
+    );
+
+    const events = await agent.listScheduledTaskHandlerEventsForTest();
+    expect(events).toHaveLength(3);
+    const [row] = await agent.listDeclaredScheduledTaskRowsForTest();
+    expect(row.next_run_at).toBeGreaterThan(payload.scheduledFor);
   });
 
   it("supports declared scheduled tasks in sub-agents", async () => {
@@ -302,6 +422,47 @@ describe("Think scheduled tasks", () => {
     expect(rows[0]).toMatchObject({ task_id: "childTask" });
     const childSchedules = await parent.listChildSchedulesForTest("child");
     expect(childSchedules).toHaveLength(1);
+  });
+
+  it("supports scheduled task handlers in sub-agents", async () => {
+    const parent = await freshAgent();
+    await parent.setChildScheduledTasksForTest("child", {
+      childHandler: {
+        schedule: "every 1 minute",
+        handler: "record"
+      }
+    });
+
+    await parent.reconcileChildScheduledTasksForTest("child");
+
+    const rows =
+      await parent.listChildDeclaredScheduledTaskRowsForTest("child");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ task_id: "childHandler" });
+    const childSchedules = await parent.listChildSchedulesForTest("child");
+    expect(childSchedules).toHaveLength(1);
+  });
+
+  it("reconciles pending declared rows without duplicate task rows", async () => {
+    const agent = await freshAgent();
+    await agent.setScheduledTasksForTest({
+      pending: {
+        schedule: "every 1 minute",
+        prompt: "Pending schedule"
+      }
+    });
+    await agent.reconcileScheduledTasksForTest();
+    const [before] = await agent.listDeclaredScheduledTaskRowsForTest();
+    await agent.clearDeclaredScheduleIdForTest("pending");
+
+    await agent.reconcileScheduledTasksForTest();
+
+    const rows = await agent.listDeclaredScheduledTaskRowsForTest();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ task_id: "pending" });
+    expect(rows[0].schedule_id).toBeTruthy();
+    expect(rows[0].next_run_at).toBe(before.next_run_at);
+    expect(await agent.listSchedulesForTest()).toHaveLength(1);
   });
 
   it("keeps declared task ledgers isolated across parents and sub-agents", async () => {
