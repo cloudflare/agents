@@ -28,13 +28,15 @@ import { z } from "zod";
  *
  * The new behaviour:
  *
- *   - GET (standalone SSE listen stream): no keepalive. Idle drops are
- *     recovered by clients reconnecting with `Last-Event-ID` against a
- *     configured `EventStore`.
- *   - POST (tool response stream): always keepalive. POST streams are
- *     scoped to a request id and can't be resumed, so we write
- *     `: keepalive\n\n` every 25s so long-running tool calls survive
- *     the ~5min Cloudflare edge idle watchdog.
+ *   - GET (standalone SSE listen stream): keepalive depends on whether
+ *     the caller opted into resumability via `eventStore`. With one,
+ *     no keepalive (idle drops are recovered by reconnect). Without
+ *     one, 25s comment-frame keepalive (no recovery path, preserve
+ *     pre-fix behaviour).
+ *   - POST (tool response stream): always keepalive. The in-progress
+ *     tool call has no recovery path other than staying connected, so
+ *     we write `: keepalive\n\n` every 25s so long-running tool calls
+ *     survive the ~5min Cloudflare edge idle watchdog.
  */
 describe("WorkerTransport SSE keepalive (issue #1583)", () => {
   let setIntervalSpy = vi.spyOn(globalThis, "setInterval");
@@ -118,8 +120,8 @@ describe("WorkerTransport SSE keepalive (issue #1583)", () => {
     setIntervalSpy.mockRestore();
   });
 
-  describe("GET stream never arms a keepalive (resumability path)", () => {
-    it("with no eventStore configured", async () => {
+  describe("GET stream keepalive depends on eventStore", () => {
+    it("arms a 25s interval when no eventStore is configured", async () => {
       const server = createServer();
       const transport = await setupTransport(server, {
         sessionIdGenerator: () => "get-session-no-store"
@@ -137,12 +139,15 @@ describe("WorkerTransport SSE keepalive (issue #1583)", () => {
         })
       );
       expect(response.status).toBe(200);
-      expect(longRunningIntervals()).toEqual([]);
+
+      const intervals = longRunningIntervals();
+      expect(intervals.length).toBeGreaterThanOrEqual(1);
+      expect(intervals[0][1]).toBe(25_000);
 
       await server.close();
     });
 
-    it("with eventStore configured", async () => {
+    it("skips the keepalive when eventStore is configured", async () => {
       const server = createServer();
       const transport = await setupTransport(server, {
         sessionIdGenerator: () => "get-session-with-store",

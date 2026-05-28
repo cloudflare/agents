@@ -81,16 +81,25 @@ export interface WorkerTransportOptions {
    *
    * When set, the transport assigns a globally-unique `id:` to each SSE
    * event and replays missed events when a client reconnects with the
-   * `Last-Event-ID` header. This is the supported recovery path for the
-   * standalone GET stream, which is allowed to drop at the Cloudflare
-   * edge idle watchdog (~5 min) and never carries a server-side
-   * keepalive.
+   * `Last-Event-ID` header. Both GET (standalone listen stream) and POST
+   * (tool response stream) events are stored and replayable per the
+   * MCP 2025-03-26 spec.
    *
-   * POST response streams are scoped to a single request id and can't be
-   * resumed; they get a 25s comment-frame keepalive regardless of this
-   * setting so long-running tool calls survive the idle watchdog.
+   * Configuring an event store **disables the server-side keepalive**
+   * on the standalone GET stream — idle drops are recovered by
+   * reconnect rather than prevented by writing bytes. Without an event
+   * store, the GET stream still gets the 25s comment-frame keepalive
+   * so long-lived idle listeners aren't closed by the Cloudflare edge
+   * ~5min watchdog.
    *
-   * Bring your own {@link EventStore} implementation. See
+   * POST response streams always get the keepalive regardless of this
+   * setting: in-progress tool calls have no way to recover
+   * mid-execution without staying connected, so we don't let the
+   * stream drop in the first place.
+   *
+   * Bring your own {@link EventStore} implementation — e.g.
+   * `new DurableObjectEventStore(this.ctx.storage)` when embedding
+   * `WorkerTransport` inside a Durable Object / Agent. See
    * cloudflare/agents#1583.
    */
   eventStore?: EventStore;
@@ -362,14 +371,22 @@ export class WorkerTransport implements Transport {
       headers.set("mcp-session-id", this.sessionId);
     }
 
-    // No keepalive on the standalone GET stream. Idle drops are recovered
-    // by clients reconnecting with Last-Event-ID against a configured
-    // EventStore; callers who care about long-lived listen streams must
-    // wire one up. See cloudflare/agents#1583.
-    //
-    // `cleanup` reads `streamId` at teardown time, so it stays correct
-    // across the eventStore remap below.
+    // Keepalive policy on the standalone GET stream:
+    //   - eventStore configured → no keepalive. Idle drops are
+    //     recovered by clients reconnecting with Last-Event-ID.
+    //   - no eventStore → arm a 25s comment-frame keepalive so the
+    //     stream isn't closed by the Cloudflare edge ~5min idle
+    //     watchdog. Without an event store there is no recovery path,
+    //     so this preserves the pre-fix behaviour for callers who
+    //     haven't opted into resumability.
+    // See cloudflare/agents#1583.
+    const keepAlive = this.eventStore
+      ? undefined
+      : startKeepalive(writer, encoder);
+    // `cleanup` reads `streamId` lazily so it stays correct across the
+    // eventStore remap below.
     const cleanup = () => {
+      if (keepAlive !== undefined) clearInterval(keepAlive);
       this.streamMapping.delete(streamId);
       writer.close().catch(() => {});
     };

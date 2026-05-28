@@ -235,4 +235,76 @@ describe("DurableObjectEventStore", () => {
       spy.mockRestore();
     }
   });
+
+  describe("sweep", () => {
+    it("deletes events older than maxAgeMs and leaves newer ones", async () => {
+      let now = 1_000_000;
+      vi.spyOn(Date, "now").mockImplementation(() => now);
+      try {
+        await store.storeEvent("s", msg(1));
+        await store.storeEvent("s", msg(2));
+        now += 10 * 60_000; // jump 10 minutes
+        const recentId = await store.storeEvent("s", msg(3));
+
+        // Sweep events older than 5 minutes — first two go, third stays.
+        const deleted = await store.sweep(5 * 60_000);
+        expect(deleted).toBe(2);
+        expect(storage.countWithPrefix("__mcp_event__:s:")).toBe(1);
+
+        // The surviving event is still replayable.
+        const sent: string[] = [];
+        const seedId = `s:${(0).toString(16).padStart(16, "0")}`;
+        await store.replayEventsAfter(seedId, {
+          send: async (id) => {
+            sent.push(id);
+          }
+        });
+        expect(sent).toEqual([recentId]);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
+    it("is a no-op with maxAgeMs <= 0 or non-finite", async () => {
+      await store.storeEvent("s", msg(1));
+      expect(await store.sweep(0)).toBe(0);
+      expect(await store.sweep(-1)).toBe(0);
+      expect(await store.sweep(Number.POSITIVE_INFINITY)).toBe(0);
+      expect(storage.countWithPrefix("__mcp_event__:s:")).toBe(1);
+    });
+
+    it("respects batchSize when there are more expired events than the limit", async () => {
+      let now = 1_000_000;
+      vi.spyOn(Date, "now").mockImplementation(() => now);
+      try {
+        for (let i = 0; i < 10; i++) await store.storeEvent("s", msg(i));
+        now += 10 * 60_000;
+
+        // Only delete up to 4 per sweep call.
+        const deleted = await store.sweep(60_000, { batchSize: 4 });
+        expect(deleted).toBe(4);
+        expect(storage.countWithPrefix("__mcp_event__:s:")).toBe(6);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
+    it("after sweeping a stream entirely, next storeEvent restarts seq at 1", async () => {
+      let now = 1_000_000;
+      vi.spyOn(Date, "now").mockImplementation(() => now);
+      try {
+        await store.storeEvent("s", msg(1));
+        await store.storeEvent("s", msg(2));
+        now += 10 * 60_000;
+
+        const deleted = await store.sweep(60_000);
+        expect(deleted).toBe(2);
+
+        const fresh = await store.storeEvent("s", msg(3));
+        expect(fresh).toBe(`s:${(1).toString(16).padStart(16, "0")}`);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+  });
 });
