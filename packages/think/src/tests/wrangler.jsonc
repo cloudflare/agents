@@ -84,6 +84,14 @@
         "name": "ThinkNonRecoveryTestAgent"
       },
       {
+        "class_name": "ThinkAgentToolParent",
+        "name": "ThinkAgentToolParent"
+      },
+      {
+        "class_name": "StuckThinkAgentToolChild",
+        "name": "StuckThinkAgentToolChild"
+      },
+      {
         "class_name": "ThinkExtensionHookAgent",
         "name": "ThinkExtensionHookAgent"
       }
@@ -112,6 +120,7 @@
         "ThinkAsyncHookTestAgent",
         "ThinkRecoveryTestAgent",
         "ThinkNonRecoveryTestAgent",
+        "ThinkAgentToolParent",
         "ThinkExtensionHookAgent"
       ],
       "tag": "v1"

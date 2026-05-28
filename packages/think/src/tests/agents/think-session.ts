@@ -1,6 +1,15 @@
 import type { LanguageModel, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
 import { Think } from "../../think";
+import { Agent } from "agents";
+import type {
+  AgentToolEventMessage,
+  AgentToolLifecycleResult,
+  AgentToolRunInfo,
+  AgentToolRunInspection,
+  AgentToolStoredChunk,
+  RunAgentToolResult
+} from "agents";
 import type {
   StreamCallback,
   StreamableResult,
@@ -1160,6 +1169,402 @@ export class ThinkTestAgent extends Think {
   async getLastBeforeTurnSystem(): Promise<string | null> {
     const log = this._beforeTurnLog;
     return log.length > 0 ? log[log.length - 1].system : null;
+  }
+}
+
+type AgentToolFinishForTest = {
+  run: AgentToolRunInfo;
+  result: AgentToolLifecycleResult;
+};
+
+export class StuckThinkAgentToolChild extends Agent {
+  override async _cf_initAsFacet(
+    _name: string,
+    _parentPath: ReadonlyArray<{ className: string; name: string }> = [],
+    _identityName = _name
+  ): Promise<void> {
+    await new Promise<void>(() => {
+      // Intentionally never resolves: simulates a child facet wedged in startup.
+    });
+  }
+
+  async startAgentToolRun(): Promise<AgentToolRunInspection> {
+    throw new Error("stuck Think child should never start");
+  }
+
+  async cancelAgentToolRun(): Promise<void> {}
+
+  async inspectAgentToolRun(): Promise<AgentToolRunInspection | null> {
+    throw new Error("stuck Think child should never be inspected");
+  }
+
+  async getAgentToolChunks(): Promise<AgentToolStoredChunk[]> {
+    return [];
+  }
+}
+
+export class ThinkAgentToolParent extends Agent {
+  private events: AgentToolEventMessage[] = [];
+  private finishes: AgentToolFinishForTest[] = [];
+  private startupObservedStatuses: string[][] = [];
+  private insertRunDuringOnStartId: string | null = null;
+
+  override broadcast(
+    msg: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    if (typeof msg === "string") {
+      try {
+        const parsed = JSON.parse(msg) as AgentToolEventMessage;
+        if (parsed.type === "agent-tool-event") {
+          this.events.push(parsed);
+        }
+      } catch {
+        // Ignore non-agent-tool frames.
+      }
+    }
+    super.broadcast(msg, without);
+  }
+
+  override async onAgentToolFinish(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): Promise<void> {
+    this.finishes.push({ run, result });
+  }
+
+  override onStart(): void {
+    const rows = this.sql<{ status: string }>`
+      SELECT status FROM cf_agent_tool_runs ORDER BY started_at ASC
+    `;
+    this.startupObservedStatuses.push(rows.map((row) => row.status));
+    if (this.insertRunDuringOnStartId) {
+      this.insertRecoverableParentRunForTest(
+        this.insertRunDuringOnStartId,
+        "StuckThinkAgentToolChild",
+        "created during onStart",
+        Date.now()
+      );
+    }
+  }
+
+  async runThinkChild(
+    input: string,
+    runId = crypto.randomUUID()
+  ): Promise<RunAgentToolResult> {
+    this.events = [];
+    this.finishes = [];
+    return this.runAgentTool(ThinkTestAgent, {
+      runId,
+      parentToolCallId: "think-tool-call",
+      input,
+      inputPreview: input
+    });
+  }
+
+  private insertRecoverableParentRunForTest(
+    runId: string,
+    agentType: string,
+    inputPreview: string,
+    startedAt: number,
+    status: "starting" | "running" = "running"
+  ): void {
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, input_preview,
+        input_redacted, status, display_metadata, display_order, started_at
+      ) VALUES (
+        ${runId}, 'think-tool-call', ${agentType},
+        ${JSON.stringify(inputPreview)}, 1, ${status},
+        ${JSON.stringify({ name: "think child" })}, 0, ${startedAt}
+      )
+    `;
+  }
+
+  private async waitForTerminalInspectionForTest(
+    child: {
+      inspectAgentToolRun(
+        runId: string
+      ): Promise<AgentToolRunInspection | null>;
+    },
+    runId: string
+  ): Promise<AgentToolRunInspection> {
+    let inspection = await child.inspectAgentToolRun(runId);
+    for (let attempt = 0; attempt < 50; attempt++) {
+      if (
+        inspection &&
+        inspection.status !== "running" &&
+        inspection.status !== "starting"
+      ) {
+        return inspection;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      inspection = await child.inspectAgentToolRun(runId);
+    }
+    throw new Error("Timed out waiting for Think child completion");
+  }
+
+  private async reconcileAgentToolRunsForTest(options?: {
+    deferFinishHooks?: boolean;
+    childInspectionTimeoutMs?: number;
+  }): Promise<Array<() => Promise<void>>> {
+    return (
+      this as unknown as {
+        _reconcileAgentToolRuns(options?: {
+          deferFinishHooks?: boolean;
+          childInspectionTimeoutMs?: number;
+        }): Promise<Array<() => Promise<void>>>;
+      }
+    )._reconcileAgentToolRuns(options);
+  }
+
+  private async scheduleAgentToolRunRecoveryForTest(options?: {
+    childInspectionTimeoutMs?: number;
+  }): Promise<void> {
+    await (
+      this as unknown as {
+        _scheduleAgentToolRunRecovery(options?: {
+          childInspectionTimeoutMs?: number;
+        }): Promise<void>;
+      }
+    )._scheduleAgentToolRunRecovery(options);
+  }
+
+  async reconcileCompletedThinkChildForTest(
+    input: string,
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    inspection: AgentToolRunInspection;
+    status: string | null;
+  }> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    const started = await child.startAgentToolRun(input, { runId });
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "ThinkTestAgent",
+      input,
+      started.startedAt
+    );
+    const inspection = await this.waitForTerminalInspectionForTest(
+      child,
+      runId
+    );
+
+    this.events = [];
+    this.finishes = [];
+    await this.reconcileAgentToolRunsForTest();
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      inspection,
+      status: this.getParentAgentToolStatusForTest(runId)
+    };
+  }
+
+  async reconcileRunningThinkChildForTest(
+    input: string,
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    status: string | null;
+  }> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.setBeforeStepAsyncDelay(10_000);
+    const started = await child.startAgentToolRun(input, { runId });
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "ThinkTestAgent",
+      input,
+      started.startedAt
+    );
+
+    this.events = [];
+    this.finishes = [];
+    try {
+      await this.reconcileAgentToolRunsForTest();
+    } finally {
+      await child.cancelAgentToolRun(runId, "test cleanup");
+    }
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      status: this.getParentAgentToolStatusForTest(runId)
+    };
+  }
+
+  async reconcileStuckThinkChildWithTimeoutForTest(
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    elapsedMs: number;
+    status: string | null;
+  }> {
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "StuckThinkAgentToolChild",
+      "stuck Think child",
+      Date.now()
+    );
+
+    this.events = [];
+    this.finishes = [];
+    const startedAt = Date.now();
+    await this.reconcileAgentToolRunsForTest({ childInspectionTimeoutMs: 10 });
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      elapsedMs: Date.now() - startedAt,
+      status: this.getParentAgentToolStatusForTest(runId)
+    };
+  }
+
+  async scheduleStuckThinkChildRecoveryForTest(
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    status: string | null;
+  }> {
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "StuckThinkAgentToolChild",
+      "scheduled stuck Think child",
+      Date.now()
+    );
+
+    this.events = [];
+    this.finishes = [];
+    await this.scheduleAgentToolRunRecoveryForTest({
+      childInspectionTimeoutMs: 10
+    });
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      status: this.getParentAgentToolStatusForTest(runId)
+    };
+  }
+
+  async scheduleStuckThinkChildRecoveryTwiceForTest(
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    status: string | null;
+  }> {
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "StuckThinkAgentToolChild",
+      "single flight stuck Think child",
+      Date.now()
+    );
+
+    this.events = [];
+    this.finishes = [];
+    const first = this.scheduleAgentToolRunRecoveryForTest({
+      childInspectionTimeoutMs: 10
+    });
+    const second = this.scheduleAgentToolRunRecoveryForTest({
+      childInspectionTimeoutMs: 10
+    });
+    await Promise.all([first, second]);
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      status: this.getParentAgentToolStatusForTest(runId)
+    };
+  }
+
+  async startupDefersStaleThinkRecoveryForTest(
+    runId = crypto.randomUUID()
+  ): Promise<{
+    statusesDuringStartup: string[];
+    statusAfterStartup: string | null;
+    finalStatus: string | null;
+    startupElapsedMs: number;
+    finishes: AgentToolFinishForTest[];
+    events: AgentToolEventMessage[];
+  }> {
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "StuckThinkAgentToolChild",
+      "startup stuck Think child",
+      Date.now()
+    );
+
+    this.events = [];
+    this.finishes = [];
+    this.startupObservedStatuses = [];
+    const startedAt = Date.now();
+    await this.onStart();
+    const startupElapsedMs = Date.now() - startedAt;
+    const statusAfterStartup = this.getParentAgentToolStatusForTest(runId);
+
+    for (let attempt = 0; attempt < 40; attempt++) {
+      if (this.getParentAgentToolStatusForTest(runId) === "interrupted") {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    return {
+      statusesDuringStartup: this.startupObservedStatuses[0] ?? [],
+      statusAfterStartup,
+      finalStatus: this.getParentAgentToolStatusForTest(runId),
+      startupElapsedMs,
+      finishes: this.finishes,
+      events: this.events
+    };
+  }
+
+  async startupRecoveryIgnoresRunsCreatedDuringOnStartForTest(): Promise<{
+    staleStatus: string | null;
+    onStartRunStatus: string | null;
+    finishes: AgentToolFinishForTest[];
+    events: AgentToolEventMessage[];
+  }> {
+    const staleRunId = crypto.randomUUID();
+    const onStartRunId = crypto.randomUUID();
+    this.insertRecoverableParentRunForTest(
+      staleRunId,
+      "StuckThinkAgentToolChild",
+      "startup snapshot stale child",
+      Date.now()
+    );
+
+    this.events = [];
+    this.finishes = [];
+    this.startupObservedStatuses = [];
+    this.insertRunDuringOnStartId = onStartRunId;
+    try {
+      await this.onStart();
+    } finally {
+      this.insertRunDuringOnStartId = null;
+    }
+
+    for (let attempt = 0; attempt < 40; attempt++) {
+      if (this.getParentAgentToolStatusForTest(staleRunId) === "interrupted") {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    return {
+      staleStatus: this.getParentAgentToolStatusForTest(staleRunId),
+      onStartRunStatus: this.getParentAgentToolStatusForTest(onStartRunId),
+      finishes: this.finishes,
+      events: this.events
+    };
+  }
+
+  getParentAgentToolStatusForTest(runId: string): string | null {
+    const rows = this.sql<{ status: string }>`
+      SELECT status FROM cf_agent_tool_runs WHERE run_id = ${runId} LIMIT 1
+    `;
+    return rows[0]?.status ?? null;
   }
 }
 
