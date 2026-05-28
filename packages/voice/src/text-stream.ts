@@ -15,6 +15,10 @@
 /** Union of every source type that {@link iterateText} accepts. */
 export type TextSource = string | TextReadableStream | AsyncIterable<unknown>;
 
+export type TextStreamEvent =
+  | { type: "text"; text: string }
+  | { type: "boundary" };
+
 type TextReadableStreamReader = {
   read(): Promise<ReadableStreamReadResult<unknown>>;
 };
@@ -44,9 +48,17 @@ const warnedTextStreamSources = new WeakSet<object>();
  * - `AsyncIterable<string>` → re-yields each chunk.
  */
 export async function* iterateText(source: TextSource): AsyncGenerator<string> {
+  for await (const event of iterateTextEvents(source)) {
+    if (event.type === "text") yield event.text;
+  }
+}
+
+export async function* iterateTextEvents(
+  source: TextSource
+): AsyncGenerator<TextStreamEvent> {
   // --- plain string ---
   if (typeof source === "string") {
-    if (source) yield source;
+    if (source) yield textEvent(source);
     return;
   }
 
@@ -56,10 +68,10 @@ export async function* iterateText(source: TextSource): AsyncGenerator<string> {
   // parser, while still letting native ReadableStream async iteration fall
   // through to the stream-specific branches below.
   if (hasCustomAsyncIterator(source)) {
-    for await (const chunk of iterateAsyncText(
+    for await (const event of iterateAsyncTextEvents(
       source as AsyncIterable<unknown>
     )) {
-      yield chunk;
+      yield event;
     }
     return;
   }
@@ -90,19 +102,19 @@ export async function* iterateText(source: TextSource): AsyncGenerator<string> {
       for await (const chunk of parseNDJSON(combined.getReader())) {
         const ai = chunk as AIStreamChunk;
         if (ai.response) {
-          yield ai.response;
+          yield textEvent(ai.response);
         } else if (ai.choices && ai.choices.length > 0) {
           const choice = ai.choices[0];
           if (choice.delta?.content && choice.delta?.role === "assistant") {
-            yield choice.delta.content;
+            yield textEvent(choice.delta.content);
           }
         }
       }
     } else {
-      for await (const chunk of iterateAsyncText(
+      for await (const event of iterateAsyncTextEvents(
         readWithFirst(first.value, reader)
       )) {
-        yield chunk;
+        yield event;
       }
     }
     return;
@@ -110,8 +122,8 @@ export async function* iterateText(source: TextSource): AsyncGenerator<string> {
 
   // --- AsyncIterable ---
   if (Symbol.asyncIterator in source) {
-    for await (const chunk of iterateAsyncText(source)) {
-      yield chunk;
+    for await (const event of iterateAsyncTextEvents(source)) {
+      yield event;
     }
   }
 }
@@ -147,9 +159,9 @@ function hasCustomAsyncIterator(source: Exclude<TextSource, string>): boolean {
   );
 }
 
-async function* iterateAsyncText(
+async function* iterateAsyncTextEvents(
   source: AsyncIterable<unknown>
-): AsyncGenerator<string> {
+): AsyncGenerator<TextStreamEvent> {
   let needsBoundarySpace = false;
   let hasYieldedText = false;
   let lastTextEndedWithWhitespace = false;
@@ -157,7 +169,7 @@ async function* iterateAsyncText(
   for await (const chunk of source) {
     if (typeof chunk === "string") {
       warnDeprecatedTextStream(source);
-      if (chunk) yield chunk;
+      if (chunk) yield textEvent(chunk);
       continue;
     }
 
@@ -173,10 +185,10 @@ async function* iterateAsyncText(
         !lastTextEndedWithWhitespace &&
         !startsWithWhitespace(text)
       ) {
-        yield " ";
+        yield textEvent(" ");
       }
 
-      yield text;
+      yield textEvent(text);
       hasYieldedText = true;
       lastTextEndedWithWhitespace = endsWithWhitespace(text);
       needsBoundarySpace = false;
@@ -184,9 +196,14 @@ async function* iterateAsyncText(
     }
 
     if (hasYieldedText && isTextBoundary(chunk.type)) {
+      if (!needsBoundarySpace) yield { type: "boundary" };
       needsBoundarySpace = true;
     }
   }
+}
+
+function textEvent(text: string): TextStreamEvent {
+  return { type: "text", text };
 }
 
 function warnDeprecatedTextStream(source?: object): void {

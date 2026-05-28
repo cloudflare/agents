@@ -2,7 +2,8 @@
  * Tests for text-stream.ts — iterateText and SSE/NDJSON parsing.
  */
 import { describe, expect, it, vi } from "vitest";
-import { iterateText } from "../text-stream";
+import { iterateText, iterateTextEvents } from "../text-stream";
+import type { TextStreamEvent } from "../text-stream";
 
 async function collect(source: AsyncIterable<string>): Promise<string[]> {
   const chunks: string[] = [];
@@ -10,6 +11,16 @@ async function collect(source: AsyncIterable<string>): Promise<string[]> {
     chunks.push(chunk);
   }
   return chunks;
+}
+
+async function collectEvents(
+  source: AsyncIterable<TextStreamEvent>
+): Promise<TextStreamEvent[]> {
+  const events: TextStreamEvent[] = [];
+  for await (const event of source) {
+    events.push(event);
+  }
+  return events;
 }
 
 describe("iterateText", () => {
@@ -119,6 +130,26 @@ describe("iterateText", () => {
 
     const chunks = await collect(iterateText(fullStream()));
     expect(chunks).toEqual(["I can help.", " ", "The weather is warm"]);
+  });
+
+  it("emits stream boundaries before later fullStream text deltas", async () => {
+    async function* fullStream() {
+      yield { type: "text-start", id: "a" };
+      yield { type: "text-delta", id: "a", text: "I can help." };
+      yield { type: "text-end", id: "a" };
+      yield { type: "tool-call", toolName: "getWeather" };
+      yield { type: "text-start", id: "b" };
+      yield { type: "text-delta", id: "b", text: "The weather is warm" };
+      yield { type: "text-end", id: "b" };
+    }
+
+    const events = await collectEvents(iterateTextEvents(fullStream()));
+    expect(events).toEqual([
+      { type: "text", text: "I can help." },
+      { type: "boundary" },
+      { type: "text", text: " " },
+      { type: "text", text: "The weather is warm" }
+    ]);
   });
 });
 

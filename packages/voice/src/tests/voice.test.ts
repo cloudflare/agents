@@ -85,6 +85,27 @@ function waitForType(ws: WebSocket, type: string) {
   );
 }
 
+function waitForBinary(ws: WebSocket, timeout = 5000): Promise<ArrayBuffer> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("Timeout waiting for binary message")),
+      timeout
+    );
+    const handler = (e: MessageEvent) => {
+      if (e.data instanceof ArrayBuffer) {
+        clearTimeout(timer);
+        ws.removeEventListener("message", handler);
+        resolve(e.data);
+      }
+    };
+    ws.addEventListener("message", handler);
+  });
+}
+
+function decodeAudio(buffer: ArrayBuffer): string {
+  return String.fromCharCode(...new Uint8Array(buffer));
+}
+
 function collectMessagesUntil(
   ws: WebSocket,
   predicate: (msg: Record<string, unknown>) => boolean,
@@ -315,6 +336,55 @@ describe("VoiceAgent — continuous STT pipeline", () => {
     for (let i = 0; i < 4; i++) {
       ws.send(new ArrayBuffer(5000));
     }
+
+    const transcriptEnd = (await waitForType(ws, "transcript_end")) as Record<
+      string,
+      unknown
+    >;
+    expect(transcriptEnd.text).toBe(
+      "I can get the weather for you. The weather is warm"
+    );
+
+    await waitForStatus(ws, "listening");
+    ws.close();
+  });
+
+  it("speaks fullStream text before delayed tool results complete", async () => {
+    const { ws } = await connectWS(uniqueAISDKFullStreamPath());
+    await waitForStatus(ws, "idle");
+
+    const mockResponse = [
+      [
+        { type: "text", text: "I can get the weather for you." },
+        {
+          type: "tool-call",
+          toolName: "getWeather",
+          input: { location: "San Francisco" },
+          output: "warm",
+          outputDelayMs: 1000
+        }
+      ],
+      [{ type: "text", text: "The weather is warm" }]
+    ];
+    sendJSON(ws, { type: "_set_mock_response", response: mockResponse });
+    await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "_ack" &&
+        (m as Record<string, unknown>).command === "_set_mock_response"
+    );
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+
+    const audio = await waitForBinary(ws, 500);
+    expect(decodeAudio(audio)).toBe("I can get the weather for you.");
 
     const transcriptEnd = (await waitForType(ws, "transcript_end")) as Record<
       string,

@@ -100,6 +100,7 @@ type MockTextStreamPart =
       toolName: string;
       input: Record<string, unknown>;
       output?: unknown;
+      outputDelayMs?: number;
       toolCallId?: string;
     };
 
@@ -189,12 +190,20 @@ function createToolCallingTextStreamModel(
 }
 
 function createMockTools(response: MockTextStreamResponse): ToolSet {
-  const toolOutputs = new Map<string, unknown[]>();
+  const toolOutputs = new Map<
+    string,
+    { output: unknown; outputDelayMs?: number }[]
+  >();
   for (const step of response) {
     for (const part of step) {
       if (part.type === "tool-call") {
         const outputs = toolOutputs.get(part.toolName) ?? [];
-        outputs.push(part.output ?? `${part.toolName} result`);
+        outputs.push({
+          output: part.output ?? `${part.toolName} result`,
+          ...(part.outputDelayMs === undefined
+            ? {}
+            : { outputDelayMs: part.outputDelayMs })
+        });
         toolOutputs.set(part.toolName, outputs);
       }
     }
@@ -205,8 +214,16 @@ function createMockTools(response: MockTextStreamResponse): ToolSet {
     tools[toolName] = tool({
       description: `Mock ${toolName} tool`,
       inputSchema: z.record(z.string(), z.unknown()),
-      execute: async (_input: Record<string, unknown>) =>
-        outputs.shift() ?? `${toolName} result`
+      execute: async (_input: Record<string, unknown>) => {
+        const result = outputs.shift();
+        if (!result) return `${toolName} result`;
+        if (result.outputDelayMs) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, result.outputDelayMs)
+          );
+        }
+        return result.output;
+      }
     });
   }
 
@@ -233,6 +250,8 @@ function isMockTextStreamResponse(
             typeof part.toolName === "string" &&
             isRecord(part.input) &&
             (part.output === undefined || isJsonValue(part.output)) &&
+            (part.outputDelayMs === undefined ||
+              typeof part.outputDelayMs === "number") &&
             (part.toolCallId === undefined ||
               typeof part.toolCallId === "string")
           );
