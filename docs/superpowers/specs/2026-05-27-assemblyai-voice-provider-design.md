@@ -57,7 +57,8 @@ built into u3-rt-pro's end-of-turn).
 - AssemblyAI Universal-3 Pro Streaming (`u3-rt-pro`) protocol mapping over a WebSocket.
 - A fully typed options surface (see §7): `domain`, `keyterms`, `prompt`,
   turn-detection (`minTurnSilence`/`maxTurnSilence`), barge-in (`interruptionDelay`),
-  `vadThreshold`, `continuousPartials`, and a `baseUrl` override.
+  `vadThreshold`, `continuousPartials`, `languageDetection` (+ `onLanguageDetected`
+  callback), and a `baseUrl` override.
 - Configurable endpoint via `baseUrl` (defaults to the AssemblyAI US streaming host),
   which also enables routing through Cloudflare AI Gateway and selecting the EU host.
   README documents both URL formats.
@@ -214,6 +215,19 @@ export interface AssemblyAISTTOptions {
    */
   continuousPartials?: boolean;
   /**
+   * Return language metadata (`language_code`, `language_confidence`) on Turn
+   * events → `language_detection`. u3-rt-pro transcribes multilingual audio
+   * regardless; this only toggles the metadata. Surface it via `onLanguageDetected`
+   * (the pipeline's transcript callbacks are text-only).
+   */
+  languageDetection?: boolean;
+  /**
+   * Called when a `Turn` carries detected-language metadata (requires
+   * `languageDetection: true`). Provider-specific extension, since the pipeline's
+   * text-only `onUtterance`/`onInterim` cannot carry this.
+   */
+  onLanguageDetected?: (languageCode: string, languageConfidence: number) => void;
+  /**
    * Full WebSocket base URL override. Use to select the EU host or route through
    * Cloudflare AI Gateway — see README for the gateway URL format.
    * @default "wss://streaming.assemblyai.com/v3/ws"
@@ -231,8 +245,8 @@ export interface AssemblyAISTTOptions {
 explicitly set** (so AssemblyAI's server defaults apply otherwise and the URL stays
 minimal): `domain`, `keyterms_prompt` (JSON-stringified array), `prompt`,
 `min_turn_silence`, `max_turn_silence`, `interruption_delay`, `vad_threshold`,
-`continuous_partials`. The API key is sent via the `Authorization` header, not the
-query string.
+`continuous_partials`, `language_detection`. The API key is sent via the
+`Authorization` header, not the query string.
 
 ### Usage
 ```typescript
@@ -281,8 +295,8 @@ Single file `tests/index.test.ts` covering both units:
 - always-present params: `speech_model=u3-rt-pro`, `sample_rate=16000`, `encoding=pcm_s16le`;
 - conditional params appear only when set: `domain`, `keyterms → keyterms_prompt`
   (JSON encoding), `prompt`, `min_turn_silence`, `max_turn_silence`,
-  `interruption_delay`, `vad_threshold`, `continuous_partials`; and are absent when
-  unset (server defaults apply);
+  `interruption_delay`, `vad_threshold`, `continuous_partials`, `language_detection`;
+  and are absent when unset (server defaults apply);
 - `format_turns` is never sent;
 - API key is placed in the `Authorization` header (no prefix), not in the query string;
 - `baseUrl` override replaces the default host.
@@ -292,7 +306,9 @@ Single file `tests/index.test.ts` covering both units:
 - `Turn{end_of_turn:false} → onInterim`, `Turn{end_of_turn:true} → onUtterance`;
 - pre-connect `feed()` buffers, then flushes on open;
 - `close()` sends `{"type":"Terminate"}`, closes the socket, and tolerates a
-  missing/late socket (no await).
+  missing/late socket (no await);
+- `Turn` carrying `language_code`/`language_confidence` (with `languageDetection`)
+  → `onLanguageDetected`; not fired when the metadata is absent.
 
 ## 10. Repo integration tasks
 
@@ -316,6 +332,8 @@ Single file `tests/index.test.ts` covering both units:
    guided via the `prompt` option (e.g. prepend "Transcribe Spanish." to the
    default prompt — a beta mechanism AssemblyAI is still tuning). The pipeline's
    `TranscriberSessionOptions.language` is not auto-forwarded into a prompt.
+   Detected-language metadata (`language_code`/`language_confidence`) is available
+   by enabling `languageDetection` and reading the `onLanguageDetected` callback.
    Documented in the README.
 3. **Single model / 6 languages.** Locked to `u3-rt-pro` (en/es/de/fr/pt/it).
    Use cases needing whisper-rt's 99-language coverage or a different streaming
