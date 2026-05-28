@@ -55,9 +55,9 @@ built into u3-rt-pro's end-of-turn).
 ### In scope
 - `AssemblyAISTT` (`Transcriber`) + per-call `AssemblyAISession` (`TranscriberSession`).
 - AssemblyAI Universal-3 Pro Streaming (`u3-rt-pro`) protocol mapping over a WebSocket.
-- A fully typed options surface (see §7): `domain`, `keyterms`, turn-detection
-  (`minTurnSilence`/`maxTurnSilence`), barge-in (`interruptionDelay`),
-  `continuousPartials`, and a `baseUrl` override.
+- A fully typed options surface (see §7): `domain`, `keyterms`, `prompt`,
+  turn-detection (`minTurnSilence`/`maxTurnSilence`), barge-in (`interruptionDelay`),
+  `vadThreshold`, `continuousPartials`, and a `baseUrl` override.
 - Configurable endpoint via `baseUrl` (defaults to the AssemblyAI US streaming host),
   which also enables routing through Cloudflare AI Gateway and selecting the EU host.
   README documents both URL formats.
@@ -72,9 +72,6 @@ built into u3-rt-pro's end-of-turn).
 - **Generic `params` passthrough.** Intentionally omitted (see Design stance).
   Niche u3-rt-pro params not typed in v1 — `inactivity_timeout`, `speaker_labels` /
   `max_speakers` — would be added as typed fields when needed.
-- **`prompt` option.** Cut from v1: u3-rt-pro auto-applies an optimized default
-  prompt (good turn detection out of the box), and a custom prompt is best set via a
-  post-connect `UpdateConfiguration` round-trip. Add when there is a concrete need.
 - **Typed AI Gateway helper** (`buildGatewayUrl`, `gateway: {accountId, gatewayId}`):
   deferred until AssemblyAI-over-AI-Gateway-over-WebSocket is verified end-to-end.
   AssemblyAI is **not** currently in Cloudflare's `AIGatewayProviders` type. `baseUrl`
@@ -178,6 +175,15 @@ export interface AssemblyAISTTOptions {
   /** Domain vocabulary to bias recognition → `keyterms_prompt` (JSON-encoded). */
   keyterms?: string[];
   /**
+   * Custom transcription prompt (u3-rt-pro is promptable) → `prompt`, set at
+   * connection time. **Omit to use AssemblyAI's optimized default prompt
+   * (recommended — 88% turn-detection accuracy out of the box).** If set, build
+   * off the default prompt; custom prompts that reduce punctuation degrade the
+   * punctuation-based turn detection. Also the lever for guiding transcription
+   * language (e.g. prepend "Transcribe Spanish.").
+   */
+  prompt?: string;
+  /**
    * Turn detection: minimum silence (ms) before a speculative end-of-turn check.
    * → `min_turn_silence`. Server default 100. Lower = faster partials but more
    * entity splitting; raise mid-flow for dictation of numbers/addresses.
@@ -194,6 +200,13 @@ export interface AssemblyAISTTOptions {
    * default 500. Lower = faster barge-in signal; higher = more confident.
    */
   interruptionDelay?: number;
+  /**
+   * VAD confidence threshold (0.0–1.0) for classifying audio frames as silence
+   * → `vad_threshold`. Raise in noisy environments (call centers, clinical rooms)
+   * to reduce false speech detection. AssemblyAI suggests ~0.3 to align with a
+   * client-side VAD.
+   */
+  vadThreshold?: number;
   /**
    * Emit a steady stream of non-final partials (~every 3 s) during long
    * uninterrupted turns (e.g. a caller reading a card/address). → `continuous_partials`.
@@ -216,9 +229,10 @@ export interface AssemblyAISTTOptions {
 **Query-string construction:** always append `speech_model=u3-rt-pro`,
 `sample_rate=16000`, `encoding=pcm_s16le`. Then append, **only when the option is
 explicitly set** (so AssemblyAI's server defaults apply otherwise and the URL stays
-minimal): `domain`, `keyterms_prompt` (JSON-stringified array), `min_turn_silence`,
-`max_turn_silence`, `interruption_delay`, `continuous_partials`. The API key is sent
-via the `Authorization` header, not the query string.
+minimal): `domain`, `keyterms_prompt` (JSON-stringified array), `prompt`,
+`min_turn_silence`, `max_turn_silence`, `interruption_delay`, `vad_threshold`,
+`continuous_partials`. The API key is sent via the `Authorization` header, not the
+query string.
 
 ### Usage
 ```typescript
@@ -266,8 +280,9 @@ Single file `tests/index.test.ts` covering both units:
 **Config / query-string building:**
 - always-present params: `speech_model=u3-rt-pro`, `sample_rate=16000`, `encoding=pcm_s16le`;
 - conditional params appear only when set: `domain`, `keyterms → keyterms_prompt`
-  (JSON encoding), `min_turn_silence`, `max_turn_silence`, `interruption_delay`,
-  `continuous_partials`; and are absent when unset (server defaults apply);
+  (JSON encoding), `prompt`, `min_turn_silence`, `max_turn_silence`,
+  `interruption_delay`, `vad_threshold`, `continuous_partials`; and are absent when
+  unset (server defaults apply);
 - `format_turns` is never sent;
 - API key is placed in the `Authorization` header (no prefix), not in the query string;
 - `baseUrl` override replaces the default host.
@@ -296,10 +311,12 @@ Single file `tests/index.test.ts` covering both units:
    such as an auth error (v3 `1008`) can only be logged — the agent simply goes
    quiet. Fixing this would require extending the shared `@cloudflare/voice`
    interface, which is out of scope here.
-2. **Language is model-determined.** u3-rt-pro silently ignores the `language_code`
-   connection parameter; language is guided via the (cut) `prompt` param. The
-   pipeline's `TranscriberSessionOptions.language` therefore has no effect.
-   Documented in the README to avoid surprise.
+2. **Language is set via `prompt`, not a language param.** u3-rt-pro silently
+   ignores the `language_code` connection parameter; transcription language is
+   guided via the `prompt` option (e.g. prepend "Transcribe Spanish." to the
+   default prompt — a beta mechanism AssemblyAI is still tuning). The pipeline's
+   `TranscriberSessionOptions.language` is not auto-forwarded into a prompt.
+   Documented in the README.
 3. **Single model / 6 languages.** Locked to `u3-rt-pro` (en/es/de/fr/pt/it).
    Use cases needing whisper-rt's 99-language coverage or a different streaming
    model are not served until a `model` option is added (see §3 out-of-scope).
