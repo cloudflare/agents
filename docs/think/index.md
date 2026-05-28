@@ -48,10 +48,10 @@ helpers are exported from `@cloudflare/think/messengers`, while provider
 implementations use provider subpaths so unused Chat SDK adapters are not
 bundled.
 
-For Telegram messengers, also install Chat SDK and the Telegram adapter:
+For Telegram messengers, also install the Telegram adapter:
 
 ```bash
-npm install chat @chat-adapter/telegram
+npm install @chat-adapter/telegram
 ```
 
 ```typescript
@@ -60,7 +60,7 @@ import {
   defineMessengers,
   ThinkMessengerStateAgent
 } from "@cloudflare/think/messengers";
-import { telegramMessenger } from "@cloudflare/think/messengers/telegram";
+import telegramMessenger from "@cloudflare/think/messengers/telegram";
 
 export { ThinkMessengerStateAgent };
 
@@ -81,11 +81,11 @@ The root Think agent handles messenger webhook routes before user-defined
 `onRequest` fallback. By default, the `telegram` key maps to
 `/messengers/telegram/webhook`. Direct messages and mentions route to the model
 by default. New mentions subscribe the thread so later mentions are still
-observed; ordinary subscribed-thread messages are opt-in with
-`respondTo: ["subscribed-thread"]`. Each Chat SDK thread gets its own Think
-sub-agent for memory isolation. A root agent owns one Chat SDK runtime for all
-configured messengers, so multiple providers share state and webhook handling
-without competing over Chat SDK singleton registration.
+observed; ordinary subscribed-thread messages and button actions are opt-in with
+`respondTo: ["subscribed-thread", "action"]`. Each Chat SDK thread gets its own
+Think sub-agent for memory isolation. A root agent owns one Chat SDK runtime for
+all configured messengers, so multiple providers share state and webhook
+handling without competing over Chat SDK singleton registration.
 
 Use `conversation: "self"` to run messenger turns on the root Think agent:
 
@@ -436,7 +436,6 @@ Think's `this.messages` getter reads directly from Session's tree-structured sto
 | `zod`                    | yes      | Schema validation (v4)           |
 | `@cloudflare/shell`      | yes      | Workspace filesystem             |
 | `@cloudflare/codemode`   | optional | For `createExecuteTool`          |
-| `chat`                   | optional | Required for messengers          |
 | `@chat-adapter/telegram` | optional | Required for Telegram messengers |
 
 ## Docs

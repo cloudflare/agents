@@ -1,12 +1,12 @@
 import type { UIMessage } from "ai";
 import type {
   Adapter,
+  ActionEvent as ChatActionEvent,
   Attachment as ChatAttachment,
   Author as ChatAuthor,
   ChatConfig,
   Message as ChatMessage,
-  Thread as ChatThread,
-  WebhookOptions
+  Thread as ChatThread
 } from "chat";
 import { Chat } from "chat";
 import type {
@@ -24,6 +24,7 @@ import { ChatSdkStateAgent } from "agents/chat-sdk";
 import type { StreamCallback } from "../think";
 import type {
   MessengerAttachment,
+  MessengerAction,
   MessengerAuthor,
   MessengerCapabilities,
   MessengerEvent,
@@ -46,6 +47,7 @@ import {
 export class ThinkMessengerStateAgent extends ChatSdkStateAgent {}
 
 export type MessengerRespondTo =
+  | "action"
   | "direct-message"
   | "mention"
   | "subscribed-thread";
@@ -105,6 +107,7 @@ export interface ChatSdkMessengerOptions extends Omit<
 }
 
 export interface ChatSdkMessengerEventInput {
+  action?: ChatActionEvent;
   eventKind: MessengerEventKind;
   message?: ChatMessage;
   raw?: unknown;
@@ -213,7 +216,9 @@ export class ThinkMessengerRuntime {
     }
 
     if (definition.verifyWebhook !== false) {
-      const verification = await definition.verifyWebhook(request);
+      const verification = await definition.verifyWebhook(
+        request.clone() as Request
+      );
       if (verification instanceof Response) {
         return verification;
       }
@@ -248,8 +253,20 @@ export class ThinkMessengerRuntime {
     const mode = messengerReplyRecoveryMode(snapshot);
 
     if (mode === "answer") {
-      await this.answer(definition, snapshot.event, thread);
-      await this.host.resolveFiber(ctx.id, { status: "completed" });
+      await this.answer(
+        definition,
+        snapshot.event,
+        thread,
+        undefined,
+        snapshot.event,
+        async (nextSnapshot) => {
+          await this.host.resolveFiber(ctx.id, {
+            snapshot: nextSnapshot,
+            status:
+              nextSnapshot.stage === "completed" ? "completed" : "interrupted"
+          });
+        }
+      );
       return true;
     }
 
@@ -330,8 +347,27 @@ export class ThinkMessengerRuntime {
         await this.enqueueReply(
           definition,
           await this.toEvent(definition, {
-            eventKind: "subscribed-message",
+            eventKind: message.isMention ? "mention" : "subscribed-message",
             message,
+            thread
+          }),
+          thread
+        );
+      }
+    });
+
+    chat.onAction(async (event) => {
+      if (!event.thread) return;
+      const thread = event.thread as ChatThread;
+      const definition = this.definitionForThread(thread);
+      if (!definition) return;
+      if (definition.respondTo.includes("action")) {
+        await this.enqueueReply(
+          definition,
+          await this.toEvent(definition, {
+            action: event,
+            eventKind: "action",
+            raw: event.raw,
             thread
           }),
           thread
@@ -380,8 +416,20 @@ export class ThinkMessengerRuntime {
 
     const mode = messengerReplyRecoveryMode(snapshot);
     if (mode === "answer") {
-      await this.answer(definition, snapshot.event, thread);
-      await this.host.resolveFiber(result.fiberId, { status: "completed" });
+      await this.answer(
+        definition,
+        snapshot.event,
+        thread,
+        undefined,
+        snapshot.event,
+        async (nextSnapshot) => {
+          await this.host.resolveFiber(result.fiberId, {
+            snapshot: nextSnapshot,
+            status:
+              nextSnapshot.stage === "completed" ? "completed" : "interrupted"
+          });
+        }
+      );
       return;
     }
 
@@ -401,11 +449,15 @@ export class ThinkMessengerRuntime {
     event: MessengerEvent,
     thread: ChatThread,
     fiber?: FiberContext,
-    snapshotEvent = serializableMessengerEvent(event)
+    snapshotEvent = serializableMessengerEvent(event),
+    checkpoint?: (
+      snapshot: ReturnType<typeof messengerReplySnapshot>
+    ) => Promise<void> | void
   ): Promise<void> {
     const target = await this.resolveTarget(definition, event);
     await deliverMessengerReply({
       event,
+      checkpoint,
       fiber,
       policy: definition.delivery,
       snapshotEvent,
@@ -471,10 +523,18 @@ export class ThinkMessengerRuntime {
       (definition) =>
         threadId === definition.id ||
         threadId.startsWith(`${definition.id}:`) ||
-        threadId === definition.provider ||
-        threadId.startsWith(`${definition.provider}:`) ||
+        (this.hasUniqueProvider(definition.provider) &&
+          (threadId === definition.provider ||
+            threadId.startsWith(`${definition.provider}:`))) ||
         threadId === definition.adapterName ||
         threadId.startsWith(`${definition.adapterName}:`)
+    );
+  }
+
+  private hasUniqueProvider(provider: string): boolean {
+    return (
+      this.definitions.filter((definition) => definition.provider === provider)
+        .length === 1
     );
   }
 
@@ -586,12 +646,23 @@ export function defaultChatSdkEvent(
 ): MessengerEvent {
   return {
     capabilities: definition.capabilities ?? {},
+    action: input.action && toMessengerAction(input.action),
     kind: input.eventKind,
     message: input.message && toMessengerMessage(input.message),
     messengerId: definition.id,
     provider: definition.provider,
     raw: input.raw ?? input.message?.raw,
     thread: toMessengerThread(input.thread)
+  };
+}
+
+export function toMessengerAction(action: ChatActionEvent): MessengerAction {
+  return {
+    actionId: action.actionId,
+    messageId: action.messageId,
+    raw: action.raw,
+    user: toMessengerAuthor(action.user),
+    value: action.value
   };
 }
 
@@ -677,5 +748,3 @@ function validatePath(path: string, id: string): void {
     throw new Error(`Messenger ${id} path must not include query or hash`);
   }
 }
-
-export type { WebhookOptions };

@@ -39,7 +39,7 @@ import {
   defineMessengers,
   ThinkMessengerStateAgent
 } from "@cloudflare/think/messengers";
-import { telegramMessenger } from "@cloudflare/think/messengers/telegram";
+import telegramMessenger from "@cloudflare/think/messengers/telegram";
 
 export { ThinkMessengerStateAgent };
 
@@ -60,12 +60,12 @@ The root Think agent handles the webhook route with this precedence: framework
 sub-agent routing, Think internal routes, messenger routes, then user
 `onRequest`. By default, `telegram` maps to
 `/messengers/telegram/webhook`, direct messages and mentions are routed to the
-agent, and new mentions subscribe the thread so later mentions are still
-observed. Ordinary subscribed-thread messages are opt-in with
-`respondTo: ["subscribed-thread"]`. Each Chat SDK thread runs in its own Think
-sub-agent to avoid accidental context sharing. Each root agent owns one Chat SDK
-runtime for all configured messengers, so multi-provider agents do not fight over
-Chat SDK singleton state.
+agent, and new mentions subscribe the thread so later mentions in the same
+thread are still observed. Ordinary subscribed-thread messages and button
+actions are opt-in with `respondTo: ["subscribed-thread", "action"]`. Each Chat
+SDK thread runs in its own Think sub-agent to avoid accidental context sharing.
+Each root agent owns one Chat SDK runtime for all configured messengers, so
+multi-provider agents do not fight over Chat SDK singleton state.
 
 Use `conversation: "self"` when all messenger traffic should share the root
 agent's memory. Use a custom `conversation(event)` resolver to route by thread,
@@ -645,13 +645,14 @@ getTools() {
 
 ## Peer dependencies
 
-| Package                | Required | Notes                            |
-| ---------------------- | -------- | -------------------------------- |
-| `agents`               | yes      | Cloudflare Agents SDK            |
-| `ai`                   | yes      | Vercel AI SDK v6                 |
-| `zod`                  | yes      | Schema validation (v3.25+ or v4) |
-| `@cloudflare/shell`    | yes      | Workspace filesystem             |
-| `@cloudflare/codemode` | optional | For `createExecuteTool`          |
+| Package                  | Required | Notes                            |
+| ------------------------ | -------- | -------------------------------- |
+| `agents`                 | yes      | Cloudflare Agents SDK            |
+| `ai`                     | yes      | Vercel AI SDK v6                 |
+| `zod`                    | yes      | Schema validation (v4)           |
+| `@cloudflare/shell`      | yes      | Workspace filesystem             |
+| `@cloudflare/codemode`   | optional | For `createExecuteTool`          |
+| `@chat-adapter/telegram` | optional | Required for Telegram messengers |
 
 ## Acknowledgments
 

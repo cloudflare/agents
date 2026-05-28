@@ -6,10 +6,10 @@ routing, and streamed delivery back to the provider.
 
 ## Install
 
-Install the Think package, Chat SDK, and the provider adapter you use:
+Install the Think package and the provider adapter you use:
 
 ```bash
-npm install @cloudflare/think agents ai chat @chat-adapter/telegram
+npm install @cloudflare/think agents ai @chat-adapter/telegram
 ```
 
 Provider adapters are exported from provider-specific subpaths so unused
@@ -23,7 +23,7 @@ import {
   defineMessengers,
   ThinkMessengerStateAgent
 } from "@cloudflare/think/messengers";
-import { telegramMessenger } from "@cloudflare/think/messengers/telegram";
+import telegramMessenger from "@cloudflare/think/messengers/telegram";
 
 export { ThinkMessengerStateAgent };
 
@@ -50,6 +50,29 @@ https://<your-worker>/messengers/telegram/webhook
 custom `verifyWebhook` function or explicitly opt out with
 `verifyWebhook: false`.
 
+If one Think agent owns multiple Telegram bots, give each provider a distinct
+Chat SDK adapter name:
+
+```typescript
+defineMessengers({
+  support: telegramMessenger({
+    adapterName: "support-telegram",
+    token: this.env.SUPPORT_TELEGRAM_BOT_TOKEN,
+    userName: "support_bot",
+    secretToken: this.env.SUPPORT_TELEGRAM_WEBHOOK_SECRET_TOKEN
+  }),
+  sales: telegramMessenger({
+    adapterName: "sales-telegram",
+    token: this.env.SALES_TELEGRAM_BOT_TOKEN,
+    userName: "sales_bot",
+    secretToken: this.env.SALES_TELEGRAM_WEBHOOK_SECRET_TOKEN
+  })
+});
+```
+
+Duplicate adapter names fail during startup so providers cannot overwrite each
+other in the shared Chat SDK runtime.
+
 ## Routing
 
 The root Think agent handles messenger webhook routes after framework sub-agent
@@ -59,16 +82,22 @@ does not create webhook routes for that sub-agent.
 
 By default, Think replies to direct messages and mentions. New mentions subscribe
 the Chat SDK thread so later mentions in the same thread are still observed, but
-ordinary subscribed-thread messages are ignored unless you opt in:
+ordinary subscribed-thread messages and button actions are ignored unless you
+opt in:
 
 ```typescript
 telegramMessenger({
   token: this.env.TELEGRAM_BOT_TOKEN,
   userName: "support_bot",
   secretToken: this.env.TELEGRAM_WEBHOOK_SECRET_TOKEN,
-  respondTo: ["direct-message", "mention", "subscribed-thread"]
+  respondTo: ["direct-message", "mention", "subscribed-thread", "action"]
 });
 ```
+
+Action events are converted into Think user messages with the action id, value,
+source message id, and initiating user. Use `getMessengerContext()?.action`
+inside hooks or tools when you need provider-specific action details. Actions
+are opt-in so interactive cards do not accidentally trigger model turns.
 
 ## Conversation Targets
 
@@ -160,6 +189,10 @@ Every custom messenger must provide `verifyWebhook` or explicitly use
 `verifyWebhook: false`.
 
 ## Advanced Manual Ingress
+
+The `examples/think-chat-sdk` example demonstrates the Think-native
+`getMessengers()` path with a small Vite dashboard that inspects the root Think
+conversation over the Agent websocket.
 
 The `examples/chat-sdk-messenger` example demonstrates a larger manual ingress
 agent with an admin dashboard, menu handling, and application-owned reply

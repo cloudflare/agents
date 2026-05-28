@@ -52,6 +52,7 @@ export interface MessengerAction {
   messageId?: string;
   raw?: unknown;
   user?: MessengerAuthor;
+  value?: string;
 }
 
 export interface MessengerCapabilities {
@@ -106,7 +107,8 @@ export function serializableMessengerEvent(
       ? {
           actionId: event.action.actionId,
           messageId: event.action.messageId,
-          user: event.action.user ? { ...event.action.user } : undefined
+          user: event.action.user ? { ...event.action.user } : undefined,
+          value: event.action.value
         }
       : undefined,
     message: event.message
@@ -132,6 +134,38 @@ export function serializableMessengerEvent(
 
 export function toMessengerUserMessage(event: MessengerEvent): UIMessage {
   const message = event.message;
+  if (event.action) {
+    const user = event.action.user;
+    const displayName = user?.fullName || user?.userName || user?.userId;
+    const details = [
+      `Action selected: ${event.action.actionId}`,
+      event.action.value ? `Value: ${event.action.value}` : undefined,
+      event.action.messageId
+        ? `Source message: ${event.action.messageId}`
+        : undefined
+    ].filter(Boolean);
+    const text = displayName
+      ? `${displayName}: ${details.join("\n")}`
+      : details.join("\n");
+
+    return {
+      id: [
+        event.messengerId,
+        "action",
+        event.thread.id,
+        event.action.messageId,
+        event.action.actionId
+      ]
+        .filter(Boolean)
+        .join(":"),
+      role: "user",
+      parts: [{ type: "text", text }],
+      metadata: {
+        messenger: messengerContextFromEvent(event)
+      }
+    } as UIMessage;
+  }
+
   if (!message) {
     throw new Error(`Messenger event ${event.kind} does not contain a message`);
   }

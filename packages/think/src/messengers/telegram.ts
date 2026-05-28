@@ -11,7 +11,7 @@ const TELEGRAM_DEDUPE_PREFIX = "dedupe:telegram:";
 
 export interface TelegramMessengerOptions extends Omit<
   ChatSdkMessengerOptions,
-  "adapter" | "adapterName" | "provider" | "userName" | "verifyWebhook"
+  "adapter" | "provider" | "userName" | "verifyWebhook"
 > {
   apiBaseUrl?: string;
   apiUrl?: string;
@@ -27,10 +27,15 @@ export interface TelegramMessengerOptions extends Omit<
 export function telegramMessenger(
   options: TelegramMessengerOptions
 ): MessengerDefinition {
+  const adapterName = options.adapterName ?? "telegram";
+  const shardThread =
+    options.shardKey ??
+    ((threadId: string) => defaultTelegramThreadShard(threadId, adapterName));
+
   if (
     (options.mode ?? "webhook") === "webhook" &&
     !options.secretToken &&
-    options.verifyWebhook !== false
+    options.verifyWebhook === undefined
   ) {
     throw new Error(
       "telegramMessenger requires secretToken for webhook verification, or verifyWebhook: false to opt out explicitly"
@@ -49,7 +54,7 @@ export function telegramMessenger(
   return chatSdkMessenger({
     ...options,
     adapter,
-    adapterName: "telegram",
+    adapterName,
     capabilities: {
       canEditMessages: true,
       canStream: true,
@@ -64,13 +69,9 @@ export function telegramMessenger(
       ...options.delivery
     },
     keyShard: (key) =>
-      options.keyShard?.(key) ??
-      shardTelegramStateKey(
-        key,
-        options.shardKey ?? defaultTelegramThreadShard
-      ),
+      options.keyShard?.(key) ?? shardTelegramStateKey(key, shardThread),
     provider: "telegram",
-    shardKey: options.shardKey ?? defaultTelegramThreadShard,
+    shardKey: shardThread,
     userName: options.userName,
     verifyWebhook:
       options.verifyWebhook === false
@@ -79,6 +80,8 @@ export function telegramMessenger(
           telegramSecretTokenVerifier(options.secretToken))
   });
 }
+
+export default telegramMessenger;
 
 export function telegramSecretTokenVerifier(
   secretToken: string | undefined
@@ -91,8 +94,12 @@ export function telegramSecretTokenVerifier(
     request.headers.get("x-telegram-bot-api-secret-token") === secretToken;
 }
 
-export function defaultTelegramThreadShard(threadId: string): string {
-  return threadId.split(":").slice(0, 2).join(":") || "telegram";
+export function defaultTelegramThreadShard(
+  threadId: string,
+  adapterName = "telegram"
+): string {
+  const shard = threadId.split(":").slice(0, 2).join(":") || "telegram";
+  return adapterName === "telegram" ? shard : `${adapterName}:${shard}`;
 }
 
 export function shardTelegramStateKey(

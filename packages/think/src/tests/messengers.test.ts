@@ -1,10 +1,15 @@
 import { env } from "cloudflare:workers";
-import type { FiberRecoveryContext, FiberRecoveryResult } from "agents";
+import type {
+  FiberContext,
+  FiberRecoveryContext,
+  FiberRecoveryResult
+} from "agents";
 import { getAgentByName } from "agents";
 import type { Adapter } from "chat";
 import { describe, expect, it } from "vitest";
 import {
   chatSdkMessenger,
+  defaultChatSdkEvent,
   defaultConversationName,
   deliverMessengerReply,
   defineMessengers,
@@ -24,11 +29,11 @@ import {
   type MessengerEvent,
   type MessengerThinkHost
 } from "../messengers";
-import {
+import telegramMessenger, {
   isExpectedTelegramFinalEditNoop,
   isTelegramIgnorableDeliveryError,
+  shardTelegramStateKey,
   splitTelegramMessageText,
-  telegramMessenger,
   telegramSecretTokenVerifier
 } from "../messengers/telegram";
 
@@ -205,6 +210,36 @@ describe("think messengers core", () => {
     expect(response?.status).toBe(401);
   });
 
+  it("lets custom webhook verification read the body without consuming adapter input", async () => {
+    const runtime = new ThinkMessengerRuntime(
+      defineMessengers({
+        fake: chatSdkMessenger({
+          adapter: fakeAdapter({
+            async handleWebhook(request?: Request) {
+              return new Response(await request?.text());
+            }
+          }),
+          provider: "fake",
+          userName: "fake_bot",
+          async verifyWebhook(request) {
+            return (await request.text()) === "payload";
+          }
+        })
+      }),
+      fakeHost([])
+    );
+    runtime.initialize();
+
+    const response = await runtime.handleRequest(
+      new Request("https://example.com/messengers/fake/webhook", {
+        body: "payload",
+        method: "POST"
+      })
+    );
+
+    await expect(response?.text()).resolves.toBe("payload");
+  });
+
   it("derives stable conversation and idempotency keys", () => {
     expect(defaultConversationName(baseEvent)).toBe(
       "messenger:telegram:telegram:-100123:42"
@@ -226,6 +261,56 @@ describe("think messengers core", () => {
           "",
           "Attachments:",
           "- notes.txt (text/plain, 12 bytes, https://example.com/notes.txt)"
+        ].join("\n")
+      }
+    ]);
+  });
+
+  it("converts messenger actions to Think user messages", () => {
+    const event = defaultChatSdkEvent(
+      normalizeMessengers({
+        fake: chatSdkMessenger({
+          adapter: fakeAdapter(),
+          capabilities: { supportsActions: true },
+          provider: "fake",
+          userName: "fake_bot",
+          verifyWebhook: false
+        })
+      })[0]!,
+      {
+        action: {
+          actionId: "approve",
+          adapter: fakeAdapter(),
+          messageId: "source-message",
+          raw: { callback: true },
+          thread: null,
+          threadId: "fake:thread",
+          user: {
+            fullName: "Ada Lovelace",
+            isBot: false,
+            isMe: false,
+            userId: "fake:user",
+            userName: "ada"
+          },
+          value: "ship-it"
+        } as never,
+        eventKind: "action",
+        thread: fakeThread("fake:thread")
+      }
+    );
+
+    expect(event.action).toMatchObject({
+      actionId: "approve",
+      messageId: "source-message",
+      value: "ship-it"
+    });
+    expect(toMessengerUserMessage(event).parts).toEqual([
+      {
+        type: "text",
+        text: [
+          "Ada Lovelace: Action selected: approve",
+          "Value: ship-it",
+          "Source message: source-message"
         ].join("\n")
       }
     ]);
@@ -362,6 +447,44 @@ describe("think messengers core", () => {
     expect(callback.visibleLimitReached()).toBe(true);
   });
 
+  it("marks messenger reply fibers as streaming only when visible text starts", async () => {
+    const stages: string[] = [];
+    const posts: string[] = [];
+
+    await deliverMessengerReply({
+      event: baseEvent,
+      fiber: {
+        stash(snapshot: unknown) {
+          stages.push(
+            parseMessengerReplySnapshot(snapshot)?.stage ?? "unknown"
+          );
+        }
+      } as unknown as FiberContext,
+      surface: {
+        async post(message) {
+          if (isAsyncIterable(message)) {
+            posts.push(...(await collectText(message)));
+          }
+        }
+      },
+      target: {
+        cancelChat() {
+          return Promise.resolve(false);
+        },
+        chat(_message, callback) {
+          expect(stages).toEqual([]);
+          callback.onEvent(
+            JSON.stringify({ type: "text-delta", delta: "hello" })
+          );
+          return Promise.resolve();
+        }
+      }
+    });
+
+    expect(posts).toEqual(["hello"]);
+    expect(stages).toEqual(["streaming", "completed"]);
+  });
+
   it("delivers successful replies with active messenger context and overflow chunks", async () => {
     const posts: string[] = [];
     let seenContext: MessengerEvent | undefined;
@@ -471,6 +594,59 @@ describe("telegram messenger provider", () => {
         verifyWebhook: false
       })
     ).not.toThrow();
+
+    expect(() =>
+      telegramMessenger({
+        token: "token",
+        userName: "fake_bot",
+        verifyWebhook() {
+          return true;
+        }
+      })
+    ).not.toThrow();
+  });
+
+  it("supports distinct Telegram adapter names and rejects duplicate defaults", () => {
+    expect(() =>
+      normalizeMessengers({
+        first: telegramMessenger({
+          secretToken: "secret",
+          token: "token-1",
+          userName: "first_bot"
+        }),
+        second: telegramMessenger({
+          secretToken: "secret",
+          token: "token-2",
+          userName: "second_bot"
+        })
+      })
+    ).toThrow("Duplicate messenger adapter name: telegram");
+
+    const definitions = normalizeMessengers({
+      first: telegramMessenger({
+        adapterName: "telegram-first",
+        secretToken: "secret",
+        token: "token-1",
+        userName: "first_bot"
+      }),
+      second: telegramMessenger({
+        adapterName: "telegram-second",
+        secretToken: "secret",
+        token: "token-2",
+        userName: "second_bot"
+      })
+    });
+
+    expect(definitions.map((definition) => definition.adapterName)).toEqual([
+      "telegram-first",
+      "telegram-second"
+    ]);
+    expect(definitions[0]?.shardKey?.("telegram:123:456")).toBe(
+      "telegram-first:telegram:123"
+    );
+    expect(
+      shardTelegramStateKey("dedupe:telegram:123:456", definitions[0]?.shardKey)
+    ).toBe("telegram-first:telegram:123");
   });
 
   it("verifies Telegram secret token headers", () => {
@@ -599,4 +775,13 @@ function fakeAdapter(overrides: Partial<Adapter> = {}): Adapter {
     userName: "fake_bot",
     ...overrides
   } as Adapter;
+}
+
+function fakeThread(id: string) {
+  return {
+    channel: { name: "Fake" },
+    channelId: id,
+    id,
+    isDM: false
+  } as never;
 }

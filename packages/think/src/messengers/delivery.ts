@@ -17,10 +17,12 @@ export const INTERRUPTED_MESSENGER_RESPONSE =
 type Wake = () => void;
 
 export interface TextStreamCallbackOptions {
+  onVisibleStart?: () => Promise<void> | void;
   visibleSoftLimit?: number;
 }
 
 export class TextStreamCallback extends RpcTarget implements StreamCallback {
+  private readonly onVisibleStart?: () => Promise<void> | void;
   private readonly visibleChunks: string[] = [];
   private readonly wakeups: Wake[] = [];
   private readonly visibleSoftLimit?: number;
@@ -30,10 +32,12 @@ export class TextStreamCallback extends RpcTarget implements StreamCallback {
   private text = "";
   private visibleClosed = false;
   private visibleLimitReachedValue = false;
+  private visibleStarted = false;
   private visibleTextValue = "";
 
   constructor(options: TextStreamCallbackOptions = {}) {
     super();
+    this.onVisibleStart = options.onVisibleStart;
     this.visibleSoftLimit = options.visibleSoftLimit;
   }
 
@@ -101,6 +105,7 @@ export class TextStreamCallback extends RpcTarget implements StreamCallback {
     while (true) {
       const next = this.visibleChunks.shift();
       if (next !== undefined) {
+        await this.markVisibleStarted();
         yield next;
         continue;
       }
@@ -156,6 +161,14 @@ export class TextStreamCallback extends RpcTarget implements StreamCallback {
     for (const wake of this.wakeups.splice(0)) {
       wake();
     }
+  }
+
+  private async markVisibleStarted(): Promise<void> {
+    if (this.visibleStarted) {
+      return;
+    }
+    this.visibleStarted = true;
+    await this.onVisibleStart?.();
   }
 }
 
@@ -279,6 +292,7 @@ export interface MessengerDeliveryPolicy {
 }
 
 export interface DeliverMessengerReplyOptions {
+  checkpoint?: (snapshot: MessengerReplySnapshot) => Promise<void> | void;
   event: MessengerEvent;
   fiber?: FiberContext;
   policy?: MessengerDeliveryPolicy;
@@ -292,9 +306,6 @@ export interface DeliverMessengerReplyOptions {
 export async function deliverMessengerReply(
   options: DeliverMessengerReplyOptions
 ): Promise<void> {
-  const callback = new TextStreamCallback({
-    visibleSoftLimit: options.policy?.visibleSoftLimit
-  });
   const emptyResponseText =
     options.policy?.emptyResponseText ?? EMPTY_MESSENGER_RESPONSE;
   const errorResponseText =
@@ -303,10 +314,24 @@ export async function deliverMessengerReply(
     options.policy?.interruptedResponseText ?? INTERRUPTED_MESSENGER_RESPONSE;
   let completedModelTurn = false;
   const snapshotEvent = options.snapshotEvent ?? options.event;
+  const checkpoint =
+    options.checkpoint ??
+    ((snapshot: MessengerReplySnapshot) => {
+      options.fiber?.stash(snapshot);
+    });
 
-  options.fiber?.stash(
-    messengerReplySnapshot("streaming", snapshotEvent, options.snapshotThread)
-  );
+  const callback = new TextStreamCallback({
+    onVisibleStart: async () => {
+      await checkpoint(
+        messengerReplySnapshot(
+          "streaming",
+          snapshotEvent,
+          options.snapshotThread
+        )
+      );
+    },
+    visibleSoftLimit: options.policy?.visibleSoftLimit
+  });
   const post = options.surface
     .post(callback.stream())
     .catch(async (error: unknown) => {
@@ -347,7 +372,7 @@ export async function deliverMessengerReply(
       []) {
       await options.surface.post(chunk);
     }
-    options.fiber?.stash(
+    await checkpoint(
       messengerReplySnapshot("completed", snapshotEvent, options.snapshotThread)
     );
   } catch (error) {
@@ -360,7 +385,7 @@ export async function deliverMessengerReply(
     );
 
     if (failureMode === null) {
-      options.fiber?.stash(
+      await checkpoint(
         messengerReplySnapshot(
           "completed",
           snapshotEvent,
@@ -374,7 +399,7 @@ export async function deliverMessengerReply(
       await options.surface
         .post(interruptedResponseText)
         .catch(() => undefined);
-      options.fiber?.stash(
+      await checkpoint(
         messengerReplySnapshot(
           "completed",
           snapshotEvent,
@@ -389,7 +414,7 @@ export async function deliverMessengerReply(
         markdown: errorResponseText
       })
       .catch(() => undefined);
-    options.fiber?.stash(
+    await checkpoint(
       messengerReplySnapshot("completed", snapshotEvent, options.snapshotThread)
     );
   }
