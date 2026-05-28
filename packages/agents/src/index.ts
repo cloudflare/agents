@@ -7856,7 +7856,7 @@ export class Agent<
     runId: string,
     timeoutMs?: number
   ): Promise<AgentToolStoredChunk[] | undefined> {
-    const chunks = adapter.getAgentToolChunks(runId);
+    const chunks = adapter.getAgentToolChunks(runId).catch(() => undefined);
     if (timeoutMs === undefined || timeoutMs <= 0) return chunks;
 
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
