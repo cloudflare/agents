@@ -314,6 +314,8 @@ type ThinkWorkflowPromptContext = {
   fingerprint?: string;
 };
 
+const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
+
 export type ThinkSubmissionInspection = {
   submissionId: string;
   idempotencyKey?: string;
@@ -2815,19 +2817,23 @@ export class Think<
   private _readWorkflowPromptContext(
     metadata: Record<string, unknown> | null
   ): ThinkWorkflowPromptContext | null {
-    const workflowPromptValue = metadata?.workflowPrompt;
-    const workflowValue = metadata?.workflow;
+    const workflowPromptValue = metadata?.[THINK_WORKFLOW_PROMPT_METADATA_KEY];
     if (
       workflowPromptValue === null ||
       typeof workflowPromptValue !== "object" ||
-      Array.isArray(workflowPromptValue) ||
+      Array.isArray(workflowPromptValue)
+    ) {
+      return null;
+    }
+    const workflowPrompt = workflowPromptValue as Record<string, unknown>;
+    const workflowValue = workflowPrompt.workflow;
+    if (
       workflowValue === null ||
       typeof workflowValue !== "object" ||
       Array.isArray(workflowValue)
     ) {
       return null;
     }
-    const workflowPrompt = workflowPromptValue as Record<string, unknown>;
     const workflowRecord = workflowValue as Record<string, unknown>;
     if (
       typeof workflowRecord.name !== "string" ||

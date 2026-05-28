@@ -24,6 +24,8 @@ type ThinkPromptEventPayload = {
   error?: string;
 };
 
+const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
+
 export type ThinkPromptOptions<Schema extends ZodObject> = {
   prompt: string;
   output: Schema;
@@ -135,13 +137,13 @@ export class ThinkWorkflow<
         {
           idempotencyKey,
           metadata: {
-            workflow: {
-              name: this.workflowName,
-              id: this.workflowId,
-              stepName,
-              eventType
-            },
-            workflowPrompt: {
+            [THINK_WORKFLOW_PROMPT_METADATA_KEY]: {
+              workflow: {
+                name: this.workflowName,
+                id: this.workflowId,
+                stepName,
+                eventType
+              },
               output: {
                 schema: outputSchema
               },

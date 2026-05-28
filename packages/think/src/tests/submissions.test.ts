@@ -140,6 +140,7 @@ const terminalStatuses = new Set<ThinkSubmissionStatus>([
   "skipped",
   "error"
 ]);
+const workflowPromptMetadataKey = "__thinkWorkflowPrompt";
 
 async function waitForSubmission(
   agent: ThinkSubmissionTestStub,
@@ -372,6 +373,44 @@ describe("Think durable submissions", () => {
     await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([]);
   });
 
+  it("does not treat public workflow-shaped metadata as workflow configuration", async () => {
+    const agent = await freshAgent();
+    await agent.setProgrammaticResponseForTest("plain text response");
+
+    const accepted = await agent.testSubmitMessages("normal metadata", {
+      submissionId: "sub-public-metadata-workflow-shape",
+      metadata: {
+        workflow: {
+          name: "TEST_WORKFLOW",
+          id: "metadata-controlled",
+          stepName: "not-a-workflow-step",
+          eventType: "think-prompt-metadata"
+        },
+        workflowPrompt: {
+          output: {
+            schema: {
+              type: "object",
+              properties: {
+                title: { type: "string" }
+              },
+              required: ["title"],
+              additionalProperties: false
+            }
+          },
+          fingerprint: "metadata"
+        }
+      }
+    });
+    const completed = await waitForSubmission(
+      agent,
+      accepted.submissionId,
+      (submission) => terminalStatuses.has(submission.status)
+    );
+
+    expect(completed.status).toBe("completed");
+    await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([]);
+  });
+
   it("aborts a running submission without letting late completion overwrite it", async () => {
     const agent = await freshAgent();
     await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
@@ -426,13 +465,13 @@ describe("Think durable submissions", () => {
       completedAt: Date.now(),
       errorMessage: "model failed",
       metadata: {
-        workflow: {
-          name: "TEST_WORKFLOW",
-          id: "workflow-recover",
-          stepName: "draft-report",
-          eventType: "think-prompt-recover"
-        },
-        workflowPrompt: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-recover",
+            stepName: "draft-report",
+            eventType: "think-prompt-recover"
+          },
           output: { schema: { type: "object" } },
           fingerprint: "fingerprint"
         }
@@ -481,13 +520,13 @@ describe("Think durable submissions", () => {
     const accepted = await agent.testSubmitMessages("produce workflow output", {
       submissionId: "sub-workflow-output",
       metadata: {
-        workflow: {
-          name: "TEST_WORKFLOW",
-          id: "workflow-output",
-          stepName: "draft-report",
-          eventType: "think-prompt-output"
-        },
-        workflowPrompt: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-output",
+            stepName: "draft-report",
+            eventType: "think-prompt-output"
+          },
           output: {
             schema: {
               type: "object",
