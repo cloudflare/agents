@@ -1648,6 +1648,56 @@ describe("createCompactFunction", () => {
     await expect(compact(messages)).resolves.toBeNull();
     expect(summarizeCalls).toBe(0);
   });
+
+  it("uses a supplied token counter for tail budgeting tool-heavy histories", async () => {
+    let summarizeCalls = 0;
+    const messages: SessionMessage[] = [
+      {
+        id: "head",
+        role: "user",
+        parts: [{ type: "text", text: "start" }]
+      },
+      ...Array.from(
+        { length: 8 },
+        (_, i): SessionMessage => ({
+          id: `tool-${i}`,
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-read_many",
+              toolCallId: `call-${i}`,
+              toolName: "read_many",
+              state: "output-available",
+              input: { glob: "**/*.ts" },
+              output: "x".repeat(25_000)
+            }
+          ]
+        })
+      )
+    ];
+
+    const compact = createCompactFunction({
+      summarize: async () => {
+        summarizeCalls++;
+        return "summary";
+      },
+      protectHead: 1,
+      minTailMessages: 1,
+      tailTokenBudget: 10_000,
+      tokenCounter: (countedMessages) =>
+        countedMessages.reduce(
+          (sum, message) => sum + JSON.stringify(message.parts).length,
+          0
+        )
+    });
+
+    const result = await compact(messages);
+    expect(result).toMatchObject({
+      fromMessageId: "tool-0",
+      summary: "summary"
+    });
+    expect(summarizeCalls).toBe(1);
+  });
 });
 
 // ── DO-backed tests (session isolation, system prompt persistence) ──

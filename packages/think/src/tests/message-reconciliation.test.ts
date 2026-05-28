@@ -258,7 +258,7 @@ describe("Think — message reconciliation on incoming submits", () => {
     ws.close(1000);
   });
 
-  it("documents that a persisted orphan tool call poisons the next Think turn", async () => {
+  it("repairs a persisted orphan tool call before the next Think turn", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
     const ws = await connectWS(room);
@@ -274,23 +274,20 @@ describe("Think — message reconciliation on incoming submits", () => {
     const response = await responsePromise;
 
     expect(response.done).toBe(true);
+    expect(response.error).toBeUndefined();
 
     const responseLog = (await agent.getResponseLog()) as Array<{
       status: string;
       error?: string;
     }>;
     const lastResponse = responseLog[responseLog.length - 1];
-    expect(lastResponse).toMatchObject({
-      status: "error",
-      error: expect.stringMatching(/tool|result|call/i)
-    });
+    expect(lastResponse).toMatchObject({ status: "completed" });
 
     const messages = (await agent.getMessages()) as UIMessage[];
-    expect(messages.map((message) => message.id)).toEqual([
-      "user-a",
-      "orphan-assistant",
-      "user-b"
-    ]);
+    expect(messages.map((message) => message.id)).not.toContain(
+      "orphan-assistant"
+    );
+    expect(messages.some((message) => message.id === "user-b")).toBe(true);
 
     ws.close(1000);
   });

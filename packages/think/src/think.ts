@@ -1407,6 +1407,130 @@ export class Think<
     return (await this.session.getHistory()) as UIMessage[];
   }
 
+  private _repairToolTranscriptParts(messages: UIMessage[]): {
+    messages: UIMessage[];
+    removedToolCalls: number;
+    removedToolResults: number;
+    normalizedInputs: number;
+    toolCallIds: string[];
+  } {
+    let removedToolCalls = 0;
+    let removedToolResults = 0;
+    let normalizedInputs = 0;
+    const toolCallIds: string[] = [];
+    const repaired: UIMessage[] = [];
+
+    for (const message of messages) {
+      const parts: UIMessage["parts"] = [];
+      let messageRemovedToolCalls = 0;
+      for (const part of message.parts) {
+        const record = part as Record<string, unknown>;
+        const toolCallId =
+          typeof record.toolCallId === "string" ? record.toolCallId : undefined;
+        const isToolPart =
+          typeof record.type === "string" &&
+          (record.type.startsWith("tool-") || record.type === "dynamic-tool") &&
+          toolCallId;
+        if (!isToolPart) {
+          parts.push(part);
+          continue;
+        }
+
+        const state = typeof record.state === "string" ? record.state : "";
+        const hasOutput =
+          "output" in record ||
+          "result" in record ||
+          state === "output-available";
+        if (!hasOutput) {
+          removedToolCalls++;
+          messageRemovedToolCalls++;
+          toolCallIds.push(toolCallId);
+          continue;
+        }
+
+        if (
+          "input" in record &&
+          typeof record.input === "string" &&
+          record.input.trim().startsWith("{")
+        ) {
+          try {
+            parts.push({
+              ...part,
+              input: JSON.parse(record.input) as unknown
+            } as UIMessage["parts"][number]);
+            normalizedInputs++;
+            continue;
+          } catch {
+            // Keep the original input if it is not valid JSON.
+          }
+        }
+
+        parts.push(part);
+      }
+
+      const hasMeaningfulPart = parts.some(
+        (part) => (part as Record<string, unknown>).type !== "step-start"
+      );
+      if (
+        (!hasMeaningfulPart || parts.length === 0) &&
+        message.parts.length > 0
+      ) {
+        if (messageRemovedToolCalls === 0) removedToolResults++;
+        continue;
+      }
+      repaired.push(
+        parts.length === message.parts.length ? message : { ...message, parts }
+      );
+    }
+
+    return {
+      messages: repaired,
+      removedToolCalls,
+      removedToolResults,
+      normalizedInputs,
+      toolCallIds
+    };
+  }
+
+  private async _repairTranscriptForProvider(
+    messages: UIMessage[]
+  ): Promise<UIMessage[]> {
+    const repair = this._repairToolTranscriptParts(messages);
+    if (
+      repair.removedToolCalls === 0 &&
+      repair.removedToolResults === 0 &&
+      repair.normalizedInputs === 0
+    ) {
+      return messages;
+    }
+
+    const repairedIds = new Set(repair.messages.map((message) => message.id));
+    const removedIds = messages
+      .filter((message) => !repairedIds.has(message.id))
+      .map((message) => message.id);
+    if (removedIds.length > 0) {
+      await this.session.deleteMessages(removedIds);
+    }
+    for (const message of repair.messages) {
+      const original = messages.find(
+        (candidate) => candidate.id === message.id
+      );
+      if (original && original.parts !== message.parts) {
+        await this.session.updateMessage(sanitizeMessage(message));
+      }
+    }
+
+    this._replaceCachedMessages(repair.messages);
+    this._broadcastMessages();
+    this._emit("chat:transcript:repaired", {
+      removedToolCalls: repair.removedToolCalls,
+      removedToolResults: repair.removedToolResults,
+      normalizedInputs: repair.normalizedInputs,
+      toolCallIds: repair.toolCallIds
+    });
+    return repair.messages;
+  }
+
   /** Replace the live cache with a durable storage snapshot. */
   private _replaceCachedMessages(messages: UIMessage[]): UIMessage[] {
     this._cachedMessages = messages;
@@ -2292,7 +2416,7 @@ export class Think<
     const baseSystem = frozenPrompt || this.getSystemPrompt();
     const system = this._systemPromptForTurn(baseSystem, tools);
 
-    const history = this.messages;
+    const history = await this._repairTranscriptForProvider(this.messages);
     const truncated = truncateOlderMessages(history) as UIMessage[];
     const messages = await convertToModelMessages(truncated, { tools });
 
