@@ -1016,6 +1016,12 @@ export interface TurnConfig {
   output?: Parameters<typeof streamText>[0]["output"];
 }
 
+export interface ChatErrorContext {
+  requestId?: string;
+  stage: "parse" | "persist" | "turn" | "stream" | "recovery" | "transcript";
+  messagesPersisted?: boolean;
+}
+
 /**
  * Context passed to the `beforeStep` hook before each AI SDK step in
  * the agentic loop. Backed by the AI SDK's `PrepareStepFunction<TOOLS>`
@@ -2166,7 +2172,7 @@ export class Think<
    * Handle an error that occurred during a chat turn.
    * Override to customize error handling (e.g. logging, metrics).
    */
-  onChatError(error: unknown): unknown {
+  onChatError(error: unknown, _ctx?: ChatErrorContext): unknown {
     return error;
   }
 
@@ -2963,9 +2969,17 @@ export class Think<
                   })
               );
             } catch (error) {
-              const wrapped = this.onChatError(error);
+              const wrapped = this.onChatError(error, {
+                stage: "turn",
+                messagesPersisted: true
+              });
               const errorMessage =
                 wrapped instanceof Error ? wrapped.message : String(wrapped);
+              this._emit("chat:request:failed", {
+                stage: "turn",
+                messagesPersisted: true,
+                error: errorMessage
+              });
               await callback.onError(errorMessage);
               return;
             }
@@ -5393,7 +5407,18 @@ export class Think<
     let rawParsed: Record<string, unknown>;
     try {
       rawParsed = JSON.parse(event.init.body) as Record<string, unknown>;
-    } catch {
+    } catch (error) {
+      const wrapped = this.onChatError(error, {
+        requestId: event.id,
+        stage: "parse",
+        messagesPersisted: false
+      });
+      this._emit("chat:request:failed", {
+        requestId: event.id,
+        stage: "parse",
+        messagesPersisted: false,
+        error: wrapped instanceof Error ? wrapped.message : String(wrapped)
+      });
       return;
     }
 
@@ -5413,6 +5438,8 @@ export class Think<
     const isRegeneration = rawTrigger === "regenerate-message";
     const isSubmitMessage = !isRegeneration;
     const requestId = event.id;
+    let messagesPersisted = false;
+    let failureStage: ChatErrorContext["stage"] = "persist";
 
     // ── Concurrency decision (before persisting anything) ────────
     const concurrencyDecision =
@@ -5497,8 +5524,10 @@ export class Think<
 
       await this._syncMessages();
       this._broadcastMessages([connection.id]);
+      messagesPersisted = true;
 
       // ── Enter turn queue ────────────────────────────────────────
+      failureStage = "turn";
       const abortSignal = this._aborts.getSignal(requestId);
 
       await this.keepAliveWhile(async () => {
@@ -5590,10 +5619,23 @@ export class Think<
         }
       });
     } catch (error) {
+      const wrapped = this.onChatError(error, {
+        requestId,
+        stage: failureStage,
+        messagesPersisted
+      });
+      const errorMessage =
+        wrapped instanceof Error ? wrapped.message : String(wrapped);
+      this._emit("chat:request:failed", {
+        requestId,
+        stage: failureStage,
+        messagesPersisted,
+        error: errorMessage
+      });
       this._broadcastChat({
         type: MSG_CHAT_RESPONSE,
         id: requestId,
-        body: error instanceof Error ? error.message : "Error",
+        body: errorMessage,
         done: true,
         error: true
       });
@@ -5842,9 +5884,19 @@ export class Think<
         this._broadcastMessages();
       }
 
-      const wrapped = this.onChatError(error);
+      const wrapped = this.onChatError(error, {
+        requestId,
+        stage: "stream",
+        messagesPersisted: true
+      });
       const errorMessage =
         wrapped instanceof Error ? wrapped.message : String(wrapped);
+      this._emit("chat:request:failed", {
+        requestId,
+        stage: "stream",
+        messagesPersisted: true,
+        error: errorMessage
+      });
 
       if (assistantMsg) {
         await this._fireResponseHook({

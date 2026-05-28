@@ -41,6 +41,7 @@ const RECOVERY_CONTEXTS_KEY = "test:recovery-contexts";
 const RECOVERY_BEHAVIOR_KEY = "test:recovery-behavior";
 const BEFORE_TURN_ERROR_KEY = "test:before-turn-error";
 const ON_ERROR_LOG_KEY = "test:on-error-log";
+const ON_CHAT_ERROR_LOG_KEY = "test:on-chat-error-log";
 
 export class TestAssistant extends Think<Env> {
   override workspace = new Workspace({
@@ -154,6 +155,17 @@ export class ThinkRecoveryE2EAgent extends Think<Env> {
     await this.ctx.storage.put(ON_ERROR_LOG_KEY, log);
   }
 
+  override onChatError(error: unknown): unknown {
+    const message = error instanceof Error ? error.message : String(error);
+    this.ctx.storage
+      .get<string[]>(ON_CHAT_ERROR_LOG_KEY)
+      .then((log = []) =>
+        this.ctx.storage.put(ON_CHAT_ERROR_LOG_KEY, [...log, message])
+      )
+      .catch(console.error);
+    return error;
+  }
+
   @callable()
   async getRecoveryStatus(): Promise<{
     recoveryCount: number;
@@ -191,6 +203,11 @@ export class ThinkRecoveryE2EAgent extends Think<Env> {
   @callable()
   async getOnErrorLog(): Promise<string[]> {
     return (await this.ctx.storage.get<string[]>(ON_ERROR_LOG_KEY)) ?? [];
+  }
+
+  @callable()
+  async getOnChatErrorLog(): Promise<string[]> {
+    return (await this.ctx.storage.get<string[]>(ON_CHAT_ERROR_LOG_KEY)) ?? [];
   }
 
   @callable()

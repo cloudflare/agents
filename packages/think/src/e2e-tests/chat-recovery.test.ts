@@ -539,6 +539,13 @@ describe("Think chat recovery e2e", () => {
     // This documents the observability gap from the report: the request catch
     // broadcasts a chat error frame, but it does not route through onError.
     expect((await callAgent("getOnErrorLog")) as string[]).toEqual([]);
+    const chatErrorLog = await pollUntil(
+      "chat error hook",
+      () => callAgent("getOnChatErrorLog") as Promise<string[]>,
+      (log) => log.some((entry) => entry.includes("forced beforeTurn failure")),
+      { attempts: 10, delayMs: 250 }
+    );
+    expect(chatErrorLog).toContain("forced beforeTurn failure");
   });
 
   it("should recover helper sub-agent chat after process kill via parent alarm", async () => {
