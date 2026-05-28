@@ -46,8 +46,10 @@ export interface ContinuationConnection {
   send(message: string): void;
 }
 
-export interface ContinuationPending {
-  connection: ContinuationConnection;
+export interface ContinuationPending<
+  TConnection extends ContinuationConnection = ContinuationConnection
+> {
+  connection: TConnection;
   connectionId: string;
   requestId: string;
   clientTools?: ClientToolSchema[];
@@ -57,8 +59,10 @@ export interface ContinuationPending {
   pastCoalesce: boolean;
 }
 
-export interface ContinuationDeferred {
-  connection: ContinuationConnection;
+export interface ContinuationDeferred<
+  TConnection extends ContinuationConnection = ContinuationConnection
+> {
+  connection: TConnection;
   connectionId: string;
   clientTools?: ClientToolSchema[];
   body?: Record<string, unknown>;
@@ -66,12 +70,14 @@ export interface ContinuationDeferred {
   prerequisite: Promise<boolean> | null;
 }
 
-export class ContinuationState {
-  pending: ContinuationPending | null = null;
-  deferred: ContinuationDeferred | null = null;
+export class ContinuationState<
+  TConnection extends ContinuationConnection = ContinuationConnection
+> {
+  pending: ContinuationPending<TConnection> | null = null;
+  deferred: ContinuationDeferred<TConnection> | null = null;
   activeRequestId: string | null = null;
   activeConnectionId: string | null = null;
-  awaitingConnections: Map<string, ContinuationConnection> = new Map();
+  awaitingConnections: Map<string, TConnection> = new Map();
 
   /** Clear pending state and awaiting connections (without sending RESUME_NONE). */
   clearPending(): void {
@@ -106,9 +112,7 @@ export class ContinuationState {
    * Flush awaiting connections by notifying each one via the provided
    * callback (typically sends STREAM_RESUMING), then clear.
    */
-  flushAwaitingConnections(
-    notify: (conn: ContinuationConnection) => void
-  ): void {
+  flushAwaitingConnections(notify: (conn: TConnection) => void): void {
     for (const connection of this.awaitingConnections.values()) {
       notify(connection);
     }
@@ -136,7 +140,7 @@ export class ContinuationState {
    */
   activateDeferred(
     generateRequestId: () => string
-  ): ContinuationPending | null {
+  ): ContinuationPending<TConnection> | null {
     if (this.pending || !this.deferred) return null;
 
     const d = this.deferred;

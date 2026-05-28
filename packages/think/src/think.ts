@@ -1423,7 +1423,7 @@ export class Think<
   private _pendingResumeConnections: Set<string> = new Set();
   private _lastClientTools: ClientToolSchema[] | undefined;
   private _lastBody: Record<string, unknown> | undefined;
-  private _continuation = new ContinuationState();
+  private _continuation = new ContinuationState<Connection>();
   private _continuationTimer: ReturnType<typeof setTimeout> | null = null;
   private _insideResponseHook = false;
   private _insideInferenceLoop = false;
@@ -6578,29 +6578,30 @@ export class Think<
     if (this._continuationTimer) {
       clearTimeout(this._continuationTimer);
     }
+    this._continuation.pending = {
+      connection,
+      connectionId: connection.id,
+      requestId: crypto.randomUUID(),
+      clientTools: this._lastClientTools,
+      body: undefined,
+      errorPrefix: "[Think] Auto-continuation failed:",
+      prerequisite: null,
+      pastCoalesce: false
+    };
+    this._continuation.awaitingConnections.set(connection.id, connection);
     this._continuationTimer = setTimeout(() => {
       this._continuationTimer = null;
-      this._fireAutoContinuation(connection);
+      const pending = this._continuation.pending;
+      if (!pending) return;
+      this._fireAutoContinuation(pending.connection);
     }, 50);
   }
 
   private _fireAutoContinuation(connection: Connection): void {
-    if (!this._continuation.pending) {
-      const requestId = crypto.randomUUID();
-      this._continuation.pending = {
-        connection,
-        connectionId: connection.id,
-        requestId,
-        clientTools: this._lastClientTools,
-        body: undefined,
-        errorPrefix: "[Think] Auto-continuation failed:",
-        prerequisite: null,
-        pastCoalesce: false
-      };
-      this._continuation.awaitingConnections.set(connection.id, connection);
-    }
+    const pending = this._continuation.pending;
+    if (!pending) return;
 
-    const { requestId, clientTools } = this._continuation.pending!;
+    const { requestId, clientTools } = pending;
     const abortSignal = this._aborts.getSignal(requestId);
 
     this.keepAliveWhile(async () => {

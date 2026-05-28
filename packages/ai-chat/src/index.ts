@@ -48,7 +48,6 @@ import { ResumableStream } from "agents/chat";
 import {
   ContinuationState,
   AbortRegistry,
-  type ContinuationConnection,
   type ClientToolSchema
 } from "agents/chat";
 import type {
@@ -339,7 +338,7 @@ export class AIChatAgent<
    * Continuation lifecycle state: pending, deferred, active, and
    * connections awaiting a continuation stream to start.
    */
-  private _continuation = new ContinuationState();
+  private _continuation = new ContinuationState<Connection>();
   private _agentToolForwarders = new Map<
     string,
     Set<(chunk: AgentToolStoredChunk) => void>
@@ -1101,8 +1100,8 @@ export class AIChatAgent<
       return;
     }
 
-    this._continuation.flushAwaitingConnections((c: ContinuationConnection) =>
-      this._notifyStreamResuming(c as Connection)
+    this._continuation.flushAwaitingConnections((c) =>
+      this._notifyStreamResuming(c)
     );
   }
 
@@ -1997,8 +1996,7 @@ export class AIChatAgent<
             return;
           }
 
-          const connection = this._continuation.pending
-            ?.connection as Connection | null;
+          const connection = this._continuation.pending?.connection;
           if (!connection) {
             this._clearAllAutoContinuationState(true);
             return;

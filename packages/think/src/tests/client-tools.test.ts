@@ -997,6 +997,74 @@ describe("Think — tool broadcast and persistence", () => {
 // ── Resume coordination during pending continuation ──────────────
 
 describe("resume coordination during pending continuation", () => {
+  it("does not send STREAM_RESUME_NONE for an immediate resume request after tool output", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await delay(100);
+
+    const userMsg: UIMessage = {
+      id: "msg-immediate-resume-user",
+      role: "user",
+      parts: [{ type: "text", text: "hi" }]
+    } as UIMessage;
+
+    const initialDone = waitForDone(ws, 10000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_CHAT_REQUEST,
+        id: "req-immediate-resume",
+        init: {
+          method: "POST",
+          body: JSON.stringify({ messages: [userMsg] })
+        }
+      })
+    );
+    await initialDone;
+
+    await agent.persistToolCallMessage([
+      userMsg,
+      {
+        id: "assistant-immediate-resume",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-immediate-resume",
+            state: "input-available",
+            input: { action: "test" }
+          }
+        ]
+      } as unknown as UIMessage
+    ]);
+
+    const resumeResponse = Promise.race([
+      waitForMessageOfType(ws, MSG_STREAM_RESUMING, 5000).then(
+        () => "resuming" as const
+      ),
+      waitForMessageOfType(ws, MSG_STREAM_RESUME_NONE, 5000).then(
+        () => "none" as const
+      )
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-immediate-resume",
+        toolName: "client_action",
+        output: "done",
+        autoContinue: true
+      })
+    );
+    ws.send(JSON.stringify({ type: MSG_STREAM_RESUME_REQUEST }));
+
+    const result = await resumeResponse;
+    expect(result).toBe("resuming");
+
+    await waitForDone(ws, 10000);
+    await closeWS(ws);
+  });
+
   it("holds STREAM_RESUME_REQUEST while continuation is pending", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
