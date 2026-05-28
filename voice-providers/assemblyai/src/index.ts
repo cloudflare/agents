@@ -208,8 +208,13 @@ class AssemblyAISession implements TranscriberSession {
     }
   }
 
-  feed(_chunk: ArrayBuffer): void {
-    // Wired in a later task.
+  feed(chunk: ArrayBuffer): void {
+    if (this.#closed) return;
+    if (this.#connected && this.#ws) {
+      this.#ws.send(chunk);
+    } else {
+      this.#pendingChunks.push(chunk);
+    }
   }
 
   close(): void {

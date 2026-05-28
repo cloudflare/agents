@@ -347,3 +347,48 @@ describe("AssemblyAISession — SpeechStarted and language metadata", () => {
     expect(onLanguageDetected).not.toHaveBeenCalled();
   });
 });
+
+describe("AssemblyAISession — feed", () => {
+  it("buffers audio fed before connect, then flushes on open", async () => {
+    // Block fetch so the session is unconnected when feed() is first called.
+    let resolveFetch: (resp: unknown) => void = () => {};
+    const fetchPromise = new Promise((r) => {
+      resolveFetch = r;
+    });
+    const ws = new MockWebSocket();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => fetchPromise)
+    );
+
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+
+    const chunkA = new Uint8Array([1, 2, 3]).buffer;
+    const chunkB = new Uint8Array([4, 5, 6]).buffer;
+    session.feed(chunkA);
+    session.feed(chunkB);
+
+    expect(ws.send).not.toHaveBeenCalled();
+
+    resolveFetch({ webSocket: ws });
+    await flush();
+
+    expect(ws.send).toHaveBeenCalledTimes(2);
+    expect(ws.send).toHaveBeenNthCalledWith(1, chunkA);
+    expect(ws.send).toHaveBeenNthCalledWith(2, chunkB);
+  });
+
+  it("sends audio immediately once connected", async () => {
+    const { ws } = setupMockFetch();
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+    await flush();
+
+    const chunk = new Uint8Array([7, 8, 9]).buffer;
+    session.feed(chunk);
+
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    expect(ws.send).toHaveBeenCalledWith(chunk);
+  });
+});
