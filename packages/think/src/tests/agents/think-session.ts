@@ -1,6 +1,6 @@
 import type { LanguageModel, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
-import { Think } from "../../think";
+import { defineScheduledTasks, Think } from "../../think";
 import { Agent } from "agents";
 import type {
   AgentToolEventMessage,
@@ -21,6 +21,9 @@ import type {
   ThinkSubmissionInspection,
   ThinkSubmissionStatus,
   SubmitMessagesResult,
+  ThinkScheduledTask,
+  ThinkScheduledTaskContext,
+  ThinkScheduledTasks,
   TurnContext,
   TurnConfig,
   PrepareStepContext,
@@ -33,6 +36,7 @@ import type {
 } from "../../think";
 import { sanitizeMessage, enforceRowSizeLimit } from "agents/chat";
 import type { ClientToolSchema } from "agents/chat";
+import type { Schedule } from "agents";
 import { Session } from "agents/experimental/memory/session";
 import { z } from "zod";
 
@@ -2761,6 +2765,303 @@ export class ThinkProgrammaticTestAgent extends Think {
       done: cb.doneCalled,
       error: cb.errorMessage
     };
+  }
+}
+
+type ScheduledTaskConfigForTest = {
+  schedule: string;
+  timezone?: string;
+  prompt?: string;
+  handler?: "record" | "throw" | "throw-once";
+  retry?: ThinkScheduledTask["retry"];
+  metadata?: Record<string, unknown>;
+};
+
+type DeclaredScheduledTaskRowForTest = {
+  owner_key: string;
+  task_id: string;
+  schedule_hash: string;
+  task_hash: string;
+  schedule_id: string | null;
+  next_run_at: number | null;
+  created_at: number;
+  updated_at: number;
+};
+
+type DeclaredScheduledTaskPayloadForTest = {
+  taskId: string;
+  scheduleHash: string;
+  scheduledFor: number;
+};
+
+type ScheduledTaskHandlerEventForTest = {
+  taskId: string;
+  scheduledFor: number;
+  scheduledForIso: string;
+  occurrenceKey: string;
+  idempotencyKey: string;
+  schedule: string;
+  scheduleKind: string;
+  timezone: string | null;
+  metadataJson: string | null;
+};
+
+export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
+  override async getDefaultTimezone(): Promise<string | undefined> {
+    return this.ctx.storage.get<string>("scheduledTasksDefaultTimezone");
+  }
+
+  override async getScheduledTasks(): Promise<ThinkScheduledTasks> {
+    const config =
+      (await this.ctx.storage.get<Record<string, ScheduledTaskConfigForTest>>(
+        "scheduledTasksConfig"
+      )) ?? {};
+    const tasks: ThinkScheduledTasks = {};
+    for (const [taskId, task] of Object.entries(config)) {
+      const base = {
+        schedule: task.schedule as ThinkScheduledTask["schedule"],
+        ...(task.timezone !== undefined && { timezone: task.timezone }),
+        ...(task.retry !== undefined && { retry: task.retry }),
+        ...(task.metadata !== undefined && { metadata: task.metadata })
+      };
+      if (task.handler) {
+        tasks[taskId] = {
+          ...base,
+          handler: async (ctx: ThinkScheduledTaskContext) => {
+            const events =
+              (await this.ctx.storage.get<ScheduledTaskHandlerEventForTest[]>(
+                "scheduledTaskHandlerEvents"
+              )) ?? [];
+            events.push({
+              taskId: ctx.taskId,
+              scheduledFor: ctx.scheduledFor,
+              scheduledForIso: ctx.scheduledForDate.toISOString(),
+              occurrenceKey: ctx.occurrenceKey,
+              idempotencyKey: ctx.idempotencyKey,
+              schedule: ctx.schedule,
+              scheduleKind: ctx.scheduleKind,
+              timezone: ctx.timezone ?? null,
+              metadataJson:
+                ctx.metadata === undefined ? null : JSON.stringify(ctx.metadata)
+            });
+            await this.ctx.storage.put("scheduledTaskHandlerEvents", events);
+            if (
+              task.handler === "throw" ||
+              (task.handler === "throw-once" &&
+                events.filter((event) => event.taskId === ctx.taskId).length ===
+                  1)
+            ) {
+              throw new Error("scheduled handler failed");
+            }
+          }
+        } as ThinkScheduledTask;
+        continue;
+      }
+      const prompt: ThinkScheduledTask["prompt"] =
+        task.prompt === "__throw__"
+          ? () => {
+              throw new Error("scheduled prompt failed");
+            }
+          : (task.prompt ?? "");
+      tasks[taskId] = {
+        ...base,
+        prompt
+      } as ThinkScheduledTask;
+    }
+    return defineScheduledTasks(tasks);
+  }
+
+  async setScheduledTasksForTest(
+    config: Record<string, ScheduledTaskConfigForTest>
+  ): Promise<void> {
+    await this.ctx.storage.put("scheduledTasksConfig", config);
+  }
+
+  async setDefaultTimezoneForTest(timezone?: string): Promise<void> {
+    if (timezone === undefined) {
+      await this.ctx.storage.delete("scheduledTasksDefaultTimezone");
+      return;
+    }
+    await this.ctx.storage.put("scheduledTasksDefaultTimezone", timezone);
+  }
+
+  async reconcileScheduledTasksForTest(): Promise<void> {
+    await this.internal_reconcileScheduledTasks();
+  }
+
+  async reconcileScheduledTasksErrorForTest(): Promise<string> {
+    try {
+      await this.reconcileScheduledTasksForTest();
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async validateScheduleForTest(
+    schedule: string,
+    options: { timezone?: string; defaultTimezone?: string } = {}
+  ): Promise<string | null> {
+    return (
+      this as unknown as {
+        _declaredScheduleValidationError: (
+          schedule: string,
+          timezone?: string,
+          defaultTimezone?: string
+        ) => string | null;
+      }
+    )._declaredScheduleValidationError(
+      schedule,
+      options.timezone,
+      options.defaultTimezone
+    );
+  }
+
+  async nextScheduleTimeForTest(
+    schedule: string,
+    nowIso: string,
+    options: {
+      timezone?: string;
+      defaultTimezone?: string;
+      previousScheduledFor?: number;
+    } = {}
+  ): Promise<number> {
+    return (
+      this as unknown as {
+        _nextDeclaredScheduleTimeForConfig: (
+          schedule: string,
+          now: Date,
+          options?: {
+            taskTimezone?: string;
+            defaultTimezone?: string;
+            previousScheduledFor?: number;
+          }
+        ) => Date;
+      }
+    )
+      ._nextDeclaredScheduleTimeForConfig(schedule, new Date(nowIso), {
+        taskTimezone: options.timezone,
+        defaultTimezone: options.defaultTimezone,
+        previousScheduledFor: options.previousScheduledFor
+      })
+      .getTime();
+  }
+
+  async listDeclaredScheduledTaskRowsForTest(): Promise<
+    DeclaredScheduledTaskRowForTest[]
+  > {
+    const ownerKey = (
+      this as unknown as { _declaredScheduleOwnerKey(): string }
+    )._declaredScheduleOwnerKey();
+    return this.sql<DeclaredScheduledTaskRowForTest>`
+      SELECT owner_key, task_id, schedule_hash, task_hash, schedule_id,
+             next_run_at, created_at, updated_at
+      FROM cf_think_scheduled_tasks
+      WHERE owner_key = ${ownerKey}
+      ORDER BY task_id ASC
+    `;
+  }
+
+  async listSchedulesForTest(): Promise<Schedule<unknown>[]> {
+    return this.listSchedules();
+  }
+
+  async listScheduledTaskHandlerEventsForTest(): Promise<
+    ScheduledTaskHandlerEventForTest[]
+  > {
+    return (
+      (await this.ctx.storage.get<ScheduledTaskHandlerEventForTest[]>(
+        "scheduledTaskHandlerEvents"
+      )) ?? []
+    );
+  }
+
+  async clearDeclaredScheduleIdForTest(taskId: string): Promise<void> {
+    const row = (
+      this as unknown as {
+        _readDeclaredScheduledTaskRow(
+          taskId: string
+        ): DeclaredScheduledTaskRowForTest | null;
+      }
+    )._readDeclaredScheduledTaskRow(taskId);
+    if (!row) throw new Error("No declared schedule row");
+    if (row.schedule_id) await this.cancelSchedule(row.schedule_id);
+    this.sql`
+      UPDATE cf_think_scheduled_tasks
+      SET schedule_id = NULL
+      WHERE owner_key = ${row.owner_key}
+        AND task_id = ${taskId}
+    `;
+  }
+
+  async createUnrelatedScheduleForTest(): Promise<string> {
+    const schedule = await this.schedule(
+      new Date(Date.now() + 60 * 60_000),
+      "noopScheduledTaskForTest",
+      { source: "unrelated" },
+      { idempotent: true }
+    );
+    return schedule.id;
+  }
+
+  async noopScheduledTaskForTest(): Promise<void> {}
+
+  async getFirstDeclaredPayloadForTest(): Promise<DeclaredScheduledTaskPayloadForTest> {
+    const [row] = await this.listDeclaredScheduledTaskRowsForTest();
+    if (!row?.schedule_id) throw new Error("No declared schedule row");
+    const schedule = await this.getScheduleById(row.schedule_id);
+    if (!schedule) throw new Error("Declared schedule row has no schedule");
+    return schedule.payload as DeclaredScheduledTaskPayloadForTest;
+  }
+
+  async runDeclaredPayloadForTest(
+    payload: DeclaredScheduledTaskPayloadForTest
+  ): Promise<void> {
+    await this._runDeclaredScheduledTask(payload);
+  }
+
+  async runDeclaredPayloadErrorForTest(
+    payload: DeclaredScheduledTaskPayloadForTest
+  ): Promise<string> {
+    try {
+      await this.runDeclaredPayloadForTest(payload);
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async setChildScheduledTasksForTest(
+    name: string,
+    config: Record<string, ScheduledTaskConfigForTest>
+  ): Promise<void> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    await child.setScheduledTasksForTest(config);
+  }
+
+  async setChildDefaultTimezoneForTest(
+    name: string,
+    timezone?: string
+  ): Promise<void> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    await child.setDefaultTimezoneForTest(timezone);
+  }
+
+  async reconcileChildScheduledTasksForTest(name: string): Promise<void> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    await child.reconcileScheduledTasksForTest();
+  }
+
+  async listChildDeclaredScheduledTaskRowsForTest(
+    name: string
+  ): Promise<DeclaredScheduledTaskRowForTest[]> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    return child.listDeclaredScheduledTaskRowsForTest();
+  }
+
+  async listChildSchedulesForTest(name: string): Promise<Schedule<unknown>[]> {
+    const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
+    return child.listSchedulesForTest();
   }
 }
 

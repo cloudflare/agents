@@ -118,7 +118,12 @@ import {
 } from "agents";
 
 const agentToolChunkEncoder = new TextEncoder();
-import type { Connection, FiberRecoveryContext, WSMessage } from "agents";
+import type {
+  Connection,
+  FiberRecoveryContext,
+  RetryOptions,
+  WSMessage
+} from "agents";
 import {
   sanitizeMessage,
   enforceRowSizeLimit,
@@ -188,6 +193,348 @@ function shouldMarkSkippedAfterGenerationChange(
   status: SaveMessagesResult["status"]
 ): boolean {
   return status === "completed";
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+    .join(",")}}`;
+}
+
+function stableHash(value: unknown): string {
+  const input = stableStringify(value);
+  let h1 = 1779033703;
+  let h2 = 3144134277;
+  let h3 = 1013904242;
+  let h4 = 2773480762;
+  for (let i = 0; i < input.length; i++) {
+    const code = input.charCodeAt(i);
+    h1 = h2 ^ Math.imul(h1 ^ code, 597399067);
+    h2 = h3 ^ Math.imul(h2 ^ code, 2869860233);
+    h3 = h4 ^ Math.imul(h3 ^ code, 951274213);
+    h4 = h1 ^ Math.imul(h4 ^ code, 2716044179);
+  }
+  h1 = Math.imul(h3 ^ (h1 >>> 18), 597399067);
+  h2 = Math.imul(h4 ^ (h2 >>> 22), 2869860233);
+  h3 = Math.imul(h1 ^ (h3 >>> 17), 951274213);
+  h4 = Math.imul(h2 ^ (h4 >>> 19), 2716044179);
+  return [h1, h2, h3, h4]
+    .map((part) => (part >>> 0).toString(16).padStart(8, "0"))
+    .join("");
+}
+
+function validateTimezone(timezone: string): string {
+  try {
+    const formatter = new Intl.DateTimeFormat("en-US", { timeZone: timezone });
+    return formatter.resolvedOptions().timeZone;
+  } catch {
+    throw new Error(`Invalid timezone "${timezone}"`);
+  }
+}
+
+function parseTime(value: string): { hour: number; minute: number } {
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(value);
+  if (!match) {
+    throw new Error(`Invalid schedule time "${value}"; expected HH:mm`);
+  }
+  return { hour: Number(match[1]), minute: Number(match[2]) };
+}
+
+const declaredScheduleDayNumbers: Record<string, number> = {
+  sun: 0,
+  sunday: 0,
+  mon: 1,
+  monday: 1,
+  tue: 2,
+  tuesday: 2,
+  wed: 3,
+  wednesday: 3,
+  thu: 4,
+  thursday: 4,
+  fri: 5,
+  friday: 5,
+  sat: 6,
+  saturday: 6
+};
+
+function parseDeclaredTaskSchedule(
+  rawSchedule: string,
+  taskTimezone: string | undefined,
+  defaultTimezone: string | undefined
+): ParsedDeclaredSchedule {
+  const result = tryParseDeclaredTaskSchedule(
+    rawSchedule,
+    taskTimezone,
+    defaultTimezone
+  );
+  if (!result.ok) throw new Error(result.error);
+  return result.schedule;
+}
+
+function tryParseDeclaredTaskSchedule(
+  rawSchedule: string,
+  taskTimezone: string | undefined,
+  defaultTimezone: string | undefined
+): ParseDeclaredScheduleResult {
+  try {
+    return {
+      ok: true,
+      schedule: parseDeclaredTaskScheduleUnchecked(
+        rawSchedule,
+        taskTimezone,
+        defaultTimezone
+      )
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function parseDeclaredTaskScheduleUnchecked(
+  rawSchedule: string,
+  taskTimezone: string | undefined,
+  defaultTimezone: string | undefined
+): ParsedDeclaredSchedule {
+  const trimmed = rawSchedule.trim().replace(/\s+/g, " ").toLowerCase();
+  const inlineTimezoneMatch = /^(.*) in ([A-Za-z_][A-Za-z0-9_+\-/]*)$/.exec(
+    trimmed
+  );
+  const schedule = inlineTimezoneMatch?.[1] ?? trimmed;
+  const inlineTimezone = inlineTimezoneMatch?.[2];
+  if (
+    inlineTimezone &&
+    taskTimezone &&
+    validateTimezone(inlineTimezone) !== validateTimezone(taskTimezone)
+  ) {
+    throw new Error(
+      `Schedule timezone "${inlineTimezone}" does not match task timezone "${taskTimezone}"`
+    );
+  }
+
+  const intervalMatch = /^every ([1-9]\d*) (minute|minutes|hour|hours)$/.exec(
+    schedule
+  );
+  if (intervalMatch) {
+    if (inlineTimezone || taskTimezone) {
+      throw new Error("Interval schedules cannot specify a timezone");
+    }
+    const count = Number(intervalMatch[1]);
+    const unit = intervalMatch[2];
+    if (count === 1 && unit.endsWith("s")) {
+      throw new Error(`Use singular unit for "${rawSchedule}"`);
+    }
+    if (count !== 1 && !unit.endsWith("s")) {
+      throw new Error(`Use plural unit for "${rawSchedule}"`);
+    }
+    return {
+      kind: "interval",
+      intervalMs: count * (unit.startsWith("hour") ? 60 * 60_000 : 60_000),
+      normalizedSchedule: `every ${count} ${unit}`
+    };
+  }
+
+  const timezone = inlineTimezone ?? taskTimezone ?? defaultTimezone;
+  if (!timezone) {
+    throw new Error(
+      `Wall-clock schedule "${rawSchedule}" requires a timezone or getDefaultTimezone()`
+    );
+  }
+  const resolvedTimezone = validateTimezone(timezone);
+
+  const dailyMatch = /^every day at ([0-2]\d:[0-5]\d)$/.exec(schedule);
+  if (dailyMatch) {
+    const { hour, minute } = parseTime(dailyMatch[1]);
+    return {
+      kind: "wall-clock",
+      normalizedSchedule: `every day at ${dailyMatch[1]}`,
+      timezone: resolvedTimezone,
+      hour,
+      minute,
+      days: "daily"
+    };
+  }
+
+  const weekdayMatch = /^every weekday at ([0-2]\d:[0-5]\d)$/.exec(schedule);
+  if (weekdayMatch) {
+    const { hour, minute } = parseTime(weekdayMatch[1]);
+    return {
+      kind: "wall-clock",
+      normalizedSchedule: `every weekday at ${weekdayMatch[1]}`,
+      timezone: resolvedTimezone,
+      hour,
+      minute,
+      days: "weekday"
+    };
+  }
+
+  const weeklyMatch = /^every week on ([a-z,\s]+) at ([0-2]\d:[0-5]\d)$/.exec(
+    schedule
+  );
+  if (weeklyMatch) {
+    const seen = new Set<number>();
+    const days = weeklyMatch[1].split(",").map((day) => {
+      const normalized = day.trim();
+      const dayNumber = declaredScheduleDayNumbers[normalized];
+      if (dayNumber === undefined) {
+        throw new Error(`Invalid schedule day "${normalized}"`);
+      }
+      if (seen.has(dayNumber)) {
+        throw new Error(`Duplicate schedule day "${normalized}"`);
+      }
+      seen.add(dayNumber);
+      return dayNumber;
+    });
+    if (days.length === 0) {
+      throw new Error("Weekly schedule requires at least one day");
+    }
+    const { hour, minute } = parseTime(weeklyMatch[2]);
+    return {
+      kind: "wall-clock",
+      normalizedSchedule: `every week on ${weeklyMatch[1]
+        .split(",")
+        .map((day) => day.trim())
+        .join(",")} at ${weeklyMatch[2]}`,
+      timezone: resolvedTimezone,
+      hour,
+      minute,
+      days
+    };
+  }
+
+  throw new Error(`Unsupported schedule DSL "${rawSchedule}"`);
+}
+
+function getZonedParts(date: Date, timezone: string): ZonedParts {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    calendar: "iso8601",
+    numberingSystem: "latn",
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(date);
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((entry) => entry.type === type)?.value ?? "";
+  return {
+    year: Number(part("year")),
+    month: Number(part("month")),
+    day: Number(part("day")),
+    hour: Number(part("hour")),
+    minute: Number(part("minute")),
+    second: Number(part("second")),
+    weekday: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(
+      part("weekday")
+    )
+  };
+}
+
+function compareLocalParts(
+  left: Pick<ZonedParts, "year" | "month" | "day" | "hour" | "minute">,
+  right: Pick<ZonedParts, "year" | "month" | "day" | "hour" | "minute">
+): number {
+  const fields = ["year", "month", "day", "hour", "minute"] as const;
+  for (const field of fields) {
+    const diff = left[field] - right[field];
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function findZonedInstant(
+  target: Pick<ZonedParts, "year" | "month" | "day" | "hour" | "minute">,
+  timezone: string
+): Date {
+  const approximate = Date.UTC(
+    target.year,
+    target.month - 1,
+    target.day,
+    target.hour,
+    target.minute
+  );
+  const start = approximate - 14 * 60 * 60_000;
+  const end = approximate + 14 * 60 * 60_000;
+  for (let time = start; time <= end; time += 60_000) {
+    const candidate = new Date(time);
+    const parts = getZonedParts(candidate, timezone);
+    if (compareLocalParts(parts, target) === 0) return candidate;
+  }
+  for (let time = start; time <= end; time += 60_000) {
+    const candidate = new Date(time);
+    const parts = getZonedParts(candidate, timezone);
+    if (compareLocalParts(parts, target) > 0) return candidate;
+  }
+  throw new Error(`Unable to resolve local time in timezone "${timezone}"`);
+}
+
+function addLocalDays(
+  parts: Pick<ZonedParts, "year" | "month" | "day">,
+  days: number
+): Pick<ZonedParts, "year" | "month" | "day"> {
+  const date = new Date(
+    Date.UTC(parts.year, parts.month - 1, parts.day + days)
+  );
+  return {
+    year: date.getUTCFullYear(),
+    month: date.getUTCMonth() + 1,
+    day: date.getUTCDate()
+  };
+}
+
+function isAllowedWallClockDay(
+  weekday: number,
+  days: ParsedDeclaredSchedule & { kind: "wall-clock" }
+): boolean {
+  if (days.days === "daily") return true;
+  if (days.days === "weekday") return weekday >= 1 && weekday <= 5;
+  return days.days.includes(weekday);
+}
+
+function nextDeclaredScheduleTime(
+  schedule: ParsedDeclaredSchedule,
+  now: Date,
+  previousScheduledFor?: number
+): Date {
+  if (schedule.kind === "interval") {
+    let next =
+      previousScheduledFor === undefined
+        ? now.getTime() + schedule.intervalMs
+        : previousScheduledFor + schedule.intervalMs;
+    while (next <= now.getTime()) next += schedule.intervalMs;
+    return new Date(next);
+  }
+
+  const nowParts = getZonedParts(now, schedule.timezone);
+  for (let offset = 0; offset < 370; offset++) {
+    const localDate = addLocalDays(nowParts, offset);
+    const candidate = findZonedInstant(
+      {
+        ...localDate,
+        hour: schedule.hour,
+        minute: schedule.minute
+      },
+      schedule.timezone
+    );
+    const weekday = getZonedParts(candidate, schedule.timezone).weekday;
+    if (!isAllowedWallClockDay(weekday, schedule)) continue;
+    if (candidate.getTime() > now.getTime()) return candidate;
+  }
+  throw new Error("Unable to compute next scheduled task occurrence");
 }
 
 type StreamResultStatus = {
@@ -280,6 +627,131 @@ type AgentToolRunInspection<Output = unknown> = {
   error?: string;
   startedAt: number;
   completedAt?: number;
+};
+
+type Digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
+type Hour = `0${Digit}` | `1${Digit}` | "20" | "21" | "22" | "23";
+type Minute = `${"0" | "1" | "2" | "3" | "4" | "5"}${Digit}`;
+export type ThinkTime = `${Hour}:${Minute}`;
+export type ThinkIntervalSchedule =
+  | `every ${number} minute${"" | "s"}`
+  | `every ${number} hour${"" | "s"}`;
+export type ThinkWallClockSchedule =
+  | `every day at ${ThinkTime}`
+  | `every weekday at ${ThinkTime}`
+  | `every week on ${string} at ${ThinkTime}`;
+export type ThinkScheduledTaskSchedule =
+  | ThinkIntervalSchedule
+  | ThinkWallClockSchedule
+  | `${ThinkWallClockSchedule} in ${string}`;
+
+export type ThinkScheduledTaskContext = {
+  taskId: string;
+  scheduledFor: number;
+  scheduledForDate: Date;
+  occurrenceKey: string;
+  idempotencyKey: string;
+  schedule: string;
+  scheduleKind: "interval" | "wall-clock";
+  timezone?: string;
+  metadata?: Record<string, unknown>;
+};
+
+type ThinkScheduledTaskPromptAction = {
+  prompt: string | (() => string | Promise<string>);
+  handler?: never;
+};
+
+type ThinkScheduledTaskHandlerAction = {
+  handler: (ctx: ThinkScheduledTaskContext) => void | Promise<void>;
+  prompt?: never;
+};
+
+type ThinkScheduledTaskBase = (
+  | ThinkScheduledTaskPromptAction
+  | ThinkScheduledTaskHandlerAction
+) & {
+  retry?: RetryOptions;
+  metadata?: Record<string, unknown>;
+};
+
+export type ThinkScheduledTask =
+  | (ThinkScheduledTaskBase & {
+      schedule: ThinkIntervalSchedule;
+      timezone?: never;
+    })
+  | (ThinkScheduledTaskBase & {
+      schedule: ThinkWallClockSchedule;
+      timezone?: string;
+    })
+  | (ThinkScheduledTaskBase & {
+      schedule: `${ThinkWallClockSchedule} in ${string}`;
+      timezone?: string;
+    });
+
+export type ThinkScheduledTasks = Record<string, ThinkScheduledTask>;
+
+export function defineScheduledTasks<const T extends ThinkScheduledTasks>(
+  tasks: T
+): T {
+  return tasks;
+}
+
+type ParsedDeclaredSchedule =
+  | {
+      kind: "interval";
+      intervalMs: number;
+      normalizedSchedule: string;
+    }
+  | {
+      kind: "wall-clock";
+      normalizedSchedule: string;
+      timezone: string;
+      hour: number;
+      minute: number;
+      days: "daily" | "weekday" | number[];
+    };
+
+type ParseDeclaredScheduleResult =
+  | { ok: true; schedule: ParsedDeclaredSchedule }
+  | { ok: false; error: string };
+
+type NormalizedDeclaredTask = {
+  taskId: string;
+  prompt?: ThinkScheduledTaskPromptAction["prompt"];
+  handler?: ThinkScheduledTaskHandlerAction["handler"];
+  schedule: ParsedDeclaredSchedule;
+  retry?: RetryOptions;
+  metadata?: Record<string, unknown>;
+  scheduleHash: string;
+  taskHash: string;
+};
+
+type DeclaredScheduledTaskRow = {
+  owner_key: string;
+  task_id: string;
+  schedule_hash: string;
+  task_hash: string;
+  schedule_id: string | null;
+  next_run_at: number | null;
+  created_at: number;
+  updated_at: number;
+};
+
+type DeclaredScheduledTaskPayload = {
+  taskId: string;
+  scheduleHash: string;
+  scheduledFor: number;
+};
+
+type ZonedParts = {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+  weekday: number;
 };
 
 type AgentToolStoredChunk = {
@@ -833,7 +1305,11 @@ export class Think<
       // 8. User's onStart
       await _onStart();
 
-      // 9. Durable submissions may run user-defined model/hooks, so start them
+      // 9. Declarative scheduled tasks are code-defined and should reconcile
+      // before draining any recovered programmatic work they may enqueue.
+      await this._reconcileDeclaredScheduledTasks();
+
+      // 10. Durable submissions may run user-defined model/hooks, so start them
       // after subclass initialization has completed.
       await this._recoverSubmissionsOnStart();
       this._recoverWorkflowNotifications();
@@ -967,6 +1443,7 @@ export class Think<
   private _agentToolLiveSequences = new Map<string, number>();
   private _submissionTableEnsured = false;
   private _workflowNotificationTableEnsured = false;
+  private _declaredScheduledTasksTableEnsured = false;
   private _drainingSubmissions = false;
   private _drainingWorkflowNotifications = false;
   private _submissionAbortControllers = new Map<string, AbortController>();
@@ -1156,6 +1633,28 @@ export class Think<
   /** Return the tools available to the assistant. */
   getTools(): ToolSet {
     return {};
+  }
+
+  /** Return code-declared scheduled tasks for this agent. */
+  getScheduledTasks(): ThinkScheduledTasks | Promise<ThinkScheduledTasks> {
+    return {};
+  }
+
+  /**
+   * Reconcile code-declared scheduled tasks immediately.
+   * Static declarations are reconciled on startup automatically; call this
+   * after changing app-owned data that `getScheduledTasks()` reads.
+   */
+  async internal_reconcileScheduledTasks(): Promise<void> {
+    await this._reconcileDeclaredScheduledTasks();
+  }
+
+  /**
+   * Return the default timezone for wall-clock scheduled tasks.
+   * Task-local timezone declarations take precedence.
+   */
+  getDefaultTimezone(): string | undefined | Promise<string | undefined> {
+    return undefined;
   }
 
   private async _runChatRecoveryFiber<T>(
@@ -2606,6 +3105,441 @@ export class Think<
       if (text.length > 0) return text;
     }
     return null;
+  }
+
+  // ── Declarative scheduled tasks ─────────────────────────────────
+
+  private _ensureDeclaredScheduledTasksTable(): void {
+    if (this._declaredScheduledTasksTableEnsured) return;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_think_scheduled_tasks (
+        owner_key TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        schedule_hash TEXT NOT NULL,
+        task_hash TEXT NOT NULL,
+        schedule_id TEXT,
+        next_run_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (owner_key, task_id)
+      )
+    `;
+    this._declaredScheduledTasksTableEnsured = true;
+  }
+
+  private _readDeclaredScheduledTaskRow(
+    taskId: string
+  ): DeclaredScheduledTaskRow | null {
+    this._ensureDeclaredScheduledTasksTable();
+    const ownerKey = this._declaredScheduleOwnerKey();
+    const rows = this.sql<DeclaredScheduledTaskRow>`
+      SELECT owner_key, task_id, schedule_hash, task_hash, schedule_id,
+             next_run_at, created_at, updated_at
+      FROM cf_think_scheduled_tasks
+      WHERE task_id = ${taskId}
+        AND owner_key = ${ownerKey}
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  }
+
+  private _listDeclaredScheduledTaskRows(): DeclaredScheduledTaskRow[] {
+    this._ensureDeclaredScheduledTasksTable();
+    const ownerKey = this._declaredScheduleOwnerKey();
+    return this.sql<DeclaredScheduledTaskRow>`
+      SELECT owner_key, task_id, schedule_hash, task_hash, schedule_id,
+             next_run_at, created_at, updated_at
+      FROM cf_think_scheduled_tasks
+      WHERE owner_key = ${ownerKey}
+      ORDER BY task_id ASC
+    `;
+  }
+
+  private _updateDeclaredScheduledTaskSchedule(
+    task: NormalizedDeclaredTask,
+    ownerKey: string,
+    scheduled: { scheduleId: string; scheduledFor: number },
+    updatedAt = Date.now()
+  ): void {
+    this.sql`
+      UPDATE cf_think_scheduled_tasks
+      SET schedule_hash = ${task.scheduleHash},
+          task_hash = ${task.taskHash},
+          schedule_id = ${scheduled.scheduleId},
+          next_run_at = ${scheduled.scheduledFor},
+          updated_at = ${updatedAt}
+      WHERE owner_key = ${ownerKey}
+        AND task_id = ${task.taskId}
+    `;
+  }
+
+  private async _normalizeDeclaredScheduledTasks(
+    tasks: ThinkScheduledTasks,
+    defaultTimezone: string | undefined
+  ): Promise<Map<string, NormalizedDeclaredTask>> {
+    const normalized = new Map<string, NormalizedDeclaredTask>();
+    for (const [taskId, task] of Object.entries(tasks)) {
+      if (!/^[A-Za-z0-9_-]+$/.test(taskId)) {
+        throw new Error(
+          `Invalid scheduled task id "${taskId}"; use letters, numbers, "_" or "-"`
+        );
+      }
+      const schedule = parseDeclaredTaskSchedule(
+        task.schedule,
+        task.timezone,
+        defaultTimezone
+      );
+      const hasPrompt = "prompt" in task && task.prompt !== undefined;
+      const hasHandler = "handler" in task && task.handler !== undefined;
+      if (hasPrompt === hasHandler) {
+        throw new Error(
+          `Scheduled task "${taskId}" must define exactly one of prompt or handler`
+        );
+      }
+      const scheduleHash = stableHash({
+        schedule,
+        retry: task.retry
+      });
+      const actionHash = hasPrompt
+        ? {
+            type: "prompt",
+            value: typeof task.prompt === "string" ? task.prompt : "<function>"
+          }
+        : { type: "handler" };
+      const taskHash = stableHash({
+        scheduleHash,
+        action: actionHash,
+        metadata: task.metadata
+      });
+      normalized.set(taskId, {
+        taskId,
+        ...(hasPrompt ? { prompt: task.prompt } : {}),
+        ...(hasHandler ? { handler: task.handler } : {}),
+        schedule,
+        retry: task.retry,
+        metadata: task.metadata,
+        scheduleHash,
+        taskHash
+      });
+    }
+    return normalized;
+  }
+
+  private async _declaredScheduledTasksForNow(): Promise<
+    Map<string, NormalizedDeclaredTask>
+  > {
+    const defaultTimezone = await this.getDefaultTimezone();
+    const resolvedDefaultTimezone =
+      defaultTimezone === undefined
+        ? undefined
+        : validateTimezone(defaultTimezone);
+    return this._normalizeDeclaredScheduledTasks(
+      await this.getScheduledTasks(),
+      resolvedDefaultTimezone
+    );
+  }
+
+  private _declaredScheduleOwnerKey(): string {
+    return stableHash(this.selfPath);
+  }
+
+  private _declaredScheduleValidationError(
+    rawSchedule: string,
+    taskTimezone?: string,
+    defaultTimezone?: string
+  ): string | null {
+    const resolvedDefaultTimezone =
+      defaultTimezone === undefined
+        ? undefined
+        : validateTimezone(defaultTimezone);
+    const result = tryParseDeclaredTaskSchedule(
+      rawSchedule,
+      taskTimezone,
+      resolvedDefaultTimezone
+    );
+    return result.ok ? null : result.error;
+  }
+
+  private _nextDeclaredScheduleTimeForConfig(
+    rawSchedule: string,
+    now: Date,
+    options: {
+      taskTimezone?: string;
+      defaultTimezone?: string;
+      previousScheduledFor?: number;
+    } = {}
+  ): Date {
+    const resolvedDefaultTimezone =
+      options.defaultTimezone === undefined
+        ? undefined
+        : validateTimezone(options.defaultTimezone);
+    return nextDeclaredScheduleTime(
+      parseDeclaredTaskSchedule(
+        rawSchedule,
+        options.taskTimezone,
+        resolvedDefaultTimezone
+      ),
+      now,
+      options.previousScheduledFor
+    );
+  }
+
+  private async _reconcileDeclaredScheduledTasks(): Promise<void> {
+    const tasks = await this._declaredScheduledTasksForNow();
+    this._ensureDeclaredScheduledTasksTable();
+    const ownerKey = this._declaredScheduleOwnerKey();
+    const now = Date.now();
+    const existing = this._listDeclaredScheduledTaskRows();
+    const seen = new Set<string>();
+
+    for (const [taskId, task] of tasks) {
+      seen.add(taskId);
+      const row = existing.find((candidate) => candidate.task_id === taskId);
+      if (!row) {
+        this.sql`
+          INSERT INTO cf_think_scheduled_tasks (
+            owner_key, task_id, schedule_hash, task_hash, schedule_id,
+            next_run_at, created_at, updated_at
+          )
+          VALUES (
+            ${ownerKey}, ${taskId}, ${task.scheduleHash}, ${task.taskHash},
+            NULL, NULL, ${now}, ${now}
+          )
+        `;
+        const scheduled = await this._scheduleDeclaredTaskOccurrence(
+          task,
+          new Date(now)
+        );
+        this._updateDeclaredScheduledTaskSchedule(
+          task,
+          ownerKey,
+          scheduled,
+          now
+        );
+        continue;
+      }
+
+      if (row.schedule_hash !== task.scheduleHash) {
+        if (row.schedule_id) await this.cancelSchedule(row.schedule_id);
+        this.sql`
+          UPDATE cf_think_scheduled_tasks
+          SET schedule_hash = ${task.scheduleHash},
+              task_hash = ${task.taskHash},
+              schedule_id = NULL,
+              next_run_at = NULL,
+              updated_at = ${now}
+          WHERE owner_key = ${ownerKey}
+            AND task_id = ${taskId}
+        `;
+        const scheduled = await this._scheduleDeclaredTaskOccurrence(
+          task,
+          new Date(now)
+        );
+        this._updateDeclaredScheduledTaskSchedule(
+          task,
+          ownerKey,
+          scheduled,
+          now
+        );
+        continue;
+      }
+
+      if (!row.schedule_id) {
+        const scheduled =
+          row.next_run_at === null
+            ? await this._scheduleDeclaredTaskOccurrence(task, new Date(now))
+            : await this._scheduleDeclaredTaskOccurrenceAt(
+                task,
+                row.next_run_at
+              );
+        this._updateDeclaredScheduledTaskSchedule(
+          task,
+          ownerKey,
+          scheduled,
+          now
+        );
+        continue;
+      }
+
+      if (row.schedule_id) {
+        const schedule = await this.getScheduleById(row.schedule_id);
+        if (!schedule) {
+          const scheduled =
+            row.next_run_at === null
+              ? await this._scheduleDeclaredTaskOccurrence(task, new Date(now))
+              : await this._scheduleDeclaredTaskOccurrenceAt(
+                  task,
+                  row.next_run_at
+                );
+          this._updateDeclaredScheduledTaskSchedule(
+            task,
+            ownerKey,
+            scheduled,
+            now
+          );
+          continue;
+        }
+      }
+
+      if (row.task_hash !== task.taskHash) {
+        this.sql`
+          UPDATE cf_think_scheduled_tasks
+          SET task_hash = ${task.taskHash}, updated_at = ${now}
+          WHERE owner_key = ${ownerKey}
+            AND task_id = ${taskId}
+        `;
+      }
+    }
+
+    for (const row of existing) {
+      if (seen.has(row.task_id)) continue;
+      if (row.schedule_id) await this.cancelSchedule(row.schedule_id);
+      this.sql`
+        DELETE FROM cf_think_scheduled_tasks
+        WHERE owner_key = ${ownerKey}
+          AND task_id = ${row.task_id}
+      `;
+    }
+  }
+
+  private async _scheduleDeclaredTaskOccurrence(
+    task: NormalizedDeclaredTask,
+    now: Date,
+    previousScheduledFor?: number
+  ): Promise<{ scheduleId: string; scheduledFor: number }> {
+    const next = nextDeclaredScheduleTime(
+      task.schedule,
+      now,
+      previousScheduledFor
+    );
+    return this._scheduleDeclaredTaskOccurrenceAt(task, next.getTime());
+  }
+
+  private async _scheduleDeclaredTaskOccurrenceAt(
+    task: NormalizedDeclaredTask,
+    scheduledFor: number
+  ): Promise<{ scheduleId: string; scheduledFor: number }> {
+    const schedule = await this.schedule<DeclaredScheduledTaskPayload>(
+      new Date(scheduledFor),
+      "_runDeclaredScheduledTask",
+      {
+        taskId: task.taskId,
+        scheduleHash: task.scheduleHash,
+        scheduledFor
+      },
+      { idempotent: true }
+    );
+    return { scheduleId: schedule.id, scheduledFor };
+  }
+
+  private async _advanceDeclaredScheduledTask(
+    task: NormalizedDeclaredTask,
+    payload: DeclaredScheduledTaskPayload,
+    ownerKey: string
+  ): Promise<void> {
+    const scheduled = await this._scheduleDeclaredTaskOccurrence(
+      task,
+      new Date(),
+      payload.scheduledFor
+    );
+    this._updateDeclaredScheduledTaskSchedule(task, ownerKey, scheduled);
+  }
+
+  private _declaredScheduledTaskContext(
+    task: NormalizedDeclaredTask,
+    payload: DeclaredScheduledTaskPayload,
+    ownerKey: string
+  ): ThinkScheduledTaskContext {
+    const occurrenceKey = `${payload.taskId}:${payload.scheduledFor}`;
+    return {
+      taskId: payload.taskId,
+      scheduledFor: payload.scheduledFor,
+      scheduledForDate: new Date(payload.scheduledFor),
+      occurrenceKey,
+      idempotencyKey: `think-schedule:${ownerKey}:${occurrenceKey}`,
+      schedule: task.schedule.normalizedSchedule,
+      scheduleKind: task.schedule.kind,
+      ...(task.schedule.kind === "wall-clock" && {
+        timezone: task.schedule.timezone
+      }),
+      ...(task.metadata !== undefined && { metadata: task.metadata })
+    };
+  }
+
+  async _runDeclaredScheduledTask(
+    payload: DeclaredScheduledTaskPayload
+  ): Promise<void> {
+    if (
+      !payload ||
+      typeof payload.taskId !== "string" ||
+      typeof payload.scheduleHash !== "string" ||
+      typeof payload.scheduledFor !== "number"
+    ) {
+      throw new Error("Invalid declared scheduled task payload");
+    }
+
+    const row = this._readDeclaredScheduledTaskRow(payload.taskId);
+    if (!row || row.schedule_hash !== payload.scheduleHash) return;
+    if (row.next_run_at !== null && row.next_run_at > payload.scheduledFor) {
+      return;
+    }
+
+    const tasks = await this._declaredScheduledTasksForNow();
+    const task = tasks.get(payload.taskId);
+    if (!task || task.scheduleHash !== payload.scheduleHash) return;
+
+    const ownerKey = this._declaredScheduleOwnerKey();
+    const context = this._declaredScheduledTaskContext(task, payload, ownerKey);
+
+    let actionError: unknown;
+    try {
+      await this.retry(async () => {
+        if (task.prompt !== undefined) {
+          const prompt =
+            typeof task.prompt === "function"
+              ? await task.prompt()
+              : task.prompt;
+          await this.submitMessages(
+            [
+              {
+                id: crypto.randomUUID(),
+                role: "user",
+                parts: [{ type: "text", text: prompt }]
+              }
+            ],
+            {
+              idempotencyKey: context.idempotencyKey,
+              metadata: {
+                ...task.metadata,
+                source: "scheduled-task",
+                ownerKey,
+                taskId: payload.taskId,
+                scheduledFor: payload.scheduledFor,
+                schedule: task.schedule.normalizedSchedule
+              }
+            }
+          );
+        } else {
+          await task.handler?.(context);
+        }
+      }, task.retry);
+    } catch (error) {
+      actionError = error;
+    } finally {
+      await this._advanceDeclaredScheduledTask(task, payload, ownerKey);
+    }
+
+    if (actionError !== undefined) {
+      console.error(
+        `[Think] Scheduled task "${payload.taskId}" failed; next occurrence was still scheduled`,
+        actionError
+      );
+      try {
+        await this.onError(actionError);
+      } catch {
+        // Preserve recurrence even if user error handling fails.
+      }
+    }
   }
 
   // ── Durable programmatic submissions ───────────────────────────

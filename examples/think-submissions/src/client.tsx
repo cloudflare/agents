@@ -198,7 +198,10 @@ function App() {
                 <Text size="xs" variant="secondary">
                   `submitMessages()` stores pending work before the model runs.
                   Retrying with the same idempotency key returns the existing
-                  submission instead of duplicating the chat turn.
+                  submission instead of duplicating the chat turn. This example
+                  also declares an hourly scheduled task; shorten it locally if
+                  you want to watch automatic background submissions appear in
+                  the same list.
                 </Text>
               </span>
             </div>

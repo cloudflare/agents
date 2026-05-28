@@ -141,6 +141,7 @@ driving the work and what the caller needs back.
 | A browser user sends chat messages                             | `useAgentChat` over the WebSocket chat protocol |
 | Server code can wait for the model response                    | `saveMessages()`                                |
 | Server code needs fast durable acceptance and later status     | `submitMessages()`                              |
+| Code should create recurring prompt-driven turns or handlers   | `getScheduledTasks()`                           |
 | Parent code needs direct streaming RPC to a specific child     | `subAgent(...).chat()`                          |
 | A parent agent delegates work to a retained child agent        | `agentTool()` or `runAgentTool()`               |
 | Surround a turn with idempotent app-owned side effects         | `startFiber()`                                  |
@@ -178,6 +179,8 @@ with retries per step, long waits, external events, or approvals.
 | `getModel()`            | throws                           | Return the `LanguageModel` to use                                               |
 | `getSystemPrompt()`     | `"You are a helpful assistant."` | System prompt (fallback when no context blocks)                                 |
 | `getTools()`            | `{}`                             | AI SDK `ToolSet` for the agentic loop                                           |
+| `getScheduledTasks()`   | `{}`                             | Code-declared recurring prompts or handlers                                     |
+| `getDefaultTimezone()`  | `undefined`                      | Default timezone for wall-clock scheduled tasks                                 |
 | `maxSteps`              | `10`                             | Max tool-call rounds per turn                                                   |
 | `sendReasoning`         | `true`                           | Send reasoning chunks to chat clients                                           |
 | `configureSession()`    | identity                         | Add context blocks, compaction, search, skills — see [Sessions](../sessions.md) |
@@ -227,6 +230,79 @@ export class MyAgent extends Think<Env> {
   }
 }
 ```
+
+## Scheduled Tasks
+
+Use `getScheduledTasks()` when code should create recurring Think turns or
+deterministic scheduled handlers. Think reconciles the declarations on startup,
+stores a durable one-shot schedule for the next occurrence, and re-arms the next
+occurrence after each run.
+
+```typescript
+import { Think, defineScheduledTasks } from "@cloudflare/think";
+
+export class DigestAgent extends Think<Env> {
+  getDefaultTimezone() {
+    return "Europe/London";
+  }
+
+  getScheduledTasks() {
+    return defineScheduledTasks({
+      weeklyCommitReport: {
+        schedule: "every week on monday at 09:00",
+        prompt:
+          "Compile all my GitHub commits for the last week and send a concise summary."
+      },
+      workout: {
+        schedule: "every day at 08:00 in Europe/London",
+        prompt: "Start my workout."
+      },
+      customerDigest: {
+        schedule: "every day at 09:00",
+        timezone: "America/New_York",
+        metadata: { workflowName: "customer-digest" },
+        retry: { maxAttempts: 3 },
+        handler: async ({
+          idempotencyKey,
+          scheduledFor,
+          scheduleKind,
+          timezone
+        }) => {
+          await this.env.DIGEST_WORKFLOW.create({
+            id: idempotencyKey,
+            params: { scheduledFor, scheduleKind, timezone }
+          });
+        }
+      }
+    });
+  }
+}
+```
+
+The DSL supports `every <n> minutes`, `every <n> hours`,
+`every day at HH:mm`, `every weekday at HH:mm`, and
+`every week on monday,wednesday at HH:mm`. Wall-clock schedules require either
+an inline timezone, a task `timezone`, or `getDefaultTimezone()`. If an alarm is
+late, Think runs the intended occurrence once and schedules the next future
+occurrence; it does not backfill missed runs.
+
+Each task must define exactly one of `prompt` or `handler`. Prompt tasks create a
+durable submission with `submitMessages()`. Handler tasks receive
+`{ taskId, scheduledFor, scheduledForDate, occurrenceKey, idempotencyKey,
+schedule, scheduleKind, timezone, metadata }` and are intended for app-owned
+work such as creating a Workflow run or writing a run ledger. Delivery is
+at-least-once; use `idempotencyKey` or `occurrenceKey` for your own durable
+idempotency.
+
+Static declarations reconcile on startup. If `getScheduledTasks()` reads
+product-owned data that can change while the Durable Object is live, call
+`internal_reconcileScheduledTasks()` after updating that data. During
+reconciliation Think records the task row before creating the underlying Agent
+schedule, so a missing `schedule_id` is only a pending reconcile state and is
+repaired on the next reconcile. The task `retry` option retries the prompt or
+handler action before the failure is logged. The next occurrence is still
+scheduled after the action succeeds or exhausts its retries, so failed
+occurrences do not block future runs.
 
 ## Session Integration
 

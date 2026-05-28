@@ -72,6 +72,10 @@
         "name": "ThinkProgrammaticTestAgent"
       },
       {
+        "class_name": "ThinkScheduledTasksTestAgent",
+        "name": "ThinkScheduledTasksTestAgent"
+      },
+      {
         "class_name": "ThinkAsyncHookTestAgent",
         "name": "ThinkAsyncHookTestAgent"
       },
@@ -117,6 +121,7 @@
         "ThinkLegacyConfigMigrationAgent",
         "ThinkConfigInSessionAgent",
         "ThinkProgrammaticTestAgent",
+        "ThinkScheduledTasksTestAgent",
         "ThinkAsyncHookTestAgent",
         "ThinkRecoveryTestAgent",
         "ThinkNonRecoveryTestAgent",
