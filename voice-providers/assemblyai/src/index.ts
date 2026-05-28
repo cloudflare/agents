@@ -218,7 +218,26 @@ class AssemblyAISession implements TranscriberSession {
   }
 
   close(): void {
-    // Wired in a later task.
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#pendingChunks = [];
+
+    if (this.#ws && this.#connected) {
+      try {
+        this.#ws.send(JSON.stringify({ type: "Terminate" }));
+      } catch {
+        // ignore
+      }
+    }
+    if (this.#ws) {
+      try {
+        this.#ws.close();
+      } catch {
+        // ignore close errors
+      }
+      this.#ws = null;
+    }
+    this.#connected = false;
   }
 
   #handleMessage(event: MessageEvent): void {

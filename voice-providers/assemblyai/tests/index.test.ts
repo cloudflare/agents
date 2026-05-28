@@ -392,3 +392,52 @@ describe("AssemblyAISession — feed", () => {
     expect(ws.send).toHaveBeenCalledWith(chunk);
   });
 });
+
+describe("AssemblyAISession — close", () => {
+  it("sends Terminate then closes the WebSocket", async () => {
+    const { ws } = setupMockFetch();
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+    await flush();
+
+    session.close();
+
+    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: "Terminate" }));
+    expect(ws.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("is idempotent on a second close()", async () => {
+    const { ws } = setupMockFetch();
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+    await flush();
+
+    session.close();
+    session.close();
+    expect(ws.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("when called before the socket connects, the socket is accepted-and-closed once it arrives", async () => {
+    let resolveFetch: (resp: unknown) => void = () => {};
+    const fetchPromise = new Promise((r) => {
+      resolveFetch = r;
+    });
+    const ws = new MockWebSocket();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => fetchPromise)
+    );
+
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+
+    session.close(); // before fetch resolves
+    resolveFetch({ webSocket: ws });
+    await flush();
+
+    expect(ws.accept).toHaveBeenCalled();
+    expect(ws.close).toHaveBeenCalled();
+    // No Terminate sent — there was never a live connection.
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+});
