@@ -4988,6 +4988,10 @@ export class Think<
       this._pendingResumeConnections.delete(connection.id);
       this._continuation.awaitingConnections.delete(connection.id);
       if (this._continuation.pending?.connectionId === connection.id) {
+        if (this._continuationTimer) {
+          clearTimeout(this._continuationTimer);
+          this._continuationTimer = null;
+        }
         this._continuation.pending = null;
       }
       if (this._continuation.activeConnectionId === connection.id) {
@@ -5691,7 +5695,7 @@ export class Think<
     if (this._continuation.pending?.requestId === requestId) {
       this._continuation.activatePending();
       this._continuation.flushAwaitingConnections((c) =>
-        this._notifyStreamResuming(c as Connection)
+        this._notifyStreamResuming(c)
       );
     }
 
@@ -6572,12 +6576,10 @@ export class Think<
       this._continuation.pending.connectionId = connection.id;
       this._continuation.pending.clientTools = this._lastClientTools;
       this._continuation.awaitingConnections.set(connection.id, connection);
+      this._resetAutoContinuationTimer();
       return;
     }
 
-    if (this._continuationTimer) {
-      clearTimeout(this._continuationTimer);
-    }
     this._continuation.pending = {
       connection,
       connectionId: connection.id,
@@ -6589,6 +6591,13 @@ export class Think<
       pastCoalesce: false
     };
     this._continuation.awaitingConnections.set(connection.id, connection);
+    this._resetAutoContinuationTimer();
+  }
+
+  private _resetAutoContinuationTimer(): void {
+    if (this._continuationTimer) {
+      clearTimeout(this._continuationTimer);
+    }
     this._continuationTimer = setTimeout(() => {
       this._continuationTimer = null;
       const pending = this._continuation.pending;
@@ -6661,7 +6670,7 @@ export class Think<
     );
     if (!pending) return;
 
-    this._fireAutoContinuation(pending.connection as Connection);
+    this._fireAutoContinuation(pending.connection);
   }
 
   // ── Response hook ──────────────────────────────────────────────
