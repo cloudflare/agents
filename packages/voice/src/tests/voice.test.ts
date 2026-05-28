@@ -56,6 +56,10 @@ function uniquePath() {
   return `/agents/test-voice-agent/voice-test-${++instanceCounter}`;
 }
 
+function uniqueAISDKTextStreamPath() {
+  return `/agents/test-ai-sdk-text-stream-voice-agent/voice-test-${++instanceCounter}`;
+}
+
 function waitForStatus(ws: WebSocket, status: string) {
   return waitForMessageMatching(
     ws,
@@ -272,6 +276,54 @@ describe("VoiceAgent — continuous STT pipeline", () => {
     // Should eventually get back to listening
     await waitForStatus(ws, "listening");
 
+    ws.close();
+  });
+
+  // TODO: this is a bug we need to fix! It's caused by the way we handle text streaming
+  // when there are tool calls in the stream. The text is being joined exactly, but we should
+  // add a space between non-adjacent text parts
+  it.skip("handles AI SDK textStream responses that include tool calls", async () => {
+    const { ws } = await connectWS(uniqueAISDKTextStreamPath());
+    await waitForStatus(ws, "idle");
+
+    const mockResponse = [
+      [
+        { type: "text", text: "I can get the weather for you." },
+        {
+          type: "tool-call",
+          toolName: "getWeather",
+          input: { location: "San Francisco" },
+          output: "warm"
+        }
+      ],
+      [{ type: "text", text: "The weather is warm" }]
+    ];
+    sendJSON(ws, { type: "_set_mock_response", response: mockResponse });
+    await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "_ack" &&
+        (m as Record<string, unknown>).command === "_set_mock_response"
+    );
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+
+    const transcriptEnd = (await waitForType(ws, "transcript_end")) as Record<
+      string,
+      unknown
+    >;
+    expect(transcriptEnd.text).toBe(
+      "I can get the weather for you. The weather is warm"
+    );
+
+    await waitForStatus(ws, "listening");
     ws.close();
   });
 });
