@@ -232,6 +232,10 @@ export type AgentObservabilityEvent =
       }
     >
   | BaseEvent<
+      "agent_tool:recovery:begin",
+      { runCount: number; totalTimeoutMs?: number }
+    >
+  | BaseEvent<
       "agent_tool:recovery:row",
       {
         runId: string;
@@ -241,6 +245,15 @@ export type AgentObservabilityEvent =
         elapsedMs?: number;
       }
     >
+  | BaseEvent<
+      "agent_tool:recovery:deadline",
+      { runId: string; agentType: string; elapsedMs?: number }
+    >
+  | BaseEvent<
+      "agent_tool:recovery:complete",
+      { runCount: number; elapsedMs?: number }
+    >
+  | BaseEvent<"agent_tool:recovery:failed", { error: string }>
   | BaseEvent<"destroy">
   | BaseEvent<"connect", { connectionId: string }>
   | BaseEvent<

@@ -900,6 +900,7 @@ export type AddRpcMcpServerOptions = {
 
 const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
 const DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS = 2_000;
+const DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 5_000;
 const SUB_AGENT_IDENTITY_VERSION_LEGACY = "legacy";
 const SUB_AGENT_IDENTITY_VERSION_PATH_V2 = "path-v2";
 const SUB_AGENT_IDENTITY_PATH_V2_PREFIX = "cf-agents:v2:";
@@ -7846,8 +7847,17 @@ export class Agent<
   private async _reconcileAgentToolRuns(options?: {
     deferFinishHooks?: boolean;
     childInspectionTimeoutMs?: number;
+    totalRecoveryTimeoutMs?: number;
     runIds?: readonly string[];
   }): Promise<DeferredAgentToolFinish[]> {
+    const startedAt = Date.now();
+    const totalTimeoutMs =
+      options?.totalRecoveryTimeoutMs ??
+      DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS;
+    const deadlineAt =
+      totalTimeoutMs > 0
+        ? startedAt + totalTimeoutMs
+        : Number.POSITIVE_INFINITY;
     const deferredFinishes: DeferredAgentToolFinish[] = [];
     const rows = this.sql<AgentToolRunStorageRow>`
       SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
@@ -7859,65 +7869,98 @@ export class Agent<
     `;
     const runIds =
       options?.runIds !== undefined ? new Set(options.runIds) : undefined;
-    for (const row of rows) {
-      if (runIds && !runIds.has(row.run_id)) continue;
+    const recoveryRows = rows.filter(
+      (row) => !runIds || runIds.has(row.run_id)
+    );
+    this._emit("agent_tool:recovery:begin", {
+      runCount: recoveryRows.length,
+      totalTimeoutMs
+    });
+    for (const row of recoveryRows) {
       let sequence = 1;
       let completedAt: number | undefined;
       let result: RunAgentToolResult;
-      const recovery = await this._inspectAgentToolRunForRecovery(
-        row,
-        sequence,
-        options?.childInspectionTimeoutMs
-      );
-      if (recovery.status === "inspected") {
-        const inspection = recovery.inspection;
-        try {
-          sequence = await this._broadcastAgentToolStoredChunksFromAdapter(
-            recovery.adapter,
-            row,
-            sequence,
-            undefined,
-            undefined,
-            options?.childInspectionTimeoutMs ??
-              DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS
-          );
-        } catch {
-          // Terminal reconciliation should still complete if chunk replay fails.
-        }
-        if (
-          !inspection ||
-          inspection.status === "running" ||
-          inspection.status === "starting"
-        ) {
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0) {
+        this._emit("agent_tool:recovery:deadline", {
+          runId: row.run_id,
+          agentType: row.agent_type,
+          elapsedMs: Date.now() - startedAt
+        });
+        result = {
+          runId: row.run_id,
+          agentType: row.agent_type,
+          status: "interrupted",
+          error: "Agent tool run recovery deadline exceeded."
+        };
+      } else {
+        const childTimeout =
+          options?.childInspectionTimeoutMs ??
+          DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS;
+        const boundedChildTimeout =
+          childTimeout > 0 ? Math.min(childTimeout, remainingMs) : remainingMs;
+        const recovery = await this._inspectAgentToolRunForRecovery(
+          row,
+          sequence,
+          boundedChildTimeout
+        );
+        if (recovery.status === "inspected") {
+          const inspection = recovery.inspection;
+          try {
+            sequence = await this._broadcastAgentToolStoredChunksFromAdapter(
+              recovery.adapter,
+              row,
+              sequence,
+              undefined,
+              undefined,
+              boundedChildTimeout
+            );
+          } catch {
+            // Terminal reconciliation should still complete if chunk replay fails.
+          }
+          if (
+            !inspection ||
+            inspection.status === "running" ||
+            inspection.status === "starting"
+          ) {
+            result = {
+              runId: row.run_id,
+              agentType: row.agent_type,
+              status: "interrupted",
+              error:
+                "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
+            };
+          } else {
+            result = this._terminalResultFromInspection(
+              row.agent_type,
+              inspection
+            );
+            completedAt = inspection.completedAt;
+          }
+        } else if (recovery.status === "timed-out") {
+          result = {
+            runId: row.run_id,
+            agentType: row.agent_type,
+            status: "interrupted",
+            error: "Agent tool run inspection timed out during parent recovery."
+          };
+        } else {
           result = {
             runId: row.run_id,
             agentType: row.agent_type,
             status: "interrupted",
             error:
-              "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
+              "Agent tool run could not be inspected during parent recovery."
           };
-        } else {
-          result = this._terminalResultFromInspection(
-            row.agent_type,
-            inspection
-          );
-          completedAt = inspection.completedAt;
         }
-      } else if (recovery.status === "timed-out") {
-        result = {
-          runId: row.run_id,
-          agentType: row.agent_type,
-          status: "interrupted",
-          error: "Agent tool run inspection timed out during parent recovery."
-        };
-      } else {
-        result = {
-          runId: row.run_id,
-          agentType: row.agent_type,
-          status: "interrupted",
-          error: "Agent tool run could not be inspected during parent recovery."
-        };
       }
+      this._emit("agent_tool:recovery:row", {
+        runId: row.run_id,
+        agentType: row.agent_type,
+        status: result.status,
+        reason: result.error,
+        elapsedMs: Date.now() - startedAt
+      });
       const deferredFinish = await this._finishAgentToolRun(
         this._agentToolRunInfoFromRow(row),
         result,
@@ -7931,6 +7974,10 @@ export class Agent<
         deferredFinishes.push(deferredFinish);
       }
     }
+    this._emit("agent_tool:recovery:complete", {
+      runCount: recoveryRows.length,
+      elapsedMs: Date.now() - startedAt
+    });
     return deferredFinishes;
   }
 
@@ -7962,6 +8009,7 @@ export class Agent<
 
   private _scheduleAgentToolRunRecovery(options?: {
     childInspectionTimeoutMs?: number;
+    totalRecoveryTimeoutMs?: number;
     runIds?: readonly string[];
   }): Promise<void> {
     if (this._agentToolRunRecoveryPromise) {
@@ -7977,11 +8025,15 @@ export class Agent<
       const recoveredAgentToolFinishes = await this._reconcileAgentToolRuns({
         deferFinishHooks: true,
         childInspectionTimeoutMs: options?.childInspectionTimeoutMs,
+        totalRecoveryTimeoutMs: options?.totalRecoveryTimeoutMs,
         runIds: options?.runIds
       });
       await this._runDeferredAgentToolFinishHooks(recoveredAgentToolFinishes);
     })()
       .catch(async (error) => {
+        this._emit("agent_tool:recovery:failed", {
+          error: error instanceof Error ? error.message : String(error)
+        });
         try {
           await this.onError(error);
         } catch {
