@@ -1834,6 +1834,12 @@ export class ThinkProgrammaticTestAgent extends Think {
     this._programmaticResponse = response;
   }
 
+  async setLastBodyForTest(body: Record<string, unknown>): Promise<void> {
+    (
+      this as unknown as { _lastBody: Record<string, unknown> | undefined }
+    )._lastBody = body;
+  }
+
   async setWorkflowEventFailuresForTest(count: number): Promise<void> {
     this._workflowEventFailuresRemaining = count;
   }

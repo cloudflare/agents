@@ -403,6 +403,8 @@ export interface TurnInput {
   clientTools?: ClientToolSchema[];
   /** Custom body fields from the client request. */
   body?: Record<string, unknown>;
+  /** Internal workflow prompt configuration, never sourced from client body. */
+  workflowPrompt?: ThinkWorkflowPromptContext;
   /** Whether this is a continuation turn (auto-continue after tool result, recovery). */
   continuation: boolean;
 }
@@ -1597,7 +1599,7 @@ export class Think<
 
     const subclassConfig = (await this.beforeTurn(ctx)) ?? {};
     const config = await this._pipelineExtensionBeforeTurn(ctx, subclassConfig);
-    const workflowPrompt = this._readWorkflowPromptContext(input.body ?? null);
+    const workflowPrompt = input.workflowPrompt;
     const workflowOutput = workflowPrompt?.output
       ? Output.object({
           schema: jsonSchema(workflowPrompt.output.schema as never)
@@ -3367,7 +3369,7 @@ export class Think<
           signal: controller.signal,
           captureProgrammaticStreamError: true,
           captureOutput: Boolean(workflowPrompt?.output),
-          body: workflowPrompt ? (metadata ?? undefined) : undefined,
+          workflowPrompt: workflowPrompt ?? undefined,
           onMessagesApplied: () => {
             this.sql`
               UPDATE cf_think_submissions
@@ -3707,6 +3709,7 @@ export class Think<
       captureProgrammaticStreamError?: boolean;
       captureOutput?: boolean;
       body?: Record<string, unknown>;
+      workflowPrompt?: ThinkWorkflowPromptContext;
     }
   ): Promise<ProgrammaticMessagesResult> {
     const clientTools = this._lastClientTools;
@@ -3763,6 +3766,7 @@ export class Think<
                   signal: abortSignal,
                   clientTools,
                   body,
+                  workflowPrompt: options?.workflowPrompt,
                   continuation: false
                 })
             );

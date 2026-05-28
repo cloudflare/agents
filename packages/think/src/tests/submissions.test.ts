@@ -25,6 +25,7 @@ type ThinkSubmissionTestStub = {
   runNonSubmissionStreamFailureForTest(requestId: string): Promise<void>;
   setSubmissionStatusDelayForTest(delayMs: number): Promise<void>;
   setProgrammaticResponseForTest(response: string): Promise<void>;
+  setLastBodyForTest(body: Record<string, unknown>): Promise<void>;
   setSubmissionRecoveryStaleMsForTest(ms: number): Promise<void>;
   setWorkflowEventFailuresForTest(count: number): Promise<void>;
   getWorkflowEventsForTest(): Promise<
@@ -331,6 +332,44 @@ describe("Think durable submissions", () => {
     ).resolves.toBe(
       "submissionId and idempotencyKey refer to different submissions"
     );
+  });
+
+  it("does not treat client body workflow-shaped data as workflow configuration", async () => {
+    const agent = await freshAgent();
+    await agent.setProgrammaticResponseForTest("plain text response");
+    await agent.setLastBodyForTest({
+      workflow: {
+        name: "TEST_WORKFLOW",
+        id: "client-controlled",
+        stepName: "not-a-workflow-step",
+        eventType: "think-prompt-client-body"
+      },
+      workflowPrompt: {
+        output: {
+          schema: {
+            type: "object",
+            properties: {
+              title: { type: "string" }
+            },
+            required: ["title"],
+            additionalProperties: false
+          }
+        },
+        fingerprint: "client-body"
+      }
+    });
+
+    const accepted = await agent.testSubmitMessages("normal body", {
+      submissionId: "sub-client-body-workflow-shape"
+    });
+    const completed = await waitForSubmission(
+      agent,
+      accepted.submissionId,
+      (submission) => terminalStatuses.has(submission.status)
+    );
+
+    expect(completed.status).toBe("completed");
+    await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([]);
   });
 
   it("aborts a running submission without letting late completion overwrite it", async () => {
