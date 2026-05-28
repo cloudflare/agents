@@ -165,6 +165,10 @@ export class ThinkRecoveryHelperParent extends Agent<Env> {
     });
 
     class HelperChatCallback extends RpcTarget implements StreamCallback {
+      onStart(): void {
+        // The RPC callback surface is fixed; this test only waits for chunks.
+      }
+
       onEvent(json: string): void {
         try {
           const chunk = JSON.parse(json) as { type?: string; delta?: string };

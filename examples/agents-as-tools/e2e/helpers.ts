@@ -119,11 +119,11 @@ export async function waitForHelperOfType(
  *
  * Helper turns (the helper's OWN inference loop, separate from the
  * parent's tool-selection loop) can take a while — especially when
- * the helper has its own internal tool calls to make. 90s.
+ * the helper has its own internal tool calls to make. 150s.
  */
 export async function waitForHelperTerminal(panel: Locator): Promise<void> {
   await expect(panel).toHaveAttribute("data-helper-status", /^(done|error)$/, {
-    timeout: 90_000
+    timeout: 150_000
   });
 }
 

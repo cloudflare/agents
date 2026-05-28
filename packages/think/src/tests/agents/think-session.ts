@@ -728,10 +728,14 @@ export class ThinkTestAgent extends Think {
     };
   }
 
-  async testChatWithoutErrorCallback(message: string): Promise<string> {
+  async testChatWithRethrowingErrorCallback(message: string): Promise<string> {
     const cb: StreamCallback = {
+      onStart() {},
       onEvent() {},
-      onDone() {}
+      onDone() {},
+      onError(error: string) {
+        throw new Error(error);
+      }
     };
     try {
       await this.chat(message, cb);
@@ -743,6 +747,7 @@ export class ThinkTestAgent extends Think {
 
   async testChatWithThrowingErrorCallback(message: string): Promise<string> {
     const cb: StreamCallback = {
+      onStart() {},
       onEvent() {},
       onDone() {},
       onError() {
@@ -898,9 +903,13 @@ export class ThinkTestAgent extends Think {
       crypto.randomUUID(),
       createEmptyStreamResult(),
       {
+        onStart() {},
         onEvent() {},
         onDone() {
           doneCalled = true;
+        },
+        onError(error: string) {
+          throw new Error(error);
         }
       }
     );
@@ -916,6 +925,7 @@ export class ThinkTestAgent extends Think {
     const controller = new AbortController();
 
     const cb: StreamCallback = {
+      onStart() {},
       onEvent(json: string) {
         events.push(json);
         if (events.length >= abortAfterEvents) {

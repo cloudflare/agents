@@ -52,6 +52,28 @@ function killProcessOnPort(port: number): void {
   }
 }
 
+function killProcessTree(pid: number): void {
+  let children: number[] = [];
+  try {
+    children = execSync(`pgrep -P ${pid} 2>/dev/null || true`)
+      .toString()
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map(Number);
+  } catch {
+    // pgrep may be unavailable; killing the parent is still useful.
+  }
+  for (const childPid of children) {
+    killProcessTree(childPid);
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // Already dead
+  }
+}
+
 function startWrangler(): ChildProcess {
   const configPath = path.join(__dirname, "wrangler.jsonc");
   const child = spawn(
@@ -64,12 +86,13 @@ function startWrangler(): ChildProcess {
       "--port",
       String(PORT),
       "--persist-to",
-      PERSIST_DIR
+      PERSIST_DIR,
+      "--inspector-port",
+      "0"
     ],
     {
       cwd: __dirname,
       stdio: ["pipe", "pipe", "pipe"],
-      detached: true,
       env: { ...process.env, NODE_ENV: "test" }
     }
   );
@@ -90,6 +113,7 @@ async function waitForReady(maxAttempts = 30, delayMs = 1000): Promise<void> {
   for (let i = 0; i < maxAttempts; i++) {
     try {
       const res = await fetch(`${AGENT_URL}/`);
+      await res.body?.cancel();
       if (res.status > 0) return;
     } catch {
       // Not ready yet
@@ -102,7 +126,8 @@ async function waitForReady(maxAttempts = 30, delayMs = 1000): Promise<void> {
 async function waitForPortFree(maxAttempts = 30, delayMs = 500): Promise<void> {
   for (let i = 0; i < maxAttempts; i++) {
     try {
-      await fetch(`${AGENT_URL}/`);
+      const res = await fetch(`${AGENT_URL}/`);
+      await res.body?.cancel();
     } catch {
       return;
     }
@@ -124,15 +149,7 @@ function killProcess(child: ChildProcess): Promise<void> {
       clearTimeout(fallback);
       resolve();
     });
-    try {
-      process.kill(-child.pid, "SIGKILL");
-    } catch {
-      try {
-        process.kill(child.pid, "SIGKILL");
-      } catch {
-        // Already dead
-      }
-    }
+    killProcessTree(child.pid);
   });
 }
 

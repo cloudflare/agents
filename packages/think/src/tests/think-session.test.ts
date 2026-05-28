@@ -1044,11 +1044,11 @@ describe("Think — onChatResponse", () => {
     }
   });
 
-  it("should throw RPC in-band stream errors when no onError callback exists", async () => {
-    const agent = await freshAgent("hook-rpc-inband-error-no-callback");
+  it("should propagate RPC in-band stream errors when onError rethrows", async () => {
+    const agent = await freshAgent("hook-rpc-inband-error-rethrow");
 
     await agent.setInBandErrorResponse("RPC missing callback error");
-    const error = await agent.testChatWithoutErrorCallback(
+    const error = await agent.testChatWithRethrowingErrorCallback(
       "trigger rpc in-band error"
     );
 

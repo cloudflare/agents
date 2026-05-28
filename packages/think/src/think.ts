@@ -227,10 +227,10 @@ export interface ChatStartEvent {
 }
 
 export interface StreamCallback {
-  onStart?(event: ChatStartEvent): void | Promise<void>;
+  onStart(event: ChatStartEvent): void | Promise<void>;
   onEvent(json: string): void | Promise<void>;
   onDone(): void | Promise<void>;
-  onError?(error: string): void | Promise<void>;
+  onError(error: string): void | Promise<void>;
 }
 
 /**
@@ -2223,7 +2223,7 @@ export class Think<
     }
 
     try {
-      await callback.onStart?.({ requestId });
+      await callback.onStart({ requestId });
       await this.keepAliveWhile(async () => {
         await this._turnQueue.enqueue(requestId, async () => {
           const userMsg: UIMessage =
@@ -2258,11 +2258,8 @@ export class Think<
               const wrapped = this.onChatError(error);
               const errorMessage =
                 wrapped instanceof Error ? wrapped.message : String(wrapped);
-              if (callback.onError) {
-                await callback.onError(errorMessage);
-                return;
-              }
-              throw wrapped;
+              await callback.onError(errorMessage);
+              return;
             }
 
             await this._streamResultToRpcCallback(
@@ -4716,19 +4713,11 @@ export class Think<
         });
       }
 
-      if (callback.onError) {
-        await callback.onError(errorMessage);
-      } else {
-        throw wrapped;
-      }
+      await callback.onError(errorMessage);
     }
 
     if (pendingRpcError) {
-      if (callback.onError) {
-        await callback.onError(pendingRpcError);
-      } else {
-        throw new Error(pendingRpcError);
-      }
+      await callback.onError(pendingRpcError);
     }
   }
 

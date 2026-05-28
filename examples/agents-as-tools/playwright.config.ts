@@ -46,7 +46,7 @@ export default defineConfig({
   // tool runs two helpers in parallel which doubles that. 180s
   // gives a comfortable margin without being so long that a real
   // hang waits forever.
-  timeout: 180_000,
+  timeout: 240_000,
   expect: {
     // Long enough to wait through a slow first-token latency on
     // Workers AI without wedging on a real-but-flaked test.
@@ -78,7 +78,7 @@ export default defineConfig({
   // into a workerd-running dev server with the real `ai` binding
   // (`remote: true` in wrangler.jsonc).
   webServer: {
-    command: "npm start",
+    command: "rm -rf .wrangler/state .wrangler/tmp && npm start",
     url: `http://localhost:${PORT}`,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
