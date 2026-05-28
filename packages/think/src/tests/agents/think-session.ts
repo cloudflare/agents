@@ -2774,6 +2774,7 @@ type ScheduledTaskConfigForTest = {
 };
 
 type DeclaredScheduledTaskRowForTest = {
+  owner_key: string;
   task_id: string;
   schedule_hash: string;
   task_hash: string;
@@ -2899,10 +2900,14 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
   async listDeclaredScheduledTaskRowsForTest(): Promise<
     DeclaredScheduledTaskRowForTest[]
   > {
+    const ownerKey = (
+      this as unknown as { _declaredScheduleOwnerKey(): string }
+    )._declaredScheduleOwnerKey();
     return this.sql<DeclaredScheduledTaskRowForTest>`
-      SELECT task_id, schedule_hash, task_hash, schedule_id,
+      SELECT owner_key, task_id, schedule_hash, task_hash, schedule_id,
              next_run_at, created_at, updated_at
       FROM cf_think_scheduled_tasks
+      WHERE owner_key = ${ownerKey}
       ORDER BY task_id ASC
     `;
   }

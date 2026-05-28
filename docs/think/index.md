@@ -141,6 +141,7 @@ driving the work and what the caller needs back.
 | A browser user sends chat messages                             | `useAgentChat` over the WebSocket chat protocol |
 | Server code can wait for the model response                    | `saveMessages()`                                |
 | Server code needs fast durable acceptance and later status     | `submitMessages()`                              |
+| Code should create recurring prompt-driven turns               | `getScheduledTasks()`                           |
 | Parent code needs direct streaming RPC to a specific child     | `subAgent(...).chat()`                          |
 | A parent agent delegates work to a retained child agent        | `agentTool()` or `runAgentTool()`               |
 | Surround a turn with idempotent app-owned side effects         | `startFiber()`                                  |
@@ -178,6 +179,8 @@ with retries per step, long waits, external events, or approvals.
 | `getModel()`            | throws                           | Return the `LanguageModel` to use                                               |
 | `getSystemPrompt()`     | `"You are a helpful assistant."` | System prompt (fallback when no context blocks)                                 |
 | `getTools()`            | `{}`                             | AI SDK `ToolSet` for the agentic loop                                           |
+| `getScheduledTasks()`   | `{}`                             | Code-declared recurring prompts                                                 |
+| `getDefaultTimezone()`  | `undefined`                      | Default timezone for wall-clock scheduled tasks                                 |
 | `maxSteps`              | `10`                             | Max tool-call rounds per turn                                                   |
 | `sendReasoning`         | `true`                           | Send reasoning chunks to chat clients                                           |
 | `configureSession()`    | identity                         | Add context blocks, compaction, search, skills — see [Sessions](../sessions.md) |
@@ -227,6 +230,49 @@ export class MyAgent extends Think<Env> {
   }
 }
 ```
+
+## Scheduled Tasks
+
+Use `getScheduledTasks()` when code should create recurring Think turns. Think
+reconciles the declarations on startup, stores a durable one-shot schedule for
+the next occurrence, and submits each occurrence through `submitMessages()` with
+a stable idempotency key.
+
+```typescript
+import { Think, defineScheduledTasks } from "@cloudflare/think";
+
+export class DigestAgent extends Think<Env> {
+  getDefaultTimezone() {
+    return "Europe/London";
+  }
+
+  getScheduledTasks() {
+    return defineScheduledTasks({
+      weeklyCommitReport: {
+        schedule: "every week on monday at 09:00",
+        prompt:
+          "Compile all my GitHub commits for the last week and send a concise summary."
+      },
+      workout: {
+        schedule: "every day at 08:00 in Europe/London",
+        prompt: "Start my workout."
+      }
+    });
+  }
+}
+```
+
+The DSL supports `every <n> minutes`, `every <n> hours`,
+`every day at HH:mm`, `every weekday at HH:mm`, and
+`every week on monday,wednesday at HH:mm`. Wall-clock schedules require either
+an inline timezone, a task `timezone`, or `getDefaultTimezone()`. If an alarm is
+late, Think runs the intended occurrence once and schedules the next future
+occurrence; it does not backfill missed runs.
+
+Use `getScheduledTasks()` for recurring prompt-driven turns. If your product
+lets users edit schedules at runtime, or a scheduled occurrence should start a
+deterministic Workflow rather than submit a prompt, keep that reconciliation in
+application code for now.
 
 ## Session Integration
 

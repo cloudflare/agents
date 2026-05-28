@@ -303,4 +303,60 @@ describe("Think scheduled tasks", () => {
     const childSchedules = await parent.listChildSchedulesForTest("child");
     expect(childSchedules).toHaveLength(1);
   });
+
+  it("keeps declared task ledgers isolated across parents and sub-agents", async () => {
+    const parent = await freshAgent();
+    await parent.setScheduledTasksForTest({
+      shared: {
+        schedule: "every 1 minute",
+        prompt: "Parent task"
+      }
+    });
+    await parent.setChildScheduledTasksForTest("alpha", {
+      shared: {
+        schedule: "every 1 minute",
+        prompt: "Alpha child task"
+      }
+    });
+    await parent.setChildScheduledTasksForTest("beta", {
+      shared: {
+        schedule: "every 1 minute",
+        prompt: "Beta child task"
+      }
+    });
+
+    await parent.reconcileScheduledTasksForTest();
+    await parent.reconcileChildScheduledTasksForTest("alpha");
+    await parent.reconcileChildScheduledTasksForTest("beta");
+
+    const parentRows = await parent.listDeclaredScheduledTaskRowsForTest();
+    const alphaRows =
+      await parent.listChildDeclaredScheduledTaskRowsForTest("alpha");
+    const betaRows =
+      await parent.listChildDeclaredScheduledTaskRowsForTest("beta");
+
+    expect(parentRows).toHaveLength(1);
+    expect(alphaRows).toHaveLength(1);
+    expect(betaRows).toHaveLength(1);
+    expect(parentRows[0].task_id).toBe("shared");
+    expect(alphaRows[0].task_id).toBe("shared");
+    expect(betaRows[0].task_id).toBe("shared");
+    const scheduleIds = new Set([
+      parentRows[0].schedule_id,
+      alphaRows[0].schedule_id,
+      betaRows[0].schedule_id
+    ]);
+    expect(scheduleIds.size).toBe(3);
+
+    await parent.setChildScheduledTasksForTest("alpha", {});
+    await parent.reconcileChildScheduledTasksForTest("alpha");
+
+    expect(await parent.listDeclaredScheduledTaskRowsForTest()).toHaveLength(1);
+    expect(
+      await parent.listChildDeclaredScheduledTaskRowsForTest("alpha")
+    ).toHaveLength(0);
+    expect(
+      await parent.listChildDeclaredScheduledTaskRowsForTest("beta")
+    ).toHaveLength(1);
+  });
 });

@@ -703,6 +703,7 @@ type NormalizedDeclaredTask = {
 };
 
 type DeclaredScheduledTaskRow = {
+  owner_key: string;
   task_id: string;
   schedule_hash: string;
   task_hash: string;
@@ -3078,13 +3079,15 @@ export class Think<
     if (this._declaredScheduledTasksTableEnsured) return;
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_think_scheduled_tasks (
-        task_id TEXT PRIMARY KEY,
+        owner_key TEXT NOT NULL,
+        task_id TEXT NOT NULL,
         schedule_hash TEXT NOT NULL,
         task_hash TEXT NOT NULL,
         schedule_id TEXT,
         next_run_at INTEGER,
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (owner_key, task_id)
       )
     `;
     this._declaredScheduledTasksTableEnsured = true;
@@ -3094,11 +3097,13 @@ export class Think<
     taskId: string
   ): DeclaredScheduledTaskRow | null {
     this._ensureDeclaredScheduledTasksTable();
+    const ownerKey = this._declaredScheduleOwnerKey();
     const rows = this.sql<DeclaredScheduledTaskRow>`
-      SELECT task_id, schedule_hash, task_hash, schedule_id,
+      SELECT owner_key, task_id, schedule_hash, task_hash, schedule_id,
              next_run_at, created_at, updated_at
       FROM cf_think_scheduled_tasks
       WHERE task_id = ${taskId}
+        AND owner_key = ${ownerKey}
       LIMIT 1
     `;
     return rows[0] ?? null;
@@ -3106,10 +3111,12 @@ export class Think<
 
   private _listDeclaredScheduledTaskRows(): DeclaredScheduledTaskRow[] {
     this._ensureDeclaredScheduledTasksTable();
+    const ownerKey = this._declaredScheduleOwnerKey();
     return this.sql<DeclaredScheduledTaskRow>`
-      SELECT task_id, schedule_hash, task_hash, schedule_id,
+      SELECT owner_key, task_id, schedule_hash, task_hash, schedule_id,
              next_run_at, created_at, updated_at
       FROM cf_think_scheduled_tasks
+      WHERE owner_key = ${ownerKey}
       ORDER BY task_id ASC
     `;
   }
@@ -3214,6 +3221,7 @@ export class Think<
   private async _reconcileDeclaredScheduledTasks(): Promise<void> {
     const tasks = await this._declaredScheduledTasksForNow();
     this._ensureDeclaredScheduledTasksTable();
+    const ownerKey = this._declaredScheduleOwnerKey();
     const now = Date.now();
     const existing = this._listDeclaredScheduledTaskRows();
     const seen = new Set<string>();
@@ -3228,11 +3236,11 @@ export class Think<
         );
         this.sql`
           INSERT INTO cf_think_scheduled_tasks (
-            task_id, schedule_hash, task_hash, schedule_id,
+            owner_key, task_id, schedule_hash, task_hash, schedule_id,
             next_run_at, created_at, updated_at
           )
           VALUES (
-            ${taskId}, ${task.scheduleHash}, ${task.taskHash},
+            ${ownerKey}, ${taskId}, ${task.scheduleHash}, ${task.taskHash},
             ${scheduled.scheduleId}, ${scheduled.scheduledFor},
             ${now}, ${now}
           )
@@ -3253,7 +3261,8 @@ export class Think<
               schedule_id = ${scheduled.scheduleId},
               next_run_at = ${scheduled.scheduledFor},
               updated_at = ${now}
-          WHERE task_id = ${taskId}
+          WHERE owner_key = ${ownerKey}
+            AND task_id = ${taskId}
         `;
         continue;
       }
@@ -3272,7 +3281,8 @@ export class Think<
                 schedule_id = ${scheduled.scheduleId},
                 next_run_at = ${scheduled.scheduledFor},
                 updated_at = ${now}
-            WHERE task_id = ${taskId}
+            WHERE owner_key = ${ownerKey}
+              AND task_id = ${taskId}
           `;
           continue;
         }
@@ -3282,7 +3292,8 @@ export class Think<
         this.sql`
           UPDATE cf_think_scheduled_tasks
           SET task_hash = ${task.taskHash}, updated_at = ${now}
-          WHERE task_id = ${taskId}
+          WHERE owner_key = ${ownerKey}
+            AND task_id = ${taskId}
         `;
       }
     }
@@ -3292,7 +3303,8 @@ export class Think<
       if (row.schedule_id) await this.cancelSchedule(row.schedule_id);
       this.sql`
         DELETE FROM cf_think_scheduled_tasks
-        WHERE task_id = ${row.task_id}
+        WHERE owner_key = ${ownerKey}
+          AND task_id = ${row.task_id}
       `;
     }
   }
@@ -3375,7 +3387,8 @@ export class Think<
           next_run_at = ${scheduled.scheduledFor},
           task_hash = ${task.taskHash},
           updated_at = ${Date.now()}
-      WHERE task_id = ${payload.taskId}
+      WHERE owner_key = ${ownerKey}
+        AND task_id = ${payload.taskId}
         AND schedule_hash = ${payload.scheduleHash}
     `;
   }
