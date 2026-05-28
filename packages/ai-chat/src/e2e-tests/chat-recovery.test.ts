@@ -19,6 +19,17 @@ const AGENT_URL = `http://localhost:${PORT}`;
 const AGENT_NAME = "chat-recovery-e2e";
 const PERSIST_DIR = path.join(__dirname, ".wrangler-chat-e2e-state");
 
+type RecoveryStatus = {
+  recoveryCount: number;
+  contexts: Array<{
+    streamId: string;
+    requestId: string;
+    partialText: string;
+  }>;
+  messageCount: number;
+  assistantMessages: number;
+};
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -126,6 +137,14 @@ function killProcess(child: ChildProcess): Promise<void> {
   });
 }
 
+async function restartWrangler(child: ChildProcess): Promise<ChildProcess> {
+  await killProcess(child);
+  await waitForPortFree();
+  const next = startWrangler();
+  await waitForReady();
+  return next;
+}
+
 async function callAgent(
   method: string,
   args: unknown[] = []
@@ -167,6 +186,41 @@ async function callAgent(
       reject(err);
     };
   });
+}
+
+async function pollUntil<T>(
+  label: string,
+  read: () => Promise<T>,
+  done: (value: T) => boolean,
+  options?: { attempts?: number; delayMs?: number }
+): Promise<T> {
+  const attempts = options?.attempts ?? 30;
+  const delayMs = options?.delayMs ?? 1000;
+  let lastError: unknown;
+
+  for (let i = 0; i < attempts; i++) {
+    await sleep(delayMs);
+    try {
+      const value = await read();
+      console.log(`[test] ${label} poll ${i + 1}:`, value);
+      if (done(value)) return value;
+    } catch (error) {
+      lastError = error;
+      console.log(`[test] ${label} poll ${i + 1}: error`);
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`Timed out waiting for ${label}`);
+}
+
+async function waitForRecovery(): Promise<RecoveryStatus> {
+  return pollUntil(
+    "ai-chat recovery",
+    () => callAgent("getRecoveryStatus") as Promise<RecoveryStatus>,
+    (status) => status.recoveryCount > 0
+  );
 }
 
 function sendChatMessage(userMessage: string): Promise<void> {
@@ -294,6 +348,30 @@ describe("chat recovery e2e", () => {
       assistantMessages: number;
     };
 
+    expect(status.recoveryCount).toBeGreaterThanOrEqual(1);
+    expect(status.messageCount).toBeGreaterThanOrEqual(1);
+
+    const fiberRowsAfter = (await callAgent("hasFiberRows")) as boolean;
+    expect(fiberRowsAfter).toBe(false);
+  });
+
+  it("should still recover after repeated restart churn around an interrupted turn", async () => {
+    wrangler = startWrangler();
+    await waitForReady();
+
+    await sendChatMessage("Tell me something long and interesting");
+    await sleep(3000);
+
+    const hasFibers = (await callAgent("hasFiberRows")) as boolean;
+    expect(hasFibers).toBe(true);
+
+    for (let i = 0; i < 2; i++) {
+      console.log(`[test] AIChat restart churn cycle ${i + 1}`);
+      wrangler = await restartWrangler(wrangler);
+      await sleep(250);
+    }
+
+    const status = await waitForRecovery();
     expect(status.recoveryCount).toBeGreaterThanOrEqual(1);
     expect(status.messageCount).toBeGreaterThanOrEqual(1);
 
