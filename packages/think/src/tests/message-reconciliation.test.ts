@@ -65,6 +65,31 @@ function waitForDone(ws: WebSocket, timeout = 10_000): Promise<void> {
   });
 }
 
+function waitForChatResponse(
+  ws: WebSocket,
+  timeout = 10_000
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("Timeout waiting for chat response")),
+      timeout
+    );
+    const handler = (e: MessageEvent) => {
+      try {
+        const msg = JSON.parse(e.data as string) as Record<string, unknown>;
+        if (msg.type === MSG_CHAT_RESPONSE && msg.done === true) {
+          clearTimeout(timer);
+          ws.removeEventListener("message", handler);
+          resolve(msg);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    ws.addEventListener("message", handler);
+  });
+}
+
 function sendChatRequest(
   ws: WebSocket,
   messages: UIMessage[],
@@ -229,6 +254,43 @@ describe("Think — message reconciliation on incoming submits", () => {
       toolCallId: TOOL_CALL_ID,
       state: "output-available"
     });
+
+    ws.close(1000);
+  });
+
+  it("documents that a persisted orphan tool call poisons the next Think turn", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const ws = await connectWS(room);
+
+    await agent.setTextOnlyMode(true);
+
+    const userA = makeUserMessage("user-a", "create a cat");
+    const orphanAssistant = makeClientOptimisticAssistant("orphan-assistant");
+    await agent.persistToolCallMessage([userA, orphanAssistant]);
+
+    const responsePromise = waitForChatResponse(ws);
+    sendChatRequest(ws, [makeUserMessage("user-b", "continue")]);
+    const response = await responsePromise;
+
+    expect(response.done).toBe(true);
+
+    const responseLog = (await agent.getResponseLog()) as Array<{
+      status: string;
+      error?: string;
+    }>;
+    const lastResponse = responseLog[responseLog.length - 1];
+    expect(lastResponse).toMatchObject({
+      status: "error",
+      error: expect.stringMatching(/tool|result|call/i)
+    });
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(messages.map((message) => message.id)).toEqual([
+      "user-a",
+      "orphan-assistant",
+      "user-b"
+    ]);
 
     ws.close(1000);
   });
