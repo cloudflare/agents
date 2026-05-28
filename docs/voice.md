@@ -206,7 +206,7 @@ async onTurn(transcript: string, context: VoiceTurnContext) {
     abortSignal: context.signal
   });
 
-  return result.textStream;
+  return result.fullStream;
 }
 ```
 

@@ -40,7 +40,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
       ]
     });
 
-    return result.textStream;
+    return result.fullStream;
   }
 }
 
