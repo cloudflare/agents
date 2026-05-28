@@ -2388,7 +2388,8 @@ export class ThinkProgrammaticTestAgent extends Think {
       id: `fiber-${requestId}`,
       name: `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
       snapshot: null,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      recoveryReason: "interrupted"
     });
   }
 

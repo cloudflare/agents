@@ -86,8 +86,11 @@ export {
 
 export type {
   ChatResponseResult,
+  ChatRecoveryConfig,
   ChatRecoveryContext,
+  ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
+  ResolvedChatRecoveryConfig,
   MessageConcurrency,
   SaveMessagesOptions,
   SaveMessagesResult
