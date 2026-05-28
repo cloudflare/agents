@@ -37,7 +37,7 @@ export class MyAgent extends VoiceAgent<Env> {
       abortSignal: context.signal
     });
 
-    return result.textStream;
+    return result.fullStream;
   }
 }
 
@@ -188,7 +188,7 @@ async onTurn(
 **Return value:**
 
 - `string` — The agent's full response. Synthesized as a single TTS call.
-- `AsyncIterable<string>` — A token stream (e.g. from `streamText().textStream`). The pipeline chunks it into sentences and synthesizes TTS per-sentence for lower latency.
+- AI SDK `fullStream` or `AsyncIterable<string>` — The pipeline chunks text into sentences and synthesizes TTS per-sentence for lower latency.
 
 ### Lifecycle hooks — optional
 

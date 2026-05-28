@@ -433,6 +433,40 @@ export class TestEmptyResponseVoiceAgent extends VoiceBase {
   }
 }
 
+export class TestAiSdkFullStreamVoiceAgent extends VoiceBase {
+  static options = { hibernate: false };
+
+  transcriber = new TestTranscriber();
+  tts = new TestTTS();
+  #mockResponse = defaultMockTextStreamResponse;
+
+  async onTurn(_transcript: string, _context: VoiceTurnContext) {
+    const result = streamText({
+      model: createToolCallingTextStreamModel(this.#mockResponse),
+      tools: createMockTools(this.#mockResponse),
+      stopWhen: stepCountIs(3),
+      prompt: "Check the weather, then answer."
+    });
+
+    return result.fullStream;
+  }
+
+  onMessage(connection: Connection, message: WSMessage) {
+    if (typeof message !== "string") return;
+    try {
+      const parsed = JSON.parse(message) as Record<string, unknown>;
+      if (parsed.type === "_set_mock_response") {
+        if (isMockTextStreamResponse(parsed.response)) {
+          this.#mockResponse = parsed.response;
+        }
+        connection.send(JSON.stringify({ type: "_ack", command: parsed.type }));
+      }
+    } catch {
+      // ignore
+    }
+  }
+}
+
 export class TestAiSdkTextStreamVoiceAgent extends VoiceBase {
   static options = { hibernate: false };
 
