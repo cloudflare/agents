@@ -128,6 +128,10 @@ function stableHash(parts: string[]): string {
       hash ^= part.charCodeAt(i);
       hash = Math.imul(hash, 0x01000193);
     }
+    // Fold a boundary between parts so that, e.g., ["ab", "cd"] and ["abcd"]
+    // hash differently (otherwise the concatenated char stream is identical).
+    hash ^= 0xff;
+    hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(36);
 }

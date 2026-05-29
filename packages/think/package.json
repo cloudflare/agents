@@ -33,17 +33,12 @@
   },
   "peerDependencies": {
     "@chat-adapter/telegram": "^4.29.0",
-    "@cloudflare/codemode": ">=0.3.4 <1.0.0",
-    "@cloudflare/shell": ">=0.3.4 <1.0.0",
     "agents": ">=0.13.2 <1.0.0",
     "ai": "^6.0.182",
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
     "@chat-adapter/telegram": {
-      "optional": true
-    },
-    "@cloudflare/codemode": {
       "optional": true
     }
   },

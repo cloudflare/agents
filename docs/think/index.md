@@ -543,17 +543,28 @@ Think's `this.messages` getter reads directly from Session's tree-structured sto
 | `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
 | `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
 
-## Peer Dependencies
+## Dependencies
 
-| Package                      | Required | Notes                               |
-| ---------------------------- | -------- | ----------------------------------- |
-| `agents`                     | yes      | Cloudflare Agents SDK               |
-| `ai`                         | yes      | Vercel AI SDK v6                    |
-| `zod`                        | yes      | Schema validation (v4)              |
-| `@cloudflare/shell`          | yes      | Workspace filesystem                |
-| `@cloudflare/codemode`       | yes      | Code execution and JS skill scripts |
-| `@cloudflare/worker-bundler` | yes      | TypeScript skill scripts            |
-| `@chat-adapter/telegram`     | optional | Required for Telegram messengers    |
+Peer dependencies you provide:
+
+| Package                  | Required | Notes                            |
+| ------------------------ | -------- | -------------------------------- |
+| `agents`                 | yes      | Cloudflare Agents SDK            |
+| `ai`                     | yes      | Vercel AI SDK v6                 |
+| `zod`                    | yes      | Schema validation (v4)           |
+| `@chat-adapter/telegram` | optional | Required for Telegram messengers |
+
+Bundled with `@cloudflare/think`:
+
+| Package                | Notes                                                 |
+| ---------------------- | ----------------------------------------------------- |
+| `@cloudflare/shell`    | `Workspace` filesystem                                |
+| `@cloudflare/codemode` | Code execution for `createExecuteTool()`              |
+| `just-bash`            | Sandboxed shell for the default workspace `bash` tool |
+
+The Agent Skills engine and its script runner live in
+[`agents/skills`](../../packages/agents/AGENTS.md) (so skill scripts pull
+`@cloudflare/worker-bundler` and `just-bash` through `agents`, not Think).
 
 ## Docs
 
