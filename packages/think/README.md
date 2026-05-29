@@ -27,6 +27,90 @@ export class MyAgent extends Think<Env> {
 
 That's it. Think handles the WebSocket chat protocol, message persistence, the agentic loop, message sanitization, stream resumption, client tool support, and workspace file tools. Connect from the browser with `useAgentChat` from `@cloudflare/ai-chat`.
 
+## Messengers
+
+Think can own messenger ingress directly. Declare providers with
+`getMessengers()` and import provider implementations from subpaths so unused
+Chat SDK adapters are not bundled.
+
+```ts
+import { Think } from "@cloudflare/think";
+import {
+  defineMessengers,
+  ThinkMessengerStateAgent
+} from "@cloudflare/think/messengers";
+import telegramMessenger from "@cloudflare/think/messengers/telegram";
+
+export { ThinkMessengerStateAgent };
+
+export class SupportAgent extends Think<Env> {
+  getMessengers() {
+    return defineMessengers({
+      telegram: telegramMessenger({
+        token: this.env.TELEGRAM_BOT_TOKEN,
+        userName: "support_bot",
+        secretToken: this.env.TELEGRAM_WEBHOOK_SECRET_TOKEN
+      })
+    });
+  }
+}
+```
+
+The root Think agent handles the webhook route with this precedence: framework
+sub-agent routing, Think internal routes, messenger routes, then user
+`onRequest`. By default, `telegram` maps to
+`/messengers/telegram/webhook`, direct messages and mentions are routed to the
+agent, and new mentions subscribe the thread so later mentions in the same
+thread are still observed. Ordinary subscribed-thread messages and button
+actions are opt-in with `respondTo: ["subscribed-thread", "action"]`. Each Chat
+SDK thread runs in its own Think sub-agent to avoid accidental context sharing.
+Each root agent owns one Chat SDK runtime for all configured messengers, so
+multi-provider agents do not fight over Chat SDK singleton state.
+
+Use `conversation: "self"` when all messenger traffic should share the root
+agent's memory. Use a custom `conversation(event)` resolver to route by thread,
+channel, tenant, or user.
+
+Messenger state uses `agents/chat-sdk` under the hood. Export
+`ThinkMessengerStateAgent` from the Worker module so sub-agent routing can
+resolve it; production apps do not need to add a separate durable object binding
+or migration for this facet-only class. Test harnesses may still need explicit
+bindings.
+
+Inbound messenger replies use the streamed `chat()` path by default: the root
+agent starts an idempotent fiber, resolves the conversation target, calls
+`target.chat(message, callback)`, and lets the provider delivery policy post or
+edit messages. Recovery snapshots store only serializable event/thread data, so
+interrupted replies can either resume before streaming starts or post the
+configured interruption message after streaming has begun. `submitMessages()`
+remains the right primitive for non-streaming programmatic sends, scheduled
+digests, or background work.
+
+During a messenger turn, `getMessengerContext()` returns the initiating
+messenger context even after assistant messages are persisted. Telegram webhook
+verification is explicit: provide `secretToken`, a custom `verifyWebhook`, or
+`verifyWebhook: false` when intentionally running without verification. Custom
+messengers built with `chatSdkMessenger()` must make the same choice explicitly.
+Delivery failures use a generic user-facing error by default so internal
+exception details are not posted into external chats.
+
+Provider-neutral events include thread, author, message, action, capabilities,
+and attachment metadata. Attachment bytes are only fetched when a provider
+supplies a safe fetch function. Telegram is the first provider implementation;
+future Slack, Discord, or Teams entrypoints implement the same messenger
+contract from their own subpaths.
+
+Common messenger options:
+
+| Option               | Default                         | Description                                                                     |
+| -------------------- | ------------------------------- | ------------------------------------------------------------------------------- |
+| `path`               | `/messengers/{id}/webhook`      | Webhook path handled before user `onRequest`                                    |
+| `respondTo`          | `["direct-message", "mention"]` | Event kinds that should start a Think reply                                     |
+| `subscribeOnMention` | `true`                          | Subscribe Chat SDK threads after a new mention                                  |
+| `conversation`       | `"thread"`                      | Use one Think sub-agent per Chat SDK thread; set `"self"` to use the root agent |
+| `verifyWebhook`      | required                        | Verification function, or `false` to opt out explicitly                         |
+| `delivery`           | provider defaults               | Streaming limits, text splitting, and safe user-facing failure messages         |
+
 ## Agent tools
 
 Think subclasses can be dispatched as agent tools from another Agent. The parent
@@ -91,13 +175,15 @@ export class MyAgent extends Think<Env> {
 
 ## Exports
 
-| Export                               | Description                                                   |
-| ------------------------------------ | ------------------------------------------------------------- |
-| `@cloudflare/think`                  | `Think`, `Session`, `Workspace` — main class + re-exports     |
-| `@cloudflare/think/tools/workspace`  | `createWorkspaceTools()` — for custom storage backends        |
-| `@cloudflare/think/tools/execute`    | `createExecuteTool()` — sandboxed code execution via codemode |
-| `@cloudflare/think/tools/extensions` | `createExtensionTools()` — LLM-driven extension loading       |
-| `@cloudflare/think/extensions`       | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
+| Export                                  | Description                                                   |
+| --------------------------------------- | ------------------------------------------------------------- |
+| `@cloudflare/think`                     | `Think`, `Session`, `Workspace` — main class + re-exports     |
+| `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
+| `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
+| `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
+| `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
+| `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
+| `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
 
 ## Think
 
@@ -108,6 +194,7 @@ export class MyAgent extends Think<Env> {
 | `getModel()`           | throws                             | Return the `LanguageModel` to use               |
 | `getSystemPrompt()`    | careful assistant operating prompt | System prompt (fallback when no context blocks) |
 | `getTools()`           | `{}`                               | AI SDK `ToolSet` for the agentic loop           |
+| `getMessengers()`      | `{}`                               | Messenger ingress and delivery declarations     |
 | `getScheduledTasks()`  | `{}`                               | Code-declared recurring prompts                 |
 | `getDefaultTimezone()` | `undefined`                        | Default timezone for wall-clock schedules       |
 | `maxSteps`             | `10`                               | Max tool-call rounds per turn (property)        |
@@ -500,6 +587,7 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 - **Stream resumption** — page refresh replays buffered chunks via `ResumableStream`
 - **Client tools** — accept tool schemas from clients, handle results and approvals
 - **Durable submissions** — accept webhook/RPC-triggered turns with idempotent retry and status inspection
+- **Messengers** — receive Chat SDK webhooks and deliver streamed replies with provider-safe recovery
 - **Auto-continuation** — debounce-based continuation after tool results
 - **MCP integration** — MCP tools auto-merged, wait for connections before inference
 - **Abort/cancel** — pass an `AbortSignal` or send a cancel message
@@ -557,13 +645,14 @@ getTools() {
 
 ## Peer dependencies
 
-| Package                | Required | Notes                            |
-| ---------------------- | -------- | -------------------------------- |
-| `agents`               | yes      | Cloudflare Agents SDK            |
-| `ai`                   | yes      | Vercel AI SDK v6                 |
-| `zod`                  | yes      | Schema validation (v3.25+ or v4) |
-| `@cloudflare/shell`    | yes      | Workspace filesystem             |
-| `@cloudflare/codemode` | optional | For `createExecuteTool`          |
+| Package                  | Required | Notes                            |
+| ------------------------ | -------- | -------------------------------- |
+| `agents`                 | yes      | Cloudflare Agents SDK            |
+| `ai`                     | yes      | Vercel AI SDK v6                 |
+| `zod`                    | yes      | Schema validation (v4)           |
+| `@cloudflare/shell`      | yes      | Workspace filesystem             |
+| `@cloudflare/codemode`   | optional | For `createExecuteTool`          |
+| `@chat-adapter/telegram` | optional | Required for Telegram messengers |
 
 ## Acknowledgments
 

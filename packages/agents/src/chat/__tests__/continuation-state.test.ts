@@ -113,6 +113,49 @@ describe("ContinuationState", () => {
     expect(state.awaitingConnections.size).toBe(0);
   });
 
+  // ── releaseConnection ─────────────────────────────────────────────
+
+  it("releaseConnection clears ownership without removing pending", () => {
+    const state = new ContinuationState();
+    const conn = makeConnection("c1");
+    state.pending = {
+      connection: conn,
+      connectionId: "c1",
+      requestId: "r1",
+      errorPrefix: null,
+      prerequisite: null,
+      pastCoalesce: false
+    };
+    state.awaitingConnections.set("c1", conn);
+
+    state.releaseConnection("c1");
+
+    expect(state.pending).not.toBeNull();
+    expect(state.pending!.connection).toBe(conn);
+    expect(state.pending!.connectionId).toBeNull();
+    expect(state.awaitingConnections.size).toBe(0);
+  });
+
+  it("releaseConnection clears deferred and active ownership", () => {
+    const state = new ContinuationState();
+    const conn = makeConnection("c1");
+    state.deferred = {
+      connection: conn,
+      connectionId: "c1",
+      errorPrefix: "[test]",
+      prerequisite: null
+    };
+    state.activeRequestId = "r1";
+    state.activeConnectionId = "c1";
+
+    state.releaseConnection("c1");
+
+    expect(state.deferred).not.toBeNull();
+    expect(state.deferred!.connectionId).toBeNull();
+    expect(state.activeRequestId).toBe("r1");
+    expect(state.activeConnectionId).toBeNull();
+  });
+
   // ── sendResumeNone ────────────────────────────────────────────────
 
   it("sendResumeNone sends to all awaiting connections then clears", () => {

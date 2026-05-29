@@ -60,6 +60,7 @@
 - [Getting Started](./think/getting-started.md) - Build your first Think agent step by step
 - [Lifecycle Hooks](./think/lifecycle-hooks.md) - `beforeTurn`, `onStepFinish`, `onChunk`, `onChatResponse`, and more
 - [Tools](./think/tools.md) - Workspace tools, code execution, extensions
+- [Messengers](./think/messengers.md) - Receive and reply to Chat SDK messenger webhooks from Think
 - [Client Tools](./think/client-tools.md) - Browser-side tools, approvals, and concurrency
 - [Sub-agents and Programmatic Turns](./think/sub-agents.md) - RPC streaming, `saveMessages`, recovery
 - [Programmatic Submissions](./think/programmatic-submissions.md) - Durable Think turn admission for webhooks and RPC callers

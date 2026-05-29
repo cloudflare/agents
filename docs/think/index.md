@@ -41,6 +41,87 @@ export default {
 
 That is it. Think handles the WebSocket chat protocol, message persistence, the agentic loop, message sanitization, stream resumption, client tool support, and workspace file tools. The built-in `read` tool reads text with line numbers and passes images/PDFs through to multimodal-capable models.
 
+## Messengers
+
+Think agents can receive and reply to messenger webhooks directly. Messenger
+helpers are exported from `@cloudflare/think/messengers`, while provider
+implementations use provider subpaths so unused Chat SDK adapters are not
+bundled.
+
+For Telegram messengers, also install the Telegram adapter:
+
+```bash
+npm install @chat-adapter/telegram
+```
+
+```typescript
+import { Think } from "@cloudflare/think";
+import {
+  defineMessengers,
+  ThinkMessengerStateAgent
+} from "@cloudflare/think/messengers";
+import telegramMessenger from "@cloudflare/think/messengers/telegram";
+
+export { ThinkMessengerStateAgent };
+
+export class SupportAgent extends Think<Env> {
+  getMessengers() {
+    return defineMessengers({
+      telegram: telegramMessenger({
+        token: this.env.TELEGRAM_BOT_TOKEN,
+        userName: "support_bot",
+        secretToken: this.env.TELEGRAM_WEBHOOK_SECRET_TOKEN
+      })
+    });
+  }
+}
+```
+
+The root Think agent handles messenger webhook routes before user-defined
+`onRequest` fallback. By default, the `telegram` key maps to
+`/messengers/telegram/webhook`. Direct messages and mentions route to the model
+by default. New mentions subscribe the thread so later mentions are still
+observed; ordinary subscribed-thread messages and button actions are opt-in with
+`respondTo: ["subscribed-thread", "action"]`. Each Chat SDK thread gets its own
+Think sub-agent for memory isolation. A root agent owns one Chat SDK runtime for
+all configured messengers, so multiple providers share state and webhook
+handling without competing over Chat SDK singleton registration.
+
+Use `conversation: "self"` to run messenger turns on the root Think agent:
+
+```typescript
+telegramMessenger({
+  token: this.env.TELEGRAM_BOT_TOKEN,
+  userName: "support_bot",
+  secretToken: this.env.TELEGRAM_WEBHOOK_SECRET_TOKEN,
+  conversation: "self"
+});
+```
+
+Messenger state is backed by `agents/chat-sdk`. Export
+`ThinkMessengerStateAgent` from the Worker module so sub-agent routing can
+resolve it. Production applications do not need a separate Durable Object
+binding or migration for the state agent when it is mounted as a sub-agent
+facet.
+
+Inbound messenger replies use `chat()` with a streaming callback inside an
+idempotent root-agent fiber. Use `submitMessages()` for non-streaming
+programmatic sends, scheduled digests, or background work. Normalized messenger
+events include thread, author, message, capabilities, actions, and attachment
+metadata. Attachment bytes are fetched only when the provider supplies a safe
+fetch function.
+
+Messenger reply recovery stores serializable event and thread snapshots. If a
+Durable Object restarts before streaming starts, Think can resume the answer; if
+it restarts after streaming has begun, the delivery policy posts the configured
+interruption message. `getMessengerContext()` returns the initiating messenger
+context during the turn. Telegram webhook verification must be explicit: set
+`secretToken`, provide `verifyWebhook`, or use `verifyWebhook: false` to opt out
+intentionally. Custom `chatSdkMessenger()` definitions must also choose a
+verification posture explicitly. Delivery failures use a generic user-facing
+error by default so internal exception details are not posted into external
+chats.
+
 ### Client
 
 ```tsx
@@ -181,6 +262,7 @@ with retries per step, long waits, external events, or approvals.
 | `getTools()`            | `{}`                             | AI SDK `ToolSet` for the agentic loop                                           |
 | `getScheduledTasks()`   | `{}`                             | Code-declared recurring prompts or handlers                                     |
 | `getDefaultTimezone()`  | `undefined`                      | Default timezone for wall-clock scheduled tasks                                 |
+| `getMessengers()`       | `{}`                             | Messenger ingress and delivery declarations — see [Messengers](./messengers.md) |
 | `maxSteps`              | `10`                             | Max tool-call rounds per turn                                                   |
 | `sendReasoning`         | `true`                           | Send reasoning chunks to chat clients                                           |
 | `configureSession()`    | identity                         | Add context blocks, compaction, search, skills — see [Sessions](../sessions.md) |
@@ -334,30 +416,34 @@ Think's `this.messages` getter reads directly from Session's tree-structured sto
 
 ## Package Exports
 
-| Export                               | Description                                                   |
-| ------------------------------------ | ------------------------------------------------------------- |
-| `@cloudflare/think`                  | `Think`, `Session`, `Workspace` — main class + re-exports     |
-| `@cloudflare/think/tools/workspace`  | `createWorkspaceTools()` — for custom storage backends        |
-| `@cloudflare/think/tools/execute`    | `createExecuteTool()` — sandboxed code execution via codemode |
-| `@cloudflare/think/tools/extensions` | `createExtensionTools()` — LLM-driven extension loading       |
-| `@cloudflare/think/extensions`       | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
-| `@cloudflare/think/workflows`        | `ThinkWorkflow`, `step.prompt()` — Workflow prompts           |
+| Export                                  | Description                                                   |
+| --------------------------------------- | ------------------------------------------------------------- |
+| `@cloudflare/think`                     | `Think`, `Session`, `Workspace` — main class + re-exports     |
+| `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
+| `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
+| `@cloudflare/think/workflows`           | `ThinkWorkflow`, `step.prompt()` — Workflow prompts           |
+| `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
+| `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
+| `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
+| `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
 
 ## Peer Dependencies
 
-| Package                | Required | Notes                   |
-| ---------------------- | -------- | ----------------------- |
-| `agents`               | yes      | Cloudflare Agents SDK   |
-| `ai`                   | yes      | Vercel AI SDK v6        |
-| `zod`                  | yes      | Schema validation (v4)  |
-| `@cloudflare/shell`    | yes      | Workspace filesystem    |
-| `@cloudflare/codemode` | optional | For `createExecuteTool` |
+| Package                  | Required | Notes                            |
+| ------------------------ | -------- | -------------------------------- |
+| `agents`                 | yes      | Cloudflare Agents SDK            |
+| `ai`                     | yes      | Vercel AI SDK v6                 |
+| `zod`                    | yes      | Schema validation (v4)           |
+| `@cloudflare/shell`      | yes      | Workspace filesystem             |
+| `@cloudflare/codemode`   | optional | For `createExecuteTool`          |
+| `@chat-adapter/telegram` | optional | Required for Telegram messengers |
 
 ## Docs
 
 - [Getting Started](./getting-started.md) — Build a Think agent step by step
 - [Lifecycle Hooks](./lifecycle-hooks.md) — `beforeTurn`, `beforeStep`, `onStepFinish`, `onChunk`, `onChatResponse`, and more
 - [Tools](./tools.md) — Workspace tools, code execution, extensions
+- [Messengers](./messengers.md) — Chat SDK messenger ingress and delivery
 - [Client Tools](./client-tools.md) — Browser-side tools, approvals, and concurrency
 - [Sub-agents and Programmatic Turns](./sub-agents.md) — RPC streaming, `saveMessages`, recovery
 - [Programmatic Submissions](./programmatic-submissions.md) — durable acceptance, idempotent retry, cancellation, and status inspection

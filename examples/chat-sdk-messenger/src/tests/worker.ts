@@ -6,7 +6,7 @@ import {
 } from "agents/chat-sdk";
 import { Message } from "chat";
 import appWorker, { ChatIngressAgent, ConversationAgent } from "../index";
-import { shardTelegramStateKey } from "../provider/telegram";
+import { shardTelegramStateKey } from "@cloudflare/think/messengers/telegram";
 
 export { ChatSdkStateAgent } from "agents/chat-sdk";
 

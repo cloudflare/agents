@@ -157,6 +157,12 @@ import { Session } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
 import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "./tools/workspace";
+import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
+import type {
+  MessengerContext,
+  ThinkMessengers,
+  MessengerThinkHost
+} from "./messengers";
 
 export { Session } from "agents/experimental/memory/session";
 export { Workspace } from "@cloudflare/shell";
@@ -1213,6 +1219,10 @@ export class Think<
   /** Cached messages — kept in sync with session storage. */
   private _cachedMessages: UIMessage[] = [];
 
+  private _activeMessengerContext?: MessengerContext;
+
+  private _messengerRuntime?: ThinkMessengerRuntime;
+
   /**
    * WorkerLoader binding for sandboxed extensions.
    * Set this to enable `getExtensions()` and dynamic extension loading.
@@ -1301,6 +1311,7 @@ export class Think<
       this._restoreClientTools();
       this._restoreBody();
       this._setupProtocolHandlers();
+      this._initializeMessengers();
 
       // 8. User's onStart
       await _onStart();
@@ -1423,7 +1434,7 @@ export class Think<
   private _pendingResumeConnections: Set<string> = new Set();
   private _lastClientTools: ClientToolSchema[] | undefined;
   private _lastBody: Record<string, unknown> | undefined;
-  private _continuation = new ContinuationState();
+  private _continuation = new ContinuationState<Connection>();
   private _continuationTimer: ReturnType<typeof setTimeout> | null = null;
   private _insideResponseHook = false;
   private _insideInferenceLoop = false;
@@ -1633,6 +1644,54 @@ export class Think<
   /** Return the tools available to the assistant. */
   getTools(): ToolSet {
     return {};
+  }
+
+  /** Return messenger integrations that should be routed through this Think agent. */
+  getMessengers(): ThinkMessengers {
+    return {};
+  }
+
+  getMessengerContext(): MessengerContext | undefined {
+    if (this._activeMessengerContext) {
+      return this._activeMessengerContext;
+    }
+
+    const message = this.messages.at(-1) as
+      | (UIMessage & { metadata?: { messenger?: MessengerContext } })
+      | undefined;
+    return message?.metadata?.messenger;
+  }
+
+  async chatWithMessengerContext(
+    userMessage: string | UIMessage,
+    callback: StreamCallback,
+    context: MessengerContext,
+    options?: ChatOptions
+  ): Promise<void> {
+    const previous = this._activeMessengerContext;
+    this._activeMessengerContext = context;
+    try {
+      await this.chat(userMessage, callback, options);
+    } finally {
+      this._activeMessengerContext = previous;
+    }
+  }
+
+  private _initializeMessengers(): void {
+    if (this.parentPath.length > 0) {
+      return;
+    }
+
+    const messengers = this.getMessengers();
+    if (Object.keys(messengers).length === 0) {
+      return;
+    }
+
+    this._messengerRuntime = new ThinkMessengerRuntime(
+      messengers,
+      this as unknown as MessengerThinkHost
+    );
+    this._messengerRuntime.initialize();
   }
 
   /** Return code-declared scheduled tasks for this agent. */
@@ -4986,13 +5045,7 @@ export class Think<
       wasClean: boolean
     ) => {
       this._pendingResumeConnections.delete(connection.id);
-      this._continuation.awaitingConnections.delete(connection.id);
-      if (this._continuation.pending?.connectionId === connection.id) {
-        this._continuation.pending = null;
-      }
-      if (this._continuation.activeConnectionId === connection.id) {
-        this._continuation.activeConnectionId = null;
-      }
+      this._continuation.releaseConnection(connection.id);
       return _onClose(connection, code, reason, wasClean);
     };
 
@@ -5022,6 +5075,11 @@ export class Think<
         url.pathname.endsWith("/get-messages")
       ) {
         return Response.json(this.messages);
+      }
+      const messengerResponse =
+        await this._messengerRuntime?.handleRequest(request);
+      if (messengerResponse) {
+        return messengerResponse;
       }
       return _onRequest(request);
     };
@@ -5127,7 +5185,8 @@ export class Think<
       }
     } else if (
       this._continuation.pending !== null &&
-      this._continuation.pending.connectionId === connection.id
+      (this._continuation.pending.connectionId === null ||
+        this._continuation.pending.connectionId === connection.id)
     ) {
       this._continuation.awaitingConnections.set(connection.id, connection);
     } else {
@@ -5691,7 +5750,7 @@ export class Think<
     if (this._continuation.pending?.requestId === requestId) {
       this._continuation.activatePending();
       this._continuation.flushAwaitingConnections((c) =>
-        this._notifyStreamResuming(c as Connection)
+        this._notifyStreamResuming(c)
       );
     }
 
@@ -6047,6 +6106,10 @@ export class Think<
   protected override async _handleInternalFiberRecovery(
     ctx: FiberRecoveryContext
   ): Promise<boolean> {
+    if (await this._messengerRuntime?.handleFiberRecovery(ctx)) {
+      return true;
+    }
+
     const chatPrefix = (this.constructor as typeof Think).CHAT_FIBER_NAME + ":";
     if (!ctx.name.startsWith(chatPrefix)) {
       return false;
@@ -6572,35 +6635,41 @@ export class Think<
       this._continuation.pending.connectionId = connection.id;
       this._continuation.pending.clientTools = this._lastClientTools;
       this._continuation.awaitingConnections.set(connection.id, connection);
+      this._resetAutoContinuationTimer();
       return;
     }
 
+    this._continuation.pending = {
+      connection,
+      connectionId: connection.id,
+      requestId: crypto.randomUUID(),
+      clientTools: this._lastClientTools,
+      body: undefined,
+      errorPrefix: "[Think] Auto-continuation failed:",
+      prerequisite: null,
+      pastCoalesce: false
+    };
+    this._continuation.awaitingConnections.set(connection.id, connection);
+    this._resetAutoContinuationTimer();
+  }
+
+  private _resetAutoContinuationTimer(): void {
     if (this._continuationTimer) {
       clearTimeout(this._continuationTimer);
     }
     this._continuationTimer = setTimeout(() => {
       this._continuationTimer = null;
-      this._fireAutoContinuation(connection);
+      const pending = this._continuation.pending;
+      if (!pending) return;
+      this._fireAutoContinuation(pending.connection);
     }, 50);
   }
 
   private _fireAutoContinuation(connection: Connection): void {
-    if (!this._continuation.pending) {
-      const requestId = crypto.randomUUID();
-      this._continuation.pending = {
-        connection,
-        connectionId: connection.id,
-        requestId,
-        clientTools: this._lastClientTools,
-        body: undefined,
-        errorPrefix: "[Think] Auto-continuation failed:",
-        prerequisite: null,
-        pastCoalesce: false
-      };
-      this._continuation.awaitingConnections.set(connection.id, connection);
-    }
+    const pending = this._continuation.pending;
+    if (!pending) return;
 
-    const { requestId, clientTools } = this._continuation.pending!;
+    const { requestId, clientTools } = pending;
     const abortSignal = this._aborts.getSignal(requestId);
 
     this.keepAliveWhile(async () => {
@@ -6660,7 +6729,7 @@ export class Think<
     );
     if (!pending) return;
 
-    this._fireAutoContinuation(pending.connection as Connection);
+    this._fireAutoContinuation(pending.connection);
   }
 
   // ── Response hook ──────────────────────────────────────────────
