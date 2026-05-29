@@ -2,6 +2,133 @@ import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:workers";
 import { getAgentByName } from "../..";
 
+describe("addMcpServer with RPC binding — stable supplied ids", () => {
+  it("uses a caller-supplied stable id as the server id", async () => {
+    const agentStub = await getAgentByName(
+      env.TestRpcMcpClientAgent,
+      "test-rpc-stable-id"
+    );
+    const result = (await agentStub.testRpcStableSuppliedId()) as unknown as {
+      success: boolean;
+      id?: string;
+      savedId?: string | null;
+      toolNames?: string[];
+      error?: string;
+    };
+
+    if (!result.success) {
+      throw new Error(`Test failed: ${result.error}`);
+    }
+
+    expect(result.id).toBe("my-supplied-id");
+    expect(result.savedId).toBe("my-supplied-id");
+    expect(result.toolNames!.length).toBeGreaterThan(0);
+  });
+
+  it("normalizes a caller-supplied id (e.g. 'GitHub MCP!' → 'github-mcp')", async () => {
+    const agentStub = await getAgentByName(
+      env.TestRpcMcpClientAgent,
+      "test-rpc-normalize-id"
+    );
+    const result =
+      (await agentStub.testRpcNormalizesSuppliedId()) as unknown as {
+        success: boolean;
+        id?: string;
+        error?: string;
+      };
+
+    if (!result.success) {
+      throw new Error(`Test failed: ${result.error}`);
+    }
+
+    expect(result.id).toBe("github-mcp");
+  });
+
+  it("JIT-migrates an existing (name,url) row to a newly supplied stable id", async () => {
+    const agentStub = await getAgentByName(
+      env.TestRpcMcpClientAgent,
+      "test-rpc-migrate-id"
+    );
+    const result =
+      (await agentStub.testRpcSuppliedIdMigratesExistingNanoid()) as unknown as {
+        success: boolean;
+        firstId?: string;
+        secondId?: string;
+        storedIds?: string[];
+        connectionsBefore?: number;
+        connectionsAfter?: number;
+        stableConnectionExists?: boolean;
+        nanoidConnectionGone?: boolean;
+        callOk?: boolean;
+        error?: string;
+      };
+
+    if (!result.success) {
+      throw new Error(`Test failed: ${result.error}`);
+    }
+
+    // Original call got a nanoid; second call asked for "migrated".
+    expect(result.secondId).toBe("migrated");
+    expect(result.firstId).not.toBe("migrated");
+
+    // Exactly one row remains — the migrated one. No stale nanoid row.
+    expect(result.storedIds).toEqual(["migrated"]);
+
+    // Connection count unchanged; in-memory map renamed from nanoid → stable.
+    expect(result.connectionsBefore).toBe(result.connectionsAfter);
+    expect(result.stableConnectionExists).toBe(true);
+    expect(result.nanoidConnectionGone).toBe(true);
+
+    // Tool calls still route correctly post-migration.
+    expect(result.callOk).toBe(true);
+  });
+
+  it("dedups when the same stable id is re-supplied for the same (name,url)", async () => {
+    const agentStub = await getAgentByName(
+      env.TestRpcMcpClientAgent,
+      "test-rpc-dedup-stable"
+    );
+    const result =
+      (await agentStub.testRpcSuppliedIdDedupsOnRepeat()) as unknown as {
+        success: boolean;
+        firstId?: string;
+        secondId?: string;
+        sameId?: boolean;
+        error?: string;
+      };
+
+    if (!result.success) {
+      throw new Error(`Test failed: ${result.error}`);
+    }
+
+    expect(result.firstId).toBe("stable");
+    expect(result.sameId).toBe(true);
+  });
+
+  it("throws when a caller-supplied id collides with a different server", async () => {
+    const agentStub = await getAgentByName(
+      env.TestRpcMcpClientAgent,
+      "test-rpc-collide-id"
+    );
+    const result =
+      (await agentStub.testRpcSuppliedIdCollision()) as unknown as {
+        success: boolean;
+        firstId?: string;
+        threw?: boolean;
+        message?: string;
+        error?: string;
+      };
+
+    if (!result.success) {
+      throw new Error(`Test failed: ${result.error}`);
+    }
+
+    expect(result.firstId).toBe("collide");
+    expect(result.threw).toBe(true);
+    expect(result.message).toContain("already in use");
+  });
+});
+
 describe("addMcpServer with RPC binding", () => {
   it("should connect to McpAgent via RPC and discover tools", async () => {
     const agentStub = await getAgentByName(

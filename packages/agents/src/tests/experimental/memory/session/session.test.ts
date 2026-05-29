@@ -20,6 +20,7 @@ import {
   createCompactFunction,
   type CompactResult
 } from "../../../../experimental/memory/utils/compaction-helpers";
+import { estimateMessageTokens } from "../../../../experimental/memory/utils/tokens";
 
 // ── Test helpers ────────────────────────────────────────────────
 
@@ -916,6 +917,465 @@ describe("Session.compact()", () => {
     });
 
     expect(messages).toHaveLength(1);
+  });
+
+  it("appendMessage includes session system prompt in auto-compaction estimate", async () => {
+    let compactCalled = false;
+    const messages: SessionMessage[] = [];
+    const compactions: StoredCompaction[] = [];
+    const storage: SessionProvider = {
+      getMessage: (id) => messages.find((m) => m.id === id) ?? null,
+      getHistory: () => messages,
+      getLatestLeaf: () => messages[messages.length - 1] ?? null,
+      getBranches: () => [],
+      getPathLength: () => messages.length,
+      appendMessage: (msg) => {
+        messages.push(msg);
+      },
+      updateMessage: () => {},
+      deleteMessages: () => {},
+      clearMessages: () => {},
+      addCompaction: (summary, fromMessageId, toMessageId) => {
+        const compaction = {
+          id: "c1",
+          summary,
+          fromMessageId,
+          toMessageId,
+          createdAt: ""
+        };
+        compactions.push(compaction);
+        return compaction;
+      },
+      getCompactions: () => compactions
+    };
+    const session = new Session(storage, {
+      context: [
+        {
+          label: "big",
+          provider: new ReadonlyBlockProvider("x".repeat(400))
+        }
+      ]
+    })
+      .onCompaction(async () => {
+        compactCalled = true;
+        return {
+          fromMessageId: "m0",
+          toMessageId: "m1",
+          summary: "context-triggered"
+        };
+      })
+      .compactAfter(50);
+
+    messages.push({
+      id: "m0",
+      role: "user",
+      parts: [{ type: "text", text: "short" }]
+    });
+
+    await session.appendMessage({
+      id: "m1",
+      role: "assistant",
+      parts: [{ type: "text", text: "ok" }]
+    });
+
+    expect(compactCalled).toBe(true);
+    expect(compactions[0].summary).toBe("context-triggered");
+  });
+
+  it("auto-compaction estimates do not persist a new cached prompt", async () => {
+    const promptStore = new MemoryBlockProvider(null);
+    const messages: SessionMessage[] = [];
+    const storage: SessionProvider = {
+      getMessage: (id) => messages.find((m) => m.id === id) ?? null,
+      getHistory: () => messages,
+      getLatestLeaf: () => messages[messages.length - 1] ?? null,
+      getBranches: () => [],
+      getPathLength: () => messages.length,
+      appendMessage: (msg) => {
+        messages.push(msg);
+      },
+      updateMessage: () => {},
+      deleteMessages: () => {},
+      clearMessages: () => {},
+      addCompaction: () => {
+        throw new Error("should not compact");
+      },
+      getCompactions: () => []
+    };
+    const session = new Session(storage, {
+      context: [
+        {
+          label: "soul",
+          provider: new ReadonlyBlockProvider("do not persist during estimate")
+        }
+      ],
+      promptStore
+    })
+      .onCompaction(async () => null)
+      .compactAfter(1000000);
+
+    await session.appendMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "hello" }]
+    });
+
+    expect(await promptStore.get()).toBeNull();
+  });
+
+  it("auto-compaction estimates reuse an existing frozen prompt snapshot", async () => {
+    let compactCalled = false;
+    const provider = new MemoryBlockProvider("x".repeat(400));
+    const messages: SessionMessage[] = [];
+    const compactions: StoredCompaction[] = [];
+    const storage: SessionProvider = {
+      getMessage: (id) => messages.find((m) => m.id === id) ?? null,
+      getHistory: () => messages,
+      getLatestLeaf: () => messages[messages.length - 1] ?? null,
+      getBranches: () => [],
+      getPathLength: () => messages.length,
+      appendMessage: (msg) => {
+        messages.push(msg);
+      },
+      updateMessage: () => {},
+      deleteMessages: () => {},
+      clearMessages: () => {},
+      addCompaction: (summary, fromMessageId, toMessageId) => {
+        const compaction = {
+          id: "c1",
+          summary,
+          fromMessageId,
+          toMessageId,
+          createdAt: ""
+        };
+        compactions.push(compaction);
+        return compaction;
+      },
+      getCompactions: () => compactions
+    };
+    const session = new Session(storage, {
+      context: [{ label: "memory", provider }]
+    })
+      .onCompaction(async () => {
+        compactCalled = true;
+        return {
+          fromMessageId: "m0",
+          toMessageId: "m1",
+          summary: "should not trigger from unfrozen changes"
+        };
+      })
+      .compactAfter(50);
+
+    await session.freezeSystemPrompt();
+    await provider.set("short");
+
+    messages.push({
+      id: "m0",
+      role: "user",
+      parts: [{ type: "text", text: "short" }]
+    });
+
+    await session.appendMessage({
+      id: "m1",
+      role: "assistant",
+      parts: [{ type: "text", text: "ok" }]
+    });
+
+    expect(compactCalled).toBe(true);
+  });
+
+  it("compactAfter accepts a custom token counter", async () => {
+    let compactCalled = false;
+    let counterSawPrompt = false;
+    const messages: SessionMessage[] = [];
+    const compactions: StoredCompaction[] = [];
+    const storage: SessionProvider = {
+      getMessage: (id) => messages.find((m) => m.id === id) ?? null,
+      getHistory: () => messages,
+      getLatestLeaf: () => messages[messages.length - 1] ?? null,
+      getBranches: () => [],
+      getPathLength: () => messages.length,
+      appendMessage: (msg) => {
+        messages.push(msg);
+      },
+      updateMessage: () => {},
+      deleteMessages: () => {},
+      clearMessages: () => {},
+      addCompaction: (summary, fromMessageId, toMessageId) => {
+        const compaction = {
+          id: "c1",
+          summary,
+          fromMessageId,
+          toMessageId,
+          createdAt: ""
+        };
+        compactions.push(compaction);
+        return compaction;
+      },
+      getCompactions: () => compactions
+    };
+    const session = new Session(storage, {
+      context: [
+        {
+          label: "memory",
+          provider: new ReadonlyBlockProvider("remember this")
+        }
+      ]
+    })
+      .onCompaction(async () => {
+        compactCalled = true;
+        return {
+          fromMessageId: "m0",
+          toMessageId: "m1",
+          summary: "custom-counter"
+        };
+      })
+      .compactAfter(10, {
+        tokenCounter: ({ messages: history, systemPrompt, contextBlocks }) => {
+          counterSawPrompt =
+            history.length === 2 &&
+            systemPrompt.includes("remember this") &&
+            contextBlocks[0].label === "memory";
+          return 11;
+        }
+      });
+
+    messages.push({
+      id: "m0",
+      role: "user",
+      parts: [{ type: "text", text: "short" }]
+    });
+
+    await session.appendMessage({
+      id: "m1",
+      role: "assistant",
+      parts: [{ type: "text", text: "ok" }]
+    });
+
+    expect(counterSawPrompt).toBe(true);
+    expect(compactCalled).toBe(true);
+  });
+
+  it("loads context blocks for a custom counter when prompt store is cached", async () => {
+    const counterInputs: Array<{
+      historyLength: number;
+      systemPrompt: string;
+      blockLabels: string[];
+      blockContents: string[];
+    }> = [];
+    const messages: SessionMessage[] = [];
+    const compactions: StoredCompaction[] = [];
+    const storage: SessionProvider = {
+      getMessage: (id) => messages.find((m) => m.id === id) ?? null,
+      getHistory: () => messages,
+      getLatestLeaf: () => messages[messages.length - 1] ?? null,
+      getBranches: () => [],
+      getPathLength: () => messages.length,
+      appendMessage: (msg) => {
+        messages.push(msg);
+      },
+      updateMessage: () => {},
+      deleteMessages: () => {},
+      clearMessages: () => {},
+      addCompaction: (summary, fromMessageId, toMessageId) => {
+        const compaction = {
+          id: "c1",
+          summary,
+          fromMessageId,
+          toMessageId,
+          createdAt: ""
+        };
+        compactions.push(compaction);
+        return compaction;
+      },
+      getCompactions: () => compactions
+    };
+    const session = new Session(storage, {
+      context: [
+        {
+          label: "memory",
+          provider: new ReadonlyBlockProvider("current block content")
+        }
+      ],
+      promptStore: new MemoryBlockProvider("cached frozen prompt")
+    })
+      .onCompaction(async () => ({
+        fromMessageId: "m0",
+        toMessageId: "m1",
+        summary: "cached prompt counter"
+      }))
+      .compactAfter(10, {
+        tokenCounter: ({ messages: history, systemPrompt, contextBlocks }) => {
+          counterInputs.push({
+            historyLength: history.length,
+            systemPrompt,
+            blockLabels: contextBlocks.map((block) => block.label),
+            blockContents: contextBlocks.map((block) => block.content)
+          });
+          return 11;
+        }
+      });
+
+    messages.push({
+      id: "m0",
+      role: "user",
+      parts: [{ type: "text", text: "short" }]
+    });
+
+    await session.appendMessage({
+      id: "m1",
+      role: "assistant",
+      parts: [{ type: "text", text: "ok" }]
+    });
+
+    expect(counterInputs).toContainEqual({
+      historyLength: 2,
+      systemPrompt: "cached frozen prompt",
+      blockLabels: ["memory"],
+      blockContents: ["current block content"]
+    });
+    expect(compactions[0].summary).toBe("cached prompt counter");
+  });
+
+  it("treats non-finite custom token counter results as zero", async () => {
+    let compactCalled = false;
+    const { session, setTokenThreshold } = createCompactableSession(
+      async (): Promise<CompactResult> => {
+        compactCalled = true;
+        return {
+          fromMessageId: "m0",
+          toMessageId: "m0",
+          summary: "should not happen"
+        };
+      }
+    );
+
+    session.compactAfter(1, {
+      tokenCounter: () => Number.NaN
+    });
+    setTokenThreshold(1);
+
+    await session.appendMessage({
+      id: "m0",
+      role: "user",
+      parts: [{ type: "text", text: "short" }]
+    });
+
+    expect(compactCalled).toBe(false);
+  });
+
+  it("counts reasoning parts in message token estimates", () => {
+    const withReasoning = estimateMessageTokens([
+      {
+        id: "m1",
+        role: "assistant",
+        parts: [
+          {
+            type: "reasoning",
+            text: "Let me think through the constraints carefully."
+          }
+        ]
+      }
+    ]);
+
+    const withoutReasoning = estimateMessageTokens([
+      { id: "m1", role: "assistant", parts: [] }
+    ]);
+
+    expect(withReasoning).toBeGreaterThan(withoutReasoning);
+  });
+
+  it("calls onCompactionError when auto-compaction fails", async () => {
+    const errors: unknown[] = [];
+    const messages: SessionMessage[] = [];
+    const storage: SessionProvider = {
+      getMessage: (id) => messages.find((m) => m.id === id) ?? null,
+      getHistory: () => messages,
+      getLatestLeaf: () => messages[messages.length - 1] ?? null,
+      getBranches: () => [],
+      getPathLength: () => messages.length,
+      appendMessage: (msg) => {
+        messages.push(msg);
+      },
+      updateMessage: () => {},
+      deleteMessages: () => {},
+      clearMessages: () => {},
+      addCompaction: () => {
+        throw new Error("storage unavailable");
+      },
+      getCompactions: () => []
+    };
+    const session = new Session(storage)
+      .onCompaction(async () => ({
+        fromMessageId: "m0",
+        toMessageId: "m1",
+        summary: "will fail"
+      }))
+      .onCompactionError((err) => {
+        errors.push(err);
+      })
+      .compactAfter(1);
+
+    messages.push({
+      id: "m0",
+      role: "user",
+      parts: [{ type: "text", text: "enough tokens to trigger" }]
+    });
+
+    await session.appendMessage({
+      id: "m1",
+      role: "assistant",
+      parts: [{ type: "text", text: "ok" }]
+    });
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(Error);
+  });
+
+  it("keeps appendMessage non-fatal when onCompactionError throws", async () => {
+    const messages: SessionMessage[] = [];
+    const storage: SessionProvider = {
+      getMessage: (id) => messages.find((m) => m.id === id) ?? null,
+      getHistory: () => messages,
+      getLatestLeaf: () => messages[messages.length - 1] ?? null,
+      getBranches: () => [],
+      getPathLength: () => messages.length,
+      appendMessage: (msg) => {
+        messages.push(msg);
+      },
+      updateMessage: () => {},
+      deleteMessages: () => {},
+      clearMessages: () => {},
+      addCompaction: () => {
+        throw new Error("storage unavailable");
+      },
+      getCompactions: () => []
+    };
+    const session = new Session(storage)
+      .onCompaction(async () => ({
+        fromMessageId: "m0",
+        toMessageId: "m1",
+        summary: "will fail"
+      }))
+      .onCompactionError(() => {
+        throw new Error("logger unavailable");
+      })
+      .compactAfter(1);
+
+    messages.push({
+      id: "m0",
+      role: "user",
+      parts: [{ type: "text", text: "enough tokens to trigger" }]
+    });
+
+    await expect(
+      session.appendMessage({
+        id: "m1",
+        role: "assistant",
+        parts: [{ type: "text", text: "ok" }]
+      })
+    ).resolves.toBeUndefined();
+    expect(messages).toHaveLength(2);
   });
 
   it("iterative compaction with overlay messages in history", async () => {

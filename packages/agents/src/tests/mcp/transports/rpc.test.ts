@@ -177,65 +177,149 @@ describe("RPC Transport", () => {
       expect(result).toEqual(expectedResponse);
     });
 
-    it("should handle request and return multiple responses", async () => {
+    it("should not resolve a request with another request's earlier response", async () => {
       const transport = new RPCServerTransport();
       await transport.start();
-
-      const expectedResponses: JSONRPCMessage[] = [
-        {
-          jsonrpc: "2.0",
-          id: 1,
-          result: { success: true }
-        },
-        {
-          jsonrpc: "2.0",
-          method: "notification",
-          params: {}
-        }
-      ];
 
       transport.onmessage = (msg) => {
         const req = msg as JSONRPCRequest;
-        expect(req.id).toBe(1);
+        if (req.id === 1) return;
+        void transport.send({
+          jsonrpc: "2.0",
+          id: req.id,
+          result: { method: req.method }
+        });
       };
 
-      const handlePromise = transport.handle({
+      const first = transport.handle({
         jsonrpc: "2.0",
         id: 1,
-        method: "test",
+        method: "first",
+        params: {}
+      });
+      const second = transport.handle({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "second",
         params: {}
       });
 
-      for (const response of expectedResponses) {
-        await transport.send(response);
-      }
+      await expect(second).resolves.toEqual({
+        jsonrpc: "2.0",
+        id: 2,
+        result: { method: "second" }
+      });
 
-      const result = await handlePromise;
-      expect(result).toEqual(expectedResponses);
+      await transport.send({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { method: "first" }
+      });
+      await expect(first).resolves.toEqual({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { method: "first" }
+      });
     });
 
-    it("should handle concurrent sends within the same request", async () => {
+    it("should route overlapping responses by request id", async () => {
       const transport = new RPCServerTransport();
       await transport.start();
 
-      const expectedResponses: JSONRPCMessage[] = [
-        { jsonrpc: "2.0", id: 1, result: { first: true } },
-        { jsonrpc: "2.0", id: 1, result: { second: true } }
-      ];
-
-      transport.onmessage = () => {
-        transport.send(expectedResponses[0]);
-        transport.send(expectedResponses[1]);
+      transport.onmessage = (msg) => {
+        const req = msg as JSONRPCRequest;
+        setTimeout(
+          () => {
+            void transport.send({
+              jsonrpc: "2.0",
+              id: req.id,
+              result: { method: req.method }
+            });
+          },
+          req.method === "first" ? 20 : 0
+        );
       };
 
-      const result = await transport.handle({
+      const first = transport.handle({
         jsonrpc: "2.0",
         id: 1,
-        method: "test",
+        method: "first",
+        params: {}
+      });
+      const second = transport.handle({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "second",
         params: {}
       });
 
-      expect(result).toEqual(expectedResponses);
+      await expect(second).resolves.toEqual({
+        jsonrpc: "2.0",
+        id: 2,
+        result: { method: "second" }
+      });
+      await expect(first).resolves.toEqual({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { method: "first" }
+      });
+    });
+
+    it("should route related server requests to the originating request", async () => {
+      const transport = new RPCServerTransport();
+      await transport.start();
+
+      const elicitationRequest: JSONRPCMessage = {
+        jsonrpc: "2.0",
+        id: "elicit_1",
+        method: "elicitation/create",
+        params: { message: "Approve?" }
+      };
+
+      transport.onmessage = (msg) => {
+        const req = msg as JSONRPCRequest;
+        void transport.send(elicitationRequest, { relatedRequestId: req.id });
+      };
+
+      await expect(
+        transport.handle({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {}
+        })
+      ).resolves.toEqual(elicitationRequest);
+    });
+
+    it("should include related notifications before the final response", async () => {
+      const transport = new RPCServerTransport();
+      await transport.start();
+
+      const notification: JSONRPCMessage = {
+        jsonrpc: "2.0",
+        method: "notifications/message",
+        params: { level: "info", data: "hello" }
+      };
+      const finalResponse: JSONRPCMessage = {
+        jsonrpc: "2.0",
+        id: 1,
+        result: { ok: true }
+      };
+
+      transport.onmessage = (msg) => {
+        const req = msg as JSONRPCRequest;
+        void transport.send(notification, { relatedRequestId: req.id });
+        void transport.send(finalResponse);
+      };
+
+      await expect(
+        transport.handle({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {}
+        })
+      ).resolves.toEqual([notification, finalResponse]);
     });
 
     it("should handle notification without waiting for response", async () => {
@@ -331,10 +415,11 @@ describe("RPC Transport", () => {
       };
 
       // Simulate: onmessage dispatches async tool handler that sends
-      // an intermediate message first, then later sends the final result
-      transport.onmessage = () => {
-        // Tool handler sends elicitation request (intermediate)
-        transport.send(firstResponse);
+      // an intermediate server-to-client request first. In the MCP SDK this
+      // is sent with relatedRequestId so it routes to the originating request.
+      transport.onmessage = (msg) => {
+        const req = msg as JSONRPCRequest;
+        void transport.send(firstResponse, { relatedRequestId: req.id });
       };
 
       // handle() returns the intermediate elicitation request
@@ -347,14 +432,98 @@ describe("RPC Transport", () => {
 
       expect(handleResult).toEqual(firstResponse);
 
-      // Now await the next send() — simulates waiting for the tool result
+      // Now await the next send() — simulates waiting for the resumed tool result
       const pendingPromise = transport._awaitPendingResponse();
 
-      // Tool handler resumes and sends the final result
+      // Tool handler resumes and sends the final result for the original request id
       await transport.send(finalResponse);
 
       const result = await pendingPromise;
       expect(result).toEqual(finalResponse);
+    });
+
+    it("should keep an id-routed response from completing a continuation", async () => {
+      const transport = new RPCServerTransport();
+      await transport.start();
+
+      const continuation = transport._awaitPendingResponse();
+      const request = transport.handle({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {}
+      });
+
+      await transport.send({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { routed: true }
+      });
+      await expect(request).resolves.toEqual({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { routed: true }
+      });
+
+      await transport.send({
+        jsonrpc: "2.0",
+        id: 2,
+        result: { continuation: true }
+      });
+      await expect(continuation).resolves.toEqual({
+        jsonrpc: "2.0",
+        id: 2,
+        result: { continuation: true }
+      });
+    });
+
+    it("should reject all pending request waiters on close", async () => {
+      const transport = new RPCServerTransport();
+      await transport.start();
+
+      const first = expect(
+        transport.handle({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "slow-one",
+          params: {}
+        })
+      ).rejects.toThrow("Transport closed");
+      const second = expect(
+        transport.handle({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "slow-two",
+          params: {}
+        })
+      ).rejects.toThrow("Transport closed");
+
+      await transport.close();
+
+      await first;
+      await second;
+    });
+
+    it("should reject pending waiters on close", async () => {
+      const transport = new RPCServerTransport();
+      await transport.start();
+
+      const request = expect(
+        transport.handle({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "slow",
+          params: {}
+        })
+      ).rejects.toThrow("Transport closed");
+      const continuation = expect(
+        transport._awaitPendingResponse()
+      ).rejects.toThrow("Transport closed");
+
+      await transport.close();
+
+      await request;
+      await continuation;
     });
 
     it("should timeout _awaitPendingResponse when no send() arrives", async () => {
@@ -452,6 +621,38 @@ describe("RPC Transport", () => {
       });
     });
 
+    it("should invoke concurrent tools via RPC", async () => {
+      const { connection } = await establishRPCConnection();
+
+      const [first, second] = await Promise.all([
+        connection.client.callTool({
+          name: "greet",
+          arguments: { name: "Concurrent One" }
+        }),
+        connection.client.callTool({
+          name: "greet",
+          arguments: { name: "Concurrent Two" }
+        })
+      ]);
+
+      expectValidGreetResult(
+        {
+          jsonrpc: "2.0",
+          id: "concurrent-1",
+          result: first
+        },
+        "Concurrent One"
+      );
+      expectValidGreetResult(
+        {
+          jsonrpc: "2.0",
+          id: "concurrent-2",
+          result: second
+        },
+        "Concurrent Two"
+      );
+    });
+
     it("should invoke greet tool via RPC", async () => {
       const { connection } = await establishRPCConnection();
 
@@ -516,6 +717,37 @@ describe("RPC Transport", () => {
 
       expect(response).toBeDefined();
       expect(response).toHaveProperty("result");
+    });
+
+    it("should route overlapping handleMcpMessage calls by request id", async () => {
+      const doName = `rpc:overlap-${crypto.randomUUID()}`;
+      const id = env.MCP_OBJECT.idFromName(doName);
+      const stub = env.MCP_OBJECT.get(id) as DurableObjectStub<McpAgent>;
+
+      await seedStorageForColdWake(stub, doName);
+      await stub.handleMcpMessage(TEST_MESSAGES.initialize);
+
+      const first = stub.handleMcpMessage({
+        jsonrpc: "2.0",
+        id: "overlap-1",
+        method: "tools/call",
+        params: { name: "greet", arguments: { name: "First" } }
+      });
+      const second = stub.handleMcpMessage({
+        jsonrpc: "2.0",
+        id: "overlap-2",
+        method: "tools/call",
+        params: { name: "greet", arguments: { name: "Second" } }
+      });
+
+      await expect(first).resolves.toMatchObject({
+        jsonrpc: "2.0",
+        id: "overlap-1"
+      });
+      await expect(second).resolves.toMatchObject({
+        jsonrpc: "2.0",
+        id: "overlap-2"
+      });
     });
 
     it("should handle tool calls after cold wake via handleMcpMessage", async () => {

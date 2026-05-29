@@ -24,7 +24,17 @@ type ThinkSubmissionTestStub = {
   ): Promise<ThinkSubmissionStatus>;
   runNonSubmissionStreamFailureForTest(requestId: string): Promise<void>;
   setSubmissionStatusDelayForTest(delayMs: number): Promise<void>;
+  setProgrammaticResponseForTest(response: string): Promise<void>;
+  setLastBodyForTest(body: Record<string, unknown>): Promise<void>;
   setSubmissionRecoveryStaleMsForTest(ms: number): Promise<void>;
+  setWorkflowEventFailuresForTest(count: number): Promise<void>;
+  getWorkflowEventsForTest(): Promise<
+    Array<{
+      workflowName: string;
+      workflowId: string;
+      event: { type: string; payload?: unknown };
+    }>
+  >;
   testSubmitMessages(
     text: string,
     options?: {
@@ -70,6 +80,8 @@ type ThinkSubmissionTestStub = {
     submissionId: string;
     status?: ThinkSubmissionStatus;
     requestId?: string;
+    metadata?: Record<string, unknown>;
+    errorMessage?: string | null;
     messagesAppliedAt?: number | null;
     completedAt?: number | null;
     createdAt?: number;
@@ -83,6 +95,29 @@ type ThinkSubmissionTestStub = {
     requestId: string,
     createdAt: number
   ): Promise<void>;
+  recoverWorkflowNotificationsForTest(): Promise<void>;
+  drainWorkflowNotificationsForTest(): Promise<void>;
+  insertWorkflowNotificationForTest(options: {
+    notificationId: string;
+    submissionId: string;
+    workflowName?: string;
+    workflowId?: string;
+    eventType?: string;
+    payload?: unknown;
+  }): Promise<void>;
+  listWorkflowNotificationsForTest(): Promise<
+    Array<{
+      notificationId: string;
+      submissionId: string;
+      workflowName: string;
+      workflowId: string;
+      eventType: string;
+      payloadJson: string;
+      attempts: number;
+      lastError: string | null;
+      deliveredAt: number | null;
+    }>
+  >;
   getStoredMessages(): Promise<
     Array<{ id: string; role: string; parts?: unknown[] }>
   >;
@@ -105,6 +140,7 @@ const terminalStatuses = new Set<ThinkSubmissionStatus>([
   "skipped",
   "error"
 ]);
+const workflowPromptMetadataKey = "__thinkWorkflowPrompt";
 
 async function waitForSubmission(
   agent: ThinkSubmissionTestStub,
@@ -121,6 +157,26 @@ async function waitForSubmission(
     throw new Error(`Submission ${submissionId} was not found`);
   }
   return submission;
+}
+
+async function waitForWorkflowEvent(
+  agent: ThinkSubmissionTestStub,
+  predicate: (
+    event: Awaited<
+      ReturnType<ThinkSubmissionTestStub["getWorkflowEventsForTest"]>
+    >[number]
+  ) => boolean
+): Promise<
+  Awaited<
+    ReturnType<ThinkSubmissionTestStub["getWorkflowEventsForTest"]>
+  >[number]
+> {
+  for (let attempt = 0; attempt < 80; attempt++) {
+    const event = (await agent.getWorkflowEventsForTest()).find(predicate);
+    if (event) return event;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("Workflow event was not delivered");
 }
 
 describe("Think durable submissions", () => {
@@ -279,6 +335,82 @@ describe("Think durable submissions", () => {
     );
   });
 
+  it("does not treat client body workflow-shaped data as workflow configuration", async () => {
+    const agent = await freshAgent();
+    await agent.setProgrammaticResponseForTest("plain text response");
+    await agent.setLastBodyForTest({
+      workflow: {
+        name: "TEST_WORKFLOW",
+        id: "client-controlled",
+        stepName: "not-a-workflow-step",
+        eventType: "think-prompt-client-body"
+      },
+      workflowPrompt: {
+        output: {
+          schema: {
+            type: "object",
+            properties: {
+              title: { type: "string" }
+            },
+            required: ["title"],
+            additionalProperties: false
+          }
+        },
+        fingerprint: "client-body"
+      }
+    });
+
+    const accepted = await agent.testSubmitMessages("normal body", {
+      submissionId: "sub-client-body-workflow-shape"
+    });
+    const completed = await waitForSubmission(
+      agent,
+      accepted.submissionId,
+      (submission) => terminalStatuses.has(submission.status)
+    );
+
+    expect(completed.status).toBe("completed");
+    await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([]);
+  });
+
+  it("does not treat public workflow-shaped metadata as workflow configuration", async () => {
+    const agent = await freshAgent();
+    await agent.setProgrammaticResponseForTest("plain text response");
+
+    const accepted = await agent.testSubmitMessages("normal metadata", {
+      submissionId: "sub-public-metadata-workflow-shape",
+      metadata: {
+        workflow: {
+          name: "TEST_WORKFLOW",
+          id: "metadata-controlled",
+          stepName: "not-a-workflow-step",
+          eventType: "think-prompt-metadata"
+        },
+        workflowPrompt: {
+          output: {
+            schema: {
+              type: "object",
+              properties: {
+                title: { type: "string" }
+              },
+              required: ["title"],
+              additionalProperties: false
+            }
+          },
+          fingerprint: "metadata"
+        }
+      }
+    });
+    const completed = await waitForSubmission(
+      agent,
+      accepted.submissionId,
+      (submission) => terminalStatuses.has(submission.status)
+    );
+
+    expect(completed.status).toBe("completed");
+    await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([]);
+  });
+
   it("aborts a running submission without letting late completion overwrite it", async () => {
     const agent = await freshAgent();
     await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
@@ -323,6 +455,190 @@ describe("Think durable submissions", () => {
       error: "not needed"
     });
     await expect(agent.getStoredMessages()).resolves.toHaveLength(0);
+  });
+
+  it("recovers terminal workflow submissions into workflow notifications", async () => {
+    const agent = await freshAgent();
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-workflow-error",
+      status: "error",
+      completedAt: Date.now(),
+      errorMessage: "model failed",
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-recover",
+            stepName: "draft-report",
+            eventType: "think-prompt-recover"
+          },
+          output: { schema: { type: "object" } },
+          fingerprint: "fingerprint"
+        }
+      }
+    });
+
+    await agent.recoverWorkflowNotificationsForTest();
+    const notifications = await agent.listWorkflowNotificationsForTest();
+
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]).toMatchObject({
+      notificationId: "sub-workflow-error:think-prompt-recover",
+      submissionId: "sub-workflow-error",
+      workflowName: "TEST_WORKFLOW",
+      workflowId: "workflow-recover",
+      eventType: "think-prompt-recover",
+      attempts: 0,
+      payloadJson: "{}"
+    });
+    expect(notifications[0].deliveredAt).toBeTypeOf("number");
+    await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([
+      {
+        workflowName: "TEST_WORKFLOW",
+        workflowId: "workflow-recover",
+        event: {
+          type: "think-prompt-recover",
+          payload: {
+            submissionId: "sub-workflow-error",
+            status: "error",
+            error: "model failed"
+          }
+        }
+      }
+    ]);
+  });
+
+  it("captures workflow structured output in terminal notifications", async () => {
+    const agent = await freshAgent();
+    await agent.setProgrammaticResponseForTest(
+      JSON.stringify({
+        title: "Workflow output",
+        labels: ["ops", "review"]
+      })
+    );
+
+    const accepted = await agent.testSubmitMessages("produce workflow output", {
+      submissionId: "sub-workflow-output",
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-output",
+            stepName: "draft-report",
+            eventType: "think-prompt-output"
+          },
+          output: {
+            schema: {
+              type: "object",
+              properties: {
+                title: { type: "string" },
+                labels: {
+                  type: "array",
+                  items: { type: "string" }
+                }
+              },
+              required: ["title", "labels"],
+              additionalProperties: false
+            }
+          },
+          fingerprint: "fingerprint"
+        }
+      }
+    });
+
+    await waitForSubmission(
+      agent,
+      accepted.submissionId,
+      (submission) => submission.status === "completed"
+    );
+    const event = await waitForWorkflowEvent(
+      agent,
+      (entry) => entry.event.type === "think-prompt-output"
+    );
+
+    expect(event).toEqual({
+      workflowName: "TEST_WORKFLOW",
+      workflowId: "workflow-output",
+      event: {
+        type: "think-prompt-output",
+        payload: {
+          submissionId: "sub-workflow-output",
+          status: "completed",
+          output: {
+            title: "Workflow output",
+            labels: ["ops", "review"]
+          }
+        }
+      }
+    });
+  });
+
+  it("drains workflow notifications and clears delivered payloads", async () => {
+    const agent = await freshAgent();
+    await agent.insertWorkflowNotificationForTest({
+      notificationId: "notification-deliver",
+      submissionId: "sub-deliver",
+      workflowName: "TEST_WORKFLOW",
+      workflowId: "workflow-deliver",
+      eventType: "think-prompt-deliver",
+      payload: {
+        submissionId: "sub-deliver",
+        status: "completed",
+        output: { title: "Done" }
+      }
+    });
+
+    await agent.drainWorkflowNotificationsForTest();
+
+    await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([
+      {
+        workflowName: "TEST_WORKFLOW",
+        workflowId: "workflow-deliver",
+        event: {
+          type: "think-prompt-deliver",
+          payload: {
+            submissionId: "sub-deliver",
+            status: "completed",
+            output: { title: "Done" }
+          }
+        }
+      }
+    ]);
+    const notifications = await agent.listWorkflowNotificationsForTest();
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]).toMatchObject({
+      notificationId: "notification-deliver",
+      attempts: 0,
+      lastError: null,
+      payloadJson: "{}"
+    });
+    expect(notifications[0].deliveredAt).toBeTypeOf("number");
+  });
+
+  it("keeps workflow notifications pending when delivery fails", async () => {
+    const agent = await freshAgent();
+    await agent.insertWorkflowNotificationForTest({
+      notificationId: "notification-retry",
+      submissionId: "sub-retry",
+      workflowName: "TEST_WORKFLOW",
+      workflowId: "workflow-retry",
+      eventType: "think-prompt-retry"
+    });
+    await agent.setWorkflowEventFailuresForTest(1);
+
+    await agent.drainWorkflowNotificationsForTest();
+
+    const notifications = await agent.listWorkflowNotificationsForTest();
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]).toMatchObject({
+      notificationId: "notification-retry",
+      attempts: 1,
+      deliveredAt: null
+    });
+    expect(notifications[0].lastError).toContain(
+      "simulated workflow event failure"
+    );
+    await expect(agent.getWorkflowEventsForTest()).resolves.toEqual([]);
   });
 
   it("runs durable pending rows through the scheduled drain callback path", async () => {

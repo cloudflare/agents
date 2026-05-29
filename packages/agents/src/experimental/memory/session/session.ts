@@ -4,7 +4,13 @@
 
 import type { ToolSet } from "ai";
 import type { SessionProvider, StoredCompaction } from "./provider";
-import type { SessionMessage, SessionOptions } from "./types";
+import type {
+  CompactAfterOptions,
+  CompactionErrorHandler,
+  SessionMessage,
+  SessionOptions,
+  SessionTokenCounter
+} from "./types";
 import {
   ContextBlocks,
   type ContextBlock,
@@ -14,7 +20,7 @@ import {
 import { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 import { AgentContextProvider } from "./providers/agent-context";
 import type { CompactResult } from "../utils/compaction-helpers";
-import { estimateMessageTokens } from "../utils/tokens";
+import { estimateMessageTokens, estimateStringTokens } from "../utils/tokens";
 import { MessageType } from "../../../types";
 
 export type SessionContextOptions = Omit<ContextConfig, "label">;
@@ -71,6 +77,8 @@ export class Session {
     | ((messages: SessionMessage[]) => Promise<CompactResult | null>)
     | null;
   private _tokenThreshold?: number;
+  private _tokenCounter?: SessionTokenCounter;
+  private _compactionErrorHandler?: CompactionErrorHandler;
   private _ready = false;
   // Promise for the async skill restore kicked off during _ensureReady().
   // Every async public method awaits this before touching storage or
@@ -87,6 +95,8 @@ export class Session {
       options?.context ?? [],
       options?.promptStore
     );
+    this._tokenCounter = options?.tokenCounter;
+    this._compactionErrorHandler = options?.onCompactionError;
     this._ready = true;
   }
 
@@ -166,9 +176,27 @@ export class Session {
   /**
    * Auto-compact when estimated token count exceeds the threshold.
    * Checked after each `appendMessage`. Requires `onCompaction()`.
+   *
+   * By default this uses a Workers-safe heuristic over stored messages plus
+   * the Session-managed frozen system prompt. Provide `tokenCounter` when you
+   * have model-reported usage or a tokenizer and need a stricter budget.
    */
-  compactAfter(tokenThreshold: number): this {
+  compactAfter(tokenThreshold: number, options?: CompactAfterOptions): this {
     this._tokenThreshold = tokenThreshold;
+    if (options?.tokenCounter) {
+      this._tokenCounter = options.tokenCounter;
+    }
+    return this;
+  }
+
+  /**
+   * Handle failures from the automatic `compactAfter()` trigger.
+   *
+   * Manual `compact()` still reports errors through the existing session error
+   * broadcast path.
+   */
+  onCompactionError(handler: CompactionErrorHandler): this {
+    this._compactionErrorHandler = handler;
     return this;
   }
 
@@ -393,11 +421,67 @@ export class Session {
     this._broadcaster.broadcast(JSON.stringify({ type, ...data }));
   }
 
+  private _shouldEstimateTokens(): boolean {
+    return Boolean(
+      this._broadcaster || (this._tokenThreshold != null && this._compactionFn)
+    );
+  }
+
+  private async _estimateTokenCount(): Promise<number> {
+    const messages = await this.getHistory();
+    const systemPrompt = await this.context.getSystemPromptForEstimate();
+
+    if (this._tokenCounter) {
+      if (!this.context.isLoaded()) {
+        await this.context.load();
+      }
+      const contextBlocks = this.context.getBlocks();
+      const estimate = await this._tokenCounter({
+        messages,
+        systemPrompt,
+        contextBlocks
+      });
+      return Number.isFinite(estimate) ? Math.max(0, Math.ceil(estimate)) : 0;
+    }
+
+    return estimateMessageTokens(messages) + estimateStringTokens(systemPrompt);
+  }
+
+  private async _handleAutoCompactionError(error: unknown): Promise<void> {
+    const message = error instanceof Error ? error.message : String(error);
+
+    if (this._compactionErrorHandler) {
+      try {
+        await this._compactionErrorHandler(error);
+      } catch (handlerError) {
+        const handlerMessage =
+          handlerError instanceof Error
+            ? handlerError.message
+            : String(handlerError);
+        console.warn(
+          `Session auto-compaction error handler failed: ${handlerMessage}`
+        );
+      }
+    } else {
+      console.warn(`Session auto-compaction failed: ${message}`);
+    }
+
+    this._emitError(message);
+  }
+
   private async _emitStatus(
     phase: "idle" | "compacting",
     extra?: Record<string, unknown>
   ): Promise<number> {
-    const tokenEstimate = estimateMessageTokens(await this.getHistory());
+    let tokenEstimate = 0;
+    if (this._shouldEstimateTokens()) {
+      try {
+        tokenEstimate = await this._estimateTokenCount();
+      } catch (err) {
+        await this._handleAutoCompactionError(err);
+      }
+    }
+
     this._broadcast(MessageType.CF_AGENT_SESSION, {
       phase,
       tokenEstimate,
@@ -450,8 +534,9 @@ export class Session {
     ) {
       try {
         compacted = Boolean(await this.compact());
-      } catch {
+      } catch (err) {
         // Auto-compact failure is non-fatal — message is already appended
+        await this._handleAutoCompactionError(err);
       }
     }
 

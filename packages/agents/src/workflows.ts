@@ -138,7 +138,10 @@ export class AgentWorkflow<
             payload: userParams as Params
           } as WorkflowEvent<Params>;
 
-          const wrappedStep = this._wrapStep(step);
+          const wrappedStep = this.extendStep(
+            this._wrapStep(step),
+            cleanedEvent
+          );
 
           try {
             return await originalRun.call(this, cleanedEvent, wrappedStep);
@@ -278,6 +281,19 @@ export class AgentWorkflow<
     };
 
     return wrappedStep;
+  }
+
+  /**
+   * Extend the Agent-aware workflow step before user code receives it.
+   *
+   * Subclasses can override this to add framework-specific step helpers while
+   * preserving the underlying WorkflowStep object identity.
+   */
+  protected extendStep(
+    step: AgentWorkflowStep,
+    _event: WorkflowEvent<Params>
+  ): AgentWorkflowStep {
+    return step;
   }
 
   /**

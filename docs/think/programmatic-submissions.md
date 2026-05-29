@@ -9,6 +9,11 @@ the turn and returns a submission record before inference runs.
 For a broader comparison with `chat()`, `saveMessages()`, and agent tools, see
 [Choosing a turn API](./index.md#choosing-a-turn-api).
 
+Declarative scheduled prompt tasks use the same durable submission path under
+the hood. Use `getScheduledTasks()` when the trigger is recurring and
+code-declared; use `submitMessages()` directly when an external caller or
+webhook creates one-off work.
+
 ## Why this exists
 
 Webhook handlers, RPC callers, and parent Workers often have strict timeout

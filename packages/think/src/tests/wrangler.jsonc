@@ -72,6 +72,10 @@
         "name": "ThinkProgrammaticTestAgent"
       },
       {
+        "class_name": "ThinkScheduledTasksTestAgent",
+        "name": "ThinkScheduledTasksTestAgent"
+      },
+      {
         "class_name": "ThinkAsyncHookTestAgent",
         "name": "ThinkAsyncHookTestAgent"
       },
@@ -84,8 +88,20 @@
         "name": "ThinkNonRecoveryTestAgent"
       },
       {
+        "class_name": "ThinkAgentToolParent",
+        "name": "ThinkAgentToolParent"
+      },
+      {
+        "class_name": "StuckThinkAgentToolChild",
+        "name": "StuckThinkAgentToolChild"
+      },
+      {
         "class_name": "ThinkExtensionHookAgent",
         "name": "ThinkExtensionHookAgent"
+      },
+      {
+        "class_name": "ThinkMessengerRouteTestAgent",
+        "name": "ThinkMessengerRouteTestAgent"
       }
     ]
   },
@@ -109,10 +125,14 @@
         "ThinkLegacyConfigMigrationAgent",
         "ThinkConfigInSessionAgent",
         "ThinkProgrammaticTestAgent",
+        "ThinkScheduledTasksTestAgent",
         "ThinkAsyncHookTestAgent",
         "ThinkRecoveryTestAgent",
         "ThinkNonRecoveryTestAgent",
-        "ThinkExtensionHookAgent"
+        "ThinkAgentToolParent",
+        "StuckThinkAgentToolChild",
+        "ThinkExtensionHookAgent",
+        "ThinkMessengerRouteTestAgent"
       ],
       "tag": "v1"
     }

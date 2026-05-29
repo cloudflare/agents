@@ -25,6 +25,8 @@ import {
   MCP_MESSAGE_HEADER
 } from "./utils";
 import { McpSSETransport, StreamableHTTPServerTransport } from "./transport";
+import type { EventStore } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { DurableObjectEventStore } from "./event-store";
 import { RPCServerTransport, type RPCServerTransportOptions } from "./rpc";
 
 export abstract class McpAgent<
@@ -62,6 +64,58 @@ export abstract class McpAgent<
 
   async getInitializeRequest() {
     return this.ctx.storage.get<JSONRPCMessage>("initializeRequest");
+  }
+
+  /**
+   * Storage key prefix for the `streamId -> requestIds` mapping used to
+   * support POST stream resumption across WebSocket reconnects. See
+   * {@link StreamableHTTPServerTransport.handleGetRequest}.
+   *
+   * @internal
+   */
+  private static readonly STREAM_REQS_KEY_PREFIX = "__mcp_stream_reqs__:";
+
+  /**
+   * Persist the `requestIds` belonging to a POST tool-call stream so a
+   * future GET reconnect (carrying `Last-Event-ID`) can restore them
+   * onto a fresh WebSocket connection. Internal — used by the streamable
+   * HTTP transport.
+   *
+   * @internal
+   */
+  async setStreamRequestIds(
+    streamId: string,
+    requestIds: RequestId[]
+  ): Promise<void> {
+    await this.ctx.storage.put<RequestId[]>(
+      `${McpAgent.STREAM_REQS_KEY_PREFIX}${streamId}`,
+      requestIds
+    );
+  }
+
+  /**
+   * Read the persisted `requestIds` for a POST stream, or `undefined`
+   * if the stream has already completed (or never existed). Internal.
+   *
+   * @internal
+   */
+  async getStreamRequestIds(
+    streamId: string
+  ): Promise<RequestId[] | undefined> {
+    return this.ctx.storage.get<RequestId[]>(
+      `${McpAgent.STREAM_REQS_KEY_PREFIX}${streamId}`
+    );
+  }
+
+  /**
+   * Drop the persisted `requestIds` for a POST stream. Internal.
+   *
+   * @internal
+   */
+  async deleteStreamRequestIds(streamId: string): Promise<void> {
+    await this.ctx.storage.delete(
+      `${McpAgent.STREAM_REQS_KEY_PREFIX}${streamId}`
+    );
   }
 
   /** Read the transport type for this agent.
@@ -124,6 +178,62 @@ export abstract class McpAgent<
     return {};
   }
 
+  /**
+   * Returns the {@link EventStore} used for SSE resumability on the streamable
+   * HTTP transport. Defaults to a {@link DurableObjectEventStore} backed by
+   * this agent's storage, which lets clients reconnect with `Last-Event-ID`
+   * after the Cloudflare edge closes an idle SSE stream (~5 minute watchdog)
+   * instead of relying on a server-side keepalive that would block DO
+   * hibernation.
+   *
+   * Override to disable resumability (`return undefined`) or to plug in a
+   * different store.
+   */
+  protected getEventStore(): EventStore | undefined {
+    return new DurableObjectEventStore(this.ctx.storage);
+  }
+
+  /**
+   * Maximum age (in milliseconds) of an event in the SSE event store.
+   * Events older than this are dropped by the periodic sweep scheduled in
+   * {@link onStart}. Default 24 hours — generous enough for clients to
+   * reconnect with `Last-Event-ID` after long pauses, while still bounding
+   * storage growth from abandoned POST streams whose clients never
+   * returned.
+   *
+   * Override (in conjunction with {@link getEventStore}) to customise.
+   * Return `Infinity` to disable the sweep.
+   */
+  protected getEventStoreMaxAgeMs(): number {
+    return 24 * 60 * 60 * 1000; // 24 hours
+  }
+
+  /**
+   * Cron expression for the recurring sweep that prunes expired SSE events
+   * from the default {@link DurableObjectEventStore}. Default: every hour,
+   * at minute 0. Override to change the cadence; return `undefined` to
+   * disable scheduling entirely.
+   */
+  protected getEventStoreSweepCron(): string | undefined {
+    return "0 * * * *";
+  }
+
+  /**
+   * Scheduled callback that prunes expired events from the default
+   * {@link DurableObjectEventStore}. Wired up by {@link onStart}; not
+   * intended to be called directly.
+   *
+   * @internal
+   */
+  async _cf_sweepEventStore(): Promise<void> {
+    if (!(this._transport instanceof StreamableHTTPServerTransport)) return;
+    const store = (this._transport as StreamableHTTPServerTransport).eventStore;
+    if (!(store instanceof DurableObjectEventStore)) return;
+    const maxAgeMs = this.getEventStoreMaxAgeMs();
+    if (!Number.isFinite(maxAgeMs)) return;
+    await store.sweep(maxAgeMs);
+  }
+
   /** Returns a new transport matching the type of the Agent. */
   private initTransport() {
     switch (this.getTransportType()) {
@@ -131,7 +241,9 @@ export abstract class McpAgent<
         return new McpSSETransport();
       }
       case "streamable-http": {
-        const transport = new StreamableHTTPServerTransport({});
+        const transport = new StreamableHTTPServerTransport({
+          eventStore: this.getEventStore()
+        });
         transport.messageInterceptor = (message) => {
           return Promise.resolve(this._handleElicitationResponse(message));
         };
@@ -184,6 +296,21 @@ export abstract class McpAgent<
     await server.connect(this._transport);
 
     await this.reinitializeServer();
+
+    // Schedule a recurring sweep of the default event store. `idempotent`
+    // means re-running onStart after hibernation/restart won't enqueue
+    // duplicates. No-op if the user has disabled the sweep by returning
+    // undefined from getEventStoreSweepCron().
+    const cron = this.getEventStoreSweepCron();
+    if (
+      cron &&
+      this._transport instanceof StreamableHTTPServerTransport &&
+      this._transport.eventStore instanceof DurableObjectEventStore
+    ) {
+      await this.schedule(cron, "_cf_sweepEventStore", undefined, {
+        idempotent: true
+      });
+    }
   }
 
   /** Validates new WebSocket connections. */
@@ -403,23 +530,31 @@ export abstract class McpAgent<
       throw new Error("Expected RPC transport");
     }
 
-    // Intercept elicitation responses before they reach the transport.
-    // Mirrors what onSSEMcpMessage() and StreamableHTTPServerTransport's
-    // messageInterceptor already do for their respective transports.
-    if (!Array.isArray(message)) {
-      const parseResult = JSONRPCMessageSchema.safeParse(message);
-      if (
-        parseResult.success &&
-        this._handleElicitationResponse(parseResult.data)
-      ) {
-        // Resolved a pending elicitation — now wait for the tool handler
-        // to send its next message (another elicitation request or the
-        // final tool result).
-        return await this._transport._awaitPendingResponse();
-      }
-    }
+    const transport = this._transport;
 
-    return await this._transport.handle(message);
+    // RPC waits are intentionally in-memory. While a request/continuation is
+    // pending, keep the object alive so hibernation does not drop the resolver
+    // maps or the suspended tool stack. Making this sleep/resume across
+    // hibernation would require a durable continuation model instead.
+    return await this.keepAliveWhile(async () => {
+      // Intercept elicitation responses before they reach the transport.
+      // Mirrors what onSSEMcpMessage() and StreamableHTTPServerTransport's
+      // messageInterceptor already do for their respective transports.
+      if (!Array.isArray(message)) {
+        const parseResult = JSONRPCMessageSchema.safeParse(message);
+        if (
+          parseResult.success &&
+          this._handleElicitationResponse(parseResult.data)
+        ) {
+          // Resolved a pending elicitation — now wait for the tool handler
+          // to send its next message (another elicitation request or the
+          // final tool result).
+          return await transport._awaitPendingResponse();
+        }
+      }
+
+      return await transport.handle(message);
+    });
   }
 
   /** Return a handler for the given path for this MCP.
@@ -536,6 +671,8 @@ export type {
   MCPDiscoverResult
 } from "./client";
 
+export { normalizeServerId, MCP_SERVER_ID_MAX_LENGTH } from "./client";
+
 export type { McpClientOptions } from "./types";
 
 export {
@@ -545,6 +682,8 @@ export {
 } from "./handler";
 
 export { getMcpAuthContext, type McpAuthContext } from "./auth-context";
+
+export { DurableObjectEventStore } from "./event-store";
 
 export {
   WorkerTransport,

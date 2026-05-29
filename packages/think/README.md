@@ -27,6 +27,90 @@ export class MyAgent extends Think<Env> {
 
 That's it. Think handles the WebSocket chat protocol, message persistence, the agentic loop, message sanitization, stream resumption, client tool support, and workspace file tools. Connect from the browser with `useAgentChat` from `@cloudflare/ai-chat`.
 
+## Messengers
+
+Think can own messenger ingress directly. Declare providers with
+`getMessengers()` and import provider implementations from subpaths so unused
+Chat SDK adapters are not bundled.
+
+```ts
+import { Think } from "@cloudflare/think";
+import {
+  defineMessengers,
+  ThinkMessengerStateAgent
+} from "@cloudflare/think/messengers";
+import telegramMessenger from "@cloudflare/think/messengers/telegram";
+
+export { ThinkMessengerStateAgent };
+
+export class SupportAgent extends Think<Env> {
+  getMessengers() {
+    return defineMessengers({
+      telegram: telegramMessenger({
+        token: this.env.TELEGRAM_BOT_TOKEN,
+        userName: "support_bot",
+        secretToken: this.env.TELEGRAM_WEBHOOK_SECRET_TOKEN
+      })
+    });
+  }
+}
+```
+
+The root Think agent handles the webhook route with this precedence: framework
+sub-agent routing, Think internal routes, messenger routes, then user
+`onRequest`. By default, `telegram` maps to
+`/messengers/telegram/webhook`, direct messages and mentions are routed to the
+agent, and new mentions subscribe the thread so later mentions in the same
+thread are still observed. Ordinary subscribed-thread messages and button
+actions are opt-in with `respondTo: ["subscribed-thread", "action"]`. Each Chat
+SDK thread runs in its own Think sub-agent to avoid accidental context sharing.
+Each root agent owns one Chat SDK runtime for all configured messengers, so
+multi-provider agents do not fight over Chat SDK singleton state.
+
+Use `conversation: "self"` when all messenger traffic should share the root
+agent's memory. Use a custom `conversation(event)` resolver to route by thread,
+channel, tenant, or user.
+
+Messenger state uses `agents/chat-sdk` under the hood. Export
+`ThinkMessengerStateAgent` from the Worker module so sub-agent routing can
+resolve it; production apps do not need to add a separate durable object binding
+or migration for this facet-only class. Test harnesses may still need explicit
+bindings.
+
+Inbound messenger replies use the streamed `chat()` path by default: the root
+agent starts an idempotent fiber, resolves the conversation target, calls
+`target.chat(message, callback)`, and lets the provider delivery policy post or
+edit messages. Recovery snapshots store only serializable event/thread data, so
+interrupted replies can either resume before streaming starts or post the
+configured interruption message after streaming has begun. `submitMessages()`
+remains the right primitive for non-streaming programmatic sends, scheduled
+digests, or background work.
+
+During a messenger turn, `getMessengerContext()` returns the initiating
+messenger context even after assistant messages are persisted. Telegram webhook
+verification is explicit: provide `secretToken`, a custom `verifyWebhook`, or
+`verifyWebhook: false` when intentionally running without verification. Custom
+messengers built with `chatSdkMessenger()` must make the same choice explicitly.
+Delivery failures use a generic user-facing error by default so internal
+exception details are not posted into external chats.
+
+Provider-neutral events include thread, author, message, action, capabilities,
+and attachment metadata. Attachment bytes are only fetched when a provider
+supplies a safe fetch function. Telegram is the first provider implementation;
+future Slack, Discord, or Teams entrypoints implement the same messenger
+contract from their own subpaths.
+
+Common messenger options:
+
+| Option               | Default                         | Description                                                                     |
+| -------------------- | ------------------------------- | ------------------------------------------------------------------------------- |
+| `path`               | `/messengers/{id}/webhook`      | Webhook path handled before user `onRequest`                                    |
+| `respondTo`          | `["direct-message", "mention"]` | Event kinds that should start a Think reply                                     |
+| `subscribeOnMention` | `true`                          | Subscribe Chat SDK threads after a new mention                                  |
+| `conversation`       | `"thread"`                      | Use one Think sub-agent per Chat SDK thread; set `"self"` to use the root agent |
+| `verifyWebhook`      | required                        | Verification function, or `false` to opt out explicitly                         |
+| `delivery`           | provider defaults               | Streaming limits, text splitting, and safe user-facing failure messages         |
+
 ## Agent tools
 
 Think subclasses can be dispatched as agent tools from another Agent. The parent
@@ -91,31 +175,116 @@ export class MyAgent extends Think<Env> {
 
 ## Exports
 
-| Export                               | Description                                                   |
-| ------------------------------------ | ------------------------------------------------------------- |
-| `@cloudflare/think`                  | `Think`, `Session`, `Workspace` — main class + re-exports     |
-| `@cloudflare/think/tools/workspace`  | `createWorkspaceTools()` — for custom storage backends        |
-| `@cloudflare/think/tools/execute`    | `createExecuteTool()` — sandboxed code execution via codemode |
-| `@cloudflare/think/tools/extensions` | `createExtensionTools()` — LLM-driven extension loading       |
-| `@cloudflare/think/extensions`       | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
+| Export                                  | Description                                                   |
+| --------------------------------------- | ------------------------------------------------------------- |
+| `@cloudflare/think`                     | `Think`, `Session`, `Workspace` — main class + re-exports     |
+| `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
+| `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
+| `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
+| `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
+| `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
+| `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
 
 ## Think
 
 ### Configuration
 
-| Method / Property    | Default                            | Description                                     |
-| -------------------- | ---------------------------------- | ----------------------------------------------- |
-| `getModel()`         | throws                             | Return the `LanguageModel` to use               |
-| `getSystemPrompt()`  | careful assistant operating prompt | System prompt (fallback when no context blocks) |
-| `getTools()`         | `{}`                               | AI SDK `ToolSet` for the agentic loop           |
-| `maxSteps`           | `10`                               | Max tool-call rounds per turn (property)        |
-| `sendReasoning`      | `true`                             | Send reasoning chunks to chat clients           |
-| `configureSession()` | identity                           | Add context blocks, compaction, search, skills  |
-| `getExtensions()`    | `[]`                               | Sandboxed extension declarations (load order)   |
-| `extensionLoader`    | `undefined`                        | `WorkerLoader` binding — enables extensions     |
-| `chatRecovery`       | `true`                             | Wrap turns in `runFiber` for durable execution  |
+| Method / Property      | Default                            | Description                                     |
+| ---------------------- | ---------------------------------- | ----------------------------------------------- |
+| `getModel()`           | throws                             | Return the `LanguageModel` to use               |
+| `getSystemPrompt()`    | careful assistant operating prompt | System prompt (fallback when no context blocks) |
+| `getTools()`           | `{}`                               | AI SDK `ToolSet` for the agentic loop           |
+| `getMessengers()`      | `{}`                               | Messenger ingress and delivery declarations     |
+| `getScheduledTasks()`  | `{}`                               | Code-declared recurring prompts                 |
+| `getDefaultTimezone()` | `undefined`                        | Default timezone for wall-clock schedules       |
+| `maxSteps`             | `10`                               | Max tool-call rounds per turn (property)        |
+| `sendReasoning`        | `true`                             | Send reasoning chunks to chat clients           |
+| `configureSession()`   | identity                           | Add context blocks, compaction, search, skills  |
+| `getExtensions()`      | `[]`                               | Sandboxed extension declarations (load order)   |
+| `extensionLoader`      | `undefined`                        | `WorkerLoader` binding — enables extensions     |
+| `chatRecovery`         | `true`                             | Wrap turns in `runFiber` for durable execution  |
 
 On each turn, Think appends a small capability block to the assembled system prompt. The block is based on the tools available for that turn, so models learn about workspace tools, context-loading tools, extension tools, sandboxed execution, MCP/client tools, and delegated-agent tools only when they are actually exposed.
+
+### Scheduled tasks
+
+Use `getScheduledTasks()` for code-declared recurring prompts or deterministic
+scheduled handlers. Think reconciles these declarations on startup, stores
+durable one-shot schedules for the next occurrence, and re-arms the next
+occurrence after each run.
+
+```ts
+import { Think } from "@cloudflare/think";
+import type { ThinkScheduledTasks } from "@cloudflare/think";
+
+export class Assistant extends Think<Env> {
+  getDefaultTimezone() {
+    return "Europe/London";
+  }
+
+  getScheduledTasks(): ThinkScheduledTasks {
+    return {
+      weeklyCommitReport: {
+        schedule: "every week on monday at 09:00",
+        prompt:
+          "Compile all my GitHub commits for the last week and write a concise summary."
+      },
+      workout: {
+        schedule: "every day at 08:00 in Europe/London",
+        prompt: "Start my workout."
+      },
+      customerDigest: {
+        schedule: "every day at 09:00",
+        timezone: "America/New_York",
+        metadata: { workflowName: "customer-digest" },
+        retry: { maxAttempts: 3 },
+        handler: async ({
+          idempotencyKey,
+          scheduledFor,
+          scheduleKind,
+          timezone
+        }) => {
+          await this.env.DIGEST_WORKFLOW.create({
+            id: idempotencyKey,
+            params: { scheduledFor, scheduleKind, timezone }
+          });
+        }
+      }
+    };
+  }
+}
+```
+
+The DSL is intentionally small: `every <n> minutes`, `every <n> hours`,
+`every day at HH:mm`, `every weekday at HH:mm`, and
+`every week on monday,wednesday at HH:mm`. Wall-clock schedules require either
+an inline timezone, a task `timezone`, or `getDefaultTimezone()`. If an alarm is
+late, Think runs the intended occurrence once and schedules the next future
+occurrence; it does not backfill missed runs.
+
+The return type annotation gives TypeScript literal checks for schedule strings.
+If you prefer not to annotate the method, wrap the object with
+`defineScheduledTasks(...)` to keep the same checks. Think also validates
+scheduled tasks at runtime during startup reconciliation, so dynamically built
+objects still fail before schedules are persisted.
+
+Each task must define exactly one of `prompt` or `handler`. Prompt tasks create a
+durable submission with `submitMessages()`. Handler tasks receive
+`{ taskId, scheduledFor, scheduledForDate, occurrenceKey, idempotencyKey,
+schedule, scheduleKind, timezone, metadata }` and are intended for app-owned
+work such as creating a Workflow run or writing a run ledger. Delivery is
+at-least-once; use `idempotencyKey` or `occurrenceKey` for your own durable
+idempotency.
+
+Static declarations reconcile on startup. If `getScheduledTasks()` reads
+product-owned data that can change while the Durable Object is live, call
+`internal_reconcileScheduledTasks()` after updating that data. During
+reconciliation Think records the task row before creating the underlying Agent
+schedule, so a `schedule_id` may be temporarily empty if the object is
+interrupted mid-reconcile; the next reconcile repairs that pending row. The
+task `retry` option retries the prompt or handler action before the failure is
+logged. The next occurrence is still scheduled after the action succeeds or
+exhausts its retries, so failed occurrences do not block future runs.
 
 ### Lifecycle hooks
 
@@ -352,6 +521,8 @@ Use browser chat through `useAgentChat` when a user drives the conversation. Use
 `saveMessages()` when server code controls the trigger and can wait for the
 model response. Use `submitMessages()` when a caller needs fast durable
 acceptance, idempotent retries, cancellation, and later status inspection.
+Use `getScheduledTasks()` when code should create recurring prompt submissions
+or deterministic scheduled handlers.
 
 Use `subAgent(...).chat()` for direct streaming RPC to a specific child when
 your code owns forwarding and replay policy. Use `agentTool()` or
@@ -374,10 +545,10 @@ When used as a sub-agent (via `this.subAgent()`), the `chat()` method runs a ful
 
 ```ts
 interface StreamCallback {
-  onStart?(event: { requestId: string }): void | Promise<void>;
+  onStart(event: { requestId: string }): void | Promise<void>;
   onEvent(json: string): void | Promise<void>;
   onDone(): void | Promise<void>;
-  onError?(error: string): void | Promise<void>;
+  onError(error: string): void | Promise<void>;
 }
 
 const agent = await this.subAgent(MyAgent, "thread-1");
@@ -416,6 +587,7 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 - **Stream resumption** — page refresh replays buffered chunks via `ResumableStream`
 - **Client tools** — accept tool schemas from clients, handle results and approvals
 - **Durable submissions** — accept webhook/RPC-triggered turns with idempotent retry and status inspection
+- **Messengers** — receive Chat SDK webhooks and deliver streamed replies with provider-safe recovery
 - **Auto-continuation** — debounce-based continuation after tool results
 - **MCP integration** — MCP tools auto-merged, wait for connections before inference
 - **Abort/cancel** — pass an `AbortSignal` or send a cancel message
@@ -473,13 +645,14 @@ getTools() {
 
 ## Peer dependencies
 
-| Package                | Required | Notes                            |
-| ---------------------- | -------- | -------------------------------- |
-| `agents`               | yes      | Cloudflare Agents SDK            |
-| `ai`                   | yes      | Vercel AI SDK v6                 |
-| `zod`                  | yes      | Schema validation (v3.25+ or v4) |
-| `@cloudflare/shell`    | yes      | Workspace filesystem             |
-| `@cloudflare/codemode` | optional | For `createExecuteTool`          |
+| Package                  | Required | Notes                            |
+| ------------------------ | -------- | -------------------------------- |
+| `agents`                 | yes      | Cloudflare Agents SDK            |
+| `ai`                     | yes      | Vercel AI SDK v6                 |
+| `zod`                    | yes      | Schema validation (v4)           |
+| `@cloudflare/shell`      | yes      | Workspace filesystem             |
+| `@cloudflare/codemode`   | optional | For `createExecuteTool`          |
+| `@chat-adapter/telegram` | optional | Required for Telegram messengers |
 
 ## Acknowledgments
 

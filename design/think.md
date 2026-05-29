@@ -296,9 +296,10 @@ When used as a sub-agent, the `chat()` method runs a full turn and streams event
 
 ```typescript
 interface StreamCallback {
+  onStart(event: { requestId: string }): void | Promise<void>;
   onEvent(json: string): void | Promise<void>;
   onDone(): void | Promise<void>;
-  onError?(error: string): void | Promise<void>;
+  onError(error: string): void | Promise<void>;
 }
 ```
 

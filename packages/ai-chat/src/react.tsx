@@ -996,6 +996,11 @@ export function useAgentChat<
   statusRef.current = status;
 
   const resumingToolContinuationRef = useRef(false);
+  const pendingToolContinuationRef = useRef(false);
+  const observedToolContinuationRequestIdRef = useRef<string | null>(null);
+  const continuationLaunchTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
   // Generation counter for tool continuations. Bumped on every
   // `startToolContinuation` entry and on any external reset path
   // (e.g. `clearHistory`). The `.finally()` handler captures its
@@ -1021,31 +1026,79 @@ export function useAgentChat<
   // the generation bump ensures the pending `.finally()` is a no-op.
   const resetToolContinuation = useCallback(() => {
     continuationGenerationRef.current++;
+    pendingToolContinuationRef.current = false;
     resumingToolContinuationRef.current = false;
+    observedToolContinuationRequestIdRef.current = null;
+    if (continuationLaunchTimerRef.current) {
+      clearTimeout(continuationLaunchTimerRef.current);
+      continuationLaunchTimerRef.current = null;
+    }
     setIsToolContinuation(false);
   }, []);
+
+  const scheduleToolContinuationLaunch = useCallback(() => {
+    if (
+      !pendingToolContinuationRef.current ||
+      statusRef.current !== "ready" ||
+      continuationLaunchTimerRef.current
+    ) {
+      return;
+    }
+
+    continuationLaunchTimerRef.current = setTimeout(() => {
+      continuationLaunchTimerRef.current = null;
+
+      if (
+        !pendingToolContinuationRef.current ||
+        statusRef.current !== "ready"
+      ) {
+        return;
+      }
+
+      pendingToolContinuationRef.current = false;
+      const myGeneration = continuationGenerationRef.current;
+      customTransport.expectToolContinuation();
+
+      void resumeStream()
+        .catch((error) => {
+          console.error(
+            "[useAgentChat] Tool continuation resume failed:",
+            error
+          );
+        })
+        .finally(() => {
+          // Bail if a reset (clearHistory / cross-tab clear) or a newer
+          // continuation has taken over since we started — otherwise this
+          // stale settlement would flip the flags off while a newer
+          // continuation is still in flight, and reopen the re-entry
+          // guard spuriously.
+          if (continuationGenerationRef.current !== myGeneration) return;
+          resumingToolContinuationRef.current = false;
+          setIsToolContinuation(false);
+        });
+    }, 0);
+  }, [customTransport, resumeStream]);
 
   const startToolContinuation = useCallback(() => {
     if (!autoContinueAfterToolResult || resumingToolContinuationRef.current) {
       return;
     }
 
-    const myGeneration = ++continuationGenerationRef.current;
+    ++continuationGenerationRef.current;
     resumingToolContinuationRef.current = true;
+    pendingToolContinuationRef.current = true;
     setIsToolContinuation(true);
-    customTransport.expectToolContinuation();
+    scheduleToolContinuationLaunch();
+  }, [autoContinueAfterToolResult, scheduleToolContinuationLaunch]);
 
-    void resumeStream().finally(() => {
-      // Bail if a reset (clearHistory / cross-tab clear) or a newer
-      // continuation has taken over since we started — otherwise this
-      // stale settlement would flip the flags off while a newer
-      // continuation is still in flight, and reopen the re-entry
-      // guard spuriously.
-      if (continuationGenerationRef.current !== myGeneration) return;
-      resumingToolContinuationRef.current = false;
-      setIsToolContinuation(false);
-    });
-  }, [autoContinueAfterToolResult, customTransport, resumeStream]);
+  useEffect(() => {
+    if (status === "error" && pendingToolContinuationRef.current) {
+      resetToolContinuation();
+      return;
+    }
+
+    scheduleToolContinuationLaunch();
+  }, [resetToolContinuation, scheduleToolContinuationLaunch, status]);
 
   const stopWithToolContinuationAbort: typeof stop = useCallback(async () => {
     try {
@@ -1722,8 +1775,13 @@ export function useAgentChat<
           customTransport.handleStreamResumeNone();
           break;
 
-        case MessageType.CF_AGENT_STREAM_RESUMING:
-          if (!resume && !customTransport.isAwaitingResume()) return;
+        case MessageType.CF_AGENT_STREAM_RESUMING: {
+          const isEarlyToolContinuation =
+            resumingToolContinuationRef.current &&
+            !customTransport.isAwaitingResume();
+          if (!resume && !customTransport.isAwaitingResume()) {
+            if (!isEarlyToolContinuation) return;
+          }
           if (!resumingToolContinuationRef.current) {
             pendingReplayResumeRequestIdsRef.current.add(data.id);
           }
@@ -1740,6 +1798,14 @@ export function useAgentChat<
           // RESUME_REQUEST handler — the second one must not trigger
           // a duplicate ACK / replay).
           if (localRequestIdsRef.current.has(data.id)) return;
+          if (isEarlyToolContinuation) {
+            pendingToolContinuationRef.current = false;
+            observedToolContinuationRequestIdRef.current = data.id;
+            if (continuationLaunchTimerRef.current) {
+              clearTimeout(continuationLaunchTimerRef.current);
+              continuationLaunchTimerRef.current = null;
+            }
+          }
           // Fallback for cross-tab broadcasts or cases where the
           // transport isn't expecting a resume.
           streamStateRef.current = broadcastTransition(streamStateRef.current, {
@@ -1756,6 +1822,7 @@ export function useAgentChat<
             })
           );
           break;
+        }
 
         case MessageType.CF_AGENT_USE_CHAT_RESPONSE: {
           if (localRequestIdsRef.current.has(data.id)) {
@@ -1856,6 +1923,9 @@ export function useAgentChat<
           if (data.done) {
             customTransport.handleServerTurnCompleted(data.id);
           }
+          const completedObservedToolContinuation =
+            data.done &&
+            observedToolContinuationRequestIdRef.current === data.id;
 
           const result = broadcastTransition(streamStateRef.current, {
             type: "response",
@@ -1879,6 +1949,9 @@ export function useAgentChat<
             );
           }
           setIsServerStreaming(result.isStreaming);
+          if (completedObservedToolContinuation) {
+            resetToolContinuation();
+          }
           break;
         }
       }
@@ -1904,6 +1977,7 @@ export function useAgentChat<
     resume,
     customTransport,
     preserveProtectedStreamingAssistant,
+    resetToolContinuation,
     resetMatchingHydratedAssistantForReplay,
     restoreProtectedStreamingAssistant,
     resetLocalChatState

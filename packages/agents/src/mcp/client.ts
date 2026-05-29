@@ -34,6 +34,55 @@ const defaultClientOptions: ConstructorParameters<typeof Client>[1] = {
   jsonSchemaValidator: new CfWorkerJsonSchemaValidator()
 };
 
+/** Maximum length of a normalized MCP server id. */
+export const MCP_SERVER_ID_MAX_LENGTH = 64;
+
+/**
+ * Normalize a caller-supplied MCP server id into a stable, storage- and
+ * tool-name-safe form.
+ *
+ * The id is surfaced in several places where the character set matters:
+ *  - as the primary key in the `cf_agents_mcp_servers` SQLite table
+ *  - embedded in AI SDK tool names as `` `tool_${id.replace(/-/g, "")}_${tool}` ``
+ *    (tool names must match `/^[A-Za-z0-9_]+$/`)
+ *  - as a key on the `mcpConnections` map and OAuth provider storage
+ *
+ * Rules:
+ *  1. Lowercase.
+ *  2. Replace any run of disallowed characters with a single `-`.
+ *  3. Collapse repeated `-` and trim leading/trailing `-`/`_`.
+ *  4. Prefix with `id-` if the result is empty or doesn't start with a letter.
+ *  5. Truncate to {@link MCP_SERVER_ID_MAX_LENGTH} characters.
+ *
+ * @example
+ * normalizeServerId("my-supplied-id");  // "my-supplied-id"
+ * normalizeServerId("GitHub MCP!");     // "github-mcp"
+ * normalizeServerId("42-things");       // "id-42-things"
+ */
+export function normalizeServerId(input: string): string {
+  if (typeof input !== "string") {
+    throw new TypeError(
+      `normalizeServerId: expected string, got ${typeof input}`
+    );
+  }
+
+  let id = input
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-_]+|[-_]+$/g, "");
+
+  if (id.length === 0 || !/^[a-z]/.test(id)) {
+    id = `id-${id}`.replace(/-+$/g, "");
+  }
+
+  if (id.length > MCP_SERVER_ID_MAX_LENGTH) {
+    id = id.slice(0, MCP_SERVER_ID_MAX_LENGTH).replace(/-+$/g, "");
+  }
+
+  return id;
+}
+
 /**
  * Blocked hostname patterns for SSRF protection.
  * Prevents MCP client from connecting to internal/private network addresses
@@ -334,6 +383,113 @@ export class MCPClientManager {
 
   private removeServerFromStorage(serverId: string): void {
     this.sql("DELETE FROM cf_agents_mcp_servers WHERE id = ?", serverId);
+  }
+
+  /**
+   * Rename a server's id, in-place, across every place the id is used as a
+   * key. Used to JIT-migrate servers that were originally registered under an
+   * auto-generated nanoid to a caller-supplied stable id (see
+   * `Agent.addMcpServer`'s `{ id }` option).
+   *
+   * Migrates:
+   *  - the `cf_agents_mcp_servers` row (primary key)
+   *  - the in-memory `mcpConnections` map key
+   *  - the connection disposables map key
+   *  - the attached `authProvider.serverId`, if any
+   *  - OAuth-related storage keys under `/{clientName}/{oldId}/...`
+   *
+   * Safe to call when no OAuth keys exist (RPC / bearer-token HTTP servers).
+   * If `oldId === newId` this is a no-op. If a row already exists under
+   * `newId`, throws — the caller is expected to have verified uniqueness.
+   *
+   * @internal Exposed for `Agent.addMcpServer` JIT-migration.
+   */
+  async migrateServerId(
+    oldId: string,
+    newId: string,
+    clientName: string
+  ): Promise<void> {
+    if (oldId === newId) return;
+
+    const existing = this.sql<MCPServerRow>(
+      "SELECT id FROM cf_agents_mcp_servers WHERE id = ?",
+      oldId
+    );
+    if (existing.length === 0) {
+      // Nothing in storage to rename; just rename the in-memory connection if any.
+      this._renameInMemoryConnection(oldId, newId);
+      return;
+    }
+
+    const collision = this.sql<MCPServerRow>(
+      "SELECT id FROM cf_agents_mcp_servers WHERE id = ?",
+      newId
+    );
+    if (collision.length > 0) {
+      throw new Error(
+        `Cannot migrate MCP server id "${oldId}" → "${newId}": new id is already in use.`
+      );
+    }
+
+    // 1. Storage: rename the SQL row.
+    this.sql(
+      "UPDATE cf_agents_mcp_servers SET id = ? WHERE id = ?",
+      newId,
+      oldId
+    );
+
+    // 2. OAuth-related storage keys. The DurableObjectOAuthClientProvider
+    //    keys everything under `/{clientName}/{serverId}/...`. Other servers
+    //    won't have any keys with this prefix, so the list will be empty and
+    //    this is a no-op for them.
+    const oldPrefix = `/${clientName}/${oldId}/`;
+    const newPrefix = `/${clientName}/${newId}/`;
+    try {
+      const keys = await this._storage.list({ prefix: oldPrefix });
+      if (keys.size > 0) {
+        const writes: Record<string, unknown> = {};
+        const deletes: string[] = [];
+        for (const [oldKey, value] of keys) {
+          const newKey = newPrefix + oldKey.slice(oldPrefix.length);
+          writes[newKey] = value;
+          deletes.push(oldKey);
+        }
+        await this._storage.put(writes);
+        await this._storage.delete(deletes);
+      }
+    } catch (error) {
+      // Best-effort: storage rename failures shouldn't break the SQL-level
+      // rename that already succeeded. Log and continue.
+      console.warn(
+        `[MCPClientManager] OAuth key migration ${oldPrefix} → ${newPrefix} failed:`,
+        error
+      );
+    }
+
+    // 3. In-memory connection + disposables + authProvider.
+    this._renameInMemoryConnection(oldId, newId);
+
+    this._onServerStateChanged.fire();
+  }
+
+  private _renameInMemoryConnection(oldId: string, newId: string): void {
+    if (oldId === newId) return;
+
+    const conn = this.mcpConnections[oldId];
+    if (conn) {
+      this.mcpConnections[newId] = conn;
+      delete this.mcpConnections[oldId];
+      const authProvider = conn.options.transport.authProvider;
+      if (authProvider) {
+        authProvider.serverId = newId;
+      }
+    }
+
+    const disposables = this._connectionDisposables.get(oldId);
+    if (disposables) {
+      this._connectionDisposables.set(newId, disposables);
+      this._connectionDisposables.delete(oldId);
+    }
   }
 
   private getServersFromStorage(): MCPServerRow[] {

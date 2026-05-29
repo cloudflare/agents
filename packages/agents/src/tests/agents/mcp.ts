@@ -486,6 +486,178 @@ export class TestRpcMcpClientAgent extends Agent {
     }
   }
 
+  async testRpcStableSuppliedId() {
+    try {
+      const { id } = await this.addMcpServer(
+        "rpc-stable-id-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          id: "my-supplied-id",
+          props: { testValue: "stable-id" }
+        }
+      );
+
+      const toolNames = this.mcp.listTools().map((t) => t.name);
+      const saved = this.mcp
+        .getRpcServersFromStorage()
+        .find((s) => s.id === id);
+
+      return {
+        success: true,
+        id,
+        savedId: saved?.id ?? null,
+        toolNames
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async testRpcNormalizesSuppliedId() {
+    try {
+      const { id } = await this.addMcpServer(
+        "rpc-normalize-id-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          id: "GitHub MCP!",
+          props: { testValue: "normalized" }
+        }
+      );
+      return { success: true, id };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async testRpcSuppliedIdCollision() {
+    try {
+      const first = await this.addMcpServer(
+        "rpc-collide-a",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          id: "collide",
+          props: { testValue: "a" }
+        }
+      );
+
+      let threw = false;
+      let message = "";
+      try {
+        await this.addMcpServer(
+          "rpc-collide-b",
+          this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+          {
+            id: "collide",
+            props: { testValue: "b" }
+          }
+        );
+      } catch (e) {
+        threw = true;
+        message = e instanceof Error ? e.message : String(e);
+      }
+
+      return { success: true, firstId: first.id, threw, message };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async testRpcSuppliedIdMigratesExistingNanoid() {
+    try {
+      // First call: no supplied id — gets an auto-generated nanoid.
+      const first = await this.addMcpServer(
+        "rpc-migrate-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        { props: { testValue: "first" } }
+      );
+
+      const connectionsBefore = Object.keys(this.mcp.mcpConnections).length;
+
+      // Second call: same (name, url) but now supplying a stable id. This is
+      // the natural upgrade path (user adds `{ id }` to existing code) — the
+      // existing row + connection should be migrated in place, NOT thrown.
+      const second = await this.addMcpServer(
+        "rpc-migrate-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        { id: "migrated", props: { testValue: "second" } }
+      );
+
+      // After migration: only the new stable id should exist in storage.
+      const storedIds = this.mcp
+        .getRpcServersFromStorage()
+        .filter((s) => s.name === "rpc-migrate-test")
+        .map((s) => s.id);
+
+      const connectionsAfter = Object.keys(this.mcp.mcpConnections).length;
+      const stableConnectionExists =
+        this.mcp.mcpConnections[second.id] !== undefined;
+      const nanoidConnectionGone =
+        this.mcp.mcpConnections[first.id] === undefined;
+
+      // Tool calls should still work against the migrated id.
+      const callResult = await this.mcp.callTool({
+        serverId: second.id,
+        name: "greet",
+        arguments: { name: "Migrated User" }
+      });
+
+      return {
+        success: true,
+        firstId: first.id,
+        secondId: second.id,
+        storedIds,
+        connectionsBefore,
+        connectionsAfter,
+        stableConnectionExists,
+        nanoidConnectionGone,
+        callOk: !callResult.isError
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async testRpcSuppliedIdDedupsOnRepeat() {
+    try {
+      const first = await this.addMcpServer(
+        "rpc-dedup-stable",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        { id: "stable", props: { testValue: "first" } }
+      );
+
+      // Calling again with the same id + (name, url) should dedup, not throw.
+      const second = await this.addMcpServer(
+        "rpc-dedup-stable",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        { id: "stable", props: { testValue: "second" } }
+      );
+
+      return {
+        success: true,
+        firstId: first.id,
+        secondId: second.id,
+        sameId: first.id === second.id
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
   async testRemoveRpcMcpServer() {
     try {
       const { id } = await this.addMcpServer(
@@ -620,8 +792,12 @@ export class TestHttpMcpDedupAgent extends Agent {
   }
 
   // Set up a fake "ready" server so the dedup check has something to find
-  private async _seedServer(name: string, url: string): Promise<string> {
-    const id = `test-${name}-${Date.now()}`;
+  private async _seedServer(
+    name: string,
+    url: string,
+    overrideId?: string
+  ): Promise<string> {
+    const id = overrideId ?? `test-${name}-${Date.now()}`;
 
     // Register in storage
     await this.mcp.registerServer(id, {
@@ -700,6 +876,109 @@ export class TestHttpMcpDedupAgent extends Agent {
       returnedId: result.id,
       deduped: result.id === seededId
     };
+  }
+
+  // Test: a server first registered without `id` (under a nanoid) gets
+  // migrated in place when the caller adds `{ id }` on the next call.
+  async testHttpSuppliedIdMigratesNanoid() {
+    // Seed an existing server under a nanoid-ish id, exactly as if the user
+    // had called addMcpServer(name, url) previously without { id }.
+    const oldId = await this._seedServer(
+      "http-migrate-server",
+      "https://mcp.example.com/migrate",
+      "old-nanoid-aaaa"
+    );
+
+    // Drop fake OAuth-style keys under the old prefix to verify the manager
+    // also migrates DO-storage-backed OAuth state, not just the SQL row.
+    const ctx = (this as unknown as { ctx: { storage: DurableObjectStorage } })
+      .ctx;
+    await ctx.storage.put(`/${this.name}/${oldId}/test-client/client_info/`, {
+      client_id: "abc"
+    });
+    await ctx.storage.put(`/${this.name}/${oldId}/test-client/token`, {
+      access_token: "t"
+    });
+
+    let resultId: string | null = null;
+    try {
+      const r = await this.addMcpServer(
+        "http-migrate-server",
+        "https://mcp.example.com/migrate",
+        { id: "stable-migrated" }
+      );
+      resultId = r.id;
+    } catch (_e) {
+      // The mocked connectToServer always fails; that's expected. What we
+      // care about is the storage-level migration that ran before connect.
+      const servers = this.mcp.listServers();
+      resultId =
+        servers.find((s) => s.name === "http-migrate-server")?.id ?? null;
+    }
+
+    const storedIds = this.mcp
+      .listServers()
+      .filter((s) => s.name === "http-migrate-server")
+      .map((s) => s.id);
+
+    // OAuth keys should have moved from old prefix to new prefix.
+    const oldKeys = await ctx.storage.list({
+      prefix: `/${this.name}/${oldId}/`
+    });
+    const newKeys = await ctx.storage.list({
+      prefix: `/${this.name}/stable-migrated/`
+    });
+
+    return {
+      oldId,
+      resultId,
+      storedIds,
+      oldKeyCount: oldKeys.size,
+      newKeyCount: newKeys.size
+    };
+  }
+
+  // Test: caller-supplied id is normalized and used for the new server
+  async testHttpSuppliedIdIsUsed() {
+    try {
+      const result = await this.addMcpServer(
+        "http-stable",
+        "https://mcp.example.com/stable",
+        { id: "GitHub MCP!" }
+      );
+      return { ok: true, id: result.id };
+    } catch (e) {
+      // connectToServer is mocked to fail. The registered server still gets
+      // the requested id; we can read it back from storage.
+      const servers = this.mcp.listServers();
+      const server = servers.find((s) => s.name === "http-stable") ?? null;
+      return {
+        ok: false,
+        id: server?.id ?? null,
+        error: e instanceof Error ? e.message : String(e)
+      };
+    }
+  }
+
+  // Test: caller-supplied id colliding with a different (name,url) throws
+  async testHttpSuppliedIdCollision() {
+    const seededId = await this._seedServer(
+      "http-collide-a",
+      "https://mcp.example.com/a",
+      "collide"
+    );
+
+    let threw = false;
+    let message = "";
+    try {
+      await this.addMcpServer("http-collide-b", "https://mcp.example.com/b", {
+        id: "collide"
+      });
+    } catch (e) {
+      threw = true;
+      message = e instanceof Error ? e.message : String(e);
+    }
+    return { seededId, threw, message };
   }
 
   // Test: different name + same URL should NOT dedup

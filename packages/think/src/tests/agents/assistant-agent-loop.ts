@@ -27,6 +27,7 @@ class TestCollectingCallback implements StreamCallback {
   events: string[] = [];
   doneCalled = false;
   errorMessage?: string;
+  onStart(): void {}
   onEvent(json: string): void {
     this.events.push(json);
   }

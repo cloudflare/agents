@@ -76,6 +76,7 @@ export type Env = {
   RecoverySlowStreamAgent: DurableObjectNamespace<RecoverySlowStreamAgent>;
   AIChatAgentToolParent: DurableObjectNamespace<AIChatAgentToolParent>;
   AIChatAgentToolChild: DurableObjectNamespace<AIChatAgentToolChild>;
+  StuckAgentToolChild: DurableObjectNamespace<StuckAgentToolChild>;
 };
 
 export class TestChatAgent extends AIChatAgent<Env> {
@@ -2089,6 +2090,32 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   }
 }
 
+export class StuckAgentToolChild extends Agent<Env> {
+  override async _cf_initAsFacet(
+    _name: string,
+    _parentPath: ReadonlyArray<{ className: string; name: string }> = [],
+    _identityName = _name
+  ): Promise<void> {
+    await new Promise<void>(() => {
+      // Intentionally never resolves: simulates a child facet wedged in startup.
+    });
+  }
+
+  async startAgentToolRun(): Promise<AgentToolRunInspection> {
+    throw new Error("stuck child should never start");
+  }
+
+  async cancelAgentToolRun(): Promise<void> {}
+
+  async inspectAgentToolRun(): Promise<AgentToolRunInspection | null> {
+    throw new Error("stuck child should never be inspected");
+  }
+
+  async getAgentToolChunks(): Promise<AgentToolStoredChunk[]> {
+    return [];
+  }
+}
+
 type AgentToolFinishForTest = {
   run: AgentToolRunInfo;
   result: AgentToolLifecycleResult;
@@ -2233,14 +2260,28 @@ export class AIChatAgentToolParent extends Agent<Env> {
 
   private async reconcileAgentToolRunsForTest(options?: {
     deferFinishHooks?: boolean;
+    childInspectionTimeoutMs?: number;
   }): Promise<Array<() => Promise<void>>> {
     return (
       this as unknown as {
         _reconcileAgentToolRuns(options?: {
           deferFinishHooks?: boolean;
+          childInspectionTimeoutMs?: number;
         }): Promise<Array<() => Promise<void>>>;
       }
     )._reconcileAgentToolRuns(options);
+  }
+
+  private async scheduleAgentToolRunRecoveryForTest(options?: {
+    childInspectionTimeoutMs?: number;
+  }): Promise<void> {
+    await (
+      this as unknown as {
+        _scheduleAgentToolRunRecovery(options?: {
+          childInspectionTimeoutMs?: number;
+        }): Promise<void>;
+      }
+    )._scheduleAgentToolRunRecovery(options);
   }
 
   private async runDeferredAgentToolFinishHooksForTest(
@@ -2322,6 +2363,96 @@ export class AIChatAgentToolParent extends Agent<Env> {
     return { events: this.events, finishes: this.finishes };
   }
 
+  async reconcileStuckChildWithTimeoutForTest(
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    elapsedMs: number;
+    status: string | null;
+  }> {
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "StuckAgentToolChild",
+      "stuck child",
+      Date.now()
+    );
+
+    this.events = [];
+    this.finishes = [];
+    const startedAt = Date.now();
+    await this.reconcileAgentToolRunsForTest({ childInspectionTimeoutMs: 10 });
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      elapsedMs: Date.now() - startedAt,
+      status: this.getParentAgentToolStatusForTest(runId)
+    };
+  }
+
+  async scheduleStuckChildRecoveryForTest(
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    status: string | null;
+  }> {
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "StuckAgentToolChild",
+      "scheduled stuck child",
+      Date.now()
+    );
+
+    this.events = [];
+    this.finishes = [];
+    await this.scheduleAgentToolRunRecoveryForTest({
+      childInspectionTimeoutMs: 10
+    });
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      status: this.getParentAgentToolStatusForTest(runId)
+    };
+  }
+
+  async scheduleStuckChildRecoveryTwiceForTest(
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    status: string | null;
+  }> {
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "StuckAgentToolChild",
+      "single flight stuck child",
+      Date.now()
+    );
+
+    this.events = [];
+    this.finishes = [];
+    const first = this.scheduleAgentToolRunRecoveryForTest({
+      childInspectionTimeoutMs: 10
+    });
+    const second = this.scheduleAgentToolRunRecoveryForTest({
+      childInspectionTimeoutMs: 10
+    });
+    await Promise.all([first, second]);
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      status: this.getParentAgentToolStatusForTest(runId)
+    };
+  }
+
+  getParentAgentToolStatusForTest(runId: string): string | null {
+    const rows = this.sql<{ status: string }>`
+      SELECT status FROM cf_agent_tool_runs WHERE run_id = ${runId} LIMIT 1
+    `;
+    return rows[0]?.status ?? null;
+  }
+
   async reconcileCompletedChildWithDeferredFinishForTest(
     input: AgentToolInput,
     runId = crypto.randomUUID()
@@ -2396,25 +2527,26 @@ export class AIChatAgentToolParent extends Agent<Env> {
     this.events = [];
     this.finishes = [];
 
-    type BroadcastStoredChunks = (
+    type BroadcastStoredChunksFromAdapter = (
+      adapter: unknown,
       row: unknown,
       sequence: number,
       replay?: true,
       connection?: unknown
     ) => Promise<number>;
     const self = this as unknown as {
-      _broadcastAgentToolStoredChunks: BroadcastStoredChunks;
+      _broadcastAgentToolStoredChunksFromAdapter: BroadcastStoredChunksFromAdapter;
     };
-    const original = self._broadcastAgentToolStoredChunks.bind(
+    const original = self._broadcastAgentToolStoredChunksFromAdapter.bind(
       this
-    ) as BroadcastStoredChunks;
-    self._broadcastAgentToolStoredChunks = async () => {
+    ) as BroadcastStoredChunksFromAdapter;
+    self._broadcastAgentToolStoredChunksFromAdapter = async () => {
       throw new Error("test replay failure");
     };
     try {
       await this.reconcileAgentToolRunsForTest();
     } finally {
-      self._broadcastAgentToolStoredChunks = original;
+      self._broadcastAgentToolStoredChunksFromAdapter = original;
     }
 
     return { events: this.events, finishes: this.finishes };

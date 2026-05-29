@@ -6,6 +6,7 @@ export default defineConfig({
     // Run in Node.js — we spawn wrangler as a child process
     testTimeout: 120_000,
     hookTimeout: 60_000,
+    fileParallelism: false,
     include: ["src/e2e-tests/**/*.test.ts"]
   }
 });

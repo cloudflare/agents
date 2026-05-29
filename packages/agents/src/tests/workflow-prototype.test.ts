@@ -115,6 +115,33 @@ describe("AgentWorkflow prototype wrapping", () => {
       const proto = AgentWorkflow.prototype;
       expect(Object.hasOwn(proto, "_initAgent")).toBe(true);
       expect(Object.hasOwn(proto, "_wrapStep")).toBe(true);
+      expect(Object.hasOwn(proto, "extendStep")).toBe(true);
+    });
+
+    it("allows subclasses to extend wrapped steps", () => {
+      class ExtendingWorkflow extends AgentWorkflow {
+        protected override extendStep(
+          step: AgentWorkflowStep
+        ): AgentWorkflowStep {
+          return Object.assign(step, { customPrompt: true });
+        }
+      }
+
+      const proto = ExtendingWorkflow.prototype as unknown as {
+        extendStep(
+          step: AgentWorkflowStep,
+          event: AgentWorkflowEvent<unknown>
+        ): AgentWorkflowStep & { customPrompt?: boolean };
+      };
+
+      const step = {} as AgentWorkflowStep;
+      const extended = proto.extendStep(step, {
+        payload: {},
+        instanceId: "workflow-test"
+      } as AgentWorkflowEvent<unknown>);
+
+      expect(extended).toBe(step);
+      expect(extended.customPrompt).toBe(true);
     });
   });
 

@@ -93,7 +93,13 @@ import type {
   TypedToolCall,
   UIMessage
 } from "ai";
-import { convertToModelMessages, stepCountIs, streamText } from "ai";
+import {
+  convertToModelMessages,
+  jsonSchema,
+  Output,
+  stepCountIs,
+  streamText
+} from "ai";
 
 // Re-export AI SDK types that appear on Think's public lifecycle hooks
 // so users can import them from a single place.
@@ -112,7 +118,12 @@ import {
 } from "agents";
 
 const agentToolChunkEncoder = new TextEncoder();
-import type { Connection, FiberRecoveryContext, WSMessage } from "agents";
+import type {
+  Connection,
+  FiberRecoveryContext,
+  RetryOptions,
+  WSMessage
+} from "agents";
 import {
   sanitizeMessage,
   enforceRowSizeLimit,
@@ -146,6 +157,12 @@ import { Session } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
 import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "./tools/workspace";
+import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
+import type {
+  MessengerContext,
+  ThinkMessengers,
+  MessengerThinkHost
+} from "./messengers";
 
 export { Session } from "agents/experimental/memory/session";
 export { Workspace } from "@cloudflare/shell";
@@ -184,9 +201,356 @@ function shouldMarkSkippedAfterGenerationChange(
   return status === "completed";
 }
 
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+    .join(",")}}`;
+}
+
+function stableHash(value: unknown): string {
+  const input = stableStringify(value);
+  let h1 = 1779033703;
+  let h2 = 3144134277;
+  let h3 = 1013904242;
+  let h4 = 2773480762;
+  for (let i = 0; i < input.length; i++) {
+    const code = input.charCodeAt(i);
+    h1 = h2 ^ Math.imul(h1 ^ code, 597399067);
+    h2 = h3 ^ Math.imul(h2 ^ code, 2869860233);
+    h3 = h4 ^ Math.imul(h3 ^ code, 951274213);
+    h4 = h1 ^ Math.imul(h4 ^ code, 2716044179);
+  }
+  h1 = Math.imul(h3 ^ (h1 >>> 18), 597399067);
+  h2 = Math.imul(h4 ^ (h2 >>> 22), 2869860233);
+  h3 = Math.imul(h1 ^ (h3 >>> 17), 951274213);
+  h4 = Math.imul(h2 ^ (h4 >>> 19), 2716044179);
+  return [h1, h2, h3, h4]
+    .map((part) => (part >>> 0).toString(16).padStart(8, "0"))
+    .join("");
+}
+
+function validateTimezone(timezone: string): string {
+  try {
+    const formatter = new Intl.DateTimeFormat("en-US", { timeZone: timezone });
+    return formatter.resolvedOptions().timeZone;
+  } catch {
+    throw new Error(`Invalid timezone "${timezone}"`);
+  }
+}
+
+function parseTime(value: string): { hour: number; minute: number } {
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(value);
+  if (!match) {
+    throw new Error(`Invalid schedule time "${value}"; expected HH:mm`);
+  }
+  return { hour: Number(match[1]), minute: Number(match[2]) };
+}
+
+const declaredScheduleDayNumbers: Record<string, number> = {
+  sun: 0,
+  sunday: 0,
+  mon: 1,
+  monday: 1,
+  tue: 2,
+  tuesday: 2,
+  wed: 3,
+  wednesday: 3,
+  thu: 4,
+  thursday: 4,
+  fri: 5,
+  friday: 5,
+  sat: 6,
+  saturday: 6
+};
+
+function parseDeclaredTaskSchedule(
+  rawSchedule: string,
+  taskTimezone: string | undefined,
+  defaultTimezone: string | undefined
+): ParsedDeclaredSchedule {
+  const result = tryParseDeclaredTaskSchedule(
+    rawSchedule,
+    taskTimezone,
+    defaultTimezone
+  );
+  if (!result.ok) throw new Error(result.error);
+  return result.schedule;
+}
+
+function tryParseDeclaredTaskSchedule(
+  rawSchedule: string,
+  taskTimezone: string | undefined,
+  defaultTimezone: string | undefined
+): ParseDeclaredScheduleResult {
+  try {
+    return {
+      ok: true,
+      schedule: parseDeclaredTaskScheduleUnchecked(
+        rawSchedule,
+        taskTimezone,
+        defaultTimezone
+      )
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function parseDeclaredTaskScheduleUnchecked(
+  rawSchedule: string,
+  taskTimezone: string | undefined,
+  defaultTimezone: string | undefined
+): ParsedDeclaredSchedule {
+  const trimmed = rawSchedule.trim().replace(/\s+/g, " ").toLowerCase();
+  const inlineTimezoneMatch = /^(.*) in ([A-Za-z_][A-Za-z0-9_+\-/]*)$/.exec(
+    trimmed
+  );
+  const schedule = inlineTimezoneMatch?.[1] ?? trimmed;
+  const inlineTimezone = inlineTimezoneMatch?.[2];
+  if (
+    inlineTimezone &&
+    taskTimezone &&
+    validateTimezone(inlineTimezone) !== validateTimezone(taskTimezone)
+  ) {
+    throw new Error(
+      `Schedule timezone "${inlineTimezone}" does not match task timezone "${taskTimezone}"`
+    );
+  }
+
+  const intervalMatch = /^every ([1-9]\d*) (minute|minutes|hour|hours)$/.exec(
+    schedule
+  );
+  if (intervalMatch) {
+    if (inlineTimezone || taskTimezone) {
+      throw new Error("Interval schedules cannot specify a timezone");
+    }
+    const count = Number(intervalMatch[1]);
+    const unit = intervalMatch[2];
+    if (count === 1 && unit.endsWith("s")) {
+      throw new Error(`Use singular unit for "${rawSchedule}"`);
+    }
+    if (count !== 1 && !unit.endsWith("s")) {
+      throw new Error(`Use plural unit for "${rawSchedule}"`);
+    }
+    return {
+      kind: "interval",
+      intervalMs: count * (unit.startsWith("hour") ? 60 * 60_000 : 60_000),
+      normalizedSchedule: `every ${count} ${unit}`
+    };
+  }
+
+  const timezone = inlineTimezone ?? taskTimezone ?? defaultTimezone;
+  if (!timezone) {
+    throw new Error(
+      `Wall-clock schedule "${rawSchedule}" requires a timezone or getDefaultTimezone()`
+    );
+  }
+  const resolvedTimezone = validateTimezone(timezone);
+
+  const dailyMatch = /^every day at ([0-2]\d:[0-5]\d)$/.exec(schedule);
+  if (dailyMatch) {
+    const { hour, minute } = parseTime(dailyMatch[1]);
+    return {
+      kind: "wall-clock",
+      normalizedSchedule: `every day at ${dailyMatch[1]}`,
+      timezone: resolvedTimezone,
+      hour,
+      minute,
+      days: "daily"
+    };
+  }
+
+  const weekdayMatch = /^every weekday at ([0-2]\d:[0-5]\d)$/.exec(schedule);
+  if (weekdayMatch) {
+    const { hour, minute } = parseTime(weekdayMatch[1]);
+    return {
+      kind: "wall-clock",
+      normalizedSchedule: `every weekday at ${weekdayMatch[1]}`,
+      timezone: resolvedTimezone,
+      hour,
+      minute,
+      days: "weekday"
+    };
+  }
+
+  const weeklyMatch = /^every week on ([a-z,\s]+) at ([0-2]\d:[0-5]\d)$/.exec(
+    schedule
+  );
+  if (weeklyMatch) {
+    const seen = new Set<number>();
+    const days = weeklyMatch[1].split(",").map((day) => {
+      const normalized = day.trim();
+      const dayNumber = declaredScheduleDayNumbers[normalized];
+      if (dayNumber === undefined) {
+        throw new Error(`Invalid schedule day "${normalized}"`);
+      }
+      if (seen.has(dayNumber)) {
+        throw new Error(`Duplicate schedule day "${normalized}"`);
+      }
+      seen.add(dayNumber);
+      return dayNumber;
+    });
+    if (days.length === 0) {
+      throw new Error("Weekly schedule requires at least one day");
+    }
+    const { hour, minute } = parseTime(weeklyMatch[2]);
+    return {
+      kind: "wall-clock",
+      normalizedSchedule: `every week on ${weeklyMatch[1]
+        .split(",")
+        .map((day) => day.trim())
+        .join(",")} at ${weeklyMatch[2]}`,
+      timezone: resolvedTimezone,
+      hour,
+      minute,
+      days
+    };
+  }
+
+  throw new Error(`Unsupported schedule DSL "${rawSchedule}"`);
+}
+
+function getZonedParts(date: Date, timezone: string): ZonedParts {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    calendar: "iso8601",
+    numberingSystem: "latn",
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(date);
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((entry) => entry.type === type)?.value ?? "";
+  return {
+    year: Number(part("year")),
+    month: Number(part("month")),
+    day: Number(part("day")),
+    hour: Number(part("hour")),
+    minute: Number(part("minute")),
+    second: Number(part("second")),
+    weekday: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(
+      part("weekday")
+    )
+  };
+}
+
+function compareLocalParts(
+  left: Pick<ZonedParts, "year" | "month" | "day" | "hour" | "minute">,
+  right: Pick<ZonedParts, "year" | "month" | "day" | "hour" | "minute">
+): number {
+  const fields = ["year", "month", "day", "hour", "minute"] as const;
+  for (const field of fields) {
+    const diff = left[field] - right[field];
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function findZonedInstant(
+  target: Pick<ZonedParts, "year" | "month" | "day" | "hour" | "minute">,
+  timezone: string
+): Date {
+  const approximate = Date.UTC(
+    target.year,
+    target.month - 1,
+    target.day,
+    target.hour,
+    target.minute
+  );
+  const start = approximate - 14 * 60 * 60_000;
+  const end = approximate + 14 * 60 * 60_000;
+  for (let time = start; time <= end; time += 60_000) {
+    const candidate = new Date(time);
+    const parts = getZonedParts(candidate, timezone);
+    if (compareLocalParts(parts, target) === 0) return candidate;
+  }
+  for (let time = start; time <= end; time += 60_000) {
+    const candidate = new Date(time);
+    const parts = getZonedParts(candidate, timezone);
+    if (compareLocalParts(parts, target) > 0) return candidate;
+  }
+  throw new Error(`Unable to resolve local time in timezone "${timezone}"`);
+}
+
+function addLocalDays(
+  parts: Pick<ZonedParts, "year" | "month" | "day">,
+  days: number
+): Pick<ZonedParts, "year" | "month" | "day"> {
+  const date = new Date(
+    Date.UTC(parts.year, parts.month - 1, parts.day + days)
+  );
+  return {
+    year: date.getUTCFullYear(),
+    month: date.getUTCMonth() + 1,
+    day: date.getUTCDate()
+  };
+}
+
+function isAllowedWallClockDay(
+  weekday: number,
+  days: ParsedDeclaredSchedule & { kind: "wall-clock" }
+): boolean {
+  if (days.days === "daily") return true;
+  if (days.days === "weekday") return weekday >= 1 && weekday <= 5;
+  return days.days.includes(weekday);
+}
+
+function nextDeclaredScheduleTime(
+  schedule: ParsedDeclaredSchedule,
+  now: Date,
+  previousScheduledFor?: number
+): Date {
+  if (schedule.kind === "interval") {
+    let next =
+      previousScheduledFor === undefined
+        ? now.getTime() + schedule.intervalMs
+        : previousScheduledFor + schedule.intervalMs;
+    while (next <= now.getTime()) next += schedule.intervalMs;
+    return new Date(next);
+  }
+
+  const nowParts = getZonedParts(now, schedule.timezone);
+  for (let offset = 0; offset < 370; offset++) {
+    const localDate = addLocalDays(nowParts, offset);
+    const candidate = findZonedInstant(
+      {
+        ...localDate,
+        hour: schedule.hour,
+        minute: schedule.minute
+      },
+      schedule.timezone
+    );
+    const weekday = getZonedParts(candidate, schedule.timezone).weekday;
+    if (!isAllowedWallClockDay(weekday, schedule)) continue;
+    if (candidate.getTime() > now.getTime()) return candidate;
+  }
+  throw new Error("Unable to compute next scheduled task occurrence");
+}
+
 type StreamResultStatus = {
   status: Exclude<SaveMessagesResult["status"], "skipped">;
   error?: string;
+  output?: unknown;
+};
+
+type ProgrammaticMessagesResult = SaveMessagesResult & {
+  output?: unknown;
 };
 
 type ChatRecoveryRetryData = {
@@ -216,10 +580,10 @@ export interface ChatStartEvent {
 }
 
 export interface StreamCallback {
-  onStart?(event: ChatStartEvent): void | Promise<void>;
+  onStart(event: ChatStartEvent): void | Promise<void>;
   onEvent(json: string): void | Promise<void>;
   onDone(): void | Promise<void>;
-  onError?(error: string): void | Promise<void>;
+  onError(error: string): void | Promise<void>;
 }
 
 /**
@@ -230,6 +594,7 @@ export interface StreamableResult {
   toUIMessageStream(options?: {
     sendReasoning?: boolean;
   }): AsyncIterable<unknown>;
+  output?: PromiseLike<unknown>;
 }
 
 /**
@@ -270,6 +635,131 @@ type AgentToolRunInspection<Output = unknown> = {
   completedAt?: number;
 };
 
+type Digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
+type Hour = `0${Digit}` | `1${Digit}` | "20" | "21" | "22" | "23";
+type Minute = `${"0" | "1" | "2" | "3" | "4" | "5"}${Digit}`;
+export type ThinkTime = `${Hour}:${Minute}`;
+export type ThinkIntervalSchedule =
+  | `every ${number} minute${"" | "s"}`
+  | `every ${number} hour${"" | "s"}`;
+export type ThinkWallClockSchedule =
+  | `every day at ${ThinkTime}`
+  | `every weekday at ${ThinkTime}`
+  | `every week on ${string} at ${ThinkTime}`;
+export type ThinkScheduledTaskSchedule =
+  | ThinkIntervalSchedule
+  | ThinkWallClockSchedule
+  | `${ThinkWallClockSchedule} in ${string}`;
+
+export type ThinkScheduledTaskContext = {
+  taskId: string;
+  scheduledFor: number;
+  scheduledForDate: Date;
+  occurrenceKey: string;
+  idempotencyKey: string;
+  schedule: string;
+  scheduleKind: "interval" | "wall-clock";
+  timezone?: string;
+  metadata?: Record<string, unknown>;
+};
+
+type ThinkScheduledTaskPromptAction = {
+  prompt: string | (() => string | Promise<string>);
+  handler?: never;
+};
+
+type ThinkScheduledTaskHandlerAction = {
+  handler: (ctx: ThinkScheduledTaskContext) => void | Promise<void>;
+  prompt?: never;
+};
+
+type ThinkScheduledTaskBase = (
+  | ThinkScheduledTaskPromptAction
+  | ThinkScheduledTaskHandlerAction
+) & {
+  retry?: RetryOptions;
+  metadata?: Record<string, unknown>;
+};
+
+export type ThinkScheduledTask =
+  | (ThinkScheduledTaskBase & {
+      schedule: ThinkIntervalSchedule;
+      timezone?: never;
+    })
+  | (ThinkScheduledTaskBase & {
+      schedule: ThinkWallClockSchedule;
+      timezone?: string;
+    })
+  | (ThinkScheduledTaskBase & {
+      schedule: `${ThinkWallClockSchedule} in ${string}`;
+      timezone?: string;
+    });
+
+export type ThinkScheduledTasks = Record<string, ThinkScheduledTask>;
+
+export function defineScheduledTasks<const T extends ThinkScheduledTasks>(
+  tasks: T
+): T {
+  return tasks;
+}
+
+type ParsedDeclaredSchedule =
+  | {
+      kind: "interval";
+      intervalMs: number;
+      normalizedSchedule: string;
+    }
+  | {
+      kind: "wall-clock";
+      normalizedSchedule: string;
+      timezone: string;
+      hour: number;
+      minute: number;
+      days: "daily" | "weekday" | number[];
+    };
+
+type ParseDeclaredScheduleResult =
+  | { ok: true; schedule: ParsedDeclaredSchedule }
+  | { ok: false; error: string };
+
+type NormalizedDeclaredTask = {
+  taskId: string;
+  prompt?: ThinkScheduledTaskPromptAction["prompt"];
+  handler?: ThinkScheduledTaskHandlerAction["handler"];
+  schedule: ParsedDeclaredSchedule;
+  retry?: RetryOptions;
+  metadata?: Record<string, unknown>;
+  scheduleHash: string;
+  taskHash: string;
+};
+
+type DeclaredScheduledTaskRow = {
+  owner_key: string;
+  task_id: string;
+  schedule_hash: string;
+  task_hash: string;
+  schedule_id: string | null;
+  next_run_at: number | null;
+  created_at: number;
+  updated_at: number;
+};
+
+type DeclaredScheduledTaskPayload = {
+  taskId: string;
+  scheduleHash: string;
+  scheduledFor: number;
+};
+
+type ZonedParts = {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+  weekday: number;
+};
+
 type AgentToolStoredChunk = {
   sequence: number;
   body: string;
@@ -288,6 +778,21 @@ export type SubmitMessagesOptions = {
   idempotencyKey?: string;
   metadata?: Record<string, unknown>;
 };
+
+type ThinkWorkflowPromptContext = {
+  workflow: {
+    name: string;
+    id: string;
+    stepName: string;
+    eventType: string;
+  };
+  output?: {
+    schema: unknown;
+  };
+  fingerprint?: string;
+};
+
+const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
 
 export type ThinkSubmissionInspection = {
   submissionId: string;
@@ -331,6 +836,20 @@ type ThinkSubmissionRow = {
   completed_at: number | null;
 };
 
+type ThinkWorkflowNotificationRow = {
+  notification_id: string;
+  submission_id: string;
+  workflow_name: string;
+  workflow_id: string;
+  event_type: string;
+  payload_json: string;
+  attempts: number;
+  last_error: string | null;
+  created_at: number;
+  updated_at: number;
+  delivered_at: number | null;
+};
+
 // Lifecycle / result types are shared with `@cloudflare/ai-chat` via
 // `agents/chat`. Re-exported from Think so subclasses can import them
 // from `@cloudflare/think` directly.
@@ -364,6 +883,8 @@ export interface TurnInput {
   clientTools?: ClientToolSchema[];
   /** Custom body fields from the client request. */
   body?: Record<string, unknown>;
+  /** Internal workflow prompt configuration, never sourced from client body. */
+  workflowPrompt?: ThinkWorkflowPromptContext;
   /** Whether this is a continuation turn (auto-continue after tool result, recovery). */
   continuation: boolean;
 }
@@ -698,6 +1219,10 @@ export class Think<
   /** Cached messages — kept in sync with session storage. */
   private _cachedMessages: UIMessage[] = [];
 
+  private _activeMessengerContext?: MessengerContext;
+
+  private _messengerRuntime?: ThinkMessengerRuntime;
+
   /**
    * WorkerLoader binding for sandboxed extensions.
    * Set this to enable `getExtensions()` and dynamic extension loading.
@@ -786,14 +1311,21 @@ export class Think<
       this._restoreClientTools();
       this._restoreBody();
       this._setupProtocolHandlers();
+      this._initializeMessengers();
 
       // 8. User's onStart
       await _onStart();
 
-      // 9. Durable submissions may run user-defined model/hooks, so start them
+      // 9. Declarative scheduled tasks are code-defined and should reconcile
+      // before draining any recovered programmatic work they may enqueue.
+      await this._reconcileDeclaredScheduledTasks();
+
+      // 10. Durable submissions may run user-defined model/hooks, so start them
       // after subclass initialization has completed.
       await this._recoverSubmissionsOnStart();
+      this._recoverWorkflowNotifications();
       this._startSubmissionDrain();
+      this._startWorkflowNotificationDrain();
     };
   }
 
@@ -902,7 +1434,7 @@ export class Think<
   private _pendingResumeConnections: Set<string> = new Set();
   private _lastClientTools: ClientToolSchema[] | undefined;
   private _lastBody: Record<string, unknown> | undefined;
-  private _continuation = new ContinuationState();
+  private _continuation = new ContinuationState<Connection>();
   private _continuationTimer: ReturnType<typeof setTimeout> | null = null;
   private _insideResponseHook = false;
   private _insideInferenceLoop = false;
@@ -921,7 +1453,10 @@ export class Think<
   private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
   private _agentToolLiveSequences = new Map<string, number>();
   private _submissionTableEnsured = false;
+  private _workflowNotificationTableEnsured = false;
+  private _declaredScheduledTasksTableEnsured = false;
   private _drainingSubmissions = false;
+  private _drainingWorkflowNotifications = false;
   private _submissionAbortControllers = new Map<string, AbortController>();
   private _programmaticStreamErrors = new Map<string, string>();
   protected static submissionRecoveryStaleMs = 15 * 60 * 1000;
@@ -959,6 +1494,11 @@ export class Think<
       }
     }
     super.broadcast(msg, without);
+  }
+
+  override async alarm(): Promise<void> {
+    await super.alarm();
+    this._startWorkflowNotificationDrain();
   }
 
   // ── Dynamic config ──────────────────────────────────────────────
@@ -1104,6 +1644,76 @@ export class Think<
   /** Return the tools available to the assistant. */
   getTools(): ToolSet {
     return {};
+  }
+
+  /** Return messenger integrations that should be routed through this Think agent. */
+  getMessengers(): ThinkMessengers {
+    return {};
+  }
+
+  getMessengerContext(): MessengerContext | undefined {
+    if (this._activeMessengerContext) {
+      return this._activeMessengerContext;
+    }
+
+    const message = this.messages.at(-1) as
+      | (UIMessage & { metadata?: { messenger?: MessengerContext } })
+      | undefined;
+    return message?.metadata?.messenger;
+  }
+
+  async chatWithMessengerContext(
+    userMessage: string | UIMessage,
+    callback: StreamCallback,
+    context: MessengerContext,
+    options?: ChatOptions
+  ): Promise<void> {
+    const previous = this._activeMessengerContext;
+    this._activeMessengerContext = context;
+    try {
+      await this.chat(userMessage, callback, options);
+    } finally {
+      this._activeMessengerContext = previous;
+    }
+  }
+
+  private _initializeMessengers(): void {
+    if (this.parentPath.length > 0) {
+      return;
+    }
+
+    const messengers = this.getMessengers();
+    if (Object.keys(messengers).length === 0) {
+      return;
+    }
+
+    this._messengerRuntime = new ThinkMessengerRuntime(
+      messengers,
+      this as unknown as MessengerThinkHost
+    );
+    this._messengerRuntime.initialize();
+  }
+
+  /** Return code-declared scheduled tasks for this agent. */
+  getScheduledTasks(): ThinkScheduledTasks | Promise<ThinkScheduledTasks> {
+    return {};
+  }
+
+  /**
+   * Reconcile code-declared scheduled tasks immediately.
+   * Static declarations are reconciled on startup automatically; call this
+   * after changing app-owned data that `getScheduledTasks()` reads.
+   */
+  async internal_reconcileScheduledTasks(): Promise<void> {
+    await this._reconcileDeclaredScheduledTasks();
+  }
+
+  /**
+   * Return the default timezone for wall-clock scheduled tasks.
+   * Task-local timezone declarations take precedence.
+   */
+  getDefaultTimezone(): string | undefined | Promise<string | undefined> {
+    return undefined;
   }
 
   private async _runChatRecoveryFiber<T>(
@@ -1549,6 +2159,12 @@ export class Think<
 
     const subclassConfig = (await this.beforeTurn(ctx)) ?? {};
     const config = await this._pipelineExtensionBeforeTurn(ctx, subclassConfig);
+    const workflowPrompt = input.workflowPrompt;
+    const workflowOutput = workflowPrompt?.output
+      ? Output.object({
+          schema: jsonSchema(workflowPrompt.output.schema as never)
+        })
+      : undefined;
 
     const finalModel = config.model ?? model;
     const finalSystem =
@@ -1569,6 +2185,7 @@ export class Think<
     const finalTools: ToolSet = this._wrapToolsWithDecision(mergedTools);
     const finalMaxSteps = config.maxSteps ?? this.maxSteps;
     const finalSendReasoning = config.sendReasoning ?? this.sendReasoning;
+    const finalOutput = workflowOutput ?? config.output;
     const finalStopWhen = [
       stepCountIs(finalMaxSteps),
       ...(Array.isArray(config.stopWhen)
@@ -1604,7 +2221,7 @@ export class Think<
       // Forward the per-turn structured-output spec from TurnConfig so
       // callers can use AI SDK `Output.object({ schema })` / `Output.text()`
       // on the terminal turn without dropping tools at model construction.
-      output: config.output,
+      output: finalOutput,
       abortSignal: input.signal,
       // Forward the AI SDK's `prepareStep` callback unchanged so subclasses
       // can make per-step decisions from the previous steps, current
@@ -1663,9 +2280,19 @@ export class Think<
       }) satisfies StreamTextOnToolCallFinishCallback<ToolSet>
     });
 
+    const outputPromise =
+      finalOutput && result.output ? Promise.resolve(result.output) : undefined;
+    if (outputPromise) {
+      // Attach a rejection observer immediately. `_streamResult()` will still
+      // await this promise when captureOutput is enabled, but aborted streams can
+      // reject before the stream consumer reaches that point.
+      void outputPromise.catch(() => {});
+    }
+
     const streamResult = {
       toUIMessageStream: () =>
-        result.toUIMessageStream({ sendReasoning: finalSendReasoning })
+        result.toUIMessageStream({ sendReasoning: finalSendReasoning }),
+      output: outputPromise
     } satisfies StreamableResult;
 
     return this._transformInferenceResult(streamResult);
@@ -2154,7 +2781,7 @@ export class Think<
     }
 
     try {
-      await callback.onStart?.({ requestId });
+      await callback.onStart({ requestId });
       await this.keepAliveWhile(async () => {
         await this._turnQueue.enqueue(requestId, async () => {
           const userMsg: UIMessage =
@@ -2189,11 +2816,8 @@ export class Think<
               const wrapped = this.onChatError(error);
               const errorMessage =
                 wrapped instanceof Error ? wrapped.message : String(wrapped);
-              if (callback.onError) {
-                await callback.onError(errorMessage);
-                return;
-              }
-              throw wrapped;
+              await callback.onError(errorMessage);
+              return;
             }
 
             await this._streamResultToRpcCallback(
@@ -2542,6 +3166,441 @@ export class Think<
     return null;
   }
 
+  // ── Declarative scheduled tasks ─────────────────────────────────
+
+  private _ensureDeclaredScheduledTasksTable(): void {
+    if (this._declaredScheduledTasksTableEnsured) return;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_think_scheduled_tasks (
+        owner_key TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        schedule_hash TEXT NOT NULL,
+        task_hash TEXT NOT NULL,
+        schedule_id TEXT,
+        next_run_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (owner_key, task_id)
+      )
+    `;
+    this._declaredScheduledTasksTableEnsured = true;
+  }
+
+  private _readDeclaredScheduledTaskRow(
+    taskId: string
+  ): DeclaredScheduledTaskRow | null {
+    this._ensureDeclaredScheduledTasksTable();
+    const ownerKey = this._declaredScheduleOwnerKey();
+    const rows = this.sql<DeclaredScheduledTaskRow>`
+      SELECT owner_key, task_id, schedule_hash, task_hash, schedule_id,
+             next_run_at, created_at, updated_at
+      FROM cf_think_scheduled_tasks
+      WHERE task_id = ${taskId}
+        AND owner_key = ${ownerKey}
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  }
+
+  private _listDeclaredScheduledTaskRows(): DeclaredScheduledTaskRow[] {
+    this._ensureDeclaredScheduledTasksTable();
+    const ownerKey = this._declaredScheduleOwnerKey();
+    return this.sql<DeclaredScheduledTaskRow>`
+      SELECT owner_key, task_id, schedule_hash, task_hash, schedule_id,
+             next_run_at, created_at, updated_at
+      FROM cf_think_scheduled_tasks
+      WHERE owner_key = ${ownerKey}
+      ORDER BY task_id ASC
+    `;
+  }
+
+  private _updateDeclaredScheduledTaskSchedule(
+    task: NormalizedDeclaredTask,
+    ownerKey: string,
+    scheduled: { scheduleId: string; scheduledFor: number },
+    updatedAt = Date.now()
+  ): void {
+    this.sql`
+      UPDATE cf_think_scheduled_tasks
+      SET schedule_hash = ${task.scheduleHash},
+          task_hash = ${task.taskHash},
+          schedule_id = ${scheduled.scheduleId},
+          next_run_at = ${scheduled.scheduledFor},
+          updated_at = ${updatedAt}
+      WHERE owner_key = ${ownerKey}
+        AND task_id = ${task.taskId}
+    `;
+  }
+
+  private async _normalizeDeclaredScheduledTasks(
+    tasks: ThinkScheduledTasks,
+    defaultTimezone: string | undefined
+  ): Promise<Map<string, NormalizedDeclaredTask>> {
+    const normalized = new Map<string, NormalizedDeclaredTask>();
+    for (const [taskId, task] of Object.entries(tasks)) {
+      if (!/^[A-Za-z0-9_-]+$/.test(taskId)) {
+        throw new Error(
+          `Invalid scheduled task id "${taskId}"; use letters, numbers, "_" or "-"`
+        );
+      }
+      const schedule = parseDeclaredTaskSchedule(
+        task.schedule,
+        task.timezone,
+        defaultTimezone
+      );
+      const hasPrompt = "prompt" in task && task.prompt !== undefined;
+      const hasHandler = "handler" in task && task.handler !== undefined;
+      if (hasPrompt === hasHandler) {
+        throw new Error(
+          `Scheduled task "${taskId}" must define exactly one of prompt or handler`
+        );
+      }
+      const scheduleHash = stableHash({
+        schedule,
+        retry: task.retry
+      });
+      const actionHash = hasPrompt
+        ? {
+            type: "prompt",
+            value: typeof task.prompt === "string" ? task.prompt : "<function>"
+          }
+        : { type: "handler" };
+      const taskHash = stableHash({
+        scheduleHash,
+        action: actionHash,
+        metadata: task.metadata
+      });
+      normalized.set(taskId, {
+        taskId,
+        ...(hasPrompt ? { prompt: task.prompt } : {}),
+        ...(hasHandler ? { handler: task.handler } : {}),
+        schedule,
+        retry: task.retry,
+        metadata: task.metadata,
+        scheduleHash,
+        taskHash
+      });
+    }
+    return normalized;
+  }
+
+  private async _declaredScheduledTasksForNow(): Promise<
+    Map<string, NormalizedDeclaredTask>
+  > {
+    const defaultTimezone = await this.getDefaultTimezone();
+    const resolvedDefaultTimezone =
+      defaultTimezone === undefined
+        ? undefined
+        : validateTimezone(defaultTimezone);
+    return this._normalizeDeclaredScheduledTasks(
+      await this.getScheduledTasks(),
+      resolvedDefaultTimezone
+    );
+  }
+
+  private _declaredScheduleOwnerKey(): string {
+    return stableHash(this.selfPath);
+  }
+
+  private _declaredScheduleValidationError(
+    rawSchedule: string,
+    taskTimezone?: string,
+    defaultTimezone?: string
+  ): string | null {
+    const resolvedDefaultTimezone =
+      defaultTimezone === undefined
+        ? undefined
+        : validateTimezone(defaultTimezone);
+    const result = tryParseDeclaredTaskSchedule(
+      rawSchedule,
+      taskTimezone,
+      resolvedDefaultTimezone
+    );
+    return result.ok ? null : result.error;
+  }
+
+  private _nextDeclaredScheduleTimeForConfig(
+    rawSchedule: string,
+    now: Date,
+    options: {
+      taskTimezone?: string;
+      defaultTimezone?: string;
+      previousScheduledFor?: number;
+    } = {}
+  ): Date {
+    const resolvedDefaultTimezone =
+      options.defaultTimezone === undefined
+        ? undefined
+        : validateTimezone(options.defaultTimezone);
+    return nextDeclaredScheduleTime(
+      parseDeclaredTaskSchedule(
+        rawSchedule,
+        options.taskTimezone,
+        resolvedDefaultTimezone
+      ),
+      now,
+      options.previousScheduledFor
+    );
+  }
+
+  private async _reconcileDeclaredScheduledTasks(): Promise<void> {
+    const tasks = await this._declaredScheduledTasksForNow();
+    this._ensureDeclaredScheduledTasksTable();
+    const ownerKey = this._declaredScheduleOwnerKey();
+    const now = Date.now();
+    const existing = this._listDeclaredScheduledTaskRows();
+    const seen = new Set<string>();
+
+    for (const [taskId, task] of tasks) {
+      seen.add(taskId);
+      const row = existing.find((candidate) => candidate.task_id === taskId);
+      if (!row) {
+        this.sql`
+          INSERT INTO cf_think_scheduled_tasks (
+            owner_key, task_id, schedule_hash, task_hash, schedule_id,
+            next_run_at, created_at, updated_at
+          )
+          VALUES (
+            ${ownerKey}, ${taskId}, ${task.scheduleHash}, ${task.taskHash},
+            NULL, NULL, ${now}, ${now}
+          )
+        `;
+        const scheduled = await this._scheduleDeclaredTaskOccurrence(
+          task,
+          new Date(now)
+        );
+        this._updateDeclaredScheduledTaskSchedule(
+          task,
+          ownerKey,
+          scheduled,
+          now
+        );
+        continue;
+      }
+
+      if (row.schedule_hash !== task.scheduleHash) {
+        if (row.schedule_id) await this.cancelSchedule(row.schedule_id);
+        this.sql`
+          UPDATE cf_think_scheduled_tasks
+          SET schedule_hash = ${task.scheduleHash},
+              task_hash = ${task.taskHash},
+              schedule_id = NULL,
+              next_run_at = NULL,
+              updated_at = ${now}
+          WHERE owner_key = ${ownerKey}
+            AND task_id = ${taskId}
+        `;
+        const scheduled = await this._scheduleDeclaredTaskOccurrence(
+          task,
+          new Date(now)
+        );
+        this._updateDeclaredScheduledTaskSchedule(
+          task,
+          ownerKey,
+          scheduled,
+          now
+        );
+        continue;
+      }
+
+      if (!row.schedule_id) {
+        const scheduled =
+          row.next_run_at === null
+            ? await this._scheduleDeclaredTaskOccurrence(task, new Date(now))
+            : await this._scheduleDeclaredTaskOccurrenceAt(
+                task,
+                row.next_run_at
+              );
+        this._updateDeclaredScheduledTaskSchedule(
+          task,
+          ownerKey,
+          scheduled,
+          now
+        );
+        continue;
+      }
+
+      if (row.schedule_id) {
+        const schedule = await this.getScheduleById(row.schedule_id);
+        if (!schedule) {
+          const scheduled =
+            row.next_run_at === null
+              ? await this._scheduleDeclaredTaskOccurrence(task, new Date(now))
+              : await this._scheduleDeclaredTaskOccurrenceAt(
+                  task,
+                  row.next_run_at
+                );
+          this._updateDeclaredScheduledTaskSchedule(
+            task,
+            ownerKey,
+            scheduled,
+            now
+          );
+          continue;
+        }
+      }
+
+      if (row.task_hash !== task.taskHash) {
+        this.sql`
+          UPDATE cf_think_scheduled_tasks
+          SET task_hash = ${task.taskHash}, updated_at = ${now}
+          WHERE owner_key = ${ownerKey}
+            AND task_id = ${taskId}
+        `;
+      }
+    }
+
+    for (const row of existing) {
+      if (seen.has(row.task_id)) continue;
+      if (row.schedule_id) await this.cancelSchedule(row.schedule_id);
+      this.sql`
+        DELETE FROM cf_think_scheduled_tasks
+        WHERE owner_key = ${ownerKey}
+          AND task_id = ${row.task_id}
+      `;
+    }
+  }
+
+  private async _scheduleDeclaredTaskOccurrence(
+    task: NormalizedDeclaredTask,
+    now: Date,
+    previousScheduledFor?: number
+  ): Promise<{ scheduleId: string; scheduledFor: number }> {
+    const next = nextDeclaredScheduleTime(
+      task.schedule,
+      now,
+      previousScheduledFor
+    );
+    return this._scheduleDeclaredTaskOccurrenceAt(task, next.getTime());
+  }
+
+  private async _scheduleDeclaredTaskOccurrenceAt(
+    task: NormalizedDeclaredTask,
+    scheduledFor: number
+  ): Promise<{ scheduleId: string; scheduledFor: number }> {
+    const schedule = await this.schedule<DeclaredScheduledTaskPayload>(
+      new Date(scheduledFor),
+      "_runDeclaredScheduledTask",
+      {
+        taskId: task.taskId,
+        scheduleHash: task.scheduleHash,
+        scheduledFor
+      },
+      { idempotent: true }
+    );
+    return { scheduleId: schedule.id, scheduledFor };
+  }
+
+  private async _advanceDeclaredScheduledTask(
+    task: NormalizedDeclaredTask,
+    payload: DeclaredScheduledTaskPayload,
+    ownerKey: string
+  ): Promise<void> {
+    const scheduled = await this._scheduleDeclaredTaskOccurrence(
+      task,
+      new Date(),
+      payload.scheduledFor
+    );
+    this._updateDeclaredScheduledTaskSchedule(task, ownerKey, scheduled);
+  }
+
+  private _declaredScheduledTaskContext(
+    task: NormalizedDeclaredTask,
+    payload: DeclaredScheduledTaskPayload,
+    ownerKey: string
+  ): ThinkScheduledTaskContext {
+    const occurrenceKey = `${payload.taskId}:${payload.scheduledFor}`;
+    return {
+      taskId: payload.taskId,
+      scheduledFor: payload.scheduledFor,
+      scheduledForDate: new Date(payload.scheduledFor),
+      occurrenceKey,
+      idempotencyKey: `think-schedule:${ownerKey}:${occurrenceKey}`,
+      schedule: task.schedule.normalizedSchedule,
+      scheduleKind: task.schedule.kind,
+      ...(task.schedule.kind === "wall-clock" && {
+        timezone: task.schedule.timezone
+      }),
+      ...(task.metadata !== undefined && { metadata: task.metadata })
+    };
+  }
+
+  async _runDeclaredScheduledTask(
+    payload: DeclaredScheduledTaskPayload
+  ): Promise<void> {
+    if (
+      !payload ||
+      typeof payload.taskId !== "string" ||
+      typeof payload.scheduleHash !== "string" ||
+      typeof payload.scheduledFor !== "number"
+    ) {
+      throw new Error("Invalid declared scheduled task payload");
+    }
+
+    const row = this._readDeclaredScheduledTaskRow(payload.taskId);
+    if (!row || row.schedule_hash !== payload.scheduleHash) return;
+    if (row.next_run_at !== null && row.next_run_at > payload.scheduledFor) {
+      return;
+    }
+
+    const tasks = await this._declaredScheduledTasksForNow();
+    const task = tasks.get(payload.taskId);
+    if (!task || task.scheduleHash !== payload.scheduleHash) return;
+
+    const ownerKey = this._declaredScheduleOwnerKey();
+    const context = this._declaredScheduledTaskContext(task, payload, ownerKey);
+
+    let actionError: unknown;
+    try {
+      await this.retry(async () => {
+        if (task.prompt !== undefined) {
+          const prompt =
+            typeof task.prompt === "function"
+              ? await task.prompt()
+              : task.prompt;
+          await this.submitMessages(
+            [
+              {
+                id: crypto.randomUUID(),
+                role: "user",
+                parts: [{ type: "text", text: prompt }]
+              }
+            ],
+            {
+              idempotencyKey: context.idempotencyKey,
+              metadata: {
+                ...task.metadata,
+                source: "scheduled-task",
+                ownerKey,
+                taskId: payload.taskId,
+                scheduledFor: payload.scheduledFor,
+                schedule: task.schedule.normalizedSchedule
+              }
+            }
+          );
+        } else {
+          await task.handler?.(context);
+        }
+      }, task.retry);
+    } catch (error) {
+      actionError = error;
+    } finally {
+      await this._advanceDeclaredScheduledTask(task, payload, ownerKey);
+    }
+
+    if (actionError !== undefined) {
+      console.error(
+        `[Think] Scheduled task "${payload.taskId}" failed; next occurrence was still scheduled`,
+        actionError
+      );
+      try {
+        await this.onError(actionError);
+      } catch {
+        // Preserve recurrence even if user error handling fails.
+      }
+    }
+  }
+
   // ── Durable programmatic submissions ───────────────────────────
 
   private _ensureSubmissionTable(): void {
@@ -2575,6 +3634,40 @@ export class Think<
       ON cf_think_submissions (status, completed_at, created_at)
     `;
     this._submissionTableEnsured = true;
+  }
+
+  private _ensureWorkflowNotificationTable(): void {
+    if (this._workflowNotificationTableEnsured) return;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_think_workflow_notifications (
+        notification_id TEXT PRIMARY KEY,
+        submission_id TEXT NOT NULL,
+        workflow_name TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        delivered_at INTEGER
+      )
+    `;
+    try {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE cf_think_workflow_notifications ADD COLUMN delivered_at INTEGER"
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.toLowerCase().includes("duplicate column")) {
+        throw error;
+      }
+    }
+    this.sql`
+      CREATE INDEX IF NOT EXISTS cf_think_workflow_notifications_created_idx
+      ON cf_think_workflow_notifications (delivered_at, created_at, notification_id)
+    `;
+    this._workflowNotificationTableEnsured = true;
   }
 
   private _readSubmission(submissionId: string): ThinkSubmissionRow | null {
@@ -2711,7 +3804,64 @@ export class Think<
     return metadata === undefined ? null : JSON.stringify(metadata);
   }
 
-  private async _emitSubmissionStatus(row: ThinkSubmissionRow): Promise<void> {
+  private _readWorkflowPromptContext(
+    metadata: Record<string, unknown> | null
+  ): ThinkWorkflowPromptContext | null {
+    const workflowPromptValue = metadata?.[THINK_WORKFLOW_PROMPT_METADATA_KEY];
+    if (
+      workflowPromptValue === null ||
+      typeof workflowPromptValue !== "object" ||
+      Array.isArray(workflowPromptValue)
+    ) {
+      return null;
+    }
+    const workflowPrompt = workflowPromptValue as Record<string, unknown>;
+    const workflowValue = workflowPrompt.workflow;
+    if (
+      workflowValue === null ||
+      typeof workflowValue !== "object" ||
+      Array.isArray(workflowValue)
+    ) {
+      return null;
+    }
+    const workflowRecord = workflowValue as Record<string, unknown>;
+    if (
+      typeof workflowRecord.name !== "string" ||
+      typeof workflowRecord.id !== "string" ||
+      typeof workflowRecord.stepName !== "string" ||
+      typeof workflowRecord.eventType !== "string"
+    ) {
+      return null;
+    }
+    const output = workflowPrompt.output;
+    const outputRecord =
+      output !== null && typeof output === "object" && !Array.isArray(output)
+        ? (output as Record<string, unknown>)
+        : null;
+    return {
+      workflow: {
+        name: workflowRecord.name,
+        id: workflowRecord.id,
+        stepName: workflowRecord.stepName,
+        eventType: workflowRecord.eventType
+      },
+      ...(outputRecord
+        ? {
+            output: {
+              schema: outputRecord.schema
+            }
+          }
+        : {}),
+      ...(typeof workflowPrompt.fingerprint === "string" && {
+        fingerprint: workflowPrompt.fingerprint
+      })
+    };
+  }
+
+  private async _emitSubmissionStatus(
+    row: ThinkSubmissionRow,
+    output?: unknown
+  ): Promise<void> {
     const inspection = this._inspectionFromSubmissionRow(row);
     this._emit("submission:status", {
       submissionId: inspection.submissionId,
@@ -2725,6 +3875,9 @@ export class Think<
         error: inspection.error
       });
     }
+    if (this._isTerminalSubmissionStatus(inspection.status)) {
+      await this._enqueueWorkflowNotification(inspection, output);
+    }
     await this.keepAliveWhile(async () => {
       try {
         await this.onSubmissionStatus(inspection);
@@ -2737,6 +3890,170 @@ export class Think<
   protected onSubmissionStatus(
     _submission: ThinkSubmissionInspection
   ): void | Promise<void> {}
+
+  private async _enqueueWorkflowNotification(
+    submission: ThinkSubmissionInspection,
+    output?: unknown
+  ): Promise<void> {
+    this._insertWorkflowNotification(submission, output);
+    this._startWorkflowNotificationDrain();
+  }
+
+  private _insertWorkflowNotification(
+    submission: ThinkSubmissionInspection,
+    output?: unknown,
+    override?: { status: ThinkSubmissionStatus; error: string }
+  ): boolean {
+    const workflowPrompt = this._readWorkflowPromptContext(
+      submission.metadata ?? null
+    );
+    if (!workflowPrompt) return false;
+
+    this._ensureWorkflowNotificationTable();
+    const now = Date.now();
+    const status = override?.status ?? submission.status;
+    const error = override?.error ?? submission.error;
+    const payload = {
+      submissionId: submission.submissionId,
+      status,
+      ...(status === "completed" && { output }),
+      ...(error && { error })
+    };
+    this.sql`
+      INSERT OR IGNORE INTO cf_think_workflow_notifications (
+        notification_id, submission_id, workflow_name, workflow_id, event_type,
+        payload_json, attempts, last_error, created_at, updated_at, delivered_at
+      )
+      VALUES (
+        ${`${submission.submissionId}:${workflowPrompt.workflow.eventType}`},
+        ${submission.submissionId},
+        ${workflowPrompt.workflow.name},
+        ${workflowPrompt.workflow.id},
+        ${workflowPrompt.workflow.eventType},
+        ${JSON.stringify(payload)},
+        0,
+        NULL,
+        ${now},
+        ${now},
+        NULL
+      )
+    `;
+    return true;
+  }
+
+  private _recoverWorkflowNotifications(): void {
+    this._ensureSubmissionTable();
+    this._ensureWorkflowNotificationTable();
+    const terminalRows = this.sql<ThinkSubmissionRow>`
+      SELECT submission_id, idempotency_key, request_id, stream_id, status,
+             messages_json, metadata_json, error_message, created_at,
+             messages_applied_at, started_at, completed_at
+      FROM cf_think_submissions
+      WHERE status IN ('aborted', 'skipped', 'error')
+      ORDER BY completed_at DESC, created_at DESC
+      LIMIT 100
+    `;
+
+    let recovered = false;
+    for (const row of terminalRows) {
+      const inspection = this._inspectionFromSubmissionRow(row);
+      const workflowPrompt = this._readWorkflowPromptContext(
+        inspection.metadata ?? null
+      );
+      if (!workflowPrompt) continue;
+      const notificationId = `${inspection.submissionId}:${workflowPrompt.workflow.eventType}`;
+      const existing = this.sql<{ notification_id: string }>`
+        SELECT notification_id
+        FROM cf_think_workflow_notifications
+        WHERE notification_id = ${notificationId}
+        LIMIT 1
+      `;
+      if (existing[0]) continue;
+
+      recovered = this._insertWorkflowNotification(inspection) || recovered;
+    }
+    if (recovered) this._startWorkflowNotificationDrain();
+  }
+
+  private _startWorkflowNotificationDrain(): void {
+    void this.keepAliveWhile(() => this._drainWorkflowNotifications()).catch(
+      (error) => {
+        console.error("[Think] Failed to drain workflow notifications", error);
+        void this._scheduleWorkflowNotificationAlarm();
+      }
+    );
+  }
+
+  private async _drainWorkflowNotifications(): Promise<void> {
+    if (this._drainingWorkflowNotifications) return;
+    this._ensureWorkflowNotificationTable();
+    this._drainingWorkflowNotifications = true;
+    try {
+      const rows = this.sql<ThinkWorkflowNotificationRow>`
+        SELECT notification_id, submission_id, workflow_name, workflow_id,
+               event_type, payload_json, attempts, last_error, created_at,
+               updated_at, delivered_at
+        FROM cf_think_workflow_notifications
+        WHERE delivered_at IS NULL
+        ORDER BY created_at ASC, notification_id ASC
+        LIMIT 25
+      `;
+      for (const row of rows) {
+        try {
+          const payload = JSON.parse(row.payload_json) as unknown;
+          await this.sendWorkflowEvent(
+            row.workflow_name as string & {},
+            row.workflow_id,
+            {
+              type: row.event_type,
+              payload
+            }
+          );
+          this.sql`
+            UPDATE cf_think_workflow_notifications
+            SET payload_json = '{}',
+                last_error = NULL,
+                updated_at = ${Date.now()},
+                delivered_at = ${Date.now()}
+            WHERE notification_id = ${row.notification_id}
+              AND delivered_at IS NULL
+          `;
+        } catch (error) {
+          this.sql`
+            UPDATE cf_think_workflow_notifications
+            SET attempts = attempts + 1,
+                last_error = ${error instanceof Error ? error.message : String(error)},
+                updated_at = ${Date.now()}
+            WHERE notification_id = ${row.notification_id}
+          `;
+        }
+      }
+    } finally {
+      this._drainingWorkflowNotifications = false;
+    }
+    await this._scheduleWorkflowNotificationAlarm();
+  }
+
+  private async _scheduleWorkflowNotificationAlarm(): Promise<void> {
+    this._ensureWorkflowNotificationTable();
+    const pending = this.sql<{ attempts: number }>`
+      SELECT attempts
+      FROM cf_think_workflow_notifications
+      WHERE delivered_at IS NULL
+      ORDER BY created_at ASC, notification_id ASC
+      LIMIT 1
+    `;
+    if (!pending[0]) return;
+    const delayMs = Math.min(
+      5 * 60 * 1000,
+      1000 * 2 ** Math.min(pending[0].attempts, 8)
+    );
+    const nextAlarm = Date.now() + delayMs;
+    const existingAlarm = await this.ctx.storage.getAlarm();
+    if (existingAlarm === null || existingAlarm > nextAlarm) {
+      await this.ctx.storage.setAlarm(nextAlarm);
+    }
+  }
 
   async inspectSubmission(
     submissionId: string
@@ -3031,14 +4348,19 @@ export class Think<
 
     const controller = new AbortController();
     this._submissionAbortControllers.set(row.submission_id, controller);
+    let output: unknown;
     try {
       const messages = this._parseSubmissionMessages(row.messages_json);
+      const metadata = this._parseJsonObject(row.metadata_json);
+      const workflowPrompt = this._readWorkflowPromptContext(metadata);
       const result = await this._runProgrammaticMessagesTurn(
         requestId,
         messages,
         {
           signal: controller.signal,
           captureProgrammaticStreamError: true,
+          captureOutput: Boolean(workflowPrompt?.output),
+          workflowPrompt: workflowPrompt ?? undefined,
           onMessagesApplied: () => {
             this.sql`
               UPDATE cf_think_submissions
@@ -3050,6 +4372,7 @@ export class Think<
           }
         }
       );
+      output = result.output;
       const streamId =
         this._resumableStream
           .getAllStreamMetadata()
@@ -3061,31 +4384,56 @@ export class Think<
         result.error ?? streamError
       );
       const errorMessage = result.error ?? streamError ?? null;
-      this.sql`
-        UPDATE cf_think_submissions
-        SET status = ${finalStatus},
-            request_id = ${result.requestId},
-            stream_id = ${streamId},
-            error_message = ${finalStatus === "error" ? errorMessage : null},
-            completed_at = ${Date.now()}
-        WHERE submission_id = ${row.submission_id}
-          AND status = 'running'
-      `;
+      const completedAt = Date.now();
+      this.ctx.storage.transactionSync(() => {
+        this.sql`
+          UPDATE cf_think_submissions
+          SET status = ${finalStatus},
+              request_id = ${result.requestId},
+              stream_id = ${streamId},
+              error_message = ${finalStatus === "error" ? errorMessage : null},
+              completed_at = ${completedAt}
+          WHERE submission_id = ${row.submission_id}
+            AND status = 'running'
+        `;
+        this._insertWorkflowNotification(
+          {
+            ...this._inspectionFromSubmissionRow(claimed),
+            requestId: result.requestId,
+            status: finalStatus,
+            error:
+              finalStatus === "error" ? (errorMessage ?? undefined) : undefined,
+            completedAt
+          },
+          output
+        );
+      });
     } catch (error) {
-      this.sql`
-        UPDATE cf_think_submissions
-        SET status = 'error',
-            error_message = ${error instanceof Error ? error.message : String(error)},
-            completed_at = ${Date.now()}
-        WHERE submission_id = ${row.submission_id}
-          AND status = 'running'
-      `;
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      const completedAt = Date.now();
+      this.ctx.storage.transactionSync(() => {
+        this.sql`
+          UPDATE cf_think_submissions
+          SET status = 'error',
+              error_message = ${errorMessage},
+              completed_at = ${completedAt}
+          WHERE submission_id = ${row.submission_id}
+            AND status = 'running'
+        `;
+        this._insertWorkflowNotification({
+          ...this._inspectionFromSubmissionRow(claimed),
+          status: "error",
+          error: errorMessage,
+          completedAt
+        });
+      });
     } finally {
       this._programmaticStreamErrors.delete(requestId);
       this._submissionAbortControllers.delete(row.submission_id);
       const updated = this._readSubmission(row.submission_id);
       if (updated && this._isTerminalSubmissionStatus(updated.status)) {
-        await this._emitSubmissionStatus(updated);
+        await this._emitSubmissionStatus(updated, output);
       }
     }
   }
@@ -3350,13 +4698,17 @@ export class Think<
     options?: SaveMessagesOptions & {
       onMessagesApplied?: () => void;
       captureProgrammaticStreamError?: boolean;
+      captureOutput?: boolean;
+      body?: Record<string, unknown>;
+      workflowPrompt?: ThinkWorkflowPromptContext;
     }
-  ): Promise<SaveMessagesResult> {
+  ): Promise<ProgrammaticMessagesResult> {
     const clientTools = this._lastClientTools;
-    const body = this._lastBody;
+    const body = options?.body ?? this._lastBody;
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
+    let output: unknown;
     let wasAborted = false;
 
     await this.keepAliveWhile(async () => {
@@ -3405,6 +4757,7 @@ export class Think<
                   signal: abortSignal,
                   clientTools,
                   body,
+                  workflowPrompt: options?.workflowPrompt,
                   continuation: false
                 })
             );
@@ -3416,11 +4769,13 @@ export class Think<
                 abortSignal,
                 {
                   captureProgrammaticStreamError:
-                    options?.captureProgrammaticStreamError
+                    options?.captureProgrammaticStreamError,
+                  captureOutput: options?.captureOutput
                 }
               );
               status = streamResult.status;
               error = streamResult.error;
+              output = streamResult.output;
             }
           };
 
@@ -3450,7 +4805,12 @@ export class Think<
       status = "aborted";
     }
 
-    return { requestId, status, ...(error !== undefined && { error }) };
+    return {
+      requestId,
+      status,
+      ...(error !== undefined && { error }),
+      ...(output !== undefined && { output })
+    };
   }
 
   /**
@@ -3685,13 +5045,7 @@ export class Think<
       wasClean: boolean
     ) => {
       this._pendingResumeConnections.delete(connection.id);
-      this._continuation.awaitingConnections.delete(connection.id);
-      if (this._continuation.pending?.connectionId === connection.id) {
-        this._continuation.pending = null;
-      }
-      if (this._continuation.activeConnectionId === connection.id) {
-        this._continuation.activeConnectionId = null;
-      }
+      this._continuation.releaseConnection(connection.id);
       return _onClose(connection, code, reason, wasClean);
     };
 
@@ -3721,6 +5075,11 @@ export class Think<
         url.pathname.endsWith("/get-messages")
       ) {
         return Response.json(this.messages);
+      }
+      const messengerResponse =
+        await this._messengerRuntime?.handleRequest(request);
+      if (messengerResponse) {
+        return messengerResponse;
       }
       return _onRequest(request);
     };
@@ -3826,7 +5185,8 @@ export class Think<
       }
     } else if (
       this._continuation.pending !== null &&
-      this._continuation.pending.connectionId === connection.id
+      (this._continuation.pending.connectionId === null ||
+        this._continuation.pending.connectionId === connection.id)
     ) {
       this._continuation.awaitingConnections.set(connection.id, connection);
     } else {
@@ -4346,19 +5706,11 @@ export class Think<
         });
       }
 
-      if (callback.onError) {
-        await callback.onError(errorMessage);
-      } else {
-        throw wrapped;
-      }
+      await callback.onError(errorMessage);
     }
 
     if (pendingRpcError) {
-      if (callback.onError) {
-        await callback.onError(pendingRpcError);
-      } else {
-        throw new Error(pendingRpcError);
-      }
+      await callback.onError(pendingRpcError);
     }
   }
 
@@ -4387,6 +5739,7 @@ export class Think<
       continuation?: boolean;
       parentId?: string;
       captureProgrammaticStreamError?: boolean;
+      captureOutput?: boolean;
     }
   ): Promise<StreamResultStatus> {
     const clearGen = this._turnQueue.generation;
@@ -4397,7 +5750,7 @@ export class Think<
     if (this._continuation.pending?.requestId === requestId) {
       this._continuation.activatePending();
       this._continuation.flushAwaitingConnections((c) =>
-        this._notifyStreamResuming(c as Connection)
+        this._notifyStreamResuming(c)
       );
     }
 
@@ -4408,6 +5761,7 @@ export class Think<
     let doneSent = false;
     let streamAborted = false;
     let streamError: string | undefined;
+    let output: unknown;
 
     try {
       this._insideInferenceLoop = true;
@@ -4494,6 +5848,23 @@ export class Think<
       }
     }
 
+    if (
+      options?.captureOutput &&
+      result.output &&
+      !streamError &&
+      !streamAborted
+    ) {
+      try {
+        output = await result.output;
+      } catch (error) {
+        streamError =
+          error instanceof Error ? error.message : "Structured output error";
+        if (options.captureProgrammaticStreamError) {
+          this._programmaticStreamErrors.set(requestId, streamError);
+        }
+      }
+    }
+
     if (this._turnQueue.generation === clearGen) {
       try {
         const assistantMsg = accumulator.toMessage();
@@ -4521,7 +5892,10 @@ export class Think<
 
     return streamError
       ? { status: "error", error: streamError }
-      : { status: streamAborted ? "aborted" : "completed" };
+      : {
+          status: streamAborted ? "aborted" : "completed",
+          ...(output !== undefined && { output })
+        };
   }
 
   // ── Session-backed persistence ──────────────────────────────────
@@ -4732,6 +6106,10 @@ export class Think<
   protected override async _handleInternalFiberRecovery(
     ctx: FiberRecoveryContext
   ): Promise<boolean> {
+    if (await this._messengerRuntime?.handleFiberRecovery(ctx)) {
+      return true;
+    }
+
     const chatPrefix = (this.constructor as typeof Think).CHAT_FIBER_NAME + ":";
     if (!ctx.name.startsWith(chatPrefix)) {
       return false;
@@ -5257,35 +6635,41 @@ export class Think<
       this._continuation.pending.connectionId = connection.id;
       this._continuation.pending.clientTools = this._lastClientTools;
       this._continuation.awaitingConnections.set(connection.id, connection);
+      this._resetAutoContinuationTimer();
       return;
     }
 
+    this._continuation.pending = {
+      connection,
+      connectionId: connection.id,
+      requestId: crypto.randomUUID(),
+      clientTools: this._lastClientTools,
+      body: undefined,
+      errorPrefix: "[Think] Auto-continuation failed:",
+      prerequisite: null,
+      pastCoalesce: false
+    };
+    this._continuation.awaitingConnections.set(connection.id, connection);
+    this._resetAutoContinuationTimer();
+  }
+
+  private _resetAutoContinuationTimer(): void {
     if (this._continuationTimer) {
       clearTimeout(this._continuationTimer);
     }
     this._continuationTimer = setTimeout(() => {
       this._continuationTimer = null;
-      this._fireAutoContinuation(connection);
+      const pending = this._continuation.pending;
+      if (!pending) return;
+      this._fireAutoContinuation(pending.connection);
     }, 50);
   }
 
   private _fireAutoContinuation(connection: Connection): void {
-    if (!this._continuation.pending) {
-      const requestId = crypto.randomUUID();
-      this._continuation.pending = {
-        connection,
-        connectionId: connection.id,
-        requestId,
-        clientTools: this._lastClientTools,
-        body: undefined,
-        errorPrefix: "[Think] Auto-continuation failed:",
-        prerequisite: null,
-        pastCoalesce: false
-      };
-      this._continuation.awaitingConnections.set(connection.id, connection);
-    }
+    const pending = this._continuation.pending;
+    if (!pending) return;
 
-    const { requestId, clientTools } = this._continuation.pending!;
+    const { requestId, clientTools } = pending;
     const abortSignal = this._aborts.getSignal(requestId);
 
     this.keepAliveWhile(async () => {
@@ -5345,7 +6729,7 @@ export class Think<
     );
     if (!pending) return;
 
-    this._fireAutoContinuation(pending.connection as Connection);
+    this._fireAutoContinuation(pending.connection);
   }
 
   // ── Response hook ──────────────────────────────────────────────

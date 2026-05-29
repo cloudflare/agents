@@ -45,7 +45,11 @@ import {
   isErrorRetryable,
   validateRetryOptions
 } from "./retries";
-import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
+import {
+  MCPClientManager,
+  normalizeServerId,
+  type MCPClientOAuthResult
+} from "./mcp/client";
 import type {
   WorkflowCallback,
   WorkflowTrackingRow,
@@ -796,6 +800,7 @@ function getNextCronTime(cron: string) {
 
 export type { TransportType } from "./mcp/types";
 export type { RetryOptions } from "./retries";
+export { normalizeServerId, MCP_SERVER_ID_MAX_LENGTH } from "./mcp/client";
 export {
   DurableObjectOAuthClientProvider,
   type AgentMcpOAuthProvider,
@@ -838,6 +843,17 @@ export type MCPServer = {
  * Options for adding an MCP server
  */
 export type AddMcpServerOptions = {
+  /**
+   * Optional caller-supplied stable server id. When provided, this id is used
+   * for storage, restore, and tool-name namespacing instead of a generated
+   * `nanoid`. The value is normalized via {@link normalizeServerId} — for
+   * connector-style integrations this lets `addMcpServer` keep producing
+   * keys like `tool_github_create_pull_request`.
+   *
+   * Throws if an existing server already uses the same (normalized) id but a
+   * different name or url.
+   */
+  id?: string;
   /** OAuth callback host (auto-derived from request if omitted) */
   callbackHost?: string;
   /**
@@ -867,11 +883,21 @@ export type AddMcpServerOptions = {
  * Options for adding an MCP server via RPC (Durable Object binding)
  */
 export type AddRpcMcpServerOptions = {
+  /**
+   * Optional caller-supplied stable server id. When provided, this id is used
+   * for storage, restore, and tool-name namespacing instead of a generated
+   * `nanoid`. The value is normalized via {@link normalizeServerId}.
+   *
+   * Throws if an existing server already uses the same (normalized) id but a
+   * different name or url.
+   */
+  id?: string;
   /** Props to pass to the McpAgent instance */
   props?: Record<string, unknown>;
 };
 
 const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
+const DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS = 2_000;
 const SUB_AGENT_IDENTITY_VERSION_LEGACY = "legacy";
 const SUB_AGENT_IDENTITY_VERSION_PATH_V2 = "path-v2";
 const SUB_AGENT_IDENTITY_PATH_V2_PREFIX = "cf-agents:v2:";
@@ -879,6 +905,15 @@ const SUB_AGENT_IDENTITY_PATH_V2_PREFIX = "cf-agents:v2:";
 type SubAgentIdentityVersion =
   | typeof SUB_AGENT_IDENTITY_VERSION_LEGACY
   | typeof SUB_AGENT_IDENTITY_VERSION_PATH_V2;
+
+type AgentToolRecoveryInspection =
+  | {
+      status: "inspected";
+      adapter: AgentToolChildAdapter;
+      inspection: AgentToolRunInspection | null;
+    }
+  | { status: "failed" }
+  | { status: "timed-out" };
 
 /**
  * Schema version for the Agent's internal SQLite tables.
@@ -1323,6 +1358,8 @@ export class Agent<
   private _managedFiberTerminalWaiters = new Map<string, Set<() => void>>();
   /** @internal Prevents re-entrant recovery from overlapping alarm ticks. */
   private _runFiberRecoveryInProgress = false;
+  /** @internal Single-flight background recovery for parent agent-tool rows. */
+  private _agentToolRunRecoveryPromise: Promise<void> | undefined;
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
@@ -2201,10 +2238,7 @@ export class Agent<
 
             this._checkOrphanedWorkflows();
             await this._checkRunFibers();
-            const recoveredAgentToolFinishes =
-              await this._reconcileAgentToolRuns({
-                deferFinishHooks: true
-              });
+            const startupAgentToolRunIds = this._agentToolRunRecoveryRunIds();
 
             this._insideOnStart = true;
             this._warnedScheduleInOnStart.clear();
@@ -2214,12 +2248,9 @@ export class Agent<
             } finally {
               this._insideOnStart = false;
             }
-            // Recovered finish hooks run only after successful user startup.
-            // If onStart fails, durable recovery state is already finalized,
-            // but user hook side effects may depend on startup-initialized mirrors.
-            await this._runDeferredAgentToolFinishHooks(
-              recoveredAgentToolFinishes
-            );
+            this._scheduleAgentToolRunRecovery({
+              runIds: startupAgentToolRunIds
+            });
             return result;
           });
         }
@@ -7364,7 +7395,29 @@ export class Agent<
   ): Promise<number> {
     const child = await this._cf_resolveSubAgent(row.agent_type, row.run_id);
     const adapter = this._asAgentToolChildAdapter(child);
-    const chunks = await adapter.getAgentToolChunks(row.run_id);
+    return this._broadcastAgentToolStoredChunksFromAdapter(
+      adapter,
+      row,
+      sequence,
+      replay,
+      connection
+    );
+  }
+
+  private async _broadcastAgentToolStoredChunksFromAdapter(
+    adapter: AgentToolChildAdapter,
+    row: Pick<AgentToolRunStorageRow, "run_id" | "parent_tool_call_id">,
+    sequence: number,
+    replay?: true,
+    connection?: Connection,
+    timeoutMs?: number
+  ): Promise<number> {
+    const chunks = await this._getAgentToolChunksForRecovery(
+      adapter,
+      row.run_id,
+      timeoutMs
+    );
+    if (!chunks) return sequence;
     return this._broadcastAgentToolChunks(
       row.parent_tool_call_id ?? undefined,
       row.run_id,
@@ -7637,6 +7690,8 @@ export class Agent<
 
   private async _reconcileAgentToolRuns(options?: {
     deferFinishHooks?: boolean;
+    childInspectionTimeoutMs?: number;
+    runIds?: readonly string[];
   }): Promise<DeferredAgentToolFinish[]> {
     const deferredFinishes: DeferredAgentToolFinish[] = [];
     const rows = this.sql<AgentToolRunStorageRow>`
@@ -7647,19 +7702,30 @@ export class Agent<
       WHERE status IN ('starting', 'running')
       ORDER BY started_at ASC
     `;
+    const runIds =
+      options?.runIds !== undefined ? new Set(options.runIds) : undefined;
     for (const row of rows) {
+      if (runIds && !runIds.has(row.run_id)) continue;
       let sequence = 1;
       let completedAt: number | undefined;
       let result: RunAgentToolResult;
-      try {
-        const child = await this._cf_resolveSubAgent(
-          row.agent_type,
-          row.run_id
-        );
-        const adapter = this._asAgentToolChildAdapter(child);
-        const inspection = await adapter.inspectAgentToolRun(row.run_id);
+      const recovery = await this._inspectAgentToolRunForRecovery(
+        row,
+        sequence,
+        options?.childInspectionTimeoutMs
+      );
+      if (recovery.status === "inspected") {
+        const inspection = recovery.inspection;
         try {
-          sequence = await this._broadcastAgentToolStoredChunks(row, sequence);
+          sequence = await this._broadcastAgentToolStoredChunksFromAdapter(
+            recovery.adapter,
+            row,
+            sequence,
+            undefined,
+            undefined,
+            options?.childInspectionTimeoutMs ??
+              DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS
+          );
         } catch {
           // Terminal reconciliation should still complete if chunk replay fails.
         }
@@ -7682,7 +7748,14 @@ export class Agent<
           );
           completedAt = inspection.completedAt;
         }
-      } catch {
+      } else if (recovery.status === "timed-out") {
+        result = {
+          runId: row.run_id,
+          agentType: row.agent_type,
+          status: "interrupted",
+          error: "Agent tool run inspection timed out during parent recovery."
+        };
+      } else {
         result = {
           runId: row.run_id,
           agentType: row.agent_type,
@@ -7704,6 +7777,95 @@ export class Agent<
       }
     }
     return deferredFinishes;
+  }
+
+  private async _inspectAgentToolRunForRecovery(
+    row: AgentToolRunStorageRow,
+    _sequence: number,
+    timeoutMs = DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS
+  ): Promise<AgentToolRecoveryInspection> {
+    const inspect = (async (): Promise<AgentToolRecoveryInspection> => {
+      const child = await this._cf_resolveSubAgent(row.agent_type, row.run_id);
+      const adapter = this._asAgentToolChildAdapter(child);
+      const inspection = await adapter.inspectAgentToolRun(row.run_id);
+      return { status: "inspected", adapter, inspection };
+    })().catch((): AgentToolRecoveryInspection => ({ status: "failed" }));
+
+    if (timeoutMs <= 0) return inspect;
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<AgentToolRecoveryInspection>((resolve) => {
+      timeoutId = setTimeout(() => {
+        resolve({ status: "timed-out" });
+      }, timeoutMs);
+    });
+
+    const result = await Promise.race([inspect, timeout]);
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    return result;
+  }
+
+  private _scheduleAgentToolRunRecovery(options?: {
+    childInspectionTimeoutMs?: number;
+    runIds?: readonly string[];
+  }): Promise<void> {
+    if (this._agentToolRunRecoveryPromise) {
+      return this._agentToolRunRecoveryPromise;
+    }
+
+    if (options?.runIds && options.runIds.length === 0) {
+      return Promise.resolve();
+    }
+
+    const recovery = (async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      const recoveredAgentToolFinishes = await this._reconcileAgentToolRuns({
+        deferFinishHooks: true,
+        childInspectionTimeoutMs: options?.childInspectionTimeoutMs,
+        runIds: options?.runIds
+      });
+      await this._runDeferredAgentToolFinishHooks(recoveredAgentToolFinishes);
+    })()
+      .catch(async (error) => {
+        try {
+          await this.onError(error);
+        } catch {
+          // Background recovery must never make a started agent unreachable.
+        }
+      })
+      .finally(() => {
+        this._agentToolRunRecoveryPromise = undefined;
+      });
+
+    this._agentToolRunRecoveryPromise = recovery;
+    this.ctx.waitUntil(recovery);
+    return recovery;
+  }
+
+  private _agentToolRunRecoveryRunIds(): string[] {
+    return this.sql<{ run_id: string }>`
+      SELECT run_id
+      FROM cf_agent_tool_runs
+      WHERE status IN ('starting', 'running')
+      ORDER BY started_at ASC
+    `.map((row) => row.run_id);
+  }
+
+  private async _getAgentToolChunksForRecovery(
+    adapter: AgentToolChildAdapter,
+    runId: string,
+    timeoutMs?: number
+  ): Promise<AgentToolStoredChunk[] | undefined> {
+    const chunks = adapter.getAgentToolChunks(runId).catch(() => undefined);
+    if (timeoutMs === undefined || timeoutMs <= 0) return chunks;
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<undefined>((resolve) => {
+      timeoutId = setTimeout(() => resolve(undefined), timeoutMs);
+    });
+    const result = await Promise.race([chunks, timeout]);
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    return result;
   }
 
   /**
@@ -9394,13 +9556,63 @@ export class Agent<
     const normalizedUrl = isHttpTransport
       ? new URL(urlOrBinding).href
       : undefined;
-    const existingServer = this.mcp
-      .listServers()
-      .find(
-        (s) =>
-          s.name === serverName &&
-          (!isHttpTransport || new URL(s.server_url).href === normalizedUrl)
-      );
+
+    // Extract and normalize a caller-supplied stable id, if any. The same
+    // option field is accepted on both the HTTP and RPC option shapes.
+    let requestedId: string | undefined;
+    if (
+      typeof callbackHostOrOptions === "object" &&
+      callbackHostOrOptions !== null &&
+      typeof (callbackHostOrOptions as { id?: unknown }).id === "string"
+    ) {
+      const rawId = (callbackHostOrOptions as { id: string }).id;
+      requestedId = normalizeServerId(rawId);
+    }
+
+    const allServers = this.mcp.listServers();
+
+    const existingServer = allServers.find(
+      (s) =>
+        s.name === serverName &&
+        (!isHttpTransport || new URL(s.server_url).href === normalizedUrl)
+    );
+
+    if (requestedId) {
+      // Collision check 1: a caller-supplied id may only re-resolve to an
+      // existing server when the (name, url) also matches. Otherwise storage
+      // (INSERT OR REPLACE on id) would silently overwrite the existing row.
+      const idConflict = allServers.find((s) => {
+        if (s.id !== requestedId) return false;
+        if (s.name !== serverName) return true;
+        if (isHttpTransport) {
+          return new URL(s.server_url).href !== normalizedUrl;
+        }
+        return false;
+      });
+      if (idConflict) {
+        throw new Error(
+          `MCP server id "${requestedId}" is already in use by server "${idConflict.name}" (${idConflict.server_url}). ` +
+            `Stable ids must be unique per (name, url).`
+        );
+      }
+
+      // JIT-migrate: the same (name, url) is already registered under a
+      // different id (typically an auto-generated nanoid from a previous
+      // call that didn't supply `id`). This is the natural upgrade path —
+      // a user adds `{ id: "github" }` to an existing `addMcpServer` call.
+      // Rename the existing row + connection + OAuth keys to the new id in
+      // place so the caller's contract ("the id I get back is the id I
+      // asked for") holds and no stale storage rows are left behind.
+      if (existingServer && existingServer.id !== requestedId) {
+        await this.mcp.migrateServerId(
+          existingServer.id,
+          requestedId,
+          this.name
+        );
+        existingServer.id = requestedId;
+      }
+    }
+
     if (existingServer && this.mcp.mcpConnections[existingServer.id]) {
       const conn = this.mcp.mcpConnections[existingServer.id];
       if (
@@ -9429,7 +9641,9 @@ export class Agent<
 
       const normalizedName = serverName.toLowerCase().replace(/\s+/g, "-");
 
-      const reconnectId = existingServer?.id;
+      // Prefer the caller-supplied stable id, falling back to the existing
+      // server's id (for restore-through-addMcpServer), then to a generated id.
+      const reconnectId = requestedId ?? existingServer?.id;
       const { id } = await this.mcp.connect(
         `${RPC_DO_PREFIX}${normalizedName}`,
         {
@@ -9544,7 +9758,7 @@ export class Agent<
         : `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
     }
 
-    const id = nanoid(8);
+    const id = requestedId ?? nanoid(8);
 
     // Only create authProvider if we have a callbackUrl (needed for OAuth servers)
     let authProvider:

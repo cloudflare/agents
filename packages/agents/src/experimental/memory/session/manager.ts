@@ -14,7 +14,12 @@ import type { StoredCompaction } from "./provider";
 import type { SqlProvider } from "./providers/agent";
 import type { SearchProvider } from "./search";
 import { Session, type SessionContextOptions } from "./session";
-import type { SessionMessage } from "./types";
+import type {
+  CompactAfterOptions,
+  CompactionErrorHandler,
+  SessionMessage,
+  SessionTokenCounter
+} from "./types";
 
 export interface SessionInfo {
   id: string;
@@ -46,6 +51,8 @@ export class SessionManager {
     | ((messages: SessionMessage[]) => Promise<CompactResult | null>)
     | null;
   private _tokenThreshold?: number;
+  private _tokenCounter?: SessionTokenCounter;
+  private _compactionErrorHandler?: CompactionErrorHandler;
   private _sessions = new Map<string, Session>();
   private _historyLabel?: string;
   private _tableReady = false;
@@ -80,6 +87,8 @@ export class SessionManager {
     mgr._pending = [];
     mgr._compactionFn = null;
     mgr._tokenThreshold = undefined;
+    mgr._tokenCounter = undefined;
+    mgr._compactionErrorHandler = undefined;
     mgr._sessions = new Map();
     mgr._tableReady = false;
     mgr._ready = false;
@@ -113,8 +122,19 @@ export class SessionManager {
    * Auto-compact when estimated token count exceeds the threshold.
    * Propagated to all sessions. Requires `onCompaction()`.
    */
-  compactAfter(tokenThreshold: number): this {
+  compactAfter(tokenThreshold: number, options?: CompactAfterOptions): this {
     this._tokenThreshold = tokenThreshold;
+    if (options?.tokenCounter) {
+      this._tokenCounter = options.tokenCounter;
+    }
+    return this;
+  }
+
+  /**
+   * Handle failures from automatic compaction in managed sessions.
+   */
+  onCompactionError(handler: CompactionErrorHandler): this {
+    this._compactionErrorHandler = handler;
     return this;
   }
 
@@ -213,7 +233,12 @@ export class SessionManager {
         s.onCompaction(this._compactionFn);
       }
       if (this._tokenThreshold != null) {
-        s.compactAfter(this._tokenThreshold);
+        s.compactAfter(this._tokenThreshold, {
+          tokenCounter: this._tokenCounter
+        });
+      }
+      if (this._compactionErrorHandler) {
+        s.onCompactionError(this._compactionErrorHandler);
       }
       session = s;
       this._sessions.set(sessionId, session);
