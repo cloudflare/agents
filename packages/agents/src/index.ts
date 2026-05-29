@@ -774,6 +774,8 @@ export type FiberRecoveryContext = {
    * started). Use `Date.now() - createdAt` to gate stale recoveries.
    */
   createdAt: number;
+  /** Why this recovery hook is running. */
+  recoveryReason: "interrupted";
   [key: string]: unknown;
 };
 
@@ -898,6 +900,7 @@ export type AddRpcMcpServerOptions = {
 
 const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
 const DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS = 2_000;
+const DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 5_000;
 const SUB_AGENT_IDENTITY_VERSION_LEGACY = "legacy";
 const SUB_AGENT_IDENTITY_VERSION_PATH_V2 = "path-v2";
 const SUB_AGENT_IDENTITY_PATH_V2_PREFIX = "cf-agents:v2:";
@@ -1116,7 +1119,17 @@ export const DEFAULT_AGENT_STATIC_OPTIONS = {
     maxAttempts: 3,
     baseDelayMs: 100,
     maxDelayMs: 3000
-  } satisfies Required<RetryOptions>
+  } satisfies Required<RetryOptions>,
+  /** Timeout for internal framework fiber recovery hooks. */
+  fiberRecoveryHookTimeoutMs: 10_000,
+  /** Soft deadline for one interrupted-fiber recovery scan. */
+  fiberRecoveryScanDeadlineMs: 10_000,
+  /**
+   * Maximum age of an unmanaged interrupted-fiber row before recovery gives
+   * up. Bounds repeated retries of a `onFiberRecovered()` hook that keeps
+   * throwing so a poison row cannot re-trigger forever across boots.
+   */
+  fiberRecoveryMaxAgeMs: 24 * 60 * 60 * 1000
 };
 
 /**
@@ -1128,6 +1141,9 @@ interface ResolvedAgentOptions {
   hungScheduleTimeoutSeconds: number;
   keepAliveIntervalMs: number;
   retry: Required<RetryOptions>;
+  fiberRecoveryHookTimeoutMs: number;
+  fiberRecoveryScanDeadlineMs: number;
+  fiberRecoveryMaxAgeMs: number;
 }
 
 /**
@@ -1148,6 +1164,19 @@ export interface AgentStaticOptions {
   keepAliveIntervalMs?: number;
   /** Default retry options for schedule(), queue(), and this.retry(). */
   retry?: RetryOptions;
+  /**
+   * Timeout in milliseconds for internal framework fiber recovery hooks.
+   * User-defined `onFiberRecovered()` hooks are not timed out by default.
+   */
+  fiberRecoveryHookTimeoutMs?: number;
+  /** Soft deadline in milliseconds for one interrupted-fiber recovery scan. */
+  fiberRecoveryScanDeadlineMs?: number;
+  /**
+   * Maximum age in milliseconds of an unmanaged interrupted-fiber row before
+   * recovery stops retrying a repeatedly-throwing `onFiberRecovered()` hook
+   * and discards the row. Set to `0` to retain rows indefinitely.
+   */
+  fiberRecoveryMaxAgeMs?: number;
 }
 
 /**
@@ -1486,7 +1515,16 @@ export class Agent<
           DEFAULT_AGENT_STATIC_OPTIONS.retry.baseDelayMs,
         maxDelayMs:
           userRetry?.maxDelayMs ?? DEFAULT_AGENT_STATIC_OPTIONS.retry.maxDelayMs
-      }
+      },
+      fiberRecoveryHookTimeoutMs:
+        ctor.options?.fiberRecoveryHookTimeoutMs ??
+        DEFAULT_AGENT_STATIC_OPTIONS.fiberRecoveryHookTimeoutMs,
+      fiberRecoveryScanDeadlineMs:
+        ctor.options?.fiberRecoveryScanDeadlineMs ??
+        DEFAULT_AGENT_STATIC_OPTIONS.fiberRecoveryScanDeadlineMs,
+      fiberRecoveryMaxAgeMs:
+        ctor.options?.fiberRecoveryMaxAgeMs ??
+        DEFAULT_AGENT_STATIC_OPTIONS.fiberRecoveryMaxAgeMs
     };
     return this._cachedOptions;
   }
@@ -4437,31 +4475,108 @@ export class Agent<
     }
   }
 
+  private _fiberRecoveryPayload(
+    ctx: FiberRecoveryContext,
+    managedRow: FiberLedgerRow | null,
+    startedAt?: number
+  ): Record<string, unknown> {
+    return {
+      fiberId: ctx.id,
+      fiberName: ctx.name,
+      managed: managedRow !== null,
+      recoveryReason: ctx.recoveryReason,
+      elapsedMs: startedAt === undefined ? undefined : Date.now() - startedAt
+    };
+  }
+
+  private async _withFiberRecoveryTimeout<T>(
+    ctx: FiberRecoveryContext,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    const timeoutMs = this._resolvedOptions.fiberRecoveryHookTimeoutMs;
+    if (timeoutMs <= 0) return operation();
+
+    // Note: this bounds how long we WAIT for the operation, but does not
+    // cancel it — `operation` keeps running after the timeout rejects. It is
+    // applied to internal framework recovery only, which is idempotent and
+    // safe to abandon mid-flight.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation(),
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(
+              new Error(
+                `Fiber recovery hook timed out after ${timeoutMs}ms for "${ctx.name}" (${ctx.id})`
+              )
+            );
+          }, timeoutMs);
+        })
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  private _recordFiberRecoveryFailure(
+    ctx: FiberRecoveryContext,
+    managedRow: FiberLedgerRow | null,
+    error: unknown,
+    startedAt: number,
+    reason = "handler_error"
+  ): void {
+    const errorMessage = this._fiberErrorMessage(error);
+    const completedAt = Date.now();
+    if (managedRow) {
+      this.sql`
+        UPDATE cf_agents_fibers
+        SET status = 'error',
+            error_message = ${errorMessage},
+            completed_at = ${completedAt}
+        WHERE fiber_id = ${ctx.id}
+          AND status = 'interrupted'
+      `;
+      this._notifyManagedFiberTerminal(ctx.id);
+    }
+    this._emit("fiber:recovery:failed", {
+      ...this._fiberRecoveryPayload(ctx, managedRow, startedAt),
+      error: errorMessage,
+      reason
+    });
+  }
+
   private async _runFiberRecoveryHook(
     ctx: FiberRecoveryContext,
     managedRow: FiberLedgerRow | null
-  ): Promise<void> {
+  ): Promise<boolean> {
+    const startedAt = Date.now();
+    this._emit(
+      "fiber:recovery:attempt",
+      this._fiberRecoveryPayload(ctx, managedRow)
+    );
     try {
-      const handled = await this._handleInternalFiberRecovery(ctx);
+      const handled = await this._withFiberRecoveryTimeout(ctx, () =>
+        this._handleInternalFiberRecovery(ctx)
+      );
       if (!handled) {
         const recoveryResult = await this.onFiberRecovered(ctx);
         if (managedRow && recoveryResult) {
           this._applyManagedFiberRecoveryResult(ctx.id, recoveryResult);
         }
       }
+      this._emit("fiber:recovery:handled", {
+        ...this._fiberRecoveryPayload(ctx, managedRow, startedAt),
+        status: handled ? "internal" : managedRow ? "managed" : "user"
+      });
+      return true;
     } catch (e) {
-      if (managedRow) {
-        this.sql`
-          UPDATE cf_agents_fibers
-          SET error_message = ${this._fiberErrorMessage(e)}
-          WHERE fiber_id = ${ctx.id}
-            AND status = 'interrupted'
-        `;
-      }
+      this._recordFiberRecoveryFailure(ctx, managedRow, e, startedAt);
       console.error(
         `[Agent] Fiber recovery failed for "${ctx.name}" (${ctx.id}):`,
         e
       );
+      return false;
     }
   }
 
@@ -4927,6 +5042,12 @@ export class Agent<
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, NULL, ${Date.now()})
     `;
+    const startedAt = Date.now();
+    this._emit("fiber:run:started", {
+      fiberId: id,
+      fiberName: name,
+      managed: options?.managed === true
+    });
     this._runFiberActiveFibers.add(id);
 
     const writeSnapshot = (data: unknown) => {
@@ -4967,9 +5088,22 @@ export class Agent<
           fn({ id, signal, stash, snapshot: null })
         );
         options?.beforeRunCleanup?.({ ok: true });
+        this._emit("fiber:run:completed", {
+          fiberId: id,
+          fiberName: name,
+          managed: options?.managed === true,
+          elapsedMs: Date.now() - startedAt
+        });
         return result;
       } catch (error) {
         options?.beforeRunCleanup?.({ ok: false, error });
+        this._emit("fiber:run:failed", {
+          fiberId: id,
+          fiberName: name,
+          managed: options?.managed === true,
+          error: this._fiberErrorMessage(error),
+          elapsedMs: Date.now() - startedAt
+        });
         throw error;
       }
     } finally {
@@ -5039,6 +5173,9 @@ export class Agent<
   private async _checkRunFibers(): Promise<void> {
     if (this._runFiberRecoveryInProgress) return;
     this._runFiberRecoveryInProgress = true;
+    const scanStartedAt = Date.now();
+    const scanDeadlineMs = this._resolvedOptions.fiberRecoveryScanDeadlineMs;
+    const fiberRecoveryMaxAgeMs = this._resolvedOptions.fiberRecoveryMaxAgeMs;
 
     try {
       const rows = this.sql<{
@@ -5049,6 +5186,15 @@ export class Agent<
       }>`SELECT id, name, snapshot, created_at FROM cf_agents_runs`;
 
       for (const row of rows) {
+        if (scanDeadlineMs > 0 && Date.now() - scanStartedAt > scanDeadlineMs) {
+          this._emit("fiber:recovery:skipped", {
+            fiberId: row.id,
+            fiberName: row.name,
+            reason: "scan_deadline_exceeded",
+            elapsedMs: Date.now() - scanStartedAt
+          });
+          break;
+        }
         if (this._runFiberActiveFibers.has(row.id)) continue;
 
         const snapshot = this._parseFiberRecoverySnapshot(row.id, row.snapshot);
@@ -5056,10 +5202,22 @@ export class Agent<
           id: row.id,
           name: row.name,
           snapshot,
-          createdAt: row.created_at
+          createdAt: row.created_at,
+          recoveryReason: "interrupted"
         };
 
         const managedRow = this._readFiber(row.id);
+        this._emit("fiber:recovery:detected", {
+          ...this._fiberRecoveryPayload(ctx, managedRow),
+          elapsedMs: Date.now() - row.created_at
+        });
+        this._emit("fiber:run:interrupted", {
+          fiberId: row.id,
+          fiberName: row.name,
+          managed: managedRow !== null,
+          recoveryReason: "interrupted",
+          elapsedMs: Date.now() - row.created_at
+        });
         if (managedRow) {
           if (this._isTerminalFiberStatus(managedRow.status)) {
             this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
@@ -5081,8 +5239,25 @@ export class Agent<
           ctx.status = "interrupted";
         }
 
-        await this._runFiberRecoveryHook(ctx, managedRow);
-        this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
+        const recovered = await this._runFiberRecoveryHook(ctx, managedRow);
+        // Managed rows are always cleaned up (their ledger row records the
+        // terminal status). Unmanaged rows are retained when recovery fails so
+        // a later scan can retry — but only until they exceed the max age, at
+        // which point a repeatedly-throwing hook would otherwise loop forever.
+        const tooOld =
+          fiberRecoveryMaxAgeMs > 0 &&
+          Date.now() - row.created_at > fiberRecoveryMaxAgeMs;
+        if (recovered || managedRow || tooOld) {
+          if (!recovered && !managedRow && tooOld) {
+            this._emit("fiber:recovery:skipped", {
+              fiberId: row.id,
+              fiberName: row.name,
+              reason: "max_age_exceeded",
+              elapsedMs: Date.now() - row.created_at
+            });
+          }
+          this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
+        }
         if (managedRow) {
           this._notifyManagedFiberTerminal(row.id);
         }
@@ -5099,6 +5274,16 @@ export class Agent<
       `;
 
       for (const row of ledgerOnlyRows) {
+        if (scanDeadlineMs > 0 && Date.now() - scanStartedAt > scanDeadlineMs) {
+          this._emit("fiber:recovery:skipped", {
+            fiberId: row.fiber_id,
+            fiberName: row.name,
+            reason: "scan_deadline_exceeded",
+            elapsedMs: Date.now() - scanStartedAt,
+            managed: true
+          });
+          break;
+        }
         if (this._runFiberActiveFibers.has(row.fiber_id)) continue;
 
         const snapshot = this._parseFiberRecoverySnapshot(
@@ -5114,18 +5299,29 @@ export class Agent<
             AND status IN ('pending', 'running')
         `;
 
-        await this._runFiberRecoveryHook(
-          {
-            id: row.fiber_id,
-            name: row.name,
-            snapshot,
-            createdAt: row.created_at,
-            idempotencyKey: row.idempotency_key ?? undefined,
-            metadata: this._parseFiberJsonObject(row.metadata_json),
-            status: "interrupted"
-          },
-          row
-        );
+        const ctx: FiberRecoveryContext = {
+          id: row.fiber_id,
+          name: row.name,
+          snapshot,
+          createdAt: row.created_at,
+          idempotencyKey: row.idempotency_key ?? undefined,
+          metadata: this._parseFiberJsonObject(row.metadata_json),
+          status: "interrupted",
+          recoveryReason: "interrupted"
+        };
+        this._emit("fiber:recovery:detected", {
+          ...this._fiberRecoveryPayload(ctx, row),
+          elapsedMs: Date.now() - row.created_at
+        });
+        this._emit("fiber:run:interrupted", {
+          fiberId: row.fiber_id,
+          fiberName: row.name,
+          managed: true,
+          recoveryReason: "interrupted",
+          elapsedMs: Date.now() - row.created_at
+        });
+
+        await this._runFiberRecoveryHook(ctx, row);
         this._notifyManagedFiberTerminal(row.fiber_id);
       }
     } finally {
@@ -7691,8 +7887,17 @@ export class Agent<
   private async _reconcileAgentToolRuns(options?: {
     deferFinishHooks?: boolean;
     childInspectionTimeoutMs?: number;
+    totalRecoveryTimeoutMs?: number;
     runIds?: readonly string[];
   }): Promise<DeferredAgentToolFinish[]> {
+    const startedAt = Date.now();
+    const totalTimeoutMs =
+      options?.totalRecoveryTimeoutMs ??
+      DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS;
+    const deadlineAt =
+      totalTimeoutMs > 0
+        ? startedAt + totalTimeoutMs
+        : Number.POSITIVE_INFINITY;
     const deferredFinishes: DeferredAgentToolFinish[] = [];
     const rows = this.sql<AgentToolRunStorageRow>`
       SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
@@ -7704,65 +7909,98 @@ export class Agent<
     `;
     const runIds =
       options?.runIds !== undefined ? new Set(options.runIds) : undefined;
-    for (const row of rows) {
-      if (runIds && !runIds.has(row.run_id)) continue;
+    const recoveryRows = rows.filter(
+      (row) => !runIds || runIds.has(row.run_id)
+    );
+    this._emit("agent_tool:recovery:begin", {
+      runCount: recoveryRows.length,
+      totalTimeoutMs
+    });
+    for (const row of recoveryRows) {
       let sequence = 1;
       let completedAt: number | undefined;
       let result: RunAgentToolResult;
-      const recovery = await this._inspectAgentToolRunForRecovery(
-        row,
-        sequence,
-        options?.childInspectionTimeoutMs
-      );
-      if (recovery.status === "inspected") {
-        const inspection = recovery.inspection;
-        try {
-          sequence = await this._broadcastAgentToolStoredChunksFromAdapter(
-            recovery.adapter,
-            row,
-            sequence,
-            undefined,
-            undefined,
-            options?.childInspectionTimeoutMs ??
-              DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS
-          );
-        } catch {
-          // Terminal reconciliation should still complete if chunk replay fails.
-        }
-        if (
-          !inspection ||
-          inspection.status === "running" ||
-          inspection.status === "starting"
-        ) {
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0) {
+        this._emit("agent_tool:recovery:deadline", {
+          runId: row.run_id,
+          agentType: row.agent_type,
+          elapsedMs: Date.now() - startedAt
+        });
+        result = {
+          runId: row.run_id,
+          agentType: row.agent_type,
+          status: "interrupted",
+          error: "Agent tool run recovery deadline exceeded."
+        };
+      } else {
+        const childTimeout =
+          options?.childInspectionTimeoutMs ??
+          DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS;
+        const boundedChildTimeout =
+          childTimeout > 0 ? Math.min(childTimeout, remainingMs) : remainingMs;
+        const recovery = await this._inspectAgentToolRunForRecovery(
+          row,
+          sequence,
+          boundedChildTimeout
+        );
+        if (recovery.status === "inspected") {
+          const inspection = recovery.inspection;
+          try {
+            sequence = await this._broadcastAgentToolStoredChunksFromAdapter(
+              recovery.adapter,
+              row,
+              sequence,
+              undefined,
+              undefined,
+              boundedChildTimeout
+            );
+          } catch {
+            // Terminal reconciliation should still complete if chunk replay fails.
+          }
+          if (
+            !inspection ||
+            inspection.status === "running" ||
+            inspection.status === "starting"
+          ) {
+            result = {
+              runId: row.run_id,
+              agentType: row.agent_type,
+              status: "interrupted",
+              error:
+                "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
+            };
+          } else {
+            result = this._terminalResultFromInspection(
+              row.agent_type,
+              inspection
+            );
+            completedAt = inspection.completedAt;
+          }
+        } else if (recovery.status === "timed-out") {
+          result = {
+            runId: row.run_id,
+            agentType: row.agent_type,
+            status: "interrupted",
+            error: "Agent tool run inspection timed out during parent recovery."
+          };
+        } else {
           result = {
             runId: row.run_id,
             agentType: row.agent_type,
             status: "interrupted",
             error:
-              "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
+              "Agent tool run could not be inspected during parent recovery."
           };
-        } else {
-          result = this._terminalResultFromInspection(
-            row.agent_type,
-            inspection
-          );
-          completedAt = inspection.completedAt;
         }
-      } else if (recovery.status === "timed-out") {
-        result = {
-          runId: row.run_id,
-          agentType: row.agent_type,
-          status: "interrupted",
-          error: "Agent tool run inspection timed out during parent recovery."
-        };
-      } else {
-        result = {
-          runId: row.run_id,
-          agentType: row.agent_type,
-          status: "interrupted",
-          error: "Agent tool run could not be inspected during parent recovery."
-        };
       }
+      this._emit("agent_tool:recovery:row", {
+        runId: row.run_id,
+        agentType: row.agent_type,
+        status: result.status,
+        reason: result.error,
+        elapsedMs: Date.now() - startedAt
+      });
       const deferredFinish = await this._finishAgentToolRun(
         this._agentToolRunInfoFromRow(row),
         result,
@@ -7776,6 +8014,10 @@ export class Agent<
         deferredFinishes.push(deferredFinish);
       }
     }
+    this._emit("agent_tool:recovery:complete", {
+      runCount: recoveryRows.length,
+      elapsedMs: Date.now() - startedAt
+    });
     return deferredFinishes;
   }
 
@@ -7807,6 +8049,7 @@ export class Agent<
 
   private _scheduleAgentToolRunRecovery(options?: {
     childInspectionTimeoutMs?: number;
+    totalRecoveryTimeoutMs?: number;
     runIds?: readonly string[];
   }): Promise<void> {
     if (this._agentToolRunRecoveryPromise) {
@@ -7822,11 +8065,15 @@ export class Agent<
       const recoveredAgentToolFinishes = await this._reconcileAgentToolRuns({
         deferFinishHooks: true,
         childInspectionTimeoutMs: options?.childInspectionTimeoutMs,
+        totalRecoveryTimeoutMs: options?.totalRecoveryTimeoutMs,
         runIds: options?.runIds
       });
       await this._runDeferredAgentToolFinishHooks(recoveredAgentToolFinishes);
     })()
       .catch(async (error) => {
+        this._emit("agent_tool:recovery:failed", {
+          error: error instanceof Error ? error.message : String(error)
+        });
         try {
           await this.onError(error);
         } catch {

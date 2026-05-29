@@ -4,6 +4,11 @@ An opinionated Agent base class for AI assistants. Handles the chat lifecycle �
 
 **Status:** experimental (`@cloudflare/think`, v0.1.2)
 
+> This is a historical design note. For current user-facing API behavior, see
+> [`docs/think/index.md`](../docs/think/index.md),
+> [`docs/think/lifecycle-hooks.md`](../docs/think/lifecycle-hooks.md), and
+> [`docs/chat-agents.md#stream-recovery`](../docs/chat-agents.md#stream-recovery).
+
 ## Problem
 
 Every AI agent built on the Agents SDK needs the same infrastructure:
@@ -80,15 +85,15 @@ export class ChatSession extends Think<Env> {
 
 The full set of override points:
 
-| Method               | Default                          | Purpose                               |
-| -------------------- | -------------------------------- | ------------------------------------- |
-| `getModel()`         | throws                           | Return the `LanguageModel` to use     |
-| `getSystemPrompt()`  | `"You are a helpful assistant."` | System prompt                         |
-| `getTools()`         | `{}`                             | AI SDK `ToolSet` for the agentic loop |
-| `getMaxSteps()`      | `10`                             | Max tool-call rounds per turn         |
-| `assembleContext()`  | prune older tool calls           | Customize what's sent to the LLM      |
-| `onChatMessage()`    | `streamText(...)`                | Full control over inference           |
-| `onChatError(error)` | passthrough                      | Customize error handling              |
+| Method                    | Default                          | Purpose                               |
+| ------------------------- | -------------------------------- | ------------------------------------- |
+| `getModel()`              | throws                           | Return the `LanguageModel` to use     |
+| `getSystemPrompt()`       | `"You are a helpful assistant."` | System prompt                         |
+| `getTools()`              | `{}`                             | AI SDK `ToolSet` for the agentic loop |
+| `getMaxSteps()`           | `10`                             | Max tool-call rounds per turn         |
+| `assembleContext()`       | prune older tool calls           | Customize what's sent to the LLM      |
+| `onChatMessage()`         | `streamText(...)`                | Full control over inference           |
+| `onChatError(error, ctx)` | passthrough                      | Customize error handling              |
 
 ### Step-by-step: a chat request
 
@@ -190,7 +195,7 @@ A `_turnQueue.generation` check prevents persisting into a cleared conversation 
 If an error occurs during the agentic loop or streaming:
 
 - **Partial message is persisted** — whatever was generated before the error is saved so context isn't lost (both WebSocket and RPC paths)
-- **`onChatError(error)` is called** — override to log, transform, or swallow
+- **`onChatError(error, ctx)` is called** — override to log, transform, or swallow
 - **Error is communicated** — WebSocket broadcasts `{ done: true, error: true }`, RPC calls `callback.onError()`
 
 ### Wire protocol

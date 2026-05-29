@@ -20,18 +20,22 @@ Every event has these fields:
 
 ## Channels
 
-Events are routed to eight named channels based on their type:
+Events are routed to named channels based on their type:
 
-| Channel            | Event types                                                                                                                                                              | Description                         |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------- |
-| `agents:state`     | `state:update`                                                                                                                                                           | State sync events                   |
-| `agents:rpc`       | `rpc`, `rpc:error`                                                                                                                                                       | RPC method calls and failures       |
-| `agents:message`   | `message:request`, `message:response`, `message:clear`, `message:cancel`, `message:error`, `tool:result`, `tool:approval`                                                | Chat message and tool lifecycle     |
-| `agents:schedule`  | `schedule:create`, `schedule:execute`, `schedule:cancel`, `schedule:retry`, `schedule:error`, `schedule:duplicate_warning`, `queue:create`, `queue:retry`, `queue:error` | Scheduled and queued task lifecycle |
-| `agents:lifecycle` | `connect`, `disconnect`, `destroy`                                                                                                                                       | Agent connection and teardown       |
-| `agents:workflow`  | `workflow:start`, `workflow:event`, `workflow:approved`, `workflow:rejected`, `workflow:terminated`, `workflow:paused`, `workflow:resumed`, `workflow:restarted`         | Workflow state transitions          |
-| `agents:mcp`       | `mcp:client:preconnect`, `mcp:client:connect`, `mcp:client:authorize`, `mcp:client:discover`, `mcp:client:close`                                                         | MCP client operations               |
-| `agents:email`     | `email:receive`, `email:reply`                                                                                                                                           | Email processing                    |
+| Channel             | Event types                                                                                                                                                              | Description                         |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------- |
+| `agents:state`      | `state:update`                                                                                                                                                           | State sync events                   |
+| `agents:rpc`        | `rpc`, `rpc:error`                                                                                                                                                       | RPC method calls and failures       |
+| `agents:message`    | `message:request`, `message:response`, `message:clear`, `message:cancel`, `message:error`, `tool:result`, `tool:approval`                                                | Chat message and tool lifecycle     |
+| `agents:chat`       | `chat:request:failed`, `chat:recovery:*`                                                                                                                                 | Chat request and recovery lifecycle |
+| `agents:transcript` | `chat:transcript:repaired`                                                                                                                                               | Transcript repair events            |
+| `agents:fiber`      | `fiber:run:*`, `fiber:recovery:*`                                                                                                                                        | Durable fiber lifecycle             |
+| `agents:agent_tool` | `agent_tool:recovery:*`                                                                                                                                                  | Parent/child agent-tool recovery    |
+| `agents:schedule`   | `schedule:create`, `schedule:execute`, `schedule:cancel`, `schedule:retry`, `schedule:error`, `schedule:duplicate_warning`, `queue:create`, `queue:retry`, `queue:error` | Scheduled and queued task lifecycle |
+| `agents:lifecycle`  | `connect`, `disconnect`, `destroy`                                                                                                                                       | Agent connection and teardown       |
+| `agents:workflow`   | `workflow:start`, `workflow:event`, `workflow:approved`, `workflow:rejected`, `workflow:terminated`, `workflow:paused`, `workflow:resumed`, `workflow:restarted`         | Workflow state transitions          |
+| `agents:mcp`        | `mcp:client:preconnect`, `mcp:client:connect`, `mcp:client:authorize`, `mcp:client:discover`, `mcp:client:close`                                                         | MCP client operations               |
+| `agents:email`      | `email:receive`, `email:reply`                                                                                                                                           | Email processing                    |
 
 ## Subscribing to events
 
@@ -58,6 +62,8 @@ unsub();
 ```
 
 The callback is fully typed — `event` is narrowed to only the event types that flow through that channel.
+
+The typed helper uses camelCase keys, so agent-tool recovery is `subscribe("agentTool", ...)`. Raw diagnostics channel subscribers should use the emitted channel name, `agents:agent_tool`.
 
 ### Raw diagnostics_channel
 
@@ -149,6 +155,51 @@ These events are emitted by `AIChatAgent` from `@cloudflare/ai-chat`. They track
 | `message:error`    | `{ error }`                | A chat stream fails                 |
 | `tool:result`      | `{ toolCallId, toolName }` | A client tool result is received    |
 | `tool:approval`    | `{ toolCallId, approved }` | A tool call is approved or rejected |
+
+### Chat recovery events
+
+| Type                      | Payload                                                                  | When                                                                               |
+| ------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| `chat:request:failed`     | `{ requestId?, stage, messagesPersisted?, error }`                       | A Think chat request fails while parsing, persisting, running, or streaming        |
+| `chat:recovery:detected`  | `{ incidentId, requestId, attempt, maxAttempts, recoveryKind }`          | An interrupted chat fiber is first observed                                        |
+| `chat:recovery:attempt`   | `{ incidentId, requestId, attempt, maxAttempts, recoveryKind }`          | The framework begins a recovery attempt                                            |
+| `chat:recovery:scheduled` | `{ incidentId, requestId, attempt, maxAttempts, recoveryKind }`          | A retry or continuation callback is scheduled                                      |
+| `chat:recovery:completed` | `{ incidentId, requestId, attempt, maxAttempts, recoveryKind }`          | Recovery completed successfully                                                    |
+| `chat:recovery:skipped`   | `{ incidentId, requestId, attempt, maxAttempts, recoveryKind, reason? }` | Recovery was skipped because the conversation changed or was no longer recoverable |
+| `chat:recovery:failed`    | `{ incidentId, requestId, attempt, maxAttempts, recoveryKind, reason? }` | Recovery ran but failed                                                            |
+| `chat:recovery:exhausted` | `{ incidentId, requestId, attempt, maxAttempts, recoveryKind, reason }`  | Recovery exceeded its configured attempt budget                                    |
+
+`recoveryKind` is `"retry"` when recovery replays an unanswered user turn and `"continue"` when it continues a partial assistant turn.
+
+### Transcript events
+
+| Type                       | Payload                                                            | When                                                                   |
+| -------------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| `chat:transcript:repaired` | `{ requestId?, removedToolCalls, normalizedInputs, toolCallIds? }` | Think repairs a persisted transcript before sending it to the provider |
+
+### Fiber events
+
+| Type                      | Payload                                                                | When                                 |
+| ------------------------- | ---------------------------------------------------------------------- | ------------------------------------ |
+| `fiber:run:started`       | `{ fiberId, fiberName, managed? }`                                     | A durable fiber starts               |
+| `fiber:run:completed`     | `{ fiberId, fiberName, managed?, elapsedMs? }`                         | A durable fiber completes            |
+| `fiber:run:failed`        | `{ fiberId, fiberName, managed?, error, elapsedMs? }`                  | A durable fiber throws               |
+| `fiber:run:interrupted`   | `{ fiberId, fiberName, managed?, recoveryReason, elapsedMs? }`         | Startup finds an interrupted fiber   |
+| `fiber:recovery:detected` | `{ fiberId, fiberName, managed?, recoveryReason, elapsedMs? }`         | Recovery sees an interrupted fiber   |
+| `fiber:recovery:attempt`  | `{ fiberId, fiberName, managed?, recoveryReason }`                     | A recovery hook starts               |
+| `fiber:recovery:handled`  | `{ fiberId, fiberName, managed?, recoveryReason, status, elapsedMs? }` | Recovery handling completes          |
+| `fiber:recovery:skipped`  | `{ fiberId, fiberName, managed?, reason, elapsedMs? }`                 | A recovery scan skips remaining work |
+| `fiber:recovery:failed`   | `{ fiberId, fiberName, managed?, error, reason?, elapsedMs? }`         | A recovery hook fails                |
+
+### Agent-tool recovery events
+
+| Type                           | Payload                                             | When                                                         |
+| ------------------------------ | --------------------------------------------------- | ------------------------------------------------------------ |
+| `agent_tool:recovery:begin`    | `{ runCount, totalTimeoutMs? }`                     | Parent recovery starts scanning stale agent-tool runs        |
+| `agent_tool:recovery:row`      | `{ runId, agentType, status, reason?, elapsedMs? }` | One stale run is reconciled                                  |
+| `agent_tool:recovery:deadline` | `{ runId, agentType, elapsedMs? }`                  | Total recovery deadline is exhausted before inspecting a row |
+| `agent_tool:recovery:complete` | `{ runCount, elapsedMs? }`                          | Parent recovery finishes scanning rows                       |
+| `agent_tool:recovery:failed`   | `{ error }`                                         | Parent recovery fails unexpectedly                           |
 
 ### Schedule and queue events
 

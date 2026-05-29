@@ -98,6 +98,10 @@
       {
         "class_name": "ThinkExtensionHookAgent",
         "name": "ThinkExtensionHookAgent"
+      },
+      {
+        "class_name": "ThinkMessengerRouteTestAgent",
+        "name": "ThinkMessengerRouteTestAgent"
       }
     ]
   },
@@ -126,7 +130,9 @@
         "ThinkRecoveryTestAgent",
         "ThinkNonRecoveryTestAgent",
         "ThinkAgentToolParent",
-        "ThinkExtensionHookAgent"
+        "StuckThinkAgentToolChild",
+        "ThinkExtensionHookAgent",
+        "ThinkMessengerRouteTestAgent"
       ],
       "tag": "v1"
     }

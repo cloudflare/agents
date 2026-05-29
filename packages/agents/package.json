@@ -33,10 +33,13 @@
     "nanoid": "^5.1.11",
     "partyserver": "^0.5.6",
     "partysocket": "1.1.19",
+    "yaml": "^2.9.0",
     "yargs": "^18.0.0"
   },
   "devDependencies": {
     "@ai-sdk/react": "^3.0.187",
+    "@cloudflare/codemode": "*",
+    "@cloudflare/worker-bundler": "*",
     "@tanstack/ai": "^0.18.0",
     "@types/react": "^19.2.14",
     "@types/yargs": "^17.0.35",
@@ -45,6 +48,7 @@
     "@x402/evm": "^2.12.0",
     "ai": "^6.0.185",
     "chat": "^4.29.0",
+    "just-bash": "^3.0.1",
     "react": "^19.2.6",
     "vitest-browser-react": "^2.2.0",
     "zod": "^4.4.3"
@@ -52,11 +56,13 @@
   "peerDependencies": {
     "@cloudflare/ai-chat": ">=0.6.1 <1.0.0",
     "@cloudflare/codemode": ">=0.3.4 <1.0.0",
+    "@cloudflare/worker-bundler": ">=0.1.3 <1.0.0",
     "@tanstack/ai": ">=0.10.2 <1.0.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",
     "ai": "^6.0.0",
     "chat": "^4.29.0",
+    "just-bash": "^3.0.0",
     "react": "^19.0.0",
     "vite": ">=6.0.0 <9.0.0",
     "zod": "^4.0.0"
@@ -66,6 +72,9 @@
       "optional": true
     },
     "@cloudflare/codemode": {
+      "optional": true
+    },
+    "@cloudflare/worker-bundler": {
       "optional": true
     },
     "@tanstack/ai": {
@@ -78,6 +87,9 @@
       "optional": true
     },
     "chat": {
+      "optional": true
+    },
+    "just-bash": {
       "optional": true
     },
     "vite": {
@@ -221,6 +233,11 @@
       "types": "./dist/vite.d.ts",
       "import": "./dist/vite.js",
       "require": "./dist/vite.js"
+    },
+    "./skills": {
+      "types": "./dist/skills/index.d.ts",
+      "import": "./dist/skills/index.js",
+      "require": "./dist/skills/index.js"
     }
   },
   "publishConfig": {
@@ -229,6 +246,7 @@
   "files": [
     "dist",
     "agents.tsconfig.json",
+    "skills-module.d.ts",
     "README.md"
   ],
   "nx": {

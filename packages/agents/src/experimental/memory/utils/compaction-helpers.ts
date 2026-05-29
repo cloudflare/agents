@@ -9,6 +9,10 @@
 import type { SessionMessage } from "../session/types";
 import { estimateMessageTokens } from "./tokens";
 
+export type CompactTokenCounter = (
+  messages: SessionMessage[]
+) => number | Promise<number>;
+
 // ── Compaction ID constants ─────────────────────────────────────────
 
 /** Prefix for all compaction messages (overlays and summaries) */
@@ -153,6 +157,32 @@ export function findTailCutByTokens(
   const cutIdx = minCut >= headEnd ? Math.min(tokenCut, minCut) : tokenCut;
 
   // Align to avoid splitting tool groups
+  return alignBoundaryBackward(messages, cutIdx);
+}
+
+async function findTailCutByTokensWithCounter(
+  messages: SessionMessage[],
+  headEnd: number,
+  tokenCounter: CompactTokenCounter,
+  tailTokenBudget = 20000,
+  minTailMessages = 2
+): Promise<number> {
+  const n = messages.length;
+  let accumulated = 0;
+  let tokenCut = n;
+
+  for (let i = n - 1; i >= headEnd; i--) {
+    const msgTokens = await tokenCounter([messages[i]]);
+
+    if (accumulated + msgTokens > tailTokenBudget && tokenCut < n) {
+      break;
+    }
+    accumulated += msgTokens;
+    tokenCut = i;
+  }
+
+  const minCut = n - minTailMessages;
+  const cutIdx = minCut >= headEnd ? Math.min(tokenCut, minCut) : tokenCut;
   return alignBoundaryBackward(messages, cutIdx);
 }
 
@@ -409,6 +439,13 @@ export interface CompactOptions {
 
   /** Minimum tail messages to protect (default: 2) */
   minTailMessages?: number;
+
+  /**
+   * Optional counter for tail-budget decisions. Use this when a tokenizer or
+   * model-reported accounting is available; otherwise the Workers-safe
+   * heuristic is used.
+   */
+  tokenCounter?: CompactTokenCounter;
 }
 
 /**
@@ -450,12 +487,20 @@ export function createCompactFunction(opts: CompactOptions) {
     let compressStart = protectHead;
     compressStart = alignBoundaryForward(messages, compressStart);
 
-    let compressEnd = findTailCutByTokens(
-      messages,
-      compressStart,
-      tailTokenBudget,
-      minTailMessages
-    );
+    let compressEnd = opts.tokenCounter
+      ? await findTailCutByTokensWithCounter(
+          messages,
+          compressStart,
+          opts.tokenCounter,
+          tailTokenBudget,
+          minTailMessages
+        )
+      : findTailCutByTokens(
+          messages,
+          compressStart,
+          tailTokenBudget,
+          minTailMessages
+        );
 
     if (compressEnd <= compressStart) {
       return null;

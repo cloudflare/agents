@@ -65,6 +65,31 @@ function waitForDone(ws: WebSocket, timeout = 10_000): Promise<void> {
   });
 }
 
+function waitForChatResponse(
+  ws: WebSocket,
+  timeout = 10_000
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("Timeout waiting for chat response")),
+      timeout
+    );
+    const handler = (e: MessageEvent) => {
+      try {
+        const msg = JSON.parse(e.data as string) as Record<string, unknown>;
+        if (msg.type === MSG_CHAT_RESPONSE && msg.done === true) {
+          clearTimeout(timer);
+          ws.removeEventListener("message", handler);
+          resolve(msg);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    ws.addEventListener("message", handler);
+  });
+}
+
 function sendChatRequest(
   ws: WebSocket,
   messages: UIMessage[],
@@ -229,6 +254,83 @@ describe("Think — message reconciliation on incoming submits", () => {
       toolCallId: TOOL_CALL_ID,
       state: "output-available"
     });
+
+    ws.close(1000);
+  });
+
+  it("repairs a persisted orphan tool call before the next Think turn", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const ws = await connectWS(room);
+
+    await agent.setTextOnlyMode(true);
+
+    const userA = makeUserMessage("user-a", "create a cat");
+    const orphanAssistant = makeClientOptimisticAssistant("orphan-assistant");
+    await agent.persistToolCallMessage([userA, orphanAssistant]);
+
+    const responsePromise = waitForChatResponse(ws);
+    sendChatRequest(ws, [makeUserMessage("user-b", "continue")]);
+    const response = await responsePromise;
+
+    expect(response.done).toBe(true);
+    expect(response.error).toBeUndefined();
+
+    const responseLog = (await agent.getResponseLog()) as Array<{
+      status: string;
+      error?: string;
+    }>;
+    const lastResponse = responseLog[responseLog.length - 1];
+    expect(lastResponse).toMatchObject({ status: "completed" });
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(messages.map((message) => message.id)).not.toContain(
+      "orphan-assistant"
+    );
+    expect(messages.some((message) => message.id === "user-b")).toBe(true);
+
+    ws.close(1000);
+  });
+
+  it("persists normalized tool inputs when repair only changes part contents", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const ws = await connectWS(room);
+
+    await agent.setTextOnlyMode(true);
+
+    const userA = makeUserMessage("user-a", "create a cat");
+    const assistantWithStringInput: UIMessage = {
+      id: "assistant-string-input",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-generateImage",
+          toolCallId: TOOL_CALL_ID,
+          state: "output-available",
+          input: '{"prompt":"a cat"}',
+          output: { url: "https://example.test/cat.png" }
+        } as unknown as UIMessage["parts"][number]
+      ]
+    };
+    await agent.persistToolCallMessage([userA, assistantWithStringInput]);
+
+    const responsePromise = waitForChatResponse(ws);
+    sendChatRequest(ws, [makeUserMessage("user-b", "continue")]);
+    const response = await responsePromise;
+
+    expect(response.done).toBe(true);
+    expect(response.error).toBeUndefined();
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const repairedAssistant = messages.find(
+      (message) => message.id === assistantWithStringInput.id
+    );
+    expect(repairedAssistant).toBeDefined();
+    const toolPart = repairedAssistant!.parts.find(
+      (part) => (part as Record<string, unknown>).toolCallId === TOOL_CALL_ID
+    ) as Record<string, unknown> | undefined;
+    expect(toolPart?.input).toEqual({ prompt: "a cat" });
 
     ws.close(1000);
   });

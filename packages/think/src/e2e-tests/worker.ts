@@ -11,7 +11,9 @@ import { Think, Workspace } from "../think";
 import type {
   ChatRecoveryContext,
   ChatRecoveryOptions,
-  StreamCallback
+  StreamCallback,
+  TurnConfig,
+  TurnContext
 } from "../think";
 
 type Env = {
@@ -22,6 +24,24 @@ type Env = {
   AI: Ai;
   R2: R2Bucket;
 };
+
+type RecoveryContextLogEntry = {
+  streamId: string;
+  requestId: string;
+  partialText: string;
+};
+
+type AgentToolRunStatus = {
+  runId: string;
+  status: string;
+  error: string | null;
+};
+
+const RECOVERY_CONTEXTS_KEY = "test:recovery-contexts";
+const RECOVERY_BEHAVIOR_KEY = "test:recovery-behavior";
+const BEFORE_TURN_ERROR_KEY = "test:before-turn-error";
+const ON_ERROR_LOG_KEY = "test:on-error-log";
+const ON_CHAT_ERROR_LOG_KEY = "test:on-chat-error-log";
 
 export class TestAssistant extends Think<Env> {
   override workspace = new Workspace({
@@ -93,12 +113,6 @@ function createSlowE2EMockModel(): LanguageModel {
 export class ThinkRecoveryE2EAgent extends Think<Env> {
   override chatRecovery = true;
 
-  private _recoveryContexts: Array<{
-    streamId: string;
-    requestId: string;
-    partialText: string;
-  }> = [];
-
   override getModel(): LanguageModel {
     return createSlowE2EMockModel();
   }
@@ -110,12 +124,46 @@ export class ThinkRecoveryE2EAgent extends Think<Env> {
   override async onChatRecovery(
     ctx: ChatRecoveryContext
   ): Promise<ChatRecoveryOptions> {
-    this._recoveryContexts.push({
+    const contexts =
+      (await this.ctx.storage.get<RecoveryContextLogEntry[]>(
+        RECOVERY_CONTEXTS_KEY
+      )) ?? [];
+    contexts.push({
       streamId: ctx.streamId,
       requestId: ctx.requestId,
       partialText: ctx.partialText
     });
-    return { continue: false };
+    await this.ctx.storage.put(RECOVERY_CONTEXTS_KEY, contexts);
+
+    const behavior =
+      (await this.ctx.storage.get<"continue" | "stop">(
+        RECOVERY_BEHAVIOR_KEY
+      )) ?? "stop";
+    return { continue: behavior === "continue" };
+  }
+
+  override async beforeTurn(_ctx: TurnContext): Promise<TurnConfig | void> {
+    const error = await this.ctx.storage.get<string>(BEFORE_TURN_ERROR_KEY);
+    if (!error) return;
+    await this.ctx.storage.delete(BEFORE_TURN_ERROR_KEY);
+    throw new Error(error);
+  }
+
+  override async onError(error: unknown): Promise<void> {
+    const log = (await this.ctx.storage.get<string[]>(ON_ERROR_LOG_KEY)) ?? [];
+    log.push(error instanceof Error ? error.message : String(error));
+    await this.ctx.storage.put(ON_ERROR_LOG_KEY, log);
+  }
+
+  override onChatError(error: unknown): unknown {
+    const message = error instanceof Error ? error.message : String(error);
+    this.ctx.storage
+      .get<string[]>(ON_CHAT_ERROR_LOG_KEY)
+      .then((log = []) =>
+        this.ctx.storage.put(ON_CHAT_ERROR_LOG_KEY, [...log, message])
+      )
+      .catch(console.error);
+    return error;
   }
 
   @callable()
@@ -130,12 +178,36 @@ export class ThinkRecoveryE2EAgent extends Think<Env> {
     assistantMessages: number;
   }> {
     const messages = await this.getMessages();
+    const contexts =
+      (await this.ctx.storage.get<RecoveryContextLogEntry[]>(
+        RECOVERY_CONTEXTS_KEY
+      )) ?? [];
     return {
-      recoveryCount: this._recoveryContexts.length,
-      contexts: this._recoveryContexts,
+      recoveryCount: contexts.length,
+      contexts,
       messageCount: messages.length,
       assistantMessages: messages.filter((m) => m.role === "assistant").length
     };
+  }
+
+  @callable()
+  async setRecoveryBehavior(behavior: "continue" | "stop"): Promise<void> {
+    await this.ctx.storage.put(RECOVERY_BEHAVIOR_KEY, behavior);
+  }
+
+  @callable()
+  async throwBeforeNextTurn(message: string): Promise<void> {
+    await this.ctx.storage.put(BEFORE_TURN_ERROR_KEY, message);
+  }
+
+  @callable()
+  async getOnErrorLog(): Promise<string[]> {
+    return (await this.ctx.storage.get<string[]>(ON_ERROR_LOG_KEY)) ?? [];
+  }
+
+  @callable()
+  async getOnChatErrorLog(): Promise<string[]> {
+    return (await this.ctx.storage.get<string[]>(ON_CHAT_ERROR_LOG_KEY)) ?? [];
   }
 
   @callable()
@@ -209,6 +281,36 @@ export class ThinkRecoveryHelperParent extends Agent<Env> {
       }
     }
     return "started";
+  }
+
+  @callable()
+  async startHelperAgentToolRun(
+    runId: string,
+    prompt: string
+  ): Promise<string> {
+    void this.runAgentTool(ThinkRecoveryHelperAgent, {
+      runId,
+      input: prompt
+    }).catch((error) => {
+      console.error("[test] helper agent-tool run failed:", error);
+    });
+
+    for (let i = 0; i < 20; i++) {
+      const rows = this.getAgentToolRuns();
+      if (rows.some((row) => row.runId === runId)) return runId;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    throw new Error("Timed out waiting for helper agent-tool row");
+  }
+
+  @callable()
+  getAgentToolRuns(): AgentToolRunStatus[] {
+    return this.sql<AgentToolRunStatus>`
+      SELECT run_id as runId, status, error_message as error
+      FROM cf_agent_tool_runs
+      ORDER BY started_at ASC
+    `;
   }
 
   @callable()

@@ -30,6 +30,7 @@ export function bundlerOnlyOptionsWarning(opts: {
   define?: unknown;
   loader?: unknown;
   conditions?: unknown;
+  virtualModules?: unknown;
   plugins?: unknown;
 }): string | null {
   const set: string[] = [];
@@ -38,6 +39,7 @@ export function bundlerOnlyOptionsWarning(opts: {
   if (opts.define !== undefined) set.push("define");
   if (opts.loader !== undefined) set.push("loader");
   if (opts.conditions !== undefined) set.push("conditions");
+  if (opts.virtualModules !== undefined) set.push("virtualModules");
   if (opts.plugins !== undefined) {
     set.push("__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired");
   }
@@ -63,6 +65,7 @@ export interface BundleOptions {
   define?: Record<string, string>;
   loader?: Record<string, BundlerLoader>;
   conditions?: string[];
+  virtualModules?: Record<string, string>;
   /** Extra esbuild plugins to run BEFORE the internal virtual-fs plugin. */
   plugins?: unknown[];
 }
@@ -86,6 +89,7 @@ export async function bundleWithEsbuild(
     define,
     loader: loaderOverrides,
     conditions,
+    virtualModules,
     plugins: extraPlugins = []
   } = options;
   // Ensure esbuild is initialized (happens lazily on first use)
@@ -167,6 +171,30 @@ export async function bundleWithEsbuild(
     }
   };
 
+  const virtualModulePlugin: esbuild.Plugin | null =
+    virtualModules && Object.keys(virtualModules).length > 0
+      ? {
+          name: "virtual-modules",
+          setup(build) {
+            build.onResolve({ filter: /.*/ }, (args) => {
+              if (Object.hasOwn(virtualModules, args.path)) {
+                return { path: args.path, namespace: "virtual-module" };
+              }
+              return undefined;
+            });
+
+            build.onLoad(
+              { filter: /.*/, namespace: "virtual-module" },
+              (args) => ({
+                contents: virtualModules[args.path] ?? "",
+                loader: "js",
+                resolveDir: ""
+              })
+            );
+          }
+        }
+      : null;
+
   // Validate user plugins eagerly: the public type is `unknown[]` (so the
   // .d.ts stays free of esbuild types), which means anything can flow in.
   // Without this, a bad value surfaces as an opaque crash from inside esbuild's
@@ -203,7 +231,11 @@ export async function bundleWithEsbuild(
     target,
     minify,
     sourcemap: sourcemap ? "inline" : false,
-    plugins: [...userPlugins, virtualFsPlugin],
+    plugins: [
+      ...userPlugins,
+      ...(virtualModulePlugin ? [virtualModulePlugin] : []),
+      virtualFsPlugin
+    ],
     outfile: "bundle.js",
     ...(jsx !== undefined ? { jsx } : {}),
     ...(jsxImportSource !== undefined ? { jsxImportSource } : {}),

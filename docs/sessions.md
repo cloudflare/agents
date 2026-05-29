@@ -373,7 +373,8 @@ const session = Session.create(this)
         generateText({ model: myModel, prompt }).then((r) => r.text),
       protectHead: 3, // Keep first 3 messages (default: 3)
       tailTokenBudget: 20000, // Protect ~20K tokens at the tail (default: 20000)
-      minTailMessages: 2 // Always keep at least 2 tail messages (default: 2)
+      minTailMessages: 2, // Always keep at least 2 tail messages (default: 2)
+      tokenCounter: async (messages) => estimateWithYourTokenizer({ messages })
     })
   )
   .compactAfter(100_000); // Auto-compact at 100K estimated tokens
@@ -407,7 +408,12 @@ When `.compactAfter(threshold)` is set, `appendMessage()` checks the estimated t
 
 By default, the estimate includes stored message parts plus the Session-managed frozen system prompt. That means context blocks and cached prompts managed by `Session` contribute to the threshold. The estimate does not include framework-specific prompt additions or tool schema serialization that happen outside `Session`, such as Think's final capability prompt and tool catalog.
 
-Use `tokenCounter` when you have model-reported usage or your own tokenizer:
+There are two token-counting decisions:
+
+- `createCompactFunction({ tokenCounter })` controls which tail messages are protected from summarization. Use this when tool-heavy histories are much larger than the Workers-safe heuristic can estimate.
+- `.compactAfter(threshold, { tokenCounter })` controls when automatic compaction is triggered after writes. It can include the frozen system prompt and context blocks.
+
+Use a custom counter when you have model-reported usage or your own tokenizer:
 
 ```typescript
 const session = Session.create(this)

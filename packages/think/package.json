@@ -20,20 +20,25 @@
   "bugs": {
     "url": "https://github.com/cloudflare/agents/issues"
   },
+  "dependencies": {
+    "@cloudflare/codemode": ">=0.3.4 <1.0.0",
+    "@cloudflare/shell": ">=0.3.4 <1.0.0",
+    "chat": "^4.29.0",
+    "just-bash": "^3.0.1"
+  },
   "devDependencies": {
-    "@cloudflare/shell": "*",
+    "@chat-adapter/telegram": "^4.29.0",
     "ai": "^6.0.185",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "@cloudflare/codemode": ">=0.3.4 <1.0.0",
-    "@cloudflare/shell": ">=0.3.4 <1.0.0",
-    "agents": ">=0.12.4 <1.0.0",
-    "ai": "^6.0.0",
+    "@chat-adapter/telegram": "^4.29.0",
+    "agents": ">=0.13.2 <1.0.0",
+    "ai": "^6.0.182",
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
-    "@cloudflare/codemode": {
+    "@chat-adapter/telegram": {
       "optional": true
     }
   },
@@ -49,6 +54,14 @@
     "./workflows": {
       "types": "./dist/workflows.d.ts",
       "import": "./dist/workflows.js"
+    },
+    "./messengers": {
+      "types": "./dist/messengers/index.d.ts",
+      "import": "./dist/messengers/index.js"
+    },
+    "./messengers/telegram": {
+      "types": "./dist/messengers/telegram.d.ts",
+      "import": "./dist/messengers/telegram.js"
     },
     "./tools/workspace": {
       "types": "./dist/tools/workspace.d.ts",

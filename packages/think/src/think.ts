@@ -100,6 +100,9 @@ import {
   stepCountIs,
   streamText
 } from "ai";
+import * as skills from "agents/skills";
+import { SkillRegistry } from "agents/skills";
+import type { SkillScriptRunner, SkillSource } from "agents/skills";
 
 // Re-export AI SDK types that appear on Think's public lifecycle hooks
 // so users can import them from a single place.
@@ -112,6 +115,8 @@ export type {
   TypedToolCall,
   TypedToolResult
 } from "ai";
+export { skills };
+export type { SkillRunContext, SkillSource } from "agents/skills";
 import {
   Agent,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
@@ -157,6 +162,12 @@ import { Session } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
 import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "./tools/workspace";
+import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
+import type {
+  MessengerContext,
+  ThinkMessengers,
+  MessengerThinkHost
+} from "./messengers";
 
 export { Session } from "agents/experimental/memory/session";
 export { Workspace } from "@cloudflare/shell";
@@ -550,6 +561,7 @@ type ProgrammaticMessagesResult = SaveMessagesResult & {
 type ChatRecoveryRetryData = {
   targetUserId?: string;
   originalRequestId?: string;
+  incidentId?: string;
   lastBody?: Record<string, unknown> | null;
   lastClientTools?: ClientToolSchema[] | null;
   recoveredRequestId?: string;
@@ -558,10 +570,41 @@ type ChatRecoveryRetryData = {
 type ChatRecoveryContinueData = {
   targetAssistantId?: string;
   originalRequestId?: string;
+  incidentId?: string;
   lastBody?: Record<string, unknown> | null;
   lastClientTools?: ClientToolSchema[] | null;
   recoveredRequestId?: string;
 };
+
+type ChatRecoveryKind = "retry" | "continue";
+
+type ChatRecoveryIncident = {
+  incidentId: string;
+  requestId: string;
+  recoveryKind: ChatRecoveryKind;
+  attempt: number;
+  maxAttempts: number;
+  status:
+    | "detected"
+    | "scheduled"
+    | "attempting"
+    | "completed"
+    | "skipped"
+    | "exhausted"
+    | "failed";
+  firstSeenAt: number;
+  lastAttemptAt: number;
+  reason?: string;
+};
+
+const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
+const DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS = 6;
+const DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS = 10_000;
+const DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE =
+  "The assistant was interrupted and could not recover. Please try again.";
+// Incidents that have not seen a new attempt within this window are assumed
+// abandoned and swept so durable storage does not grow without bound.
+const CHAT_RECOVERY_INCIDENT_TTL_MS = 60 * 60 * 1000;
 
 /**
  * Callback interface for streaming chat events from a Think sub-agent.
@@ -849,17 +892,23 @@ type ThinkWorkflowNotificationRow = {
 // from `@cloudflare/think` directly.
 export type {
   ChatResponseResult,
+  ChatRecoveryConfig,
   ChatRecoveryContext,
+  ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
   MessageConcurrency,
+  ResolvedChatRecoveryConfig,
   SaveMessagesOptions,
   SaveMessagesResult
 } from "agents/chat";
 import type {
   ChatResponseResult,
+  ChatRecoveryConfig,
   ChatRecoveryContext,
+  ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
   MessageConcurrency,
+  ResolvedChatRecoveryConfig,
   SaveMessagesOptions,
   SaveMessagesResult
 } from "agents/chat";
@@ -968,6 +1017,12 @@ export interface TurnConfig {
    * is active (e.g. workers-ai-provider).
    */
   output?: Parameters<typeof streamText>[0]["output"];
+}
+
+export interface ChatErrorContext {
+  requestId?: string;
+  stage: "parse" | "persist" | "turn" | "stream" | "recovery" | "transcript";
+  messagesPersisted?: boolean;
 }
 
 /**
@@ -1171,10 +1226,13 @@ export class Think<
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Agent<Env, State, Props> {
+  private _activeChatRecoveryRootRequestId: string | undefined;
+
   private static readonly CONFIG_KEYS = [
     "_think_config",
     "lastClientTools",
-    "lastBody"
+    "lastBody",
+    "skillsFingerprint"
   ] as const;
   /**
    * Wait for MCP server connections to be ready before the inference
@@ -1184,6 +1242,9 @@ export class Think<
    * for a custom timeout. Defaults to `false` (no waiting).
    */
   waitForMcpConnections: boolean | { timeout: number } = false;
+
+  private _skillRegistry: SkillRegistry | null = null;
+  private _loggedSkillWarnings = new Set<string>();
 
   /**
    * Controls how overlapping user submit requests behave while another
@@ -1197,7 +1258,7 @@ export class Think<
    * When true, chat turns are wrapped in `runFiber` for durable execution.
    * Enables `onChatRecovery` hook and `this.stash()` during streaming.
    */
-  chatRecovery = true;
+  chatRecovery: ChatRecoveryConfig = true;
 
   static readonly CHAT_FIBER_NAME = "__cf_internal_chat_turn";
 
@@ -1212,6 +1273,10 @@ export class Think<
 
   /** Cached messages — kept in sync with session storage. */
   private _cachedMessages: UIMessage[] = [];
+
+  private _activeMessengerContext?: MessengerContext;
+
+  private _messengerRuntime?: ThinkMessengerRuntime;
 
   /**
    * WorkerLoader binding for sandboxed extensions.
@@ -1247,6 +1312,15 @@ export class Think<
    * ```
    */
   workspace!: WorkspaceLike;
+
+  /**
+   * Include the default workspace Bash tool. Enabled by default so models can
+   * run shell-style multi-file workflows against the workspace. Set to `false`
+   * to omit it from the built-in workspace tools.
+   */
+  workspaceBash:
+    | boolean
+    | NonNullable<Parameters<typeof createWorkspaceTools>[1]>["bash"] = true;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -1286,6 +1360,8 @@ export class Think<
         }
       });
 
+      await this._initializeSkills();
+
       // Force Session to initialize its tables (assistant_messages,
       // assistant_compactions, assistant_config, etc.) so that subsequent
       // config reads work.
@@ -1301,6 +1377,7 @@ export class Think<
       this._restoreClientTools();
       this._restoreBody();
       this._setupProtocolHandlers();
+      this._initializeMessengers();
 
       // 8. User's onStart
       await _onStart();
@@ -1333,6 +1410,123 @@ export class Think<
   /** Read the durable message path from session storage. */
   private async _readMessagesFromStorage(): Promise<UIMessage[]> {
     return (await this.session.getHistory()) as UIMessage[];
+  }
+
+  private _repairToolTranscriptParts(messages: UIMessage[]): {
+    messages: UIMessage[];
+    removedToolCalls: number;
+    normalizedInputs: number;
+    toolCallIds: string[];
+  } {
+    let removedToolCalls = 0;
+    let normalizedInputs = 0;
+    const toolCallIds: string[] = [];
+    const repaired: UIMessage[] = [];
+
+    for (const message of messages) {
+      const parts: UIMessage["parts"] = [];
+      let messageRemovedToolCalls = 0;
+      let messageChanged = false;
+      for (const part of message.parts) {
+        const record = part as Record<string, unknown>;
+        const toolCallId =
+          typeof record.toolCallId === "string" ? record.toolCallId : undefined;
+        const isToolPart =
+          typeof record.type === "string" &&
+          (record.type.startsWith("tool-") || record.type === "dynamic-tool") &&
+          toolCallId;
+        if (!isToolPart) {
+          parts.push(part);
+          continue;
+        }
+
+        const state = typeof record.state === "string" ? record.state : "";
+        const hasOutput =
+          "output" in record ||
+          "result" in record ||
+          state === "output-available";
+        if (!hasOutput) {
+          removedToolCalls++;
+          messageRemovedToolCalls++;
+          messageChanged = true;
+          toolCallIds.push(toolCallId);
+          continue;
+        }
+
+        if (
+          "input" in record &&
+          typeof record.input === "string" &&
+          record.input.trim().startsWith("{")
+        ) {
+          try {
+            parts.push({
+              ...part,
+              input: JSON.parse(record.input) as unknown
+            } as UIMessage["parts"][number]);
+            normalizedInputs++;
+            messageChanged = true;
+            continue;
+          } catch {
+            // Keep the original input if it is not valid JSON.
+          }
+        }
+
+        parts.push(part);
+      }
+
+      const hasMeaningfulPart = parts.some(
+        (part) => (part as Record<string, unknown>).type !== "step-start"
+      );
+      if (
+        messageRemovedToolCalls > 0 &&
+        (!hasMeaningfulPart || parts.length === 0) &&
+        message.parts.length > 0
+      ) {
+        continue;
+      }
+      repaired.push(messageChanged ? { ...message, parts } : message);
+    }
+
+    return {
+      messages: repaired,
+      removedToolCalls,
+      normalizedInputs,
+      toolCallIds
+    };
+  }
+
+  private async _repairTranscriptForProvider(
+    messages: UIMessage[]
+  ): Promise<UIMessage[]> {
+    const repair = this._repairToolTranscriptParts(messages);
+    if (repair.removedToolCalls === 0 && repair.normalizedInputs === 0) {
+      return messages;
+    }
+
+    const repairedIds = new Set(repair.messages.map((message) => message.id));
+    const removedIds = messages
+      .filter((message) => !repairedIds.has(message.id))
+      .map((message) => message.id);
+    if (removedIds.length > 0) {
+      await this.session.deleteMessages(removedIds);
+    }
+    for (const message of repair.messages) {
+      const original = messages.find(
+        (candidate) => candidate.id === message.id
+      );
+      if (original && original.parts !== message.parts) {
+        await this.session.updateMessage(sanitizeMessage(message));
+      }
+    }
+
+    this._replaceCachedMessages(repair.messages);
+    this._broadcastMessages();
+    this._emit("chat:transcript:repaired", {
+      removedToolCalls: repair.removedToolCalls,
+      normalizedInputs: repair.normalizedInputs,
+      toolCallIds: repair.toolCallIds
+    });
+    return repair.messages;
   }
 
   /** Replace the live cache with a durable storage snapshot. */
@@ -1423,7 +1617,7 @@ export class Think<
   private _pendingResumeConnections: Set<string> = new Set();
   private _lastClientTools: ClientToolSchema[] | undefined;
   private _lastBody: Record<string, unknown> | undefined;
-  private _continuation = new ContinuationState();
+  private _continuation = new ContinuationState<Connection>();
   private _continuationTimer: ReturnType<typeof setTimeout> | null = null;
   private _insideResponseHook = false;
   private _insideInferenceLoop = false;
@@ -1635,6 +1829,54 @@ export class Think<
     return {};
   }
 
+  /** Return messenger integrations that should be routed through this Think agent. */
+  getMessengers(): ThinkMessengers {
+    return {};
+  }
+
+  getMessengerContext(): MessengerContext | undefined {
+    if (this._activeMessengerContext) {
+      return this._activeMessengerContext;
+    }
+
+    const message = this.messages.at(-1) as
+      | (UIMessage & { metadata?: { messenger?: MessengerContext } })
+      | undefined;
+    return message?.metadata?.messenger;
+  }
+
+  async chatWithMessengerContext(
+    userMessage: string | UIMessage,
+    callback: StreamCallback,
+    context: MessengerContext,
+    options?: ChatOptions
+  ): Promise<void> {
+    const previous = this._activeMessengerContext;
+    this._activeMessengerContext = context;
+    try {
+      await this.chat(userMessage, callback, options);
+    } finally {
+      this._activeMessengerContext = previous;
+    }
+  }
+
+  private _initializeMessengers(): void {
+    if (this.parentPath.length > 0) {
+      return;
+    }
+
+    const messengers = this.getMessengers();
+    if (Object.keys(messengers).length === 0) {
+      return;
+    }
+
+    this._messengerRuntime = new ThinkMessengerRuntime(
+      messengers,
+      this as unknown as MessengerThinkHost
+    );
+    this._messengerRuntime.initialize();
+  }
+
   /** Return code-declared scheduled tasks for this agent. */
   getScheduledTasks(): ThinkScheduledTasks | Promise<ThinkScheduledTasks> {
     return {};
@@ -1665,6 +1907,7 @@ export class Think<
     const snapshot = createChatFiberSnapshot({
       kind: "think-chat-turn",
       requestId,
+      recoveryRootRequestId: this._activeChatRecoveryRootRequestId ?? requestId,
       continuation,
       messages: this.messages,
       lastBody: this._lastBody,
@@ -1782,6 +2025,96 @@ export class Think<
    */
   configureSession(session: Session): Session | Promise<Session> {
     return session;
+  }
+
+  /**
+   * Return Agent Skills sources for this Think agent.
+   *
+   * Bundled skills are typically imported with the Agents Vite plugin:
+   *
+   * ```typescript
+   * import productSkills from "agents:skills"; // -> ./skills next to this file
+   * ```
+   *
+   * Sources are applied in order; the first source to register a skill name
+   * wins, and later collisions are skipped with a logged warning.
+   */
+  getSkills(): SkillSource[] | Promise<SkillSource[]> {
+    return [];
+  }
+
+  private async _initializeSkills(): Promise<void> {
+    // A misconfigured or failing skill source must never prevent the agent
+    // from starting. Any error here is logged and skills stay disabled.
+    try {
+      const sources = await this.getSkills();
+      if (sources.length === 0) return;
+
+      const registry = new SkillRegistry(sources, this.getSkillScriptRunner());
+      await registry.load();
+      this._logSkillWarnings(registry);
+      this._skillRegistry = registry;
+
+      await this.session.addContext(registry.contextLabel, {
+        description: "Think skills: available skill catalog",
+        provider: {
+          get: () => registry.systemPrompt()
+        }
+      });
+
+      const previous = this._configGet("skillsFingerprint");
+      if (previous !== registry.fingerprint) {
+        await this.session.refreshSystemPrompt();
+        this._configSet("skillsFingerprint", registry.fingerprint);
+      }
+    } catch (error) {
+      console.warn(
+        `[think] Failed to initialize skills; continuing without them: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Log registry diagnostics (duplicate names, sources that failed to list),
+   * deduped by message so a new collision after a deploy still surfaces while
+   * the same warning is not repeated on every turn.
+   */
+  private _logSkillWarnings(registry: SkillRegistry): void {
+    for (const warning of registry.warnings) {
+      if (this._loggedSkillWarnings.has(warning)) continue;
+      this._loggedSkillWarnings.add(warning);
+      console.warn(`[think] ${warning}`);
+    }
+  }
+
+  /**
+   * Return an optional runner that enables the `run_skill_script` tool.
+   *
+   * @experimental Skill script execution is experimental and may change
+   * before stabilizing.
+   */
+  getSkillScriptRunner(): SkillScriptRunner | null {
+    return null;
+  }
+
+  private async _refreshSkillsIfChanged(): Promise<void> {
+    if (!this._skillRegistry) return;
+
+    // Refreshing pulls from live sources (e.g. R2); a transient failure must
+    // not break the turn. Keep the last good catalog on error.
+    try {
+      await this._skillRegistry.refresh();
+      this._logSkillWarnings(this._skillRegistry);
+      const previous = this._configGet("skillsFingerprint");
+      if (previous !== this._skillRegistry.fingerprint) {
+        await this.session.refreshSystemPrompt();
+        this._configSet("skillsFingerprint", this._skillRegistry.fingerprint);
+      }
+    } catch (error) {
+      console.warn(
+        `[think] Failed to refresh skills; using last known catalog: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 
   /**
@@ -1962,7 +2295,7 @@ export class Think<
    * Handle an error that occurred during a chat turn.
    * Override to customize error handling (e.g. logging, metrics).
    */
-  onChatError(error: unknown): unknown {
+  onChatError(error: unknown, _ctx?: ChatErrorContext): unknown {
     return error;
   }
 
@@ -2059,16 +2392,21 @@ export class Think<
       await this.mcp.waitForConnections({ timeout });
     }
 
-    const workspaceTools = createWorkspaceTools(this.workspace);
+    const workspaceTools = createWorkspaceTools(this.workspace, {
+      bash: this.workspaceBash
+    });
     const baseTools = this.getTools();
     const extensionTools = this.extensionManager?.getTools() ?? {};
+    await this._refreshSkillsIfChanged();
     const contextTools = await this.session.tools();
+    const skillTools = this._skillRegistry?.tools() ?? {};
     const clientToolSet = createToolsFromClientSchemas(input.clientTools);
     const tools: ToolSet = {
       ...workspaceTools,
       ...baseTools,
       ...extensionTools,
       ...contextTools,
+      ...skillTools,
       ...(this.mcp?.getAITools?.() ?? {}),
       ...clientToolSet
     };
@@ -2077,7 +2415,7 @@ export class Think<
     const baseSystem = frozenPrompt || this.getSystemPrompt();
     const system = this._systemPromptForTurn(baseSystem, tools);
 
-    const history = this.messages;
+    const history = await this._repairTranscriptForProvider(this.messages);
     const truncated = truncateOlderMessages(history) as UIMessage[];
     const messages = await convertToModelMessages(truncated, { tools });
 
@@ -2754,9 +3092,17 @@ export class Think<
                   })
               );
             } catch (error) {
-              const wrapped = this.onChatError(error);
+              const wrapped = this.onChatError(error, {
+                stage: "turn",
+                messagesPersisted: true
+              });
               const errorMessage =
                 wrapped instanceof Error ? wrapped.message : String(wrapped);
+              this._emit("chat:request:failed", {
+                stage: "turn",
+                messagesPersisted: true,
+                error: errorMessage
+              });
               await callback.onError(errorMessage);
               return;
             }
@@ -4986,13 +5332,7 @@ export class Think<
       wasClean: boolean
     ) => {
       this._pendingResumeConnections.delete(connection.id);
-      this._continuation.awaitingConnections.delete(connection.id);
-      if (this._continuation.pending?.connectionId === connection.id) {
-        this._continuation.pending = null;
-      }
-      if (this._continuation.activeConnectionId === connection.id) {
-        this._continuation.activeConnectionId = null;
-      }
+      this._continuation.releaseConnection(connection.id);
       return _onClose(connection, code, reason, wasClean);
     };
 
@@ -5022,6 +5362,11 @@ export class Think<
         url.pathname.endsWith("/get-messages")
       ) {
         return Response.json(this.messages);
+      }
+      const messengerResponse =
+        await this._messengerRuntime?.handleRequest(request);
+      if (messengerResponse) {
+        return messengerResponse;
       }
       return _onRequest(request);
     };
@@ -5127,7 +5472,8 @@ export class Think<
       }
     } else if (
       this._continuation.pending !== null &&
-      this._continuation.pending.connectionId === connection.id
+      (this._continuation.pending.connectionId === null ||
+        this._continuation.pending.connectionId === connection.id)
     ) {
       this._continuation.awaitingConnections.set(connection.id, connection);
     } else {
@@ -5184,7 +5530,18 @@ export class Think<
     let rawParsed: Record<string, unknown>;
     try {
       rawParsed = JSON.parse(event.init.body) as Record<string, unknown>;
-    } catch {
+    } catch (error) {
+      const wrapped = this.onChatError(error, {
+        requestId: event.id,
+        stage: "parse",
+        messagesPersisted: false
+      });
+      this._emit("chat:request:failed", {
+        requestId: event.id,
+        stage: "parse",
+        messagesPersisted: false,
+        error: wrapped instanceof Error ? wrapped.message : String(wrapped)
+      });
       return;
     }
 
@@ -5204,6 +5561,8 @@ export class Think<
     const isRegeneration = rawTrigger === "regenerate-message";
     const isSubmitMessage = !isRegeneration;
     const requestId = event.id;
+    let messagesPersisted = false;
+    let failureStage: ChatErrorContext["stage"] = "persist";
 
     // ── Concurrency decision (before persisting anything) ────────
     const concurrencyDecision =
@@ -5288,8 +5647,10 @@ export class Think<
 
       await this._syncMessages();
       this._broadcastMessages([connection.id]);
+      messagesPersisted = true;
 
       // ── Enter turn queue ────────────────────────────────────────
+      failureStage = "turn";
       const abortSignal = this._aborts.getSignal(requestId);
 
       await this.keepAliveWhile(async () => {
@@ -5381,10 +5742,23 @@ export class Think<
         }
       });
     } catch (error) {
+      const wrapped = this.onChatError(error, {
+        requestId,
+        stage: failureStage,
+        messagesPersisted
+      });
+      const errorMessage =
+        wrapped instanceof Error ? wrapped.message : String(wrapped);
+      this._emit("chat:request:failed", {
+        requestId,
+        stage: failureStage,
+        messagesPersisted,
+        error: errorMessage
+      });
       this._broadcastChat({
         type: MSG_CHAT_RESPONSE,
         id: requestId,
-        body: error instanceof Error ? error.message : "Error",
+        body: errorMessage,
         done: true,
         error: true
       });
@@ -5633,9 +6007,19 @@ export class Think<
         this._broadcastMessages();
       }
 
-      const wrapped = this.onChatError(error);
+      const wrapped = this.onChatError(error, {
+        requestId,
+        stage: "stream",
+        messagesPersisted: true
+      });
       const errorMessage =
         wrapped instanceof Error ? wrapped.message : String(wrapped);
+      this._emit("chat:request:failed", {
+        requestId,
+        stage: "stream",
+        messagesPersisted: true,
+        error: errorMessage
+      });
 
       if (assistantMsg) {
         await this._fireResponseHook({
@@ -5691,7 +6075,7 @@ export class Think<
     if (this._continuation.pending?.requestId === requestId) {
       this._continuation.activatePending();
       this._continuation.flushAwaitingConnections((c) =>
-        this._notifyStreamResuming(c as Connection)
+        this._notifyStreamResuming(c)
       );
     }
 
@@ -6044,9 +6428,202 @@ export class Think<
 
   // ── Chat recovery via fibers ───────────────────────────────────
 
+  private _resolveChatRecoveryConfig(): ResolvedChatRecoveryConfig {
+    const raw = this.chatRecovery;
+    const custom = typeof raw === "object" ? raw : undefined;
+    return {
+      enabled: raw !== false,
+      maxAttempts: Math.max(
+        1,
+        Math.floor(custom?.maxAttempts ?? DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS)
+      ),
+      stableTimeoutMs: Math.max(
+        0,
+        Math.floor(
+          custom?.stableTimeoutMs ?? DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS
+        )
+      ),
+      terminalMessage:
+        custom?.terminalMessage ?? DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,
+      ...(custom?.onExhausted ? { onExhausted: custom.onExhausted } : {})
+    };
+  }
+
+  private _chatRecoveryIncidentId(input: {
+    requestId: string;
+    recoveryRootRequestId?: string | null;
+    latestUserMessageId?: string | null;
+    targetAssistantId?: string | null;
+    recoveryKind: ChatRecoveryKind;
+  }): string {
+    // `recoveryKind` is intentionally NOT part of the identity: a single
+    // interrupted turn can flip between "retry" (no chunks persisted) and
+    // "continue" (partial chunks exist) across restarts, and the attempt
+    // budget must be shared so recovery stays bounded by `maxAttempts`.
+    return [
+      input.recoveryRootRequestId ?? input.requestId,
+      input.latestUserMessageId ?? ""
+    ].join(":");
+  }
+
+  private _chatRecoveryIncidentKey(incidentId: string): string {
+    return `${CHAT_RECOVERY_INCIDENT_KEY_PREFIX}${encodeURIComponent(incidentId)}`;
+  }
+
+  /** Sweep recovery incidents that have been inactive past the TTL. */
+  private async _sweepStaleChatRecoveryIncidents(now: number): Promise<void> {
+    const entries = await this.ctx.storage.list<ChatRecoveryIncident>({
+      prefix: CHAT_RECOVERY_INCIDENT_KEY_PREFIX
+    });
+    const staleKeys: string[] = [];
+    for (const [key, incident] of entries) {
+      const lastActive = incident?.lastAttemptAt ?? incident?.firstSeenAt ?? 0;
+      if (now - lastActive > CHAT_RECOVERY_INCIDENT_TTL_MS) {
+        staleKeys.push(key);
+      }
+    }
+    for (const key of staleKeys) {
+      await this.ctx.storage.delete(key);
+    }
+  }
+
+  private async _beginChatRecoveryIncident(input: {
+    requestId: string;
+    recoveryRootRequestId?: string | null;
+    latestUserMessageId?: string | null;
+    targetAssistantId?: string | null;
+    recoveryKind: ChatRecoveryKind;
+  }): Promise<{
+    incident: ChatRecoveryIncident;
+    config: ResolvedChatRecoveryConfig;
+    exhausted: boolean;
+  }> {
+    const config = this._resolveChatRecoveryConfig();
+    const incidentId = this._chatRecoveryIncidentId(input);
+    const key = this._chatRecoveryIncidentKey(incidentId);
+    const now = Date.now();
+    await this._sweepStaleChatRecoveryIncidents(now);
+    const existing = await this.ctx.storage.get<ChatRecoveryIncident>(key);
+    const attempt = (existing?.attempt ?? 0) + 1;
+    const exhausted = attempt > config.maxAttempts;
+    const incident: ChatRecoveryIncident = {
+      incidentId,
+      requestId: input.requestId,
+      recoveryKind: input.recoveryKind,
+      attempt,
+      maxAttempts: config.maxAttempts,
+      status: exhausted ? "exhausted" : "attempting",
+      firstSeenAt: existing?.firstSeenAt ?? now,
+      lastAttemptAt: now,
+      ...(exhausted ? { reason: "max_attempts_exceeded" } : {})
+    };
+    await this.ctx.storage.put(key, incident);
+
+    if (!existing) {
+      this._emit("chat:recovery:detected", {
+        incidentId,
+        requestId: input.requestId,
+        attempt,
+        maxAttempts: config.maxAttempts,
+        recoveryKind: input.recoveryKind
+      });
+    }
+    this._emit("chat:recovery:attempt", {
+      incidentId,
+      requestId: input.requestId,
+      attempt,
+      maxAttempts: config.maxAttempts,
+      recoveryKind: input.recoveryKind
+    });
+
+    return { incident, config, exhausted };
+  }
+
+  private async _updateChatRecoveryIncident(
+    incidentId: string | undefined,
+    status: ChatRecoveryIncident["status"],
+    reason?: string
+  ): Promise<void> {
+    if (!incidentId) return;
+    const key = this._chatRecoveryIncidentKey(incidentId);
+    const incident = await this.ctx.storage.get<ChatRecoveryIncident>(key);
+    if (!incident) return;
+    // A completed recovery is terminal and will not be retried, so drop the
+    // record instead of leaving it in storage forever. Non-completed states
+    // (scheduled/skipped/failed) are retained so the attempt budget survives
+    // across restarts; the TTL sweep eventually reclaims abandoned ones.
+    if (status === "completed") {
+      await this.ctx.storage.delete(key);
+    } else {
+      await this.ctx.storage.put(key, {
+        ...incident,
+        status,
+        ...(reason ? { reason } : {})
+      } satisfies ChatRecoveryIncident);
+    }
+
+    const eventType =
+      status === "completed"
+        ? "chat:recovery:completed"
+        : status === "skipped"
+          ? "chat:recovery:skipped"
+          : status === "failed"
+            ? "chat:recovery:failed"
+            : undefined;
+    if (eventType) {
+      this._emit(eventType, {
+        incidentId,
+        requestId: incident.requestId,
+        attempt: incident.attempt,
+        maxAttempts: incident.maxAttempts,
+        recoveryKind: incident.recoveryKind,
+        ...(reason ? { reason } : {})
+      });
+    }
+  }
+
+  private async _exhaustChatRecovery(
+    incident: ChatRecoveryIncident,
+    config: ResolvedChatRecoveryConfig
+  ): Promise<void> {
+    const ctx: ChatRecoveryExhaustedContext = {
+      incidentId: incident.incidentId,
+      requestId: incident.requestId,
+      attempt: incident.attempt,
+      maxAttempts: incident.maxAttempts,
+      recoveryKind: incident.recoveryKind,
+      reason: incident.reason ?? "max_attempts_exceeded"
+    };
+    this._emit("chat:recovery:exhausted", ctx);
+    // A throwing onExhausted hook must not prevent the terminal UX from being
+    // delivered, otherwise the turn wedges with no user-visible resolution.
+    try {
+      await config.onExhausted?.(ctx);
+    } catch (error) {
+      console.error("[Think] chatRecovery onExhausted hook threw", error);
+    }
+    await this._markRecoveredSubmissionInterrupted(
+      incident.requestId,
+      config.terminalMessage
+    );
+    this._broadcastChat({
+      type: MSG_CHAT_RESPONSE,
+      id: incident.requestId,
+      body: config.terminalMessage,
+      done: true,
+      error: true
+    });
+    // The exhausted record is retained for inspection and reclaimed later by
+    // the TTL sweep; only successful (completed) incidents are deleted eagerly.
+  }
+
   protected override async _handleInternalFiberRecovery(
     ctx: FiberRecoveryContext
   ): Promise<boolean> {
+    if (await this._messengerRuntime?.handleFiberRecovery(ctx)) {
+      return true;
+    }
+
     const chatPrefix = (this.constructor as typeof Think).CHAT_FIBER_NAME + ":";
     if (!ctx.name.startsWith(chatPrefix)) {
       return false;
@@ -6085,20 +6662,6 @@ export class Think<
       ? this._getPartialStreamText(streamId)
       : { text: "", parts: [] as MessagePart[] };
 
-    const options =
-      (await this.onChatRecovery({
-        streamId: streamId ?? "",
-        requestId,
-        partialText: partial.text,
-        partialParts: partial.parts,
-        recoveryData,
-        messages: [...this.messages],
-        lastBody: recoverySnapshot?.lastBody ?? this._lastBody,
-        lastClientTools:
-          recoverySnapshot?.lastClientTools ?? this._lastClientTools,
-        createdAt: ctx.createdAt
-      })) ?? {};
-
     const streamStillActive =
       streamId &&
       this._resumableStream.hasActiveStream() &&
@@ -6107,87 +6670,179 @@ export class Think<
     const streamIsTerminal =
       streamStatus === "completed" || streamStatus === "error";
 
-    if (
-      options.persist !== false &&
-      streamId &&
-      (streamStillActive || streamIsTerminal)
-    ) {
-      await this._persistOrphanedStream(streamId);
-    }
-
-    if (streamStillActive) {
-      this._resumableStream.complete(streamId);
-    }
-
     const retryTargetUserId = await this._recoverablePreStreamUserId(
       recoverySnapshot,
       streamId ?? "",
       partial
     );
-    const shouldRetry =
-      retryTargetUserId !== null &&
-      options.continue !== false &&
-      !streamIsTerminal;
-    const canContinue =
-      !shouldRetry && options.continue !== false && !streamIsTerminal;
-    const hasRunningSubmission = this._hasRunningSubmission(requestId);
+    const shouldRetryBase = retryTargetUserId !== null && !streamIsTerminal;
+    const recoveryKind: ChatRecoveryKind = shouldRetryBase
+      ? "retry"
+      : "continue";
+    const recoveryRootRequestId =
+      recoverySnapshot?.recoveryRootRequestId ?? requestId;
+    const { incident, config, exhausted } =
+      await this._beginChatRecoveryIncident({
+        requestId,
+        recoveryRootRequestId,
+        latestUserMessageId: recoverySnapshot?.latestUserMessageId,
+        recoveryKind
+      });
 
-    if (streamIsTerminal && hasRunningSubmission) {
-      await this._completeRecoveredSubmission(
-        requestId,
-        streamStatus === "completed" ? "completed" : "error",
-        requestId,
-        streamStatus === "completed"
-          ? null
-          : "Recovered chat stream had already errored."
-      );
+    if (exhausted) {
+      await this._exhaustChatRecovery(incident, config);
+      return true;
     }
 
-    const recoveredRequestId =
-      (canContinue || shouldRetry) && hasRunningSubmission
-        ? requestId
-        : undefined;
+    // Any throw after the incident is opened (user `onChatRecovery`, orphan
+    // persistence, scheduling) must flip the incident to a terminal `failed`
+    // state and emit, otherwise it leaks in `attempting` and is never
+    // observable as a stuck turn.
+    try {
+      const options =
+        (await this.onChatRecovery({
+          incidentId: incident.incidentId,
+          attempt: incident.attempt,
+          maxAttempts: incident.maxAttempts,
+          recoveryKind,
+          streamId: streamId ?? "",
+          requestId,
+          partialText: partial.text,
+          partialParts: partial.parts,
+          recoveryData,
+          messages: [...this.messages],
+          lastBody: recoverySnapshot?.lastBody ?? this._lastBody,
+          lastClientTools:
+            recoverySnapshot?.lastClientTools ?? this._lastClientTools,
+          createdAt: ctx.createdAt
+        })) ?? {};
 
-    if (shouldRetry) {
-      await this.schedule(
-        0,
-        "_chatRecoveryRetry",
-        {
-          targetUserId: retryTargetUserId,
-          originalRequestId: requestId,
-          lastBody: recoverySnapshot?.lastBody ?? null,
-          lastClientTools: recoverySnapshot?.lastClientTools ?? null,
-          ...(recoveredRequestId ? { recoveredRequestId } : {})
-        },
-        { idempotent: true }
+      const streamAlreadyPersisted =
+        streamIsTerminal &&
+        (await this._hasPersistedRecoveredAssistant(recoverySnapshot));
+
+      if (
+        options.persist !== false &&
+        streamId &&
+        (streamStillActive || (streamIsTerminal && !streamAlreadyPersisted))
+      ) {
+        await this._persistOrphanedStream(streamId);
+      }
+
+      if (streamStillActive) {
+        this._resumableStream.complete(streamId);
+      }
+
+      const shouldRetry =
+        retryTargetUserId !== null &&
+        options.continue !== false &&
+        !streamIsTerminal;
+      const lastLeaf = shouldRetry ? null : await this.session.getLatestLeaf();
+      const targetId =
+        lastLeaf?.role === "assistant" && !streamIsTerminal
+          ? lastLeaf.id
+          : undefined;
+      const canContinue =
+        !shouldRetry && options.continue !== false && !streamIsTerminal;
+      const hasRunningSubmission = this._hasRunningSubmission(requestId);
+
+      if (streamIsTerminal && hasRunningSubmission) {
+        await this._completeRecoveredSubmission(
+          requestId,
+          streamStatus === "completed" ? "completed" : "error",
+          requestId,
+          streamStatus === "completed"
+            ? null
+            : "Recovered chat stream had already errored."
+        );
+      }
+
+      const recoveredRequestId =
+        (canContinue || shouldRetry) && hasRunningSubmission
+          ? requestId
+          : undefined;
+
+      if (shouldRetry) {
+        await this._updateChatRecoveryIncident(
+          incident.incidentId,
+          "scheduled"
+        );
+        this._emit("chat:recovery:scheduled", {
+          incidentId: incident.incidentId,
+          requestId,
+          attempt: incident.attempt,
+          maxAttempts: incident.maxAttempts,
+          recoveryKind
+        });
+        await this.schedule(
+          0,
+          "_chatRecoveryRetry",
+          {
+            targetUserId: retryTargetUserId,
+            originalRequestId: recoveryRootRequestId,
+            incidentId: incident.incidentId,
+            lastBody: recoverySnapshot?.lastBody ?? null,
+            lastClientTools: recoverySnapshot?.lastClientTools ?? null,
+            ...(recoveredRequestId ? { recoveredRequestId } : {})
+          },
+          { idempotent: true }
+        );
+      } else if (canContinue) {
+        await this._updateChatRecoveryIncident(
+          incident.incidentId,
+          "scheduled"
+        );
+        this._emit("chat:recovery:scheduled", {
+          incidentId: incident.incidentId,
+          requestId,
+          attempt: incident.attempt,
+          maxAttempts: incident.maxAttempts,
+          recoveryKind
+        });
+        await this.schedule(
+          0,
+          "_chatRecoveryContinue",
+          {
+            ...(targetId ? { targetAssistantId: targetId } : {}),
+            originalRequestId: recoveryRootRequestId,
+            incidentId: incident.incidentId,
+            ...(recoverySnapshot
+              ? {
+                  lastBody: recoverySnapshot.lastBody ?? null,
+                  lastClientTools: recoverySnapshot.lastClientTools ?? null
+                }
+              : {}),
+            ...(recoveredRequestId ? { recoveredRequestId } : {})
+          },
+          { idempotent: true }
+        );
+      } else if (options.continue === false && !streamIsTerminal) {
+        await this._updateChatRecoveryIncident(
+          incident.incidentId,
+          "skipped",
+          "continue_disabled"
+        );
+        await this._markRecoveredSubmissionInterrupted(
+          requestId,
+          "Submission was interrupted and chat recovery was disabled."
+        );
+      } else {
+        await this._updateChatRecoveryIncident(
+          incident.incidentId,
+          "skipped",
+          streamIsTerminal ? "stream_terminal" : "not_recoverable"
+        );
+      }
+
+      return true;
+    } catch (error) {
+      await this._updateChatRecoveryIncident(
+        incident.incidentId,
+        "failed",
+        error instanceof Error ? error.message : String(error)
       );
-    } else if (canContinue) {
-      const lastLeaf = await this.session.getLatestLeaf();
-      const targetId = lastLeaf?.role === "assistant" ? lastLeaf.id : undefined;
-      await this.schedule(
-        0,
-        "_chatRecoveryContinue",
-        {
-          ...(targetId ? { targetAssistantId: targetId } : {}),
-          originalRequestId: requestId,
-          ...(recoverySnapshot
-            ? {
-                lastBody: recoverySnapshot.lastBody ?? null,
-                lastClientTools: recoverySnapshot.lastClientTools ?? null
-              }
-            : {}),
-          ...(recoveredRequestId ? { recoveredRequestId } : {})
-        },
-        { idempotent: true }
-      );
-    } else if (options.continue === false && !streamIsTerminal) {
-      await this._markRecoveredSubmissionInterrupted(
-        requestId,
-        "Submission was interrupted and chat recovery was disabled."
-      );
+      throw error;
     }
-
-    return true;
   }
 
   private async _recoverablePreStreamUserId(
@@ -6213,14 +6868,32 @@ export class Think<
       : null;
   }
 
+  private async _hasPersistedRecoveredAssistant(
+    snapshot: ChatFiberSnapshot<"think-chat-turn"> | null
+  ): Promise<boolean> {
+    const lastLeaf = await this.session.getLatestLeaf();
+    return (
+      lastLeaf?.role === "assistant" &&
+      lastLeaf.id !== snapshot?.latestMessageId
+    );
+  }
+
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {
     const recoveredSubmission = data?.recoveredRequestId
       ? this._readRunningSubmissionByRequestId(data.recoveredRequestId)
       : null;
     if (data?.recoveredRequestId && !recoveredSubmission) {
+      await this._updateChatRecoveryIncident(
+        data.incidentId,
+        "skipped",
+        "submission_not_running"
+      );
       return;
     }
 
+    const previousRootRequestId = this._activeChatRecoveryRootRequestId;
+    this._activeChatRecoveryRootRequestId =
+      data?.originalRequestId ?? previousRootRequestId;
     const controller = recoveredSubmission ? new AbortController() : null;
     if (recoveredSubmission && controller) {
       this._submissionAbortControllers.set(
@@ -6230,8 +6903,16 @@ export class Think<
     }
 
     try {
-      const ready = await this.waitUntilStable({ timeout: 10_000 });
+      const recoveryConfig = this._resolveChatRecoveryConfig();
+      const ready = await this.waitUntilStable({
+        timeout: recoveryConfig.stableTimeoutMs
+      });
       if (!ready) {
+        await this._updateChatRecoveryIncident(
+          data?.incidentId,
+          "failed",
+          "stable_timeout"
+        );
         if (data?.recoveredRequestId) {
           await this._completeRecoveredSubmission(
             data.recoveredRequestId,
@@ -6245,6 +6926,11 @@ export class Think<
 
       const lastLeaf = await this.session.getLatestLeaf();
       if (!lastLeaf || lastLeaf.role !== "user") {
+        await this._updateChatRecoveryIncident(
+          data?.incidentId,
+          "skipped",
+          "no_unanswered_user_message"
+        );
         if (data?.recoveredRequestId) {
           await this._completeRecoveredSubmission(
             data.recoveredRequestId,
@@ -6257,6 +6943,11 @@ export class Think<
       }
 
       if (data?.targetUserId && lastLeaf.id !== data.targetUserId) {
+        await this._updateChatRecoveryIncident(
+          data?.incidentId,
+          "skipped",
+          "conversation_changed"
+        );
         if (data?.recoveredRequestId) {
           await this._completeRecoveredSubmission(
             data.recoveredRequestId,
@@ -6274,6 +6965,15 @@ export class Think<
         this._lastBody,
         controller ? { signal: controller.signal } : undefined
       );
+      await this._updateChatRecoveryIncident(
+        data?.incidentId,
+        result.status === "completed"
+          ? "completed"
+          : result.status === "skipped"
+            ? "skipped"
+            : "failed",
+        result.error
+      );
       if (data?.recoveredRequestId) {
         await this._completeRecoveredSubmission(
           data.recoveredRequestId,
@@ -6285,6 +6985,11 @@ export class Think<
         );
       }
     } catch (error) {
+      await this._updateChatRecoveryIncident(
+        data?.incidentId,
+        "failed",
+        error instanceof Error ? error.message : String(error)
+      );
       if (data?.recoveredRequestId) {
         await this._completeRecoveredSubmission(
           data.recoveredRequestId,
@@ -6295,6 +7000,7 @@ export class Think<
       }
       throw error;
     } finally {
+      this._activeChatRecoveryRootRequestId = previousRootRequestId;
       if (recoveredSubmission) {
         this._submissionAbortControllers.delete(
           recoveredSubmission.submission_id
@@ -6400,9 +7106,17 @@ export class Think<
       ? this._readRunningSubmissionByRequestId(data.recoveredRequestId)
       : null;
     if (data?.recoveredRequestId && !recoveredSubmission) {
+      await this._updateChatRecoveryIncident(
+        data.incidentId,
+        "skipped",
+        "submission_not_running"
+      );
       return;
     }
 
+    const previousRootRequestId = this._activeChatRecoveryRootRequestId;
+    this._activeChatRecoveryRootRequestId =
+      data?.originalRequestId ?? previousRootRequestId;
     const controller = recoveredSubmission ? new AbortController() : null;
     if (recoveredSubmission && controller) {
       this._submissionAbortControllers.set(
@@ -6412,10 +7126,18 @@ export class Think<
     }
 
     try {
-      const ready = await this.waitUntilStable({ timeout: 10_000 });
+      const recoveryConfig = this._resolveChatRecoveryConfig();
+      const ready = await this.waitUntilStable({
+        timeout: recoveryConfig.stableTimeoutMs
+      });
       if (!ready) {
         console.warn(
           "[Think] _chatRecoveryContinue timed out waiting for stable state, skipping continuation"
+        );
+        await this._updateChatRecoveryIncident(
+          data?.incidentId,
+          "failed",
+          "stable_timeout"
         );
         if (data?.recoveredRequestId) {
           await this._completeRecoveredSubmission(
@@ -6431,6 +7153,11 @@ export class Think<
       const targetId = data?.targetAssistantId;
       const lastLeaf = await this.session.getLatestLeaf();
       if (targetId && lastLeaf?.id !== targetId) {
+        await this._updateChatRecoveryIncident(
+          data?.incidentId,
+          "skipped",
+          "conversation_changed"
+        );
         if (data?.recoveredRequestId) {
           await this._completeRecoveredSubmission(
             data.recoveredRequestId,
@@ -6447,6 +7174,15 @@ export class Think<
         undefined,
         controller ? { signal: controller.signal } : undefined
       );
+      await this._updateChatRecoveryIncident(
+        data?.incidentId,
+        result.status === "completed"
+          ? "completed"
+          : result.status === "skipped"
+            ? "skipped"
+            : "failed",
+        result.error
+      );
       if (data?.recoveredRequestId) {
         await this._completeRecoveredSubmission(
           data.recoveredRequestId,
@@ -6458,6 +7194,11 @@ export class Think<
         );
       }
     } catch (error) {
+      await this._updateChatRecoveryIncident(
+        data?.incidentId,
+        "failed",
+        error instanceof Error ? error.message : String(error)
+      );
       if (data?.recoveredRequestId) {
         await this._completeRecoveredSubmission(
           data.recoveredRequestId,
@@ -6468,6 +7209,7 @@ export class Think<
       }
       throw error;
     } finally {
+      this._activeChatRecoveryRootRequestId = previousRootRequestId;
       if (recoveredSubmission) {
         this._submissionAbortControllers.delete(
           recoveredSubmission.submission_id
@@ -6572,35 +7314,41 @@ export class Think<
       this._continuation.pending.connectionId = connection.id;
       this._continuation.pending.clientTools = this._lastClientTools;
       this._continuation.awaitingConnections.set(connection.id, connection);
+      this._resetAutoContinuationTimer();
       return;
     }
 
+    this._continuation.pending = {
+      connection,
+      connectionId: connection.id,
+      requestId: crypto.randomUUID(),
+      clientTools: this._lastClientTools,
+      body: undefined,
+      errorPrefix: "[Think] Auto-continuation failed:",
+      prerequisite: null,
+      pastCoalesce: false
+    };
+    this._continuation.awaitingConnections.set(connection.id, connection);
+    this._resetAutoContinuationTimer();
+  }
+
+  private _resetAutoContinuationTimer(): void {
     if (this._continuationTimer) {
       clearTimeout(this._continuationTimer);
     }
     this._continuationTimer = setTimeout(() => {
       this._continuationTimer = null;
-      this._fireAutoContinuation(connection);
+      const pending = this._continuation.pending;
+      if (!pending) return;
+      this._fireAutoContinuation(pending.connection);
     }, 50);
   }
 
   private _fireAutoContinuation(connection: Connection): void {
-    if (!this._continuation.pending) {
-      const requestId = crypto.randomUUID();
-      this._continuation.pending = {
-        connection,
-        connectionId: connection.id,
-        requestId,
-        clientTools: this._lastClientTools,
-        body: undefined,
-        errorPrefix: "[Think] Auto-continuation failed:",
-        prerequisite: null,
-        pastCoalesce: false
-      };
-      this._continuation.awaitingConnections.set(connection.id, connection);
-    }
+    const pending = this._continuation.pending;
+    if (!pending) return;
 
-    const { requestId, clientTools } = this._continuation.pending!;
+    const { requestId, clientTools } = pending;
     const abortSignal = this._aborts.getSignal(requestId);
 
     this.keepAliveWhile(async () => {
@@ -6660,7 +7408,7 @@ export class Think<
     );
     if (!pending) return;
 
-    this._fireAutoContinuation(pending.connection as Connection);
+    this._fireAutoContinuation(pending.connection);
   }
 
   // ── Response hook ──────────────────────────────────────────────

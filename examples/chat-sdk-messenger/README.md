@@ -15,8 +15,8 @@ adapter.
 - A top-level `ChatIngressAgent` owns the Chat SDK runtime and webhook ingress.
 - Telegram webhooks enter through Chat SDK and are normalized into Chat SDK
   `Thread` and `Message` objects.
-- `ChatSdkStateAgent` backs Chat SDK subscriptions, locks, queues, cache, and
-  lists as an Agents SDK subagent.
+- `ThinkMessengerStateAgent` backs Chat SDK subscriptions, locks, queues, cache,
+  and lists as an Agents SDK subagent.
 - `ConversationAgent extends Think` owns AI message history and model calls per
   Chat SDK `thread.id`.
 - The provider boundary stays narrow: Telegram setup/rendering lives at ingress,
@@ -110,7 +110,7 @@ flowchart TB
   Messenger[Messenger Provider] -->|"webhook event"| Worker[Worker]
   Worker --> ChatIngressAgent[ChatIngressAgent]
   ChatIngressAgent --> ChatSdk["Chat SDK runtime"]
-  ChatSdk -->|"locks, queues, subscriptions, cache"| ChatSdkStateAgent[ChatSdkStateAgent]
+  ChatSdk -->|"locks, queues, subscriptions, cache"| ThinkMessengerStateAgent[ThinkMessengerStateAgent]
   ChatSdk -->|"normalized Thread and Message"| ChatIngressAgent
   ChatIngressAgent -->|"UIMessage by thread id"| ConversationAgent[ConversationAgent extends Think]
   ConversationAgent --> WorkersAI[Workers AI]
@@ -135,7 +135,7 @@ Everything else is reached as a subagent:
 ```text
 ChatIngressAgent
   Chat({ adapters: { telegram } })
-  ChatSdkStateAgent       # Chat SDK infrastructure state
+  ThinkMessengerStateAgent # Chat SDK infrastructure state
   ConversationAgent    # Think messages and model calls per thread
 ```
 
@@ -144,16 +144,16 @@ The example code is split along the same boundaries:
 ```text
 src/
   admin/                # Admin directory and reply-job display helpers
-  intelligence/         # Think conversation, message conversion, reply delivery
-  provider/telegram.ts  # Telegram webhook setup, limits, and delivery policy
-  state                 # Provided by agents/chat-sdk
+  intelligence/         # Think conversation, message conversion, reply policy
+  provider/telegram.ts  # Telegram webhook setup
+  state                 # Backed by @cloudflare/think/messengers
   index.ts              # Ingress orchestration and Chat SDK event wiring
 ```
 
 `ChatIngressAgent` creates one Chat SDK runtime during `onStart()`:
 
 ```ts
-export { ChatSdkStateAgent } from "agents/chat-sdk";
+export { ThinkMessengerStateAgent } from "@cloudflare/think/messengers";
 
 export class ChatIngressAgent extends Agent {
   onStart() {
@@ -164,7 +164,7 @@ export class ChatIngressAgent extends Agent {
     return new Chat({
       userName,
       adapters: { telegram },
-      state: createChatSdkState(),
+      state: createChatSdkState({ agent: ThinkMessengerStateAgent }),
       concurrency: { strategy: "burst", debounceMs: 600 }
     });
   }
@@ -200,21 +200,24 @@ const bot = new Chat({
 ```
 
 The important boundary is that provider adapters produce Chat SDK `Thread` and
-`Message` objects. From there, `ChatSdkStateAgent` and `ConversationAgent` stay the
-same.
+`Message` objects. From there, `ThinkMessengerStateAgent` and
+`ConversationAgent` stay the same.
 
 ## State Subagent
 
-The Chat SDK state adapter is provided by `agents/chat-sdk`:
+The Chat SDK state adapter is provided by `agents/chat-sdk`. This example uses
+Think's messenger state agent alias so it matches the first-class Think
+messenger APIs:
 
 ```ts
-import { ChatSdkStateAgent, createChatSdkState } from "agents/chat-sdk";
+import { ThinkMessengerStateAgent } from "@cloudflare/think/messengers";
+import { createChatSdkState } from "agents/chat-sdk";
 ```
 
-Export `ChatSdkStateAgent` from your Worker entry point so sub-agent routing can
-resolve it. The state agent is infrastructure only: it stores Chat SDK locks,
-subscriptions, queues, generic cache values, and lists in Durable Object SQLite.
-It should not own channel personality, tools, or reasoning.
+Export `ThinkMessengerStateAgent` from your Worker entry point so sub-agent
+routing can resolve it. The state agent is infrastructure only: it stores Chat
+SDK locks, subscriptions, queues, generic cache values, and lists in Durable
+Object SQLite. It should not own channel personality, tools, or reasoning.
 
 The community
 [`chat-state-cloudflare-do`](https://github.com/dcartertwo/chat-state-cloudflare-do)
@@ -232,8 +235,10 @@ src/intelligence/
   conversation-agent.ts  # ConversationAgent extends Think
   delivery.ts            # Managed reply snapshots and failure policy
   messages.ts            # Chat SDK Message -> AI SDK UIMessage helpers
-  stream-callback.ts     # RPC-safe Think stream callback for Chat SDK delivery
 ```
+
+The RPC-safe `TextStreamCallback` and Telegram delivery helpers now come from
+`@cloudflare/think/messengers`.
 
 `ConversationAgent` uses Think's `messages` / Session storage as the canonical
 AI history for one Chat SDK `thread.id`. Chat SDK history remains
@@ -381,18 +386,18 @@ verifying the webhook and parsing the update at the Worker boundary:
 
 ```text
 ChatIngressAgent:tenant-a
-  ChatSdkStateAgent:telegram:-100123
-  ChatSdkStateAgent:slack:T123
+  ThinkMessengerStateAgent:telegram:-100123
+  ThinkMessengerStateAgent:slack:T123
 
 ChatIngressAgent:tenant-b
-  ChatSdkStateAgent:discord:987
+  ThinkMessengerStateAgent:discord:987
 ```
 
 ## Caveats
 
 - Telegram webhook URLs must be public. Quick Tunnel URLs are ephemeral, so click
   **Set webhook here** again whenever your tunnel URL changes.
-- Use `TELEGRAM_WEBHOOK_SECRET_TOKEN` in production so Telegram signs webhook
+- `TELEGRAM_WEBHOOK_SECRET_TOKEN` is required so Telegram signs webhook
   requests.
 - Telegram callback data is limited to 64 bytes. Keep button action IDs short.
 - Telegram bots cannot fetch complete historical chat logs. Adapter history is

@@ -99,6 +99,7 @@ export async function createWorker(
     define,
     loader,
     conditions,
+    virtualModules,
     __dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired: plugins
   } = options;
 
@@ -157,6 +158,7 @@ export async function createWorker(
       define,
       loader,
       conditions,
+      virtualModules,
       plugins
     });
 
@@ -184,6 +186,7 @@ export async function createWorker(
       define,
       loader,
       conditions,
+      virtualModules,
       plugins
     });
 

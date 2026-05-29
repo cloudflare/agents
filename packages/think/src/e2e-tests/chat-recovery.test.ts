@@ -22,6 +22,25 @@ const HELPER_PARENT_NAME = "think-helper-recovery-e2e";
 const HELPER_PARENT_SLUG = "think-recovery-helper-parent";
 const HELPER_NAME = "helper-recovery-e2e";
 const PERSIST_DIR = path.join(__dirname, ".wrangler-think-recovery-e2e-state");
+const MSG_CHAT_REQUEST = "cf_agent_use_chat_request";
+const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
+
+type RecoveryStatus = {
+  recoveryCount: number;
+  contexts: Array<{
+    streamId: string;
+    requestId: string;
+    partialText: string;
+  }>;
+  messageCount: number;
+  assistantMessages: number;
+};
+
+type AgentToolRunStatus = {
+  runId: string;
+  status: string;
+  error: string | null;
+};
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -147,6 +166,14 @@ function killProcess(child: ChildProcess): Promise<void> {
   });
 }
 
+async function restartWrangler(child: ChildProcess): Promise<ChildProcess> {
+  await killProcess(child);
+  await waitForPortFree();
+  const next = startWrangler();
+  await waitForReady();
+  return next;
+}
+
 async function callAgentByPath(
   path: string,
   method: string,
@@ -209,6 +236,120 @@ async function callHelperParent(
   );
 }
 
+async function pollUntil<T>(
+  label: string,
+  read: () => Promise<T>,
+  done: (value: T) => boolean,
+  options?: { attempts?: number; delayMs?: number }
+): Promise<T> {
+  const attempts = options?.attempts ?? 30;
+  const delayMs = options?.delayMs ?? 1000;
+  let lastError: unknown;
+
+  for (let i = 0; i < attempts; i++) {
+    await sleep(delayMs);
+    try {
+      const value = await read();
+      console.log(`[test] ${label} poll ${i + 1}:`, value);
+      if (done(value)) return value;
+    } catch (error) {
+      lastError = error;
+      console.log(`[test] ${label} poll ${i + 1}: error`);
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`Timed out waiting for ${label}`);
+}
+
+async function waitForAgentRecovery(): Promise<RecoveryStatus> {
+  return pollUntil(
+    "agent recovery",
+    () => callAgent("getRecoveryStatus") as Promise<RecoveryStatus>,
+    (status) => status.recoveryCount > 0
+  );
+}
+
+async function waitForHelperRecovery(): Promise<RecoveryStatus> {
+  return pollUntil(
+    "helper recovery",
+    () =>
+      callHelperParent("getHelperRecoveryStatus", [
+        HELPER_NAME
+      ]) as Promise<RecoveryStatus>,
+    (status) => status.recoveryCount > 0
+  );
+}
+
+async function waitForAgentToolRun(
+  runId: string,
+  predicate: (run: AgentToolRunStatus) => boolean
+): Promise<AgentToolRunStatus> {
+  const rows = await pollUntil(
+    "agent-tool recovery",
+    () => callHelperParent("getAgentToolRuns") as Promise<AgentToolRunStatus[]>,
+    (runs) => runs.some((run) => run.runId === runId && predicate(run)),
+    { attempts: 40, delayMs: 500 }
+  );
+  const row = rows.find((run) => run.runId === runId);
+  if (!row) throw new Error(`Missing agent-tool row ${runId}`);
+  return row;
+}
+
+function sendChatMessageAndWaitForDone(
+  userMessage: string
+): Promise<Record<string, unknown>> {
+  const url = `${AGENT_URL}/agents/${AGENT_SLUG}/${AGENT_NAME}`;
+
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error("Timed out waiting for chat response"));
+    }, 10000);
+
+    ws.onopen = () => {
+      ws.send(
+        JSON.stringify({
+          type: MSG_CHAT_REQUEST,
+          id: crypto.randomUUID(),
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: `user-${Date.now()}`,
+                  role: "user",
+                  parts: [{ type: "text", text: userMessage }]
+                }
+              ]
+            })
+          }
+        })
+      );
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data as string) as Record<string, unknown>;
+        if (msg.type === MSG_CHAT_RESPONSE && msg.done === true) {
+          clearTimeout(timeout);
+          ws.close();
+          resolve(msg);
+        }
+      } catch {
+        // Ignore non-chat frames.
+      }
+    };
+
+    ws.onerror = (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    };
+  });
+}
+
 function sendChatMessage(userMessage: string): Promise<void> {
   const url = `${AGENT_URL}/agents/${AGENT_SLUG}/${AGENT_NAME}`;
 
@@ -234,7 +375,7 @@ function sendChatMessage(userMessage: string): Promise<void> {
 
       ws.send(
         JSON.stringify({
-          type: "cf_agent_use_chat_request",
+          type: MSG_CHAT_REQUEST,
           id: requestId,
           init: { method: "POST", body }
         })
@@ -355,6 +496,58 @@ describe("Think chat recovery e2e", () => {
     expect(fiberRowsAfter).toBe(false);
   });
 
+  it("should still recover after repeated restart churn around an interrupted turn", async () => {
+    wrangler = startWrangler();
+    await waitForReady();
+
+    await sendChatMessage("Tell me a long restart story");
+    await sleep(6000);
+
+    expect((await callAgent("hasFiberRows")) as boolean).toBe(true);
+
+    for (let i = 0; i < 2; i++) {
+      console.log(`[test] Restart churn cycle ${i + 1}`);
+      wrangler = await restartWrangler(wrangler);
+      // Keep this intentionally short: the test approximates deploy churn where
+      // a fresh isolate can be replaced before recovery work settles.
+      await sleep(250);
+    }
+
+    const status = await waitForAgentRecovery();
+    expect(status.contexts[0].partialText.length).toBeGreaterThan(0);
+
+    const fiberRowsAfter = (await callAgent("hasFiberRows")) as boolean;
+    expect(fiberRowsAfter).toBe(false);
+  });
+
+  it("should expose the current post-persist chat request failure surface", async () => {
+    wrangler = startWrangler();
+    await waitForReady();
+
+    await callAgent("throwBeforeNextTurn", ["forced beforeTurn failure"]);
+
+    const response = await sendChatMessageAndWaitForDone(
+      "Persist this, then fail before the model turn"
+    );
+    expect(response.error).toBe(true);
+    expect(response.body).toContain("forced beforeTurn failure");
+
+    const status = (await callAgent("getRecoveryStatus")) as RecoveryStatus;
+    expect(status.messageCount).toBe(1);
+    expect(status.assistantMessages).toBe(0);
+
+    // This documents the observability gap from the report: the request catch
+    // broadcasts a chat error frame, but it does not route through onError.
+    expect((await callAgent("getOnErrorLog")) as string[]).toEqual([]);
+    const chatErrorLog = await pollUntil(
+      "chat error hook",
+      () => callAgent("getOnChatErrorLog") as Promise<string[]>,
+      (log) => log.some((entry) => entry.includes("forced beforeTurn failure")),
+      { attempts: 10, delayMs: 250 }
+    );
+    expect(chatErrorLog).toContain("forced beforeTurn failure");
+  });
+
   it("should recover helper sub-agent chat after process kill via parent alarm", async () => {
     wrangler = startWrangler();
     await waitForReady();
@@ -380,43 +573,7 @@ describe("Think chat recovery e2e", () => {
     await waitForReady();
     console.log("[test] Wrangler restarted");
 
-    let recovered = false;
-    for (let i = 0; i < 30; i++) {
-      await sleep(1000);
-      try {
-        const status = (await callHelperParent("getHelperRecoveryStatus", [
-          HELPER_NAME
-        ])) as {
-          recoveryCount: number;
-          messageCount: number;
-          assistantMessages: number;
-        };
-        console.log(
-          `[test] Helper poll ${i + 1}: recovered=${status.recoveryCount}, messages=${status.messageCount}, assistant=${status.assistantMessages}`
-        );
-        if (status.recoveryCount > 0) {
-          recovered = true;
-          break;
-        }
-      } catch {
-        console.log(`[test] Helper poll ${i + 1}: error (agent not ready)`);
-      }
-    }
-
-    expect(recovered).toBe(true);
-
-    const status = (await callHelperParent("getHelperRecoveryStatus", [
-      HELPER_NAME
-    ])) as {
-      recoveryCount: number;
-      contexts: Array<{
-        streamId: string;
-        requestId: string;
-        partialText: string;
-      }>;
-      messageCount: number;
-      assistantMessages: number;
-    };
+    const status = await waitForHelperRecovery();
 
     expect(status.recoveryCount).toBeGreaterThanOrEqual(1);
     expect(status.contexts[0].partialText.length).toBeGreaterThan(0);
@@ -425,5 +582,34 @@ describe("Think chat recovery e2e", () => {
       HELPER_NAME
     ])) as boolean;
     expect(fiberRowsAfter).toBe(false);
+  });
+
+  it("should interrupt a stale parent agent-tool run after parent restart", async () => {
+    wrangler = startWrangler();
+    await waitForReady();
+
+    const runId = `agent-tool-${Date.now()}`;
+    await callHelperParent("startHelperAgentToolRun", [
+      runId,
+      "Tell me an agent-tool story"
+    ]);
+
+    await waitForAgentToolRun(
+      runId,
+      (run) => run.status === "starting" || run.status === "running"
+    );
+
+    console.log("[test] Killing wrangler with active agent-tool run...");
+    wrangler = await restartWrangler(wrangler);
+
+    const recoveredRun = await waitForAgentToolRun(
+      runId,
+      (run) => run.status === "interrupted" || run.status === "error"
+    );
+
+    expect(recoveredRun.status).toBe("interrupted");
+    expect(recoveredRun.error ?? "").toMatch(
+      /still running|timed out|could not be inspected/
+    );
   });
 });

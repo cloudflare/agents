@@ -27,6 +27,90 @@ export class MyAgent extends Think<Env> {
 
 That's it. Think handles the WebSocket chat protocol, message persistence, the agentic loop, message sanitization, stream resumption, client tool support, and workspace file tools. Connect from the browser with `useAgentChat` from `@cloudflare/ai-chat`.
 
+## Messengers
+
+Think can own messenger ingress directly. Declare providers with
+`getMessengers()` and import provider implementations from subpaths so unused
+Chat SDK adapters are not bundled.
+
+```ts
+import { Think } from "@cloudflare/think";
+import {
+  defineMessengers,
+  ThinkMessengerStateAgent
+} from "@cloudflare/think/messengers";
+import telegramMessenger from "@cloudflare/think/messengers/telegram";
+
+export { ThinkMessengerStateAgent };
+
+export class SupportAgent extends Think<Env> {
+  getMessengers() {
+    return defineMessengers({
+      telegram: telegramMessenger({
+        token: this.env.TELEGRAM_BOT_TOKEN,
+        userName: "support_bot",
+        secretToken: this.env.TELEGRAM_WEBHOOK_SECRET_TOKEN
+      })
+    });
+  }
+}
+```
+
+The root Think agent handles the webhook route with this precedence: framework
+sub-agent routing, Think internal routes, messenger routes, then user
+`onRequest`. By default, `telegram` maps to
+`/messengers/telegram/webhook`, direct messages and mentions are routed to the
+agent, and new mentions subscribe the thread so later mentions in the same
+thread are still observed. Ordinary subscribed-thread messages and button
+actions are opt-in with `respondTo: ["subscribed-thread", "action"]`. Each Chat
+SDK thread runs in its own Think sub-agent to avoid accidental context sharing.
+Each root agent owns one Chat SDK runtime for all configured messengers, so
+multi-provider agents do not fight over Chat SDK singleton state.
+
+Use `conversation: "self"` when all messenger traffic should share the root
+agent's memory. Use a custom `conversation(event)` resolver to route by thread,
+channel, tenant, or user.
+
+Messenger state uses `agents/chat-sdk` under the hood. Export
+`ThinkMessengerStateAgent` from the Worker module so sub-agent routing can
+resolve it; production apps do not need to add a separate durable object binding
+or migration for this facet-only class. Test harnesses may still need explicit
+bindings.
+
+Inbound messenger replies use the streamed `chat()` path by default: the root
+agent starts an idempotent fiber, resolves the conversation target, calls
+`target.chat(message, callback)`, and lets the provider delivery policy post or
+edit messages. Recovery snapshots store only serializable event/thread data, so
+interrupted replies can either resume before streaming starts or post the
+configured interruption message after streaming has begun. `submitMessages()`
+remains the right primitive for non-streaming programmatic sends, scheduled
+digests, or background work.
+
+During a messenger turn, `getMessengerContext()` returns the initiating
+messenger context even after assistant messages are persisted. Telegram webhook
+verification is explicit: provide `secretToken`, a custom `verifyWebhook`, or
+`verifyWebhook: false` when intentionally running without verification. Custom
+messengers built with `chatSdkMessenger()` must make the same choice explicitly.
+Delivery failures use a generic user-facing error by default so internal
+exception details are not posted into external chats.
+
+Provider-neutral events include thread, author, message, action, capabilities,
+and attachment metadata. Attachment bytes are only fetched when a provider
+supplies a safe fetch function. Telegram is the first provider implementation;
+future Slack, Discord, or Teams entrypoints implement the same messenger
+contract from their own subpaths.
+
+Common messenger options:
+
+| Option               | Default                         | Description                                                                     |
+| -------------------- | ------------------------------- | ------------------------------------------------------------------------------- |
+| `path`               | `/messengers/{id}/webhook`      | Webhook path handled before user `onRequest`                                    |
+| `respondTo`          | `["direct-message", "mention"]` | Event kinds that should start a Think reply                                     |
+| `subscribeOnMention` | `true`                          | Subscribe Chat SDK threads after a new mention                                  |
+| `conversation`       | `"thread"`                      | Use one Think sub-agent per Chat SDK thread; set `"self"` to use the root agent |
+| `verifyWebhook`      | required                        | Verification function, or `false` to opt out explicitly                         |
+| `delivery`           | provider defaults               | Streaming limits, text splitting, and safe user-facing failure messages         |
+
 ## Agent tools
 
 Think subclasses can be dispatched as agent tools from another Agent. The parent
@@ -65,9 +149,15 @@ drill-in, and cleanup patterns.
 
 ## Built-in workspace
 
-Every Think agent gets `this.workspace` — a virtual filesystem backed by the DO's SQLite storage. Workspace tools (`read`, `write`, `edit`, `list`, `find`, `grep`, `delete`) are automatically available to the model.
+Every Think agent gets `this.workspace` — a virtual filesystem backed by the DO's SQLite storage. Workspace tools (`read`, `write`, `edit`, `list`, `find`, `grep`, `delete`, `bash`) are automatically available to the model.
 
 The `read` tool returns line-numbered text for text files. For images and PDFs, it keeps the persisted tool result compact and passes file bytes to multimodal-capable models using AI SDK content parts.
+The `bash` tool runs sandboxed shell workflows through `just-bash`, with network
+access disabled by default, and syncs changed files and empty directories back
+into the workspace. It snapshots up to 1,000 files by default, skips files larger
+than 1 MB, and treats skipped paths as protected during write-back. Set
+`workspaceBash = false` on your Think subclass to opt out, or pass an options
+object to tune limits, timeout, and network access.
 
 ```ts
 export class MyAgent extends Think<Env> {
@@ -89,35 +179,178 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
+## Agent Skills
+
+Think supports the [Agent Skills](https://agentskills.io/) directory format as
+a first-class API. Return one or more `SkillSource` objects from `getSkills()`;
+Think adds the skill catalog to the prompt and exposes `activate_skill` and
+`read_skill_resource` tools when skills are available.
+
+```ts
+import { Think, skills } from "@cloudflare/think";
+import bundledSkills from "agents:skills"; // resolves to ./skills next to this file
+
+type Env = {
+  AI: Ai;
+  LOADER: WorkerLoader;
+  SKILLS_BUCKET: R2Bucket;
+};
+
+export class MyAgent extends Think<Env> {
+  getSkills() {
+    return [
+      bundledSkills,
+      skills.r2(this.env.SKILLS_BUCKET, { prefix: "skills/" })
+    ];
+  }
+
+  getSkillScriptRunner() {
+    return skills.runner({
+      loader: this.env.LOADER,
+      workspaceInstance: this.workspace
+    });
+  }
+}
+```
+
+Bundled skills use the Agents Vite plugin. The `agents:skills` specifier
+resolves to a `./skills` directory next to the importing file; use
+`agents:skills/<dir>` for a differently named sibling directory:
+
+```ts
+import bundledSkills from "agents:skills";
+```
+
+The import is typed by ambient declarations shipped with `agents` (importing
+`Think`, which pulls in `agents`, is enough; otherwise add
+`/// <reference types="agents/skills-module" />`). Without the Vite plugin,
+construct a source with `skills.fromManifest(...)`. Sources are applied in
+order: the first to register a skill name wins, and duplicate or failing
+sources are skipped with a warning instead of failing the agent.
+
+The skills engine itself lives in `agents/skills` (so any agent, including a
+plain `@cloudflare/ai-chat` `onChatMessage`, can build a `SkillRegistry`);
+`@cloudflare/think` re-exports it as `skills` and wires `getSkills()` into the
+turn automatically.
+
+The imported directory should contain one child directory per skill:
+
+```text
+src/skills/release-notes/SKILL.md
+src/skills/release-notes/scripts/format-release-notes.ts
+src/skills/release-notes/references/style-guide.md
+```
+
+Bundled resources are packaged with explicit `encoding` metadata. Text resources
+are returned directly; binary assets are returned as base64. `read_skill_resource`
+can read `{ name, path }` or a qualified path such as
+`release-notes/references/style-guide.md`, which helps skills reference resources
+from other skills.
+
+Skills are on-demand instructions, not always-on system prompt text. The model
+sees the catalog first, then calls `activate_skill` when a user task matches a
+skill description. Use `getSystemPrompt()` or a Session context block for
+behavior that should apply to every turn.
+
+Script execution is opt-in and **experimental**. `getSkillScriptRunner()`
+enables `run_skill_script`, which can run JavaScript, TypeScript, Python, and
+Bash scripts under `scripts/`.
+
+JavaScript and TypeScript scripts are function-style:
+
+```ts
+import type { SkillRunContext } from "@cloudflare/think";
+
+export default async function run(input: unknown, ctx: SkillRunContext) {
+  const guide = ctx.files["references/style-guide.md"]; // bundled text resources
+  const summary = await ctx.tools.call("summarize", { input }); // explicit tools
+  await ctx.output.writeFile("notes.md", summary); // scratch artifact
+  return { ok: true };
+}
+```
+
+`ctx` is `{ skill, files, workspace, tools, output }`: `ctx.files` holds bundled
+text resources by relative path, `ctx.workspace` is gated by the workspace
+permission, `ctx.tools` exposes only the tools the runner was given, and
+`ctx.output.writeFile(name, content)` returns scratch artifacts without mutating
+the workspace. Python and Bash scripts instead use the path-based contract:
+`/input.json`, `/context.json`, bundled resources under `/skill`, and `/output`
+for artifacts (Python supports both `def run(input, ctx)` and CLI-style scripts).
+
+If `workspaceInstance` is provided, scripts get read-only workspace access by
+default. Workspace writes, tools, and network access are opt-in. Scripts default
+to a 30 second timeout, which can be overridden with `timeout`. TypeScript
+scripts are compiled with `@cloudflare/worker-bundler`; Python scripts run as
+Python Dynamic Workers; Bash scripts run through `just-bash`.
+
+Script execution requires a Worker Loader binding:
+
+```jsonc
+{
+  "worker_loaders": [{ "binding": "LOADER" }]
+}
+```
+
 ## Exports
 
-| Export                               | Description                                                   |
-| ------------------------------------ | ------------------------------------------------------------- |
-| `@cloudflare/think`                  | `Think`, `Session`, `Workspace` — main class + re-exports     |
-| `@cloudflare/think/tools/workspace`  | `createWorkspaceTools()` — for custom storage backends        |
-| `@cloudflare/think/tools/execute`    | `createExecuteTool()` — sandboxed code execution via codemode |
-| `@cloudflare/think/tools/extensions` | `createExtensionTools()` — LLM-driven extension loading       |
-| `@cloudflare/think/extensions`       | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
+| Export                                  | Description                                                   |
+| --------------------------------------- | ------------------------------------------------------------- |
+| `@cloudflare/think`                     | `Think`, `Session`, `Workspace` — main class + re-exports     |
+| `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
+| `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
+| `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
+| `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
+| `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
+| `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
 
 ## Think
 
 ### Configuration
 
-| Method / Property      | Default                            | Description                                     |
-| ---------------------- | ---------------------------------- | ----------------------------------------------- |
-| `getModel()`           | throws                             | Return the `LanguageModel` to use               |
-| `getSystemPrompt()`    | careful assistant operating prompt | System prompt (fallback when no context blocks) |
-| `getTools()`           | `{}`                               | AI SDK `ToolSet` for the agentic loop           |
-| `getScheduledTasks()`  | `{}`                               | Code-declared recurring prompts                 |
-| `getDefaultTimezone()` | `undefined`                        | Default timezone for wall-clock schedules       |
-| `maxSteps`             | `10`                               | Max tool-call rounds per turn (property)        |
-| `sendReasoning`        | `true`                             | Send reasoning chunks to chat clients           |
-| `configureSession()`   | identity                           | Add context blocks, compaction, search, skills  |
-| `getExtensions()`      | `[]`                               | Sandboxed extension declarations (load order)   |
-| `extensionLoader`      | `undefined`                        | `WorkerLoader` binding — enables extensions     |
-| `chatRecovery`         | `true`                             | Wrap turns in `runFiber` for durable execution  |
+| Method / Property        | Default                            | Description                                                                                                                  |
+| ------------------------ | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `getModel()`             | throws                             | Return the `LanguageModel` to use                                                                                            |
+| `getSystemPrompt()`      | careful assistant operating prompt | System prompt (fallback when no context blocks)                                                                              |
+| `getTools()`             | `{}`                               | AI SDK `ToolSet` for the agentic loop                                                                                        |
+| `getMessengers()`        | `{}`                               | Messenger ingress and delivery declarations                                                                                  |
+| `getScheduledTasks()`    | `{}`                               | Code-declared recurring prompts                                                                                              |
+| `getDefaultTimezone()`   | `undefined`                        | Default timezone for wall-clock schedules                                                                                    |
+| `maxSteps`               | `10`                               | Max tool-call rounds per turn (property)                                                                                     |
+| `sendReasoning`          | `true`                             | Send reasoning chunks to chat clients                                                                                        |
+| `configureSession()`     | identity                           | Add context blocks, compaction, search, skills                                                                               |
+| `getSkills()`            | `[]`                               | First-class Agent Skills sources                                                                                             |
+| `getSkillScriptRunner()` | `null`                             | Optional runner for `run_skill_script`                                                                                       |
+| `getExtensions()`        | `[]`                               | Sandboxed extension declarations (load order)                                                                                |
+| `extensionLoader`        | `undefined`                        | `WorkerLoader` binding — enables extensions                                                                                  |
+| `workspaceBash`          | `true`                             | Include the default workspace `bash` tool                                                                                    |
+| `chatRecovery`           | `true`                             | Wrap turns in `runFiber` for durable execution. Set `{ maxAttempts, terminalMessage, onExhausted }` to tune bounded recovery |
 
 On each turn, Think appends a small capability block to the assembled system prompt. The block is based on the tools available for that turn, so models learn about workspace tools, context-loading tools, extension tools, sandboxed execution, MCP/client tools, and delegated-agent tools only when they are actually exposed.
+
+Think enables Durable Object eviction recovery by default. This is separate from client resumable streaming: resumable streaming handles browser disconnect/reconnect while the object keeps running, while `chatRecovery` recovers turns interrupted by process restarts, deploys, or object eviction.
+
+Override `onChatRecovery(ctx)` when you need provider-specific recovery. The default behavior persists partial assistant output and continues or retries when safe:
+
+```ts
+import type {
+  ChatRecoveryContext,
+  ChatRecoveryOptions
+} from "@cloudflare/think";
+
+export class MyAgent extends Think<Env> {
+  override chatRecovery = {
+    maxAttempts: 6,
+    terminalMessage: "The assistant was interrupted. Please try again."
+  };
+
+  override async onChatRecovery(
+    ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    console.log("Recovering", ctx.incidentId, ctx.attempt, ctx.recoveryKind);
+    return {};
+  }
+}
+```
 
 ### Scheduled tasks
 
@@ -203,16 +436,20 @@ exhausts its retries, so failed occurrences do not block future runs.
 
 Think owns the `streamText` call. Hooks fire on every turn regardless of entry path (WebSocket, `chat()`, `saveMessages()`, durable `submitMessages()` execution, `continueLastTurn()`, auto-continuation).
 
-| Hook                     | When it fires                               | Return                         |
-| ------------------------ | ------------------------------------------- | ------------------------------ |
-| `beforeTurn(ctx)`        | Before `streamText` — see assembled context | `TurnConfig` overrides or void |
-| `beforeStep(ctx)`        | Before each model step                      | `StepConfig` overrides or void |
-| `beforeToolCall(ctx)`    | Before tool's `execute` runs                | `ToolCallDecision` or void     |
-| `afterToolCall(ctx)`     | After tool execution (success or failure)   | void                           |
-| `onStepFinish(ctx)`      | After each step completes                   | void                           |
-| `onChunk(ctx)`           | Per streaming chunk (high-frequency)        | void                           |
-| `onChatResponse(result)` | After turn completes + message persisted    | void                           |
-| `onChatError(error)`     | On error during a turn                      | error to propagate             |
+| Hook                      | When it fires                               | Return                         |
+| ------------------------- | ------------------------------------------- | ------------------------------ |
+| `beforeTurn(ctx)`         | Before `streamText` — see assembled context | `TurnConfig` overrides or void |
+| `beforeStep(ctx)`         | Before each model step                      | `StepConfig` overrides or void |
+| `beforeToolCall(ctx)`     | Before tool's `execute` runs                | `ToolCallDecision` or void     |
+| `afterToolCall(ctx)`      | After tool execution (success or failure)   | void                           |
+| `onStepFinish(ctx)`       | After each step completes                   | void                           |
+| `onChunk(ctx)`            | Per streaming chunk (high-frequency)        | void                           |
+| `onChatResponse(result)`  | After turn completes + message persisted    | void                           |
+| `onChatError(error, ctx)` | On error during a turn                      | error to propagate             |
+
+`onChatError` receives `ctx.stage`, `ctx.requestId`, and `ctx.messagesPersisted`
+so apps can distinguish pre-persist request failures from stream failures. The
+same failures emit `chat:request:failed` observability events.
 
 The AI SDK-derived contexts spread the SDK's own types at the top level — no information is dropped:
 
@@ -401,9 +638,13 @@ session.removeContext("notes");
 await session.refreshSystemPrompt();
 ```
 
-#### Skills
+#### Legacy Session Skills
 
-Skills support load/unload for explicit context management:
+Session still supports lower-level loadable context providers. Prefer the
+first-class Think skills API (`getSkills()`, `activate_skill`, and
+`read_skill_resource`) for new Agent Skills directories. Use Session skill
+providers only when you need generic `load_context` / `unload_context`
+management instead of Think's skills workflow.
 
 ```ts
 import { R2SkillProvider } from "agents/experimental/memory/session";
@@ -415,7 +656,6 @@ configureSession(session: Session) {
     })
     .withCachedPrompt();
 }
-// Model gets load_context and unload_context tools automatically
 ```
 
 ### MCP integration
@@ -500,6 +740,7 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 - **Stream resumption** — page refresh replays buffered chunks via `ResumableStream`
 - **Client tools** — accept tool schemas from clients, handle results and approvals
 - **Durable submissions** — accept webhook/RPC-triggered turns with idempotent retry and status inspection
+- **Messengers** — receive Chat SDK webhooks and deliver streamed replies with provider-safe recovery
 - **Auto-continuation** — debounce-based continuation after tool results
 - **MCP integration** — MCP tools auto-merged, wait for connections before inference
 - **Abort/cancel** — pass an `AbortSignal` or send a cancel message
@@ -517,6 +758,7 @@ import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 
 // Use with a custom ReadOperations/WriteOperations implementation
 const tools = createWorkspaceTools(myCustomStorage);
+const toolsWithoutBash = createWorkspaceTools(myCustomStorage, { bash: false });
 ```
 
 Each tool is an AI SDK `tool()` with Zod schemas. The underlying operations are abstracted behind interfaces (`ReadOperations`, `WriteOperations`, etc.) so you can create tools backed by any storage.
@@ -555,15 +797,18 @@ getTools() {
 }
 ```
 
-## Peer dependencies
+## Runtime dependencies
 
-| Package                | Required | Notes                            |
-| ---------------------- | -------- | -------------------------------- |
-| `agents`               | yes      | Cloudflare Agents SDK            |
-| `ai`                   | yes      | Vercel AI SDK v6                 |
-| `zod`                  | yes      | Schema validation (v3.25+ or v4) |
-| `@cloudflare/shell`    | yes      | Workspace filesystem             |
-| `@cloudflare/codemode` | optional | For `createExecuteTool`          |
+| Package                      | Notes                                                     |
+| ---------------------------- | --------------------------------------------------------- |
+| `agents`                     | Cloudflare Agents SDK peer dependency                     |
+| `ai`                         | Vercel AI SDK v6 peer dependency                          |
+| `zod`                        | Schema validation peer dependency                         |
+| `@cloudflare/shell`          | Workspace filesystem                                      |
+| `@cloudflare/codemode`       | Code execution, `createExecuteTool`, and JS skill scripts |
+| `@cloudflare/worker-bundler` | TypeScript skill script compilation                       |
+| `just-bash`                  | Bash skill script execution                               |
+| `@chat-adapter/telegram`     | Required for Telegram messengers                          |
 
 ## Acknowledgments
 

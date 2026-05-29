@@ -31,7 +31,7 @@ Related:
 | **Tools**                 | Inline in your `onChatMessage`                                              | `getTools()` + auto-merge with client tools + context tools     |
 | **Context assembly**      | Manual in `onChatMessage`                                                   | `assembleContext()` → `{ system, messages }`                    |
 | **Post-turn hook**        | `onChatResponse(result)`                                                    | `onChatResponse(result)` (same)                                 |
-| **Error handling**        | No dedicated hook                                                           | `onChatError(error)`                                            |
+| **Error handling**        | No dedicated hook                                                           | `onChatError(error, ctx)`                                       |
 | **Pre-persist transform** | `sanitizeMessageForPersistence(msg)`                                        | `sanitizeMessageForPersistence(msg)` (same)                     |
 | **Recovery hook**         | `onChatRecovery(ctx)`                                                       | `onChatRecovery(ctx)` (same)                                    |
 

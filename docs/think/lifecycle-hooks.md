@@ -14,7 +14,7 @@ Think owns the `streamText` call and provides hooks at each stage of the chat tu
 | `onStepFinish(ctx)`         | After each step completes                     | void                       | yes   |
 | `onChunk(ctx)`              | Per streaming chunk                           | void                       | yes   |
 | `onChatResponse(result)`    | After turn completes and message is persisted | void                       | yes   |
-| `onChatError(error)`        | On error during a turn                        | error to propagate         | no    |
+| `onChatError(error, ctx?)`  | On error during a turn                        | error to propagate         | no    |
 
 ## Execution Order
 
@@ -706,21 +706,31 @@ async onChatResponse(result: ChatResponseResult) {
 
 ## onChatError
 
-Called when an error occurs during a chat turn. Return the error to propagate it, or return a different error.
+Called when an error occurs during a chat turn. Return the error to propagate it, or return a different error. The optional context describes where the failure happened and whether user messages were already persisted.
 
 ```typescript
-onChatError(error: unknown): unknown
+onChatError(error: unknown, ctx?: ChatErrorContext): unknown
 ```
 
 The partial assistant message (if any) is persisted before this hook fires.
+
+`ChatErrorContext` includes:
+
+| Field               | Type                                                                       | Description                                        |
+| ------------------- | -------------------------------------------------------------------------- | -------------------------------------------------- |
+| `requestId`         | `string \| undefined`                                                      | Chat request ID, when available                    |
+| `stage`             | `"parse" \| "persist" \| "turn" \| "stream" \| "recovery" \| "transcript"` | Failure stage                                      |
+| `messagesPersisted` | `boolean`                                                                  | Whether incoming user messages were already stored |
+
+Think also emits `chat:request:failed` on the `agents:chat` observability channel with the same stage and persistence information.
 
 ### Example
 
 Log and transform errors:
 
 ```typescript
-onChatError(error: unknown) {
-  console.error("Chat turn failed:", error);
+onChatError(error: unknown, ctx?: ChatErrorContext) {
+  console.error("Chat turn failed:", ctx?.stage, error);
   return new Error("Something went wrong. Please try again.");
 }
 ```

@@ -422,6 +422,41 @@ describe("Think — error handling", () => {
     expect(errorLog[0]).toContain("Custom error for hook");
   });
 
+  it("emits chat:request:failed when a chat stream fails", async () => {
+    const agent = await freshAgent(`err-event-${crypto.randomUUID()}`);
+    const events: Array<{
+      type: string;
+      payload: {
+        requestId?: string;
+        stage?: string;
+        messagesPersisted?: boolean;
+        error?: string;
+      };
+    }> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:request:failed") {
+        events.push(event);
+      }
+    });
+
+    try {
+      await agent.testChatWithError("Custom event error");
+    } finally {
+      unsubscribe();
+    }
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "chat:request:failed",
+        payload: expect.objectContaining({
+          stage: "stream",
+          messagesPersisted: true,
+          error: "Custom event error"
+        })
+      })
+    );
+  });
+
   it("should recover and continue chatting after error", async () => {
     const agent = await freshAgent("err-recover");
 
@@ -1973,11 +2008,189 @@ describe("Think — onChatRecovery", () => {
     expect(contexts.length).toBeGreaterThanOrEqual(1);
 
     const ctx = contexts[contexts.length - 1];
+    expect(ctx).toMatchObject({
+      incidentId: "req-1:",
+      attempt: 1,
+      maxAttempts: 6,
+      recoveryKind: "continue"
+    });
     expect(ctx.partialText).toBe("Partial text");
     expect(ctx.streamId).toBe("stream-1");
     expect(typeof ctx.createdAt).toBe("number");
     expect(ctx.createdAt).toBeGreaterThanOrEqual(before);
     expect(ctx.createdAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("exhausts chat recovery after the configured max attempts", async () => {
+    const agent = await freshRecoveryAgent("recovery-exhaustion");
+
+    await agent.setChatRecoveryConfigForTest({
+      maxAttempts: 1,
+      terminalMessage: "gave up"
+    });
+    await agent.setRecoveryOverride({ continue: false });
+
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-exhaust");
+    await agent.triggerFiberRecovery();
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-exhaust");
+    await agent.triggerFiberRecovery();
+
+    const contexts = await agent.getRecoveryContexts();
+    expect(contexts).toHaveLength(1);
+
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      attempt: number;
+      maxAttempts: number;
+      status: string;
+      reason?: string;
+    }>;
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0]).toMatchObject({
+      attempt: 2,
+      maxAttempts: 1,
+      status: "exhausted",
+      reason: "max_attempts_exceeded"
+    });
+  });
+
+  it("shares one attempt budget when an incident flips between retry and continue", async () => {
+    const agent = await freshRecoveryAgent("recovery-kind-flip");
+
+    const first = await agent.beginIncidentForTest({
+      requestId: "req-flip",
+      recoveryRootRequestId: "req-flip",
+      latestUserMessageId: "user-flip",
+      recoveryKind: "retry"
+    });
+    const second = await agent.beginIncidentForTest({
+      requestId: "req-flip-2",
+      recoveryRootRequestId: "req-flip",
+      latestUserMessageId: "user-flip",
+      recoveryKind: "continue"
+    });
+
+    // Same identity despite the kind change, so the attempt budget accrues.
+    expect(first.incidentId).toBe("req-flip:user-flip");
+    expect(second.incidentId).toBe("req-flip:user-flip");
+    expect(first.attempt).toBe(1);
+    expect(second.attempt).toBe(2);
+
+    const incidents = await agent.getChatRecoveryIncidentsForTest();
+    expect(incidents).toHaveLength(1);
+  });
+
+  it("deletes the incident record once recovery completes", async () => {
+    const agent = await freshRecoveryAgent("recovery-completed-cleanup");
+
+    const incident = await agent.beginIncidentForTest({
+      requestId: "req-done",
+      recoveryRootRequestId: "req-done",
+      latestUserMessageId: "user-done",
+      recoveryKind: "continue"
+    });
+    expect(await agent.getChatRecoveryIncidentsForTest()).toHaveLength(1);
+
+    await agent.updateIncidentForTest(incident.incidentId, "completed");
+
+    expect(await agent.getChatRecoveryIncidentsForTest()).toHaveLength(0);
+  });
+
+  it("sweeps incidents that have been inactive past the TTL", async () => {
+    const agent = await freshRecoveryAgent("recovery-stale-sweep");
+
+    const staleAt = Date.now() - 2 * 60 * 60 * 1000;
+    await agent.seedIncidentForTest({
+      incidentId: "stale:user",
+      requestId: "stale",
+      recoveryKind: "continue",
+      attempt: 3,
+      maxAttempts: 6,
+      status: "failed",
+      firstSeenAt: staleAt,
+      lastAttemptAt: staleAt
+    });
+    expect(await agent.getChatRecoveryIncidentsForTest()).toHaveLength(1);
+
+    // Opening any new incident triggers the stale sweep.
+    await agent.beginIncidentForTest({
+      requestId: "req-fresh",
+      recoveryRootRequestId: "req-fresh",
+      latestUserMessageId: "user-fresh",
+      recoveryKind: "continue"
+    });
+
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      incidentId: string;
+    }>;
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0].incidentId).toBe("req-fresh:user-fresh");
+  });
+
+  it("marks the incident failed when onChatRecovery throws", async () => {
+    const agent = await freshRecoveryAgent("recovery-hook-throws");
+
+    await agent.setRecoveryShouldThrowForTest(true);
+
+    const failed: string[] = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:recovery:failed") {
+        failed.push(event.payload.incidentId);
+      }
+    });
+
+    try {
+      await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-throw");
+      await agent.triggerFiberRecovery();
+    } finally {
+      unsubscribe();
+    }
+
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      status: string;
+      reason?: string;
+    }>;
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0].status).toBe("failed");
+    expect(incidents[0].reason).toContain("onChatRecovery boom");
+    expect(failed.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("still delivers terminal UX when onExhausted throws", async () => {
+    const agent = await freshRecoveryAgent("recovery-exhausted-throws");
+
+    await agent.enableThrowingOnExhaustedForTest(1, "gave up");
+    await agent.setRecoveryOverride({ continue: false });
+
+    const fiberFailures: string[] = [];
+    const unsubscribe = subscribe("fiber", (event) => {
+      if (event.type === "fiber:recovery:failed") {
+        fiberFailures.push(event.payload.fiberId);
+      }
+    });
+
+    try {
+      await agent.insertInterruptedFiber(
+        "__cf_internal_chat_turn:req-ex-throw"
+      );
+      await agent.triggerFiberRecovery();
+      await agent.insertInterruptedFiber(
+        "__cf_internal_chat_turn:req-ex-throw"
+      );
+      await agent.triggerFiberRecovery();
+    } finally {
+      unsubscribe();
+    }
+
+    // The throwing hook ran, but it did not propagate out of recovery (which
+    // would have surfaced as a fiber recovery failure and skipped terminal UX).
+    expect(await agent.getOnExhaustedCallsForTest()).toBe(1);
+    expect(fiberFailures).toHaveLength(0);
+
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      status: string;
+    }>;
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0].status).toBe("exhausted");
   });
 
   it("stashed data round-trips through fiber recovery", async () => {

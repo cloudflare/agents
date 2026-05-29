@@ -254,6 +254,7 @@
       }
     ]
   },
+  "worker_loaders": [{ "binding": "LOADER" }],
   "workflows": [
     {
       "name": "test-processing-workflow",

@@ -1,11 +1,12 @@
 import { build } from "tsdown";
 import { globSync } from "glob";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
 
 const entries = [
   "src/*.ts",
   "src/*.tsx",
+  "src/skills/index.ts",
   "src/chat/index.ts",
   "src/chat-sdk/index.ts",
   "src/cli/index.ts",
@@ -38,6 +39,20 @@ for (const entry of entries) {
   }
 }
 
+// The `agents:skills` virtual-module types live in a standalone ambient
+// declaration (skills-module.d.ts) so they survive d.ts bundling. Prepend a
+// reference to the main entry so importing `agents` (directly or transitively
+// via @cloudflare/think / @cloudflare/ai-chat) brings them into scope without a
+// per-project shim.
+function injectSkillsTypeReference(): void {
+  const dtsPath = "dist/index.d.ts";
+  const directive = '/// <reference path="../skills-module.d.ts" />\n';
+  const current = readFileSync(dtsPath, "utf8");
+  if (!current.startsWith(directive)) {
+    writeFileSync(dtsPath, directive + current);
+  }
+}
+
 async function main() {
   await build({
     clean: true,
@@ -55,6 +70,8 @@ async function main() {
 
   // then run oxfmt on the generated .d.ts files
   formatDeclarationFiles();
+
+  injectSkillsTypeReference();
 
   process.exit(0);
 }

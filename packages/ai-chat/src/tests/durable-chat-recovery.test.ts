@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
+import { subscribe } from "agents/observability";
 import type { UIMessage as ChatMessage } from "ai";
 
 interface ChatRecoveryTestStub {
@@ -38,6 +39,38 @@ interface ChatRecoveryTestStub {
     Array<Array<{ name: string; description?: string }> | undefined>
   >;
   getScheduleCountForCallback(callback: string): Promise<number>;
+  setChatRecoveryConfigForTest(config: {
+    maxAttempts?: number;
+    terminalMessage?: string;
+  }): Promise<void>;
+  getChatRecoveryIncidentsForTest(): Promise<unknown[]>;
+  setRecoveryShouldThrowForTest(shouldThrow: boolean): Promise<void>;
+  enableThrowingOnExhaustedForTest(
+    maxAttempts: number,
+    terminalMessage: string
+  ): Promise<void>;
+  getOnExhaustedCallsForTest(): Promise<number>;
+  beginIncidentForTest(input: {
+    requestId: string;
+    recoveryRootRequestId?: string | null;
+    latestUserMessageId?: string | null;
+    recoveryKind: "retry" | "continue";
+  }): Promise<{ incidentId: string; attempt: number; exhausted: boolean }>;
+  updateIncidentForTest(
+    incidentId: string,
+    status: string,
+    reason?: string
+  ): Promise<void>;
+  seedIncidentForTest(incident: {
+    incidentId: string;
+    requestId: string;
+    recoveryKind: "retry" | "continue";
+    attempt: number;
+    maxAttempts: number;
+    status: string;
+    firstSeenAt: number;
+    lastAttemptAt: number;
+  }): Promise<void>;
 }
 
 async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
@@ -150,6 +183,194 @@ describe("onChatRecovery", () => {
     expect(typeof match!.createdAt).toBe("number");
     expect(match!.createdAt).toBeGreaterThanOrEqual(before);
     expect(match!.createdAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("passes incident metadata and exhausts after maxAttempts", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setChatRecoveryConfigForTest({
+      maxAttempts: 1,
+      terminalMessage: "gave up"
+    });
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-cap");
+    await agentStub.triggerFiberRecovery();
+
+    const contexts = (await agentStub.getRecoveryContexts()) as Array<{
+      incidentId: string;
+      attempt: number;
+      maxAttempts: number;
+      recoveryKind: string;
+    }>;
+    expect(contexts.at(-1)).toMatchObject({
+      incidentId: "req-cap:",
+      attempt: 1,
+      maxAttempts: 1,
+      recoveryKind: "continue"
+    });
+
+    await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-cap");
+    await agentStub.triggerFiberRecovery();
+
+    const incidents =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        attempt: number;
+        maxAttempts: number;
+        status: string;
+        reason?: string;
+      }>;
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0]).toMatchObject({
+      attempt: 2,
+      maxAttempts: 1,
+      status: "exhausted",
+      reason: "max_attempts_exceeded"
+    });
+  });
+
+  it("shares one attempt budget when an incident flips between retry and continue", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    const first = await agentStub.beginIncidentForTest({
+      requestId: "req-flip",
+      recoveryRootRequestId: "req-flip",
+      latestUserMessageId: "user-flip",
+      recoveryKind: "retry"
+    });
+    const second = await agentStub.beginIncidentForTest({
+      requestId: "req-flip-2",
+      recoveryRootRequestId: "req-flip",
+      latestUserMessageId: "user-flip",
+      recoveryKind: "continue"
+    });
+
+    expect(first.incidentId).toBe("req-flip:user-flip");
+    expect(second.incidentId).toBe("req-flip:user-flip");
+    expect(first.attempt).toBe(1);
+    expect(second.attempt).toBe(2);
+    expect(await agentStub.getChatRecoveryIncidentsForTest()).toHaveLength(1);
+  });
+
+  it("deletes the incident record once recovery completes", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    const incident = await agentStub.beginIncidentForTest({
+      requestId: "req-done",
+      recoveryRootRequestId: "req-done",
+      latestUserMessageId: "user-done",
+      recoveryKind: "continue"
+    });
+    expect(await agentStub.getChatRecoveryIncidentsForTest()).toHaveLength(1);
+
+    await agentStub.updateIncidentForTest(incident.incidentId, "completed");
+    expect(await agentStub.getChatRecoveryIncidentsForTest()).toHaveLength(0);
+  });
+
+  it("sweeps incidents inactive past the TTL on the next incident", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    const staleAt = Date.now() - 2 * 60 * 60 * 1000;
+    await agentStub.seedIncidentForTest({
+      incidentId: "stale:user",
+      requestId: "stale",
+      recoveryKind: "continue",
+      attempt: 3,
+      maxAttempts: 6,
+      status: "failed",
+      firstSeenAt: staleAt,
+      lastAttemptAt: staleAt
+    });
+    expect(await agentStub.getChatRecoveryIncidentsForTest()).toHaveLength(1);
+
+    await agentStub.beginIncidentForTest({
+      requestId: "req-fresh",
+      recoveryRootRequestId: "req-fresh",
+      latestUserMessageId: "user-fresh",
+      recoveryKind: "continue"
+    });
+
+    const incidents =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        incidentId: string;
+      }>;
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0].incidentId).toBe("req-fresh:user-fresh");
+  });
+
+  it("marks the incident failed when onChatRecovery throws", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setRecoveryShouldThrowForTest(true);
+
+    const failed: string[] = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:recovery:failed") {
+        failed.push(event.payload.incidentId);
+      }
+    });
+
+    try {
+      await agentStub.insertInterruptedFiber(
+        "__cf_internal_chat_turn:req-throw"
+      );
+      await agentStub.triggerFiberRecovery();
+    } finally {
+      unsubscribe();
+    }
+
+    const incidents =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        status: string;
+        reason?: string;
+      }>;
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0].status).toBe("failed");
+    expect(incidents[0].reason).toContain("onChatRecovery boom");
+    expect(failed.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("still delivers terminal UX when onExhausted throws", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.enableThrowingOnExhaustedForTest(1, "gave up");
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    const fiberFailures: string[] = [];
+    const unsubscribe = subscribe("fiber", (event) => {
+      if (event.type === "fiber:recovery:failed") {
+        fiberFailures.push(event.payload.fiberId);
+      }
+    });
+
+    try {
+      await agentStub.insertInterruptedFiber(
+        "__cf_internal_chat_turn:req-ex-throw"
+      );
+      await agentStub.triggerFiberRecovery();
+      await agentStub.insertInterruptedFiber(
+        "__cf_internal_chat_turn:req-ex-throw"
+      );
+      await agentStub.triggerFiberRecovery();
+    } finally {
+      unsubscribe();
+    }
+
+    expect(await agentStub.getOnExhaustedCallsForTest()).toBe(1);
+    expect(fiberFailures).toHaveLength(0);
+
+    const incidents =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        status: string;
+      }>;
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0].status).toBe("exhausted");
   });
 
   it("should persist partial by default (persist !== false)", async () => {

@@ -104,10 +104,12 @@ Key things worth looking at in `src/server.ts`:
   `this.parentAgent(Chat)` to get context from its direct parent even
   though `Chat` is itself a facet rather than a top-level binding.
 - Each `Chat` owns its own SQLite database, stream state, and recovery
-  state. If you build this pattern with `Think`, `chatRecovery` and
-  `runFiber()` work from inside the chat facet; the root parent's alarm
-  drives recovery checks back into idle children, and reconnecting to the
-  `/sub/chat/{chatId}` URL attaches directly to that child.
+  state. `AIChatAgent` client streams resume on reconnect by default. If you
+  want Durable Object eviction recovery for each chat facet, opt in with
+  `override chatRecovery = true` on the `Chat` class. If you build this pattern
+  with `Think`, `chatRecovery` is already enabled by default. In both cases the
+  root parent's alarm drives recovery checks back into idle children, and
+  reconnecting to the `/sub/chat/{chatId}` URL attaches directly to that child.
 - The worker entry is a one-liner: `routeAgentRequest(request, env)`.
   It already knows how to walk `/agents/inbox/.../sub/chat/...` — no
   custom routing needed.

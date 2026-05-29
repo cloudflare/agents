@@ -16,6 +16,7 @@ import type {
   ChatOptions,
   ChatResponseResult,
   SaveMessagesResult,
+  ChatRecoveryConfig,
   ChatRecoveryContext,
   ChatRecoveryOptions,
   ThinkSubmissionInspection,
@@ -2388,7 +2389,8 @@ export class ThinkProgrammaticTestAgent extends Think {
       id: `fiber-${requestId}`,
       name: `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
       snapshot: null,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      recoveryReason: "interrupted"
     });
   }
 
@@ -3108,9 +3110,13 @@ export class ThinkAsyncHookTestAgent extends Think {
 // Tests chatRecovery, fiber wrapping, onChatRecovery hook.
 
 export class ThinkRecoveryTestAgent extends Think {
-  override chatRecovery = true;
+  override chatRecovery: ChatRecoveryConfig = true;
 
   private _recoveryContexts: Array<{
+    incidentId: string;
+    attempt: number;
+    maxAttempts: number;
+    recoveryKind: "retry" | "continue";
     recoveryData: unknown;
     partialText: string;
     streamId: string;
@@ -3119,6 +3125,8 @@ export class ThinkRecoveryTestAgent extends Think {
     lastClientTools?: ClientToolSchema[];
   }> = [];
   private _recoveryOverride: ChatRecoveryOptions = {};
+  private _recoveryShouldThrow = false;
+  private _onExhaustedCalls = 0;
   private _turnCallCount = 0;
   private _turnBodies: Array<Record<string, unknown> | undefined> = [];
   private _turnClientToolNames: Array<string[]> = [];
@@ -3151,6 +3159,10 @@ export class ThinkRecoveryTestAgent extends Think {
     ctx: ChatRecoveryContext
   ): Promise<ChatRecoveryOptions> {
     this._recoveryContexts.push({
+      incidentId: ctx.incidentId,
+      attempt: ctx.attempt,
+      maxAttempts: ctx.maxAttempts,
+      recoveryKind: ctx.recoveryKind,
       recoveryData: ctx.recoveryData,
       partialText: ctx.partialText,
       streamId: ctx.streamId,
@@ -3158,6 +3170,9 @@ export class ThinkRecoveryTestAgent extends Think {
       lastBody: ctx.lastBody,
       lastClientTools: ctx.lastClientTools
     });
+    if (this._recoveryShouldThrow) {
+      throw new Error("onChatRecovery boom");
+    }
     return this._recoveryOverride;
   }
 
@@ -3187,6 +3202,10 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async getRecoveryContexts(): Promise<
     Array<{
+      incidentId: string;
+      attempt: number;
+      maxAttempts: number;
+      recoveryKind: "retry" | "continue";
       recoveryData: unknown;
       partialText: string;
       streamId: string;
@@ -3208,6 +3227,95 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async setRecoveryOverride(options: ChatRecoveryOptions): Promise<void> {
     this._recoveryOverride = options;
+  }
+
+  async setChatRecoveryConfigForTest(
+    config: ChatRecoveryConfig
+  ): Promise<void> {
+    this.chatRecovery = config;
+  }
+
+  async getChatRecoveryIncidentsForTest(): Promise<unknown[]> {
+    const entries = await this.ctx.storage.list({
+      prefix: "cf:chat-recovery:incident:"
+    });
+    return [...entries.values()];
+  }
+
+  async setRecoveryShouldThrowForTest(shouldThrow: boolean): Promise<void> {
+    this._recoveryShouldThrow = shouldThrow;
+  }
+
+  async enableThrowingOnExhaustedForTest(
+    maxAttempts: number,
+    terminalMessage: string
+  ): Promise<void> {
+    this._onExhaustedCalls = 0;
+    this.chatRecovery = {
+      maxAttempts,
+      terminalMessage,
+      onExhausted: () => {
+        this._onExhaustedCalls++;
+        throw new Error("onExhausted boom");
+      }
+    };
+  }
+
+  async getOnExhaustedCallsForTest(): Promise<number> {
+    return this._onExhaustedCalls;
+  }
+
+  async beginIncidentForTest(input: {
+    requestId: string;
+    recoveryRootRequestId?: string | null;
+    latestUserMessageId?: string | null;
+    recoveryKind: "retry" | "continue";
+  }): Promise<{ incidentId: string; attempt: number; exhausted: boolean }> {
+    const self = this as unknown as {
+      _beginChatRecoveryIncident(i: typeof input): Promise<{
+        incident: { incidentId: string; attempt: number };
+        exhausted: boolean;
+      }>;
+    };
+    const { incident, exhausted } =
+      await self._beginChatRecoveryIncident(input);
+    return {
+      incidentId: incident.incidentId,
+      attempt: incident.attempt,
+      exhausted
+    };
+  }
+
+  async updateIncidentForTest(
+    incidentId: string,
+    status: string,
+    reason?: string
+  ): Promise<void> {
+    await (
+      this as unknown as {
+        _updateChatRecoveryIncident(
+          id: string,
+          status: string,
+          reason?: string
+        ): Promise<void>;
+      }
+    )._updateChatRecoveryIncident(incidentId, status, reason);
+  }
+
+  async seedIncidentForTest(incident: {
+    incidentId: string;
+    requestId: string;
+    recoveryKind: "retry" | "continue";
+    attempt: number;
+    maxAttempts: number;
+    status: string;
+    firstSeenAt: number;
+    lastAttemptAt: number;
+  }): Promise<void> {
+    await this.ctx.storage.put(
+      `cf:chat-recovery:incident:${encodeURIComponent(incident.incidentId)}`,
+      incident
+    );
   }
 
   async setStashData(data: unknown): Promise<void> {
@@ -3370,7 +3478,7 @@ export class ThinkRecoveryTestAgent extends Think {
     name: string,
     snapshot?: unknown
   ): Promise<void> {
-    const id = `fiber-${Date.now()}`;
+    const id = `fiber-${crypto.randomUUID()}`;
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})

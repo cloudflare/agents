@@ -1,6 +1,7 @@
 import { Agent } from "agents";
 import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "../../tools/workspace";
+import type { WorkspaceToolsOptions } from "../../tools/workspace";
 
 export class TestAssistantToolsAgent extends Agent {
   workspace = new Workspace({
@@ -144,6 +145,26 @@ export class TestAssistantToolsAgent extends Agent {
     const tools = this.getTools();
     return tools.grep.execute!(
       { query, include, fixedString, caseSensitive, contextLines },
+      {
+        toolCallId: "test",
+        messages: [],
+        abortSignal: new AbortController().signal
+      }
+    );
+  }
+
+  async toolBash(
+    script: string,
+    cwd?: string,
+    options?: Exclude<WorkspaceToolsOptions["bash"], boolean>
+  ): Promise<unknown> {
+    const tools = options
+      ? createWorkspaceTools(this.workspace, { bash: options })
+      : this.getTools();
+    const bash = tools.bash;
+    if (!bash?.execute) throw new Error("bash tool is not available");
+    return bash.execute(
+      { script, cwd },
       {
         toolCallId: "test",
         messages: [],
