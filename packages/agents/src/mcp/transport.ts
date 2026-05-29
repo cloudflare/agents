@@ -483,7 +483,7 @@ export class StreamableHTTPServerTransport implements Transport {
       (await agent.getStreamIdForRequestId(requestId));
     if (!streamId) {
       throw new Error(
-        `No connection established for request ID: ${String(requestId)}`
+        `No active stream found for request ID: ${String(requestId)}`
       );
     }
 

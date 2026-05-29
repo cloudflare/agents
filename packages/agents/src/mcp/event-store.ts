@@ -126,24 +126,24 @@ export class DurableObjectEventStore implements EventStore {
    * immediately after a POST's final response has been written to the
    * wire — no future `Last-Event-ID` for this stream is expected to
    * resolve.
+   *
+   * Lists and deletes in chunks of {@link DELETE_CHUNK} (128, the DO
+   * storage cap) so we never load the entire event log into memory.
+   * After deleting, the next `list` call won't see the deleted keys,
+   * so passing `start: <prefix>` again is enough — no cursor bookkeeping.
    */
   async clearStream(streamId: StreamId): Promise<void> {
     const prefix = `${DurableObjectEventStore.EVENT_KEY_PREFIX}${streamId}:`;
-    const rows = await this.storage.list({ prefix });
-    const keys = [...rows.keys()];
-    if (keys.length > 0) {
-      await this.deleteChunked(keys);
+    for (;;) {
+      const rows = await this.storage.list({
+        prefix,
+        limit: DurableObjectEventStore.DELETE_CHUNK
+      });
+      if (rows.size === 0) break;
+      await this.storage.delete([...rows.keys()]);
     }
     this.seqByStream.delete(streamId);
     this.seqInit.delete(streamId);
-  }
-
-  /** Multi-key delete capped at 128 per call by DO storage. */
-  private async deleteChunked(keys: string[]): Promise<void> {
-    const chunkSize = DurableObjectEventStore.DELETE_CHUNK;
-    for (let i = 0; i < keys.length; i += chunkSize) {
-      await this.storage.delete(keys.slice(i, i + chunkSize));
-    }
   }
 
   private async ensureSeqLoaded(streamId: StreamId): Promise<void> {

@@ -300,5 +300,9 @@ describe("McpAgent SSE resumability (#1583)", () => {
       `expected the resumed GET to receive the tool result, got:\n${resumeBuf}`
     ).toContain('"result"');
     expect(resumeBuf).toContain("Hello, midflight!");
+    // The Last-Event-ID was the progress notification itself, so
+    // `replayEventsAfter` must skip it — the client already saw it on
+    // the original POST stream and re-delivering it would be a bug.
+    expect(resumeBuf).not.toContain("notifications/progress");
   });
 });
