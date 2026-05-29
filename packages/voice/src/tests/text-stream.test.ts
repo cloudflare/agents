@@ -149,6 +149,129 @@ describe("NDJSON parsing resilience", () => {
     expect(chunks).toEqual(["hello", " world"]);
   });
 
+  it("keeps parsing OpenAI-style assistant content after role is omitted", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            '{"choices":[{"delta":{"role":"assistant","content":"before tool"}}]}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode('{"choices":[{"delta":{"content":" after tool"}}]}\n')
+        );
+        controller.close();
+      }
+    });
+
+    const chunks = await collect(iterateText(stream));
+    expect(chunks).toEqual(["before tool", " after tool"]);
+  });
+
+  it("keeps OpenRouter-style text flowing around two tool calls", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"role":"assistant","content":"Some intro text. "}}]}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tool-1","type":"function","function":{"name":"first_tool","arguments":"{}"}}]}}]}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"content":"Here is what the first tool found. "}}]}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tool-2","type":"function","function":{"name":"second_tool","arguments":"{}"}}]}}]}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"content":"Here is the conclusion."}}]}\n'
+          )
+        );
+        controller.enqueue(encoder.encode("data: [DONE]\n"));
+        controller.close();
+      }
+    });
+
+    const chunks = await collect(iterateText(stream));
+    expect(chunks).toEqual([
+      "Some intro text. ",
+      "Here is what the first tool found. ",
+      "Here is the conclusion."
+    ]);
+  });
+
+  it("keeps AI SDK UI message text deltas flowing around tool parts", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode('data: {"type":"text-start","id":"t1"}\n')
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"text-delta","id":"t1","delta":"Some intro text. "}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"tool-input-start","toolCallId":"tool-1","toolName":"first_tool"}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"tool-input-available","toolCallId":"tool-1","toolName":"first_tool","input":{}}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode('data: {"type":"text-start","id":"t2"}\n')
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"text-delta","id":"t2","delta":"Here is what the first tool found. "}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"tool-input-start","toolCallId":"tool-2","toolName":"second_tool"}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"tool-input-available","toolCallId":"tool-2","toolName":"second_tool","input":{}}\n'
+          )
+        );
+        controller.enqueue(
+          encoder.encode('data: {"type":"text-start","id":"t3"}\n')
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"type":"text-delta","id":"t3","delta":"Here is the conclusion."}\n'
+          )
+        );
+        controller.enqueue(encoder.encode("data: [DONE]\n"));
+        controller.close();
+      }
+    });
+
+    const chunks = await collect(iterateText(stream));
+    expect(chunks).toEqual([
+      "Some intro text. ",
+      "Here is what the first tool found. ",
+      "Here is the conclusion."
+    ]);
+  });
+
   it("survives malformed raw JSON lines without crashing", async () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
