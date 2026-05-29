@@ -90,7 +90,7 @@ The printed verdict distinguishes the two failure shapes from the report:
 - **SELF-RECOVERED** — a turn completed on fresh code after the churn.
 - **RECOVERY EXHAUSTED** — the attempt budget was burned and the turn abandoned.
 - plus **Durable Object health after churn** — a fresh message must complete,
-  proving it's the *turn* that's orphaned, not the *DO* that's wedged.
+  proving it's the _turn_ that's orphaned, not the _DO_ that's wedged.
 - plus an **error breakdown** from `onChatError` grouped by `stage` (and any
   `onError` agent-level errors), so you can see the actual failure class — e.g.
   a `recovery`-stage error carrying "Durable Object reset because its code was
@@ -98,15 +98,15 @@ The printed verdict distinguishes the two failure shapes from the report:
 
 ### Common flags
 
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--deploys N` | 3 | mid-turn deploys |
-| `--duration S` | 90 | turn length (seconds) |
-| `--mid-turn-delay S` | 8 | wait before first deploy |
-| `--between S` | 0 | gap between deploys (0 = back-to-back) |
-| `--settle S` | 150 | recovery wait after last deploy |
-| `--base-url URL` | derived | override the deployed origin |
-| `--no-initial-deploy` | off | skip the pre-run deploy |
+| Flag                  | Default | Meaning                                |
+| --------------------- | ------- | -------------------------------------- |
+| `--deploys N`         | 3       | mid-turn deploys                       |
+| `--duration S`        | 90      | turn length (seconds)                  |
+| `--mid-turn-delay S`  | 8       | wait before first deploy               |
+| `--between S`         | 0       | gap between deploys (0 = back-to-back) |
+| `--settle S`          | 150     | recovery wait after last deploy        |
+| `--base-url URL`      | derived | override the deployed origin           |
+| `--no-initial-deploy` | off     | skip the pre-run deploy                |
 
 ## Watch it in a browser
 
