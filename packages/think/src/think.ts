@@ -100,9 +100,9 @@ import {
   stepCountIs,
   streamText
 } from "ai";
-import * as skills from "./skills";
-import { SkillRegistry } from "./skills";
-import type { SkillScriptRunner, SkillSource } from "./skills";
+import * as skills from "agents/skills";
+import { SkillRegistry } from "agents/skills";
+import type { SkillScriptRunner, SkillSource } from "agents/skills";
 
 // Re-export AI SDK types that appear on Think's public lifecycle hooks
 // so users can import them from a single place.
@@ -116,7 +116,7 @@ export type {
   TypedToolResult
 } from "ai";
 export { skills };
-export type { SkillSource };
+export type { SkillRunContext, SkillSource } from "agents/skills";
 import {
   Agent,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
@@ -1198,6 +1198,7 @@ export class Think<
   waitForMcpConnections: boolean | { timeout: number } = false;
 
   private _skillRegistry: SkillRegistry | null = null;
+  private _loggedSkillWarnings = new Set<string>();
 
   /**
    * Controls how overlapping user submit requests behave while another
@@ -1865,38 +1866,69 @@ export class Think<
   /**
    * Return Agent Skills sources for this Think agent.
    *
-   * Bundled skills are typically imported with:
+   * Bundled skills are typically imported with the Agents Vite plugin:
    *
    * ```typescript
-   * import productSkills from "./skills" with { type: "skills" };
+   * import productSkills from "agents:skills"; // -> ./skills next to this file
    * ```
+   *
+   * Sources are applied in order; the first source to register a skill name
+   * wins, and later collisions are skipped with a logged warning.
    */
   getSkills(): SkillSource[] | Promise<SkillSource[]> {
     return [];
   }
 
   private async _initializeSkills(): Promise<void> {
-    const sources = await this.getSkills();
-    if (sources.length === 0) return;
+    // A misconfigured or failing skill source must never prevent the agent
+    // from starting. Any error here is logged and skills stay disabled.
+    try {
+      const sources = await this.getSkills();
+      if (sources.length === 0) return;
 
-    const registry = new SkillRegistry(sources, this.getSkillScriptRunner());
-    await registry.load();
-    this._skillRegistry = registry;
+      const registry = new SkillRegistry(sources, this.getSkillScriptRunner());
+      await registry.load();
+      this._logSkillWarnings(registry);
+      this._skillRegistry = registry;
 
-    await this.session.addContext(registry.contextLabel, {
-      description: "Think skills: available skill catalog",
-      provider: {
-        get: () => registry.systemPrompt()
+      await this.session.addContext(registry.contextLabel, {
+        description: "Think skills: available skill catalog",
+        provider: {
+          get: () => registry.systemPrompt()
+        }
+      });
+
+      const previous = this._configGet("skillsFingerprint");
+      if (previous !== registry.fingerprint) {
+        await this.session.refreshSystemPrompt();
+        this._configSet("skillsFingerprint", registry.fingerprint);
       }
-    });
-
-    const previous = this._configGet("skillsFingerprint");
-    if (previous !== registry.fingerprint) {
-      await this.session.refreshSystemPrompt();
-      this._configSet("skillsFingerprint", registry.fingerprint);
+    } catch (error) {
+      console.warn(
+        `[think] Failed to initialize skills; continuing without them: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
 
+  /**
+   * Log registry diagnostics (duplicate names, sources that failed to list),
+   * deduped by message so a new collision after a deploy still surfaces while
+   * the same warning is not repeated on every turn.
+   */
+  private _logSkillWarnings(registry: SkillRegistry): void {
+    for (const warning of registry.warnings) {
+      if (this._loggedSkillWarnings.has(warning)) continue;
+      this._loggedSkillWarnings.add(warning);
+      console.warn(`[think] ${warning}`);
+    }
+  }
+
+  /**
+   * Return an optional runner that enables the `run_skill_script` tool.
+   *
+   * @experimental Skill script execution is experimental and may change
+   * before stabilizing.
+   */
   getSkillScriptRunner(): SkillScriptRunner | null {
     return null;
   }
@@ -1904,11 +1936,20 @@ export class Think<
   private async _refreshSkillsIfChanged(): Promise<void> {
     if (!this._skillRegistry) return;
 
-    await this._skillRegistry.refresh();
-    const previous = this._configGet("skillsFingerprint");
-    if (previous !== this._skillRegistry.fingerprint) {
-      await this.session.refreshSystemPrompt();
-      this._configSet("skillsFingerprint", this._skillRegistry.fingerprint);
+    // Refreshing pulls from live sources (e.g. R2); a transient failure must
+    // not break the turn. Keep the last good catalog on error.
+    try {
+      await this._skillRegistry.refresh();
+      this._logSkillWarnings(this._skillRegistry);
+      const previous = this._configGet("skillsFingerprint");
+      if (previous !== this._skillRegistry.fingerprint) {
+        await this.session.refreshSystemPrompt();
+        this._configSet("skillsFingerprint", this._skillRegistry.fingerprint);
+      }
+    } catch (error) {
+      console.warn(
+        `[think] Failed to refresh skills; using last known catalog: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
 

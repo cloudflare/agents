@@ -31,6 +31,36 @@ export interface SkillScriptContext {
   skill: SkillDescriptor;
 }
 
+/**
+ * The `ctx` object passed as the second argument to function-style JS/TS
+ * skill scripts (`export default async function run(input, ctx)`).
+ *
+ * Capabilities are gated by the runner: `workspace` throws unless workspace
+ * access is enabled, and `tools` only resolves tools the runner was given.
+ */
+export interface SkillRunContext {
+  /** Metadata for the skill that owns this script. */
+  skill: SkillDescriptor;
+  /** Text bundled resources by relative path (e.g. `references/style-guide.md`). */
+  files: Record<string, string>;
+  /** Workspace access, gated by the runner's `workspace` permission. */
+  workspace: {
+    readFile(path: string): Promise<string | null>;
+    listFiles(path?: string): Promise<unknown>;
+    glob(pattern: string): Promise<unknown>;
+    stat(path: string): Promise<{ type: string; size: number } | null>;
+    writeFile(path: string, content: string): Promise<void>;
+  };
+  /** Explicitly granted tools: `tools.call(name, input)` or `tools.<name>(input)`. */
+  tools: {
+    call(name: string, input?: unknown): Promise<unknown>;
+  } & Record<string, (input?: unknown) => Promise<unknown>>;
+  /** Scratch artifacts returned to the model as `outputFiles`. */
+  output: {
+    writeFile(name: string, content: string): Promise<void>;
+  };
+}
+
 export interface SkillScriptRequest {
   skill: SkillContent;
   path: string;

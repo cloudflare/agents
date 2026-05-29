@@ -188,7 +188,7 @@ Think adds the skill catalog to the prompt and exposes `activate_skill` and
 
 ```ts
 import { Think, skills } from "@cloudflare/think";
-import bundledSkills from "./skills" with { type: "skills" };
+import bundledSkills from "agents:skills"; // resolves to ./skills next to this file
 
 type Env = {
   AI: Ai;
@@ -205,7 +205,7 @@ export class MyAgent extends Think<Env> {
   }
 
   getSkillScriptRunner() {
-    return skills.workerScriptRunner({
+    return skills.runner({
       loader: this.env.LOADER,
       workspaceInstance: this.workspace
     });
@@ -213,11 +213,25 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-Bundled skills use the Agents Vite plugin:
+Bundled skills use the Agents Vite plugin. The `agents:skills` specifier
+resolves to a `./skills` directory next to the importing file; use
+`agents:skills/<dir>` for a differently named sibling directory:
 
 ```ts
-import bundledSkills from "./skills" with { type: "skills" };
+import bundledSkills from "agents:skills";
 ```
+
+The import is typed by ambient declarations shipped with `agents` (importing
+`Think`, which pulls in `agents`, is enough; otherwise add
+`/// <reference types="agents/skills-module" />`). Without the Vite plugin,
+construct a source with `skills.fromManifest(...)`. Sources are applied in
+order: the first to register a skill name wins, and duplicate or failing
+sources are skipped with a warning instead of failing the agent.
+
+The skills engine itself lives in `agents/skills` (so any agent, including a
+plain `@cloudflare/ai-chat` `onChatMessage`, can build a `SkillRegistry`);
+`@cloudflare/think` re-exports it as `skills` and wires `getSkills()` into the
+turn automatically.
 
 The imported directory should contain one child directory per skill:
 
@@ -238,19 +252,30 @@ sees the catalog first, then calls `activate_skill` when a user task matches a
 skill description. Use `getSystemPrompt()` or a Session context block for
 behavior that should apply to every turn.
 
-Script execution is opt-in. `getSkillScriptRunner()` enables
-`run_skill_script`, which can run JavaScript, TypeScript, Python, and Bash
-scripts under `scripts/`. Python and Bash scripts receive `/input.json`,
-`/context.json`, and bundled skill resources under `/skill`. JavaScript and
-TypeScript scripts can run as top-level files, import sibling script files, and
-use a partial `fs`/`node:fs` compatibility layer for skill-local files through
-static imports or dynamic `import("node:fs")`. Sync FS reads work for `/skill`,
-`/input.json`, and `/context.json`; workspace access is async-only through
-`fs.promises`. JS/TS and Python writes to `/output` are returned as script
-artifacts, while writes to `/workspace` require `workspace: "read-write"` and
-must use async APIs.
-`export default function run(input, ctx)` remains supported for JS/TS, and Python
-`def run(input, ctx)` scripts are still supported.
+Script execution is opt-in and **experimental**. `getSkillScriptRunner()`
+enables `run_skill_script`, which can run JavaScript, TypeScript, Python, and
+Bash scripts under `scripts/`.
+
+JavaScript and TypeScript scripts are function-style:
+
+```ts
+import type { SkillRunContext } from "@cloudflare/think";
+
+export default async function run(input: unknown, ctx: SkillRunContext) {
+  const guide = ctx.files["references/style-guide.md"]; // bundled text resources
+  const summary = await ctx.tools.call("summarize", { input }); // explicit tools
+  await ctx.output.writeFile("notes.md", summary); // scratch artifact
+  return { ok: true };
+}
+```
+
+`ctx` is `{ skill, files, workspace, tools, output }`: `ctx.files` holds bundled
+text resources by relative path, `ctx.workspace` is gated by the workspace
+permission, `ctx.tools` exposes only the tools the runner was given, and
+`ctx.output.writeFile(name, content)` returns scratch artifacts without mutating
+the workspace. Python and Bash scripts instead use the path-based contract:
+`/input.json`, `/context.json`, bundled resources under `/skill`, and `/output`
+for artifacts (Python supports both `def run(input, ctx)` and CLI-style scripts).
 
 If `workspaceInstance` is provided, scripts get read-only workspace access by
 default. Workspace writes, tools, and network access are opt-in. Scripts default

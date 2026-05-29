@@ -67,6 +67,13 @@ function validateResourcePath(path: string): string | null {
 export class SkillRegistry {
   readonly contextLabel = SKILL_CONTEXT_LABEL;
 
+  /**
+   * Non-fatal diagnostics collected during the most recent {@link load} or
+   * {@link refresh} (duplicate skill names, sources that failed to list).
+   * Reset on every load so it never grows unbounded across refreshes.
+   */
+  readonly warnings: string[] = [];
+
   private sources: SkillSource[];
   private scriptRunner: SkillScriptRunner | null;
   private descriptors = new Map<string, SkillDescriptor>();
@@ -90,14 +97,30 @@ export class SkillRegistry {
 
     this.descriptors.clear();
     this.sourceBySkill.clear();
+    this.warnings.length = 0;
 
+    // Skills are applied in `getSkills()` order: the first source to register
+    // a name wins, and later collisions are skipped with a diagnostic. A bad
+    // source must not take down the whole registry, so listing failures are
+    // also recorded rather than thrown.
     for (const source of this.sources) {
-      for (const descriptor of await source.list()) {
+      let descriptors: SkillDescriptor[];
+      try {
+        descriptors = await source.list();
+      } catch (error) {
+        this.warnings.push(
+          `Skill source "${source.id}" failed to list skills and was skipped: ${error instanceof Error ? error.message : String(error)}`
+        );
+        continue;
+      }
+
+      for (const descriptor of descriptors) {
         const existing = this.descriptors.get(descriptor.name);
         if (existing) {
-          throw new Error(
-            `Duplicate skill "${descriptor.name}" from ${source.id}; already registered from ${existing.sourceId}.`
+          this.warnings.push(
+            `Duplicate skill "${descriptor.name}" from ${source.id} ignored; already registered from ${existing.sourceId}.`
           );
+          continue;
         }
         this.descriptors.set(descriptor.name, {
           ...descriptor,
@@ -111,9 +134,22 @@ export class SkillRegistry {
   }
 
   async refresh(): Promise<void> {
-    await Promise.all(this.sources.map((source) => source.refresh?.()));
+    const refreshErrors: string[] = [];
+    await Promise.all(
+      this.sources.map(async (source) => {
+        try {
+          await source.refresh?.();
+        } catch (error) {
+          refreshErrors.push(
+            `Skill source "${source.id}" failed to refresh: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+      })
+    );
     this.loaded = false;
     await this.load();
+    // `load()` reset warnings; re-append any refresh failures so they surface.
+    this.warnings.push(...refreshErrors);
   }
 
   async snapshot(): Promise<SkillRegistrySnapshot> {

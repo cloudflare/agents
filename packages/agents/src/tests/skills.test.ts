@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { skills } from "../think";
+import * as skills from "../skills";
 import { SkillRegistry } from "../skills";
 import type { SkillManifest } from "../skills";
 
@@ -313,7 +313,7 @@ Review carefully.
     );
   });
 
-  it("rejects duplicate skill names across sources", async () => {
+  it("keeps the first source on duplicate skill names and records a warning", async () => {
     const registry = new SkillRegistry([
       skills.fromManifest(manifest),
       skills.fromManifest({
@@ -329,8 +329,61 @@ Review carefully.
       })
     ]);
 
-    await expect(registry.load()).rejects.toThrow(
+    await expect(registry.load()).resolves.toBeUndefined();
+
+    // First source wins; the collision is reported, not thrown.
+    await expect(registry.loadSkill("code-review")).resolves.toMatchObject({
+      description: "Review code when asked."
+    });
+    expect(registry.warnings.join("\n")).toContain(
       'Duplicate skill "code-review"'
     );
+  });
+
+  it("skips a source that fails to list without breaking others", async () => {
+    const failingSource = {
+      id: "broken-source",
+      fingerprint: "v1",
+      async list(): Promise<never> {
+        throw new Error("list exploded");
+      },
+      async load() {
+        return null;
+      }
+    };
+
+    const registry = new SkillRegistry([
+      failingSource,
+      skills.fromManifest(manifest)
+    ]);
+
+    await expect(registry.load()).resolves.toBeUndefined();
+
+    // The healthy source still loads.
+    const snapshot = await registry.snapshot();
+    expect(snapshot.catalogPrompt).toContain("code-review");
+    expect(registry.warnings.join("\n")).toContain("broken-source");
+  });
+
+  it("resets warnings on each load", async () => {
+    const registry = new SkillRegistry([
+      skills.fromManifest(manifest),
+      skills.fromManifest({
+        id: "duplicate",
+        fingerprint: "v1",
+        skills: [
+          {
+            name: "code-review",
+            description: "Duplicate review skill.",
+            body: "Duplicate."
+          }
+        ]
+      })
+    ]);
+
+    await registry.refresh();
+    const first = registry.warnings.length;
+    await registry.refresh();
+    expect(registry.warnings.length).toBe(first);
   });
 });

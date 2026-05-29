@@ -1,5 +1,6 @@
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { getToolName, isToolUIPart } from "ai";
 import {
   ChatCircleTextIcon,
   InfoIcon,
@@ -7,7 +8,8 @@ import {
   PaperPlaneRightIcon,
   SparkleIcon,
   SunIcon,
-  TrashIcon
+  TrashIcon,
+  WrenchIcon
 } from "@phosphor-icons/react";
 import {
   Badge,
@@ -17,7 +19,7 @@ import {
   Text
 } from "@cloudflare/kumo";
 import { createRoot } from "react-dom/client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import "./styles.css";
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected";
@@ -26,6 +28,55 @@ type SkillSummary = {
   name: string;
   description: string;
 };
+
+// Human-readable label for a skill tool call (activate_skill,
+// run_skill_script, read_skill_resource) shown inline in the transcript.
+function toolActivityLabel(toolName: string, input: unknown): string {
+  const args = (input ?? {}) as { name?: string; path?: string };
+  if (toolName === "activate_skill") return `Activated skill: ${args.name}`;
+  if (toolName === "run_skill_script") {
+    return `Ran script: ${args.name}/${args.path}`;
+  }
+  if (toolName === "read_skill_resource") {
+    return `Read resource: ${args.path ?? args.name}`;
+  }
+  return toolName;
+}
+
+function truncate(value: string, max = 600): string {
+  return value.length > max ? `${value.slice(0, max)}\n…` : value;
+}
+
+function ToolActivity({ part }: { part: unknown }) {
+  const toolName = getToolName(part as Parameters<typeof getToolName>[0]);
+  const { input, output, state } = part as {
+    input?: unknown;
+    output?: unknown;
+    state?: string;
+  };
+  const done = state === "output-available";
+
+  return (
+    <div className="rounded-lg border border-kumo-line bg-kumo-surface p-2.5">
+      <div className="flex items-center gap-2">
+        <WrenchIcon size={14} className="text-kumo-accent" />
+        <Text size="xs" bold>
+          {toolActivityLabel(toolName, input)}
+        </Text>
+        <Badge variant="secondary">{done ? "done" : "running"}</Badge>
+      </div>
+      {done && output != null && toolName !== "activate_skill" && (
+        <pre className="mt-1.5 whitespace-pre-wrap font-sans text-xs text-kumo-subtle">
+          {truncate(
+            typeof output === "string"
+              ? output
+              : JSON.stringify(output, null, 2)
+          )}
+        </pre>
+      )}
+    </div>
+  );
+}
 
 function ModeToggle() {
   const [mode, setMode] = useState(
@@ -73,25 +124,11 @@ function ConnectionIndicator({ status }: { status: ConnectionStatus }) {
   );
 }
 
-function textFromMessage(message: {
-  parts?: Array<{ type?: string; text?: string; toolName?: string }>;
-}) {
-  return (
-    message.parts
-      ?.map((part) => {
-        if (part.type === "text") return part.text ?? "";
-        if (part.type === "tool-call") return `\n[tool: ${part.toolName}]\n`;
-        return "";
-      })
-      .join("") ?? ""
-  );
-}
-
 function App() {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
   const [input, setInput] = useState(
-    "Write release notes for these changes: added bundled Think skills, added a Vite import attribute, added a skill activation tool. Use the release notes script."
+    "Write release notes for these changes: added bundled Think skills, added the agents:skills import, added a skill activation tool. Use the release notes script."
   );
   const [skills, setSkills] = useState<SkillSummary[]>([]);
 
@@ -109,6 +146,25 @@ function App() {
   const { messages, sendMessage, clearHistory, status } = useAgentChat({
     agent
   });
+
+  // Skills the model has activated this conversation, derived from
+  // `activate_skill` tool calls. Used to light up the sidebar.
+  const activatedSkills = useMemo(() => {
+    const active = new Set<string>();
+    for (const message of messages) {
+      for (const part of message.parts ?? []) {
+        if (
+          isToolUIPart(part) &&
+          getToolName(part) === "activate_skill" &&
+          part.input != null
+        ) {
+          const name = (part.input as { name?: string }).name;
+          if (name) active.add(name);
+        }
+      }
+    }
+    return active;
+  }, [messages]);
 
   useEffect(() => {
     agent
@@ -136,7 +192,7 @@ function App() {
             </Text>
             <span className="mt-1 block">
               <Text size="sm" variant="secondary">
-                Import a local skills directory with `type: "skills"` and let
+                Import a local skills directory with `agents:skills` and let
                 Think expose the right skill tools.
               </Text>
             </span>
@@ -160,12 +216,13 @@ function App() {
               </Text>
               <span className="mt-1 block">
                 <Text size="xs" variant="secondary">
-                  The Worker imports `./skills` with an import attribute. The
-                  Agents Vite plugin bundles each `SKILL.md`, Think registers
-                  them through `getSkills()`, and the model can call
-                  `activate_skill` when a task matches a skill description. The
+                  The Worker imports its `./skills` directory with
+                  `agents:skills`. The Agents Vite plugin bundles each
+                  `SKILL.md`, Think registers them through `getSkills()`, and
+                  the model can call `activate_skill` when a task matches a
+                  skill — activated skills light up on the right. The
                   release-notes skill also demonstrates `run_skill_script` with
-                  TypeScript, Python, and Bash scripts.
+                  a TypeScript script.
                 </Text>
               </span>
             </div>
@@ -209,9 +266,29 @@ function App() {
                     <div className="mb-2 flex items-center gap-2">
                       <Badge>{message.role}</Badge>
                     </div>
-                    <pre className="whitespace-pre-wrap text-sm font-sans text-kumo-default">
-                      {textFromMessage(message)}
-                    </pre>
+                    <div className="space-y-2">
+                      {(message.parts ?? []).map((part, index) => {
+                        if (part.type === "text") {
+                          return part.text ? (
+                            <pre
+                              key={index}
+                              className="whitespace-pre-wrap font-sans text-sm text-kumo-default"
+                            >
+                              {part.text}
+                            </pre>
+                          ) : null;
+                        }
+                        if (isToolUIPart(part)) {
+                          return (
+                            <ToolActivity
+                              key={part.toolCallId ?? index}
+                              part={part}
+                            />
+                          );
+                        }
+                        return null;
+                      })}
+                    </div>
                   </div>
                 ))
               )}
@@ -260,22 +337,33 @@ function App() {
                 </Text>
               </div>
               <div className="space-y-3">
-                {skills.map((skill) => (
-                  <div
-                    key={skill.name}
-                    className="rounded-lg border border-kumo-line p-3"
-                  >
-                    <div className="mb-1 flex items-center justify-between gap-2">
-                      <Text size="sm" bold>
-                        {skill.name}
+                {skills.map((skill) => {
+                  const active = activatedSkills.has(skill.name);
+                  return (
+                    <div
+                      key={skill.name}
+                      className={`rounded-lg border p-3 ${
+                        active
+                          ? "border-kumo-accent bg-kumo-surface"
+                          : "border-kumo-line"
+                      }`}
+                    >
+                      <div className="mb-1 flex items-center justify-between gap-2">
+                        <Text size="sm" bold>
+                          {skill.name}
+                        </Text>
+                        {active ? (
+                          <Badge>active</Badge>
+                        ) : (
+                          <Badge variant="secondary">on demand</Badge>
+                        )}
+                      </div>
+                      <Text size="xs" variant="secondary">
+                        {skill.description}
                       </Text>
-                      <Badge>on demand</Badge>
                     </div>
-                    <Text size="xs" variant="secondary">
-                      {skill.description}
-                    </Text>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </Surface>
 
@@ -285,8 +373,9 @@ function App() {
               </Text>
               <div className="mt-3 space-y-2">
                 {[
-                  "Write release notes for these changes: added Think skills, import attributes, and skill tools. Use the release notes script.",
+                  "Write release notes for these changes: added Think skills, the agents:skills import, and skill tools. Use the release notes script.",
                   "Make a debug plan for an intermittent WebSocket disconnect.",
+                  "Draft a test plan for a new password reset flow.",
                   "What skills are available in this demo?"
                 ].map((prompt) => (
                   <Button

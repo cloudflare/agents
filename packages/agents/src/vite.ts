@@ -5,7 +5,7 @@ import { basename, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { Plugin } from "vite";
 
-const SKILLS_VIRTUAL_PUBLIC_PREFIX = "virtual:agents-skills:";
+const SKILLS_SPECIFIER = "agents:skills";
 const SKILLS_VIRTUAL_PREFIX = "\0agents:skills:";
 const SKILL_RESOURCE_ROOTS = new Set([
   "references",
@@ -30,6 +30,19 @@ const SKILL_IGNORED_ROOTS = new Set([
   "node_modules"
 ]);
 const SPEC_RESOURCE_ROOTS = new Set(["references", "scripts", "assets"]);
+
+// Bundled skill resources are base64-embedded into the Worker bundle, which
+// inflates them by ~1.33x and competes with app code for the bundle-size
+// budget. These heuristic thresholds (raw bytes) trigger a recommendation to
+// move large assets to an R2-backed skill source instead.
+const SKILL_ASSET_WARN_BYTES = 256 * 1024;
+const SKILL_BUNDLE_WARN_BYTES = 1024 * 1024;
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)}KB`;
+  return `${bytes}B`;
+}
 
 interface SkillFile {
   name: string;
@@ -283,12 +296,35 @@ async function buildSkillsModule(
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const skill = await readSkill(join(dir, entry.name), warn);
-    if (!skill || seen.has(skill.name)) continue;
+    if (!skill) continue;
+    if (seen.has(skill.name)) {
+      warn?.(
+        `Duplicate bundled skill name "${skill.name}" in "${entry.name}/"; keeping the first occurrence and ignoring this one.`
+      );
+      continue;
+    }
     seen.add(skill.name);
     skills.push(skill);
   }
 
   skills.sort((a, b) => a.name.localeCompare(b.name));
+
+  let totalBytes = 0;
+  for (const skill of skills) {
+    for (const resource of skill.resources) {
+      totalBytes += resource.size;
+      if (resource.size > SKILL_ASSET_WARN_BYTES) {
+        warn?.(
+          `Bundled skill resource "${skill.name}/${resource.path}" is ${formatBytes(resource.size)}; large assets bloat the Worker bundle (base64, ~1.33x). Prefer an R2-backed source via skills.r2().`
+        );
+      }
+    }
+  }
+  if (totalBytes > SKILL_BUNDLE_WARN_BYTES) {
+    warn?.(
+      `Bundled skills total ${formatBytes(totalBytes)} of embedded resources; this competes with the Worker bundle-size budget. Consider serving large skills from R2 via skills.r2().`
+    );
+  }
 
   const hash = createHash("sha256");
   hash.update(JSON.stringify(skills));
@@ -305,33 +341,21 @@ async function buildSkillsModule(
 function skillsImportPlugin(): Plugin {
   return {
     name: "agents-skills-import",
-    transform(code, id) {
+    async resolveId(source, importer) {
+      // `agents:skills` resolves to a `./skills` directory next to the
+      // importer; `agents:skills/<dir>` points at a sibling directory.
       if (
-        !code.includes('type: "skills"') &&
-        !code.includes("type: 'skills'")
+        source !== SKILLS_SPECIFIER &&
+        !source.startsWith(`${SKILLS_SPECIFIER}/`)
       ) {
         return null;
       }
-
-      const next = code.replace(
-        /from\s+(["'])([^"']+)\1\s+with\s+\{\s*type\s*:\s*(["'])skills\3\s*\}/g,
-        (_match, quote: string, source: string) => {
-          const resolved = resolve(id, "..", source);
-          return `from ${quote}${SKILLS_VIRTUAL_PUBLIC_PREFIX}${encodeURIComponent(resolved)}${quote}`;
-        }
-      );
-
-      return next === code ? null : next;
-    },
-    async resolveId(source, importer, options) {
-      const attributes = (options as { attributes?: Record<string, string> })
-        .attributes;
-      if (source.startsWith(SKILLS_VIRTUAL_PUBLIC_PREFIX)) {
-        return `${SKILLS_VIRTUAL_PREFIX}${decodeURIComponent(source.slice(SKILLS_VIRTUAL_PUBLIC_PREFIX.length))}`;
-      }
-      if (attributes?.type !== "skills") return null;
       if (!importer) return null;
-      const resolved = resolve(importer, "..", source);
+      const relative =
+        source === SKILLS_SPECIFIER
+          ? "skills"
+          : source.slice(SKILLS_SPECIFIER.length + 1);
+      const resolved = resolve(importer, "..", relative);
       return `${SKILLS_VIRTUAL_PREFIX}${resolved}`;
     },
     async load(id) {

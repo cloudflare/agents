@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { skills } from "../think";
+import * as skills from "../skills";
 
 type FakeObject = {
   key: string;

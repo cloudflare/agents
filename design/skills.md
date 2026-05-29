@@ -30,7 +30,7 @@ deterministic fingerprint.
 
 ```ts
 import { Think, skills } from "@cloudflare/think";
-import productSkills from "./skills" with { type: "skills" };
+import productSkills from "agents:skills"; // -> ./skills next to this file
 
 export class MyAgent extends Think<Env> {
   getSkills() {
@@ -67,12 +67,22 @@ API.
 Colocated skills are the first implementation target:
 
 ```ts
-import skills from "./skills" with { type: "skills" };
+import skills from "agents:skills"; // -> ./skills next to the importer
+import other from "agents:skills/marketing"; // -> ./marketing next to the importer
 ```
 
 Workers do not have a general runtime filesystem, so this is a build-time
-feature. The existing `agents/vite` plugin supports `type: "skills"` import
-attributes alongside decorator transforms.
+feature. The `agents/vite` plugin resolves the `agents:skills` virtual
+specifier alongside decorator transforms. The default export is typed by
+ambient declarations shipped from `agents` (`skills-module.d.ts`), so no
+per-project shim module is needed.
+
+The skills engine (sources, registry, runner, and tools) lives in the
+framework-agnostic `agents/skills` module, so it is not tied to Think.
+`@cloudflare/think` re-exports it as `skills` and adds the `getSkills()` /
+Session wiring; `@cloudflare/ai-chat` (or any AI SDK caller) can build a
+`SkillRegistry` directly and merge `registry.tools()` and
+`registry.systemPrompt()` into its own turn.
 
 The plugin:
 
@@ -171,9 +181,12 @@ Skill content should be wrapped in identifiable tags with the skill name and
 version/fingerprint. This gives compaction and diagnostics something stable to
 recognize.
 
-Skill names are globally unique within a Think agent. If two sources expose the
-same name, Think should fail during registry loading instead of silently choosing
-one source.
+Skill names are globally unique within a Think agent. Sources are applied in
+`getSkills()` order: the first source to register a name wins, and a later
+collision is skipped with a logged warning rather than throwing. Bundled
+duplicates are also reported by the Vite plugin at build time. A source that
+fails to list is skipped with a warning so one bad source cannot disable the
+rest — skill loading must never break `onStart` or a turn.
 
 ## Deploy-To-Deploy Changes
 
@@ -199,8 +212,11 @@ Scripts should receive explicit capabilities rather than ambient access to the
 agent. The first implementation keeps this concrete: runner options are the
 permission boundary.
 
+Script execution is experimental; `skills.runner` logs a one-time warning on
+first use and its capability shape may change.
+
 ```ts
-skills.workerScriptRunner({
+skills.runner({
   loader: this.env.LOADER,
   workspaceInstance: this.workspace,
   tools: {
@@ -213,40 +229,15 @@ The default is useful but not ambiently powerful: no network and no tools, with
 read-only workspace access when `workspaceInstance` is provided, and a 30 second
 script timeout. Tool access is explicit; Think does not expose the full turn
 toolset to a script by default. Workspace access is `"none"`, `"read"`, or
-`"read-write"`, with
-`workspace: "read-write"` required for mutating filesystem operations.
+`"read-write"`, with `workspace: "read-write"` required for mutating operations.
 
-JavaScript scripts run through the existing codemode Dynamic Worker execution
-path. TypeScript scripts are first compiled with `@cloudflare/worker-bundler`,
-then run through the same codemode path so tool and workspace namespaces stay
-consistent. Python scripts with `.py` extensions run as Python Dynamic Workers
-with the `python_workers` compatibility flag. Bash scripts with `.sh` or
-`.bash` extensions run through `just-bash`, which provides a simulated shell and
-virtual filesystem instead of ambient host shell access. Python Workers have
-slower cold starts than JavaScript Workers, so JavaScript remains the preferred
-runtime for one-off generated code.
+A single host bridge (`SkillScriptHostBridge`) is the one source of truth for
+capabilities and permission enforcement; it is constructed fresh per `run()` so
+the per-invocation `/output` buffer never leaks between concurrent runs. Every
+runtime delegates to it: JavaScript/TypeScript through a codemode `ToolProvider`,
+Python through an RPC `RpcTarget`, and Bash through `just-bash` custom commands.
 
-For Python and Bash, the primary script contract is path-based, matching
-CLI-oriented Agent Skills. The runner mounts:
-
-- `/skill`: `SKILL.md` and bundled skill resources.
-- `/input.json`: the `run_skill_script` input, defaulting to `{}`.
-- `/context.json`: skill metadata.
-- `/workspace`: reserved for workspace-backed files; direct workspace access is
-  still governed by the explicit workspace permission.
-
-JavaScript and TypeScript scripts use `@cloudflare/worker-bundler` virtual module
-aliases for partial `fs`/`node:fs`, `fs/promises`, and `path` compatibility,
-including static imports and dynamic `import("node:fs")`. Sync FS reads are
-limited to embedded files (`/skill`, `/input.json`, and `/context.json`).
-Workspace reads and writes cross the host Worker boundary, so they are async-only
-through `fs.promises`; sync workspace access throws a clear error. Writes to
-`/output` create scratch artifacts returned by `run_skill_script` and do not
-mutate durable workspace state. Async writes to `/workspace` require
-`workspace: "read-write"`.
-
-For Think-specific compatibility, JavaScript and TypeScript scripts may still
-export a function:
+JavaScript and TypeScript scripts are **function-style only**:
 
 ```ts
 export default async function run(input, ctx) {
@@ -254,23 +245,31 @@ export default async function run(input, ctx) {
 }
 ```
 
-Python scripts may use the equivalent compatibility contract:
+`ctx` is `{ skill, files, workspace, tools, output }`. `ctx.files` holds bundled
+text resources by relative path (replacing the earlier `node:fs` shim, which was
+removed); `ctx.workspace` exposes async `readFile`/`listFiles`/`glob`/`stat`/
+`writeFile` gated by the workspace permission; `ctx.tools` exposes
+`tools.call(name, input)` and `tools.<name>(input)` for explicitly granted
+tools; and `ctx.output.writeFile(name, content)` records scratch artifacts
+returned by `run_skill_script` without mutating the workspace. TypeScript and
+multi-file scripts are compiled/bundled with `@cloudflare/worker-bundler`.
 
-```py
-def run(input, ctx):
-    return input
-```
+Python (`.py`) and Bash (`.sh`/`.bash`) keep the path-based contract, matching
+CLI-oriented Agent Skills. The runner mounts:
 
-`input` defaults to `{}` when omitted. `ctx` starts with skill metadata. For
-function-style scripts, workspace and tools are available through
-runtime-specific namespaces when enabled by the runner. JavaScript and
-TypeScript use the codemode sandbox namespaces; Python exposes
-`tools.<name>(input)`, `tools.call(name, input)`, and `workspace.read_file()`,
-`workspace.list_files()`, `workspace.glob()`, and `workspace.write_file()`
-according to the configured workspace permission. Bash exposes workspace access
-through commands such as `workspace-read`, `workspace-list`, and
-`workspace-glob`, while explicit tools are exposed through a
-`tool <name> <json>` command.
+- `/skill`: `SKILL.md` and bundled skill resources.
+- `/input.json`: the `run_skill_script` input, defaulting to `{}`.
+- `/context.json`: skill metadata.
+- `/output`: scratch artifacts returned by `run_skill_script`.
+
+Python runs as a Python Dynamic Worker with `python_workers`, supporting both
+`def run(input, ctx)` and CLI-style scripts; it exposes `tools.<name>(input)`,
+`tools.call(name, input)`, and `workspace.read_file()` / `list_files()` /
+`glob()` / `write_file()` per the workspace permission. Bash runs through
+`just-bash` and exposes `workspace-read` / `workspace-list` / `workspace-glob`
+(plus `workspace-write` with read-write access) and a `tool <name> <json>`
+command. Python Workers have slower cold starts than JavaScript, so JavaScript
+remains the preferred runtime for one-off generated code.
 
 ## MVP
 
@@ -283,9 +282,10 @@ The first implementation stays narrow:
 4. Support on-demand skill activation.
 5. Add prompt fingerprint refresh for catalog changes.
 6. Add `activate_skill` and `read_skill_resource`.
-7. Add the `type: "skills"` import-attribute transform in `agents/vite`.
+7. Add the `agents:skills` virtual specifier transform in `agents/vite`.
 8. Add a read-only R2-backed Agent Skills source.
-9. Add optional script execution for JavaScript/TypeScript, Python, and Bash.
+9. Add optional, experimental script execution for JavaScript/TypeScript,
+   Python, and Bash behind a single capability bridge.
 
 Git-backed sources should follow once the source story is proven.
 
@@ -300,7 +300,7 @@ deploy-change handling.
 ### Make `skills.bundle(imported)` Required
 
 This gives a place for runtime options, but it makes the flagship API noisier.
-The import attribute can return the correct type directly. Runtime helpers
+The virtual specifier can return the correct type directly. Runtime helpers
 should remain optional for tests and non-import sources.
 
 ### Live Git Provider First

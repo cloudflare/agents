@@ -1,7 +1,7 @@
 # Agent Skills
 
 This example demonstrates first-class Agent Skills in Think using a bundled
-skills directory imported with `type: "skills"`.
+skills directory imported with the `agents:skills` specifier.
 
 ## Run
 
@@ -22,12 +22,17 @@ Script execution uses the Worker Loader binding in `wrangler.jsonc`:
 }
 ```
 
-Open the local Vite URL and try one of the suggested prompts. The agent has:
+Open the local Vite URL and try one of the suggested prompts. When the model
+calls `activate_skill`, that skill lights up in the sidebar, and skill tool
+activity (`activate_skill` / `run_skill_script`) is shown inline in the chat.
 
-- `brand-voice` available through `activate_skill`
-- `release-notes` available through `activate_skill`, with a harmless TypeScript
-  formatting script that reads a bundled style guide through `node:fs`, plus Bash
-  input-inspection and Python summary scripts runnable through `run_skill_script`
+The agent has:
+
+- `release-notes` available through `activate_skill`, with a function-style
+  TypeScript formatting script that reads a bundled style guide from `ctx.files`
+  and is runnable through `run_skill_script`
+- `test-plan` available through `activate_skill` — a procedure-style skill that
+  turns a change description into a prioritized test plan
 - `debug-plan` available through `activate_skill`, with an extra reference file
 - `pirate-voice` available through `activate_skill`
 
@@ -35,7 +40,7 @@ Open the local Vite URL and try one of the suggested prompts. The agent has:
 
 ```ts
 import { Think, skills } from "@cloudflare/think";
-import bundledSkills from "./skills" with { type: "skills" };
+import bundledSkills from "agents:skills"; // -> ./skills next to this file
 
 type Env = {
   AI: Ai;
@@ -49,7 +54,7 @@ export class SkillsAgent extends Think<Env> {
   }
 
   getSkillScriptRunner() {
-    return skills.workerScriptRunner({
+    return skills.runner({
       loader: this.env.LOADER,
       workspaceInstance: this.workspace
     });
@@ -58,17 +63,16 @@ export class SkillsAgent extends Think<Env> {
 ```
 
 The `agents/vite` plugin turns the local `src/skills/*/SKILL.md` directories
-into a `SkillSource` that Think can register at startup. The optional script
-runner executes JavaScript/TypeScript files under `scripts/` in a sandboxed
-Worker, using `@cloudflare/worker-bundler` to compile TypeScript and bundle
-sibling script imports. JS/TS scripts can read bundled skill files through a
-partial `fs`/`node:fs` compatibility layer using static imports or dynamic
-`import("node:fs")`, write scratch artifacts to `/output`, and use async
-`fs.promises` calls for workspace access. It runs `.py` files as Python Dynamic
-Workers with the same `/output` artifact return shape, and `.sh`/`.bash` files
-through `just-bash`, with `/input.json`, `/context.json`, and bundled resources
-under `/skill` materialized for those runtimes. Script execution requires the
-`worker_loaders` binding shown in `wrangler.jsonc`.
+into a `SkillSource` that Think can register at startup. The optional,
+experimental script runner executes the TypeScript file under `scripts/` in a
+sandboxed Worker, using `@cloudflare/worker-bundler` to compile TypeScript and
+bundle sibling script imports. JS/TS scripts are function-style
+(`export default async function run(input, ctx)`) and read bundled text files
+from `ctx.files`, call explicit `ctx.tools`, access `ctx.workspace`, and write
+scratch artifacts with `ctx.output.writeFile(name, content)`. The same runner
+also supports Python and Bash scripts via the path-based `/input.json` /
+`/skill` / `/output` contract — this example keeps it to TypeScript. Script
+execution requires the `worker_loaders` binding shown in `wrangler.jsonc`.
 Passing `workspaceInstance` gives scripts read-only workspace access by default;
 opt in to `workspace: "read-write"`, tools, or network only when a skill needs
 them. The default 30 second timeout leaves room for TypeScript compilation and

@@ -284,7 +284,7 @@ Bundled skills are usually imported with the Agents Vite plugin:
 
 ```typescript
 import { Think, skills } from "@cloudflare/think";
-import bundledSkills from "./skills" with { type: "skills" };
+import bundledSkills from "agents:skills"; // resolves to ./skills next to this file
 
 type Env = {
   AI: Ai;
@@ -301,13 +301,30 @@ export class MyAgent extends Think<Env> {
   }
 
   getSkillScriptRunner() {
-    return skills.workerScriptRunner({
+    return skills.runner({
       loader: this.env.LOADER,
       workspaceInstance: this.workspace
     });
   }
 }
 ```
+
+`agents:skills` resolves to a `./skills` directory next to the importing file;
+use `agents:skills/<dir>` to point at a differently named sibling directory.
+The `agents:skills` import is typed by ambient declarations that ship with
+`agents`, so importing `Think` in the same file brings the type into scope (for
+a file that imports only the specifier, add
+`/// <reference types="agents/skills-module" />`). If you are not using the
+Agents Vite plugin, build a source with `skills.fromManifest(...)` instead.
+
+The skills engine lives in `agents/skills` and is framework-agnostic, so any
+agent (including a plain `@cloudflare/ai-chat` `onChatMessage`) can build a
+`SkillRegistry`; `@cloudflare/think` re-exports it as `skills` and wires
+`getSkills()` into the turn automatically.
+
+Sources are applied in order; the first source to register a skill name wins,
+and later duplicates (or a source that fails to load) are skipped with a logged
+warning rather than failing the agent.
 
 The imported directory should contain one child directory per skill:
 
@@ -338,15 +355,32 @@ Script execution is opt-in and requires a Worker Loader binding:
 }
 ```
 
-`skills.workerScriptRunner()` runs JavaScript, TypeScript, Python, and Bash
-scripts under `scripts/`. TypeScript is compiled with
+`skills.runner()` is experimental and runs JavaScript, TypeScript, Python, and
+Bash scripts under `scripts/`. TypeScript is compiled with
 `@cloudflare/worker-bundler`; Python runs as Python Dynamic Workers; Bash runs
-through `just-bash`. Scripts receive `/input.json`, `/context.json`, and bundled
-resources under `/skill`. JS/TS scripts can also import sibling script files and
-use partial `fs` / `node:fs` compatibility: sync reads for skill-local files,
-async `fs.promises` for `/workspace`, scratch writes to `/output` returned as
-artifacts for JS/TS and Python scripts, and async workspace writes only with
-`workspace: "read-write"`.
+through `just-bash`.
+
+JavaScript and TypeScript scripts are function-style:
+
+```typescript
+import type { SkillRunContext } from "@cloudflare/think";
+
+export default async function run(input: unknown, ctx: SkillRunContext) {
+  const guide = ctx.files["references/style-guide.md"]; // bundled text resources
+  const docs = await ctx.workspace.readFile("README.md"); // gated by permission
+  const summary = await ctx.tools.call("summarize", { input }); // explicit tools
+  await ctx.output.writeFile("notes.md", summary); // scratch artifact
+  return { ok: true };
+}
+```
+
+`ctx` is `{ skill, files, workspace, tools, output }`. `ctx.files` holds bundled
+text resources by relative path, `ctx.workspace` is gated by the workspace
+permission, `ctx.tools` only exposes tools the runner was given, and
+`ctx.output.writeFile(name, content)` returns scratch artifacts to the model
+(it does not mutate the workspace). Python and Bash use the path-based contract
+instead: `/input.json`, `/context.json`, bundled resources under `/skill`, and
+`/output` for artifacts.
 
 Passing `workspaceInstance` gives scripts read-only workspace access by default.
 Network access, tools, and workspace writes are opt-in. The default timeout is

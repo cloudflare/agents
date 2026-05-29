@@ -2,16 +2,10 @@ import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import { tool } from "ai";
 import { z } from "zod";
-import { skills } from "../think";
-import type { WorkspaceLike } from "../think";
+import * as skills from "../skills";
+import type { SkillWorkspace } from "../skills";
 
-declare module "cloudflare:test" {
-  interface ProvidedEnv {
-    LOADER: WorkerLoader;
-  }
-}
-
-function testWorkspace(files: Record<string, string>): WorkspaceLike {
+function testWorkspace(files: Record<string, string>): SkillWorkspace {
   const info = (path: string) => ({
     name: path,
     path,
@@ -26,22 +20,15 @@ function testWorkspace(files: Record<string, string>): WorkspaceLike {
     async readFile(path: string) {
       return files[path] ?? null;
     },
-    async readFileBytes(path: string) {
-      return new TextEncoder().encode(files[path] ?? "");
-    },
     async writeFile(path: string, content: string) {
       files[path] = content;
     },
     async readDir() {
       return Object.keys(files).map(info);
     },
-    async rm(path: string) {
-      delete files[path];
-    },
     async glob() {
       return Object.keys(files).map(info);
     },
-    async mkdir() {},
     async stat(path: string) {
       const content = files[path];
       if (content === undefined) return null;
@@ -51,8 +38,8 @@ function testWorkspace(files: Record<string, string>): WorkspaceLike {
 }
 
 describe("skill script runner", () => {
-  it("runs TypeScript skill scripts with input, context, and tools", async () => {
-    const runner = skills.workerScriptRunner({
+  it("runs function-style TypeScript scripts with input, context, and tools", async () => {
+    const runner = skills.runner({
       loader: env.LOADER,
       tools: {
         shout: tool({
@@ -73,9 +60,9 @@ describe("skill script runner", () => {
         input: { text: "hello" },
         source: `export default async function run(
   input: { text: string },
-  ctx: { skill: { name: string } }
+  ctx: { skill: { name: string }; tools: { shout(input: unknown): Promise<string> } }
 ) {
-  const text = await tools.shout({ text: input.text });
+  const text = await ctx.tools.shout({ text: input.text });
   return { text, skill: ctx.skill.name };
 }`
       })
@@ -86,7 +73,7 @@ describe("skill script runner", () => {
   });
 
   it("surfaces script failures with console output", async () => {
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER
     });
 
@@ -107,8 +94,27 @@ describe("skill script runner", () => {
     ).rejects.toThrow("before failure");
   });
 
+  it("requires a default-exported function for JS/TS scripts", async () => {
+    const runner = skills.runner({
+      loader: env.LOADER
+    });
+
+    await expect(
+      runner.run({
+        skill: {
+          name: "no-default",
+          description: "No default export.",
+          body: "Run script."
+        },
+        path: "scripts/run.ts",
+        input: {},
+        source: `console.log("no default export");`
+      })
+    ).rejects.toThrow("must `export default`");
+  });
+
   it("runs TypeScript skill files with sibling script imports", async () => {
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER
     });
 
@@ -122,8 +128,9 @@ describe("skill script runner", () => {
         path: "scripts/format.ts",
         input: { text: "hello" },
         source: `import { format } from "./helper";
-const data = globalThis.input as { text: string };
-console.log(format(data.text));`,
+export default function run(input: { text: string }) {
+  return format(input.text);
+}`,
         resources: [
           {
             path: "scripts/helper.ts",
@@ -135,15 +142,11 @@ console.log(format(data.text));`,
           }
         ]
       })
-    ).resolves.toEqual({
-      stdout: "HELLO\n",
-      stderr: "",
-      exitCode: 0
-    });
+    ).resolves.toBe("HELLO");
   });
 
-  it("allows JavaScript skill scripts to read embedded files through fs aliases", async () => {
-    const runner = skills.workerScriptRunner({
+  it("exposes text bundled resources through ctx.files", async () => {
+    const runner = skills.runner({
       loader: env.LOADER
     });
 
@@ -155,14 +158,10 @@ console.log(format(data.text));`,
           body: "Use the script."
         },
         path: "scripts/read.js",
-        input: { text: "hello" },
-        source: `import { readFileSync as read } from "node:fs";
-import fs from "fs";
-import path from "node:path";
-console.log([
-  read("/input.json", "utf8"),
-  fs.readFileSync(path.join("/skill", "references/template.txt"), "utf8")
-].join("\\n"));`,
+        input: {},
+        source: `export default function run(input, ctx) {
+  return ctx.files["references/template.txt"];
+}`,
         resources: [
           {
             path: "references/template.txt",
@@ -172,16 +171,12 @@ console.log([
           }
         ]
       })
-    ).resolves.toEqual({
-      stdout: '{"text":"hello"}\ntemplate\n',
-      stderr: "",
-      exitCode: 0
-    });
+    ).resolves.toBe("template");
   });
 
-  it("returns JavaScript output files without mutating workspace", async () => {
+  it("returns output artifacts written through ctx.output", async () => {
     const workspace = testWorkspace({});
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER,
       workspaceInstance: workspace
     });
@@ -195,48 +190,8 @@ console.log([
         },
         path: "scripts/write.js",
         input: {},
-        source: `import { writeFileSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
-writeFileSync("/output/sync.txt", "sync");
-await writeFile("/output/async.txt", "async");`
-      })
-    ).resolves.toMatchObject({
-      stdout: "",
-      stderr: "",
-      exitCode: 0,
-      outputFiles: [
-        {
-          path: "/output/sync.txt",
-          encoding: "text",
-          content: "sync"
-        },
-        {
-          path: "/output/async.txt",
-          encoding: "text",
-          content: "async"
-        }
-      ]
-    });
-    await expect(workspace.readFile("sync.txt")).resolves.toBeNull();
-  });
-
-  it("returns output files from function-style JavaScript scripts", async () => {
-    const runner = skills.workerScriptRunner({
-      loader: env.LOADER
-    });
-
-    await expect(
-      runner.run({
-        skill: {
-          name: "writer",
-          description: "Write output.",
-          body: "Use the script."
-        },
-        path: "scripts/write.js",
-        input: {},
-        source: `import { writeFileSync } from "node:fs";
-export default function run() {
-  writeFileSync("/output/function.txt", "function");
+        source: `export default async function run(input, ctx) {
+  await ctx.output.writeFile("notes.md", "hello");
   return "ok";
 }`
       })
@@ -244,48 +199,18 @@ export default function run() {
       result: "ok",
       outputFiles: [
         {
-          path: "/output/function.txt",
+          path: "notes.md",
           encoding: "text",
-          content: "function"
+          content: "hello"
         }
       ]
     });
+    // Output artifacts are scratch, not durable workspace writes.
+    await expect(workspace.readFile("notes.md")).resolves.toBeNull();
   });
 
-  it("supports dynamic JavaScript imports for fs aliases", async () => {
-    const runner = skills.workerScriptRunner({
-      loader: env.LOADER
-    });
-
-    await expect(
-      runner.run({
-        skill: {
-          name: "reader",
-          description: "Read files.",
-          body: "Use the script."
-        },
-        path: "scripts/read.js",
-        input: {},
-        source: `const { readFileSync } = await import("node:fs");
-console.log(readFileSync("/skill/references/template.txt", "utf8"));`,
-        resources: [
-          {
-            path: "references/template.txt",
-            kind: "reference",
-            encoding: "text",
-            content: "dynamic"
-          }
-        ]
-      })
-    ).resolves.toEqual({
-      stdout: "dynamic\n",
-      stderr: "",
-      exitCode: 0
-    });
-  });
-
-  it("returns binary JavaScript output files as base64 and rejects oversized artifacts", async () => {
-    const runner = skills.workerScriptRunner({
+  it("rejects oversized output artifacts", async () => {
+    const runner = skills.runner({
       loader: env.LOADER
     });
 
@@ -298,36 +223,15 @@ console.log(readFileSync("/skill/references/template.txt", "utf8"));`,
         },
         path: "scripts/write.js",
         input: {},
-        source: `import { writeFileSync } from "node:fs";
-writeFileSync("/output/data.bin", new Uint8Array([104, 105]));`
+        source: `export default async function run(input, ctx) {
+  await ctx.output.writeFile("large.txt", "x".repeat(64001));
+}`
       })
-    ).resolves.toMatchObject({
-      outputFiles: [
-        {
-          path: "/output/data.bin",
-          encoding: "base64",
-          content: "aGk="
-        }
-      ]
-    });
-
-    await expect(
-      runner.run({
-        skill: {
-          name: "writer",
-          description: "Write output.",
-          body: "Use the script."
-        },
-        path: "scripts/write.js",
-        input: {},
-        source: `import { writeFileSync } from "node:fs";
-writeFileSync("/output/large.txt", "x".repeat(64_001));`
-      })
-    ).rejects.toThrow("Output artifact exceeds");
+    ).rejects.toThrow("exceeds");
   });
 
-  it("keeps JavaScript workspace access async-only", async () => {
-    const runner = skills.workerScriptRunner({
+  it("reads workspace files through ctx.workspace by default", async () => {
+    const runner = skills.runner({
       loader: env.LOADER,
       workspaceInstance: testWorkspace({
         "README.md": "hello from workspace"
@@ -343,53 +247,40 @@ writeFileSync("/output/large.txt", "x".repeat(64_001));`
         },
         path: "scripts/read.js",
         input: {},
-        source: `import { readFileSync } from "node:fs";
-readFileSync("/workspace/README.md", "utf8");`
+        source: `export default async function run(input, ctx) {
+  return await ctx.workspace.readFile("README.md");
+}`
       })
-    ).rejects.toThrow("Synchronous workspace access is not supported");
-
-    await expect(
-      runner.run({
-        skill: {
-          name: "workspace-reader",
-          description: "Read workspace files.",
-          body: "Use JS."
-        },
-        path: "scripts/read.js",
-        input: {},
-        source: `import { readFile } from "node:fs/promises";
-console.log(await readFile("/workspace/README.md", "utf8"));`
-      })
-    ).resolves.toEqual({
-      stdout: "hello from workspace\n",
-      stderr: "",
-      exitCode: 0
-    });
-
-    await expect(
-      runner.run({
-        skill: {
-          name: "workspace-reader",
-          description: "Read workspace files.",
-          body: "Use JS."
-        },
-        path: "scripts/read.js",
-        input: {},
-        source: `import { readdir, stat } from "node:fs/promises";
-console.log((await readdir("/workspace")).join(","));
-const info = await stat("/workspace/README.md");
-console.log([info.isFile(), info.isDirectory(), info.size].join(","));`
-      })
-    ).resolves.toEqual({
-      stdout: "README.md\ntrue,false,20\n",
-      stderr: "",
-      exitCode: 0
-    });
+    ).resolves.toBe("hello from workspace");
   });
 
-  it("requires read-write access for async JavaScript workspace writes", async () => {
+  it("normalizes ctx.workspace.stat to { type, size }", async () => {
+    const runner = skills.runner({
+      loader: env.LOADER,
+      workspaceInstance: testWorkspace({
+        "README.md": "hello from workspace"
+      })
+    });
+
+    await expect(
+      runner.run({
+        skill: {
+          name: "workspace-reader",
+          description: "Read workspace files.",
+          body: "Use JS."
+        },
+        path: "scripts/stat.js",
+        input: {},
+        source: `export default async function run(input, ctx) {
+  return await ctx.workspace.stat("README.md");
+}`
+      })
+    ).resolves.toEqual({ type: "file", size: 20 });
+  });
+
+  it("requires read-write access for ctx.workspace writes", async () => {
     const readOnlyWorkspace = testWorkspace({});
-    const readOnlyRunner = skills.workerScriptRunner({
+    const readOnlyRunner = skills.runner({
       loader: env.LOADER,
       workspaceInstance: readOnlyWorkspace
     });
@@ -403,27 +294,14 @@ console.log([info.isFile(), info.isDirectory(), info.size].join(","));`
         },
         path: "scripts/write.js",
         input: {},
-        source: `import { writeFileSync } from "node:fs";
-writeFileSync("/workspace/generated.md", "nope");`
-      })
-    ).rejects.toThrow("Synchronous workspace writes are not supported");
-
-    await expect(
-      readOnlyRunner.run({
-        skill: {
-          name: "workspace-writer",
-          description: "Write workspace files.",
-          body: "Use JS."
-        },
-        path: "scripts/write.js",
-        input: {},
-        source: `import { writeFile } from "node:fs/promises";
-await writeFile("/workspace/generated.md", "nope");`
+        source: `export default async function run(input, ctx) {
+  await ctx.workspace.writeFile("generated.md", "nope");
+}`
       })
     ).rejects.toThrow("Workspace write access is not available");
 
     const writeWorkspace = testWorkspace({});
-    const writeRunner = skills.workerScriptRunner({
+    const writeRunner = skills.runner({
       loader: env.LOADER,
       workspaceInstance: writeWorkspace,
       workspace: "read-write"
@@ -438,37 +316,38 @@ await writeFile("/workspace/generated.md", "nope");`
         },
         path: "scripts/write.js",
         input: {},
-        source: `import { writeFile } from "node:fs/promises";
-await writeFile("/workspace/generated.md", "ok");`
+        source: `export default async function run(input, ctx) {
+  await ctx.workspace.writeFile("generated.md", "ok");
+  return "done";
+}`
       })
-    ).resolves.toMatchObject({
-      exitCode: 0
-    });
+    ).resolves.toBe("done");
     await expect(writeWorkspace.readFile("generated.md")).resolves.toBe("ok");
   });
 
-  it("rejects relative JavaScript writes outside /output", async () => {
-    const runner = skills.workerScriptRunner({
+  it("denies ctx.workspace access when no workspace is provided", async () => {
+    const runner = skills.runner({
       loader: env.LOADER
     });
 
     await expect(
       runner.run({
         skill: {
-          name: "writer",
-          description: "Write files.",
+          name: "workspace-reader",
+          description: "Read workspace files.",
           body: "Use JS."
         },
-        path: "scripts/write.js",
+        path: "scripts/read.js",
         input: {},
-        source: `import { writeFileSync } from "node:fs";
-writeFileSync("generated.md", "nope");`
+        source: `export default async function run(input, ctx) {
+  return await ctx.workspace.readFile("README.md");
+}`
       })
-    ).rejects.toThrow("only write to /output");
+    ).rejects.toThrow("Workspace access is not available");
   });
 
   it("runs bash skill scripts with input files and explicit tools", async () => {
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER,
       tools: {
         shout: tool({
@@ -507,7 +386,7 @@ tool shout '{"text":"hello"}'`,
   });
 
   it("mounts binary resources for bash scripts as decoded bytes", async () => {
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER
     });
 
@@ -538,7 +417,7 @@ tool shout '{"text":"hello"}'`,
   });
 
   it("returns non-zero bash exits without throwing", async () => {
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER
     });
 
@@ -561,7 +440,7 @@ tool shout '{"text":"hello"}'`,
   });
 
   it("rejects unsafe mounted resource paths", async () => {
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER
     });
 
@@ -588,7 +467,7 @@ tool shout '{"text":"hello"}'`,
   });
 
   it("runs python skill scripts with input and context", async () => {
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER
     });
 
@@ -614,7 +493,7 @@ tool shout '{"text":"hello"}'`,
   });
 
   it("runs python skill files as CLI-style scripts", async () => {
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER
     });
 
@@ -653,7 +532,7 @@ print(template.replace("{{text}}", data["text"].upper()))`,
   });
 
   it("returns output files from python CLI-style scripts", async () => {
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER
     });
 
@@ -695,7 +574,7 @@ print("done")`
   });
 
   it("returns output files from python function-style scripts", async () => {
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER
     });
 
@@ -726,7 +605,7 @@ print("done")`
   });
 
   it("rejects oversized python output artifacts", async () => {
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER
     });
 
@@ -746,7 +625,7 @@ print("done")`
   });
 
   it("runs python skill scripts with explicit tools", async () => {
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER,
       tools: {
         shout: tool({
@@ -776,7 +655,7 @@ print("done")`
   });
 
   it("allows python skill scripts to call tools by dynamic name", async () => {
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER,
       tools: {
         "format-title": tool({
@@ -805,7 +684,7 @@ print("done")`
   });
 
   it("allows python scripts to read from a provided workspace by default", async () => {
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER,
       workspaceInstance: testWorkspace({
         "README.md": "hello from workspace"
@@ -829,7 +708,7 @@ print("done")`
 
   it("does not expose python workspace writes for read-only workspace access", async () => {
     const workspace = testWorkspace({});
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER,
       workspaceInstance: workspace
     });
@@ -853,7 +732,7 @@ print("done")`
   });
 
   it("surfaces python script failures", async () => {
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER
     });
 
@@ -873,7 +752,7 @@ print("done")`
   });
 
   it("times out CPU-bound python CLI scripts", async () => {
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER,
       timeout: 50
     });
@@ -894,7 +773,7 @@ print("done")`
   });
 
   it("allows bash scripts to read from a provided workspace by default", async () => {
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER,
       workspaceInstance: testWorkspace({
         "README.md": "hello from workspace"
@@ -921,7 +800,7 @@ print("done")`
 
   it("does not expose bash workspace writes for read-only workspace access", async () => {
     const workspace = testWorkspace({});
-    const runner = skills.workerScriptRunner({
+    const runner = skills.runner({
       loader: env.LOADER,
       workspaceInstance: workspace
     });

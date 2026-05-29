@@ -136,6 +136,7 @@ import type {
 } from "./agents";
 
 export type Env = {
+  LOADER: WorkerLoader;
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
   EmailAgent: DurableObjectNamespace<TestEmailAgent>;
   CaseSensitiveAgent: DurableObjectNamespace<TestCaseSensitiveAgent>;
