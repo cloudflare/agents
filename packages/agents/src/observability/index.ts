@@ -53,6 +53,15 @@ export const channels = {
 } as const;
 
 /**
+ * Channel keys whose diagnostics channel name differs from `agents:${key}`.
+ * Keep this in sync with {@link channels} for any camelCase key that maps to a
+ * snake_case diagnostics channel.
+ */
+const CHANNEL_DIAGNOSTIC_NAME_OVERRIDES: Partial<Record<string, string>> = {
+  agentTool: "agents:agent_tool"
+};
+
+/**
  * Map event type prefixes to their diagnostics channel.
  */
 function getChannel(type: string): Channel {
@@ -141,7 +150,7 @@ export function subscribe<K extends keyof ChannelEventMap>(
   callback: (event: ChannelEventMap[K]) => void
 ): () => void {
   const name =
-    channelKey === "agentTool" ? "agents:agent_tool" : `agents:${channelKey}`;
+    CHANNEL_DIAGNOSTIC_NAME_OVERRIDES[channelKey] ?? `agents:${channelKey}`;
   const handler = (message: unknown, _name: string | symbol) =>
     callback(message as ChannelEventMap[K]);
   dcSubscribe(name, handler);

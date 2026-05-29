@@ -1517,10 +1517,16 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.includeReasoningInResponse = value;
   }
 
+  recoveryShouldThrow = false;
+  onExhaustedCalls = 0;
+
   override async onChatRecovery(
     ctx: ChatRecoveryContext
   ): Promise<ChatRecoveryOptions> {
     this.recoveryContexts.push(ctx);
+    if (this.recoveryShouldThrow) {
+      throw new Error("onChatRecovery boom");
+    }
     if (this.recoveryOverride) return this.recoveryOverride;
     return {};
   }
@@ -1533,8 +1539,84 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.recoveryOverride = options;
   }
 
+  setRecoveryShouldThrowForTest(shouldThrow: boolean): void {
+    this.recoveryShouldThrow = shouldThrow;
+  }
+
+  enableThrowingOnExhaustedForTest(
+    maxAttempts: number,
+    terminalMessage: string
+  ): void {
+    this.onExhaustedCalls = 0;
+    this.chatRecovery = {
+      maxAttempts,
+      terminalMessage,
+      onExhausted: () => {
+        this.onExhaustedCalls++;
+        throw new Error("onExhausted boom");
+      }
+    };
+  }
+
+  getOnExhaustedCallsForTest(): number {
+    return this.onExhaustedCalls;
+  }
+
   setChatRecoveryConfigForTest(config: ChatRecoveryConfig): void {
     this.chatRecovery = config;
+  }
+
+  async beginIncidentForTest(input: {
+    requestId: string;
+    recoveryRootRequestId?: string | null;
+    latestUserMessageId?: string | null;
+    recoveryKind: "retry" | "continue";
+  }): Promise<{ incidentId: string; attempt: number; exhausted: boolean }> {
+    const self = this as unknown as {
+      _beginChatRecoveryIncident(i: typeof input): Promise<{
+        incident: { incidentId: string; attempt: number };
+        exhausted: boolean;
+      }>;
+    };
+    const { incident, exhausted } =
+      await self._beginChatRecoveryIncident(input);
+    return {
+      incidentId: incident.incidentId,
+      attempt: incident.attempt,
+      exhausted
+    };
+  }
+
+  async updateIncidentForTest(
+    incidentId: string,
+    status: string,
+    reason?: string
+  ): Promise<void> {
+    await (
+      this as unknown as {
+        _updateChatRecoveryIncident(
+          id: string,
+          status: string,
+          reason?: string
+        ): Promise<void>;
+      }
+    )._updateChatRecoveryIncident(incidentId, status, reason);
+  }
+
+  async seedIncidentForTest(incident: {
+    incidentId: string;
+    requestId: string;
+    recoveryKind: "retry" | "continue";
+    attempt: number;
+    maxAttempts: number;
+    status: string;
+    firstSeenAt: number;
+    lastAttemptAt: number;
+  }): Promise<void> {
+    await this.ctx.storage.put(
+      `cf:chat-recovery:incident:${encodeURIComponent(incident.incidentId)}`,
+      incident
+    );
   }
 
   async getChatRecoveryIncidentsForTest(): Promise<unknown[]> {

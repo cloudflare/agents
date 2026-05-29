@@ -320,6 +320,62 @@ describe("runFiber", () => {
         (await agent.getRecoveredFibers()) as unknown as FiberRecoveryContext[];
       expect(recovered.length).toBe(1);
     });
+
+    it("retains a fresh unmanaged row when onFiberRecovered throws (retryable)", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "recovery-retain-throw"
+      );
+
+      await agent.insertInterruptedFiber(
+        "fiber-throw-fresh",
+        "unmanaged-recovery-throws"
+      );
+      await agent.triggerRecoveryCheck();
+
+      // Failed recovery on a fresh unmanaged row is retained so a later scan
+      // can retry it.
+      const count = (await agent.getRunningFiberCount()) as unknown as number;
+      expect(count).toBe(1);
+    });
+
+    it("evicts an aged unmanaged row whose recovery keeps throwing", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "recovery-evict-aged"
+      );
+
+      const skipped: Array<{ fiberId: string; reason: string }> = [];
+      const unsubscribe = subscribe("fiber", (event) => {
+        if (event.type === "fiber:recovery:skipped") {
+          skipped.push({
+            fiberId: event.payload.fiberId,
+            reason: event.payload.reason
+          });
+        }
+      });
+
+      try {
+        // Older than the 24h default max age.
+        await agent.insertAgedInterruptedFiber(
+          "fiber-throw-aged",
+          "unmanaged-recovery-throws",
+          25 * 60 * 60 * 1000
+        );
+        await agent.triggerRecoveryCheck();
+      } finally {
+        unsubscribe();
+      }
+
+      const count = (await agent.getRunningFiberCount()) as unknown as number;
+      expect(count).toBe(0);
+      expect(
+        skipped.some(
+          (s) =>
+            s.fiberId === "fiber-throw-aged" && s.reason === "max_age_exceeded"
+        )
+      ).toBe(true);
+    });
   });
 
   // ── Concurrent fibers ─────────────────────────────────────────

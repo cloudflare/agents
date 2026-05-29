@@ -1123,7 +1123,13 @@ export const DEFAULT_AGENT_STATIC_OPTIONS = {
   /** Timeout for internal framework fiber recovery hooks. */
   fiberRecoveryHookTimeoutMs: 10_000,
   /** Soft deadline for one interrupted-fiber recovery scan. */
-  fiberRecoveryScanDeadlineMs: 10_000
+  fiberRecoveryScanDeadlineMs: 10_000,
+  /**
+   * Maximum age of an unmanaged interrupted-fiber row before recovery gives
+   * up. Bounds repeated retries of a `onFiberRecovered()` hook that keeps
+   * throwing so a poison row cannot re-trigger forever across boots.
+   */
+  fiberRecoveryMaxAgeMs: 24 * 60 * 60 * 1000
 };
 
 /**
@@ -1137,6 +1143,7 @@ interface ResolvedAgentOptions {
   retry: Required<RetryOptions>;
   fiberRecoveryHookTimeoutMs: number;
   fiberRecoveryScanDeadlineMs: number;
+  fiberRecoveryMaxAgeMs: number;
 }
 
 /**
@@ -1164,6 +1171,12 @@ export interface AgentStaticOptions {
   fiberRecoveryHookTimeoutMs?: number;
   /** Soft deadline in milliseconds for one interrupted-fiber recovery scan. */
   fiberRecoveryScanDeadlineMs?: number;
+  /**
+   * Maximum age in milliseconds of an unmanaged interrupted-fiber row before
+   * recovery stops retrying a repeatedly-throwing `onFiberRecovered()` hook
+   * and discards the row. Set to `0` to retain rows indefinitely.
+   */
+  fiberRecoveryMaxAgeMs?: number;
 }
 
 /**
@@ -1508,7 +1521,10 @@ export class Agent<
         DEFAULT_AGENT_STATIC_OPTIONS.fiberRecoveryHookTimeoutMs,
       fiberRecoveryScanDeadlineMs:
         ctor.options?.fiberRecoveryScanDeadlineMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.fiberRecoveryScanDeadlineMs
+        DEFAULT_AGENT_STATIC_OPTIONS.fiberRecoveryScanDeadlineMs,
+      fiberRecoveryMaxAgeMs:
+        ctor.options?.fiberRecoveryMaxAgeMs ??
+        DEFAULT_AGENT_STATIC_OPTIONS.fiberRecoveryMaxAgeMs
     };
     return this._cachedOptions;
   }
@@ -4480,6 +4496,10 @@ export class Agent<
     const timeoutMs = this._resolvedOptions.fiberRecoveryHookTimeoutMs;
     if (timeoutMs <= 0) return operation();
 
+    // Note: this bounds how long we WAIT for the operation, but does not
+    // cancel it — `operation` keeps running after the timeout rejects. It is
+    // applied to internal framework recovery only, which is idempotent and
+    // safe to abandon mid-flight.
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
@@ -5155,6 +5175,7 @@ export class Agent<
     this._runFiberRecoveryInProgress = true;
     const scanStartedAt = Date.now();
     const scanDeadlineMs = this._resolvedOptions.fiberRecoveryScanDeadlineMs;
+    const fiberRecoveryMaxAgeMs = this._resolvedOptions.fiberRecoveryMaxAgeMs;
 
     try {
       const rows = this.sql<{
@@ -5219,7 +5240,22 @@ export class Agent<
         }
 
         const recovered = await this._runFiberRecoveryHook(ctx, managedRow);
-        if (recovered || managedRow) {
+        // Managed rows are always cleaned up (their ledger row records the
+        // terminal status). Unmanaged rows are retained when recovery fails so
+        // a later scan can retry — but only until they exceed the max age, at
+        // which point a repeatedly-throwing hook would otherwise loop forever.
+        const tooOld =
+          fiberRecoveryMaxAgeMs > 0 &&
+          Date.now() - row.created_at > fiberRecoveryMaxAgeMs;
+        if (recovered || managedRow || tooOld) {
+          if (!recovered && !managedRow && tooOld) {
+            this._emit("fiber:recovery:skipped", {
+              fiberId: row.id,
+              fiberName: row.name,
+              reason: "max_age_exceeded",
+              elapsedMs: Date.now() - row.created_at
+            });
+          }
           this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
         }
         if (managedRow) {
