@@ -13,48 +13,64 @@ import type {
  *
  * ## Storage layout
  *
- * - `__mcp_event__:<streamId>:<seqHex>` — the JSON-RPC message.
- *   `<seqHex>` is a 16-char zero-padded counter, so events in a stream
- *   sort lexicographically and `getStreamIdForEventId` can recover the
- *   stream from `eventId` without a storage hit.
- * - `__mcp_stream_evt_meta__:<streamId>` — `{ lastWriteAt }`, updated on
- *   every `storeEvent`. The cleanup sweep scans only this index, never
- *   the event log itself, so cleanup cost is O(active streams) not
- *   O(total events).
+ * Events are stored under `__mcp_event__:<streamId>:<seqHex>`, where
+ * `<seqHex>` is a 16-char zero-padded counter so events in a stream
+ * sort lexicographically and `getStreamIdForEventId` can recover the
+ * stream from `eventId` without a storage hit.
  *
- * Storage is bounded by the cleanup alarm `McpAgent` schedules off the
- * `onStoreEvent` hook: when streams have been quiet for `maxAgeMs`,
- * {@link sweep} drops every event of those streams. The DO itself dies
- * with the session.
+ * ## Lifecycle
+ *
+ * Each POST tool-call stream's events live only until the final
+ * response is delivered. The transport calls {@link clearStream}
+ * immediately after writing the close frame, so storage growth is
+ * bounded by the in-flight POST streams plus the standalone GET
+ * stream. There is no background sweep — quiescent agents do no work,
+ * and the DO itself dies with the session.
+ *
+ * Trade-off: if the client TCP connection dies *after* the close
+ * frame has been enqueued on the WS but before the bytes reach the
+ * client, the final message is unreplayable. Every earlier event in
+ * the stream is still replayable while the in-flight stream is open.
+ *
+ * ## Stream id constraints
+ *
+ * `streamId` MUST NOT contain `:`. `storeEvent` asserts this so
+ * embedders using custom stream ids fail loudly rather than risk
+ * prefix-scan collisions (e.g. clearing `a` accidentally hitting
+ * `a:b`). Default ids (`connection.id` UUIDs and the literal
+ * `_GET_stream`) already satisfy this.
  */
 export class DurableObjectEventStore implements EventStore {
   private static readonly EVENT_KEY_PREFIX = "__mcp_event__:";
-  private static readonly META_KEY_PREFIX = "__mcp_stream_evt_meta__:";
   private static readonly SEQ_PAD = 16;
+  /** DO storage caps multi-key delete at 128. */
+  private static readonly DELETE_CHUNK = 128;
+  /** Defensive ceiling on a single replay batch. A live stream's
+   *  event count is small (progress notifications + final result);
+   *  this is here so a pathological history can't OOM the DO. */
+  private static readonly REPLAY_LIMIT = 1000;
 
   private readonly storage: DurableObjectStorage;
-  private readonly onStoreEvent?: () => void | Promise<void>;
 
   /** In-memory seq counters per stream, rehydrated lazily from storage. */
   private readonly seqByStream = new Map<StreamId, number>();
   private readonly seqInit = new Map<StreamId, Promise<void>>();
 
-  constructor(
-    storage: DurableObjectStorage,
-    options: {
-      /** Fired after each successful `storeEvent`. McpAgent uses this
-       *  to arm a cleanup alarm. */
-      onStoreEvent?: () => void | Promise<void>;
-    } = {}
-  ) {
+  constructor(storage: DurableObjectStorage) {
     this.storage = storage;
-    this.onStoreEvent = options.onStoreEvent;
   }
 
   async storeEvent(
     streamId: StreamId,
     message: JSONRPCMessage
   ): Promise<EventId> {
+    if (streamId.includes(":")) {
+      // Event keys are `__mcp_event__:<streamId>:<seqHex>` — a `:` in
+      // streamId would let prefix scans cross stream boundaries.
+      throw new Error(
+        `DurableObjectEventStore: streamId must not contain ':' (got ${JSON.stringify(streamId)})`
+      );
+    }
     await this.ensureSeqLoaded(streamId);
     const seq = (this.seqByStream.get(streamId) ?? 0) + 1;
     this.seqByStream.set(streamId, seq);
@@ -64,12 +80,8 @@ export class DurableObjectEventStore implements EventStore {
       .padStart(DurableObjectEventStore.SEQ_PAD, "0");
     const eventId = `${streamId}:${seqHex}`;
     const eventKey = `${DurableObjectEventStore.EVENT_KEY_PREFIX}${eventId}`;
-    const metaKey = `${DurableObjectEventStore.META_KEY_PREFIX}${streamId}`;
 
-    const meta: StreamMeta = { lastWriteAt: Date.now() };
-    await this.storage.put({ [eventKey]: message, [metaKey]: meta });
-
-    if (this.onStoreEvent) await this.onStoreEvent();
+    await this.storage.put(eventKey, message);
     return eventId;
   }
 
@@ -89,12 +101,14 @@ export class DurableObjectEventStore implements EventStore {
 
     const prefix = `${DurableObjectEventStore.EVENT_KEY_PREFIX}${streamId}:`;
     const lastKey = `${DurableObjectEventStore.EVENT_KEY_PREFIX}${lastEventId}`;
-    // No explicit limit — DO storage list defaults to 1000 which is a
-    // safe upper bound for a single replay batch. Clients can issue
-    // further reconnects to drain longer histories.
+    // DO `storage.list()` with no `limit` loads everything into memory.
+    // Stream histories are normally small (progress events + result),
+    // but cap the batch defensively. Clients can reconnect again to
+    // drain past the cap if they ever produce that many events.
     const rows = await this.storage.list<JSONRPCMessage>({
       prefix,
-      start: lastKey
+      start: lastKey,
+      limit: DurableObjectEventStore.REPLAY_LIMIT
     });
 
     for (const [key, message] of rows) {
@@ -107,62 +121,29 @@ export class DurableObjectEventStore implements EventStore {
     return streamId;
   }
 
-  /** Drop the event log for a single stream. */
+  /**
+   * Drop the event log for a single stream. Called by the transport
+   * immediately after a POST's final response has been written to the
+   * wire — no future `Last-Event-ID` for this stream is expected to
+   * resolve.
+   */
   async clearStream(streamId: StreamId): Promise<void> {
     const prefix = `${DurableObjectEventStore.EVENT_KEY_PREFIX}${streamId}:`;
     const rows = await this.storage.list({ prefix });
     const keys = [...rows.keys()];
-    keys.push(`${DurableObjectEventStore.META_KEY_PREFIX}${streamId}`);
-    await this.storage.delete(keys);
+    if (keys.length > 0) {
+      await this.deleteChunked(keys);
+    }
     this.seqByStream.delete(streamId);
     this.seqInit.delete(streamId);
   }
 
-  /**
-   * Delete every event of every stream whose `lastWriteAt` is older
-   * than `cutoff`. Returns the streamIds it deleted (so callers can
-   * clean up sibling state like routing entries) and the next-earliest
-   * `lastWriteAt` still present (so the agent can schedule its next
-   * alarm), or `undefined` if the store is empty.
-   */
-  async sweep(cutoff: number): Promise<{
-    expiredStreamIds: StreamId[];
-    nextWriteAt: number | undefined;
-  }> {
-    const rows = await this.storage.list<StreamMeta>({
-      prefix: DurableObjectEventStore.META_KEY_PREFIX
-    });
-
-    const expired: StreamId[] = [];
-    let nextWriteAt: number | undefined;
-    for (const [key, meta] of rows) {
-      const ts = meta?.lastWriteAt ?? 0;
-      const streamId = key.slice(
-        DurableObjectEventStore.META_KEY_PREFIX.length
-      );
-      if (ts < cutoff) {
-        expired.push(streamId);
-      } else if (nextWriteAt === undefined || ts < nextWriteAt) {
-        nextWriteAt = ts;
-      }
+  /** Multi-key delete capped at 128 per call by DO storage. */
+  private async deleteChunked(keys: string[]): Promise<void> {
+    const chunkSize = DurableObjectEventStore.DELETE_CHUNK;
+    for (let i = 0; i < keys.length; i += chunkSize) {
+      await this.storage.delete(keys.slice(i, i + chunkSize));
     }
-
-    if (expired.length === 0) {
-      return { expiredStreamIds: [], nextWriteAt };
-    }
-
-    const toDelete: string[] = [];
-    for (const streamId of expired) {
-      const eventPrefix = `${DurableObjectEventStore.EVENT_KEY_PREFIX}${streamId}:`;
-      const eventRows = await this.storage.list({ prefix: eventPrefix });
-      for (const k of eventRows.keys()) toDelete.push(k);
-      toDelete.push(`${DurableObjectEventStore.META_KEY_PREFIX}${streamId}`);
-      this.seqByStream.delete(streamId);
-      this.seqInit.delete(streamId);
-    }
-    await this.storage.delete(toDelete);
-
-    return { expiredStreamIds: expired, nextWriteAt };
   }
 
   private async ensureSeqLoaded(streamId: StreamId): Promise<void> {
@@ -194,5 +175,3 @@ export class DurableObjectEventStore implements EventStore {
     }
   }
 }
-
-type StreamMeta = { lastWriteAt: number };

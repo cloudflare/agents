@@ -216,6 +216,16 @@ export class StreamableHTTPServerTransport implements Transport {
             await agent.getStreamRequestIds(resumedStreamId);
           if (persistedReqs && persistedReqs.length > 0) {
             resumeState.requestIds = persistedReqs;
+            // Supersede any prior connections that still claim these
+            // requestIds. Without this, `send()` may iterate to the
+            // stale POST bridge first and route tool progress there
+            // instead of the resumed GET stream.
+            for (const other of agent.getConnections<TransportConnState>()) {
+              if (other.id === connection.id) continue;
+              if (other.state?.streamId !== resumedStreamId) continue;
+              const { requestIds: _drop, ...rest } = other.state ?? {};
+              other.setState(rest);
+            }
           }
         }
         connection.setState(resumeState);
@@ -424,20 +434,14 @@ export class StreamableHTTPServerTransport implements Transport {
         );
       }
 
-      let standaloneConnection: Connection<TransportConnState> | undefined;
+      // The spec allows multiple concurrent standalone SSE streams
+      // per session. Fan out to every one of them; if none are live
+      // the event is still stored for replay when a client reconnects
+      // with Last-Event-ID.
       for (const conn of agent.getConnections<TransportConnState>()) {
-        if (conn.state?._standaloneSse) standaloneConnection = conn;
+        if (!conn.state?._standaloneSse) continue;
+        this.writeSSEEvent(conn, message, eventId);
       }
-
-      if (standaloneConnection === undefined) {
-        // Stream is disconnected — event is stored for replay, nothing
-        // more to do. Per spec the server MAY send messages on the
-        // stream, and resumability covers the dropped case.
-        return;
-      }
-
-      // Send the message to the standalone SSE stream.
-      this.writeSSEEvent(standaloneConnection, message, eventId);
       return;
     }
 
@@ -482,24 +486,9 @@ export class StreamableHTTPServerTransport implements Transport {
       shouldClose = relatedIds.every((id) => this._requestResponseMap.has(id));
 
       if (shouldClose) {
-        // Clean up
         for (const id of relatedIds) {
           this._requestResponseMap.delete(id);
         }
-
-        // POST stream is fully responded — drop the persisted requestIds
-        // mapping so a future GET with Last-Event-ID for this stream is
-        // treated as standalone resumption (events still replay; no new
-        // tool messages get routed here).
-        //
-        // We deliberately do *not* call `clearStream(streamId)` here: a
-        // client that loses the connection right as the final response
-        // is in flight still needs to be able to reconnect with
-        // Last-Event-ID and replay that response. Bounded growth is
-        // handled by the TTL sweep on `DurableObjectEventStore.sweep()`
-        // (scheduled hourly from `McpAgent.onStart`) rather than
-        // immediately at close time.
-        await agent.deleteStreamRequestIds(streamId);
       }
     }
 
@@ -508,6 +497,35 @@ export class StreamableHTTPServerTransport implements Transport {
     // reconnect with Last-Event-ID can replay it.
     if (liveConnection) {
       this.writeSSEEvent(liveConnection, message, eventId, shouldClose);
+    }
+
+    // Post-write cleanup for the happy path. Writing FIRST and clearing
+    // SECOND is deliberate: the previous PR cleared the stream before
+    // emitting the close frame, which deleted the very event the `id:`
+    // line referenced — a client losing the WS pipe at that exact
+    // moment could reconnect with Last-Event-ID and find nothing to
+    // replay. With this ordering, every event up to and including the
+    // final response is replayable while the in-flight stream is open.
+    //
+    // Trade-off: if the WS message is enqueued but the client TCP dies
+    // before the bytes arrive, that one final message is lost. This is
+    // accepted in exchange for not running any background cleanup.
+    if (shouldClose) {
+      // Drop the persisted requestIds mapping so a future GET with
+      // Last-Event-ID for this stream is treated as standalone
+      // resumption with no future routing.
+      await agent.deleteStreamRequestIds(streamId);
+      // And drop the stored events. The DO storage budget is now
+      // bounded by the number of in-flight POST streams plus the
+      // standalone GET stream. `clearStream` is an extension on
+      // `DurableObjectEventStore` — a structural check keeps custom
+      // event stores that don't implement it from breaking.
+      const clearable = this._eventStore as
+        | (EventStore & { clearStream?: (s: StreamId) => Promise<void> })
+        | undefined;
+      if (clearable?.clearStream) {
+        await clearable.clearStream(streamId);
+      }
     }
   }
 }

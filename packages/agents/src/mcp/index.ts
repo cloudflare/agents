@@ -190,77 +190,15 @@ export abstract class McpAgent<
    * edge closes an idle SSE stream (~5 minute watchdog) instead of
    * relying on a server-side keepalive that would block hibernation.
    *
+   * Per-stream events are cleared by the transport immediately after
+   * the final response is written to the wire, so there's no
+   * background cleanup — storage cost is bounded by the in-flight
+   * streams alone.
+   *
    * Override to disable (`return undefined`) or swap implementations.
    */
   protected getEventStore(): EventStore | undefined {
-    return new DurableObjectEventStore(this.ctx.storage, {
-      // Each write re-arms a single cleanup schedule. The callback
-      // sweeps streams that have been quiet for `maxAgeMs`, then
-      // either reschedules for the next earliest expiry or doesn't
-      // reschedule at all — quiescent DOs do no periodic work.
-      onStoreEvent: () => this._cf_armEventStoreCleanup()
-    });
-  }
-
-  /**
-   * Streams whose last write is older than this are eligible for
-   * cleanup. Default 24 hours. Return `Infinity` to disable cleanup
-   * (events still respect `maxEventsPerStream`; whole log dies with the
-   * DO).
-   */
-  protected getEventStoreMaxAgeMs(): number {
-    return 24 * 60 * 60 * 1000;
-  }
-
-  /** @internal Arm the cleanup schedule. Dedupes; safe to call often. */
-  async _cf_armEventStoreCleanup(): Promise<void> {
-    const maxAgeMs = this.getEventStoreMaxAgeMs();
-    if (!Number.isFinite(maxAgeMs)) return;
-    await this.schedule(
-      Math.ceil(maxAgeMs / 1000),
-      "_cf_runEventStoreCleanup",
-      undefined,
-      { idempotent: true }
-    );
-  }
-
-  /**
-   * @internal Scheduled cleanup. Deletes events for streams quiet
-   * past `maxAgeMs`, drops their stream-reqs entries, then either
-   * reschedules for the next earliest expiry or stops.
-   */
-  async _cf_runEventStoreCleanup(): Promise<void> {
-    const maxAgeMs = this.getEventStoreMaxAgeMs();
-    if (!Number.isFinite(maxAgeMs)) return;
-
-    const store =
-      this._transport instanceof StreamableHTTPServerTransport &&
-      this._transport.eventStore instanceof DurableObjectEventStore
-        ? (this._transport.eventStore as DurableObjectEventStore)
-        : undefined;
-    if (!store) return;
-
-    const cutoff = Date.now() - maxAgeMs;
-    const { expiredStreamIds, nextWriteAt } = await store.sweep(cutoff);
-
-    // Drop the routing entries for the streams the sweep just expired.
-    // Happy path (`shouldClose` in transport) already cleans these on
-    // tool completion; this catches abandoned POSTs.
-    if (expiredStreamIds.length > 0) {
-      await this.ctx.storage.delete(
-        expiredStreamIds.map((id) => `${McpAgent.STREAM_REQS_KEY_PREFIX}${id}`)
-      );
-    }
-
-    if (nextWriteAt !== undefined) {
-      const whenSeconds = Math.max(
-        1,
-        Math.ceil((nextWriteAt + maxAgeMs - Date.now()) / 1000)
-      );
-      await this.schedule(whenSeconds, "_cf_runEventStoreCleanup", undefined, {
-        idempotent: true
-      });
-    }
+    return new DurableObjectEventStore(this.ctx.storage);
   }
 
   /** Returns a new transport matching the type of the Agent. */

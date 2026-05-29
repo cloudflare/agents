@@ -63,6 +63,36 @@ export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
       }
     );
 
+    // Deferred tool used by resumability tests. Emits a progress
+    // notification (with `relatedRequestId` attached by the SDK)
+    // immediately, then sleeps before returning the final result.
+    // The notification gives the test a real event id on the POST
+    // stream which it can use as `Last-Event-ID` to resume.
+    this.server.registerTool(
+      "deferredGreet",
+      {
+        description:
+          "Emit a progress notification, wait, then return the result",
+        inputSchema: {
+          name: z.string(),
+          delayMs: z.number().int().nonnegative().optional()
+        }
+      },
+      async ({ name, delayMs }, extra) => {
+        await extra.sendNotification({
+          method: "notifications/progress",
+          params: {
+            progressToken: "deferred-greet",
+            progress: 1,
+            total: 2,
+            message: `working on ${name}`
+          }
+        });
+        await new Promise((r) => setTimeout(r, delayMs ?? 500));
+        return { content: [{ text: `Hello, ${name}!`, type: "text" }] };
+      }
+    );
+
     this.server.registerTool(
       "getPropsTestValue",
       {

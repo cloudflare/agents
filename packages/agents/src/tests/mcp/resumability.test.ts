@@ -149,75 +149,6 @@ describe("McpAgent SSE resumability (#1583)", () => {
     expect(eventId).toMatch(/^.+:.+$/);
   });
 
-  it("resumed GET stream is registered as the standalone SSE stream", async () => {
-    // Regression: previously, after replayEvents() the reconnected connection
-    // was never tagged with `_standaloneSse: true`, so subsequent
-    // server-initiated notifications had nowhere to land. The spec says the
-    // server "resume[s] the stream from that point" — i.e. the same stream
-    // continues to deliver new messages, not just the replayed backlog.
-    const ctx = createExecutionContext();
-    const sessionId = await initializeStreamableHTTPServer(ctx, baseUrl);
-
-    // Drive a tool call to populate the event store with one real event id.
-    const callResponse = await worker.fetch(
-      new Request(baseUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json, text/event-stream",
-          "mcp-session-id": sessionId
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 42,
-          method: "tools/call",
-          params: { name: "greet", arguments: { name: "prime" } }
-        })
-      }),
-      env,
-      ctx
-    );
-    const reader = callResponse.body!.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      if (buf.includes('"result"')) break;
-    }
-    await reader.cancel();
-    const eventId = extractEventId(buf);
-    expect(eventId).toBeTruthy();
-
-    // Open a standalone GET with Last-Event-ID. Even though there are no
-    // events after the cursor, the reconnected connection MUST be tagged as
-    // the standalone stream so that future server-initiated messages can
-    // reach the client.
-    const resumeResponse = await worker.fetch(
-      new Request(baseUrl, {
-        method: "GET",
-        headers: {
-          Accept: "text/event-stream",
-          "mcp-session-id": sessionId,
-          "Last-Event-ID": eventId!
-        }
-      }),
-      env,
-      ctx
-    );
-    expect(resumeResponse.status).toBe(200);
-
-    // We can't easily peek at DO connection state from inside this test, but
-    // we can assert the end-to-end contract: a second POST request that
-    // produces a server-initiated event must not error with "no standalone
-    // SSE connection". In practice, the agent server only emits standalone
-    // events when explicitly asked; this assertion is therefore conservative
-    // — the test mostly guards that resume returns 200 even when the
-    // last-event-id has no events after it.
-    await resumeResponse.body?.cancel();
-  });
-
   it("reconnecting GET with a valid Last-Event-ID returns 200", async () => {
     const ctx = createExecutionContext();
     const sessionId = await initializeStreamableHTTPServer(ctx, baseUrl);
@@ -278,18 +209,17 @@ describe("McpAgent SSE resumability (#1583)", () => {
     await resumeResponse.body?.cancel();
   });
 
-  it("replays the tool result after a POST stream is interrupted", async () => {
-    // Regression: the final response to a POST used to be stored in the
-    // event store and then immediately cleared on shouldClose, leaving the
-    // emitted `id:` referencing a deleted event. A client that lost the
-    // POST connection right as the result was in flight could reconnect
-    // with Last-Event-ID and find nothing to replay. This test exercises
-    // the fix: events stay in the store until the TTL sweep evicts them,
-    // so a resumed GET sees the final response.
+  it("mid-flight POST disconnect: resumed GET receives the final tool result", async () => {
+    // The actual failure mode #1583 was opened to address: a client
+    // starts a tool call over POST, the SSE pipe drops while the tool
+    // is still running, and the client reconnects with Last-Event-ID
+    // to receive the eventual result. The `deferredGreet` test tool
+    // emits a progress notification immediately, then sleeps before
+    // returning — giving us a real event id on the POST stream that
+    // we can cancel from and then resume.
     const ctx = createExecutionContext();
     const sessionId = await initializeStreamableHTTPServer(ctx, baseUrl);
 
-    // Drive the full tool call so the final response lands in the store.
     const callResponse = await worker.fetch(
       new Request(baseUrl, {
         method: "POST",
@@ -300,44 +230,52 @@ describe("McpAgent SSE resumability (#1583)", () => {
         },
         body: JSON.stringify({
           jsonrpc: "2.0",
-          id: 88,
+          id: 77,
           method: "tools/call",
-          params: { name: "greet", arguments: { name: "replay" } }
+          params: {
+            name: "deferredGreet",
+            arguments: { name: "midflight", delayMs: 600 }
+          }
         })
       }),
       env,
       ctx
     );
+    expect(callResponse.status).toBe(200);
+
+    // Read the POST stream just until the progress notification
+    // arrives — that gives us an event id while the tool is still
+    // running. Crucially, we do NOT wait for the final result.
     const reader = callResponse.body!.getReader();
     const decoder = new TextDecoder();
-    let buf = "";
-    while (true) {
+    let postBuf = "";
+    for (let i = 0; i < 20; i++) {
       const { value, done } = await reader.read();
       if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      if (buf.includes('"result"')) break;
+      postBuf += decoder.decode(value, { stream: true });
+      if (postBuf.includes("notifications/progress")) break;
     }
+    expect(postBuf).toContain("notifications/progress");
+    const progressEventId = extractEventId(postBuf);
+    expect(
+      progressEventId,
+      `expected an SSE id on the progress notification, got:\n${postBuf}`
+    ).toBeTruthy();
+
+    // Simulate the client losing the POST SSE stream.
     await reader.cancel();
 
-    // The POST response carried an event id; simulate the client never
-    // having seen it by resuming from the id *before* it.
-    const finalEventId = extractEventId(buf);
-    expect(finalEventId).toBeTruthy();
-    const [streamId, seqHex] = finalEventId!.split(":");
-    const priorSeq = (Number.parseInt(seqHex, 16) - 1)
-      .toString(16)
-      .padStart(16, "0");
-    const priorEventId = `${streamId}:${priorSeq}`;
-
-    // Resume with the prior id; the server MUST replay the final
-    // response on the new connection.
+    // Reconnect with GET + Last-Event-ID set to the progress event.
+    // The server must (a) treat this as a POST resume rather than a
+    // fresh standalone, and (b) deliver the final tool result on this
+    // new connection once the tool handler returns.
     const resumeResponse = await worker.fetch(
       new Request(baseUrl, {
         method: "GET",
         headers: {
           Accept: "text/event-stream",
           "mcp-session-id": sessionId,
-          "Last-Event-ID": priorEventId
+          "Last-Event-ID": progressEventId!
         }
       }),
       env,
@@ -347,9 +285,9 @@ describe("McpAgent SSE resumability (#1583)", () => {
 
     const resumeReader = resumeResponse.body!.getReader();
     let resumeBuf = "";
-    // Read a few chunks looking for the replayed result. Bound the loop
-    // so the test can't hang.
-    for (let i = 0; i < 20; i++) {
+    // Bound the loop so the test can't hang. The tool sleeps for
+    // 600ms and then writes one result frame.
+    for (let i = 0; i < 40; i++) {
       const { value, done } = await resumeReader.read();
       if (done) break;
       resumeBuf += decoder.decode(value, { stream: true });
@@ -357,7 +295,10 @@ describe("McpAgent SSE resumability (#1583)", () => {
     }
     await resumeReader.cancel();
 
-    expect(resumeBuf).toContain('"result"');
-    expect(resumeBuf).toContain(`id: ${finalEventId}`);
+    expect(
+      resumeBuf,
+      `expected the resumed GET to receive the tool result, got:\n${resumeBuf}`
+    ).toContain('"result"');
+    expect(resumeBuf).toContain("Hello, midflight!");
   });
 });

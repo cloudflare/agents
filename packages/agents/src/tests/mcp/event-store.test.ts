@@ -204,92 +204,76 @@ describe("DurableObjectEventStore", () => {
     }
   });
 
-  describe("sweep", () => {
-    it("deletes every event of streams quieter than cutoff and leaves the rest", async () => {
-      let now = 1_000_000;
-      vi.spyOn(Date, "now").mockImplementation(() => now);
-      try {
-        // Stream `a` writes early then goes idle; stream `b` is recent.
-        await store.storeEvent("a", msg(1));
-        await store.storeEvent("a", msg(2));
-        now += 10 * 60_000; // jump 10 minutes
-        const recentBWriteAt = now;
-        const recentBId = await store.storeEvent("b", msg(99));
+  it("rejects streamIds containing ':' so prefix scans can't cross streams", async () => {
+    await expect(store.storeEvent("a:b", msg(1))).rejects.toThrow(/':' /);
+  });
 
-        // Cutoff = 5 minutes ago. `a` (10 min old) goes; `b` (just
-        // now) stays.
-        const cutoff = now - 5 * 60_000;
-        const result = await store.sweep(cutoff);
-        expect(result.expiredStreamIds).toEqual(["a"]);
-        expect(result.nextWriteAt).toBe(recentBWriteAt);
-        expect(storage.countWithPrefix("__mcp_event__:a:")).toBe(0);
-        expect(storage.countWithPrefix("__mcp_event__:b:")).toBe(1);
-
-        // The surviving stream's event is still replayable.
-        const sent: string[] = [];
-        const seedId = `b:${(0).toString(16).padStart(16, "0")}`;
-        await store.replayEventsAfter(seedId, {
-          send: async (id) => {
-            sent.push(id);
-          }
-        });
-        expect(sent).toEqual([recentBId]);
-      } finally {
-        vi.restoreAllMocks();
+  describe("clearStream chunking", () => {
+    /**
+     * DO storage caps `delete(keys[])` at 128 keys per call. A stream
+     * with more than 128 stored events must therefore issue multiple
+     * delete calls, none larger than 128.
+     */
+    class CappedMockStorage extends MockStorage {
+      override async delete(key: string | string[]): Promise<number> {
+        const keys = Array.isArray(key) ? key : [key];
+        if (keys.length > 128) {
+          throw new Error(
+            `mock: delete() called with ${keys.length} keys, exceeds the 128 limit`
+          );
+        }
+        return super.delete(keys);
       }
-    });
+    }
 
-    it("with no streams in the store, returns empty result", async () => {
-      const result = await store.sweep(Date.now());
-      expect(result.expiredStreamIds).toEqual([]);
-      expect(result.nextWriteAt).toBeUndefined();
-    });
-
-    it("with no expired streams, returns the oldest active write time", async () => {
-      let now = 1_000_000;
-      vi.spyOn(Date, "now").mockImplementation(() => now);
-      try {
-        await store.storeEvent("a", msg(1));
-        const aWriteAt = now;
-        now += 60_000;
-        await store.storeEvent("b", msg(2));
-
-        // Cutoff of 0 — nothing qualifies as expired.
-        const result = await store.sweep(0);
-        expect(result.expiredStreamIds).toEqual([]);
-        expect(result.nextWriteAt).toBe(aWriteAt);
-      } finally {
-        vi.restoreAllMocks();
-      }
-    });
-
-    it("after a stream is swept entirely, next storeEvent restarts seq at 1", async () => {
-      let now = 1_000_000;
-      vi.spyOn(Date, "now").mockImplementation(() => now);
-      try {
-        await store.storeEvent("s", msg(1));
-        await store.storeEvent("s", msg(2));
-        now += 10 * 60_000;
-
-        const result = await store.sweep(now - 60_000);
-        expect(result.expiredStreamIds).toEqual(["s"]);
-
-        const fresh = await store.storeEvent("s", msg(3));
-        expect(fresh).toBe(`s:${(1).toString(16).padStart(16, "0")}`);
-      } finally {
-        vi.restoreAllMocks();
-      }
-    });
-
-    it("fires onStoreEvent after each storeEvent (used by McpAgent to arm sweeps)", async () => {
-      const onStoreEvent = vi.fn(async () => {});
-      const hookedStore = new DurableObjectEventStore(
-        storage as unknown as DurableObjectStorage,
-        { onStoreEvent }
+    it("deletes more than 128 events without exceeding the per-call cap", async () => {
+      const capped = new CappedMockStorage();
+      const big = new DurableObjectEventStore(
+        capped as unknown as DurableObjectStorage
       );
-      await hookedStore.storeEvent("s", msg(1));
-      await hookedStore.storeEvent("s", msg(2));
-      expect(onStoreEvent).toHaveBeenCalledTimes(2);
+      const total = 300;
+      for (let i = 0; i < total; i++) await big.storeEvent("s", msg(i));
+      expect(capped.countWithPrefix("__mcp_event__:s:")).toBe(total);
+
+      await big.clearStream("s");
+
+      expect(capped.countWithPrefix("__mcp_event__:s:")).toBe(0);
+      expect(capped.deleteCalls.length).toBeGreaterThanOrEqual(
+        Math.ceil(total / 128)
+      );
+      for (const call of capped.deleteCalls) {
+        expect(call.length).toBeLessThanOrEqual(128);
+      }
+    });
+
+    it("is a no-op when the stream has no events", async () => {
+      const capped = new CappedMockStorage();
+      const empty = new DurableObjectEventStore(
+        capped as unknown as DurableObjectStorage
+      );
+      await empty.clearStream("nonexistent");
+      expect(capped.deleteCalls.length).toBe(0);
+    });
+  });
+
+  describe("replayEventsAfter memory bound", () => {
+    it("caps the per-call replay at 1000 events", async () => {
+      // Push more than the internal REPLAY_LIMIT and confirm only that
+      // many events are emitted in one call. (The cap is here so a
+      // pathological history can't load the entire event log into
+      // memory at once.)
+      const total = 1500;
+      for (let i = 0; i < total; i++) await store.storeEvent("s", msg(i));
+
+      const seedId = `s:${(0).toString(16).padStart(16, "0")}`;
+      const sent: string[] = [];
+      await store.replayEventsAfter(seedId, {
+        send: async (id) => {
+          sent.push(id);
+        }
+      });
+      expect(sent.length).toBeLessThanOrEqual(1000);
+      expect(sent.length).toBeGreaterThan(0);
     });
   });
 });
