@@ -39,6 +39,9 @@ interface ChatRecoveryTestStub {
     Array<Array<{ name: string; description?: string }> | undefined>
   >;
   getScheduleCountForCallback(callback: string): Promise<number>;
+  getRunFiberCountForTest(): Promise<number>;
+  runAlarmForTest(): Promise<void>;
+  setSimulateSupersededIsolateForTest(value: boolean): Promise<void>;
   setChatRecoveryConfigForTest(config: {
     maxAttempts?: number;
     terminalMessage?: string;
@@ -297,6 +300,41 @@ describe("onChatRecovery", () => {
       status: "exhausted",
       reason: "max_recovery_window_exceeded"
     });
+  });
+
+  it("recovers when the continuation alarm fires on a superseded isolate", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    // Interrupted chat turn: recovery schedules the continuation and, because
+    // recovery is "handled", deletes the orphaned fiber-ledger row. From here
+    // the only thing that can resume the turn is the scheduled continuation.
+    await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-stale");
+    await agentStub.triggerFiberRecovery();
+    expect(
+      await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
+    ).toBe(1);
+    expect(await agentStub.getRunFiberCountForTest()).toBe(0);
+
+    // The continuation alarm fires on a SUPERSEDED isolate: the first storage
+    // op throws the catchable "Durable Object reset because its code was
+    // updated." for the whole invocation. `_executeScheduleCallback` burns its
+    // in-process retries, swallows the error, and `alarm()` deletes the
+    // one-shot row.
+    await agentStub.setSimulateSupersededIsolateForTest(true);
+    await agentStub.runAlarmForTest();
+    await agentStub.setSimulateSupersededIsolateForTest(false);
+
+    // A deploy-class transient must not destroy recovery: the turn should still
+    // be resumable afterward — either the one-shot continuation row survives for
+    // a fresh-code re-run, or an orphaned fiber remains for the boot scan. On
+    // current main BOTH are gone, so this assertion fails — that is the bug
+    // (the turn is permanently abandoned; #1615's progress logic never re-runs).
+    const pendingContinuations = await agentStub.getScheduleCountForCallback(
+      "_chatRecoveryContinue"
+    );
+    const pendingFibers = await agentStub.getRunFiberCountForTest();
+    expect(pendingContinuations + pendingFibers).toBeGreaterThanOrEqual(1);
   });
 
   it("shares one attempt budget when an incident flips between retry and continue", async () => {
