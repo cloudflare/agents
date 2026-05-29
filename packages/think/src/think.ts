@@ -643,6 +643,12 @@ function ensureValidContinueCheckpoint(
   return [...messages, { role: "user", content: CONTINUE_CHECKPOINT_PROMPT }];
 }
 
+// Durable record of the last turn that ended in a terminal error / abandoned
+// recovery. Replayed to clients on connect so a turn that failed while they
+// were disconnected (e.g. during a deploy/WS reconnect storm) is not silently
+// frozen — the terminal `MSG_CHAT_RESPONSE` broadcast is otherwise transient.
+const CHAT_LAST_TERMINAL_KEY = "cf:chat:last-terminal";
+
 /**
  * Callback interface for streaming chat events from a Think sub-agent.
  *
@@ -5353,12 +5359,9 @@ export class Think<
         // until the stream finishes.
         this._notifyStreamResuming(connection);
       } else {
-        connection.send(
-          JSON.stringify({
-            type: MSG_CHAT_MESSAGES,
-            messages: this.messages
-          })
-        );
+        for (const message of await this._buildIdleConnectMessages()) {
+          connection.send(JSON.stringify(message));
+        }
       }
       return _onConnect(connection, ctx);
     };
@@ -6682,6 +6685,11 @@ export class Think<
       incident.requestId,
       config.terminalMessage
     );
+    await this._recordTerminalChatStatus(
+      "interrupted",
+      incident.requestId,
+      config.terminalMessage
+    );
     this._broadcastChat({
       type: MSG_CHAT_RESPONSE,
       id: incident.requestId,
@@ -7490,6 +7498,13 @@ export class Think<
   // ── Response hook ──────────────────────────────────────────────
 
   private async _fireResponseHook(result: ChatResponseResult): Promise<void> {
+    // Record the terminal status durably so a client connecting after the turn
+    // ended still learns its outcome (see `_buildIdleConnectMessages`).
+    await this._recordTerminalChatStatus(
+      result.status,
+      result.requestId,
+      result.error ?? "The assistant was interrupted."
+    );
     if (this._insideResponseHook) return;
     this._insideResponseHook = true;
     try {
@@ -7499,6 +7514,61 @@ export class Think<
     } finally {
       this._insideResponseHook = false;
     }
+  }
+
+  /**
+   * Persist (on `error`) or clear (on `completed`/`aborted`) a durable record of
+   * the last terminal turn so it can be replayed to clients on connect. A
+   * `completed`/`aborted` turn is conveyed by the persisted messages, so the
+   * record is cleared; an `error`/`interrupted` turn has no durable trace
+   * otherwise, so it is kept until a later turn resolves.
+   */
+  private async _recordTerminalChatStatus(
+    status: ChatResponseResult["status"] | "interrupted",
+    requestId: string,
+    body: string
+  ): Promise<void> {
+    if (status === "error" || status === "interrupted") {
+      await this.ctx.storage.put(CHAT_LAST_TERMINAL_KEY, { requestId, body });
+    } else {
+      await this.ctx.storage.delete(CHAT_LAST_TERMINAL_KEY);
+    }
+  }
+
+  private async _pendingTerminalChatResponse(): Promise<{
+    requestId: string;
+    body: string;
+  } | null> {
+    return (
+      (await this.ctx.storage.get<{ requestId: string; body: string }>(
+        CHAT_LAST_TERMINAL_KEY
+      )) ?? null
+    );
+  }
+
+  /**
+   * Messages sent to a client on connect when no stream is active: the current
+   * transcript, plus a replay of the last terminal error (if any) so a turn
+   * that failed while the client was disconnected is surfaced rather than
+   * silently frozen.
+   */
+  private async _buildIdleConnectMessages(): Promise<
+    Array<Record<string, unknown>>
+  > {
+    const messages: Array<Record<string, unknown>> = [
+      { type: MSG_CHAT_MESSAGES, messages: this.messages }
+    ];
+    const pending = await this._pendingTerminalChatResponse();
+    if (pending) {
+      messages.push({
+        type: MSG_CHAT_RESPONSE,
+        id: pending.requestId,
+        body: pending.body,
+        done: true,
+        error: true
+      });
+    }
+    return messages;
   }
 
   // ── Resume helpers ──────────────────────────────────────────────

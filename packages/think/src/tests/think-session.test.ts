@@ -2068,6 +2068,40 @@ describe("Think — onChatRecovery", () => {
     expect(result.status).toBe("completed");
   });
 
+  it("replays a terminal error to a reconnecting client (hydration)", async () => {
+    const agent = await freshRecoveryAgent("terminal-hydration");
+
+    // A turn that errored. The live error broadcast is transient — a client
+    // disconnected at that moment (e.g. during a WS reconnect storm) misses it.
+    await agent.fireResponseHookForTest({
+      requestId: "r-fail",
+      status: "error",
+      error: "boom"
+    });
+
+    // On (re)connect, the client must learn the turn failed instead of seeing
+    // only the current messages with no terminal signal (frozen UI).
+    const onConnect = (await agent.getIdleConnectMessagesForTest()) as Array<{
+      type: string;
+      id?: string;
+      error?: boolean;
+      done?: boolean;
+    }>;
+    const terminal = onConnect.find((m) => m.error === true && m.done === true);
+    expect(terminal).toBeTruthy();
+    expect(terminal?.id).toBe("r-fail");
+
+    // A subsequent completed turn resolves it — no stale error replayed.
+    await agent.fireResponseHookForTest({
+      requestId: "r-ok",
+      status: "completed"
+    });
+    const afterOk = (await agent.getIdleConnectMessagesForTest()) as Array<{
+      error?: boolean;
+    }>;
+    expect(afterOk.some((m) => m.error === true)).toBe(false);
+  });
+
   it("resets the attempt budget when recovery makes forward progress", async () => {
     const agent = await freshRecoveryAgent("recovery-progress-reset");
     await agent.setChatRecoveryConfigForTest({ maxAttempts: 2 });

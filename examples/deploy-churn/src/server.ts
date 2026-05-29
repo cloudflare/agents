@@ -240,6 +240,39 @@ function createSlowMockModel(seconds: number): LanguageModel {
   } as LanguageModel;
 }
 
+/**
+ * Streams a couple chunks then errors mid-stream — used to produce a terminal
+ * *error* turn on demand (send a message containing "fail") so the silent /
+ * frozen-after-reconnect behavior (Issue 4) can be observed in a browser.
+ */
+function createFailingModel(): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "deploy-churn",
+    modelId: "mock-failing",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream() {
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: "t" });
+          controller.enqueue({
+            type: "text-delta",
+            id: "t",
+            delta: "Working on it"
+          });
+          await new Promise((r) => setTimeout(r, 600));
+          controller.error(new Error("Simulated model failure (harness)"));
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
 export class DeployChurnAgent extends Think<Env> {
   // Wake quickly after eviction so alarm-driven recovery is observable.
   static options = { keepAliveIntervalMs: 5_000 };
@@ -279,6 +312,7 @@ export class DeployChurnAgent extends Think<Env> {
           .map((p) => p.text)
           .join(" ")
       : "";
+    if (/\bfail\b/i.test(text)) return createFailingModel();
     return createSlowMockModel(parseDurationSeconds(text));
   }
 

@@ -3360,6 +3360,38 @@ export class ThinkRecoveryTestAgent extends Think {
     return this._lastPromptRole;
   }
 
+  /** Drive the internal terminal-status hook (what `_streamResult` calls). */
+  async fireResponseHookForTest(result: {
+    requestId: string;
+    status: "completed" | "error" | "aborted";
+    error?: string;
+  }): Promise<void> {
+    const self = this as unknown as {
+      _fireResponseHook(r: unknown): Promise<void>;
+    };
+    await self._fireResponseHook({
+      message: {
+        id: `m-${result.requestId}`,
+        role: "assistant",
+        parts: [{ type: "text", text: "" }]
+      },
+      requestId: result.requestId,
+      continuation: false,
+      status: result.status,
+      ...(result.error !== undefined ? { error: result.error } : {})
+    });
+  }
+
+  /** What `onConnect` replays to a reconnecting client (no active stream). */
+  async getIdleConnectMessagesForTest(): Promise<
+    Array<Record<string, unknown>>
+  > {
+    const self = this as unknown as {
+      _buildIdleConnectMessages(): Promise<Array<Record<string, unknown>>>;
+    };
+    return self._buildIdleConnectMessages();
+  }
+
   async setRecoveryShouldThrowForTest(shouldThrow: boolean): Promise<void> {
     this._recoveryShouldThrow = shouldThrow;
   }
