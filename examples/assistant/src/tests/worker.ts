@@ -29,10 +29,10 @@
 import { routeAgentRequest } from "agents";
 
 export { AssistantDirectory } from "../../agents/assistant/agent";
-export { MyAssistant } from "../../agents/assistant/agents/my-assistant";
+export { MyAssistant } from "../../agents/assistant/agents/my-assistant/agent";
 
 import type { AssistantDirectory } from "../../agents/assistant/agent";
-import type { MyAssistant } from "../../agents/assistant/agents/my-assistant";
+import type { MyAssistant } from "../../agents/assistant/agents/my-assistant/agent";
 
 export type Env = {
   AssistantDirectory: DurableObjectNamespace<AssistantDirectory>;

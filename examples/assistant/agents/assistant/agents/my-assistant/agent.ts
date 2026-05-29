@@ -1,6 +1,7 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { callable } from "agents";
-import { Think, Session } from "@cloudflare/think";
+import { Think, Session, skills } from "@cloudflare/think";
+import bundledSkills from "agents:skills";
 import {
   createWorkspaceStateBackend,
   type WorkspaceFsLike
@@ -21,10 +22,10 @@ import type {
 import { tool, generateText } from "ai";
 import type { LanguageModel, ToolSet } from "ai";
 import { z } from "zod";
-import { AssistantDirectory } from "../agent";
-import { SharedMCPClient } from "../shared-mcp-client";
-import { SharedWorkspace } from "../shared-workspace";
-import type { AgentConfig } from "../types";
+import { AssistantDirectory } from "../../agent";
+import { SharedMCPClient } from "../../shared-mcp-client";
+import { SharedWorkspace } from "../../shared-workspace";
+import type { AgentConfig } from "../../types";
 
 // ── MyAssistant — one Think DO per chat (a facet of the directory) ────
 
@@ -87,6 +88,24 @@ export class MyAssistant extends Think<Env> {
       models[tier] ?? models.fast,
       { sessionAffinity: this.sessionAffinity }
     );
+  }
+
+  // Bundled Agent Skills colocated under `./skills` (resolved through the
+  // `agents:skills` specifier). The model advertises the skill catalog in
+  // its prompt and activates a skill on demand via `activate_skill` rather
+  // than carrying every instruction in every turn.
+  getSkills() {
+    return [bundledSkills];
+  }
+
+  // Lets skills expose runnable scripts (`run_skill_script`). Scripts run in
+  // a bounded Worker via the Worker Loader, with read-only access to this
+  // chat's shared workspace so a script can inspect saved files.
+  getSkillScriptRunner() {
+    return skills.runner({
+      loader: this.env.LOADER,
+      workspaceInstance: this.workspace
+    });
   }
 
   configureSession(session: Session) {

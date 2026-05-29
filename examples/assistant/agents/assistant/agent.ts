@@ -1,9 +1,11 @@
-import { Agent, callable } from "agents";
+import { callable } from "agents";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { Workspace } from "@cloudflare/think";
+import { createWorkersAI } from "workers-ai-provider";
+import { defineScheduledTasks, Think, Workspace } from "@cloudflare/think";
+import type { LanguageModel } from "ai";
 import type { FileInfo, WorkspaceChangeEvent } from "@cloudflare/shell";
 import { nanoid } from "nanoid";
-import { MyAssistant } from "./agents/my-assistant";
+import { MyAssistant } from "./agents/my-assistant/agent";
 import type { ChatSummary, DirectoryState, McpToolDescriptor } from "./types";
 
 // ── AssistantDirectory — one DO per authenticated GitHub user ─────────
@@ -20,8 +22,23 @@ import type { ChatSummary, DirectoryState, McpToolDescriptor } from "./types";
 // by chat id; a row there is pure decoration. If they drift, the
 // registry wins.
 
-export class AssistantDirectory extends Agent<Env, DirectoryState> {
+export class AssistantDirectory extends Think<Env, DirectoryState> {
   initialState: DirectoryState = { chats: [] };
+
+  // The directory is a Think root used as an accumulator: it owns the
+  // chat index, shared workspace, MCP registry, and cross-chat
+  // scheduled work, but its own chat machinery stays dormant (clients
+  // talk to per-chat `MyAssistant` facets, not the directory). Declaring
+  // it as `Think` lets the directory own a declarative scheduled task
+  // (see `getScheduledTasks`) and leaves room for top-level agentic work
+  // later. `getModel()` is a stub for that future use — nothing in the
+  // accumulator role calls it.
+  override getModel(): LanguageModel {
+    return createWorkersAI({ binding: this.env.AI })(
+      "@cf/moonshotai/kimi-k2.6",
+      { sessionAffinity: this.sessionAffinity }
+    );
+  }
 
   /**
    * Shared workspace for every chat under this directory. Backed by the
@@ -77,11 +94,11 @@ export class AssistantDirectory extends Agent<Env, DirectoryState> {
     )`;
     this._refreshState();
 
-    // The directory owns cross-chat scheduled work. Facets can't
-    // schedule (see `packages/agents/src/index.ts` — schedule() throws
-    // on _isFacet), so any recurring turn lives here and RPCs into the
-    // most-recently-active child on fire.
-    this.schedule("0 9 * * *", "dailySummary", {}, { idempotent: true });
+    // Cross-chat scheduled work is declared in `getScheduledTasks()` below
+    // and reconciled automatically by Think after this `onStart` runs — no
+    // manual `schedule()` call needed. (Sub-agents and Think roots alike can
+    // own declarative scheduled tasks; the directory owns this one because
+    // the daily summary is a cross-chat concern.)
 
     // OAuth popup handler for MCP servers. The directory owns the MCP
     // state, so the OAuth redirect (`/chat/mcp-callback`) lands here
@@ -233,25 +250,40 @@ export class AssistantDirectory extends Agent<Env, DirectoryState> {
     this._refreshState();
   }
 
-  // ── Scheduled work (parent-owned, fans out to one child) ───────────
+  // ── Scheduled work (declarative, directory-owned, fans out to one child) ──
 
   /**
-   * Fires daily at 09:00 UTC (from `onStart()`'s cron schedule).
-   *
-   * Design note: we post the summary into the most-recently-updated
-   * chat rather than fanning out to every chat. For a demo this keeps
-   * the behavior legible — one notification per day, attached to the
-   * conversation the user was last using. A real app might fan out, or
-   * skip chats idle beyond some threshold.
+   * Wall-clock timezone for declarative scheduled tasks. A real app would
+   * derive this per user; the demo pins it to UTC.
    */
-  async dailySummary() {
-    const [row] = this.sql<{ id: string }>`
-      SELECT id FROM chat_meta ORDER BY updated_at DESC LIMIT 1
-    `;
-    if (!row) return;
+  override getDefaultTimezone(): string {
+    return "UTC";
+  }
 
-    const target = await this.subAgent(MyAssistant, row.id);
-    await target.postDailySummaryPrompt();
+  /**
+   * Declarative scheduled work, reconciled by Think on startup. The
+   * directory is a Think root, so it owns this cross-chat task directly.
+   *
+   * `dailySummary` is a deterministic handler (not a prompt task): it
+   * picks the most-recently-updated chat and RPCs a proactive summary
+   * prompt into that one child, so the user gets a single daily
+   * notification attached to the conversation they last used. A real app
+   * might fan out to every chat, or skip chats idle beyond a threshold.
+   */
+  override getScheduledTasks() {
+    return defineScheduledTasks({
+      dailySummary: {
+        schedule: "every day at 09:00",
+        handler: async () => {
+          const [row] = this.sql<{ id: string }>`
+            SELECT id FROM chat_meta ORDER BY updated_at DESC LIMIT 1
+          `;
+          if (!row) return;
+          const target = await this.subAgent(MyAssistant, row.id);
+          await target.postDailySummaryPrompt();
+        }
+      }
+    });
   }
 
   // ── Shared workspace RPC surface (called by SharedWorkspace) ─────
