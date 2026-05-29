@@ -44,6 +44,7 @@ interface ChatRecoveryTestStub {
     terminalMessage?: string;
   }): Promise<void>;
   getChatRecoveryIncidentsForTest(): Promise<unknown[]>;
+  addAssistantMessageForTest(id: string): Promise<void>;
   setRecoveryShouldThrowForTest(shouldThrow: boolean): Promise<void>;
   enableThrowingOnExhaustedForTest(
     maxAttempts: number,
