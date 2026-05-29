@@ -6,6 +6,7 @@
   "ignorePatterns": [
     "packages/agents/CHANGELOG.md",
     "site/agents/.astro",
-    "**/routeTree.gen.ts"
+    "**/routeTree.gen.ts",
+    "**/think.d.ts"
   ]
 }
