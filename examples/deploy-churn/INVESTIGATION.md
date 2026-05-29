@@ -93,11 +93,60 @@ assistant prompt; fails without the fix, passes with it. Full think suite: 432.
 - Customer's SPA only banners on `failed` / recovery `exhausted`, so `interrupted`
   shows nothing; the WS reconnect storm also lost the stall watchdog's turn.
 
-### Proposed fix
-Transition a non-recoverable `interrupted` turn to a client-surfaceable signal
-(either a terminal `MSG_CHAT_RESPONSE` like the exhausted path, or a dedicated
-recovery-status broadcast the client can render), instead of returning silently
-on skip/fail.
+### The silent paths (think.ts `_chatRecoveryContinue` / `_chatRecoveryRetry`)
+- `skipped`: `conversation_changed`, `no_unanswered_user_message`,
+  `stream_terminal`, `not_recoverable`, `submission_not_running`,
+  `continue_disabled` → update incident + `return`. No client broadcast.
+- `failed`: `stable_timeout`, or a thrown continuation → update incident,
+  re-throw (then swallowed by `_executeScheduleCallback`). No client broadcast,
+  and (post-#1617) only re-armed if the throw was a code-update reset — a
+  prefill/other failure is terminal with no client signal.
+- `exhausted`: the ONLY path that broadcasts a terminal
+  `MSG_CHAT_RESPONSE { done: true, error: true }` (think.ts ~5771) — what the
+  customer's SPA banners on.
+
+### Design options
+- **A. Surface terminal `failed` recovery** like exhaustion: when a continuation
+  fails and will not be retried, broadcast the terminal `MSG_CHAT_RESPONSE`
+  (error) so the client banners instead of freezing. Safe — a dead turn should
+  surface.
+- **B. Recovery-progress broadcast**: on `detected`/`scheduled`, broadcast a
+  non-error "recovering" status so the client shows a spinner rather than
+  nothing; clear on completion. Directly fixes the "frozen" symptom.
+- **C. Keep benign skips silent**: `conversation_changed` /
+  `no_unanswered_user_message` mean a newer turn owns the UI — do NOT
+  false-banner there.
+- **D. Expose recovery status via agent state / observability** the client
+  subscribes to; client decides what to render (least intrusive, most flexible).
+
+Recommendation: **A + C** (surface terminal failures, keep benign skips silent),
+optionally **B** for the best UX. NOTE: the customer's specific frozen case was a
+`conversation_changed` *skip* — under C that stays silent because a newer turn
+should own the UI; if their newer turn also didn't render, part of that is the
+SPA's WS-reconnect/stall-watchdog, not the SDK. Needs a UX decision before
+implementing, since it changes client-facing behavior.
+
+### KEY INSIGHT (re-scopes Issue 4): it's a HYDRATION gap, not a missing broadcast
+`_streamResult`'s catch ALREADY broadcasts a terminal
+`MSG_CHAT_RESPONSE { error: true }` when a continuation stream throws
+(think.ts ~6033). So a connected client *does* get an error. The real problem:
+that broadcast is **transient**. During the WS reconnect storm the client is
+disconnected when it fires; on reconnect, `onConnect` (think.ts ~5355) only
+re-sends `MSG_CHAT_MESSAGES` (current messages) — there is **no durable record
+of the failed/interrupted turn**, so the reconnected client sees no completed
+response and no error → frozen.
+
+Therefore the correct Issue 4 fix is **hydration-backed durable turn status**:
+persist a per-turn terminal/`recovering` status and replay it on connect
+(extend the `onConnect` hydration), so a client that reconnects after the event
+learns the turn failed / is recovering. This subsumes B (recovering status,
+hydrated) and most of A (terminal status, hydrated). A bare broadcast does NOT
+fix the customer's reconnect-storm case.
+
+Scope: durable status table/field + `onConnect` replay + a backward-compatible
+client signal + `useAgentChat` / SPA rendering + browser validation. This is a
+focused feature (cross-package, client-involved), not a one-line bugfix — best
+as its own design/PR rather than folded into the Issue 3 branch.
 
 ---
 
