@@ -19,6 +19,22 @@ export interface ResolvedProvider {
 }
 
 /**
+ * A connector binding passable directly to the sandbox as an env binding.
+ * The sandbox calls callTool(method, args) via Workers RPC —
+ * no ToolDispatcher serialization layer needed.
+ */
+export interface ConnectorBinding {
+  name: string;
+  /** The connector instance (WorkerEntrypoint subclass) or ServiceStub. */
+  binding: { callTool(method: string, args: unknown): Promise<unknown> };
+}
+
+export interface ExecuteOptions {
+  /** Connectors passed as env bindings — sandbox calls callTool via RPC. */
+  connectors?: ConnectorBinding[];
+}
+
+/**
  * An executor runs LLM-generated code in a sandbox, making the provided
  * tool functions callable under their namespace inside the sandbox.
  *
@@ -29,6 +45,7 @@ export interface Executor {
     code: string,
     providersOrFns:
       | ResolvedProvider[]
-      | Record<string, (...args: unknown[]) => Promise<unknown>>
+      | Record<string, (...args: unknown[]) => Promise<unknown>>,
+    options?: ExecuteOptions
   ): Promise<ExecuteResult>;
 }

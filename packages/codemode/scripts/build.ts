@@ -10,7 +10,8 @@ async function main() {
       "src/ai.ts",
       "src/mcp.ts",
       "src/tanstack-ai.ts",
-      "src/browser.ts"
+      "src/browser.ts",
+      "src/vite.ts"
     ],
     deps: {
       skipNodeModulesBundle: true,
