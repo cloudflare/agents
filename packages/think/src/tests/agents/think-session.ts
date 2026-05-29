@@ -3242,6 +3242,24 @@ export class ThinkRecoveryTestAgent extends Think {
     return [...entries.values()];
   }
 
+  /**
+   * Simulate forward recovery progress by adding one assistant message to the
+   * cached message list (what `_persistOrphanedStream` -> `_persistAssistantMessage`
+   * does after a partial). Used to exercise the progress-aware attempt-budget
+   * reset in `_beginChatRecoveryIncident`.
+   */
+  async addAssistantMessageForTest(id: string): Promise<void> {
+    const self = this as unknown as { _cachedMessages: UIMessage[] };
+    self._cachedMessages = [
+      ...self._cachedMessages,
+      {
+        id,
+        role: "assistant",
+        parts: [{ type: "text", text: "progress" }]
+      }
+    ];
+  }
+
   async setRecoveryShouldThrowForTest(shouldThrow: boolean): Promise<void> {
     this._recoveryShouldThrow = shouldThrow;
   }

@@ -1,0 +1,30 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "agents-deploy-churn",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "DeployChurnAgent",
+        "name": "DeployChurnAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["DeployChurnAgent"]
+    }
+  ],
+  // Required so the deployed Worker's structured logs are queryable via the
+  // dashboard / Workers Observability MCP server after a churn run.
+  "observability": {
+    "logs": { "enabled": true }
+  }
+}

@@ -113,6 +113,14 @@ type ChatRecoveryIncident = {
   firstSeenAt: number;
   lastAttemptAt: number;
   reason?: string;
+  /**
+   * High-water mark of a monotonic recovery-progress signal (count of persisted
+   * assistant messages) observed for this incident. Used to distinguish a turn
+   * that is making forward progress but keeps getting interrupted by isolate
+   * resets (deploys) — which should NOT exhaust the budget — from one that
+   * genuinely fails to advance.
+   */
+  progress?: number;
 };
 
 const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
@@ -123,6 +131,11 @@ const DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE =
 // Incidents that have not seen a new attempt within this window are assumed
 // abandoned and swept so durable storage does not grow without bound.
 const CHAT_RECOVERY_INCIDENT_TTL_MS = 60 * 60 * 1000;
+// Hard wall-clock ceiling for a single recovery incident. The attempt budget
+// can be reset by forward progress (see `_beginChatRecoveryIncident`), so this
+// is the ultimate stop that prevents an environment churning indefinitely from
+// retrying forever.
+const CHAT_RECOVERY_MAX_WINDOW_MS = 15 * 60 * 1000;
 
 type StreamResultStatus = {
   status: Exclude<SaveMessagesResult["status"], "skipped">;
@@ -2987,6 +3000,19 @@ export class AIChatAgent<
     return `${CHAT_RECOVERY_INCIDENT_KEY_PREFIX}${encodeURIComponent(incidentId)}`;
   }
 
+  /**
+   * Monotonic-ish recovery-progress signal: the number of persisted assistant
+   * messages. An interrupted partial is persisted as an assistant message (and
+   * not pruned), so this grows whenever recovery makes forward progress and
+   * never shrinks mid-incident.
+   */
+  private _chatRecoveryProgressMarker(): number {
+    return this.messages.reduce(
+      (count, message) => (message.role === "assistant" ? count + 1 : count),
+      0
+    );
+  }
+
   /** Sweep recovery incidents that have been inactive past the TTL. */
   private async _sweepStaleChatRecoveryIncidents(now: number): Promise<void> {
     const entries = await this.ctx.storage.list<ChatRecoveryIncident>({
@@ -3021,8 +3047,25 @@ export class AIChatAgent<
     const now = Date.now();
     await this._sweepStaleChatRecoveryIncidents(now);
     const existing = await this.ctx.storage.get<ChatRecoveryIncident>(key);
-    const attempt = (existing?.attempt ?? 0) + 1;
-    const exhausted = attempt > config.maxAttempts;
+
+    // Forward-progress detection. A mid-turn deploy resets the Durable Object
+    // ("code was updated"); the interrupted continuation is re-detected on the
+    // next wake. Without this, every such interruption consumes one attempt, so
+    // a deploy roughly every few minutes burns the whole budget and permanently
+    // abandons a turn that is actually advancing. We treat an interruption that
+    // followed real progress (more persisted assistant content than the last
+    // attempt saw) as environmental and reset the budget, while a turn that
+    // never advances still exhausts at `maxAttempts`.
+    const prevProgress = existing?.progress ?? 0;
+    const currentProgress = this._chatRecoveryProgressMarker();
+    const madeProgress = existing != null && currentProgress > prevProgress;
+    const windowExceeded =
+      existing != null &&
+      now - existing.firstSeenAt > CHAT_RECOVERY_MAX_WINDOW_MS;
+
+    const attempt =
+      madeProgress && !windowExceeded ? 1 : (existing?.attempt ?? 0) + 1;
+    const exhausted = windowExceeded || attempt > config.maxAttempts;
     const incident: ChatRecoveryIncident = {
       incidentId,
       requestId: input.requestId,
@@ -3032,7 +3075,14 @@ export class AIChatAgent<
       status: exhausted ? "exhausted" : "attempting",
       firstSeenAt: existing?.firstSeenAt ?? now,
       lastAttemptAt: now,
-      ...(exhausted ? { reason: "max_attempts_exceeded" } : {})
+      progress: Math.max(prevProgress, currentProgress),
+      ...(exhausted
+        ? {
+            reason: windowExceeded
+              ? "max_recovery_window_exceeded"
+              : "max_attempts_exceeded"
+          }
+        : {})
     };
     await this.ctx.storage.put(key, incident);
 

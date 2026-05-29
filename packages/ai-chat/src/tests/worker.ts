@@ -1626,6 +1626,21 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return [...entries.values()];
   }
 
+  /**
+   * Simulate forward recovery progress by persisting one assistant message
+   * (what `_persistOrphanedStream` does after a partial). Used to exercise the
+   * progress-aware attempt-budget reset in `_beginChatRecoveryIncident`.
+   */
+  async addAssistantMessageForTest(id: string): Promise<void> {
+    const message = {
+      id,
+      role: "assistant" as const,
+      parts: [{ type: "text" as const, text: "progress" }]
+    };
+    this.messages = [...this.messages, message];
+    await this.persistMessages(this.messages);
+  }
+
   getPersistedMessages(): ChatMessage[] {
     return (
       this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||

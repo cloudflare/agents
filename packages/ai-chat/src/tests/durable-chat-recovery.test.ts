@@ -230,6 +230,74 @@ describe("onChatRecovery", () => {
     });
   });
 
+  it("resets the attempt budget when recovery makes forward progress", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 2 });
+
+    const input = {
+      requestId: "req-prog",
+      recoveryRootRequestId: "req-prog",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue" as const
+    };
+
+    // Two consecutive detections with no progress climb toward the cap.
+    expect((await agentStub.beginIncidentForTest(input)).attempt).toBe(1);
+    expect((await agentStub.beginIncidentForTest(input)).attempt).toBe(2);
+
+    // Forward progress (an assistant message persisted, as `_persistOrphanedStream`
+    // does after a partial) resets the budget — this is the deploy-churn fix.
+    await agentStub.addAssistantMessageForTest("asst-1");
+    const afterProgress = await agentStub.beginIncidentForTest(input);
+    expect(afterProgress.attempt).toBe(1);
+    expect(afterProgress.exhausted).toBe(false);
+
+    // Without further progress it climbs again and still exhausts at the cap.
+    expect((await agentStub.beginIncidentForTest(input)).attempt).toBe(2);
+    const exhausted = await agentStub.beginIncidentForTest(input);
+    expect(exhausted.attempt).toBe(3);
+    expect(exhausted.exhausted).toBe(true);
+  });
+
+  it("exhausts via the wall-clock window even while making progress", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 6 });
+
+    // An incident that opened more than the 15-minute window ago.
+    await agentStub.seedIncidentForTest({
+      incidentId: "req-old:u1",
+      requestId: "req-old",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now() - 16 * 60 * 1000,
+      lastAttemptAt: Date.now() - 1000
+    });
+
+    // Even with fresh progress, the wall-clock ceiling terminalizes it.
+    await agentStub.addAssistantMessageForTest("asst-old");
+    const next = await agentStub.beginIncidentForTest({
+      requestId: "req-old-2",
+      recoveryRootRequestId: "req-old",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue"
+    });
+    expect(next.exhausted).toBe(true);
+
+    const incidents =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        status: string;
+        reason?: string;
+      }>;
+    expect(incidents[0]).toMatchObject({
+      status: "exhausted",
+      reason: "max_recovery_window_exceeded"
+    });
+  });
+
   it("shares one attempt budget when an incident flips between retry and continue", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
