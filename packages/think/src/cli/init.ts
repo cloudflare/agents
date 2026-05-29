@@ -465,7 +465,7 @@ function agentSource(): string {
   return [
     `import { Think, skills } from "@cloudflare/think";`,
     `import { createWorkersAI } from "workers-ai-provider";`,
-    `import bundledSkills from "./skills" with { type: "skills" };`,
+    `import bundledSkills from "agents:skills";`,
     "",
     "type Env = Cloudflare.Env & {",
     "  AI: Ai;",
@@ -499,7 +499,7 @@ function agentSource(): string {
     "  }",
     "",
     "  override getSkillScriptRunner() {",
-    "    return skills.workerScriptRunner({",
+    "    return skills.runner({",
     "      loader: this.env.LOADER,",
     "      workspaceInstance: this.workspace",
     "    });",

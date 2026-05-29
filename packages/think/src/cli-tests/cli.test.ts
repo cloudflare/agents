@@ -256,6 +256,8 @@ describe("think CLI", () => {
     expect(agentSource).toContain("override getSystemPrompt()");
     expect(agentSource).toContain("override getScheduledTasks()");
     expect(agentSource).toContain("override getSkills()");
+    expect(agentSource).toContain(`import bundledSkills from "agents:skills"`);
+    expect(agentSource).toContain("skills.runner({");
     expect(await readFile(path.join(appRoot, "think.d.ts"), "utf8")).toContain(
       `declare module "virtual:think/entry"`
     );
@@ -265,9 +267,11 @@ describe("think CLI", () => {
         "utf8"
       )
     ).toContain("Project Helper");
-    expect(
-      await readFile(path.join(appRoot, "agents/assistant/skills.d.ts"), "utf8")
-    ).toContain("SkillSource");
+    // `agents:skills` ships ambient types from the `agents` package, so no
+    // per-agent skills.d.ts shim is generated.
+    await expect(
+      readFile(path.join(appRoot, "agents/assistant/skills.d.ts"), "utf8")
+    ).rejects.toThrow();
     expect(consoleOutput.join("\n")).toContain("Created Think app");
   });
 

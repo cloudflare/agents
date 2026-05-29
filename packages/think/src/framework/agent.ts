@@ -1,7 +1,7 @@
 import type { LanguageModel, ToolSet } from "ai";
 import type { Session } from "agents/experimental/memory/session";
 import { Think } from "../think";
-import type { SkillScriptRunner, SkillSource } from "../skills";
+import type { SkillScriptRunner, SkillSource } from "agents/skills";
 import type { ThinkMessengers } from "../messengers";
 import type { ThinkScheduledTasks } from "../think";
 

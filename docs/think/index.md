@@ -1033,13 +1033,13 @@ Think's `this.messages` getter reads directly from Session's tree-structured sto
 
 Peer dependencies you provide:
 
-| Package                  | Required | Notes                                           |
-| ------------------------ | -------- | ----------------------------------------------- |
-| `agents`                 | yes      | Cloudflare Agents SDK                           |
-| `ai`                     | yes      | Vercel AI SDK v6                                |
-| `zod`                    | yes      | Schema validation (v4)                          |
-| `@chat-adapter/telegram` | optional | Required for Telegram messengers                |
-| `vite`                   | optional | Required for the Think Vite plugin (`/vite`)    |
+| Package                  | Required | Notes                                        |
+| ------------------------ | -------- | -------------------------------------------- |
+| `agents`                 | yes      | Cloudflare Agents SDK                        |
+| `ai`                     | yes      | Vercel AI SDK v6                             |
+| `zod`                    | yes      | Schema validation (v4)                       |
+| `@chat-adapter/telegram` | optional | Required for Telegram messengers             |
+| `vite`                   | optional | Required for the Think Vite plugin (`/vite`) |
 
 Bundled with `@cloudflare/think`:
 
