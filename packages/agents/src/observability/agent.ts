@@ -226,7 +226,6 @@ export type AgentObservabilityEvent =
       {
         requestId?: string;
         removedToolCalls: number;
-        removedToolResults: number;
         normalizedInputs: number;
         toolCallIds?: string[];
       }

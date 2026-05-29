@@ -173,9 +173,9 @@ These events are emitted by `AIChatAgent` from `@cloudflare/ai-chat`. They track
 
 ### Transcript events
 
-| Type                       | Payload                                                                                | When                                                                   |
-| -------------------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `chat:transcript:repaired` | `{ requestId?, removedToolCalls, removedToolResults, normalizedInputs, toolCallIds? }` | Think repairs a persisted transcript before sending it to the provider |
+| Type                       | Payload                                                            | When                                                                   |
+| -------------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| `chat:transcript:repaired` | `{ requestId?, removedToolCalls, normalizedInputs, toolCallIds? }` | Think repairs a persisted transcript before sending it to the provider |
 
 ### Fiber events
 

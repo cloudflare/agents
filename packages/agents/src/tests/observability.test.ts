@@ -297,7 +297,6 @@ describe("channel routing", () => {
       payload: {
         requestId: "req-1",
         removedToolCalls: 1,
-        removedToolResults: 0,
         normalizedInputs: 0,
         toolCallIds: ["tool-1"]
       },

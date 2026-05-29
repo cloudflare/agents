@@ -1412,12 +1412,10 @@ export class Think<
   private _repairToolTranscriptParts(messages: UIMessage[]): {
     messages: UIMessage[];
     removedToolCalls: number;
-    removedToolResults: number;
     normalizedInputs: number;
     toolCallIds: string[];
   } {
     let removedToolCalls = 0;
-    let removedToolResults = 0;
     let normalizedInputs = 0;
     const toolCallIds: string[] = [];
     const repaired: UIMessage[] = [];
@@ -1489,7 +1487,6 @@ export class Think<
     return {
       messages: repaired,
       removedToolCalls,
-      removedToolResults,
       normalizedInputs,
       toolCallIds
     };
@@ -1499,11 +1496,7 @@ export class Think<
     messages: UIMessage[]
   ): Promise<UIMessage[]> {
     const repair = this._repairToolTranscriptParts(messages);
-    if (
-      repair.removedToolCalls === 0 &&
-      repair.removedToolResults === 0 &&
-      repair.normalizedInputs === 0
-    ) {
+    if (repair.removedToolCalls === 0 && repair.normalizedInputs === 0) {
       return messages;
     }
 
@@ -1527,7 +1520,6 @@ export class Think<
     this._broadcastMessages();
     this._emit("chat:transcript:repaired", {
       removedToolCalls: repair.removedToolCalls,
-      removedToolResults: repair.removedToolResults,
       normalizedInputs: repair.normalizedInputs,
       toolCallIds: repair.toolCallIds
     });
