@@ -31,8 +31,7 @@ export function generateThinkTypes(
         ...options,
         typesFile
       })
-    },
-    ...generateSkillStubFiles(manifest)
+    }
   ];
 }
 
@@ -88,28 +87,6 @@ function generateThinkEnvBlock(
       .filter((line) => line.length > 0)
       .join("\n") + "\n"
   );
-}
-
-function generateSkillStubFiles(
-  manifest: ThinkFrameworkManifest
-): ThinkGeneratedFile[] {
-  return manifest.agents
-    .filter((agent) => agent.features.includes("skills"))
-    .map((agent) => {
-      const directory = dirname(agent.sourcePath);
-      return {
-        path: `${directory}/skills.d.ts`,
-        content: [
-          GENERATED_FILE_HEADER,
-          "",
-          `import type { SkillSource } from "@cloudflare/think";`,
-          "",
-          "declare const source: SkillSource;",
-          "export default source;",
-          ""
-        ].join("\n")
-      };
-    });
 }
 
 function agentConstructorType(

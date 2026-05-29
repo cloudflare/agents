@@ -79,9 +79,12 @@ describe("Think framework discovery", () => {
     ).toContain(
       `InstanceType<(typeof import("./agents/host/agent"))["HostAgent"]>`
     );
+    // Bundled skills resolve through the `agents:skills` specifier, whose
+    // ambient types ship from the `agents` package, so the framework no
+    // longer emits a per-agent `skills.d.ts` shim.
     expect(
       generated.find((file) => file.path === "agents/host/skills.d.ts")
-    ).toBeDefined();
+    ).toBeUndefined();
   });
 
   it("builds folder-style top-level agents and nested subagents", () => {
