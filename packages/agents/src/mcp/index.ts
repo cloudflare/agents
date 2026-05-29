@@ -107,13 +107,19 @@ export abstract class McpAgent<
    * `send()` can still record events for replay (mirrors the SDK's
    * `_requestToStreamMapping` which outlives connection loss).
    *
+   * O(n) in the number of in-flight POST streams — single-digit in
+   * practice since each stream is cleaned up on its final response.
+   * The `limit` is a defensive ceiling so an abandoned-POST leak can't
+   * unbounded-load this scan.
+   *
    * @internal
    */
   async getStreamIdForRequestId(
     requestId: RequestId
   ): Promise<string | undefined> {
     const rows = await this.ctx.storage.list<RequestId[]>({
-      prefix: McpAgent.STREAM_REQS_KEY_PREFIX
+      prefix: McpAgent.STREAM_REQS_KEY_PREFIX,
+      limit: 1000
     });
     for (const [key, requestIds] of rows) {
       if (requestIds?.includes(requestId)) {

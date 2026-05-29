@@ -95,6 +95,12 @@ export interface ClearableEventStore extends EventStore {
   clearStream(streamId: StreamId): Promise<void>;
 }
 
+function isClearableEventStore(
+  store: EventStore | ClearableEventStore
+): store is ClearableEventStore {
+  return typeof (store as ClearableEventStore).clearStream === "function";
+}
+
 /**
  * Adapted from: https://github.com/modelcontextprotocol/typescript-sdk/blob/main/src/client/streamableHttp.ts
  * - Validation and initialization are removed as they're handled in `McpAgent.serve()` handler.
@@ -227,6 +233,11 @@ export class StreamableHTTPServerTransport implements Transport {
             // the resumed GET. Closing rather than mutating sibling
             // state mirrors how the SDK's `_streamMapping` gives
             // last-writer-wins for free.
+            //
+            // Note: this also means two rapid GET resumes for the
+            // same stream will see the second close the first. That
+            // matches the last-writer-wins semantic and is what a
+            // client retrying a reconnect would expect anyway.
             for (const other of agent.getConnections<TransportConnState>()) {
               if (other.id === connection.id) continue;
               if (other.state?.streamId !== resumedStreamId) continue;
@@ -443,9 +454,16 @@ export class StreamableHTTPServerTransport implements Transport {
       message
     );
 
+    // Per-connection try/catch so one dead WS can't block delivery
+    // to the rest. `writeSSEEvent` can throw if the underlying socket
+    // was torn down between iteration and send.
     for (const conn of agent.getConnections<TransportConnState>()) {
       if (!conn.state?._standaloneSse) continue;
-      this.writeSSEEvent(conn, message, eventId);
+      try {
+        this.writeSSEEvent(conn, message, eventId);
+      } catch (error) {
+        this.onerror?.(error as Error);
+      }
     }
   }
 
@@ -509,8 +527,16 @@ export class StreamableHTTPServerTransport implements Transport {
     }
 
     if (shouldClose) {
+      // Ordering note: there is a tiny window between the
+      // `deleteStreamRequestIds` await and the `clearStream` await
+      // where a concurrent GET resume on this stream would find no
+      // persisted requestIds, treat the connection as a completed-
+      // POST one-shot replay, and start iterating events that
+      // `clearStream` is about to delete. The replay `send` callback
+      // writes synchronously to the WS, so the worst case is replaying
+      // a few events that are immediately garbage-collected — benign.
       await agent.deleteStreamRequestIds(streamId);
-      if (this._eventStore && "clearStream" in this._eventStore) {
+      if (this._eventStore && isClearableEventStore(this._eventStore)) {
         await this._eventStore.clearStream(streamId);
       }
     }

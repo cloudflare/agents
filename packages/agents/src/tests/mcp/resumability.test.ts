@@ -262,6 +262,15 @@ describe("McpAgent SSE resumability (#1583)", () => {
       `expected an SSE id on the progress notification, got:\n${postBuf}`
     ).toBeTruthy();
 
+    // Guard against a timing regression: if the test runner ran slow
+    // enough that the tool already completed, the resumed GET would
+    // have nothing to deliver live and the test would be a false pass.
+    // We want this to fail loudly instead.
+    expect(
+      postBuf,
+      "tool completed before mid-flight cancel — raise delayMs"
+    ).not.toContain('"result"');
+
     // Simulate the client losing the POST SSE stream.
     await reader.cancel();
 
