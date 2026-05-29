@@ -291,4 +291,47 @@ describe("Think — message reconciliation on incoming submits", () => {
 
     ws.close(1000);
   });
+
+  it("persists normalized tool inputs when repair only changes part contents", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const ws = await connectWS(room);
+
+    await agent.setTextOnlyMode(true);
+
+    const userA = makeUserMessage("user-a", "create a cat");
+    const assistantWithStringInput: UIMessage = {
+      id: "assistant-string-input",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-generateImage",
+          toolCallId: TOOL_CALL_ID,
+          state: "output-available",
+          input: '{"prompt":"a cat"}',
+          output: { url: "https://example.test/cat.png" }
+        } as unknown as UIMessage["parts"][number]
+      ]
+    };
+    await agent.persistToolCallMessage([userA, assistantWithStringInput]);
+
+    const responsePromise = waitForChatResponse(ws);
+    sendChatRequest(ws, [makeUserMessage("user-b", "continue")]);
+    const response = await responsePromise;
+
+    expect(response.done).toBe(true);
+    expect(response.error).toBeUndefined();
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const repairedAssistant = messages.find(
+      (message) => message.id === assistantWithStringInput.id
+    );
+    expect(repairedAssistant).toBeDefined();
+    const toolPart = repairedAssistant!.parts.find(
+      (part) => (part as Record<string, unknown>).toolCallId === TOOL_CALL_ID
+    ) as Record<string, unknown> | undefined;
+    expect(toolPart?.input).toEqual({ prompt: "a cat" });
+
+    ws.close(1000);
+  });
 });

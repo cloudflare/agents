@@ -1425,6 +1425,7 @@ export class Think<
     for (const message of messages) {
       const parts: UIMessage["parts"] = [];
       let messageRemovedToolCalls = 0;
+      let messageChanged = false;
       for (const part of message.parts) {
         const record = part as Record<string, unknown>;
         const toolCallId =
@@ -1446,6 +1447,7 @@ export class Think<
         if (!hasOutput) {
           removedToolCalls++;
           messageRemovedToolCalls++;
+          messageChanged = true;
           toolCallIds.push(toolCallId);
           continue;
         }
@@ -1461,6 +1463,7 @@ export class Think<
               input: JSON.parse(record.input) as unknown
             } as UIMessage["parts"][number]);
             normalizedInputs++;
+            messageChanged = true;
             continue;
           } catch {
             // Keep the original input if it is not valid JSON.
@@ -1480,9 +1483,7 @@ export class Think<
       ) {
         continue;
       }
-      repaired.push(
-        parts.length === message.parts.length ? message : { ...message, parts }
-      );
+      repaired.push(messageChanged ? { ...message, parts } : message);
     }
 
     return {
