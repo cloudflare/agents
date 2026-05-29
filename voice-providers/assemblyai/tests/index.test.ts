@@ -86,15 +86,18 @@ describe("_buildConnectionUrl — conditional params (only when set)", () => {
       "domain",
       "keyterms_prompt",
       "prompt",
-      "min_turn_silence",
-      "max_turn_silence",
       "interruption_delay",
       "vad_threshold",
-      "continuous_partials",
       "language_detection"
     ]) {
       expect(p.has(k)).toBe(false);
     }
+  });
+
+  it("defaults turn-silence windows above the server defaults", () => {
+    const p = parse(_buildConnectionUrl({ apiKey: "k" }));
+    expect(p.get("min_turn_silence")).toBe("400");
+    expect(p.get("max_turn_silence")).toBe("1280");
   });
 
   it("forwards domain", () => {
@@ -151,6 +154,152 @@ describe("_buildConnectionUrl — conditional params (only when set)", () => {
   });
 });
 
+describe("_buildConnectionUrl — continuous_partials default", () => {
+  it("defaults continuous_partials to true on u3-rt-pro", () => {
+    const p = parse(_buildConnectionUrl({ apiKey: "k" }));
+    expect(p.get("continuous_partials")).toBe("true");
+  });
+
+  it("respects an explicit continuousPartials: false on u3-rt-pro", () => {
+    const p = parse(
+      _buildConnectionUrl({ apiKey: "k", continuousPartials: false })
+    );
+    expect(p.get("continuous_partials")).toBe("false");
+  });
+
+  it("does not default continuous_partials for non-u3-rt-pro models", () => {
+    const p = parse(
+      _buildConnectionUrl({
+        apiKey: "k",
+        speechModel: "universal-streaming-english"
+      })
+    );
+    expect(p.has("continuous_partials")).toBe(false);
+  });
+});
+
+describe("_buildConnectionUrl — speechModel", () => {
+  it("defaults speech_model to u3-rt-pro when unset", () => {
+    const p = parse(_buildConnectionUrl({ apiKey: "k" }));
+    expect(p.get("speech_model")).toBe("u3-rt-pro");
+  });
+
+  it("forwards an explicit speechModel", () => {
+    const p = parse(
+      _buildConnectionUrl({
+        apiKey: "k",
+        speechModel: "universal-streaming-english"
+      })
+    );
+    expect(p.get("speech_model")).toBe("universal-streaming-english");
+  });
+
+  it("never sends a deprecated end_of_turn_confidence_threshold param", () => {
+    const p = parse(
+      _buildConnectionUrl({
+        apiKey: "k",
+        speechModel: "universal-streaming-english"
+      })
+    );
+    expect(p.has("end_of_turn_confidence_threshold")).toBe(false);
+  });
+});
+
+describe("AssemblyAISTT — model-aware validation", () => {
+  it("throws when prompt is set with a non-u3-rt-pro model", () => {
+    expect(
+      () =>
+        new AssemblyAISTT({
+          apiKey: "k",
+          speechModel: "universal-streaming-english",
+          prompt: "Transcribe Spanish."
+        })
+    ).toThrow(/prompt.*u3-rt-pro/);
+  });
+
+  it("throws when continuousPartials is set with a non-u3-rt-pro model", () => {
+    expect(
+      () =>
+        new AssemblyAISTT({
+          apiKey: "k",
+          speechModel: "universal-streaming-multilingual",
+          continuousPartials: true
+        })
+    ).toThrow(/continuousPartials.*u3-rt-pro/);
+  });
+
+  it("throws when interruptionDelay is set with a non-u3-rt-pro model", () => {
+    expect(
+      () =>
+        new AssemblyAISTT({
+          apiKey: "k",
+          speechModel: "universal-streaming-multilingual",
+          interruptionDelay: 200
+        })
+    ).toThrow(/interruptionDelay.*u3-rt-pro/);
+  });
+
+  it("allows the u3-rt-pro-only options on u3-rt-pro (the default)", () => {
+    expect(
+      () =>
+        new AssemblyAISTT({
+          apiKey: "k",
+          prompt: "Transcribe Spanish.",
+          continuousPartials: true,
+          interruptionDelay: 200
+        })
+    ).not.toThrow();
+  });
+
+  it("allows a non-u3-rt-pro model when no u3-only options are set", () => {
+    expect(
+      () =>
+        new AssemblyAISTT({
+          apiKey: "k",
+          speechModel: "universal-streaming-english",
+          minTurnSilence: 400,
+          maxTurnSilence: 1280
+        })
+    ).not.toThrow();
+  });
+});
+
+describe("AssemblyAISession — close diagnostics", () => {
+  it("logs the close code and reason on an unexpected close", async () => {
+    const { ws } = setupMockFetch();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    provider.createSession();
+    await flush();
+
+    ws.dispatchEvent(
+      Object.assign(new Event("close"), {
+        code: 1008,
+        reason: "Not authorized"
+      })
+    );
+
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("1008"));
+    errSpy.mockRestore();
+  });
+
+  it("does not log when close() initiated the teardown", async () => {
+    const { ws } = setupMockFetch();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const provider = new AssemblyAISTT({ apiKey: "k" });
+    const session = provider.createSession();
+    await flush();
+
+    session.close();
+    ws.dispatchEvent(
+      Object.assign(new Event("close"), { code: 1000, reason: "" })
+    );
+
+    expect(errSpy).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+});
+
 describe("_buildConnectionUrl — baseUrl override", () => {
   it("baseUrl replaces the default host", () => {
     const url = new URL(
@@ -201,7 +350,13 @@ describe("AssemblyAISession — connect", () => {
 
     expect(calls).toHaveLength(1);
     const { url, init } = calls[0];
-    expect(url).toBe(_buildConnectionUrl({ apiKey: "MY_KEY" }));
+    // Cloudflare's fetch WebSocket upgrade requires the http(s) scheme — the
+    // canonical wss:// URL is rewritten to https:// for the fetch call.
+    expect(url).toBe(
+      _buildConnectionUrl({ apiKey: "MY_KEY" }).replace(/^wss:\/\//, "https://")
+    );
+    expect(url.startsWith("https://")).toBe(true);
+    expect(url.startsWith("wss://")).toBe(false);
     const headers = init?.headers as Record<string, string> | undefined;
     expect(headers?.Upgrade).toBe("websocket");
     expect(headers?.Authorization).toBe("MY_KEY");
