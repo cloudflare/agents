@@ -2053,6 +2053,21 @@ describe("Think — onChatRecovery", () => {
     });
   });
 
+  it("continuation does not replay a trailing assistant message (assistant prefill)", async () => {
+    const agent = await freshRecoveryAgent("continuation-prefill");
+
+    // A deploy-interrupted turn leaves a partial assistant message as the latest
+    // leaf; `continueLastTurn` replays it. Modern models (Claude 4.6+) reject a
+    // request that ends in an assistant message with a 400.
+    await agent.seedPartialAssistantTurnForTest();
+    const result = await agent.runContinueWithPrefillRejectingModelForTest();
+
+    // The model must never receive a request ending in an assistant message;
+    // the continuation should append a user checkpoint and complete.
+    expect(await agent.getLastPromptRoleForTest()).not.toBe("assistant");
+    expect(result.status).toBe("completed");
+  });
+
   it("resets the attempt budget when recovery makes forward progress", async () => {
     const agent = await freshRecoveryAgent("recovery-progress-reset");
     await agent.setChatRecoveryConfigForTest({ maxAttempts: 2 });

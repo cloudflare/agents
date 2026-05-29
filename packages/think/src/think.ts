@@ -619,6 +619,30 @@ const CHAT_RECOVERY_INCIDENT_TTL_MS = 60 * 60 * 1000;
 // retrying forever.
 const CHAT_RECOVERY_MAX_WINDOW_MS = 15 * 60 * 1000;
 
+// Ephemeral user message appended when a model request would otherwise end in
+// an assistant message (see `ensureValidContinueCheckpoint`).
+const CONTINUE_CHECKPOINT_PROMPT =
+  "Continue your previous response from exactly where it left off. Do not repeat any of it.";
+
+/**
+ * Ensure a model request does not end in an assistant message.
+ *
+ * Continuing a partial assistant turn (e.g. after a deploy interrupts a stream)
+ * replays a transcript whose final message is that partial assistant message —
+ * an "assistant prefill". Modern chat models reject this: Anthropic Claude 4.6+
+ * returns a 400 ("This model does not support assistant message prefill. The
+ * conversation must end with a user message."). To reach a valid continue
+ * checkpoint across providers we append an ephemeral user message. This shapes
+ * only the model request; it is never persisted to the transcript.
+ */
+function ensureValidContinueCheckpoint(
+  messages: ModelMessage[]
+): ModelMessage[] {
+  if (messages.length === 0) return messages;
+  if (messages[messages.length - 1]?.role !== "assistant") return messages;
+  return [...messages, { role: "user", content: CONTINUE_CHECKPOINT_PROMPT }];
+}
+
 /**
  * Callback interface for streaming chat events from a Think sub-agent.
  *
@@ -2465,7 +2489,9 @@ export class Think<
         baseSystem,
         config.tools ? { ...tools, ...config.tools } : tools
       );
-    const finalMessages = config.messages ?? messages;
+    const finalMessages = ensureValidContinueCheckpoint(
+      config.messages ?? messages
+    );
     const mergedTools: ToolSet = config.tools
       ? { ...tools, ...config.tools }
       : tools;

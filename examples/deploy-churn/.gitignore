@@ -46,6 +46,9 @@ jspm_packages/
 .env.*
 !.env.example
 
+# wrangler local secrets
+.dev.vars
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache

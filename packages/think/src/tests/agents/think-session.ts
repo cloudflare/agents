@@ -154,6 +154,58 @@ function createMockModel(
   } as LanguageModel;
 }
 
+/**
+ * Mimics Claude 4.6+: rejects a request whose final message is an assistant
+ * message ("assistant prefill"). Reports the trailing role of each call so a
+ * test can assert the continuation never sends a trailing assistant message.
+ */
+function createPrefillRejectingModel(
+  response: string,
+  options: { onCall?: (lastRole: string | undefined) => void } = {}
+): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-prefill-rejecting",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream(callOptions: unknown) {
+      const prompt =
+        (callOptions as { prompt?: Array<{ role?: string }> }).prompt ?? [];
+      const lastRole = prompt[prompt.length - 1]?.role;
+      options.onCall?.(lastRole);
+      if (lastRole === "assistant") {
+        throw new Error(
+          "This model does not support assistant message prefill. The conversation must end with a user message."
+        );
+      }
+      _mockCallCount++;
+      const callId = _mockCallCount;
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: `t-${callId}` });
+          controller.enqueue({
+            type: "text-delta",
+            id: `t-${callId}`,
+            delta: response
+          });
+          controller.enqueue({ type: "text-end", id: `t-${callId}` });
+          controller.enqueue({
+            type: "finish",
+            finishReason: v3FinishReason("stop"),
+            usage: v3Usage(10, 5)
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
 function createReasoningMockModel(
   response: string,
   reasoning: string
@@ -3132,8 +3184,17 @@ export class ThinkRecoveryTestAgent extends Think {
   private _turnClientToolNames: Array<string[]> = [];
   private _stashData: unknown = null;
   private _stashResult: { success: boolean; error?: string } | null = null;
+  private _rejectPrefill = false;
+  private _lastPromptRole: string | undefined;
 
   override getModel(): LanguageModel {
+    if (this._rejectPrefill) {
+      return createPrefillRejectingModel("Continued response.", {
+        onCall: (role) => {
+          this._lastPromptRole = role;
+        }
+      });
+    }
     return createMockModel("Continued response.");
   }
 
@@ -3258,6 +3319,45 @@ export class ThinkRecoveryTestAgent extends Think {
         parts: [{ type: "text", text: "progress" }]
       }
     ];
+  }
+
+  /** Seed a session that ends in a PARTIAL assistant message (the state a
+   * deploy-interrupted turn leaves behind, which `continueLastTurn` replays). */
+  async seedPartialAssistantTurnForTest(): Promise<void> {
+    const self = this as unknown as {
+      _upsertMessageInHistory(msg: UIMessage, parentId?: string): Promise<void>;
+    };
+    await self._upsertMessageInHistory({
+      id: "u1",
+      role: "user",
+      parts: [{ type: "text", text: "Say hello." }]
+    });
+    await self._upsertMessageInHistory(
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Sure, here is" }]
+      },
+      "u1"
+    );
+  }
+
+  /** Run `continueLastTurn` against a model that rejects assistant prefill. */
+  async runContinueWithPrefillRejectingModelForTest(): Promise<{
+    status: string;
+    error?: string;
+  }> {
+    this._rejectPrefill = true;
+    this.chatRecovery = false;
+    const result = await this.continueLastTurn();
+    return {
+      status: result.status,
+      ...(result.error !== undefined ? { error: result.error } : {})
+    };
+  }
+
+  getLastPromptRoleForTest(): string | undefined {
+    return this._lastPromptRole;
   }
 
   async setRecoveryShouldThrowForTest(shouldThrow: boolean): Promise<void> {

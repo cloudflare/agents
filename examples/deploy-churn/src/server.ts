@@ -39,11 +39,97 @@ import type {
   ChunkContext
 } from "@cloudflare/think";
 import { callable, routeAgentRequest } from "agents";
-import type { LanguageModel, UIMessage } from "ai";
+import { generateText } from "ai";
+import type { LanguageModel, ModelMessage, UIMessage } from "ai";
+import { createWorkersAI } from "workers-ai-provider";
+import { createAnthropic } from "@ai-sdk/anthropic";
 
 type Env = {
   DeployChurnAgent: DurableObjectNamespace<DeployChurnAgent>;
+  AI: Ai;
+  ANTHROPIC_API_KEY?: string;
 };
+
+const DEFAULT_WORKERS_AI_MODEL = "@cf/moonshotai/kimi-k2.6";
+const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
+
+/**
+ * Probe whether a model rejects a transcript ending in an assistant message —
+ * exactly what `continueLastTurn` replays when it continues a partial assistant
+ * turn after a deploy interruption. `trailing-user` is the control.
+ *
+ * Workers AI / Kimi tolerate the trailing assistant (they just respond);
+ * Anthropic 4.6+ returns a 400 ("prefill not supported"), which is what the
+ * customer hits in production.
+ */
+async function probeTrailingRole(
+  env: Env,
+  trailingRole: "assistant" | "user",
+  provider: "workers-ai" | "anthropic",
+  modelId: string
+): Promise<Record<string, unknown>> {
+  let model: LanguageModel;
+  if (provider === "anthropic") {
+    if (!env.ANTHROPIC_API_KEY) {
+      return {
+        provider,
+        ok: false,
+        error: "ANTHROPIC_API_KEY not set (add it to .dev.vars)"
+      };
+    }
+    model = createAnthropic({ apiKey: env.ANTHROPIC_API_KEY })(modelId);
+  } else {
+    model = createWorkersAI({ binding: env.AI })(modelId);
+  }
+
+  const messages: ModelMessage[] =
+    trailingRole === "assistant"
+      ? [
+          { role: "user", content: "Give me a one-sentence greeting." },
+          // The partial assistant message a recovery continuation replays.
+          { role: "assistant", content: "Sure, here is a greeting:" }
+        ]
+      : [{ role: "user", content: "Give me a one-sentence greeting." }];
+  const startedAt = Date.now();
+  try {
+    // maxRetries: 0 so a 400 surfaces immediately instead of being retried.
+    const { text } = await generateText({ model, messages, maxRetries: 0 });
+    return {
+      provider,
+      model: modelId,
+      trailingRole,
+      ok: true,
+      durationMs: Date.now() - startedAt,
+      textPreview: text.slice(0, 200)
+    };
+  } catch (error) {
+    return {
+      provider,
+      model: modelId,
+      trailingRole,
+      ok: false,
+      durationMs: Date.now() - startedAt,
+      name: error instanceof Error ? error.name : "Error",
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function probeParams(url: URL): {
+  provider: "workers-ai" | "anthropic";
+  modelId: string;
+} {
+  const provider =
+    url.searchParams.get("provider") === "anthropic"
+      ? "anthropic"
+      : "workers-ai";
+  const modelId =
+    url.searchParams.get("model") ??
+    (provider === "anthropic"
+      ? DEFAULT_ANTHROPIC_MODEL
+      : DEFAULT_WORKERS_AI_MODEL);
+  return { provider, modelId };
+}
 
 /** A finalized chat turn, recorded from `onChatResponse`. */
 type TurnRecord = {
@@ -436,6 +522,24 @@ export class DeployChurnAgent extends Think<Env> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+
+    // Prefill-rejection probe: does the model reject a transcript that ends in
+    // an assistant message (what recovery's continuation replays)? Defaults to
+    // Workers AI / Kimi; pass ?provider=anthropic&model=claude-sonnet-4-6.
+    if (url.pathname === "/probe/trailing-assistant") {
+      const { provider, modelId } = probeParams(url);
+      return Response.json(
+        await probeTrailingRole(env, "assistant", provider, modelId)
+      );
+    }
+    if (url.pathname === "/probe/trailing-user") {
+      const { provider, modelId } = probeParams(url);
+      return Response.json(
+        await probeTrailingRole(env, "user", provider, modelId)
+      );
+    }
+
     return (
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
