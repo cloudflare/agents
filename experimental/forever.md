@@ -30,7 +30,7 @@ Two layers, both built into the `Agent` base class:
 | 1     | `keepAlive()` | Prevents idle eviction via alarm heartbeats                           |
 | 2     | `runFiber()`  | Durable execution — registered in SQLite, checkpointable, recoverable |
 
-`AIChatAgent` builds on Layer 2 to provide chat-specific recovery: it wraps each chat turn in a fiber, detects interruptions, and exposes `onChatRecovery` for provider-specific continuation strategies.
+`AIChatAgent` builds on Layer 2 to provide chat-specific recovery when `chatRecovery` is enabled: it wraps each chat turn in a fiber, detects interruptions, tracks bounded recovery incidents, and exposes `onChatRecovery` for provider-specific continuation strategies. Think enables this by default.
 
 ## Layer 1: `keepAlive()`
 
@@ -109,6 +109,7 @@ type FiberRecoveryContext = {
   id: string;
   name: string;
   snapshot: unknown | null;
+  recoveryReason: "interrupted";
 };
 ```
 
@@ -186,7 +187,7 @@ runFiber("work", fn)
   │    │    ├─ Call _handleInternalFiberRecovery(ctx)
   │    │    │    └─ If handled (returns true): skip user hook
   │    │    ├─ Otherwise: call onFiberRecovered(ctx)
-  │    │    └─ DELETE the row
+   │    │    └─ DELETE the row after successful recovery
   │    │
   │    └─ If developer re-invokes runFiber in the hook:
   │         └─ New row created → normal execution continues
@@ -202,7 +203,7 @@ fn(ctx) throws Error
   └─ Error propagates to caller (or logged if fire-and-forget)
 ```
 
-No automatic retries. The old API had `maxRetries` with automatic retry loops — in practice, nobody used them, and retry logic is better left to the developer's recovery hook where they have full context about what went wrong.
+No automatic retries during normal execution. The old API had `maxRetries` with automatic retry loops — in practice, nobody used them, and retry logic is better left to the developer's recovery hook where they have full context about what went wrong. If `onFiberRecovered` itself throws, the row is preserved so a later recovery scan can retry the hook.
 
 ### `ctx.stash()` — checkpoint semantics
 

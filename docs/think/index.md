@@ -386,6 +386,35 @@ Passing `workspaceInstance` gives scripts read-only workspace access by default.
 Network access, tools, and workspace writes are opt-in. The default timeout is
 30 seconds.
 
+### Chat Recovery
+
+Think wraps chat turns in recoverable fibers by default. If the Durable Object is evicted mid-stream, Think reconstructs any buffered chunks, persists partial output, and schedules either a continuation of the assistant turn or a retry of the unanswered user turn.
+
+Override `onChatRecovery` when you need provider-specific recovery, such as retrieving a stored OpenAI Responses result instead of issuing a new model call:
+
+```typescript
+import type {
+  ChatRecoveryContext,
+  ChatRecoveryOptions
+} from "@cloudflare/think";
+
+export class MyAgent extends Think<Env> {
+  override chatRecovery = {
+    maxAttempts: 6,
+    terminalMessage: "The assistant was interrupted. Please try again."
+  };
+
+  override async onChatRecovery(
+    ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    console.log("Recovering chat turn", ctx.incidentId, ctx.attempt);
+    return {}; // persist partial output and continue/retry when possible
+  }
+}
+```
+
+The same recovery events are available through `agents/observability` on the `chat` channel. Transcript repairs are emitted on the `transcript` channel.
+
 ## Dynamic Configuration
 
 `configure()` and `getConfig()` persist a JSON-serializable config blob in SQLite. It survives hibernation and restarts. Pass the config shape as a method-level generic for typed call sites:

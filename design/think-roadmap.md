@@ -2,6 +2,8 @@
 
 The implementation plan for `@cloudflare/think` — an opinionated chat agent base class built on Session for conversation storage and the Agents SDK for execution.
 
+> This roadmap is retained as a historical implementation record. All phases are complete, and current recovery behavior is documented in [`docs/think/index.md`](../docs/think/index.md) and [`docs/chat-agents.md#stream-recovery`](../docs/chat-agents.md#stream-recovery).
+
 This document synthesizes four prior analyses:
 
 - [think-sessions.md](./think-sessions.md) — Session integration design (the foundation)
@@ -9,7 +11,7 @@ This document synthesizes four prior analyses:
 - [chat-api.md](./chat-api.md) — API analysis of AIChatAgent + useAgentChat (informs what to avoid)
 - [chat-improvements.md](./chat-improvements.md) — non-breaking improvements + shared code extraction (feeds into Phase 1)
 
-Think hasn't shipped yet. There are no backward compatibility constraints.
+Think has shipped as an experimental package. Treat the sections below as design history rather than current API reference.
 
 ---
 
@@ -147,7 +149,7 @@ See [chat-improvements.md §Shared Code Extraction](./chat-improvements.md#share
 | `configureSession(session)` | pass-through                        | Add context blocks, compaction, search                 |
 | `assembleContext()`         | context blocks + truncated history  | Full control over what's sent to the LLM               |
 | `onChatMessage(options?)`   | `streamText` with assembled context | Full control over inference                            |
-| `onChatError(error)`        | passthrough                         | Customize error handling                               |
+| `onChatError(error, ctx)`   | passthrough                         | Customize error handling                               |
 
 ---
 

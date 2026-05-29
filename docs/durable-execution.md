@@ -347,7 +347,7 @@ runFiber("work", fn)
   ├─ For each orphaned row:
   │    ├─ Parse snapshot from JSON
   │    ├─ Call onFiberRecovered(ctx)
-  │    └─ DELETE the row
+  │    └─ DELETE the row after successful recovery
   └─ If onFiberRecovered calls runFiber() again → new row, normal execution
 ```
 
@@ -460,9 +460,9 @@ class ResearchAgent extends Agent {
 Key points:
 
 - **The original lambda is gone.** On recovery, you only have the `name` and `snapshot`. The lambda cannot be serialized — recovery logic must be in the hook.
-- **The row is deleted after the hook runs.** If you want to continue the work, call `runFiber()` again inside the hook — this creates a new row.
+- **The row is deleted after the hook returns successfully.** If you want to continue the work, call `runFiber()` again inside the hook — this creates a new row.
 - **You control what recovery means.** Retry from the beginning, resume from a checkpoint, skip and notify the user, or do nothing. The framework does not impose a strategy.
-- **If the hook throws, the row is still deleted.** You do not get a second chance at recovery. If your recovery logic can fail, catch errors and handle them (e.g., schedule a retry, log, or re-create the fiber).
+- **If the hook throws, the row is kept.** A later startup or alarm scan will try recovery again, which protects against transient storage or scheduling failures. Catch application-level errors yourself when you want to mark the work terminal instead of retrying.
 
 ### Chat recovery
 

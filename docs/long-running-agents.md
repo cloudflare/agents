@@ -573,7 +573,7 @@ The right recovery strategy depends on the LLM provider:
 
 For a complete multi-provider implementation with full code for each strategy, see the [`forever-chat` example](../experimental/forever-chat/) and the [`forever.md` design doc](../experimental/forever.md).
 
-[Think](./think/index.md) exposes `chatRecovery` as a configuration toggle — the recovery machinery is handled for you without implementing `onChatRecovery` yourself.
+[Think](./think/index.md) enables `chatRecovery` by default. The default path persists partial output and auto-continues or retries the turn when safe, so many apps do not need a custom hook. Override `onChatRecovery` when a provider has a better recovery strategy, or configure `chatRecovery = { maxAttempts, terminalMessage, onExhausted }` to tune the terminal user experience.
 
 If the agent is interrupted before any assistant stream chunks are written, there is no partial assistant message to continue. When the latest persisted message is still the unanswered user message from that turn, chat recovery retries the turn automatically unless `onChatRecovery` returns `{ continue: false }`.
 

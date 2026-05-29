@@ -44,6 +44,7 @@
 - TODO: [AI SDK Integration](./ai-sdk.md) - Using Vercel AI SDK with agents
 - TODO: [TanStack Integration](./tanstack.md) - Using TanStack AI with agents
 - [Chat Agents](./chat-agents.md) - `AIChatAgent` class and `useAgentChat` React hook
+- [Chat & Fiber Recovery](./chat-agents.md#stream-recovery) - Recover LLM turns after Durable Object eviction
 - [Agent Tools](./agent-tools.md) - Run chat-capable sub-agents as tools with streaming child timelines
 - [Server-Driven Messages](./server-driven-messages.md) - Autonomous agent workflows: scheduled follow-ups, queue processing, webhooks, chained reasoning
 - TODO: [Using AI Models](./using-ai-models.md) - OpenAI, Anthropic, Workers AI, and other providers
@@ -52,7 +53,7 @@
 - [Workspace (Experimental)](./workspace.md) - Durable virtual filesystem backed by SQLite + R2
 - [Codemode (Experimental)](./codemode.md) - LLM-generated executable code for tool orchestration
 - [Client Tools Continuation](./client-tools-continuation.md) - Handling tool calls across client/server
-- [Resumable Streaming](./resumable-streaming.md) - Automatic stream resumption on disconnect
+- [Resumable Streaming](./resumable-streaming.md) - Automatic stream resumption on client disconnect
 
 ## Think (Experimental)
 

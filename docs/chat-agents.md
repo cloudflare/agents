@@ -600,6 +600,8 @@ export class ChatAgent extends AIChatAgent {
 
 When enabled, every `onChatMessage` call runs inside a fiber. If the agent is evicted mid-stream, the fiber row survives in SQLite. On the next activation, the framework detects the interrupted fiber, reconstructs the partial response from buffered stream chunks, and calls `onChatRecovery`.
 
+`AIChatAgent` defaults `chatRecovery` to `false` so existing chat agents only get client reconnect/resumable-stream behavior. `Think` defaults it to `true`.
+
 #### `onChatRecovery`
 
 Override to implement provider-specific recovery. The default behavior persists the partial response and schedules a continuation via `continueLastTurn()`.
@@ -665,6 +667,20 @@ override chatRecovery = {
   }
 };
 ```
+
+Monitor recovery through observability:
+
+```ts
+import { subscribe } from "agents/observability";
+
+const unsubscribe = subscribe("chat", (event) => {
+  if (event.type === "chat:recovery:exhausted") {
+    console.error("Chat recovery exhausted", event.payload);
+  }
+});
+```
+
+Transcript repairs, such as removing orphaned tool calls before a provider call, are emitted on the `transcript` channel.
 
 #### Guarding against stale recoveries
 

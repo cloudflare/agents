@@ -13,6 +13,7 @@ A complete chat application built with `@cloudflare/ai-chat` showcasing the reco
 - Tool approval with `needsApproval` (calculation with amount threshold)
 - `pruneMessages()` for managing LLM context in long conversations
 - `maxPersistedMessages` for storage management
+- client resumable streaming on reconnect; enable `chatRecovery` separately for Durable Object eviction recovery
 
 **Client (`src/client.tsx`):**
 

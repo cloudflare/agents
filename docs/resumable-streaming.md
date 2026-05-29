@@ -2,6 +2,8 @@
 
 The `AIChatAgent` class provides **automatic resumable streaming** out of the box. When a client disconnects and reconnects during an active stream, the response automatically resumes from where it left off.
 
+This is client reconnect recovery, not Durable Object eviction recovery. If the Worker process or Durable Object is evicted while the model call is in flight, enable `chatRecovery` so the turn runs inside a recoverable fiber. `Think` enables `chatRecovery` by default; plain `AIChatAgent` subclasses opt in with `override chatRecovery = true`.
+
 ## How It Works
 
 When you use `AIChatAgent` with `useAgentChat`:

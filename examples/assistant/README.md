@@ -39,7 +39,7 @@ the sub-agent routing primitive from `agents`.
 - **Tool approval** — `calculate` requires user approval for large numbers
 - **MCP integration** — connect external tool servers; tools appear in every chat automatically (shared at the directory level)
 - **Lifecycle hooks** — `beforeTurn`, `beforeToolCall`, `afterToolCall`, `onStepFinish`, `onChatResponse`
-- **Durable chat recovery** — `chatRecovery` wraps turns in fibers for crash recovery
+- **Durable chat recovery** — Think's default `chatRecovery` wraps turns in fibers for eviction recovery, with bounded retry/exhaustion behavior
 - **Parent-owned scheduled work** — daily summary scheduled from the directory (facets can't own schedules), fans out to the most recently active chat
 - **Regeneration with branch navigation** — v1/v2/v3 response versions via `getBranches`
 - **Stream resumption** — page refresh replays the active stream (built into Think)
@@ -78,6 +78,11 @@ npm start
 
 Open the app, click **Sign in with GitHub**, approve the OAuth flow, and you
 will land in the Think assistant scoped to your GitHub login.
+
+To manually exercise client stream resumption, ask for a long response and
+refresh the page mid-stream. To exercise Durable Object eviction recovery,
+compare this app with `experimental/forever-chat`, which includes dedicated
+provider-specific `onChatRecovery` examples and restart testing notes.
 
 ## Architecture
 

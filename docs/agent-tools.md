@@ -212,3 +212,27 @@ await this.clearAgentToolRuns({ olderThan: Date.now() - 7 * 24 * 60 * 60_000 });
 
 If a retained run is still `starting` or `running`, cleanup cancels the child
 before deleting its facet.
+
+## Interrupted runs and recovery
+
+Agent-tool runs are retained in the parent. If the parent restarts while child
+runs are still marked `starting` or `running`, startup recovery reconciles those
+rows against the child agent. Completed children are finalized in the parent;
+stale children that are still running, cannot be inspected, or exceed the
+recovery deadline are marked `interrupted` so the parent tool call returns a
+structured failure instead of hanging indefinitely.
+
+Monitor parent reconciliation through the `agentTool` observability channel:
+
+```ts
+import { subscribe } from "agents/observability";
+
+const unsubscribe = subscribe("agentTool", (event) => {
+  if (event.type === "agent_tool:recovery:row") {
+    console.log("Recovered agent-tool row", event.payload);
+  }
+});
+```
+
+Raw `diagnostics_channel` subscribers should use the channel name
+`agents:agent_tool`.
