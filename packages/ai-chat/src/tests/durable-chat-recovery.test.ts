@@ -42,6 +42,7 @@ interface ChatRecoveryTestStub {
   getRunFiberCountForTest(): Promise<number>;
   runAlarmForTest(): Promise<void>;
   setSimulateSupersededIsolateForTest(value: boolean): Promise<void>;
+  getSupersededThrowsForTest(): Promise<number>;
   setChatRecoveryConfigForTest(config: {
     maxAttempts?: number;
     terminalMessage?: string;
@@ -306,35 +307,40 @@ describe("onChatRecovery", () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
 
+    // Simulate a SUPERSEDED isolate before recovery schedules anything, so
+    // every run of the continuation throws the catchable "Durable Object reset
+    // because its code was updated." — no race with the real DO alarm.
+    await agentStub.setSimulateSupersededIsolateForTest(true);
+
     // Interrupted chat turn: recovery schedules the continuation and, because
     // recovery is "handled", deletes the orphaned fiber-ledger row. From here
     // the only thing that can resume the turn is the scheduled continuation.
     await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-stale");
     await agentStub.triggerFiberRecovery();
-    expect(
-      await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
-    ).toBe(1);
     expect(await agentStub.getRunFiberCountForTest()).toBe(0);
 
-    // The continuation alarm fires on a SUPERSEDED isolate: the first storage
-    // op throws the catchable "Durable Object reset because its code was
-    // updated." for the whole invocation. `_executeScheduleCallback` burns its
-    // in-process retries, swallows the error, and `alarm()` deletes the
-    // one-shot row.
-    await agentStub.setSimulateSupersededIsolateForTest(true);
+    // Fire the continuation alarm on the superseded isolate. The first storage
+    // op throws for the whole invocation; `_executeScheduleCallback` would burn
+    // its in-process retries and (pre-fix) swallow the error, letting `alarm()`
+    // delete the one-shot row.
     await agentStub.runAlarmForTest();
-    await agentStub.setSimulateSupersededIsolateForTest(false);
+    expect(await agentStub.getSupersededThrowsForTest()).toBeGreaterThanOrEqual(
+      1
+    );
 
     // A deploy-class transient must not destroy recovery: the turn should still
     // be resumable afterward — either the one-shot continuation row survives for
     // a fresh-code re-run, or an orphaned fiber remains for the boot scan. On
-    // current main BOTH are gone, so this assertion fails — that is the bug
-    // (the turn is permanently abandoned; #1615's progress logic never re-runs).
+    // current main BOTH are gone, so this fails — that is the bug (the turn is
+    // permanently abandoned; #1615's progress logic never runs again).
     const pendingContinuations = await agentStub.getScheduleCountForCallback(
       "_chatRecoveryContinue"
     );
     const pendingFibers = await agentStub.getRunFiberCountForTest();
     expect(pendingContinuations + pendingFibers).toBeGreaterThanOrEqual(1);
+
+    // Stop simulating so any platform-retried alarm can complete cleanly.
+    await agentStub.setSimulateSupersededIsolateForTest(false);
   });
 
   it("shares one attempt budget when an incident flips between retry and continue", async () => {

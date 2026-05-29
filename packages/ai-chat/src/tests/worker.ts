@@ -1528,10 +1528,13 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
    * invocation. Used to reproduce the scheduled-callback abandonment path that
    * #1615's `_beginChatRecoveryIncident` progress logic cannot reach.
    */
+  _supersededThrows = 0;
+
   override async _chatRecoveryContinue(
     ...args: Parameters<AIChatAgent<Env>["_chatRecoveryContinue"]>
   ): Promise<void> {
     if (this._simulateSupersededIsolate) {
+      this._supersededThrows += 1;
       throw new Error("Durable Object reset because its code was updated.");
     }
     return super._chatRecoveryContinue(...args);
@@ -1539,6 +1542,10 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   setSimulateSupersededIsolateForTest(value: boolean): void {
     this._simulateSupersededIsolate = value;
+  }
+
+  getSupersededThrowsForTest(): number {
+    return this._supersededThrows;
   }
 
   override async onChatRecovery(
@@ -1778,9 +1785,18 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return rows[0]?.count ?? 0;
   }
 
-  /** Run the real DO alarm handler (schedule dispatch + one-shot row delete). */
+  /**
+   * Run the real DO alarm handler (schedule dispatch + one-shot row delete).
+   * Swallows a thrown alarm the way the platform does — workerd absorbs a
+   * rejected alarm and retries it later under the at-least-once guarantee — so
+   * tests can inspect the post-alarm state.
+   */
   async runAlarmForTest(): Promise<void> {
-    await (this as unknown as { alarm(): Promise<void> }).alarm();
+    try {
+      await (this as unknown as { alarm(): Promise<void> }).alarm();
+    } catch {
+      // Platform absorbs and retries; intentionally swallowed for inspection.
+    }
   }
 
   async waitForIdleForTest(): Promise<void> {
