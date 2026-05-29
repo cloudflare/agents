@@ -5,18 +5,19 @@ distinct issues found while hardening chat recovery against deploy churn.
 
 ## Status at a glance
 
-| # | Issue | Layer | Status |
-|---|-------|-------|--------|
-| 1 | Recovery attempt budget burned progress-blindly under deploys | `think` / `ai-chat` `_beginChatRecoveryIncident` | FIXED — PR #1615 (merged) |
-| 2 | Recovery one-shot alarm swallowed + deleted on a superseded-isolate reset | `agents` `_executeScheduleCallback` | FIXED — PR #1617 (open) |
-| 3 | Continuation replays a trailing **partial assistant** message (prefill); modern models reject it | `think` `continueLastTurn` → `_runInferenceLoop` | FIXED — `ensureValidContinueCheckpoint` (this branch) |
-| 4 | `interrupted` is a silent state — no client signal unless recovery `exhausted` | `think` `_chatRecoveryContinue` skip/fail paths | CONFIRMED in code — fix TBD |
+| #   | Issue                                                                                            | Layer                                            | Status                                                |
+| --- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------ | ----------------------------------------------------- |
+| 1   | Recovery attempt budget burned progress-blindly under deploys                                    | `think` / `ai-chat` `_beginChatRecoveryIncident` | FIXED — PR #1615 (merged)                             |
+| 2   | Recovery one-shot alarm swallowed + deleted on a superseded-isolate reset                        | `agents` `_executeScheduleCallback`              | FIXED — PR #1617 (open)                               |
+| 3   | Continuation replays a trailing **partial assistant** message (prefill); modern models reject it | `think` `continueLastTurn` → `_runInferenceLoop` | FIXED — `ensureValidContinueCheckpoint` (this branch) |
+| 4   | `interrupted` is a silent state — no client signal unless recovery `exhausted`                   | `think` `_chatRecoveryContinue` skip/fail paths  | CONFIRMED in code — fix TBD                           |
 
 ---
 
 ## Issue 3 — assistant-prefill rejection on continuation (REPRODUCED)
 
 ### Mechanism (code)
+
 - `continueLastTurn` only runs when `session.getLatestLeaf()` is an **assistant**
   message (`packages/think/src/think.ts` ~5137). After a deploy interrupts a turn
   mid-stream, the last leaf is a **partial assistant** message.
@@ -34,11 +35,13 @@ distinct issues found while hardening chat recovery against deploy churn.
   **assistant text** turn (the redeploy-interruption case).
 
 ### Live reproduction (via the harness `/probe` routes)
+
 Added to `src/server.ts`: `/probe/trailing-user` (control) and
 `/probe/trailing-assistant` (prefill), with `?provider=workers-ai|anthropic&model=...`.
 Run with `npm start`, then curl. `maxRetries: 0` so a 400 surfaces immediately.
 
 Results:
+
 - **Kimi 2.6 (`@cf/moonshotai/kimi-k2.6`, Workers AI): does NOT reproduce.**
   - trailing-user → `ok` ("Hello, it's a pleasure to connect with you!")
   - trailing-assistant → `ok` ("Hello, it's wonderful to meet you!")
@@ -49,12 +52,14 @@ Results:
     `"This model does not support assistant message prefill. The conversation must end with a user message."`
 - Confirmed by Anthropic docs: prefilling the final assistant message is
   **deprecated and returns 400 on Claude 4.6+** (Opus 4.6/4.7, Sonnet 4.6).
-  Anthropic's migration guidance: *"For continuations, move the desired
-  continuation text into a user message instead of an assistant message."*
+  Anthropic's migration guidance: _"For continuations, move the desired
+  continuation text into a user message instead of an assistant message."_
 
 ### Proposed fix (think `continueLastTurn` / `_runInferenceLoop`)
+
 When a continuation would otherwise send a transcript ending in a partial
 assistant message, make it provider-safe. Options:
+
 1. **(lean) Append a minimal "continue" user message** so the request ends in a
    user turn — cross-provider; matches Anthropic's own guidance. Keep the nudge
    out of the persisted transcript.
@@ -68,6 +73,7 @@ assistant message, make it provider-safe. Options:
 Recommendation: **(1)**, optionally gated by capability detection for (2).
 
 ### Fix shipped (option 1)
+
 `think.ts` `ensureValidContinueCheckpoint(messages)` appends an ephemeral user
 "continue" checkpoint when a model request would otherwise end in an assistant
 message; applied to `finalMessages` in `_runInferenceLoop` (after `beforeTurn`,
@@ -81,10 +87,10 @@ assistant prompt; fails without the fix, passes with it. Full think suite: 432.
 ## Issue 4 — silent `interrupted` state (CONFIRMED in code)
 
 - Recovery incident states (`detected/scheduled/attempting/completed/skipped/
-  exhausted/failed`) are **observability only**; clients render chat messages +
+exhausted/failed`) are **observability only**; clients render chat messages +
   `MSG_CHAT_RESPONSE` broadcasts.
 - Only `_exhaustChatRecovery` broadcasts a terminal `MSG_CHAT_RESPONSE
-  { done: true, error: true }` (think.ts ~5771-5776) that a client banners on.
+{ done: true, error: true }` (think.ts ~5771-5776) that a client banners on.
 - `_chatRecoveryContinue` **skip** paths (e.g. `conversation_changed`, think.ts
   ~7205-7219) and several **fail** paths just update the incident + `return` —
   **no client broadcast**. So a turn whose recovery is skipped (e.g. a concurrent
@@ -94,6 +100,7 @@ assistant prompt; fails without the fix, passes with it. Full think suite: 432.
   shows nothing; the WS reconnect storm also lost the stall watchdog's turn.
 
 ### The silent paths (think.ts `_chatRecoveryContinue` / `_chatRecoveryRetry`)
+
 - `skipped`: `conversation_changed`, `no_unanswered_user_message`,
   `stream_terminal`, `not_recoverable`, `submission_not_running`,
   `continue_disabled` → update incident + `return`. No client broadcast.
@@ -106,6 +113,7 @@ assistant prompt; fails without the fix, passes with it. Full think suite: 432.
   customer's SPA banners on.
 
 ### Design options
+
 - **A. Surface terminal `failed` recovery** like exhaustion: when a continuation
   fails and will not be retried, broadcast the terminal `MSG_CHAT_RESPONSE`
   (error) so the client banners instead of freezing. Safe — a dead turn should
@@ -121,15 +129,16 @@ assistant prompt; fails without the fix, passes with it. Full think suite: 432.
 
 Recommendation: **A + C** (surface terminal failures, keep benign skips silent),
 optionally **B** for the best UX. NOTE: the customer's specific frozen case was a
-`conversation_changed` *skip* — under C that stays silent because a newer turn
+`conversation_changed` _skip_ — under C that stays silent because a newer turn
 should own the UI; if their newer turn also didn't render, part of that is the
 SPA's WS-reconnect/stall-watchdog, not the SDK. Needs a UX decision before
 implementing, since it changes client-facing behavior.
 
 ### KEY INSIGHT (re-scopes Issue 4): it's a HYDRATION gap, not a missing broadcast
+
 `_streamResult`'s catch ALREADY broadcasts a terminal
 `MSG_CHAT_RESPONSE { error: true }` when a continuation stream throws
-(think.ts ~6033). So a connected client *does* get an error. The real problem:
+(think.ts ~6033). So a connected client _does_ get an error. The real problem:
 that broadcast is **transient**. During the WS reconnect storm the client is
 disconnected when it fires; on reconnect, `onConnect` (think.ts ~5355) only
 re-sends `MSG_CHAT_MESSAGES` (current messages) — there is **no durable record
@@ -151,6 +160,7 @@ as its own design/PR rather than folded into the Issue 3 branch.
 ---
 
 ## Harness additions (this branch, uncommitted)
+
 - `wrangler.jsonc`: `ai` binding (`remote: true`) + `/probe/*` in `run_worker_first`.
 - `src/server.ts`: `probeTrailingRole()` + `/probe/trailing-{user,assistant}` routes
   (Workers AI default; `?provider=anthropic&model=claude-sonnet-4-6`).
@@ -158,6 +168,7 @@ as its own design/PR rather than folded into the Issue 3 branch.
 - `.dev.vars.example` (ANTHROPIC_API_KEY); `.dev.vars` is gitignored.
 
 ### How to re-run the repro
+
 ```
 cd examples/deploy-churn
 # put ANTHROPIC_API_KEY in .dev.vars
@@ -168,6 +179,7 @@ curl "http://localhost:5173/probe/trailing-assistant?provider=anthropic&model=cl
 ```
 
 ## Notes
+
 - The vite dev server + remote-binding tunnel appears to destabilize the editor
   (crashed 3×). Prefer stopping it promptly; the probe call itself is ~0.4s.
 - Issues 1 & 2 are already fixed/PR'd. Issues 3 & 4 still need fixes + (ideally)
