@@ -462,7 +462,7 @@ Key points:
 - **The original lambda is gone.** On recovery, you only have the `name` and `snapshot`. The lambda cannot be serialized — recovery logic must be in the hook.
 - **The row is deleted after the hook returns successfully.** If you want to continue the work, call `runFiber()` again inside the hook — this creates a new row.
 - **You control what recovery means.** Retry from the beginning, resume from a checkpoint, skip and notify the user, or do nothing. The framework does not impose a strategy.
-- **If the hook throws, the row is kept.** A later startup or alarm scan will try recovery again, which protects against transient storage or scheduling failures. Catch application-level errors yourself when you want to mark the work terminal instead of retrying.
+- **If the hook throws, the row is kept (up to a bound).** A later startup or alarm scan will try recovery again, which protects against transient storage or scheduling failures. Catch application-level errors yourself when you want to mark the work terminal instead of retrying — a hook that always throws is retried on every scan until the row exceeds `fiberRecoveryMaxAgeMs` (default 24h), after which it is discarded with a `fiber:recovery:skipped` (`reason: "max_age_exceeded"`) event.
 
 ### Chat recovery
 
