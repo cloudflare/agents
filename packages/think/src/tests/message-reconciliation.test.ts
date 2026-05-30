@@ -345,4 +345,49 @@ describe("Think — message reconciliation on incoming submits", () => {
 
     ws.close(1000);
   });
+
+  it("defaults a missing tool input to an empty object so the provider does not 400", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const ws = await connectWS(room);
+
+    await agent.setTextOnlyMode(true);
+
+    const userA = makeUserMessage("user-a", "create a cat");
+    // A settled tool call whose `input` was lost (provider-executed tool, a
+    // racey persist, etc.). Anthropic rejects a tool_use block with no input,
+    // so repair must default it to `{}` rather than leave it unrepaired.
+    const assistantMissingInput: UIMessage = {
+      id: "assistant-missing-input",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-generateImage",
+          toolCallId: TOOL_CALL_ID,
+          state: "output-available",
+          output: { url: "https://example.test/cat.png" }
+        } as unknown as UIMessage["parts"][number]
+      ]
+    };
+    await agent.persistToolCallMessage([userA, assistantMissingInput]);
+
+    const responsePromise = waitForChatResponse(ws);
+    sendChatRequest(ws, [makeUserMessage("user-b", "continue")]);
+    const response = await responsePromise;
+
+    expect(response.done).toBe(true);
+    expect(response.error).toBeUndefined();
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const repaired = messages.find(
+      (message) => message.id === assistantMissingInput.id
+    );
+    expect(repaired).toBeDefined();
+    const toolPart = repaired!.parts.find(
+      (part) => (part as Record<string, unknown>).toolCallId === TOOL_CALL_ID
+    ) as Record<string, unknown> | undefined;
+    expect(toolPart?.input).toEqual({});
+
+    ws.close(1000);
+  });
 });

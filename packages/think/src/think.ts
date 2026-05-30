@@ -1458,6 +1458,34 @@ export class Think<
     return (await this.session.getHistory()) as UIMessage[];
   }
 
+  /**
+   * Normalize a tool part's `input` into something the provider will accept.
+   *
+   * Two malformed shapes 400 modern providers (and persist forever once
+   * written): a stringified-JSON `input` (e.g. `'{"prompt":"a cat"}'` instead
+   * of the object) and a missing/`null` `input` on a settled or interrupted
+   * tool call (Anthropic rejects a `tool_use` block whose `input` is absent).
+   * We parse the former and default the latter to an empty object so the
+   * tool-call/tool-result pair stays valid. Any other value is left untouched.
+   */
+  private _normalizeToolInput(record: Record<string, unknown>): {
+    input: unknown;
+    changed: boolean;
+  } {
+    const raw = "input" in record ? record.input : undefined;
+    if (typeof raw === "string" && raw.trim().startsWith("{")) {
+      try {
+        return { input: JSON.parse(raw) as unknown, changed: true };
+      } catch {
+        return { input: raw, changed: false };
+      }
+    }
+    if (raw === undefined || raw === null) {
+      return { input: {}, changed: true };
+    }
+    return { input: raw, changed: false };
+  }
+
   private _repairToolTranscriptParts(messages: UIMessage[]): {
     messages: UIMessage[];
     removedToolCalls: number;
@@ -1496,49 +1524,30 @@ export class Think<
           // (broadcast) transcript and lets the model silently re-run it; an
           // errored result keeps the user-visible record AND gives conversion a
           // tool-result so the provider doesn't 400 (AI_MissingToolResultsError).
-          const normalizedInput =
-            "input" in record &&
-            typeof record.input === "string" &&
-            record.input.trim().startsWith("{")
-              ? (() => {
-                  try {
-                    return JSON.parse(record.input as string) as unknown;
-                  } catch {
-                    return record.input;
-                  }
-                })()
-              : record.input;
+          const normalized = this._normalizeToolInput(record);
           parts.push({
             ...part,
-            ...(normalizedInput !== undefined
-              ? { input: normalizedInput }
-              : {}),
+            input: normalized.input,
             state: "output-error",
             errorText:
               "The tool call was interrupted before a result was recorded."
           } as UIMessage["parts"][number]);
+          if (normalized.changed) normalizedInputs++;
           removedToolCalls++;
           messageChanged = true;
           toolCallIds.push(toolCallId);
           continue;
         }
 
-        if (
-          "input" in record &&
-          typeof record.input === "string" &&
-          record.input.trim().startsWith("{")
-        ) {
-          try {
-            parts.push({
-              ...part,
-              input: JSON.parse(record.input) as unknown
-            } as UIMessage["parts"][number]);
-            normalizedInputs++;
-            messageChanged = true;
-            continue;
-          } catch {
-            // Keep the original input if it is not valid JSON.
-          }
+        const normalized = this._normalizeToolInput(record);
+        if (normalized.changed) {
+          parts.push({
+            ...part,
+            input: normalized.input
+          } as UIMessage["parts"][number]);
+          normalizedInputs++;
+          messageChanged = true;
+          continue;
         }
 
         parts.push(part);
