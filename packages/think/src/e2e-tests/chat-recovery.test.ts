@@ -124,7 +124,7 @@ function startWrangler(): ChildProcess {
   return child;
 }
 
-async function waitForReady(maxAttempts = 30, delayMs = 1000): Promise<void> {
+async function waitForReady(maxAttempts = 60, delayMs = 1000): Promise<void> {
   for (let i = 0; i < maxAttempts; i++) {
     try {
       const res = await fetch(`${AGENT_URL}/`);

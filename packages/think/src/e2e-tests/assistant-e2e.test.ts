@@ -106,7 +106,7 @@ function startWrangler(): ChildProcess {
   return child;
 }
 
-async function waitForReady(maxAttempts = 30, delayMs = 1000): Promise<void> {
+async function waitForReady(maxAttempts = 60, delayMs = 1000): Promise<void> {
   for (let i = 0; i < maxAttempts; i++) {
     try {
       const res = await fetch(`${BASE_URL}/`);
@@ -126,9 +126,15 @@ function killProcess(child: ChildProcess): Promise<void> {
       resolve();
       return;
     }
-    child.on("exit", () => resolve());
+    // Clear the fallback timer once the child exits — an uncleared timer keeps
+    // the vitest worker's event loop alive and can push teardown past the pool's
+    // termination window ("Timeout terminating forks worker").
+    const fallback = setTimeout(resolve, 3000);
+    child.on("exit", () => {
+      clearTimeout(fallback);
+      resolve();
+    });
     killProcessTree(child.pid);
-    setTimeout(resolve, 3000);
   });
 }
 
