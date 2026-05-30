@@ -13,3 +13,5 @@ It is now flipped to `state: "output-error"` with an explanatory message, so:
 - the provider still receives a valid tool-result (no `AI_MissingToolResultsError`).
 
 Stringified tool `input`s are normalized in the same pass.
+
+As a last-line backstop, `convertToModelMessages` is now called with `ignoreIncompleteToolCalls: true`, so any incomplete tool call that still slips past the repair (compaction edges, `addToolOutput` races, unrecognized part shapes) is dropped at conversion rather than 400ing the provider.

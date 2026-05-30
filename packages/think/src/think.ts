@@ -2477,7 +2477,15 @@ export class Think<
 
     const history = await this._repairTranscriptForProvider(this.messages);
     const truncated = truncateOlderMessages(history) as UIMessage[];
-    const messages = await convertToModelMessages(truncated, { tools });
+    // `_repairTranscriptForProvider` above already heals orphan tool calls
+    // (flipping them to errored results, preserving the record). This is the
+    // last-line backstop: if any incomplete tool call still slips through
+    // (compaction edge, addToolOutput race, an unrecognized part shape), drop it
+    // here rather than letting the provider 400 with AI_MissingToolResultsError.
+    const messages = await convertToModelMessages(truncated, {
+      tools,
+      ignoreIncompleteToolCalls: true
+    });
 
     if (messages.length === 0) {
       throw new Error(
