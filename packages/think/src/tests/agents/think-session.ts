@@ -3823,7 +3823,12 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async getScheduledChatRecoveryPayloadForTest(
     callback = "_chatRecoveryContinue"
-  ): Promise<Record<string, unknown> | null> {
+    // Concrete, serializable return shape: a `Record<string, unknown>` collapses
+    // to `never` across the Durable Object RPC stub boundary (Workers RPC drops
+    // `unknown`-valued records as non-serializable), which made callers see
+    // `payload` as `never`. The scheduled payload only needs its recovery-link
+    // fields exposed for assertions.
+  ): Promise<{ recoveredRequestId?: string; requestId?: string } | null> {
     const rows = this.sql<{ payload: string }>`
       SELECT payload FROM cf_agents_schedules
       WHERE callback = ${callback}
@@ -3831,7 +3836,10 @@ export class ThinkRecoveryTestAgent extends Think {
       LIMIT 1
     `;
     return rows[0]
-      ? (JSON.parse(rows[0].payload) as Record<string, unknown>)
+      ? (JSON.parse(rows[0].payload) as {
+          recoveredRequestId?: string;
+          requestId?: string;
+        })
       : null;
   }
 }
