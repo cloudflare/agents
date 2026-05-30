@@ -5797,6 +5797,11 @@ export class Think<
         messagesPersisted,
         error: errorMessage
       });
+      // Persist the terminal error before broadcasting it: the broadcast is
+      // transient, so a client disconnected at this moment (a pre-stream
+      // failure like message reconciliation) would otherwise never learn the
+      // turn failed and stay frozen on reconnect (see `_buildIdleConnectMessages`).
+      await this._recordTerminalChatStatus("error", requestId, errorMessage);
       this._broadcastChat({
         type: MSG_CHAT_RESPONSE,
         id: requestId,
@@ -6934,10 +6939,27 @@ export class Think<
           "skipped",
           "continue_disabled"
         );
+        const disabledMessage =
+          "Submission was interrupted and chat recovery was disabled.";
         await this._markRecoveredSubmissionInterrupted(
           requestId,
-          "Submission was interrupted and chat recovery was disabled."
+          disabledMessage
         );
+        // Unlike `conversation_changed` (a newer turn owns the UI, so silence
+        // is correct), disabling recovery abandons the turn with no superseding
+        // turn. Surface it like exhaustion so a reconnecting client isn't frozen.
+        await this._recordTerminalChatStatus(
+          "interrupted",
+          requestId,
+          disabledMessage
+        );
+        this._broadcastChat({
+          type: MSG_CHAT_RESPONSE,
+          id: requestId,
+          body: disabledMessage,
+          done: true,
+          error: true
+        });
       } else {
         await this._updateChatRecoveryIncident(
           incident.incidentId,

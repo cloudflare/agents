@@ -2116,6 +2116,30 @@ describe("Think — onChatRecovery", () => {
     expect(afterToolOutputCount).toBeGreaterThan(bufferedTextCount);
   });
 
+  it("replays a pre-stream error to a reconnecting client (hydration)", async () => {
+    const agent = await freshRecoveryAgent("pre-stream-hydration");
+
+    // A turn that fails before streaming starts (e.g. message reconciliation).
+    // The error broadcast is transient — a client disconnected at that moment
+    // misses it, so it must be persisted for replay on reconnect.
+    await agent.simulatePreStreamChatFailureForTest({
+      requestId: "r-prestream",
+      userText: "hello",
+      error: "pre-stream boom"
+    });
+
+    const onConnect = (await agent.getIdleConnectMessagesForTest()) as Array<{
+      id?: string;
+      body?: string;
+      error?: boolean;
+      done?: boolean;
+    }>;
+    const terminal = onConnect.find((m) => m.error === true && m.done === true);
+    expect(terminal).toBeTruthy();
+    expect(terminal?.id).toBe("r-prestream");
+    expect(terminal?.body).toContain("pre-stream boom");
+  });
+
   it("resets the attempt budget when recovery makes forward progress", async () => {
     const agent = await freshRecoveryAgent("recovery-progress-reset");
     await agent.setChatRecoveryConfigForTest({ maxAttempts: 2 });
@@ -2533,6 +2557,39 @@ describe("Think — onChatRecovery", () => {
     await agent.triggerFiberRecovery();
 
     expect(await agent.getTurnCallCount()).toBe(0);
+  });
+
+  it("{ continue: false } surfaces a terminal error on reconnect", async () => {
+    const agent = await freshRecoveryAgent("no-continue-terminal");
+
+    await agent.setRecoveryOverride({ continue: false });
+
+    await agent.insertInterruptedStream("stream-nct", "req-nct", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "a-nct" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Partial" }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-nct");
+
+    await agent.triggerFiberRecovery();
+
+    // Disabling recovery abandons the turn with no superseding turn, so a
+    // reconnecting client must see a terminal error rather than a frozen,
+    // half-streamed turn (unlike a benign `conversation_changed` skip).
+    const onConnect = (await agent.getIdleConnectMessagesForTest()) as Array<{
+      body?: string;
+      error?: boolean;
+      done?: boolean;
+    }>;
+    const terminal = onConnect.find((m) => m.error === true && m.done === true);
+    expect(terminal).toBeTruthy();
+    expect(terminal?.body).toContain("chat recovery was disabled");
   });
 
   it("does not continue a recovered chat fiber whose stream already completed", async () => {

@@ -3186,6 +3186,7 @@ export class ThinkRecoveryTestAgent extends Think {
   private _stashResult: { success: boolean; error?: string } | null = null;
   private _rejectPrefill = false;
   private _lastPromptRole: string | undefined;
+  private _throwBeforeTurnMessage: string | null = null;
 
   override getModel(): LanguageModel {
     if (this._rejectPrefill) {
@@ -3199,6 +3200,12 @@ export class ThinkRecoveryTestAgent extends Think {
   }
 
   override beforeTurn(ctx: TurnContext): void {
+    // Simulate a pre-stream failure (e.g. message reconciliation) that throws
+    // before any stream is produced, so it surfaces in `_handleChatRequest`'s
+    // outer catch rather than the stream-level `_fireResponseHook` path.
+    if (this._throwBeforeTurnMessage) {
+      throw new Error(this._throwBeforeTurnMessage);
+    }
     this._turnCallCount++;
     this._turnBodies.push(ctx.body);
     this._turnClientToolNames.push(Object.keys(ctx.tools));
@@ -3423,6 +3430,42 @@ export class ThinkRecoveryTestAgent extends Think {
       status: result.status,
       ...(result.error !== undefined ? { error: result.error } : {})
     });
+  }
+
+  /**
+   * Drive a real chat request through `_handleChatRequest` that fails before
+   * the stream starts (a `beforeTurn` throw stands in for a message
+   * reconciliation/persist failure). Recovery is disabled so the error reaches
+   * the outer catch instead of being intercepted by the recovery fiber.
+   */
+  async simulatePreStreamChatFailureForTest(input: {
+    requestId: string;
+    userText: string;
+    error: string;
+  }): Promise<void> {
+    this.chatRecovery = false;
+    this._throwBeforeTurnMessage = input.error;
+    const connection = { id: "c-prestream", send() {} };
+    const event = {
+      type: "chat-request" as const,
+      id: input.requestId,
+      init: {
+        method: "POST",
+        body: JSON.stringify({
+          messages: [
+            {
+              id: `u-${input.requestId}`,
+              role: "user",
+              parts: [{ type: "text", text: input.userText }]
+            }
+          ]
+        })
+      }
+    };
+    const self = this as unknown as {
+      _handleChatRequest(c: unknown, e: unknown): Promise<void>;
+    };
+    await self._handleChatRequest(connection, event);
   }
 
   /** What `onConnect` replays to a reconnecting client (no active stream). */

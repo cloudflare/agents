@@ -13,3 +13,11 @@ already flushed recoverable content; this brings the WebSocket path to parity
 via a shared `_storeChunkDurably` helper that flushes immediately on
 `tool-output-available` / `tool-output-error`. Net effect: recovery loses at
 most the single in-flight step, even when multiple evictions hit one turn.
+
+Also closes two remaining "frozen turn" hydration gaps from the terminal-status
+work: a turn that fails before the stream starts (e.g. a message reconciliation
+error in `_handleChatRequest`) now records its terminal status, and a recovery
+skip caused by `onChatRecovery` returning `{ continue: false }` now surfaces a
+terminal error too. Both were previously broadcast (or silent) but not persisted,
+so a client disconnected at that moment stayed frozen on reconnect. Benign skips
+such as `conversation_changed` (a newer turn already owns the UI) remain silent.
