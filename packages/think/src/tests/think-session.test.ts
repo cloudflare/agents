@@ -13,7 +13,8 @@ import type {
   ThinkProgrammaticTestAgent,
   ThinkAsyncHookTestAgent,
   ThinkRecoveryTestAgent,
-  ThinkNonRecoveryTestAgent
+  ThinkNonRecoveryTestAgent,
+  TestChatResult
 } from "./agents/think-session";
 import type { ChatResponseResult, SaveMessagesResult } from "../think";
 
@@ -455,6 +456,33 @@ describe("Think — error handling", () => {
         })
       })
     );
+  });
+
+  it("aborts a stalled stream via the inactivity watchdog instead of hanging forever", async () => {
+    const agent = await freshAgent(`stall-${crypto.randomUUID()}`);
+    const stalled: Array<{ requestId?: string; timeoutMs?: number }> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:stream:stalled") {
+        stalled.push(
+          event.payload as { requestId?: string; timeoutMs?: number }
+        );
+      }
+    });
+
+    let result: TestChatResult;
+    try {
+      // Emit one chunk, then hang forever. Without the watchdog this turn never
+      // resolves (the read loop parks on a promise that never settles); the test
+      // would hit the vitest timeout. With it, the turn ends terminally.
+      result = await agent.testChatWithStall(1, 50);
+    } finally {
+      unsubscribe();
+    }
+
+    expect(result.done).toBe(false);
+    expect(result.error).toContain("stalled");
+    expect(stalled).toHaveLength(1);
+    expect(stalled[0]?.timeoutMs).toBe(50);
   });
 
   it("should recover and continue chatting after error", async () => {

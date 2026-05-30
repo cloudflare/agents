@@ -2080,6 +2080,24 @@ export class Think<
   sendReasoning = true;
 
   /**
+   * Inactivity watchdog for the streaming read loop, in milliseconds.
+   *
+   * If a turn's model stream produces no chunk for this long, the watchdog
+   * aborts the turn and surfaces a terminal stream error instead of letting the
+   * loop park forever on a hung provider/transport (the "infinite spinner"
+   * failure: the stream never throws, so no error and no `done` ever arrives).
+   * A `chat:stream:stalled` observability event is emitted when it fires.
+   *
+   * This measures the gap *between UI-message-stream chunks*, which includes
+   * time spent executing server-side tools (no chunks flow while a tool runs).
+   * Set it comfortably above your slowest expected model time-to-first-token
+   * and your slowest tool execution, or you will abort healthy long turns.
+   *
+   * Default `0` (disabled) — opt in by setting a value (e.g. `120_000`).
+   */
+  chatStreamStallTimeoutMs = 0;
+
+  /**
    * Configure the session. Called once during `onStart`.
    * Override to add context blocks, compaction, search, skills.
    *
@@ -5963,11 +5981,26 @@ export class Think<
     let streamError: string | undefined;
     let pendingRpcError: string | undefined;
 
+    const stallTimeoutMs = this.chatStreamStallTimeoutMs;
     try {
       this._insideInferenceLoop = true;
       const flushState = { chunksSinceFlush: 0, hasFlushedContent: false };
       try {
-        for await (const chunk of result.toUIMessageStream()) {
+        const guardedStream = this._iterateWithStallWatchdog(
+          result.toUIMessageStream(),
+          stallTimeoutMs,
+          () => {
+            this._emit("chat:stream:stalled", {
+              requestId,
+              timeoutMs: stallTimeoutMs
+            });
+            this.abortRequest(
+              requestId,
+              new Error("chat stream stalled: inactivity watchdog fired")
+            );
+          }
+        );
+        for await (const chunk of guardedStream) {
           if (abortSignal?.aborted) {
             aborted = true;
             break;
@@ -6165,6 +6198,61 @@ export class Think<
     }
   }
 
+  /**
+   * Wrap a UI-message stream with an inactivity watchdog. If no chunk arrives
+   * within `timeoutMs`, `onStall` runs (aborting the upstream model stream) and
+   * the iterator throws, so the consumer loop exits with a terminal error
+   * instead of parking forever on a hung provider/transport. `timeoutMs <= 0`
+   * passes the source through untouched.
+   */
+  private async *_iterateWithStallWatchdog<T>(
+    source: AsyncIterable<T>,
+    timeoutMs: number,
+    onStall: () => void
+  ): AsyncGenerator<T> {
+    if (!(timeoutMs > 0)) {
+      yield* source;
+      return;
+    }
+    const iterator = source[Symbol.asyncIterator]();
+    while (true) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let stalled = false;
+      const stall = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          stalled = true;
+          reject(
+            new Error(
+              `Chat stream stalled: no activity for ${timeoutMs}ms; the turn was aborted by the stall watchdog.`
+            )
+          );
+        }, timeoutMs);
+      });
+      const nextPromise = iterator.next();
+      // If the watchdog wins the race we abandon this read; aborting the
+      // upstream stream makes it reject later, so pre-attach a no-op catch to
+      // keep that abandoned rejection from surfacing as an unhandled rejection.
+      nextPromise.catch(() => {});
+      let next: IteratorResult<T>;
+      try {
+        next = await Promise.race([nextPromise, stall]);
+      } catch (err) {
+        // On stall, `onStall` aborts the turn's signal which tears the upstream
+        // model stream down and rejects the abandoned `nextPromise` (already
+        // caught above). We deliberately do NOT call `iterator.return()` here:
+        // cancelling the readable and then aborting makes the AI SDK pipeline
+        // write to an already-cancelled readable ("readable side is no longer
+        // readable"). Letting the abort error the stream is the clean path.
+        if (stalled) onStall();
+        throw err;
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+      if (next.done) return;
+      yield next.value;
+    }
+  }
+
   private async _streamResult(
     requestId: string,
     result: StreamableResult,
@@ -6198,10 +6286,27 @@ export class Think<
     let output: unknown;
     const flushState = { chunksSinceFlush: 0, hasFlushedContent: false };
 
+    const stallTimeoutMs = this.chatStreamStallTimeoutMs;
     try {
       this._insideInferenceLoop = true;
       try {
-        for await (const chunk of result.toUIMessageStream()) {
+        const guardedStream = this._iterateWithStallWatchdog(
+          result.toUIMessageStream(),
+          stallTimeoutMs,
+          () => {
+            this._emit("chat:stream:stalled", {
+              requestId,
+              timeoutMs: stallTimeoutMs
+            });
+            // Tear down the upstream model stream so a hung provider/transport
+            // is released; the watchdog's throw drives the terminal error below.
+            this.abortRequest(
+              requestId,
+              new Error("chat stream stalled: inactivity watchdog fired")
+            );
+          }
+        );
+        for await (const chunk of guardedStream) {
           if (abortSignal?.aborted) {
             streamAborted = true;
             break;

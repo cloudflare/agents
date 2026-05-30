@@ -231,6 +231,14 @@ export type AgentObservabilityEvent =
       }
     >
   | BaseEvent<
+      "chat:stream:stalled",
+      {
+        requestId: string;
+        /** Inactivity window that elapsed with no stream chunk, in ms. */
+        timeoutMs: number;
+      }
+    >
+  | BaseEvent<
       "agent_tool:recovery:begin",
       { runCount: number; totalTimeoutMs?: number }
     >

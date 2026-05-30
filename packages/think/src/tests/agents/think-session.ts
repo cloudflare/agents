@@ -486,6 +486,7 @@ export class ThinkTestAgent extends Think {
     message: string;
   } | null = null;
   private _stripTextResponseForTest = false;
+  private _stallAfterChunks: number | null = null;
   private _agentToolOutputForTest = new Map<string, unknown>();
   private _responseLog: ChatResponseResult[] = [];
 
@@ -695,10 +696,16 @@ export class ThinkTestAgent extends Think {
   protected override _transformInferenceResult(
     result: StreamableResult
   ): StreamableResult {
-    if (!this._errorConfig && !this._stripTextResponseForTest) return result;
+    if (
+      !this._errorConfig &&
+      !this._stripTextResponseForTest &&
+      this._stallAfterChunks == null
+    )
+      return result;
 
     const config = this._errorConfig;
     const stripText = this._stripTextResponseForTest;
+    const stallAfter = this._stallAfterChunks;
 
     return {
       toUIMessageStream(options?: { sendReasoning?: boolean }) {
@@ -713,6 +720,11 @@ export class ThinkTestAgent extends Think {
           [Symbol.asyncIterator]() {
             return {
               async next() {
+                // Simulate a parked/hung provider: emit `stallAfter` chunks,
+                // then never resolve. The stall watchdog must abort the turn.
+                if (stallAfter != null && chunkCount >= stallAfter) {
+                  return new Promise<IteratorResult<unknown>>(() => {});
+                }
                 while (true) {
                   if (shouldThrow && config) {
                     await reader.cancel();
@@ -888,6 +900,25 @@ export class ThinkTestAgent extends Think {
       return await this.testChat("trigger error");
     } finally {
       this._errorConfig = null;
+    }
+  }
+
+  /**
+   * Emit `afterChunks` chunks then hang the stream forever. With
+   * `chatStreamStallTimeoutMs` set, the inactivity watchdog should abort the
+   * turn and surface a terminal stream error instead of parking indefinitely.
+   */
+  async testChatWithStall(
+    afterChunks: number,
+    timeoutMs: number
+  ): Promise<TestChatResult> {
+    this._stallAfterChunks = afterChunks;
+    this.chatStreamStallTimeoutMs = timeoutMs;
+    try {
+      return await this.testChat("trigger stall");
+    } finally {
+      this._stallAfterChunks = null;
+      this.chatStreamStallTimeoutMs = 0;
     }
   }
 
