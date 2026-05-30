@@ -1471,7 +1471,6 @@ export class Think<
 
     for (const message of messages) {
       const parts: UIMessage["parts"] = [];
-      let messageRemovedToolCalls = 0;
       let messageChanged = false;
       for (const part of message.parts) {
         const record = part as Record<string, unknown>;
@@ -1492,8 +1491,33 @@ export class Think<
           "result" in record ||
           state === "output-available";
         if (!hasOutput) {
+          // Preserve the interrupted/abandoned tool call as an errored result
+          // instead of deleting it. Deleting makes the call "disappear" from the
+          // (broadcast) transcript and lets the model silently re-run it; an
+          // errored result keeps the user-visible record AND gives conversion a
+          // tool-result so the provider doesn't 400 (AI_MissingToolResultsError).
+          const normalizedInput =
+            "input" in record &&
+            typeof record.input === "string" &&
+            record.input.trim().startsWith("{")
+              ? (() => {
+                  try {
+                    return JSON.parse(record.input as string) as unknown;
+                  } catch {
+                    return record.input;
+                  }
+                })()
+              : record.input;
+          parts.push({
+            ...part,
+            ...(normalizedInput !== undefined
+              ? { input: normalizedInput }
+              : {}),
+            state: "output-error",
+            errorText:
+              "The tool call was interrupted before a result was recorded."
+          } as UIMessage["parts"][number]);
           removedToolCalls++;
-          messageRemovedToolCalls++;
           messageChanged = true;
           toolCallIds.push(toolCallId);
           continue;
@@ -1520,16 +1544,6 @@ export class Think<
         parts.push(part);
       }
 
-      const hasMeaningfulPart = parts.some(
-        (part) => (part as Record<string, unknown>).type !== "step-start"
-      );
-      if (
-        messageRemovedToolCalls > 0 &&
-        (!hasMeaningfulPart || parts.length === 0) &&
-        message.parts.length > 0
-      ) {
-        continue;
-      }
       repaired.push(messageChanged ? { ...message, parts } : message);
     }
 

@@ -284,9 +284,20 @@ describe("Think — message reconciliation on incoming submits", () => {
     expect(lastResponse).toMatchObject({ status: "completed" });
 
     const messages = (await agent.getMessages()) as UIMessage[];
-    expect(messages.map((message) => message.id)).not.toContain(
-      "orphan-assistant"
+    // The interrupted orphan is PRESERVED (not deleted) and flipped to an
+    // errored result: the record survives in the transcript (no "disappearing"
+    // tool call) while the synthesized tool-result keeps the provider from
+    // 400ing (AI_MissingToolResultsError).
+    const orphan = messages.find(
+      (message) => message.id === "orphan-assistant"
     );
+    expect(orphan).toBeDefined();
+    const orphanToolPart = orphan!.parts.find((part) =>
+      (
+        (part as Record<string, unknown>).type as string | undefined
+      )?.startsWith("tool-")
+    ) as Record<string, unknown> | undefined;
+    expect(orphanToolPart?.state).toBe("output-error");
     expect(messages.some((message) => message.id === "user-b")).toBe(true);
 
     ws.close(1000);
