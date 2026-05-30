@@ -3321,6 +3321,49 @@ export class ThinkRecoveryTestAgent extends Think {
     ];
   }
 
+  /**
+   * Stream a couple of text chunks (throttled → buffered) then a settled tool
+   * result, and report how many chunks are durably persisted (raw SQLite, no
+   * flush) before vs. after the tool result. Proves a settled tool result is
+   * flushed immediately rather than left in the in-memory buffer.
+   */
+  async probeToolResultDurabilityForTest(): Promise<{
+    bufferedTextCount: number;
+    afterToolOutputCount: number;
+  }> {
+    const self = this as unknown as {
+      _resumableStream: { start(id: string): string };
+      _storeChunkDurably(
+        streamId: string,
+        chunk: unknown,
+        chunkBody: string,
+        state: { chunksSinceFlush: number; hasFlushedContent: boolean }
+      ): void;
+    };
+    const streamId = self._resumableStream.start("req-tool-durability");
+    const state = { chunksSinceFlush: 0, hasFlushedContent: false };
+    const store = (chunk: Record<string, unknown>): void =>
+      self._storeChunkDurably(streamId, chunk, JSON.stringify(chunk), state);
+    const rawCount = (): number => {
+      const rows = this.sql<{ count: number }>`
+        SELECT COUNT(*) as count FROM cf_ai_chat_stream_chunks
+        WHERE stream_id = ${streamId}
+      `;
+      return rows[0]?.count ?? 0;
+    };
+
+    store({ type: "text-delta", id: "t", delta: "hello " });
+    store({ type: "text-delta", id: "t", delta: "there" });
+    const bufferedTextCount = rawCount();
+    store({
+      type: "tool-output-available",
+      toolCallId: "tc1",
+      output: { ok: true }
+    });
+    const afterToolOutputCount = rawCount();
+    return { bufferedTextCount, afterToolOutputCount };
+  }
+
   /** Seed a session that ends in a PARTIAL assistant message (the state a
    * deploy-interrupted turn leaves behind, which `continueLastTurn` replays). */
   async seedPartialAssistantTurnForTest(): Promise<void> {

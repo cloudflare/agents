@@ -2102,6 +2102,20 @@ describe("Think — onChatRecovery", () => {
     expect(afterOk.some((m) => m.error === true)).toBe(false);
   });
 
+  it("flushes a settled tool result to durable storage immediately", async () => {
+    const agent = await freshRecoveryAgent("tool-result-durability");
+
+    const { bufferedTextCount, afterToolOutputCount } =
+      await agent.probeToolResultDurabilityForTest();
+
+    // Streamed text after the first flush stays buffered in memory (throttled).
+    expect(bufferedTextCount).toBe(1);
+    // A settled tool result forces an immediate flush, so it (and the buffered
+    // text) are durable before the stream completes — surviving an eviction
+    // that would otherwise lose the result and re-run the (non-idempotent) tool.
+    expect(afterToolOutputCount).toBeGreaterThan(bufferedTextCount);
+  });
+
   it("resets the attempt budget when recovery makes forward progress", async () => {
     const agent = await freshRecoveryAgent("recovery-progress-reset");
     await agent.setChatRecoveryConfigForTest({ maxAttempts: 2 });
