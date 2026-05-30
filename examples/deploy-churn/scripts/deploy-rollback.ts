@@ -122,6 +122,9 @@ const PROVIDER = (
 ) as Provider;
 const MODEL = args.get("model") ?? "";
 const STEPS = num("steps", "STEPS", 24);
+// Per-tool in-flight window. Set large (e.g. 12000) so a real ~33s deploy lands
+// DURING a tool execution, exercising the code-update reset mid-tool.
+const STEP_DELAY_MS = num("delay-ms", "STEP_DELAY_MS", 0);
 const DEPLOYS = num("deploys", "DEPLOYS", 3);
 const MID_TURN_DELAY = num("mid-turn-delay", "MID_TURN_DELAY", 6);
 const BETWEEN = num("between", "BETWEEN", 4);
@@ -286,7 +289,8 @@ async function main(): Promise<void> {
   const start = (await http("POST", "/drive/start", {
     provider: PROVIDER,
     steps: String(STEPS),
-    ...(MODEL ? { model: MODEL } : {})
+    ...(MODEL ? { model: MODEL } : {}),
+    ...(STEP_DELAY_MS ? { delayMs: String(STEP_DELAY_MS) } : {})
   })) as { submissionId: string };
   record("turn:started", { submissionId: start.submissionId });
 

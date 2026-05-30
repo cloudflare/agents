@@ -376,9 +376,11 @@ export class DeployChurnAgent extends Think<Env> {
             INSERT INTO harness_ledger (idx, tool_call_id, at)
             VALUES (${index}, ${toolCallId}, ${Date.now()})
           `;
-          // Small delay widens the interruption window between "tool settled"
-          // and "next step", where a lost result would force a re-run.
-          await new Promise((r) => setTimeout(r, 250));
+          // Configurable in-flight window. A large delay (e.g. 12s) makes a real
+          // ~33s `wrangler deploy` reliably land DURING a tool execution, so we
+          // exercise the code-update reset mid-tool (not just between tools).
+          const delayMs = Number(this._harnessConfig("stepDelayMs")) || 250;
+          await new Promise((r) => setTimeout(r, delayMs));
           const total =
             this.sql<{ c: number }>`SELECT COUNT(*) AS c FROM harness_ledger`[0]
               ?.c ?? 0;
@@ -681,7 +683,8 @@ export class DeployChurnAgent extends Think<Env> {
   async startToolRun(
     provider: Provider = "workers-ai",
     steps: number = DEFAULT_TOOL_STEPS,
-    model?: string
+    model?: string,
+    stepDelayMs?: number
   ): Promise<{ submissionId: string; provider: Provider; steps: number }> {
     const stepCount =
       Number.isFinite(steps) && steps > 0
@@ -691,6 +694,9 @@ export class DeployChurnAgent extends Think<Env> {
     this._setHarnessConfig("provider", provider);
     this._setHarnessConfig("steps", String(stepCount));
     if (model) this._setHarnessConfig("model", model);
+    if (stepDelayMs && Number.isFinite(stepDelayMs) && stepDelayMs > 0) {
+      this._setHarnessConfig("stepDelayMs", String(Math.floor(stepDelayMs)));
+    }
     this._ensureLedgerTable();
 
     const submissionId = crypto.randomUUID();
@@ -866,7 +872,11 @@ export default {
             : "workers-ai";
         const steps = Number(url.searchParams.get("steps") ?? "") || undefined;
         const model = url.searchParams.get("model") ?? undefined;
-        return Response.json(await stub.startToolRun(provider, steps, model));
+        const delayMs =
+          Number(url.searchParams.get("delayMs") ?? "") || undefined;
+        return Response.json(
+          await stub.startToolRun(provider, steps, model, delayMs)
+        );
       }
       if (url.pathname === "/drive/status") {
         return Response.json(await stub.getToolStatus());
