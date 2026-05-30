@@ -3480,11 +3480,15 @@ export class AIChatAgent<
       lastAttemptAt: Date.now(),
       reason: "stable_timeout_retry"
     });
+    // Must NOT be idempotent: this runs inside the currently-executing one-shot
+    // schedule row (deleted by `alarm()` only after we return). An idempotent
+    // reschedule would dedup onto that row and be deleted with it — the retry
+    // would never fire. A fresh delayed row survives.
     await this.schedule(
       CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
       callback,
       data ?? {},
-      { idempotent: true }
+      { idempotent: false }
     );
     return true;
   }

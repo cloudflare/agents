@@ -3808,6 +3808,19 @@ export class ThinkRecoveryTestAgent extends Think {
       : null;
   }
 
+  /**
+   * Pre-insert a matching `_chatRecoveryContinue` schedule row to simulate the
+   * not-yet-deleted one-shot row that `alarm()` is executing — so a reschedule
+   * with `idempotent: true` would (incorrectly) dedup onto it.
+   */
+  async preScheduleRecoveryContinueForTest(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await this.schedule(60, "_chatRecoveryContinue", data, {
+      idempotent: false
+    });
+  }
+
   async getScheduledChatRecoveryPayloadForTest(
     callback = "_chatRecoveryContinue"
   ): Promise<Record<string, unknown> | null> {

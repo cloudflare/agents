@@ -80,6 +80,9 @@ interface ChatRecoveryTestStub {
   runChatRecoveryContinueDirectForTest(
     data: Record<string, unknown>
   ): Promise<void>;
+  preScheduleRecoveryContinueForTest(
+    data: Record<string, unknown>
+  ): Promise<void>;
   getIncidentForTest(incidentId: string): Promise<{
     attempt: number;
     status: string;
@@ -862,17 +865,21 @@ describe("onChatRecovery", () => {
       lastAttemptAt: Date.now()
     });
 
-    await agentStub.runChatRecoveryContinueDirectForTest({
+    const continueData = {
       incidentId: "inc-retry",
       originalRequestId: "root-retry",
       targetAssistantId: "a-x"
-    });
+    };
+    // Simulate the executing one-shot row that `alarm()` deletes after return.
+    await agentStub.preScheduleRecoveryContinueForTest(continueData);
 
-    // A transient stable-state timeout reschedules instead of permanently
-    // abandoning the turn, and consumes one attempt.
+    await agentStub.runChatRecoveryContinueDirectForTest(continueData);
+
+    // The reschedule must create a NEW row (2 total), not dedup onto the
+    // executing one — otherwise the retry silently never fires.
     expect(
       await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
-    ).toBe(1);
+    ).toBe(2);
     const incident = await agentStub.getIncidentForTest("inc-retry");
     expect(incident?.attempt).toBe(2);
     expect(incident?.status).toBe("scheduled");

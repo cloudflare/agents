@@ -7070,11 +7070,13 @@ export class Think<
             lastAttemptAt: Date.now(),
             reason: "stable_timeout_retry"
           });
+          // Non-idempotent for the same reason as the continue path: avoid
+          // deduping onto the executing one-shot row that `alarm()` deletes.
           await this.schedule(
             CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
             "_chatRecoveryRetry",
             data ?? {},
-            { idempotent: true }
+            { idempotent: false }
           );
           return;
         }
@@ -7330,11 +7332,16 @@ export class Think<
             lastAttemptAt: Date.now(),
             reason: "stable_timeout_retry"
           });
+          // Must NOT be idempotent: this runs INSIDE the currently-executing
+          // one-shot schedule row (which `alarm()` deletes only after we
+          // return). An idempotent reschedule would dedup onto that row and
+          // then be deleted with it — the retry would silently never fire,
+          // stalling the turn. A fresh delayed row survives the deletion.
           await this.schedule(
             CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
             "_chatRecoveryContinue",
             data ?? {},
-            { idempotent: true }
+            { idempotent: false }
           );
           return;
         }

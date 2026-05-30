@@ -1675,6 +1675,15 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     );
   }
 
+  /** Simulate the not-yet-deleted one-shot row `alarm()` is executing. */
+  async preScheduleRecoveryContinueForTest(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await this.schedule(60, "_chatRecoveryContinue", data, {
+      idempotent: false
+    });
+  }
+
   async getIncidentForTest(incidentId: string): Promise<{
     attempt: number;
     status: string;

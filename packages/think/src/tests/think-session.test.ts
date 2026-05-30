@@ -2727,17 +2727,24 @@ describe("Think — onChatRecovery", () => {
       lastAttemptAt: Date.now()
     });
 
-    await agent.runChatRecoveryContinueForTestWith({
+    const continueData = {
       recoveredRequestId: "root-C",
       targetAssistantId: "a-x",
       incidentId: "inc-C",
       originalRequestId: "root-C"
-    });
+    };
+    // Simulate the currently-executing one-shot schedule row (which `alarm()`
+    // deletes only after the callback returns). A buggy idempotent reschedule
+    // would dedup onto this and then vanish with it, stalling recovery.
+    await agent.preScheduleRecoveryContinueForTest(continueData);
 
-    // Rescheduled (not terminally failed), submission left running, attempt bumped.
+    await agent.runChatRecoveryContinueForTestWith(continueData);
+
+    // The reschedule must create a NEW row (2 total), not dedup onto the
+    // executing one — otherwise the retry silently never fires.
     expect(
       await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
-    ).toBe(1);
+    ).toBe(2);
     expect(await agent.getSubmissionStatusForTest("root-C")).toBe("running");
     const incident = await agent.getIncidentAttemptForTest("inc-C");
     expect(incident?.attempt).toBe(2);
