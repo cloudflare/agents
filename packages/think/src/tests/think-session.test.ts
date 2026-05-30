@@ -2783,6 +2783,68 @@ describe("Think — onChatRecovery", () => {
     expect(incident?.status).toBe("failed");
   });
 
+  it("re-reconstructing the same interrupted stream is idempotent (no duplicate, no loss)", async () => {
+    const agent = await freshRecoveryAgent(`dup-${crypto.randomUUID()}`);
+    // continue:false isolates the orphan-persist behavior from continuation.
+    await agent.setRecoveryOverride({ continue: false });
+    await agent.persistTestMessage({
+      id: "u-dup",
+      role: "user",
+      parts: [{ type: "text", text: "do it" }]
+    });
+    const snapshot = {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: "req-dup",
+        continuation: false,
+        latestMessageId: "a-dup",
+        latestMessageRole: "assistant",
+        latestUserMessageId: "u-dup",
+        startedAt: Date.now()
+      },
+      user: null
+    };
+    const chunks = [
+      { body: JSON.stringify({ type: "start", messageId: "a-dup" }), index: 0 },
+      { body: JSON.stringify({ type: "text-start", id: "t" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", id: "t", delta: "Partial" }),
+        index: 2
+      }
+    ];
+
+    await agent.insertInterruptedStream(
+      "stream-dup",
+      "req-dup",
+      chunks,
+      "error"
+    );
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-dup",
+      snapshot
+    );
+    await agent.triggerFiberRecovery();
+
+    const afterFirst = (await agent.getStoredMessages()) as UIMessage[];
+    expect(afterFirst.filter((m) => m.role === "assistant")).toHaveLength(1);
+
+    // Simulate a SECOND eviction re-detecting the same fiber before the first
+    // recovery's cleanup deleted it (the `_persistOrphanedStream` window).
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-dup",
+      snapshot
+    );
+    await agent.triggerFiberRecovery();
+
+    const afterSecond = (await agent.getStoredMessages()) as UIMessage[];
+    const assistants = afterSecond.filter((m) => m.role === "assistant");
+    // Stable message id (from the `start` chunk) + upsert-by-id ⇒ a replace,
+    // not a duplicate — and the completed content is never lost.
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0].id).toBe("a-dup");
+  });
+
   it("does not continue a recovered chat fiber whose stream already completed", async () => {
     const agent = await freshRecoveryAgent("completed-stream-recovery");
 
