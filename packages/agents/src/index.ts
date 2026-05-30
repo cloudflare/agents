@@ -96,6 +96,7 @@ export type {
   AgentToolEvent,
   AgentToolEventMessage,
   AgentToolEventState,
+  AgentToolFailure,
   AgentToolLifecycleResult,
   AgentToolRunInfo,
   AgentToolRunInspection,
