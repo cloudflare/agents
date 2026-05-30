@@ -2592,6 +2592,190 @@ describe("Think — onChatRecovery", () => {
     expect(terminal?.body).toContain("chat recovery was disabled");
   });
 
+  // ── Recovery under multi-deploy churn (chained continuations) ──────────────
+
+  it("schedules chained continuations against the recovery root submission, not the per-continuation requestId", async () => {
+    const agent = await freshRecoveryAgent(
+      `chain-ownership-${crypto.randomUUID()}`
+    );
+
+    // A running submission keyed by the recovery ROOT request id.
+    await agent.seedRunningSubmissionForTest("root-1");
+    await agent.persistTestMessage({
+      id: "u-1",
+      role: "user",
+      parts: [{ type: "text", text: "do it" }]
+    });
+    await agent.persistTestMessage({
+      id: "a-1",
+      role: "assistant",
+      parts: [{ type: "text", text: "Partial" }]
+    });
+
+    // A continuation turn (requestId "cont-2", DIFFERENT from the root) is
+    // interrupted mid-stream. Its snapshot carries the recovery root.
+    await agent.insertInterruptedStream("stream-2", "cont-2", [
+      { body: JSON.stringify({ type: "start", messageId: "a-1" }), index: 0 },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Partial" }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:cont-2", {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: "cont-2",
+        recoveryRootRequestId: "root-1",
+        continuation: true,
+        latestMessageId: "a-1",
+        latestMessageRole: "assistant",
+        latestUserMessageId: "u-1",
+        startedAt: Date.now()
+      },
+      user: null
+    });
+
+    await agent.triggerFiberRecovery();
+
+    // The scheduled continuation must still own the submission via the stable
+    // root id — otherwise the continuation that completes the turn can never
+    // mark the submission done (the bug under deploy churn).
+    const payload = await agent.getScheduledChatRecoveryPayloadForTest(
+      "_chatRecoveryContinue"
+    );
+    expect(payload?.recoveredRequestId).toBe("root-1");
+  });
+
+  it("a superseded continuation (leaf moved to another assistant message) skips benignly without erroring the submission", async () => {
+    const agent = await freshRecoveryAgent(`superseded-${crypto.randomUUID()}`);
+    await agent.seedRunningSubmissionForTest("root-A");
+    // Leaf is a NEWER assistant message — recovery's own forward progress.
+    await agent.persistTestMessage({
+      id: "a-new",
+      role: "assistant",
+      parts: [{ type: "text", text: "progressed" }]
+    });
+    await agent.seedIncidentForTest({
+      incidentId: "inc-A",
+      requestId: "root-A",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    await agent.runChatRecoveryContinueForTestWith({
+      recoveredRequestId: "root-A",
+      targetAssistantId: "a-old-superseded",
+      incidentId: "inc-A",
+      originalRequestId: "root-A"
+    });
+
+    // Must NOT clobber the submission to error — the active continuation will
+    // complete it.
+    expect(await agent.getSubmissionStatusForTest("root-A")).toBe("running");
+  });
+
+  it("a genuinely superseding user turn marks the submission skipped, not errored", async () => {
+    const agent = await freshRecoveryAgent(`newuser-${crypto.randomUUID()}`);
+    await agent.seedRunningSubmissionForTest("root-B");
+    // Leaf is a USER message — a genuinely newer turn.
+    await agent.persistTestMessage({
+      id: "u-new",
+      role: "user",
+      parts: [{ type: "text", text: "new question" }]
+    });
+    await agent.seedIncidentForTest({
+      incidentId: "inc-B",
+      requestId: "root-B",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    await agent.runChatRecoveryContinueForTestWith({
+      recoveredRequestId: "root-B",
+      targetAssistantId: "a-old",
+      incidentId: "inc-B",
+      originalRequestId: "root-B"
+    });
+
+    expect(await agent.getSubmissionStatusForTest("root-B")).toBe("skipped");
+  });
+
+  it("reschedules a continuation that times out waiting for stable state, within the attempt budget", async () => {
+    const agent = await freshRecoveryAgent(
+      `stable-retry-${crypto.randomUUID()}`
+    );
+    await agent.setForceStableTimeoutForTest(true);
+    await agent.seedRunningSubmissionForTest("root-C");
+    await agent.seedIncidentForTest({
+      incidentId: "inc-C",
+      requestId: "root-C",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    await agent.runChatRecoveryContinueForTestWith({
+      recoveredRequestId: "root-C",
+      targetAssistantId: "a-x",
+      incidentId: "inc-C",
+      originalRequestId: "root-C"
+    });
+
+    // Rescheduled (not terminally failed), submission left running, attempt bumped.
+    expect(
+      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
+    ).toBe(1);
+    expect(await agent.getSubmissionStatusForTest("root-C")).toBe("running");
+    const incident = await agent.getIncidentAttemptForTest("inc-C");
+    expect(incident?.attempt).toBe(2);
+    expect(incident?.status).toBe("scheduled");
+  });
+
+  it("fails terminally once the stable-state retry budget is exhausted", async () => {
+    const agent = await freshRecoveryAgent(
+      `stable-exhaust-${crypto.randomUUID()}`
+    );
+    await agent.setForceStableTimeoutForTest(true);
+    await agent.seedRunningSubmissionForTest("root-D");
+    await agent.seedIncidentForTest({
+      incidentId: "inc-D",
+      requestId: "root-D",
+      recoveryKind: "continue",
+      attempt: 6,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    await agent.runChatRecoveryContinueForTestWith({
+      recoveredRequestId: "root-D",
+      targetAssistantId: "a-x",
+      incidentId: "inc-D",
+      originalRequestId: "root-D"
+    });
+
+    expect(
+      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
+    ).toBe(0);
+    expect(await agent.getSubmissionStatusForTest("root-D")).toBe("error");
+    const incident = await agent.getIncidentAttemptForTest("inc-D");
+    expect(incident?.status).toBe("failed");
+  });
+
   it("does not continue a recovered chat fiber whose stream already completed", async () => {
     const agent = await freshRecoveryAgent("completed-stream-recovery");
 

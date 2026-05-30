@@ -608,6 +608,9 @@ type ChatRecoveryIncident = {
 const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
 const DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS = 6;
 const DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS = 10_000;
+// Delay before retrying a continuation that timed out waiting for stable state.
+// Gives an actively-churning isolate (e.g. a deploy in flight) time to settle.
+const CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS = 3;
 const DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE =
   "The assistant was interrupted and could not recover. Please try again.";
 // Incidents that have not seen a new attempt within this window are assumed
@@ -6861,11 +6864,18 @@ export class Think<
           : undefined;
       const canContinue =
         !shouldRetry && options.continue !== false && !streamIsTerminal;
-      const hasRunningSubmission = this._hasRunningSubmission(requestId);
+      // The durable submission is keyed by the recovery ROOT request id (stable
+      // across the whole continuation chain), not this turn's per-continuation
+      // requestId. Keying off `requestId` loses the link on every chained
+      // continuation, so the continuation that finally completes the turn can no
+      // longer mark the submission done (see investigate/recovery-* findings).
+      const hasRunningSubmission = this._hasRunningSubmission(
+        recoveryRootRequestId
+      );
 
       if (streamIsTerminal && hasRunningSubmission) {
         await this._completeRecoveredSubmission(
-          requestId,
+          recoveryRootRequestId,
           streamStatus === "completed" ? "completed" : "error",
           requestId,
           streamStatus === "completed"
@@ -6876,7 +6886,7 @@ export class Think<
 
       const recoveredRequestId =
         (canContinue || shouldRetry) && hasRunningSubmission
-          ? requestId
+          ? recoveryRootRequestId
           : undefined;
 
       if (shouldRetry) {
@@ -7042,6 +7052,32 @@ export class Think<
         timeout: recoveryConfig.stableTimeoutMs
       });
       if (!ready) {
+        // Transient under churn — reschedule within the attempt budget rather
+        // than terminally failing the turn (see _chatRecoveryContinue).
+        const incidentKey = data?.incidentId
+          ? this._chatRecoveryIncidentKey(data.incidentId)
+          : null;
+        const incident = incidentKey
+          ? await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)
+          : null;
+        const attempt = incident?.attempt ?? 0;
+        const maxAttempts = incident?.maxAttempts ?? recoveryConfig.maxAttempts;
+        if (incident && incidentKey && attempt < maxAttempts) {
+          await this.ctx.storage.put(incidentKey, {
+            ...incident,
+            attempt: attempt + 1,
+            status: "scheduled",
+            lastAttemptAt: Date.now(),
+            reason: "stable_timeout_retry"
+          });
+          await this.schedule(
+            CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+            "_chatRecoveryRetry",
+            data ?? {},
+            { idempotent: true }
+          );
+          return;
+        }
         await this._updateChatRecoveryIncident(
           data?.incidentId,
           "failed",
@@ -7060,6 +7096,10 @@ export class Think<
 
       const lastLeaf = await this.session.getLatestLeaf();
       if (!lastLeaf || lastLeaf.role !== "user") {
+        // The user turn is no longer the leaf — it was already answered (an
+        // assistant message now follows) or the conversation moved on. This is
+        // a benign skip, not an error: a completing turn marks the submission
+        // `completed`; otherwise it is terminally `skipped`, never `error`.
         await this._updateChatRecoveryIncident(
           data?.incidentId,
           "skipped",
@@ -7068,15 +7108,17 @@ export class Think<
         if (data?.recoveredRequestId) {
           await this._completeRecoveredSubmission(
             data.recoveredRequestId,
-            "error",
+            "skipped",
             null,
-            "Recovered chat retry was skipped because there is no unanswered user message."
+            null
           );
         }
         return;
       }
 
       if (data?.targetUserId && lastLeaf.id !== data.targetUserId) {
+        // Superseded by a genuinely newer user turn — terminal `skipped`, not an
+        // error (recovery being superseded is benign).
         await this._updateChatRecoveryIncident(
           data?.incidentId,
           "skipped",
@@ -7085,9 +7127,9 @@ export class Think<
         if (data?.recoveredRequestId) {
           await this._completeRecoveredSubmission(
             data.recoveredRequestId,
-            "error",
+            "skipped",
             null,
-            "Recovered chat retry was skipped because the conversation changed."
+            null
           );
         }
         return;
@@ -7266,8 +7308,36 @@ export class Think<
       });
       if (!ready) {
         console.warn(
-          "[Think] _chatRecoveryContinue timed out waiting for stable state, skipping continuation"
+          "[Think] _chatRecoveryContinue timed out waiting for stable state"
         );
+        // A stable-state timeout under deploy churn is usually transient (the
+        // isolate is still settling / another deploy is in flight). Reschedule
+        // within the attempt budget instead of terminally failing the turn at
+        // attempt 1; only give up once the budget is genuinely exhausted.
+        const incidentKey = data?.incidentId
+          ? this._chatRecoveryIncidentKey(data.incidentId)
+          : null;
+        const incident = incidentKey
+          ? await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)
+          : null;
+        const attempt = incident?.attempt ?? 0;
+        const maxAttempts = incident?.maxAttempts ?? recoveryConfig.maxAttempts;
+        if (incident && incidentKey && attempt < maxAttempts) {
+          await this.ctx.storage.put(incidentKey, {
+            ...incident,
+            attempt: attempt + 1,
+            status: "scheduled",
+            lastAttemptAt: Date.now(),
+            reason: "stable_timeout_retry"
+          });
+          await this.schedule(
+            CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+            "_chatRecoveryContinue",
+            data ?? {},
+            { idempotent: true }
+          );
+          return;
+        }
         await this._updateChatRecoveryIncident(
           data?.incidentId,
           "failed",
@@ -7287,17 +7357,27 @@ export class Think<
       const targetId = data?.targetAssistantId;
       const lastLeaf = await this.session.getLatestLeaf();
       if (targetId && lastLeaf?.id !== targetId) {
+        // The target assistant message is no longer the leaf. This is NOT an
+        // error and must never clobber the submission to `error`:
+        //  - leaf is an ASSISTANT message → recovery's OWN later continuation
+        //    advanced (or already completed) this turn. This continuation is
+        //    stale/superseded; skip benignly and leave the submission alone so
+        //    the active continuation marks the real outcome (`completed`).
+        //  - leaf is a USER message → a genuinely newer turn superseded this
+        //    one; mark the submission `skipped` (terminal, non-error) so it
+        //    doesn't hang waiting on a turn nobody will finish.
+        const supersededByNewerUserTurn = lastLeaf?.role === "user";
         await this._updateChatRecoveryIncident(
           data?.incidentId,
           "skipped",
           "conversation_changed"
         );
-        if (data?.recoveredRequestId) {
+        if (data?.recoveredRequestId && supersededByNewerUserTurn) {
           await this._completeRecoveredSubmission(
             data.recoveredRequestId,
-            "error",
+            "skipped",
             null,
-            "Recovered chat continuation was skipped because the conversation changed."
+            null
           );
         }
         return;

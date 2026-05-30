@@ -3738,6 +3738,89 @@ export class ThinkRecoveryTestAgent extends Think {
   async waitUntilStableForTest(timeout?: number): Promise<boolean> {
     return this.waitUntilStable({ timeout: timeout ?? 5000 });
   }
+
+  private _forceStableTimeout = false;
+
+  async setForceStableTimeoutForTest(value: boolean): Promise<void> {
+    this._forceStableTimeout = value;
+  }
+
+  protected override async waitUntilStable(options?: {
+    timeout?: number;
+  }): Promise<boolean> {
+    if (this._forceStableTimeout) return false;
+    return super.waitUntilStable(options);
+  }
+
+  /** Seed a `running` durable submission keyed by `requestId` (== submission id). */
+  async seedRunningSubmissionForTest(requestId: string): Promise<void> {
+    (
+      this as unknown as { _ensureSubmissionTable(): void }
+    )._ensureSubmissionTable();
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_think_submissions (
+        submission_id, idempotency_key, request_id, stream_id, status,
+        messages_json, metadata_json, error_message, created_at,
+        messages_applied_at, started_at, completed_at
+      ) VALUES (
+        ${requestId}, NULL, ${requestId}, NULL, 'running',
+        '[]', NULL, NULL, ${now}, ${now}, ${now}, NULL
+      )
+    `;
+  }
+
+  async getSubmissionStatusForTest(
+    submissionId: string
+  ): Promise<string | null> {
+    const rows = this.sql<{ status: string }>`
+      SELECT status FROM cf_think_submissions WHERE submission_id = ${submissionId}
+    `;
+    return rows[0]?.status ?? null;
+  }
+
+  async runChatRecoveryContinueForTestWith(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await (
+      this as unknown as {
+        _chatRecoveryContinue(d: unknown): Promise<void>;
+      }
+    )._chatRecoveryContinue(data);
+  }
+
+  async getIncidentAttemptForTest(incidentId: string): Promise<{
+    attempt: number;
+    status: string;
+    reason?: string;
+  } | null> {
+    const incident = await this.ctx.storage.get<{
+      attempt: number;
+      status: string;
+      reason?: string;
+    }>(`cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`);
+    return incident
+      ? {
+          attempt: incident.attempt,
+          status: incident.status,
+          reason: incident.reason
+        }
+      : null;
+  }
+
+  async getScheduledChatRecoveryPayloadForTest(
+    callback = "_chatRecoveryContinue"
+  ): Promise<Record<string, unknown> | null> {
+    const rows = this.sql<{ payload: string }>`
+      SELECT payload FROM cf_agents_schedules
+      WHERE callback = ${callback}
+      ORDER BY time ASC
+      LIMIT 1
+    `;
+    return rows[0]
+      ? (JSON.parse(rows[0].payload) as Record<string, unknown>)
+      : null;
+  }
 }
 
 // ── ThinkNonRecoveryTestAgent ───────────────────────────────
