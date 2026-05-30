@@ -6,7 +6,7 @@
  * for custom CompactFunction implementations.
  */
 
-import type { SessionMessage } from "../session/types";
+import type { CompactContext, SessionMessage } from "../session/types";
 import { estimateMessageTokens } from "./tokens";
 
 export type CompactTokenCounter = (
@@ -478,20 +478,42 @@ export function createCompactFunction(opts: CompactOptions) {
   const tailTokenBudget = opts.tailTokenBudget ?? 20000;
   const minTailMessages = opts.minTailMessages ?? 2;
 
-  return async (messages: SessionMessage[]): Promise<CompactResult | null> => {
+  return async (
+    messages: SessionMessage[],
+    context?: CompactContext
+  ): Promise<CompactResult | null> => {
     if (messages.length <= protectHead + minTailMessages) {
       return null;
     }
+
+    // Prefer an explicit counter; otherwise adapt the Session's counter (flowed
+    // via CompactContext) so a single `tokenCounter` on `compactAfter` drives
+    // the boundary cut too — without it, a fire counter + the default heuristic
+    // under-counting a tool-heavy history makes compaction fire every turn but
+    // never shorten anything. The session counter is whole-prompt shaped; for
+    // the tail walk we feed it individual messages with empty system/context so
+    // it yields a comparable per-message count.
+    const sessionCounter = context?.tokenCounter;
+    const tailCounter: CompactTokenCounter | undefined =
+      opts.tokenCounter ??
+      (sessionCounter
+        ? (msgs) =>
+            sessionCounter({
+              messages: msgs,
+              systemPrompt: "",
+              contextBlocks: []
+            })
+        : undefined);
 
     // 1. Find compression boundaries
     let compressStart = protectHead;
     compressStart = alignBoundaryForward(messages, compressStart);
 
-    let compressEnd = opts.tokenCounter
+    let compressEnd = tailCounter
       ? await findTailCutByTokensWithCounter(
           messages,
           compressStart,
-          opts.tokenCounter,
+          tailCounter,
           tailTokenBudget,
           minTailMessages
         )
