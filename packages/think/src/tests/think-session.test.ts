@@ -2779,6 +2779,45 @@ describe("Think — onChatRecovery", () => {
     expect(incident?.status).toBe("scheduled");
   });
 
+  it("reschedules a pre-stream retry that times out waiting for stable state, within the attempt budget", async () => {
+    const agent = await freshRecoveryAgent(
+      `stable-retry-pre-${crypto.randomUUID()}`
+    );
+    await agent.setForceStableTimeoutForTest(true);
+    await agent.seedRunningSubmissionForTest("root-R");
+    await agent.seedIncidentForTest({
+      incidentId: "inc-R",
+      requestId: "root-R",
+      recoveryKind: "retry",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    const retryData = {
+      recoveredRequestId: "root-R",
+      targetUserId: "u-x",
+      incidentId: "inc-R",
+      originalRequestId: "root-R"
+    };
+    // Simulate the executing one-shot row so a buggy idempotent reschedule
+    // would dedup onto it and vanish (the `_chatRecoveryRetry` twin of the
+    // continue-path test — guards the now-shared reschedule helper).
+    await agent.preScheduleRecoveryRetryForTest(retryData);
+
+    await agent.runChatRecoveryRetryForTestWith(retryData);
+
+    expect(
+      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryRetry")
+    ).toBe(2);
+    expect(await agent.getSubmissionStatusForTest("root-R")).toBe("running");
+    const incident = await agent.getIncidentAttemptForTest("inc-R");
+    expect(incident?.attempt).toBe(2);
+    expect(incident?.status).toBe("scheduled");
+  });
+
   it("fails terminally once the stable-state retry budget is exhausted", async () => {
     const agent = await freshRecoveryAgent(
       `stable-exhaust-${crypto.randomUUID()}`

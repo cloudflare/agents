@@ -550,7 +550,9 @@ export class Session {
           this._warnedCompactionNoOp = true;
           console.warn(
             `[Session] Auto-compaction fired (~${tokenEstimate} tokens > ${this._tokenThreshold}) but the compaction function returned null, so history was not shortened. ` +
-              `If your history is tool-heavy, configure a tokenCounter on compactAfter() — it now flows to createCompactFunction's boundary logic automatically.`
+              (this._tokenCounter
+                ? `A tokenCounter is configured and now flows to the boundary logic, but it is invoked per-message there — a whole-prompt/usage counter (e.g. returning a fixed usage.inputTokens regardless of which messages are passed) degrades the tail budget to minTailMessages and can still no-op. Pass a per-message CompactOptions.tokenCounter for precise tail budgeting.`
+                : `If your history is tool-heavy, configure a tokenCounter on compactAfter() — it flows to createCompactFunction's boundary logic automatically.`)
           );
         } else if (compacted) {
           // Re-arm the one-time warning so a later regression is surfaced again.

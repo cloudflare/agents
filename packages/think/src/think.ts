@@ -1272,6 +1272,14 @@ export class Think<
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Agent<Env, State, Props> {
+  // Root requestId of the in-flight recovery chain, threaded into each
+  // continuation's snapshot so chained continuations keep owning the original
+  // submission. This is a single instance field, NOT per-incident: it is only
+  // safe because turns (and recovery fibers) are serialized by the turn queue,
+  // so at most one recovery chain is active at a time. The `try/finally`
+  // restore in `_chatRecoveryRetry` / `_chatRecoveryContinue` returns it to the
+  // prior value once a continuation settles. If turns ever run concurrently,
+  // this must move to per-incident storage.
   private _activeChatRecoveryRootRequestId: string | undefined;
 
   private static readonly CONFIG_KEYS = [
@@ -1484,6 +1492,37 @@ export class Think<
       return { input: {}, changed: true };
     }
     return { input: raw, changed: false };
+  }
+
+  /**
+   * Tool-call ids that still have no recorded result, using the same
+   * "has output" predicate as `_repairToolTranscriptParts`. After repair this
+   * should be empty; a non-empty result means the backstop
+   * (`ignoreIncompleteToolCalls`) will drop those calls — i.e. repair missed a
+   * shape and should be extended.
+   */
+  private _incompleteToolCallIds(messages: UIMessage[]): string[] {
+    const ids: string[] = [];
+    for (const message of messages) {
+      for (const part of message.parts) {
+        const record = part as Record<string, unknown>;
+        const toolCallId =
+          typeof record.toolCallId === "string" ? record.toolCallId : undefined;
+        const isToolPart =
+          typeof record.type === "string" &&
+          (record.type.startsWith("tool-") || record.type === "dynamic-tool") &&
+          toolCallId;
+        if (!isToolPart) continue;
+        const state = typeof record.state === "string" ? record.state : "";
+        const hasOutput =
+          "output" in record ||
+          "result" in record ||
+          state === "output-available" ||
+          state === "output-error";
+        if (!hasOutput) ids.push(toolCallId);
+      }
+    }
+    return ids;
   }
 
   private _repairToolTranscriptParts(messages: UIMessage[]): {
@@ -2509,6 +2548,21 @@ export class Think<
     // last-line backstop: if any incomplete tool call still slips through
     // (compaction edge, addToolOutput race, an unrecognized part shape), drop it
     // here rather than letting the provider 400 with AI_MissingToolResultsError.
+    //
+    // The backstop drops silently. Repair should have left nothing incomplete,
+    // so a non-empty set here means repair missed a shape — surface it (rather
+    // than masking a repair bug) without breaking the turn.
+    const incompleteAfterRepair = this._incompleteToolCallIds(truncated);
+    if (incompleteAfterRepair.length > 0) {
+      console.warn(
+        `[Think] ${incompleteAfterRepair.length} incomplete tool call(s) survived transcript repair and will be dropped by ignoreIncompleteToolCalls: ${incompleteAfterRepair.join(", ")}. This indicates a gap in _repairToolTranscriptParts.`
+      );
+      this._emit("chat:transcript:repaired", {
+        removedToolCalls: incompleteAfterRepair.length,
+        normalizedInputs: 0,
+        toolCallIds: incompleteAfterRepair
+      });
+    }
     const messages = await convertToModelMessages(truncated, {
       tools,
       ignoreIncompleteToolCalls: true
@@ -7158,6 +7212,51 @@ export class Think<
     );
   }
 
+  /**
+   * Reschedule a recovery callback that timed out waiting for stable state,
+   * consuming one attempt. Returns `true` if rescheduled, `false` if the
+   * attempt budget is exhausted (the caller then fails the turn terminally).
+   *
+   * Shared by `_chatRecoveryRetry` and `_chatRecoveryContinue` so the
+   * non-idempotent scheduling invariant lives in exactly one place — a fix to
+   * one path can't silently diverge from the other. Mirrors the same helper in
+   * `@cloudflare/ai-chat`.
+   */
+  private async _rescheduleRecoveryAfterStableTimeout(
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
+    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
+    maxAttempts: number
+  ): Promise<boolean> {
+    const incidentKey = data?.incidentId
+      ? this._chatRecoveryIncidentKey(data.incidentId)
+      : null;
+    const incident = incidentKey
+      ? await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)
+      : null;
+    if (!incident || !incidentKey) return false;
+    const attempt = incident.attempt ?? 0;
+    if (attempt >= (incident.maxAttempts ?? maxAttempts)) return false;
+    await this.ctx.storage.put(incidentKey, {
+      ...incident,
+      attempt: attempt + 1,
+      status: "scheduled",
+      lastAttemptAt: Date.now(),
+      reason: "stable_timeout_retry"
+    });
+    // Must NOT be idempotent: this runs INSIDE the currently-executing one-shot
+    // schedule row (which `alarm()` deletes only after we return). An idempotent
+    // reschedule would dedup onto that row and then be deleted with it — the
+    // retry would silently never fire, stalling the turn. A fresh delayed row
+    // survives the deletion.
+    await this.schedule(
+      CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+      callback,
+      data ?? {},
+      { idempotent: false }
+    );
+    return true;
+  }
+
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {
     const recoveredSubmission = data?.recoveredRequestId
       ? this._readRunningSubmissionByRequestId(data.recoveredRequestId)
@@ -7190,30 +7289,13 @@ export class Think<
       if (!ready) {
         // Transient under churn — reschedule within the attempt budget rather
         // than terminally failing the turn (see _chatRecoveryContinue).
-        const incidentKey = data?.incidentId
-          ? this._chatRecoveryIncidentKey(data.incidentId)
-          : null;
-        const incident = incidentKey
-          ? await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)
-          : null;
-        const attempt = incident?.attempt ?? 0;
-        const maxAttempts = incident?.maxAttempts ?? recoveryConfig.maxAttempts;
-        if (incident && incidentKey && attempt < maxAttempts) {
-          await this.ctx.storage.put(incidentKey, {
-            ...incident,
-            attempt: attempt + 1,
-            status: "scheduled",
-            lastAttemptAt: Date.now(),
-            reason: "stable_timeout_retry"
-          });
-          // Non-idempotent for the same reason as the continue path: avoid
-          // deduping onto the executing one-shot row that `alarm()` deletes.
-          await this.schedule(
-            CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+        if (
+          await this._rescheduleRecoveryAfterStableTimeout(
             "_chatRecoveryRetry",
-            data ?? {},
-            { idempotent: false }
-          );
+            data,
+            recoveryConfig.maxAttempts
+          )
+        ) {
           return;
         }
         await this._updateChatRecoveryIncident(
@@ -7452,33 +7534,13 @@ export class Think<
         // isolate is still settling / another deploy is in flight). Reschedule
         // within the attempt budget instead of terminally failing the turn at
         // attempt 1; only give up once the budget is genuinely exhausted.
-        const incidentKey = data?.incidentId
-          ? this._chatRecoveryIncidentKey(data.incidentId)
-          : null;
-        const incident = incidentKey
-          ? await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)
-          : null;
-        const attempt = incident?.attempt ?? 0;
-        const maxAttempts = incident?.maxAttempts ?? recoveryConfig.maxAttempts;
-        if (incident && incidentKey && attempt < maxAttempts) {
-          await this.ctx.storage.put(incidentKey, {
-            ...incident,
-            attempt: attempt + 1,
-            status: "scheduled",
-            lastAttemptAt: Date.now(),
-            reason: "stable_timeout_retry"
-          });
-          // Must NOT be idempotent: this runs INSIDE the currently-executing
-          // one-shot schedule row (which `alarm()` deletes only after we
-          // return). An idempotent reschedule would dedup onto that row and
-          // then be deleted with it — the retry would silently never fire,
-          // stalling the turn. A fresh delayed row survives the deletion.
-          await this.schedule(
-            CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+        if (
+          await this._rescheduleRecoveryAfterStableTimeout(
             "_chatRecoveryContinue",
-            data ?? {},
-            { idempotent: false }
-          );
+            data,
+            recoveryConfig.maxAttempts
+          )
+        ) {
           return;
         }
         await this._updateChatRecoveryIncident(

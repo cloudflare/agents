@@ -3820,6 +3820,25 @@ export class ThinkRecoveryTestAgent extends Think {
     )._chatRecoveryContinue(data);
   }
 
+  async runChatRecoveryRetryForTestWith(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await (
+      this as unknown as {
+        _chatRecoveryRetry(d: unknown): Promise<void>;
+      }
+    )._chatRecoveryRetry(data);
+  }
+
+  /** Retry-path twin of `preScheduleRecoveryContinueForTest`. */
+  async preScheduleRecoveryRetryForTest(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await this.schedule(60, "_chatRecoveryRetry", data, {
+      idempotent: false
+    });
+  }
+
   async getIncidentAttemptForTest(incidentId: string): Promise<{
     attempt: number;
     status: string;
