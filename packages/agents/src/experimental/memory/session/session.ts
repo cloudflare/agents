@@ -552,6 +552,9 @@ export class Session {
             `[Session] Auto-compaction fired (~${tokenEstimate} tokens > ${this._tokenThreshold}) but the compaction function returned null, so history was not shortened. ` +
               `If your history is tool-heavy, configure a tokenCounter on compactAfter() — it now flows to createCompactFunction's boundary logic automatically.`
           );
+        } else if (compacted) {
+          // Re-arm the one-time warning so a later regression is surfaced again.
+          this._warnedCompactionNoOp = false;
         }
       } catch (err) {
         // Auto-compact failure is non-fatal — message is already appended

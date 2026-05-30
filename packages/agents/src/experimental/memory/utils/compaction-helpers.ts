@@ -491,8 +491,17 @@ export function createCompactFunction(opts: CompactOptions) {
     // the boundary cut too — without it, a fire counter + the default heuristic
     // under-counting a tool-heavy history makes compaction fire every turn but
     // never shorten anything. The session counter is whole-prompt shaped; for
-    // the tail walk we feed it individual messages with empty system/context so
-    // it yields a comparable per-message count.
+    // the tail walk we feed it individual messages with empty system/context.
+    //
+    // Caveat: this counter is invoked once PER MESSAGE. A tokenizer-style
+    // counter yields accurate per-message tokens; a counter that returns a
+    // fixed whole-prompt total (e.g. `usage.inputTokens`) returns the same
+    // value for every message, which degrades `tailTokenBudget` to
+    // `minTailMessages` — compaction still runs and context stays bounded, but
+    // the byte budget is effectively ignored. It is also called O(n) times per
+    // compaction, so an async/remote counter (e.g. a `count_tokens` API) will
+    // be slow. For precise tail budgeting with such counters, pass an explicit
+    // per-message `CompactOptions.tokenCounter` instead.
     const sessionCounter = context?.tokenCounter;
     const tailCounter: CompactTokenCounter | undefined =
       opts.tokenCounter ??
