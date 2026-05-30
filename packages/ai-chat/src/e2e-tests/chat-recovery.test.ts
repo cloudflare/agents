@@ -9,13 +9,24 @@
  */
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
+import { setDefaultAutoSelectFamily } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 
+// Disable happy-eyeballs dual-stack racing. When a probe `fetch`/WebSocket
+// connects to a server that is mid-SIGKILL/restart, the abandoned racing socket
+// can throw a connect-time `setTypeOfService` EINVAL that surfaces as an
+// unhandled error and fails an otherwise-green chaos run.
+setDefaultAutoSelectFamily(false);
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 18798;
-const AGENT_URL = `http://localhost:${PORT}`;
+// Use a literal IPv4 address rather than `localhost`: resolving `localhost`
+// triggers happy-eyeballs dual-stack racing, which intermittently throws a
+// connect-time `setTypeOfService` EINVAL on the abandoned socket while probing
+// a server that is mid-SIGKILL/restart.
+const AGENT_URL = `http://127.0.0.1:${PORT}`;
 const AGENT_NAME = "chat-recovery-e2e";
 const PERSIST_DIR = path.join(__dirname, ".wrangler-chat-e2e-state");
 
@@ -89,10 +100,13 @@ function startWrangler(): ChildProcess {
   return child;
 }
 
-async function waitForReady(maxAttempts = 30, delayMs = 1000): Promise<void> {
+async function waitForReady(maxAttempts = 60, delayMs = 1000): Promise<void> {
   for (let i = 0; i < maxAttempts; i++) {
     try {
       const res = await fetch(`${AGENT_URL}/`);
+      // Drain the body so the connection is released rather than left open,
+      // which would leak sockets across the kill/restart churn.
+      await res.body?.cancel();
       if (res.status > 0) return;
     } catch {
       // Not ready
@@ -105,7 +119,8 @@ async function waitForReady(maxAttempts = 30, delayMs = 1000): Promise<void> {
 async function waitForPortFree(maxAttempts = 30, delayMs = 500): Promise<void> {
   for (let i = 0; i < maxAttempts; i++) {
     try {
-      await fetch(`${AGENT_URL}/`);
+      const res = await fetch(`${AGENT_URL}/`);
+      await res.body?.cancel();
     } catch {
       return;
     }
