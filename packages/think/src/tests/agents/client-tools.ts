@@ -197,6 +197,33 @@ export class ThinkClientToolsAgent extends Think {
     )._lastClientTools;
   }
 
+  // Demonstrates the `repairInterruptedToolPart` override: a client-resolved
+  // `ask_user` (a question with no server execute) is preserved as a text part
+  // carrying the prompt rather than flipped to a generic errored tool result.
+  protected override repairInterruptedToolPart(
+    part: UIMessage["parts"][number]
+  ): UIMessage["parts"][number] {
+    const record = part as Record<string, unknown>;
+    if (record.type === "tool-ask_user") {
+      const input = record.input as { prompt?: unknown } | undefined;
+      const prompt = typeof input?.prompt === "string" ? input.prompt : "";
+      if (prompt) {
+        return { type: "text", text: prompt } as UIMessage["parts"][number];
+      }
+    }
+    return super.repairInterruptedToolPart(part);
+  }
+
+  async repairToolTranscriptPartsForTest(
+    messages: UIMessage[]
+  ): Promise<UIMessage[]> {
+    return (
+      this as unknown as {
+        _repairToolTranscriptParts(m: UIMessage[]): { messages: UIMessage[] };
+      }
+    )._repairToolTranscriptParts(messages).messages;
+  }
+
   async persistToolCallMessage(messages: UIMessage[]): Promise<void> {
     for (const msg of messages) {
       await this.session.appendMessage(msg);
