@@ -1564,7 +1564,14 @@ export class Think<
         const hasOutput =
           "output" in record ||
           "result" in record ||
-          state === "output-available";
+          state === "output-available" ||
+          // `output-error` is a settled terminal state (an errored result the
+          // provider accepts). It must count as "has output", otherwise a part
+          // we already healed to `output-error` (which carries no `output`
+          // field) — or a tool that legitimately errored — would be re-flipped
+          // every turn: redundant writes, false `chat:transcript:repaired`
+          // events, and clobbering a real `errorText` with the generic message.
+          state === "output-error";
         if (!hasOutput) {
           // Preserve the interrupted/abandoned tool call as an errored result
           // instead of deleting it. Deleting makes the call "disappear" from the

@@ -390,4 +390,53 @@ describe("Think — message reconciliation on incoming submits", () => {
 
     ws.close(1000);
   });
+
+  it("does not re-repair an already-errored tool call or clobber its errorText", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const ws = await connectWS(room);
+
+    await agent.setTextOnlyMode(true);
+
+    const userA = makeUserMessage("user-a", "create a cat");
+    // A tool that legitimately errored: state `output-error` with a real
+    // message and NO `output` field. Repair must treat `output-error` as
+    // settled — otherwise it re-flips the part every turn, clobbering the real
+    // errorText with the generic "interrupted" message and emitting spurious
+    // repair events/writes/broadcasts for the life of the conversation.
+    const REAL_ERROR = "Image provider rejected the prompt (content policy).";
+    const assistantErrored: UIMessage = {
+      id: "assistant-errored",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-generateImage",
+          toolCallId: TOOL_CALL_ID,
+          state: "output-error",
+          input: { prompt: "a cat" },
+          errorText: REAL_ERROR
+        } as unknown as UIMessage["parts"][number]
+      ]
+    };
+    await agent.persistToolCallMessage([userA, assistantErrored]);
+
+    const responsePromise = waitForChatResponse(ws);
+    sendChatRequest(ws, [makeUserMessage("user-b", "continue")]);
+    const response = await responsePromise;
+
+    expect(response.done).toBe(true);
+    expect(response.error).toBeUndefined();
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const errored = messages.find((m) => m.id === assistantErrored.id);
+    expect(errored).toBeDefined();
+    const toolPart = errored!.parts.find(
+      (part) => (part as Record<string, unknown>).toolCallId === TOOL_CALL_ID
+    ) as Record<string, unknown> | undefined;
+    expect(toolPart?.state).toBe("output-error");
+    // The real error survives — repair did not re-flip it to the generic text.
+    expect(toolPart?.errorText).toBe(REAL_ERROR);
+
+    ws.close(1000);
+  });
 });
