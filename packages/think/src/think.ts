@@ -6981,15 +6981,21 @@ export class Think<
 
   private async _exhaustChatRecovery(
     incident: ChatRecoveryIncident,
-    config: ResolvedChatRecoveryConfig
+    config: ResolvedChatRecoveryConfig,
+    partial: { text: string; parts: MessagePart[] }
   ): Promise<void> {
     const ctx: ChatRecoveryExhaustedContext = {
       incidentId: incident.incidentId,
       requestId: incident.requestId,
+      recoveryRootRequestId:
+        incident.recoveryRootRequestId ?? incident.requestId,
       attempt: incident.attempt,
       maxAttempts: incident.maxAttempts,
       recoveryKind: incident.recoveryKind,
-      reason: incident.reason ?? "max_attempts_exceeded"
+      partialText: partial.text,
+      partialParts: partial.parts,
+      reason: incident.reason ?? "max_attempts_exceeded",
+      terminalMessage: config.terminalMessage
     };
     this._emit("chat:recovery:exhausted", ctx);
     // A throwing onExhausted hook must not prevent the terminal UX from being
@@ -7109,7 +7115,7 @@ export class Think<
       ) {
         await this._persistOrphanedStream(streamId);
       }
-      await this._exhaustChatRecovery(incident, config);
+      await this._exhaustChatRecovery(incident, config, partial);
       return true;
     }
 
@@ -7121,6 +7127,7 @@ export class Think<
       const options =
         (await this.onChatRecovery({
           incidentId: incident.incidentId,
+          recoveryRootRequestId,
           attempt: incident.attempt,
           maxAttempts: incident.maxAttempts,
           recoveryKind,

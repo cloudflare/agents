@@ -18,6 +18,7 @@ import type {
   SaveMessagesResult,
   ChatRecoveryConfig,
   ChatRecoveryContext,
+  ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
   ThinkSubmissionInspection,
   ThinkSubmissionStatus,
@@ -3244,6 +3245,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
   private _recoveryContexts: Array<{
     incidentId: string;
+    recoveryRootRequestId: string;
     attempt: number;
     maxAttempts: number;
     recoveryKind: "retry" | "continue";
@@ -3256,6 +3258,7 @@ export class ThinkRecoveryTestAgent extends Think {
   }> = [];
   private _recoveryOverride: ChatRecoveryOptions = {};
   private _recoveryShouldThrow = false;
+  private _exhaustedContexts: ChatRecoveryExhaustedContext[] = [];
   private _onExhaustedCalls = 0;
   private _turnCallCount = 0;
   private _turnBodies: Array<Record<string, unknown> | undefined> = [];
@@ -3306,6 +3309,7 @@ export class ThinkRecoveryTestAgent extends Think {
   ): Promise<ChatRecoveryOptions> {
     this._recoveryContexts.push({
       incidentId: ctx.incidentId,
+      recoveryRootRequestId: ctx.recoveryRootRequestId,
       attempt: ctx.attempt,
       maxAttempts: ctx.maxAttempts,
       recoveryKind: ctx.recoveryKind,
@@ -3349,6 +3353,7 @@ export class ThinkRecoveryTestAgent extends Think {
   async getRecoveryContexts(): Promise<
     Array<{
       incidentId: string;
+      recoveryRootRequestId: string;
       attempt: number;
       maxAttempts: number;
       recoveryKind: "retry" | "continue";
@@ -3361,6 +3366,21 @@ export class ThinkRecoveryTestAgent extends Think {
     }>
   > {
     return this._recoveryContexts;
+  }
+
+  /** Capture the `onExhausted` context for assertions (instead of throwing). */
+  async enableExhaustedCaptureForTest(maxAttempts: number): Promise<void> {
+    this._exhaustedContexts = [];
+    this.chatRecovery = {
+      maxAttempts,
+      onExhausted: (exhaustedCtx) => {
+        this._exhaustedContexts.push(exhaustedCtx);
+      }
+    };
+  }
+
+  async getExhaustedContextsForTest(): Promise<ChatRecoveryExhaustedContext[]> {
+    return this._exhaustedContexts;
   }
 
   async getTurnBodies(): Promise<Array<Record<string, unknown> | undefined>> {
