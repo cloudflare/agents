@@ -227,4 +227,21 @@ describe("resolveProvider", () => {
     expect(spy).toHaveBeenCalledWith({ msg: "hi" });
     expect(result).toEqual({ echo: { msg: "hi" } });
   });
+
+  it("should preserve optional provider runtime factories", async () => {
+    const provider: ToolProvider = {
+      tools: {
+        query: { description: "Query", execute: async () => "fallback" }
+      } as SimpleToolRecord,
+      createRuntime: () => ({
+        fns: { query: async () => "runtime" }
+      })
+    };
+
+    const resolved = resolveProvider(provider);
+    const runtime = await resolved.createRuntime?.();
+
+    expect(runtime).toBeDefined();
+    expect(await runtime?.fns.query()).toBe("runtime");
+  });
 });

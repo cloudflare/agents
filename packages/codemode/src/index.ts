@@ -4,7 +4,9 @@ export {
   type DynamicWorkerExecutorOptions,
   type Executor,
   type ExecuteResult,
+  type ProviderRuntime,
   type ResolvedProvider,
+  type ToolFunction,
   type ToolProvider
 } from "./executor";
 export { sanitizeToolName } from "./utils";

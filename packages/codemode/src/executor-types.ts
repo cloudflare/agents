@@ -8,6 +8,13 @@ export interface ExecuteResult {
   logs?: string[];
 }
 
+export type ToolFunction = (...args: unknown[]) => Promise<unknown>;
+
+export interface ProviderRuntime {
+  fns: Record<string, ToolFunction>;
+  dispose?: () => void | Promise<void>;
+}
+
 /**
  * Internal resolved form of a tool provider, ready for execution.
  * The tool functions are keyed by tool name and exposed under `name.*`
@@ -15,7 +22,8 @@ export interface ExecuteResult {
  */
 export interface ResolvedProvider {
   name: string;
-  fns: Record<string, (...args: unknown[]) => Promise<unknown>>;
+  fns: Record<string, ToolFunction>;
+  createRuntime?: () => ProviderRuntime | Promise<ProviderRuntime>;
 }
 
 /**
@@ -27,8 +35,6 @@ export interface ResolvedProvider {
 export interface Executor {
   execute(
     code: string,
-    providersOrFns:
-      | ResolvedProvider[]
-      | Record<string, (...args: unknown[]) => Promise<unknown>>
+    providersOrFns: ResolvedProvider[] | Record<string, ToolFunction>
   ): Promise<ExecuteResult>;
 }

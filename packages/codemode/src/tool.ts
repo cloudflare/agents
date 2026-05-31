@@ -82,7 +82,11 @@ export function aiTools(tools: ToolDescriptors | ToolSet): ToolProvider {
 export function resolveProvider(provider: ToolProvider): ResolvedProvider {
   const name = provider.name ?? "codemode";
   const filtered = filterTools(provider.tools);
-  const resolved: ResolvedProvider = { name, fns: extractFns(filtered) };
+  const resolved: ResolvedProvider = {
+    name,
+    fns: extractFns(filtered),
+    createRuntime: provider.createRuntime
+  };
   return resolved;
 }
 
@@ -101,7 +105,11 @@ export function createCodeTool(
     const types =
       provider.types ?? generateTypes(filtered as ToolDescriptors, name);
     typeBlocks.push(types);
-    resolvedProviders.push({ name, fns: extractFns(filtered) });
+    resolvedProviders.push({
+      name,
+      fns: extractFns(filtered),
+      createRuntime: provider.createRuntime
+    });
   }
 
   const typeBlock = typeBlocks.filter(Boolean).join("\n\n");
