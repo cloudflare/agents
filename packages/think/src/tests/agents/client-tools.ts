@@ -5,7 +5,9 @@
  * and text on subsequent invocations (after tool results are applied).
  */
 
-import type { LanguageModel, UIMessage } from "ai";
+import type { LanguageModel, ToolSet, UIMessage } from "ai";
+import { tool } from "ai";
+import { z } from "zod";
 import { Think } from "../../think";
 import type { ChatResponseResult, MessageConcurrency } from "../../think";
 import type { ClientToolSchema } from "agents/chat";
@@ -69,6 +71,91 @@ function createClientToolMockModel(): LanguageModel {
             });
           }
 
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+function createServerApprovalToolMockModel(): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-server-approval-tool-model",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream(options: Record<string, unknown>) {
+      const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+      const hasToolResult = messages.some(
+        (m: unknown) =>
+          typeof m === "object" &&
+          m !== null &&
+          (m as Record<string, unknown>).role === "tool"
+      );
+
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (!hasToolResult) {
+            controller.enqueue({
+              type: "tool-input-start",
+              id: "tc-server-approval-1",
+              toolName: "updateTrigger"
+            });
+            controller.enqueue({
+              type: "tool-input-delta",
+              id: "tc-server-approval-1",
+              delta: JSON.stringify({ enabled: true })
+            });
+            controller.enqueue({
+              type: "tool-input-end",
+              id: "tc-server-approval-1"
+            });
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "tc-server-approval-1",
+              toolName: "updateTrigger",
+              input: JSON.stringify({ enabled: true })
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: { unified: "tool-calls", raw: undefined },
+              usage: {
+                inputTokens: {
+                  total: 10,
+                  noCache: 10,
+                  cacheRead: 0,
+                  cacheWrite: 0
+                },
+                outputTokens: { total: 5, text: 5, reasoning: 0 }
+              }
+            });
+          } else {
+            controller.enqueue({ type: "text-start", id: "t-approved" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-approved",
+              delta: "Trigger updated"
+            });
+            controller.enqueue({ type: "text-end", id: "t-approved" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: { unified: "stop", raw: undefined },
+              usage: {
+                inputTokens: {
+                  total: 20,
+                  noCache: 20,
+                  cacheRead: 0,
+                  cacheWrite: 0
+                },
+                outputTokens: { total: 10, text: 10, reasoning: 0 }
+              }
+            });
+          }
           controller.close();
         }
       });
@@ -154,6 +241,9 @@ function createTextOnlyMockModel(): LanguageModel {
 export class ThinkClientToolsAgent extends Think {
   private _useTextOnly = false;
   private _useSlowStream = false;
+  private _useServerApprovalTool = false;
+  private _serverApprovalToolExecutions = 0;
+  private _serverApprovalToolFails = false;
   private _slowDelayMs = 40;
   private _slowChunkCount = 4;
   private _responseLog: ChatResponseResult[] = [];
@@ -170,7 +260,26 @@ export class ThinkClientToolsAgent extends Think {
     if (this._useSlowStream)
       return createSlowMockModel(this._slowDelayMs, this._slowChunkCount);
     if (this._useTextOnly) return createTextOnlyMockModel();
+    if (this._useServerApprovalTool) return createServerApprovalToolMockModel();
     return createClientToolMockModel();
+  }
+
+  override getTools(): ToolSet {
+    if (!this._useServerApprovalTool) return {};
+    return {
+      updateTrigger: tool({
+        description: "Enable or disable a trigger",
+        inputSchema: z.object({ enabled: z.boolean() }),
+        needsApproval: true,
+        execute: async ({ enabled }: { enabled: boolean }) => {
+          this._serverApprovalToolExecutions++;
+          if (this._serverApprovalToolFails) {
+            throw new Error("Trigger update failed");
+          }
+          return { enabled };
+        }
+      })
+    };
   }
 
   getSystemPrompt(): string {
@@ -179,6 +288,18 @@ export class ThinkClientToolsAgent extends Think {
 
   async setTextOnlyMode(value: boolean): Promise<void> {
     this._useTextOnly = value;
+  }
+
+  async setServerApprovalToolMode(value: boolean): Promise<void> {
+    this._useServerApprovalTool = value;
+  }
+
+  async getServerApprovalToolExecutions(): Promise<number> {
+    return this._serverApprovalToolExecutions;
+  }
+
+  async setServerApprovalToolFailure(value: boolean): Promise<void> {
+    this._serverApprovalToolFails = value;
   }
 
   async setSlowStreamMode(
