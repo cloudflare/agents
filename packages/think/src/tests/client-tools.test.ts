@@ -731,6 +731,157 @@ describe("Think — auto-continuation", () => {
     await closeWS(ws);
   });
 
+  it("streams and persists output from an approved server tool continuation (#1627)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setServerApprovalToolMode(true);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const initialDone = waitForDone(ws, 15000);
+    sendChatRequest(ws, [makeUserMessage("update my trigger")]);
+    const initialFrames = await initialDone;
+    const initialChunks = initialFrames
+      .filter(
+        (frame) =>
+          frame.type === MSG_CHAT_RESPONSE &&
+          typeof frame.body === "string" &&
+          frame.body.length > 0
+      )
+      .map(
+        (frame) => JSON.parse(frame.body as string) as Record<string, unknown>
+      );
+    expect(
+      initialChunks.some(
+        (chunk) =>
+          chunk.type === "tool-approval-request" &&
+          chunk.toolCallId === "tc-server-approval-1"
+      )
+    ).toBe(true);
+
+    const continuationDone = waitForDone(ws, 15000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc-server-approval-1",
+        approved: true,
+        autoContinue: true
+      })
+    );
+    const continuationFrames = await continuationDone;
+    const outputUpdateFrame = continuationFrames.find((frame) => {
+      if (frame.type !== MSG_MESSAGE_UPDATED) return false;
+      const message = frame.message as UIMessage;
+      return message.parts.some(
+        (part) =>
+          "toolCallId" in part &&
+          part.toolCallId === "tc-server-approval-1" &&
+          "state" in part &&
+          part.state === "output-available"
+      );
+    });
+    const continuationComplete = continuationFrames.find(
+      (frame) => frame.type === MSG_CHAT_RESPONSE && frame.done === true
+    );
+
+    expect(await agent.getServerApprovalToolExecutions()).toBe(1);
+    expect(outputUpdateFrame).toBeDefined();
+    expect(continuationComplete?.continuation).toBe(true);
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const toolPart = messages
+      .flatMap((message) => message.parts)
+      .find(
+        (part) =>
+          "toolCallId" in part && part.toolCallId === "tc-server-approval-1"
+      ) as Record<string, unknown> | undefined;
+    expect(toolPart).toMatchObject({
+      state: "output-available",
+      output: { enabled: true }
+    });
+
+    await closeWS(ws);
+  });
+
+  it("does not execute a rejected server approval tool and retains denial", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setServerApprovalToolMode(true);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const initialDone = waitForDone(ws, 15000);
+    sendChatRequest(ws, [makeUserMessage("do not update my trigger")]);
+    await initialDone;
+
+    const continuationDone = waitForDone(ws, 15000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc-server-approval-1",
+        approved: false,
+        autoContinue: true
+      })
+    );
+    const continuationFrames = await continuationDone;
+
+    expect(await agent.getServerApprovalToolExecutions()).toBe(0);
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const toolPart = messages
+      .flatMap((message) => message.parts)
+      .find(
+        (part) =>
+          "toolCallId" in part && part.toolCallId === "tc-server-approval-1"
+      ) as Record<string, unknown> | undefined;
+    expect(toolPart?.state).toBe("output-denied");
+    expect(
+      continuationFrames.find(
+        (frame) => frame.type === MSG_CHAT_RESPONSE && frame.done === true
+      )?.continuation
+    ).toBe(true);
+
+    await closeWS(ws);
+  });
+
+  it("persists an approved server tool execution error as terminal output", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setServerApprovalToolMode(true);
+    await agent.setServerApprovalToolFailure(true);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const initialDone = waitForDone(ws, 15000);
+    sendChatRequest(ws, [makeUserMessage("update a broken trigger")]);
+    await initialDone;
+
+    const continuationDone = waitForDone(ws, 15000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc-server-approval-1",
+        approved: true,
+        autoContinue: true
+      })
+    );
+    await continuationDone;
+
+    expect(await agent.getServerApprovalToolExecutions()).toBe(1);
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const toolPart = messages
+      .flatMap((message) => message.parts)
+      .find(
+        (part) =>
+          "toolCallId" in part && part.toolCallId === "tc-server-approval-1"
+      ) as Record<string, unknown> | undefined;
+    expect(toolPart).toMatchObject({
+      state: "output-error",
+      errorText: "Trigger update failed"
+    });
+
+    await closeWS(ws);
+  });
+
   it("rejection with autoContinue still triggers continuation", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

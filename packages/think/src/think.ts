@@ -1672,6 +1672,16 @@ export class Think<
         }
 
         if (!this._toolPartHasSettledResult(record)) {
+          const state = typeof record.state === "string" ? record.state : "";
+          // An approved server tool waits at `approval-responded` until its
+          // scheduled continuation runs `execute()`. It is not abandoned, so
+          // preserve it verbatim — flipping it to an error (or removing it)
+          // would strand the approval and prevent the real result from ever
+          // being produced by the continuation.
+          if (state === "approval-responded") {
+            parts.push(part);
+            continue;
+          }
           // Preserve the interrupted/abandoned tool call instead of deleting
           // it. Deleting makes the call "disappear" from the (broadcast)
           // transcript and lets the model silently re-run it. `input` is
@@ -6744,6 +6754,34 @@ export class Think<
           const streamChunk = chunk as unknown as StreamChunkData;
           const { action } = accumulator.applyChunk(streamChunk);
 
+          // Approved server tools execute during a continuation stream, but
+          // their original tool part lives in an earlier assistant message.
+          // The accumulator only builds this turn's new content, so persist
+          // that cross-message result directly as soon as it arrives.
+          if (
+            (streamChunk.type === "tool-output-available" ||
+              streamChunk.type === "tool-output-error") &&
+            typeof streamChunk.toolCallId === "string" &&
+            !accumulator.parts.some(
+              (part) =>
+                "toolCallId" in part &&
+                part.toolCallId === streamChunk.toolCallId
+            )
+          ) {
+            await this._applyToolResult(
+              streamChunk.toolCallId,
+              streamChunk.type === "tool-output-available"
+                ? streamChunk.output
+                : undefined,
+              streamChunk.type === "tool-output-error"
+                ? "output-error"
+                : undefined,
+              streamChunk.type === "tool-output-error"
+                ? streamChunk.errorText
+                : undefined
+            );
+          }
+
           if (action?.type === "error") {
             streamError = action.error;
             if (options?.captureProgrammaticStreamError) {
@@ -6755,7 +6793,8 @@ export class Think<
               id: requestId,
               body: action.error,
               done: false,
-              error: true
+              error: true,
+              ...(continuation && { continuation: true })
             });
             break;
           }
@@ -6771,7 +6810,8 @@ export class Think<
             type: MSG_CHAT_RESPONSE,
             id: requestId,
             body: chunkBody,
-            done: false
+            done: false,
+            ...(continuation && { continuation: true })
           });
         }
       } finally {
@@ -6788,7 +6828,8 @@ export class Think<
         type: MSG_CHAT_RESPONSE,
         id: requestId,
         body: "",
-        done: true
+        done: true,
+        ...(continuation && { continuation: true })
       });
       doneSent = true;
     } catch (error) {
@@ -6862,7 +6903,8 @@ export class Think<
           id: requestId,
           body: streamError,
           done: true,
-          error: true
+          error: true,
+          ...(continuation && { continuation: true })
         });
         doneSent = true;
       }
@@ -6874,7 +6916,8 @@ export class Think<
           type: MSG_CHAT_RESPONSE,
           id: requestId,
           body: "",
-          done: true
+          done: true,
+          ...(continuation && { continuation: true })
         });
       }
     }
@@ -7034,6 +7077,9 @@ export class Think<
           parts: result.parts as UIMessage["parts"]
         };
         const safe = await this._updateMessageInHistory(updatedMsg);
+        // Session change callbacks may run after an immediately scheduled
+        // continuation begins. Keep its input cache coherent synchronously.
+        this._patchCachedMessage(safe);
         // Patch the live cache in place instead of doing a full
         // `_syncMessages()` round-trip.
         // A full re-read during a streaming turn drops in-flight messages
