@@ -1,45 +1,51 @@
 /**
- * Daily-summary fan-out test.
+ * Daily-summary scheduled-task test.
  *
- * `AssistantDirectory.dailySummary` runs on a parent-side cron
- * because facets can't `schedule()` (workerd limitation). It picks
- * the most-recently-updated chat from `chat_meta` and queues a prompt
- * into that child via
- * `subAgent(MyAssistant, id).postDailySummaryPrompt()`.
+ * The directory (`AssistantDirectory`, a Think root used as an accumulator)
+ * declares a `dailySummary` scheduled task via `getScheduledTasks()`. Think
+ * reconciles declared tasks on startup into a durable one-shot schedule. The
+ * task is a deterministic handler that picks the most-recently-updated chat
+ * and RPCs a proactive summary prompt into that child.
  *
- * Scope note: a full round-trip test would have to invoke
- * `postDailySummaryPrompt` to completion. That calls `saveMessages`,
- * which in turn fires Think's auto-resume fiber → `getModel()` →
- * `createWorkersAI({ binding: env.AI })`. We deliberately don't bind
- * `AI` in the test wrangler (see `wrangler.jsonc` for why), so we
- * scope these tests to the no-op path and the ordering precondition
- * the dispatcher relies on. The framework's own Think tests cover
- * the `saveMessages` → turn pipeline in detail.
+ * Scope note: we assert reconciliation (a schedule row exists) and the
+ * ordering precondition the handler relies on. We don't drive the handler to
+ * completion because that fans out into a child `saveMessages` -> turn, which
+ * needs the `AI` binding (deliberately unbound here; see `wrangler.jsonc`).
+ * The framework's own tests cover scheduled-task execution in detail.
  */
 
 import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
-import { readDirectoryState, uniqueDirectoryName } from "./helpers";
+import { connectWS, readDirectoryState, uniqueDirectoryName } from "./helpers";
 
-describe("AssistantDirectory.dailySummary", () => {
-  it("is a no-op when no chats exist", async () => {
-    const directory = await getAgentByName(
-      env.AssistantDirectory,
-      uniqueDirectoryName()
+describe("AssistantDirectory daily summary", () => {
+  it("reconciles the declarative dailySummary scheduled task on startup", async () => {
+    const name = uniqueDirectoryName();
+
+    // Warm the directory with a real request so Think's onStart (which
+    // reconciles declared scheduled tasks) runs to completion.
+    const { ws } = await connectWS(`/agents/assistant-directory/${name}`);
+    ws.close();
+
+    const stub = env.AssistantDirectory.get(
+      env.AssistantDirectory.idFromName(name)
     );
 
-    // Resolves cleanly without spawning anything.
-    await directory.dailySummary();
+    // Read the directory's schedules in-process. `_runDeclaredScheduledTask`
+    // is the callback Think schedules for each declared task occurrence.
+    const callbacks = await runInDurableObject(stub, (instance) =>
+      instance.getSchedules().map((schedule) => schedule.callback)
+    );
 
-    expect((await directory.listSubAgents()).length).toBe(0);
+    expect(callbacks).toContain("_runDeclaredScheduledTask");
   });
 
   it("ordering: chat_meta is sorted most-recently-updated first", async () => {
-    // dailySummary picks `chat_meta[0].id` after ORDER BY updated_at
-    // DESC. We verify the ordering precondition holds — the actual
-    // dispatch into the child is gated on the AI binding (see scope
-    // note above).
+    // The handler picks `chat_meta[0].id` after ORDER BY updated_at DESC.
+    // We verify the ordering precondition holds — the actual dispatch into
+    // the child is gated on the AI binding (see scope note above).
     const directoryName = uniqueDirectoryName();
     const directory = await getAgentByName(
       env.AssistantDirectory,

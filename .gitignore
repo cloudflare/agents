@@ -144,6 +144,8 @@ dist
 .DS_Store
 
 .astro
+.react-router
+examples/think-react-router/build
 # Vitest browser test screenshots
 __screenshots__
 

@@ -10,13 +10,17 @@ async function main() {
       "src/think.ts",
       "src/workflows.ts",
       "src/extensions/index.ts",
+      "src/framework/index.ts",
+      "src/server-entry.ts",
       "src/messengers/index.ts",
       "src/messengers/telegram.ts",
       "src/tools/workspace.ts",
       "src/tools/execute.ts",
       "src/tools/extensions.ts",
       "src/tools/browser.ts",
-      "src/tools/sandbox.ts"
+      "src/tools/sandbox.ts",
+      "src/cli/index.ts",
+      "src/vite.ts"
     ],
     deps: {
       skipNodeModulesBundle: true,

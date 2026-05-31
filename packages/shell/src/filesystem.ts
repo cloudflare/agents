@@ -1497,17 +1497,30 @@ export class Workspace {
       const p = missing[i];
       const parentPath = getParent(p);
       const name = getBasename(p);
-      await this.sql.run(
-        `INSERT INTO ${T}
+      const inserted = await this.sql.query<{ path: string }>(
+        `INSERT OR IGNORE INTO ${T}
           (path, parent_path, name, type, size, created_at, modified_at)
-        VALUES (?, ?, ?, 'directory', 0, ?, ?)`,
+        VALUES (?, ?, ?, 'directory', 0, ?, ?)
+        RETURNING path`,
         p,
         parentPath,
         name,
         now,
         now
       );
-      this.emit("create", p, "directory");
+      if (inserted[0]) {
+        this.emit("create", p, "directory");
+        continue;
+      }
+      const row = (
+        await this.sql.query<{ type: string }>(
+          `SELECT type FROM ${T} WHERE path = ?`,
+          p
+        )
+      )[0];
+      if (row?.type !== "directory") {
+        throw new Error(`ENOTDIR: ${p} is not a directory`);
+      }
     }
   }
 

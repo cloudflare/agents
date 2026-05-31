@@ -32,7 +32,7 @@
 import { useCallback, useState } from "react";
 import { useAgent } from "agents/react";
 import type { MCPServersState } from "agents";
-import type { ChatSummary, DirectoryState } from "./server";
+import type { ChatSummary, DirectoryState } from "../agents/assistant/types";
 
 const EMPTY_MCP_STATE: MCPServersState = {
   prompts: [],

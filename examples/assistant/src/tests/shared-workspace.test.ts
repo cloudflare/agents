@@ -18,7 +18,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName, getSubAgentByName } from "agents";
 import { uniqueDirectoryName } from "./helpers";
-import { MyAssistant } from "../server";
+import { MyAssistant } from "../../agents/assistant/agents/my-assistant/agent";
 
 describe("SharedWorkspace — cross-chat round-trip", () => {
   it("file written inside chat A is visible inside chat B", async () => {
