@@ -1503,11 +1503,32 @@ export class Think<
   }
 
   /**
-   * Tool-call ids that still have no recorded result, using the same
-   * "has output" predicate as `_repairToolTranscriptParts`. After repair this
-   * should be empty; a non-empty result means the backstop
-   * (`ignoreIncompleteToolCalls`) will drop those calls — i.e. repair missed a
-   * shape and should be extended.
+   * Whether a tool part already has a settled result the provider accepts, so
+   * it must NOT be re-repaired into an errored result.
+   *
+   * Single source of truth for the terminal tool states, shared by the repair
+   * pass and the backstop detector so they cannot drift. Mirror the AI SDK's
+   * terminal states: `convertToModelMessages` emits a `tool-result` for
+   * `output-available`, `output-error`, AND `output-denied` (a user-denied
+   * approval — its denial reason becomes the tool-result). Omitting any of
+   * these makes repair re-flip the part every turn — clobbering a real
+   * `errorText`/denial with the generic "interrupted" message — and makes the
+   * backstop falsely drop a valid call.
+   */
+  private _toolPartHasSettledResult(record: Record<string, unknown>): boolean {
+    if ("output" in record || "result" in record) return true;
+    const state = typeof record.state === "string" ? record.state : "";
+    return (
+      state === "output-available" ||
+      state === "output-error" ||
+      state === "output-denied"
+    );
+  }
+
+  /**
+   * Tool-call ids that still have no recorded result. After repair this should
+   * be empty; a non-empty result means the backstop (`ignoreIncompleteToolCalls`)
+   * will drop those calls — i.e. repair missed a shape and should be extended.
    */
   private _incompleteToolCallIds(messages: UIMessage[]): string[] {
     const ids: string[] = [];
@@ -1521,13 +1542,7 @@ export class Think<
           (record.type.startsWith("tool-") || record.type === "dynamic-tool") &&
           toolCallId;
         if (!isToolPart) continue;
-        const state = typeof record.state === "string" ? record.state : "";
-        const hasOutput =
-          "output" in record ||
-          "result" in record ||
-          state === "output-available" ||
-          state === "output-error";
-        if (!hasOutput) ids.push(toolCallId);
+        if (!this._toolPartHasSettledResult(record)) ids.push(toolCallId);
       }
     }
     return ids;
@@ -1560,19 +1575,7 @@ export class Think<
           continue;
         }
 
-        const state = typeof record.state === "string" ? record.state : "";
-        const hasOutput =
-          "output" in record ||
-          "result" in record ||
-          state === "output-available" ||
-          // `output-error` is a settled terminal state (an errored result the
-          // provider accepts). It must count as "has output", otherwise a part
-          // we already healed to `output-error` (which carries no `output`
-          // field) — or a tool that legitimately errored — would be re-flipped
-          // every turn: redundant writes, false `chat:transcript:repaired`
-          // events, and clobbering a real `errorText` with the generic message.
-          state === "output-error";
-        if (!hasOutput) {
+        if (!this._toolPartHasSettledResult(record)) {
           // Preserve the interrupted/abandoned tool call as an errored result
           // instead of deleting it. Deleting makes the call "disappear" from the
           // (broadcast) transcript and lets the model silently re-run it; an
@@ -6213,12 +6216,14 @@ export class Think<
    * Whether storing this chunk should immediately flush the resumable-stream
    * buffer to SQLite.
    *
-   * A settled tool result (`tool-output-available` / `tool-output-error`)
-   * captures a completed, often non-idempotent side effect, so it is flushed
-   * **immediately** — an isolate eviction (deploy) before the next batch flush
+   * A settled tool result (`tool-output-available` / `tool-output-error` /
+   * `tool-output-denied`) captures a completed, often non-idempotent side
+   * effect — or, for a denial, a user decision — so it is flushed
+   * **immediately**. An isolate eviction (deploy) before the next batch flush
    * would otherwise lose it, and recovery would re-anchor without it and re-run
-   * the already-completed tool call. Frequent recoverable content (text /
-   * reasoning / tool-input streaming) is throttled to avoid write amplification.
+   * the already-completed tool call (or drop the denial). Frequent recoverable
+   * content (text / reasoning / tool-input streaming) is throttled to avoid
+   * write amplification.
    */
   private _shouldFlushRecoverableChunk(
     chunk: StreamChunkData,
@@ -6227,7 +6232,8 @@ export class Think<
   ): boolean {
     if (
       chunk.type === "tool-output-available" ||
-      chunk.type === "tool-output-error"
+      chunk.type === "tool-output-error" ||
+      chunk.type === "tool-output-denied"
     ) {
       return true;
     }

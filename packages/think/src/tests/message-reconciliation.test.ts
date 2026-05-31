@@ -439,4 +439,49 @@ describe("Think — message reconciliation on incoming submits", () => {
 
     ws.close(1000);
   });
+
+  it("preserves a denied tool approval (output-denied) instead of flipping it to errored", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const ws = await connectWS(room);
+
+    await agent.setTextOnlyMode(true);
+
+    const userA = makeUserMessage("user-a", "delete everything");
+    // A user-denied tool approval. `output-denied` is a settled terminal state
+    // the provider accepts (convertToModelMessages turns it into a denial
+    // tool-result), so repair must NOT flip it to `output-error` — doing so
+    // loses the denial and mislabels it as "interrupted".
+    const assistantDenied: UIMessage = {
+      id: "assistant-denied",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-deleteFiles",
+          toolCallId: TOOL_CALL_ID,
+          state: "output-denied",
+          input: { path: "/" },
+          approval: { id: "appr-1", approved: false, reason: "Too dangerous" }
+        } as unknown as UIMessage["parts"][number]
+      ]
+    };
+    await agent.persistToolCallMessage([userA, assistantDenied]);
+
+    const responsePromise = waitForChatResponse(ws);
+    sendChatRequest(ws, [makeUserMessage("user-b", "continue")]);
+    const response = await responsePromise;
+
+    expect(response.done).toBe(true);
+    expect(response.error).toBeUndefined();
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const denied = messages.find((m) => m.id === assistantDenied.id);
+    expect(denied).toBeDefined();
+    const toolPart = denied!.parts.find(
+      (part) => (part as Record<string, unknown>).toolCallId === TOOL_CALL_ID
+    ) as Record<string, unknown> | undefined;
+    expect(toolPart?.state).toBe("output-denied");
+
+    ws.close(1000);
+  });
 });
