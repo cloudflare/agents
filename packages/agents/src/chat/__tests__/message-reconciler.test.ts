@@ -98,6 +98,57 @@ describe("reconcileMessages — tool output merge", () => {
     expect((result[0].parts[0] as Record<string, unknown>).output).toBe("done");
   });
 
+  it("merges a server output-error over a stale client input-available", () => {
+    const server: ChatMessage[] = [
+      {
+        id: "srv-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-calc",
+            toolCallId: "tc1",
+            toolName: "calc",
+            state: "output-error",
+            errorText: "Tool blew up"
+          } as unknown as ChatMessage["parts"][number]
+        ]
+      } as ChatMessage
+    ];
+    const client = [
+      toolAssistantMsg("srv-1", "tc1", "input-available", { input: { x: 1 } })
+    ];
+    const result = reconcileMessages(client, server);
+    const part = result[0].parts[0] as Record<string, unknown>;
+    // The server's terminal error must not be clobbered back to input-available.
+    expect(part.state).toBe("output-error");
+    expect(part.errorText).toBe("Tool blew up");
+  });
+
+  it("merges a server output-denied over a stale client input-available", () => {
+    const server: ChatMessage[] = [
+      {
+        id: "srv-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-calc",
+            toolCallId: "tc1",
+            toolName: "calc",
+            state: "output-denied",
+            approval: { id: "a1", approved: false, reason: "nope" }
+          } as unknown as ChatMessage["parts"][number]
+        ]
+      } as ChatMessage
+    ];
+    const client = [
+      toolAssistantMsg("srv-1", "tc1", "approval-requested", { input: {} })
+    ];
+    const result = reconcileMessages(client, server);
+    const part = result[0].parts[0] as Record<string, unknown>;
+    expect(part.state).toBe("output-denied");
+    expect((part.approval as Record<string, unknown>).approved).toBe(false);
+  });
+
   it("passes through when no server tool outputs exist", () => {
     const server = [assistantMsg("srv-1", "Hello")];
     const client = [
