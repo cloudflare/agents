@@ -25,6 +25,7 @@ type Env = {
   ThinkRecoveryHelperParent: DurableObjectNamespace<ThinkRecoveryHelperParent>;
   ThinkRecoveryHelperAgent: DurableObjectNamespace<ThinkRecoveryHelperAgent>;
   ThinkToolRollbackE2EAgent: DurableObjectNamespace<ThinkToolRollbackE2EAgent>;
+  ThinkPersistFalseE2EAgent: DurableObjectNamespace<ThinkPersistFalseE2EAgent>;
   ThinkTaskParentE2EAgent: DurableObjectNamespace<ThinkTaskParentE2EAgent>;
   ThinkAgentToolNaturalParentE2EAgent: DurableObjectNamespace<ThinkAgentToolNaturalParentE2EAgent>;
   AI: Ai;
@@ -207,6 +208,107 @@ export class ThinkToolRollbackE2EAgent extends Think<Env> {
   @callable()
   override async getMessages(): Promise<UIMessage[]> {
     return this.messages;
+  }
+}
+
+/**
+ * #1631 (R1) e2e: a `recordStep` tool loop whose `onChatRecovery` returns
+ * `{ persist: false, continue: false }` — the explicit "stop this turn"
+ * override. Under a real SIGKILL, recovery fires and returns persist:false;
+ * R1 guarantees the SETTLED tool results produced before the kill are still
+ * preserved in the durable transcript (never dropped), while continue:false
+ * stops the turn (no re-run). This proves the persist:false no-loss default
+ * survives a REAL process kill, not just a unit-seeded incident.
+ */
+export class ThinkPersistFalseE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override chatRecovery = true;
+  override maxSteps = 500;
+  private _ledgerReady = false;
+
+  override getModel(): LanguageModel {
+    return createToolLoopMockModel(TOOL_ROLLBACK_TOTAL_STEPS);
+  }
+
+  override getSystemPrompt(): string {
+    return "Record each step in order using the recordStep tool.";
+  }
+
+  override getTools(): ToolSet {
+    return {
+      recordStep: tool({
+        description: "Record a step by its index.",
+        inputSchema: z.object({ index: z.number() }),
+        execute: async ({ index }) => {
+          this._ensureLedger();
+          this
+            .sql`INSERT INTO tool_ledger (idx, at) VALUES (${index}, ${Date.now()})`;
+          await new Promise((r) => setTimeout(r, TOOL_ROLLBACK_EXEC_DELAY_MS));
+          return { recorded: index };
+        }
+      })
+    };
+  }
+
+  override async onChatRecovery(): Promise<ChatRecoveryOptions> {
+    const n = (await this.ctx.storage.get<number>("tool:recovery-count")) ?? 0;
+    await this.ctx.storage.put("tool:recovery-count", n + 1);
+    // Explicit "stop this turn" — but R1 must STILL preserve the settled work.
+    return { persist: false, continue: false };
+  }
+
+  private _ensureLedger(): void {
+    if (this._ledgerReady) return;
+    this
+      .sql`CREATE TABLE IF NOT EXISTS tool_ledger (seq INTEGER PRIMARY KEY AUTOINCREMENT, idx INTEGER, at INTEGER)`;
+    this._ledgerReady = true;
+  }
+
+  @callable()
+  async getPersistFalseStatus(): Promise<{
+    totalExecutions: number;
+    uniqueIndices: number;
+    maxIndex: number;
+    recoveryCount: number;
+    assistantMessages: number;
+    settledToolPartsInTranscript: number;
+    hasFiberRows: boolean;
+  }> {
+    this._ensureLedger();
+    const rows = this.sql<{ idx: number; count: number }>`
+      SELECT idx, COUNT(*) as count FROM tool_ledger GROUP BY idx ORDER BY idx
+    `;
+    const fiberRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    const assistant = this.messages.filter((m) => m.role === "assistant");
+    const settledToolPartsInTranscript = assistant.reduce((n, m) => {
+      return (
+        n +
+        m.parts.filter((p) => {
+          const part = p as {
+            type?: unknown;
+            output?: unknown;
+            state?: unknown;
+          };
+          return (
+            typeof part.type === "string" &&
+            part.type.startsWith("tool-") &&
+            (part.output !== undefined || part.state === "output-available")
+          );
+        }).length
+      );
+    }, 0);
+    return {
+      totalExecutions: rows.reduce((n, r) => n + r.count, 0),
+      uniqueIndices: rows.length,
+      maxIndex: rows.reduce((m, r) => Math.max(m, r.idx), 0),
+      recoveryCount:
+        (await this.ctx.storage.get<number>("tool:recovery-count")) ?? 0,
+      assistantMessages: assistant.length,
+      settledToolPartsInTranscript,
+      hasFiberRows: (fiberRows[0]?.c ?? 0) > 0
+    };
   }
 }
 

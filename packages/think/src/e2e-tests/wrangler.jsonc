@@ -32,6 +32,10 @@
         "class_name": "ThinkToolRollbackE2EAgent"
       },
       {
+        "name": "ThinkPersistFalseE2EAgent",
+        "class_name": "ThinkPersistFalseE2EAgent"
+      },
+      {
         "name": "ThinkTaskParentE2EAgent",
         "class_name": "ThinkTaskParentE2EAgent"
       },
@@ -61,6 +65,10 @@
     {
       "tag": "v4",
       "new_sqlite_classes": ["ThinkAgentToolNaturalParentE2EAgent"]
+    },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": ["ThinkPersistFalseE2EAgent"]
     }
   ],
   "r2_buckets": [

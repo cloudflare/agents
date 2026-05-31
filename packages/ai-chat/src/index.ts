@@ -3227,6 +3227,26 @@ export class AIChatAgent<
     await this._bumpChatRecoveryProgress();
   }
 
+  /** Whether a reconstructed partial carries any settled (provider-accepted)
+   *  tool result — the completed, often non-idempotent work that a
+   *  `{ persist: false }` recovery return would silently discard.
+   *  `convertToModelMessages` treats `output-available` / `output-error` /
+   *  `output-denied` (or a part carrying `output`/`result`) as settled. */
+  private _partialHasSettledToolResults(parts: MessagePart[]): boolean {
+    return parts.some((part) => {
+      const record = part as Record<string, unknown>;
+      const type = typeof record.type === "string" ? record.type : "";
+      if (!(type.startsWith("tool-") || type === "dynamic-tool")) return false;
+      if ("output" in record || "result" in record) return true;
+      const state = typeof record.state === "string" ? record.state : "";
+      return (
+        state === "output-available" ||
+        state === "output-error" ||
+        state === "output-denied"
+      );
+    });
+  }
+
   /** Sweep recovery incidents that have been inactive past the TTL. */
   private async _sweepStaleChatRecoveryIncidents(now: number): Promise<void> {
     const entries = await this.ctx.storage.list<ChatRecoveryIncident>({
@@ -3458,6 +3478,15 @@ export class AIChatAgent<
       ? this._getPartialStreamText(streamId)
       : { text: "", parts: [] as MessagePart[] };
 
+    // Only persist while the stream is still active. The ACK handler (client
+    // reconnect → replayChunks) may have already persisted + completed the
+    // orphaned stream before fiber recovery runs; persisting again on the same
+    // chunks would double the assistant message's parts.
+    const streamStillActive =
+      streamId &&
+      this._resumableStream.hasActiveStream() &&
+      this._resumableStream.activeStreamId === streamId;
+
     const shouldRetryPreStream = this._shouldRetryRecoveredPreStreamTurn(
       recoverySnapshot,
       streamId ?? "",
@@ -3477,6 +3506,13 @@ export class AIChatAgent<
       });
 
     if (exhausted) {
+      // Preserve the settled partial before sealing the turn. Exhaustion is
+      // decided BEFORE `onChatRecovery` is consulted, so without this the
+      // settled (often non-idempotent) tool results the turn already produced
+      // are discarded and the model re-runs them on the next message (#1631).
+      if (streamStillActive) {
+        await this._persistOrphanedStream(streamId);
+      }
       await this._exhaustChatRecovery(incident, config);
       return true;
     }
@@ -3504,17 +3540,17 @@ export class AIChatAgent<
           createdAt: ctx.createdAt
         })) ?? {};
 
-      // Only persist and complete if the stream is still active. The ACK
-      // handler (client reconnect → replayChunks) may have already persisted
-      // the orphaned stream and completed it before fiber recovery runs.
-      // Without this guard, _persistOrphanedStream runs twice on the same
-      // chunks, doubling the assistant message's parts.
-      const streamStillActive =
-        streamId &&
-        this._resumableStream.hasActiveStream() &&
-        this._resumableStream.activeStreamId === streamId;
-
-      if (options.persist !== false && streamStillActive) {
+      // Settled work — completed, often non-idempotent tool results — is NEVER
+      // dropped by recovery. `persist: false` only suppresses persistence of a
+      // partial that has nothing settled to lose; a partial carrying settled
+      // tool results is persisted regardless, so an app can never accidentally
+      // discard completed work (and never needs `{ persist: true }` just to be
+      // safe). A safe default beats a warning about an unsafe one (#1631).
+      if (
+        streamStillActive &&
+        (options.persist !== false ||
+          this._partialHasSettledToolResults(partial.parts))
+      ) {
         await this._persistOrphanedStream(streamId);
       }
 
