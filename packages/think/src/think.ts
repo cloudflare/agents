@@ -6269,41 +6269,55 @@ export class Think<
       return;
     }
     const iterator = source[Symbol.asyncIterator]();
-    while (true) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      let stalled = false;
-      const stall = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          stalled = true;
-          reject(
-            new Error(
-              `Chat stream stalled: no activity for ${timeoutMs}ms; the turn was aborted by the stall watchdog.`
-            )
-          );
-        }, timeoutMs);
-      });
-      const nextPromise = iterator.next();
-      // If the watchdog wins the race we abandon this read; aborting the
-      // upstream stream makes it reject later, so pre-attach a no-op catch to
-      // keep that abandoned rejection from surfacing as an unhandled rejection.
-      nextPromise.catch(() => {});
-      let next: IteratorResult<T>;
-      try {
-        next = await Promise.race([nextPromise, stall]);
-      } catch (err) {
-        // On stall, `onStall` aborts the turn's signal which tears the upstream
-        // model stream down and rejects the abandoned `nextPromise` (already
-        // caught above). We deliberately do NOT call `iterator.return()` here:
-        // cancelling the readable and then aborting makes the AI SDK pipeline
-        // write to an already-cancelled readable ("readable side is no longer
-        // readable"). Letting the abort error the stream is the clean path.
-        if (stalled) onStall();
-        throw err;
-      } finally {
-        if (timer !== undefined) clearTimeout(timer);
+    // Tracks whether the watchdog itself aborted the upstream. In that case we
+    // must NOT also `iterator.return()` it: cancelling the readable after the
+    // abort makes the AI SDK pipeline write to an already-cancelled readable
+    // ("readable side is no longer readable"). Letting the abort error the
+    // stream is the clean path.
+    let selfAborted = false;
+    try {
+      while (true) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let stalled = false;
+        const stall = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            stalled = true;
+            reject(
+              new Error(
+                `Chat stream stalled: no activity for ${timeoutMs}ms; the turn was aborted by the stall watchdog.`
+              )
+            );
+          }, timeoutMs);
+        });
+        const nextPromise = iterator.next();
+        // If the watchdog wins the race we abandon this read; aborting the
+        // upstream stream makes it reject later, so pre-attach a no-op catch to
+        // keep that abandoned rejection from surfacing as an unhandled rejection.
+        nextPromise.catch(() => {});
+        let next: IteratorResult<T>;
+        try {
+          next = await Promise.race([nextPromise, stall]);
+        } catch (err) {
+          if (stalled) {
+            selfAborted = true;
+            onStall();
+          }
+          throw err;
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+        if (next.done) return;
+        yield next.value;
       }
-      if (next.done) return;
-      yield next.value;
+    } finally {
+      // Forward early termination (consumer `break`/`throw`, e.g. an in-band
+      // stream error where the abort signal is NOT set) to the source so its
+      // reader is cancelled — otherwise the wrapped source would leak when the
+      // consumer stops reading mid-stream. Skipped after a watchdog stall, which
+      // already aborted the upstream (see `selfAborted` above).
+      if (!selfAborted) {
+        await iterator.return?.(undefined as never).catch(() => {});
+      }
     }
   }
 

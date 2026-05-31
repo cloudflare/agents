@@ -485,6 +485,38 @@ describe("Think — error handling", () => {
     expect(stalled[0]?.timeoutMs).toBe(50);
   });
 
+  it("does not fire the watchdog for a slow-but-steady stream (timer resets per chunk)", async () => {
+    const agent = await freshAgent(`slow-${crypto.randomUUID()}`);
+    const stalled: Array<unknown> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:stream:stalled") stalled.push(event.payload);
+    });
+
+    let result: TestChatResult;
+    try {
+      // Each chunk arrives at ~15ms; watchdog window is 200ms. The gap never
+      // exceeds the window, so the turn must complete normally.
+      result = await agent.testChatWithSlowStream(15, 200);
+    } finally {
+      unsubscribe();
+    }
+
+    expect(result.done).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(stalled).toHaveLength(0);
+  });
+
+  it("terminates cleanly on an in-band stream error while the watchdog is armed", async () => {
+    const agent = await freshAgent(`err-guard-${crypto.randomUUID()}`);
+    // An in-band error breaks the read loop without aborting the signal. With
+    // the watchdog wrapper active, the source must still be cancelled on break
+    // (no unhandled rejection — vitest would surface one as a test error).
+    const result = await agent.testChatWithErrorUnderStallGuard(5000);
+
+    expect(result.done).toBe(false);
+    expect(result.error).toContain("Mock error under guard");
+  });
+
   it("should recover and continue chatting after error", async () => {
     const agent = await freshAgent("err-recover");
 

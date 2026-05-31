@@ -487,6 +487,7 @@ export class ThinkTestAgent extends Think {
   } | null = null;
   private _stripTextResponseForTest = false;
   private _stallAfterChunks: number | null = null;
+  private _streamChunkDelayMs: number | null = null;
   private _agentToolOutputForTest = new Map<string, unknown>();
   private _responseLog: ChatResponseResult[] = [];
 
@@ -699,13 +700,15 @@ export class ThinkTestAgent extends Think {
     if (
       !this._errorConfig &&
       !this._stripTextResponseForTest &&
-      this._stallAfterChunks == null
+      this._stallAfterChunks == null &&
+      this._streamChunkDelayMs == null
     )
       return result;
 
     const config = this._errorConfig;
     const stripText = this._stripTextResponseForTest;
     const stallAfter = this._stallAfterChunks;
+    const chunkDelayMs = this._streamChunkDelayMs;
 
     return {
       toUIMessageStream(options?: { sendReasoning?: boolean }) {
@@ -724,6 +727,12 @@ export class ThinkTestAgent extends Think {
                 // then never resolve. The stall watchdog must abort the turn.
                 if (stallAfter != null && chunkCount >= stallAfter) {
                   return new Promise<IteratorResult<unknown>>(() => {});
+                }
+                // Simulate a slow-but-steady stream: each chunk arrives after a
+                // delay. With a watchdog timeout larger than the delay, the
+                // watchdog must reset on every chunk and never fire.
+                if (chunkDelayMs != null) {
+                  await new Promise((r) => setTimeout(r, chunkDelayMs));
                 }
                 while (true) {
                   if (shouldThrow && config) {
@@ -918,6 +927,44 @@ export class ThinkTestAgent extends Think {
       return await this.testChat("trigger stall");
     } finally {
       this._stallAfterChunks = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
+  }
+
+  /**
+   * Stream each chunk after `delayMs` with the watchdog armed at `timeoutMs`
+   * (> delay). Proves the watchdog resets per chunk and does NOT false-fire on
+   * a slow-but-steady stream.
+   */
+  async testChatWithSlowStream(
+    delayMs: number,
+    timeoutMs: number
+  ): Promise<TestChatResult> {
+    this._streamChunkDelayMs = delayMs;
+    this.chatStreamStallTimeoutMs = timeoutMs;
+    try {
+      return await this.testChat("slow but steady");
+    } finally {
+      this._streamChunkDelayMs = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
+  }
+
+  /**
+   * Throw a stream error after `afterChunks` chunks with the watchdog armed.
+   * Guards that an in-band error under the watchdog wrapper terminates cleanly
+   * (the wrapper cancels the source on break without an unhandled rejection).
+   */
+  async testChatWithErrorUnderStallGuard(
+    timeoutMs: number,
+    errorMessage = "Mock error under guard"
+  ): Promise<TestChatResult> {
+    this._errorConfig = { afterChunks: 1, message: errorMessage };
+    this.chatStreamStallTimeoutMs = timeoutMs;
+    try {
+      return await this.testChat("error under guard");
+    } finally {
+      this._errorConfig = null;
       this.chatStreamStallTimeoutMs = 0;
     }
   }
