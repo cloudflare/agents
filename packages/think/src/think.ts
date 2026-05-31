@@ -581,6 +581,14 @@ type ChatRecoveryKind = "retry" | "continue";
 type ChatRecoveryIncident = {
   incidentId: string;
   requestId: string;
+  /**
+   * Stable root requestId for the whole continuation chain. The durable
+   * submission is keyed by this (not the per-attempt `requestId`, which is
+   * overwritten each continuation), so terminal paths must use it to mark the
+   * submission. Optional for backward-compat with incidents persisted before
+   * this field existed — fall back to `requestId`.
+   */
+  recoveryRootRequestId?: string;
   recoveryKind: ChatRecoveryKind;
   attempt: number;
   maxAttempts: number;
@@ -6821,6 +6829,7 @@ export class Think<
     const incident: ChatRecoveryIncident = {
       incidentId,
       requestId: input.requestId,
+      recoveryRootRequestId: input.recoveryRootRequestId ?? input.requestId,
       recoveryKind: input.recoveryKind,
       attempt,
       maxAttempts: config.maxAttempts,
@@ -6921,8 +6930,10 @@ export class Think<
     } catch (error) {
       console.error("[Think] chatRecovery onExhausted hook threw", error);
     }
+    // The submission is keyed by the recovery ROOT request id; `incident.requestId`
+    // is the latest per-continuation id and won't match a chained submission.
     await this._markRecoveredSubmissionInterrupted(
-      incident.requestId,
+      incident.recoveryRootRequestId ?? incident.requestId,
       config.terminalMessage
     );
     await this._recordTerminalChatStatus(
@@ -7155,8 +7166,11 @@ export class Think<
         );
         const disabledMessage =
           "Submission was interrupted and chat recovery was disabled.";
+        // Key off the recovery ROOT, not this continuation's `requestId` — a
+        // chained submission's row still carries the root id, so passing the
+        // per-continuation id would miss it and leave it stuck `running`.
         await this._markRecoveredSubmissionInterrupted(
-          requestId,
+          recoveryRootRequestId,
           disabledMessage
         );
         // Unlike `conversation_changed` (a newer turn owns the UI, so silence

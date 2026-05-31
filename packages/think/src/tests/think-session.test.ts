@@ -2708,6 +2708,55 @@ describe("Think — onChatRecovery", () => {
     expect(payload?.recoveredRequestId).toBe("root-1");
   });
 
+  it("marks the root submission errored when a chained continuation is abandoned (recovery disabled)", async () => {
+    const agent = await freshRecoveryAgent(
+      `chain-disabled-${crypto.randomUUID()}`
+    );
+    // Disabling recovery routes the interrupted continuation through
+    // `_markRecoveredSubmissionInterrupted`, which must key off the recovery
+    // ROOT (root-1) — the submission row still carries root-1, so passing the
+    // per-continuation id (cont-2) would miss it and leave it stuck `running`.
+    await agent.setRecoveryOverride({ continue: false });
+    await agent.seedRunningSubmissionForTest("root-1");
+    await agent.persistTestMessage({
+      id: "u-1",
+      role: "user",
+      parts: [{ type: "text", text: "do it" }]
+    });
+    await agent.persistTestMessage({
+      id: "a-1",
+      role: "assistant",
+      parts: [{ type: "text", text: "Partial" }]
+    });
+
+    await agent.insertInterruptedStream("stream-2", "cont-2", [
+      { body: JSON.stringify({ type: "start", messageId: "a-1" }), index: 0 },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Partial" }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:cont-2", {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: "cont-2",
+        recoveryRootRequestId: "root-1",
+        continuation: true,
+        latestMessageId: "a-1",
+        latestMessageRole: "assistant",
+        latestUserMessageId: "u-1",
+        startedAt: Date.now()
+      },
+      user: null
+    });
+
+    await agent.triggerFiberRecovery();
+
+    expect(await agent.getSubmissionStatusForTest("root-1")).toBe("error");
+  });
+
   it("a superseded continuation (leaf moved to another assistant message) skips benignly without erroring the submission", async () => {
     const agent = await freshRecoveryAgent(`superseded-${crypto.randomUUID()}`);
     await agent.seedRunningSubmissionForTest("root-A");
