@@ -355,6 +355,27 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
+When a turn is interrupted mid-flight, an unsettled tool call left in the
+transcript is repaired before the next provider call so the model does not
+re-run it (and the provider does not 400 with `AI_MissingToolResultsError`). The
+default flips it to an errored tool result; override `repairInterruptedToolPart`
+to customize the repaired shape — for example, convert an interrupted
+client-resolved `ask_user` (a question with no server `execute`) into a plain
+text part carrying the prompt so the model treats it as ordinary conversation:
+
+```ts
+protected override repairInterruptedToolPart(
+  part: UIMessage["parts"][number]
+): UIMessage["parts"][number] {
+  const record = part as Record<string, unknown>;
+  if (record.type === "tool-ask_user") {
+    const input = record.input as { prompt?: string } | undefined;
+    if (input?.prompt) return { type: "text", text: input.prompt };
+  }
+  return super.repairInterruptedToolPart(part);
+}
+```
+
 ### Scheduled tasks
 
 Use `getScheduledTasks()` for code-declared recurring prompts or deterministic

@@ -1588,6 +1588,37 @@ export class Think<
     return ids;
   }
 
+  /**
+   * Repair a single interrupted tool call — a tool part with no settled result,
+   * left behind when a stream was cut off mid-flight. Returns the replacement
+   * part that takes its place in the transcript. `input` has already been
+   * normalized to a valid object.
+   *
+   * The default flips it to an errored tool result so the record survives (no
+   * "disappearing" tool call) and `convertToModelMessages` still gets a
+   * tool-result for it (avoiding `AI_MissingToolResultsError`).
+   *
+   * Override to customize the repaired shape for client-resolved tools — e.g.
+   * convert an interrupted `ask_user` (a question with no server `execute`,
+   * normally answered by the user's next message) into a plain text part
+   * carrying the question prose, so the model sees it as ordinary conversation
+   * rather than a tool error and compaction keeps the question verbatim. This
+   * runs DURING transcript repair — before the repaired transcript is persisted
+   * and sent to the model — so the conversion shapes the current turn, not just
+   * the next one. A returned tool part MUST carry a settled result
+   * (`output-available` / `output-error` / `output-denied` or an
+   * `output`/`result` field); returning a non-tool part (e.g. text) is fine.
+   */
+  protected repairInterruptedToolPart(
+    part: UIMessage["parts"][number]
+  ): UIMessage["parts"][number] {
+    return {
+      ...part,
+      state: "output-error",
+      errorText: "The tool call was interrupted before a result was recorded."
+    } as UIMessage["parts"][number];
+  }
+
   private _repairToolTranscriptParts(messages: UIMessage[]): {
     messages: UIMessage[];
     removedToolCalls: number;
@@ -1616,19 +1647,21 @@ export class Think<
         }
 
         if (!this._toolPartHasSettledResult(record)) {
-          // Preserve the interrupted/abandoned tool call as an errored result
-          // instead of deleting it. Deleting makes the call "disappear" from the
-          // (broadcast) transcript and lets the model silently re-run it; an
-          // errored result keeps the user-visible record AND gives conversion a
-          // tool-result so the provider doesn't 400 (AI_MissingToolResultsError).
+          // Preserve the interrupted/abandoned tool call instead of deleting
+          // it. Deleting makes the call "disappear" from the (broadcast)
+          // transcript and lets the model silently re-run it. `input` is
+          // normalized to a valid object first, then `repairInterruptedToolPart`
+          // decides the replacement shape (default: an errored result, so
+          // conversion still gets a tool-result and the provider doesn't 400
+          // with AI_MissingToolResultsError). Subclasses can override it to
+          // preserve client-resolved tools (e.g. `ask_user`) as text.
           const normalized = this._normalizeToolInput(record);
-          parts.push({
-            ...part,
-            input: normalized.input,
-            state: "output-error",
-            errorText:
-              "The tool call was interrupted before a result was recorded."
-          } as UIMessage["parts"][number]);
+          parts.push(
+            this.repairInterruptedToolPart({
+              ...part,
+              input: normalized.input
+            } as UIMessage["parts"][number])
+          );
           if (normalized.changed) normalizedInputs++;
           removedToolCalls++;
           messageChanged = true;

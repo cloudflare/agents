@@ -416,6 +416,33 @@ export class MyAgent extends Think<Env> {
 
 The same recovery events are available through `agents/observability` on the `chat` channel. Transcript repairs are emitted on the `transcript` channel.
 
+#### Repairing interrupted tool calls
+
+When a turn is interrupted mid-flight, the transcript can contain a tool call with no settled result. Before the next provider call, Think repairs each such call so the model does not silently re-run it and the provider does not reject the transcript with `AI_MissingToolResultsError`. The default flips the interrupted call to an errored tool result, so the record survives and conversion still has a tool result for it.
+
+Override `repairInterruptedToolPart` to customize the repaired shape. The common case is a client-resolved tool — for example an `ask_user` question that has no server `execute` and is normally answered by the user's next message. Converting it to a plain text part lets the model treat it as ordinary conversation rather than a tool error, and keeps the question verbatim through compaction:
+
+```typescript
+import type { UIMessage } from "ai";
+
+export class MyAgent extends Think<Env> {
+  protected override repairInterruptedToolPart(
+    part: UIMessage["parts"][number]
+  ): UIMessage["parts"][number] {
+    const record = part as Record<string, unknown>;
+    if (record.type === "tool-ask_user") {
+      const input = record.input as { prompt?: string } | undefined;
+      if (input?.prompt) {
+        return { type: "text", text: input.prompt };
+      }
+    }
+    return super.repairInterruptedToolPart(part);
+  }
+}
+```
+
+This runs during transcript repair — before the repaired transcript is persisted and sent to the model — so the conversion shapes the current turn, not just the next one. The `input` is already normalized to a valid object. A returned tool part must carry a settled result (`output-available`, `output-error`, or `output-denied`); returning a non-tool part such as text is also fine.
+
 ## Dynamic Configuration
 
 `configure()` and `getConfig()` persist a JSON-serializable config blob in SQLite. It survives hibernation and restarts. Pass the config shape as a method-level generic for typed call sites:
