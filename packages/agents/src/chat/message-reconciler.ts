@@ -125,16 +125,22 @@ function mergeServerToolOutputs(
       ) {
         hasChanges = true;
         const server = serverResolvedParts.get(record.toolCallId as string)!;
-        // Overlay the server's resolved state + result fields; keep the client
-        // part's identity/input. Carry the field that belongs to each terminal
-        // state (output / errorText / approval).
-        return {
+        // Overlay the server's resolved state, keeping the client part's
+        // identity/input. Carry ONLY the result field that belongs to the
+        // server's terminal state — so a stray `output` left on an
+        // `output-error` part can't ride along and be misread as a result.
+        const merged: Record<string, unknown> = {
           ...part,
-          state: server.state,
-          ...("output" in server ? { output: server.output } : {}),
-          ...("errorText" in server ? { errorText: server.errorText } : {}),
-          ...("approval" in server ? { approval: server.approval } : {})
+          state: server.state
         };
+        if (server.state === "output-available") {
+          if ("output" in server) merged.output = server.output;
+        } else if (server.state === "output-error") {
+          if ("errorText" in server) merged.errorText = server.errorText;
+        } else if (server.state === "output-denied") {
+          if ("approval" in server) merged.approval = server.approval;
+        }
+        return merged;
       }
       return part;
     }) as UIMessage["parts"];

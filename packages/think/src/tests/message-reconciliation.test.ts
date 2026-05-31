@@ -346,6 +346,46 @@ describe("Think — message reconciliation on incoming submits", () => {
     ws.close(1000);
   });
 
+  it("parses a stringified ARRAY tool input back into structured form", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const ws = await connectWS(room);
+
+    await agent.setTextOnlyMode(true);
+
+    const userA = makeUserMessage("user-a", "batch these");
+    const assistantArrayInput: UIMessage = {
+      id: "assistant-array-input",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-batch",
+          toolCallId: TOOL_CALL_ID,
+          state: "output-available",
+          input: '[{"id":1},{"id":2}]',
+          output: { ok: true }
+        } as unknown as UIMessage["parts"][number]
+      ]
+    };
+    await agent.persistToolCallMessage([userA, assistantArrayInput]);
+
+    const responsePromise = waitForChatResponse(ws);
+    sendChatRequest(ws, [makeUserMessage("user-b", "continue")]);
+    const response = await responsePromise;
+
+    expect(response.done).toBe(true);
+    expect(response.error).toBeUndefined();
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const repaired = messages.find((m) => m.id === assistantArrayInput.id);
+    const toolPart = repaired!.parts.find(
+      (part) => (part as Record<string, unknown>).toolCallId === TOOL_CALL_ID
+    ) as Record<string, unknown> | undefined;
+    expect(toolPart?.input).toEqual([{ id: 1 }, { id: 2 }]);
+
+    ws.close(1000);
+  });
+
   it("defaults a missing tool input to an empty object so the provider does not 400", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

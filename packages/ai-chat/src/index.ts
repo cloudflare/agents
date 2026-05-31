@@ -3415,6 +3415,13 @@ export class AIChatAgent<
 
       const targetId = data?.targetAssistantId;
       if (targetId && this._findLastAssistantMessage()?.id !== targetId) {
+        // The leaf moved, so this continuation is superseded — skip it.
+        // NOTE: unlike `@cloudflare/think`, AIChatAgent does NOT distinguish an
+        // assistant leaf (recovery's own forward progress) from a newer user
+        // turn here, because AIChatAgent has no durable-submission layer to
+        // protect — there is nothing to mark `skipped` vs leave `running`. If
+        // AIChatAgent ever gains submissions, mirror Think's split in
+        // `_chatRecoveryContinue` or this skip will silently clobber them.
         await this._updateChatRecoveryIncident(
           data?.incidentId,
           "skipped",

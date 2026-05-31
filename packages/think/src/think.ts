@@ -1489,11 +1489,15 @@ export class Think<
     changed: boolean;
   } {
     const raw = "input" in record ? record.input : undefined;
-    if (typeof raw === "string" && raw.trim().startsWith("{")) {
-      try {
-        return { input: JSON.parse(raw) as unknown, changed: true };
-      } catch {
-        return { input: raw, changed: false };
+    if (typeof raw === "string") {
+      const trimmed = raw.trim();
+      // Stringified JSON object or array — parse back into structured input.
+      if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+        try {
+          return { input: JSON.parse(raw) as unknown, changed: true };
+        } catch {
+          return { input: raw, changed: false };
+        }
       }
     }
     if (raw === undefined || raw === null) {
@@ -1629,13 +1633,8 @@ export class Think<
       return messages;
     }
 
-    const repairedIds = new Set(repair.messages.map((message) => message.id));
-    const removedIds = messages
-      .filter((message) => !repairedIds.has(message.id))
-      .map((message) => message.id);
-    if (removedIds.length > 0) {
-      await this.session.deleteMessages(removedIds);
-    }
+    // Repair preserves every message (orphans are flipped to errored in place,
+    // never deleted), so there are no removed rows to delete — only updates.
     for (const message of repair.messages) {
       const original = messages.find(
         (candidate) => candidate.id === message.id

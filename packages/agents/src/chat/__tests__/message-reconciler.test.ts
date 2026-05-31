@@ -149,6 +149,35 @@ describe("reconcileMessages — tool output merge", () => {
     expect((part.approval as Record<string, unknown>).approved).toBe(false);
   });
 
+  it("does not carry a stray server output onto an output-error part", () => {
+    const server: ChatMessage[] = [
+      {
+        id: "srv-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-calc",
+            toolCallId: "tc1",
+            toolName: "calc",
+            state: "output-error",
+            errorText: "boom",
+            // A stray leftover output alongside the error state.
+            output: "partial"
+          } as unknown as ChatMessage["parts"][number]
+        ]
+      } as ChatMessage
+    ];
+    const client = [
+      toolAssistantMsg("srv-1", "tc1", "input-available", { input: {} })
+    ];
+    const result = reconcileMessages(client, server);
+    const part = result[0].parts[0] as Record<string, unknown>;
+    expect(part.state).toBe("output-error");
+    expect(part.errorText).toBe("boom");
+    // Only the field matching the terminal state is carried over.
+    expect("output" in part).toBe(false);
+  });
+
   it("passes through when no server tool outputs exist", () => {
     const server = [assistantMsg("srv-1", "Hello")];
     const client = [
