@@ -8,6 +8,7 @@
 import { RpcTarget } from "cloudflare:workers";
 import type {
   ExecuteResult,
+  ExecuteOptions,
   Executor,
   ResolvedProvider
 } from "./executor-types";
@@ -17,9 +18,12 @@ import type { ToolDescriptors } from "./tool-types";
 import type { ToolSet } from "ai";
 export type {
   ExecuteResult,
+  ExecuteOptions,
   Executor,
+  ConnectorBinding,
   ResolvedProvider
 } from "./executor-types";
+// ConnectorBinding re-exported for public API — used by proxy-tool and runtime.
 
 const BINARY_TAG = "__codemode_binary_v1__";
 
@@ -238,6 +242,14 @@ export interface DynamicWorkerExecutorOptions {
    * Note: the key `"executor.js"` is reserved and will be ignored if provided.
    */
   modules?: Record<string, string>;
+  /**
+   * Additional env bindings injected into the sandbox worker.
+   * Use this to pass ServiceStubs (e.g. CodemodeConnector instances)
+   * so sandbox code can call their RPC methods directly.
+   *
+   * These are available as `env.KEY` inside the sandbox worker.
+   */
+  bindings?: Record<string, unknown>;
 }
 
 /**
@@ -263,6 +275,7 @@ export class DynamicWorkerExecutor implements Executor {
   #timeout: number;
   #globalOutbound: Fetcher | null;
   #modules: Record<string, string>;
+  #bindings: Record<string, unknown>;
 
   constructor(options: DynamicWorkerExecutorOptions) {
     this.#loader = options.loader;
@@ -270,13 +283,15 @@ export class DynamicWorkerExecutor implements Executor {
     this.#globalOutbound = options.globalOutbound ?? null;
     const { "executor.js": _, ...safeModules } = options.modules ?? {};
     this.#modules = safeModules;
+    this.#bindings = options.bindings ?? {};
   }
 
   async execute(
     code: string,
     providersOrFns:
       | ResolvedProvider[]
-      | Record<string, (...args: unknown[]) => Promise<unknown>>
+      | Record<string, (...args: unknown[]) => Promise<unknown>>,
+    options?: ExecuteOptions
   ): Promise<ExecuteResult> {
     // Backwards compat: detect old `execute(code, fns)` signature.
     let providers: ResolvedProvider[];
@@ -329,15 +344,59 @@ export class DynamicWorkerExecutor implements Executor {
       seenNames.add(provider.name);
     }
 
-    // Generate a Proxy global for each provider namespace.
-    const proxyInits = providers.map(
-      (p) =>
-        `    const ${p.name} = new Proxy({}, {\n` +
+    // Connector bindings — passed as env to the sandbox worker.
+    // These use direct RPC (callTool) instead of ToolDispatcher serialization.
+    const connectors = options?.connectors ?? [];
+    const connectorNames = new Set(connectors.map((c) => c.name));
+
+    // Validate connector names don't clash with provider names or reserved names.
+    for (const connector of connectors) {
+      if (
+        RESERVED_NAMES.has(connector.name) ||
+        connector.name === "__connectors"
+      ) {
+        return {
+          result: undefined,
+          error: `Connector name "${connector.name}" is reserved`
+        };
+      }
+      if (!VALID_IDENT.test(connector.name)) {
+        return {
+          result: undefined,
+          error: `Connector name "${connector.name}" is not a valid JavaScript identifier`
+        };
+      }
+      if (seenNames.has(connector.name)) {
+        return {
+          result: undefined,
+          error: `Duplicate name "${connector.name}" (connector clashes with provider)`
+        };
+      }
+      seenNames.add(connector.name);
+    }
+
+    // Generate Proxy globals for dispatcher-backed providers.
+    const proxyInits = providers
+      .filter((p) => !connectorNames.has(p.name))
+      .map(
+        (p) =>
+          `    const ${p.name} = new Proxy({}, {\n` +
+          `      get: (_, toolName) => async (...args) => {\n` +
+          `        const resJson = await __dispatchers.${p.name}.call(String(toolName), __stringifyForCodemode(args));\n` +
+          `        const data = __parseForCodemode(resJson);\n` +
+          `        if (data.error) throw new Error(data.error);\n` +
+          `        return data.result;\n` +
+          `      }\n` +
+          `    });`
+      );
+
+    // Generate Proxy globals for connector-backed namespaces.
+    // These call connector.callTool(method, args) via Workers RPC — no serialization layer.
+    const connectorProxyInits = connectors.map(
+      (c) =>
+        `    const ${c.name} = new Proxy({}, {\n` +
         `      get: (_, toolName) => async (...args) => {\n` +
-        `        const resJson = await __dispatchers.${p.name}.call(String(toolName), __stringifyForCodemode(args));\n` +
-        `        const data = __parseForCodemode(resJson);\n` +
-        `        if (data.error) throw new Error(data.error);\n` +
-        `        return data.result;\n` +
+        `        return this.env.__connectors.${c.name}.callTool(String(toolName), args[0]);\n` +
         `      }\n` +
         `    });`
     );
@@ -353,6 +412,7 @@ export class DynamicWorkerExecutor implements Executor {
       '    console.error = (...a) => { __logs.push("[error] " + a.map(String).join(" ")); };',
       SANDBOX_CODEC,
       ...proxyInits,
+      ...connectorProxyInits,
       "",
       "    try {",
       "      const result = await Promise.race([",
@@ -401,6 +461,17 @@ export class DynamicWorkerExecutor implements Executor {
       dispatchers[provider.name] = new ToolDispatcher(sanitizedFns);
     }
 
+    // Merge static bindings with connector bindings.
+    const connectorBindings: Record<string, unknown> = {};
+    for (const connector of connectors) {
+      connectorBindings[connector.name] = connector.binding;
+    }
+    const env = {
+      ...this.#bindings,
+      ...(connectors.length > 0 ? { __connectors: connectorBindings } : {})
+    };
+    const hasEnv = Object.keys(env).length > 0;
+
     const worker = this.#loader.get(`codemode-${crypto.randomUUID()}`, () => ({
       compatibilityDate: "2025-06-01",
       compatibilityFlags: ["nodejs_compat"],
@@ -409,7 +480,8 @@ export class DynamicWorkerExecutor implements Executor {
         ...this.#modules,
         "executor.js": executorModule
       },
-      globalOutbound: this.#globalOutbound
+      globalOutbound: this.#globalOutbound,
+      env: hasEnv ? env : undefined
     }));
 
     const entrypoint = worker.getEntrypoint() as unknown as {
