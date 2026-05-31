@@ -1507,32 +1507,31 @@ export class Think<
   }
 
   /**
-   * Whether a tool part already has a settled result the provider accepts, so
-   * it must NOT be re-repaired into an errored result.
+   * Whether a tool part is valid context for the next provider call, so it
+   * must NOT be repaired into an interrupted error or dropped by the backstop.
    *
-   * Single source of truth for the terminal tool states, shared by the repair
-   * pass and the backstop detector so they cannot drift. Mirror the AI SDK's
-   * terminal states: `convertToModelMessages` emits a `tool-result` for
-   * `output-available`, `output-error`, AND `output-denied` (a user-denied
-   * approval — its denial reason becomes the tool-result). Omitting any of
-   * these makes repair re-flip the part every turn — clobbering a real
-   * `errorText`/denial with the generic "interrupted" message — and makes the
-   * backstop falsely drop a valid call.
+   * Terminal states (`output-available`, `output-error`, and `output-denied`)
+   * produce provider-acceptable tool results. `approval-responded` is not
+   * terminal, but is the required input to the automatic continuation that
+   * executes an approved server tool. Treating it as interrupted prevents the
+   * approved tool from ever running.
    */
-  private _toolPartHasSettledResult(record: Record<string, unknown>): boolean {
+  private _toolPartIsValidContext(record: Record<string, unknown>): boolean {
     if ("output" in record || "result" in record) return true;
     const state = typeof record.state === "string" ? record.state : "";
     return (
       state === "output-available" ||
       state === "output-error" ||
-      state === "output-denied"
+      state === "output-denied" ||
+      state === "approval-responded"
     );
   }
 
   /**
-   * Tool-call ids that still have no recorded result. After repair this should
-   * be empty; a non-empty result means the backstop (`ignoreIncompleteToolCalls`)
-   * will drop those calls — i.e. repair missed a shape and should be extended.
+   * Tool-call ids that have neither a recorded result nor a valid pending
+   * approved execution. After repair this should be empty; a non-empty result
+   * means the backstop (`ignoreIncompleteToolCalls`) will drop those calls —
+   * i.e. repair missed a shape and should be extended.
    */
   private _incompleteToolCallIds(messages: UIMessage[]): string[] {
     const ids: string[] = [];
@@ -1546,7 +1545,7 @@ export class Think<
           (record.type.startsWith("tool-") || record.type === "dynamic-tool") &&
           toolCallId;
         if (!isToolPart) continue;
-        if (!this._toolPartHasSettledResult(record)) ids.push(toolCallId);
+        if (!this._toolPartIsValidContext(record)) ids.push(toolCallId);
       }
     }
     return ids;
@@ -1579,12 +1578,14 @@ export class Think<
           continue;
         }
 
-        if (!this._toolPartHasSettledResult(record)) {
-          // Preserve the interrupted/abandoned tool call as an errored result
+        if (!this._toolPartIsValidContext(record)) {
+          // Preserve an interrupted/abandoned tool call as an errored result
           // instead of deleting it. Deleting makes the call "disappear" from the
           // (broadcast) transcript and lets the model silently re-run it; an
           // errored result keeps the user-visible record AND gives conversion a
           // tool-result so the provider doesn't 400 (AI_MissingToolResultsError).
+          // Approved server tools are excluded above because their continuation
+          // still needs the `approval-responded` part in order to execute.
           const normalized = this._normalizeToolInput(record);
           parts.push({
             ...part,
@@ -6403,6 +6404,34 @@ export class Think<
           const streamChunk = chunk as unknown as StreamChunkData;
           const { action } = accumulator.applyChunk(streamChunk);
 
+          // Approved server tools execute during a continuation stream, but
+          // their original tool part lives in an earlier assistant message.
+          // The accumulator only builds this turn's new content, so persist
+          // that cross-message result directly as soon as it arrives.
+          if (
+            (streamChunk.type === "tool-output-available" ||
+              streamChunk.type === "tool-output-error") &&
+            typeof streamChunk.toolCallId === "string" &&
+            !accumulator.parts.some(
+              (part) =>
+                "toolCallId" in part &&
+                part.toolCallId === streamChunk.toolCallId
+            )
+          ) {
+            await this._applyToolResult(
+              streamChunk.toolCallId,
+              streamChunk.type === "tool-output-available"
+                ? streamChunk.output
+                : undefined,
+              streamChunk.type === "tool-output-error"
+                ? "output-error"
+                : undefined,
+              streamChunk.type === "tool-output-error"
+                ? streamChunk.errorText
+                : undefined
+            );
+          }
+
           if (action?.type === "error") {
             streamError = action.error;
             if (options?.captureProgrammaticStreamError) {
@@ -6414,7 +6443,8 @@ export class Think<
               id: requestId,
               body: action.error,
               done: false,
-              error: true
+              error: true,
+              ...(continuation && { continuation: true })
             });
             break;
           }
@@ -6425,7 +6455,8 @@ export class Think<
             type: MSG_CHAT_RESPONSE,
             id: requestId,
             body: chunkBody,
-            done: false
+            done: false,
+            ...(continuation && { continuation: true })
           });
         }
       } finally {
@@ -6442,7 +6473,8 @@ export class Think<
         type: MSG_CHAT_RESPONSE,
         id: requestId,
         body: "",
-        done: true
+        done: true,
+        ...(continuation && { continuation: true })
       });
       doneSent = true;
     } catch (error) {
@@ -6458,7 +6490,8 @@ export class Think<
           id: requestId,
           body: streamError,
           done: true,
-          error: true
+          error: true,
+          ...(continuation && { continuation: true })
         });
         doneSent = true;
       }
@@ -6470,7 +6503,8 @@ export class Think<
           type: MSG_CHAT_RESPONSE,
           id: requestId,
           body: "",
-          done: true
+          done: true,
+          ...(continuation && { continuation: true })
         });
       }
     }
@@ -6630,6 +6664,9 @@ export class Think<
           parts: result.parts as UIMessage["parts"]
         };
         const safe = await this._updateMessageInHistory(updatedMsg);
+        // Session change callbacks may run after an immediately scheduled
+        // continuation begins. Keep its input cache coherent synchronously.
+        this._patchCachedMessage(safe);
         // Patch the live cache in place instead of doing a full
         // `_syncMessages()` round-trip.
         // A full re-read during a streaming turn drops in-flight messages
