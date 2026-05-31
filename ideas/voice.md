@@ -158,7 +158,7 @@ class RestaurantAgent extends VoiceAgent<Env> {
       tools: { book_table: tool({...}) },
       abortSignal: context.signal
     });
-    return result.textStream; // streamed through sentence chunker → TTS
+    return result.fullStream; // streamed through sentence chunker → TTS
   }
 
   async onCallStart(connection) {

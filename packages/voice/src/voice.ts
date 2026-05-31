@@ -13,7 +13,7 @@
  *
  *     async onTurn(transcript, context) {
  *       const result = streamText({ ... });
- *       return result.textStream;
+ *       return result.fullStream;
  *     }
  *   }
  *
@@ -27,7 +27,12 @@
 
 import type { Agent, Connection, WSMessage } from "agents";
 import { SentenceChunker } from "./sentence-chunker";
-import { iterateText, type TextSource } from "./text-stream";
+import {
+  iterateText,
+  iterateTextEvents,
+  type TextSource,
+  type TextStreamEvent
+} from "./text-stream";
 import { VOICE_PROTOCOL_VERSION } from "./types";
 import type {
   VoiceRole,
@@ -340,7 +345,7 @@ export function withVoice<TBase extends AgentLike>(
       _context: VoiceTurnContext
     ): Promise<TextSource> {
       throw new Error(
-        "VoiceAgent subclass must implement onTurn(). Return a string, AsyncIterable<string>, or ReadableStream."
+        "VoiceAgent subclass must implement onTurn(). Return a string, AI SDK fullStream, AsyncIterable<string>, or ReadableStream."
       );
     }
 
@@ -833,7 +838,7 @@ export function withVoice<TBase extends AgentLike>(
 
       return this.#streamingTTSPipeline(
         connection,
-        iterateText(response),
+        iterateTextEvents(response),
         llmStart,
         pipelineStart,
         signal
@@ -842,7 +847,7 @@ export function withVoice<TBase extends AgentLike>(
 
     async #streamingTTSPipeline(
       connection: Connection,
-      tokenStream: AsyncIterable<string>,
+      tokenStream: AsyncIterable<TextStreamEvent>,
       llmStart: number,
       pipelineStart: number,
       signal: AbortSignal
@@ -970,8 +975,17 @@ export function withVoice<TBase extends AgentLike>(
         this.#sendJSON(connection, { type: "transcript_delta", text: token });
       };
 
-      for await (const token of tokenStream) {
+      for await (const event of tokenStream) {
         if (signal.aborted) break;
+
+        if (event.type === "boundary") {
+          for (const sentence of chunker.flush()) {
+            enqueueSentence(sentence);
+          }
+          continue;
+        }
+
+        const token = event.text;
 
         fullText += token;
         sendAssistantDelta(token);

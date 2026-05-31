@@ -231,7 +231,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
       abortSignal: context.signal
     });
 
-    return result.textStream;
+    return result.fullStream;
   }
 
   async onCallStart(connection: Connection) {

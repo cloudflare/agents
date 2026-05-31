@@ -3,7 +3,8 @@
  * `AsyncGenerator<string>`.  This lets `onTurn()` return any of:
  *
  *   - A plain `string`
- *   - An `AsyncIterable<string>` (e.g. AI SDK `textStream`)
+ *   - An `AsyncIterable<string>` (deprecated for AI SDK `textStream`)
+ *   - An `AsyncIterable` of AI SDK `fullStream` parts
  *   - A `ReadableStream<Uint8Array>` (e.g. a raw `fetch` response body
  *     containing newline-delimited JSON / SSE)
  *   - A `ReadableStream<string>`
@@ -12,11 +13,19 @@
  */
 
 /** Union of every source type that {@link iterateText} accepts. */
-export type TextSource =
-  | string
-  | ReadableStream<Uint8Array>
-  | ReadableStream<string>
-  | AsyncIterable<string>;
+export type TextSource = string | TextReadableStream | AsyncIterable<unknown>;
+
+export type TextStreamEvent =
+  | { type: "text"; text: string }
+  | { type: "boundary" };
+
+type TextReadableStreamReader = {
+  read(): Promise<ReadableStreamReadResult<unknown>>;
+};
+
+interface TextReadableStream {
+  getReader(): TextReadableStreamReader;
+}
 
 /** Shape of a parsed NDJSON/SSE chunk from common AI APIs. */
 interface AIStreamChunk {
@@ -25,6 +34,8 @@ interface AIStreamChunk {
     delta?: { content?: string; role?: string };
   }[];
 }
+
+const warnedTextStreamSources = new WeakSet<object>();
 
 /**
  * Turn any {@link TextSource} into a lazy async generator of string chunks.
@@ -37,40 +48,42 @@ interface AIStreamChunk {
  * - `AsyncIterable<string>` → re-yields each chunk.
  */
 export async function* iterateText(source: TextSource): AsyncGenerator<string> {
+  for await (const event of iterateTextEvents(source)) {
+    if (event.type === "text") yield event.text;
+  }
+}
+
+export async function* iterateTextEvents(
+  source: TextSource
+): AsyncGenerator<TextStreamEvent> {
   // --- plain string ---
   if (typeof source === "string") {
-    if (source) yield source;
+    if (source) yield textEvent(source);
     return;
   }
 
-  // --- Custom AsyncIterable<string> ---
-  // AI SDK textStream is a ReadableStream with its own async iterator that
-  // yields string deltas. Prefer that custom iterator before the generic
-  // ReadableStream parser, while still letting native ReadableStream async
-  // iteration fall through to the stream-specific branches below.
+  // --- Custom AsyncIterable ---
+  // AI SDK textStream/fullStream are ReadableStreams with custom async
+  // iterators. Prefer those custom iterators before the generic ReadableStream
+  // parser, while still letting native ReadableStream async iteration fall
+  // through to the stream-specific branches below.
   if (hasCustomAsyncIterator(source)) {
-    for await (const chunk of source) {
-      if (typeof chunk === "string" && chunk) yield chunk;
+    for await (const event of iterateAsyncTextEvents(
+      source as AsyncIterable<unknown>
+    )) {
+      yield event;
     }
     return;
   }
 
   // --- ReadableStream ---
   if (source instanceof ReadableStream) {
-    const reader = (source as ReadableStream<string | Uint8Array>).getReader();
+    const reader = source.getReader();
 
     const first = await reader.read();
     if (first.done || first.value === undefined) return;
 
-    if (typeof first.value === "string") {
-      // ReadableStream<string> — yield chunks as-is
-      if (first.value) yield first.value;
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (typeof value === "string" && value) yield value;
-      }
-    } else {
+    if (first.value instanceof Uint8Array) {
       // ReadableStream<Uint8Array> — re-assemble into an NDJSON stream
       // by pushing the already-read first chunk back into a new stream.
       const peeked = first.value as Uint8Array;
@@ -89,30 +102,47 @@ export async function* iterateText(source: TextSource): AsyncGenerator<string> {
       for await (const chunk of parseNDJSON(combined.getReader())) {
         const ai = chunk as AIStreamChunk;
         if (ai.response) {
-          yield ai.response;
+          yield textEvent(ai.response);
         } else if (ai.choices && ai.choices.length > 0) {
           const choice = ai.choices[0];
           if (choice.delta?.content && choice.delta?.role === "assistant") {
-            yield choice.delta.content;
+            yield textEvent(choice.delta.content);
           }
         }
+      }
+    } else {
+      for await (const event of iterateAsyncTextEvents(
+        readWithFirst(first.value, reader)
+      )) {
+        yield event;
       }
     }
     return;
   }
 
-  // --- AsyncIterable<string> ---
+  // --- AsyncIterable ---
   if (Symbol.asyncIterator in source) {
-    for await (const chunk of source as AsyncIterable<string>) {
-      if (typeof chunk === "string" && chunk) yield chunk;
+    for await (const event of iterateAsyncTextEvents(source)) {
+      yield event;
     }
   }
 }
 
-function hasCustomAsyncIterator(
-  source: Exclude<TextSource, string>
-): source is AsyncIterable<string> {
-  const iterator = (source as Partial<AsyncIterable<string>>)[
+async function* readWithFirst(
+  first: unknown,
+  reader: TextReadableStreamReader
+): AsyncGenerator<unknown> {
+  yield first;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    yield value;
+  }
+}
+
+function hasCustomAsyncIterator(source: Exclude<TextSource, string>): boolean {
+  const iterator = (source as Partial<AsyncIterable<unknown>>)[
     Symbol.asyncIterator
   ];
 
@@ -127,6 +157,93 @@ function hasCustomAsyncIterator(
         Symbol.asyncIterator
       ]
   );
+}
+
+async function* iterateAsyncTextEvents(
+  source: AsyncIterable<unknown>
+): AsyncGenerator<TextStreamEvent> {
+  let needsBoundarySpace = false;
+  let hasYieldedText = false;
+  let lastTextEndedWithWhitespace = false;
+
+  for await (const chunk of source) {
+    if (typeof chunk === "string") {
+      warnDeprecatedTextStream(source);
+      if (chunk) yield textEvent(chunk);
+      continue;
+    }
+
+    if (!isRecord(chunk)) continue;
+
+    if (chunk.type === "text-delta") {
+      const text = getTextDelta(chunk);
+      if (!text) continue;
+
+      if (
+        needsBoundarySpace &&
+        hasYieldedText &&
+        !lastTextEndedWithWhitespace &&
+        !startsWithWhitespace(text)
+      ) {
+        yield textEvent(" ");
+      }
+
+      yield textEvent(text);
+      hasYieldedText = true;
+      lastTextEndedWithWhitespace = endsWithWhitespace(text);
+      needsBoundarySpace = false;
+      continue;
+    }
+
+    if (hasYieldedText && isTextBoundary(chunk.type)) {
+      if (!needsBoundarySpace) yield { type: "boundary" };
+      needsBoundarySpace = true;
+    }
+  }
+}
+
+function textEvent(text: string): TextStreamEvent {
+  return { type: "text", text };
+}
+
+function warnDeprecatedTextStream(source?: object): void {
+  if (!source || !(source instanceof ReadableStream)) return;
+  if (warnedTextStreamSources.has(source)) return;
+  warnedTextStreamSources.add(source);
+
+  console.warn(
+    "[voice] AI SDK textStream is not recommended because non-adjacent text parts may be joined incorrectly. Return result.fullStream from onTurn() instead."
+  );
+}
+
+function getTextDelta(chunk: Record<string, unknown>): string | null {
+  if (typeof chunk.text === "string") return chunk.text;
+  if (typeof chunk.delta === "string") return chunk.delta;
+  return null;
+}
+
+function isTextBoundary(type: unknown): boolean {
+  return (
+    typeof type === "string" &&
+    type !== "text-start" &&
+    type !== "text-end" &&
+    type !== "start" &&
+    type !== "finish" &&
+    type !== "start-step" &&
+    type !== "finish-step"
+  );
+}
+
+function startsWithWhitespace(text: string): boolean {
+  return /^\s/.test(text);
+}
+
+function endsWithWhitespace(text: string): boolean {
+  return /\s$/.test(text);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 // ---------------------------------------------------------------------------
