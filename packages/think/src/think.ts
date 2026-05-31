@@ -1297,6 +1297,10 @@ export class Think<
   // this must move to per-incident storage.
   private _activeChatRecoveryRootRequestId: string | undefined;
 
+  // One-time guard so the `{ persist: false }` data-loss warning fires at most
+  // once per isolate instead of on every recovery attempt.
+  private _warnedPersistFalseDropsSettledWork = false;
+
   private static readonly CONFIG_KEYS = [
     "_think_config",
     "lastClientTools",
@@ -7057,6 +7061,21 @@ export class Think<
       });
 
     if (exhausted) {
+      // Preserve the settled partial before sealing the turn. Exhaustion is
+      // decided BEFORE `onChatRecovery` is consulted, so without this the
+      // settled (often non-idempotent) tool results the turn already produced
+      // are discarded and the model re-runs them on the next message (#1631).
+      // Same gating as the normal path below so an already-persisted partial is
+      // never duplicated.
+      if (
+        await this._shouldPersistOrphanedPartial(streamId, {
+          streamStillActive: Boolean(streamStillActive),
+          streamIsTerminal,
+          snapshot: recoverySnapshot
+        })
+      ) {
+        await this._persistOrphanedStream(streamId);
+      }
       await this._exhaustChatRecovery(incident, config);
       return true;
     }
@@ -7084,15 +7103,27 @@ export class Think<
           createdAt: ctx.createdAt
         })) ?? {};
 
-      const streamAlreadyPersisted =
-        streamIsTerminal &&
-        (await this._hasPersistedRecoveredAssistant(recoverySnapshot));
+      const shouldPersist = await this._shouldPersistOrphanedPartial(streamId, {
+        streamStillActive: Boolean(streamStillActive),
+        streamIsTerminal,
+        snapshot: recoverySnapshot
+      });
 
-      if (
-        options.persist !== false &&
-        streamId &&
-        (streamStillActive || (streamIsTerminal && !streamAlreadyPersisted))
-      ) {
+      if (shouldPersist && options.persist === false) {
+        // `persist: false` discards the partial. Warn (once) if that drops
+        // settled tool results — completed, often non-idempotent work the model
+        // will otherwise re-run. The data-loss-free way to stop a turn is
+        // `{ persist: true, continue: false }` (#1631).
+        if (
+          !this._warnedPersistFalseDropsSettledWork &&
+          this._partialHasSettledToolResults(partial.parts)
+        ) {
+          this._warnedPersistFalseDropsSettledWork = true;
+          console.warn(
+            "[Think] onChatRecovery returned { persist: false } while the interrupted turn had settled tool results. Those completed tool calls will be dropped from the transcript and the model may re-run them. Return { persist: true, continue: false } to stop the turn without losing settled work."
+          );
+        }
+      } else if (shouldPersist) {
         await this._persistOrphanedStream(streamId);
       }
 
@@ -7270,6 +7301,44 @@ export class Think<
       lastLeaf?.role === "assistant" &&
       lastLeaf.id !== snapshot?.latestMessageId
     );
+  }
+
+  /**
+   * Whether the orphaned stream's partial should be materialized into an
+   * assistant message: there is a stream, and it is either still active or
+   * terminal-but-not-yet-persisted. Shared by the normal recovery path AND the
+   * exhaustion path so neither discards settled work nor duplicates a partial
+   * an earlier attempt already saved.
+   */
+  private async _shouldPersistOrphanedPartial(
+    streamId: string,
+    opts: {
+      streamStillActive: boolean;
+      streamIsTerminal: boolean;
+      snapshot: ChatFiberSnapshot<"think-chat-turn"> | null;
+    }
+  ): Promise<boolean> {
+    if (!streamId) return false;
+    const alreadyPersisted =
+      opts.streamIsTerminal &&
+      (await this._hasPersistedRecoveredAssistant(opts.snapshot));
+    return (
+      opts.streamStillActive || (opts.streamIsTerminal && !alreadyPersisted)
+    );
+  }
+
+  /** Whether a reconstructed partial carries any settled (provider-accepted)
+   *  tool result — the completed, often non-idempotent work that a
+   *  `{ persist: false }` recovery return would silently discard. */
+  private _partialHasSettledToolResults(parts: MessagePart[]): boolean {
+    return parts.some((part) => {
+      const record = part as Record<string, unknown>;
+      const type = typeof record.type === "string" ? record.type : "";
+      return (
+        (type.startsWith("tool-") || type === "dynamic-tool") &&
+        this._toolPartHasSettledResult(record)
+      );
+    });
   }
 
   /**

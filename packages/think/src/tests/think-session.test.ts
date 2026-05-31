@@ -3145,6 +3145,154 @@ describe("Think — onChatRecovery", () => {
     expect(messages).toHaveLength(0);
     expect(await agent.getTurnCallCount()).toBe(0);
   });
+
+  it("persists the settled partial when the recovery budget is exhausted (#1631)", async () => {
+    const agent = await freshRecoveryAgent("exhaust-preserves-partial");
+    // maxAttempts: 1 so a seeded attempt at the cap exhausts on the next wake.
+    await agent.setChatRecoveryConfigForTest({ maxAttempts: 1 });
+
+    // Terminal stream carrying a settled partial (text + a completed tool call).
+    await agent.insertInterruptedStream(
+      "stream-exh",
+      "req-exh",
+      [
+        {
+          body: JSON.stringify({ type: "start", messageId: "a-exh" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({ type: "text-delta", delta: "did real work" }),
+          index: 2
+        }
+      ],
+      "completed"
+    );
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-exh");
+
+    // Seed an incident already at the cap so this recovery exhausts. The
+    // incident id is `<recoveryRootRequestId>:<latestUserMessageId>` — here the
+    // root is the requestId and there is no latest user message.
+    await agent.seedIncidentForTest({
+      incidentId: "req-exh:",
+      requestId: "req-exh",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 1,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    await agent.triggerFiberRecovery();
+
+    // Exhaustion seals the turn but must NOT discard the settled partial — the
+    // bug was that `_exhaustChatRecovery` returned before persisting it.
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe("assistant");
+    const text = messages[0].parts
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("");
+    expect(text).toContain("did real work");
+
+    // And the incident is recorded as exhausted.
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      status: string;
+    }>;
+    expect(incidents[0]?.status).toBe("exhausted");
+  });
+
+  it("warns when { persist: false } drops settled tool results, but still honors the skip (#1631)", async () => {
+    const agent = await freshRecoveryAgent("warn-persist-false-drops");
+    await agent.setRecoveryOverride({ persist: false, continue: false });
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // Terminal stream (so the persist gate is reached) carrying a SETTLED
+      // tool result — the non-idempotent work `persist: false` would drop.
+      await agent.insertInterruptedStream(
+        "stream-warn",
+        "req-warn",
+        [
+          {
+            body: JSON.stringify({ type: "start", messageId: "a-warn" }),
+            index: 0
+          },
+          {
+            body: JSON.stringify({
+              type: "tool-input-available",
+              toolCallId: "tc1",
+              toolName: "calc",
+              input: { x: 1 }
+            }),
+            index: 1
+          },
+          {
+            body: JSON.stringify({
+              type: "tool-output-available",
+              toolCallId: "tc1",
+              output: { result: 42 }
+            }),
+            index: 2
+          }
+        ],
+        "completed"
+      );
+      await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-warn");
+
+      await agent.triggerFiberRecovery();
+
+      // Warned about the dropped settled work...
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0]?.[0]).toContain("persist: false");
+      expect(warnSpy.mock.calls[0]?.[0]).toContain("settled tool results");
+      // ...but `persist: false` is still honored — nothing was persisted.
+      const messages = (await agent.getStoredMessages()) as UIMessage[];
+      expect(messages).toHaveLength(0);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("does NOT warn on { persist: false } when the partial has no settled tool results", async () => {
+    const agent = await freshRecoveryAgent("warn-persist-false-text-only");
+    await agent.setRecoveryOverride({ persist: false, continue: false });
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await agent.insertInterruptedStream(
+        "stream-textonly",
+        "req-textonly",
+        [
+          {
+            body: JSON.stringify({ type: "start", messageId: "a-textonly" }),
+            index: 0
+          },
+          { body: JSON.stringify({ type: "text-start" }), index: 1 },
+          {
+            body: JSON.stringify({
+              type: "text-delta",
+              delta: "just prose, no tools"
+            }),
+            index: 2
+          }
+        ],
+        "completed"
+      );
+      await agent.insertInterruptedFiber(
+        "__cf_internal_chat_turn:req-textonly"
+      );
+
+      await agent.triggerFiberRecovery();
+
+      // Text-only partial carries no settled tool results, so no data-loss warn.
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 });
 
 // ── waitUntilStable / hasPendingInteraction ───────────────────────

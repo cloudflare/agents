@@ -319,6 +319,10 @@ export class AIChatAgent<
 > extends Agent<Env, State, Props> {
   private _activeChatRecoveryRootRequestId: string | undefined;
 
+  // One-time guard so the `{ persist: false }` data-loss warning fires at most
+  // once per isolate instead of on every recovery attempt.
+  private _warnedPersistFalseDropsSettledWork = false;
+
   /**
    * Registry of per-request AbortControllers.
    * Used to propagate cancellation signals for any external calls made by the agent.
@@ -3041,6 +3045,26 @@ export class AIChatAgent<
     await this.ctx.storage.put(CHAT_RECOVERY_PROGRESS_KEY, current + 1);
   }
 
+  /** Whether a reconstructed partial carries any settled (provider-accepted)
+   *  tool result — the completed, often non-idempotent work that a
+   *  `{ persist: false }` recovery return would silently discard.
+   *  `convertToModelMessages` treats `output-available` / `output-error` /
+   *  `output-denied` (or a part carrying `output`/`result`) as settled. */
+  private _partialHasSettledToolResults(parts: MessagePart[]): boolean {
+    return parts.some((part) => {
+      const record = part as Record<string, unknown>;
+      const type = typeof record.type === "string" ? record.type : "";
+      if (!(type.startsWith("tool-") || type === "dynamic-tool")) return false;
+      if ("output" in record || "result" in record) return true;
+      const state = typeof record.state === "string" ? record.state : "";
+      return (
+        state === "output-available" ||
+        state === "output-error" ||
+        state === "output-denied"
+      );
+    });
+  }
+
   /** Sweep recovery incidents that have been inactive past the TTL. */
   private async _sweepStaleChatRecoveryIncidents(now: number): Promise<void> {
     const entries = await this.ctx.storage.list<ChatRecoveryIncident>({
@@ -3244,6 +3268,15 @@ export class AIChatAgent<
       ? this._getPartialStreamText(streamId)
       : { text: "", parts: [] as MessagePart[] };
 
+    // Only persist while the stream is still active. The ACK handler (client
+    // reconnect → replayChunks) may have already persisted + completed the
+    // orphaned stream before fiber recovery runs; persisting again on the same
+    // chunks would double the assistant message's parts.
+    const streamStillActive =
+      streamId &&
+      this._resumableStream.hasActiveStream() &&
+      this._resumableStream.activeStreamId === streamId;
+
     const shouldRetryPreStream = this._shouldRetryRecoveredPreStreamTurn(
       recoverySnapshot,
       streamId ?? "",
@@ -3263,6 +3296,13 @@ export class AIChatAgent<
       });
 
     if (exhausted) {
+      // Preserve the settled partial before sealing the turn. Exhaustion is
+      // decided BEFORE `onChatRecovery` is consulted, so without this the
+      // settled (often non-idempotent) tool results the turn already produced
+      // are discarded and the model re-runs them on the next message (#1631).
+      if (streamStillActive) {
+        await this._persistOrphanedStream(streamId);
+      }
       await this._exhaustChatRecovery(incident, config);
       return true;
     }
@@ -3290,17 +3330,21 @@ export class AIChatAgent<
           createdAt: ctx.createdAt
         })) ?? {};
 
-      // Only persist and complete if the stream is still active. The ACK
-      // handler (client reconnect → replayChunks) may have already persisted
-      // the orphaned stream and completed it before fiber recovery runs.
-      // Without this guard, _persistOrphanedStream runs twice on the same
-      // chunks, doubling the assistant message's parts.
-      const streamStillActive =
-        streamId &&
-        this._resumableStream.hasActiveStream() &&
-        this._resumableStream.activeStreamId === streamId;
-
-      if (options.persist !== false && streamStillActive) {
+      if (streamStillActive && options.persist === false) {
+        // `persist: false` discards the partial. Warn (once) if that drops
+        // settled tool results — completed, often non-idempotent work the model
+        // will otherwise re-run. The data-loss-free way to stop a turn is
+        // `{ persist: true, continue: false }` (#1631).
+        if (
+          !this._warnedPersistFalseDropsSettledWork &&
+          this._partialHasSettledToolResults(partial.parts)
+        ) {
+          this._warnedPersistFalseDropsSettledWork = true;
+          console.warn(
+            "[AIChatAgent] onChatRecovery returned { persist: false } while the interrupted turn had settled tool results. Those completed tool calls will be dropped from the transcript and the model may re-run them. Return { persist: true, continue: false } to stop the turn without losing settled work."
+          );
+        }
+      } else if (options.persist !== false && streamStillActive) {
         await this._persistOrphanedStream(streamId);
       }
 
