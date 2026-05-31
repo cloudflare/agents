@@ -3293,6 +3293,78 @@ describe("Think — onChatRecovery", () => {
       warnSpy.mockRestore();
     }
   });
+
+  it("exposes recoveryRootRequestId on the onChatRecovery context (#1631)", async () => {
+    const agent = await freshRecoveryAgent("recovery-root-id");
+
+    await agent.insertInterruptedStream("stream-root", "req-root", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "a-root" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "partial" }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-root");
+
+    await agent.triggerFiberRecovery();
+
+    const contexts = await agent.getRecoveryContexts();
+    expect(contexts.length).toBeGreaterThanOrEqual(1);
+    // The stable incident root (constant across chained continuations) is now a
+    // first-class field — no re-deriving identity from message IDs.
+    expect(contexts[0]?.recoveryRootRequestId).toBe("req-root");
+  });
+
+  it("onExhausted context carries terminalMessage, recoveryRootRequestId, and the partial (#1631)", async () => {
+    const agent = await freshRecoveryAgent("exhausted-ctx");
+    await agent.enableExhaustedCaptureForTest(1);
+
+    await agent.insertInterruptedStream(
+      "stream-exctx",
+      "req-exctx",
+      [
+        {
+          body: JSON.stringify({ type: "start", messageId: "a-exctx" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({
+            type: "text-delta",
+            delta: "work before giving up"
+          }),
+          index: 2
+        }
+      ],
+      "completed"
+    );
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-exctx");
+    await agent.seedIncidentForTest({
+      incidentId: "req-exctx:",
+      requestId: "req-exctx",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 1,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    await agent.triggerFiberRecovery();
+
+    const exhausted = await agent.getExhaustedContextsForTest();
+    expect(exhausted).toHaveLength(1);
+    const ctx = exhausted[0];
+    // Enough to render/persist a terminal banner without re-deriving anything.
+    expect(ctx.recoveryRootRequestId).toBe("req-exctx");
+    expect(ctx.terminalMessage.length).toBeGreaterThan(0);
+    expect(ctx.partialText).toContain("work before giving up");
+    expect(ctx.reason).toBe("max_attempts_exceeded");
+  });
 });
 
 // ── waitUntilStable / hasPendingInteraction ───────────────────────

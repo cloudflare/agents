@@ -99,6 +99,8 @@ type ChatRecoveryKind = "retry" | "continue";
 type ChatRecoveryIncident = {
   incidentId: string;
   requestId: string;
+  /** Stable request ID for the whole continuation chain (the recovery root). */
+  recoveryRootRequestId?: string;
   recoveryKind: ChatRecoveryKind;
   attempt: number;
   maxAttempts: number;
@@ -3121,6 +3123,7 @@ export class AIChatAgent<
     const incident: ChatRecoveryIncident = {
       incidentId,
       requestId: input.requestId,
+      recoveryRootRequestId: input.recoveryRootRequestId ?? input.requestId,
       recoveryKind: input.recoveryKind,
       attempt,
       maxAttempts: config.maxAttempts,
@@ -3203,15 +3206,21 @@ export class AIChatAgent<
 
   private async _exhaustChatRecovery(
     incident: ChatRecoveryIncident,
-    config: ResolvedChatRecoveryConfig
+    config: ResolvedChatRecoveryConfig,
+    partial: { text: string; parts: MessagePart[] }
   ): Promise<void> {
     const ctx: ChatRecoveryExhaustedContext = {
       incidentId: incident.incidentId,
       requestId: incident.requestId,
+      recoveryRootRequestId:
+        incident.recoveryRootRequestId ?? incident.requestId,
       attempt: incident.attempt,
       maxAttempts: incident.maxAttempts,
       recoveryKind: incident.recoveryKind,
-      reason: incident.reason ?? "max_attempts_exceeded"
+      partialText: partial.text,
+      partialParts: partial.parts,
+      reason: incident.reason ?? "max_attempts_exceeded",
+      terminalMessage: config.terminalMessage
     };
     this._emit("chat:recovery:exhausted", ctx);
     // A throwing onExhausted hook must not prevent the terminal UX from being
@@ -3303,7 +3312,7 @@ export class AIChatAgent<
       if (streamStillActive) {
         await this._persistOrphanedStream(streamId);
       }
-      await this._exhaustChatRecovery(incident, config);
+      await this._exhaustChatRecovery(incident, config, partial);
       return true;
     }
 
@@ -3315,6 +3324,7 @@ export class AIChatAgent<
       const options =
         (await this.onChatRecovery({
           incidentId: incident.incidentId,
+          recoveryRootRequestId,
           attempt: incident.attempt,
           maxAttempts: incident.maxAttempts,
           recoveryKind,

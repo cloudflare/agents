@@ -10,7 +10,21 @@ interface ChatTestStub {
   getActiveFibers(): Promise<Array<{ id: string; name: string }>>;
   getOnChatMessageCallCount(): Promise<number>;
   getRecoveryContexts(): Promise<
-    Array<{ recoveryData: unknown; partialText: string; streamId: string }>
+    Array<{
+      recoveryData: unknown;
+      partialText: string;
+      streamId: string;
+      recoveryRootRequestId: string;
+    }>
+  >;
+  enableExhaustedCaptureForTest(maxAttempts: number): Promise<void>;
+  getExhaustedContextsForTest(): Promise<
+    Array<{
+      recoveryRootRequestId: string;
+      terminalMessage: string;
+      partialText: string;
+      reason: string;
+    }>
   >;
   waitForIdleForTest(): Promise<void>;
   persistMessages(messages: unknown[]): Promise<void>;
@@ -700,6 +714,78 @@ describe("chatRecovery", () => {
       } finally {
         warnSpy.mockRestore();
       }
+    });
+
+    it("exposes recoveryRootRequestId on the onChatRecovery context", async () => {
+      const room = crypto.randomUUID();
+      const stub = (await getAgentByName(
+        env.ChatRecoveryTestAgent,
+        room
+      )) as unknown as ChatTestStub;
+
+      await stub.insertInterruptedStream("stream-root", "req-root", [
+        {
+          body: JSON.stringify({ type: "start", messageId: "a-root" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({ type: "text-delta", delta: "partial" }),
+          index: 2
+        }
+      ]);
+      await stub.insertInterruptedFiber("__cf_internal_chat_turn:req-root");
+
+      await stub.triggerFiberRecovery();
+
+      const contexts = await stub.getRecoveryContexts();
+      expect(contexts.length).toBeGreaterThanOrEqual(1);
+      expect(contexts[0]?.recoveryRootRequestId).toBe("req-root");
+    });
+
+    it("onExhausted context carries terminalMessage, recoveryRootRequestId, and the partial", async () => {
+      const room = crypto.randomUUID();
+      const stub = (await getAgentByName(
+        env.ChatRecoveryTestAgent,
+        room
+      )) as unknown as ChatTestStub;
+      await stub.enableExhaustedCaptureForTest(1);
+
+      await stub.insertInterruptedStream("stream-exctx", "req-exctx", [
+        {
+          body: JSON.stringify({ type: "start", messageId: "a-exctx" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({
+            type: "text-delta",
+            delta: "work before giving up"
+          }),
+          index: 2
+        }
+      ]);
+      await stub.insertInterruptedFiber("__cf_internal_chat_turn:req-exctx");
+      await stub.seedIncidentForTest({
+        incidentId: "req-exctx:",
+        requestId: "req-exctx",
+        recoveryKind: "continue",
+        attempt: 1,
+        maxAttempts: 1,
+        status: "scheduled",
+        firstSeenAt: Date.now(),
+        lastAttemptAt: Date.now()
+      });
+
+      await stub.triggerFiberRecovery();
+
+      const exhausted = await stub.getExhaustedContextsForTest();
+      expect(exhausted).toHaveLength(1);
+      const ctx = exhausted[0];
+      expect(ctx.recoveryRootRequestId).toBe("req-exctx");
+      expect(ctx.terminalMessage.length).toBeGreaterThan(0);
+      expect(ctx.partialText).toContain("work before giving up");
+      expect(ctx.reason).toBe("max_attempts_exceeded");
     });
   });
 
