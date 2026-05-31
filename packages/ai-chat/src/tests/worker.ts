@@ -23,6 +23,7 @@ import type {
   ClientToolSchema,
   ChatRecoveryConfig,
   ChatRecoveryContext,
+  ChatRecoveryExhaustedContext,
   ChatRecoveryOptions
 } from "../";
 import { ResumableStream } from "agents/chat";
@@ -1457,6 +1458,7 @@ export class AgentWithoutSuperCall extends AIChatAgent<Env> {
 export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   override chatRecovery: ChatRecoveryConfig = true;
   recoveryContexts: ChatRecoveryContext[] = [];
+  exhaustedContexts: ChatRecoveryExhaustedContext[] = [];
   recoveryOverride: ChatRecoveryOptions | null = null;
   onChatMessageCallCount = 0;
   onChatMessageBodies: Array<Record<string, unknown> | undefined> = [];
@@ -1588,6 +1590,21 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   getOnExhaustedCallsForTest(): number {
     return this.onExhaustedCalls;
+  }
+
+  /** Capture the `onExhausted` context for assertions (instead of throwing). */
+  enableExhaustedCaptureForTest(maxAttempts: number): void {
+    this.exhaustedContexts = [];
+    this.chatRecovery = {
+      maxAttempts,
+      onExhausted: (exhaustedCtx) => {
+        this.exhaustedContexts.push(exhaustedCtx);
+      }
+    };
+  }
+
+  getExhaustedContextsForTest(): ChatRecoveryExhaustedContext[] {
+    return this.exhaustedContexts;
   }
 
   setChatRecoveryConfigForTest(config: ChatRecoveryConfig): void {
@@ -1995,6 +2012,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     const options =
       (await this.onChatRecovery({
         incidentId: `test:${requestId}`,
+        recoveryRootRequestId: requestId,
         attempt: 1,
         maxAttempts: 6,
         recoveryKind: "continue",

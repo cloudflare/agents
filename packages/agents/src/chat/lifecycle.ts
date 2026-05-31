@@ -88,6 +88,14 @@ export type SaveMessagesResult = {
 export type ChatRecoveryContext = {
   /** Stable identifier for this recovery incident. */
   incidentId: string;
+  /**
+   * Stable request ID for the whole continuation chain (the recovery "root").
+   * Unlike `requestId` — which changes on every chained continuation — this is
+   * constant for the lifetime of the incident, so it's the right key for
+   * per-incident budget tracking or fresh-incident detection without
+   * re-deriving identity from message IDs.
+   */
+  recoveryRootRequestId: string;
   /** Attempt number for this recovery incident, starting at 1. */
   attempt: number;
   /** Maximum attempts before the framework terminalizes recovery. */
@@ -130,12 +138,29 @@ export type ChatRecoveryOptions = {
 
 /**
  * Context passed when framework-owned chat recovery exhausts its retry budget.
+ *
+ * Carries enough to render/persist a user-facing terminal banner without
+ * re-deriving anything: the `terminalMessage` that was shown, the
+ * `recoveryRootRequestId` (stable incident identity), and the partial the turn
+ * produced before it was given up on.
  */
 export type ChatRecoveryExhaustedContext = Pick<
   ChatRecoveryContext,
-  "incidentId" | "requestId" | "attempt" | "maxAttempts" | "recoveryKind"
+  | "incidentId"
+  | "requestId"
+  | "recoveryRootRequestId"
+  | "attempt"
+  | "maxAttempts"
+  | "recoveryKind"
+  | "streamId"
+  | "createdAt"
+  | "partialText"
+  | "partialParts"
 > & {
+  /** Why recovery stopped: `max_attempts_exceeded` or `max_recovery_window_exceeded`. */
   reason: string;
+  /** The terminal message shown to the user (from the `chatRecovery` config). */
+  terminalMessage: string;
 };
 
 /**
