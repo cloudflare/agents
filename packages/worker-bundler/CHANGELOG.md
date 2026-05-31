@@ -1,5 +1,11 @@
 # @cloudflare/worker-bundler
 
+## 0.2.0
+
+### Minor Changes
+
+- [#1584](https://github.com/cloudflare/agents/pull/1584) [`87006e2`](https://github.com/cloudflare/agents/commit/87006e27498ee535feabd2a9bd207366f33621be) Thanks [@threepointone](https://github.com/threepointone)! - Add a `virtualModules` option to `createWorker`. Each key is an import specifier (for example `"node:fs"` or `"virtual:app/config"`) and each value is JavaScript module source made available during bundling. Only applies when `bundle: true`; in transform-only mode it is ignored with a warning.
+
 ## 0.1.3
 
 ### Patch Changes

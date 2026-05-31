@@ -1,5 +1,125 @@
 # @cloudflare/think
 
+## 0.8.0
+
+### Minor Changes
+
+- [#1584](https://github.com/cloudflare/agents/pull/1584) [`87006e2`](https://github.com/cloudflare/agents/commit/87006e27498ee535feabd2a9bd207366f33621be) Thanks [@threepointone](https://github.com/threepointone)! - Add a framework-agnostic Agent Skills engine at `agents/skills`: skill sources (`fromManifest`, R2), a `SkillRegistry` that produces a catalog prompt and AI SDK activation tools (`activate_skill`, `read_skill_resource`, `run_skill_script`), binary-safe resource reads, and qualified cross-skill resource paths. Bundled skills are imported through the Agents Vite plugin with the `agents:skills` specifier (defaulting to a `./skills` directory), typed via ambient declarations shipped from `agents`. `@cloudflare/think` re-exports the engine as `skills` and wires `getSkills()` into the turn; any AI SDK caller (including `@cloudflare/ai-chat`) can build a `SkillRegistry` directly.
+
+  Skill loading is resilient: duplicate or failing sources are skipped with a warning (first source wins) instead of throwing. Optional, experimental script execution (`skills.runner`) runs function-style JavaScript/TypeScript (`export default run(input, ctx)` with `ctx = { skill, files, workspace, tools, output }`) plus path-based Python and Bash, all behind a single capability and permission bridge.
+
+- [#1611](https://github.com/cloudflare/agents/pull/1611) [`02f9380`](https://github.com/cloudflare/agents/commit/02f93809587aca310ad39fa5683de57ee9f6e070) Thanks [@threepointone](https://github.com/threepointone)! - Add bounded, observable recovery foundations for durable chat turns and fibers.
+  - Add dedicated recovery observability channels/events for fibers, chat recovery, transcript repair, and agent-tool recovery.
+  - Bound internal framework fiber recovery hooks and parent agent-tool recovery scans so startup and recovery work cannot wedge indefinitely.
+  - Add shared chat recovery incident tracking with attempt counts, configurable `chatRecovery` defaults, and terminal exhaustion behavior for `AIChatAgent` and `Think`. Think recovery now exhausts after six failed attempts by default and sends a terminal error frame instead of spinning indefinitely.
+  - Keep the recovery attempt budget bounded even when an interrupted turn flips between `retry` and `continue` recovery kinds (the incident identity no longer includes the kind), guard a throwing `onExhausted` hook so the terminal UX is still delivered, mark incidents `failed` when the recovery dispatch throws, and reclaim incident records on success plus a TTL sweep for abandoned ones so durable storage does not grow without bound.
+  - Bound generic unmanaged fiber recovery with a configurable `fiberRecoveryMaxAgeMs` so a repeatedly-throwing `onFiberRecovered()` hook cannot re-trigger forever across restarts.
+  - Surface Think post-persist chat request failures through `onChatError(error, ctx)` and `chat:request:failed`.
+  - Repair incomplete Think tool-call transcripts before provider calls and allow `createCompactFunction()` to use a supplied token counter for tail budgeting.
+
+- [#1587](https://github.com/cloudflare/agents/pull/1587) [`32ea71e`](https://github.com/cloudflare/agents/commit/32ea71ef805e25e7926cfbcb849350e40df739d3) Thanks [@threepointone](https://github.com/threepointone)! - Add first-class Think messengers with provider-neutral routing, durable Chat SDK state, streamed Think replies, action events, and a Telegram provider entrypoint.
+
+  The messenger runtime depends directly on Chat SDK, supports provider-specific adapter names for multi-bot setups, and exposes the Telegram provider as both a named and default export.
+
+- [#1598](https://github.com/cloudflare/agents/pull/1598) [`f5e37bf`](https://github.com/cloudflare/agents/commit/f5e37bfa313634105fd0bdb7912498f9f92b24c6) Thanks [@threepointone](https://github.com/threepointone)! - Add `ThinkWorkflow` with durable `step.prompt()` support for Workflow-owned Think reasoning steps.
+
+- [#1623](https://github.com/cloudflare/agents/pull/1623) [`4c8b371`](https://github.com/cloudflare/agents/commit/4c8b3712b11d2b07298e384e5884844272f4697a) Thanks [@threepointone](https://github.com/threepointone)! - Add an opt-in inactivity watchdog for the streaming read loop, so a hung provider/transport surfaces a terminal error instead of an infinite spinner.
+
+  Previously, if a model stream parked without ever throwing — no chunk, no error, no `done` — the chat read loop would wait forever and the client would spin indefinitely. There was no detection for a silently hung turn (only recovery-path `stable_timeout`, which guards recovery scheduling, not a live stream).
+
+  Set `chatStreamStallTimeoutMs` on a Think subclass to arm it: if no UI-message-stream chunk arrives within that window, the watchdog aborts the turn and the loop exits with a terminal stream error (routed through `onChatError` with `stage: "stream"`), emitting a new `chat:stream:stalled` observability event.
+
+  It is **off by default** (`0`) and applies to both the WebSocket turn loop and the `chat()` / sub-agent callback loop. Note it measures the gap _between_ stream chunks, which includes server-side tool execution time (no chunks flow while a tool runs) — set it comfortably above your slowest model time-to-first-token and slowest tool, or you will abort healthy long turns. A good starting point is `120_000`.
+
+- [#1585](https://github.com/cloudflare/agents/pull/1585) [`8ad724b`](https://github.com/cloudflare/agents/commit/8ad724b1a436398b9e17b8234ca914f2caa4a859) Thanks [@threepointone](https://github.com/threepointone)! - Add declarative scheduled tasks for Think agents with a typed recurring DSL, timezone-aware reconciliation, and durable idempotent submissions.
+
+### Patch Changes
+
+- [#1615](https://github.com/cloudflare/agents/pull/1615) [`51a771f`](https://github.com/cloudflare/agents/commit/51a771ff7a640eae4b530b588d0f741300ddb0dc) Thanks [@threepointone](https://github.com/threepointone)! - Chat recovery no longer permanently abandons a turn under repeated deploys. A
+  mid-turn deploy resets the Durable Object ("code was updated") and the
+  interrupted continuation is re-detected on the next wake; previously every such
+  interruption consumed one of the bounded recovery attempts, so a deploy every
+  few minutes exhausted the budget (`max_attempts_exceeded`) and the turn was
+  terminally abandoned even though each fresh isolate was healthy. Recovery now
+  distinguishes an interruption that followed forward progress (more persisted
+  assistant content than the previous attempt observed) — treated as environmental
+  and not counted against the budget — from a turn that never advances, which still
+  exhausts at `maxAttempts`. A 15-minute wall-clock ceiling per incident bounds the
+  worst case so a continuously churning environment cannot retry forever.
+
+- [#1618](https://github.com/cloudflare/agents/pull/1618) [`e6b6c0b`](https://github.com/cloudflare/agents/commit/e6b6c0b91b55e12e5cf4ced0719938155d845720) Thanks [@threepointone](https://github.com/threepointone)! - Chat continuation no longer fails on models that reject assistant-prefill.
+  Continuing a partial assistant turn (e.g. after a deploy interrupts a stream)
+  replayed a transcript whose final message was that partial assistant message.
+  Modern chat models reject a request ending in an assistant message — Anthropic
+  Claude 4.6+ returns a 400 ("This model does not support assistant message
+  prefill. The conversation must end with a user message.") — so the continuation
+  threw and the turn was left interrupted. Think now appends an ephemeral user
+  "continue" checkpoint whenever a model request would otherwise end in an
+  assistant message, so continuation works across providers. The checkpoint
+  shapes only the model request and is never persisted to the transcript.
+
+- [#1608](https://github.com/cloudflare/agents/pull/1608) [`7c17736`](https://github.com/cloudflare/agents/commit/7c17736fafa58c218181d7dcb30e36d3605d4395) Thanks [@cjol](https://github.com/cjol)! - Fix auto-continuation stream resumes so immediate client-tool resume requests attach to the pending continuation instead of receiving `cf_agent_stream_resume_none`.
+
+- [#1601](https://github.com/cloudflare/agents/pull/1601) [`0fb0acf`](https://github.com/cloudflare/agents/commit/0fb0acf818d2d45543bc49998c1aee30db578d53) Thanks [@threepointone](https://github.com/threepointone)! - Require fixed StreamCallback RPC handlers so sub-agent chat callbacks do not probe missing remote methods.
+
+- [#1621](https://github.com/cloudflare/agents/pull/1621) [`fac4463`](https://github.com/cloudflare/agents/commit/fac44632a26530412dd2457164fa58140b9bef48) Thanks [@threepointone](https://github.com/threepointone)! - Settled tool results are now flushed to durable storage immediately during a
+  chat turn, so recovery never re-runs an already-completed (often non-idempotent)
+  tool call. Stream chunks are batched in memory and flushed to SQLite every ~10
+  chunks; the WebSocket chat path did not force a flush on settled tool results,
+  so an isolate eviction (deploy) before the next batch flush lost them. Recovery
+  then rebuilt the partial assistant message without those tool calls and the
+  model re-ran them (e.g. duplicate INSERTs). The sub-agent RPC streaming path
+  already flushed recoverable content; this brings the WebSocket path to parity
+  via a shared `_storeChunkDurably` helper that flushes immediately on
+  `tool-output-available` / `tool-output-error`. Net effect: recovery loses at
+  most the single in-flight step, even when multiple evictions hit one turn.
+
+  Also closes two remaining "frozen turn" hydration gaps from the terminal-status
+  work: a turn that fails before the stream starts (e.g. a message reconciliation
+  error in `_handleChatRequest`) now records its terminal status, and a recovery
+  skip caused by `onChatRecovery` returning `{ continue: false }` now surfaces a
+  terminal error too. Both were previously broadcast (or silent) but not persisted,
+  so a client disconnected at that moment stayed frozen on reconnect. Benign skips
+  such as `conversation_changed` (a newer turn already owns the UI) remain silent.
+
+- [#1623](https://github.com/cloudflare/agents/pull/1623) [`4c8b371`](https://github.com/cloudflare/agents/commit/4c8b3712b11d2b07298e384e5884844272f4697a) Thanks [@threepointone](https://github.com/threepointone)! - Transcript repair now preserves an interrupted/abandoned tool call as an errored result instead of deleting it.
+
+  Previously, a tool call with no recorded output (e.g. a tool interrupted mid-execution by a deploy, or an `ask_user` answered by the user's next message) was **removed** from the durable transcript before the next turn. That made the call visibly "disappear" from the broadcast transcript and let the model silently **re-run** it (duplicating non-idempotent side effects).
+
+  It is now flipped to `state: "output-error"` with an explanatory message, so:
+  - the user-visible record survives (no disappearing tool calls),
+  - the model sees the tool errored rather than re-running it blind, and
+  - the provider still receives a valid tool-result (no `AI_MissingToolResultsError`).
+
+  Malformed tool `input`s are normalized in the same pass: a stringified-JSON `input` is parsed back into an object, and a missing/`null` `input` on a settled or interrupted tool call is defaulted to `{}` (Anthropic rejects a `tool_use` block whose `input` is absent).
+
+  As a last-line backstop, `convertToModelMessages` is now called with `ignoreIncompleteToolCalls: true`, so any incomplete tool call that still slips past the repair (compaction edges, `addToolOutput` races, unrecognized part shapes) is dropped at conversion rather than 400ing the provider.
+
+  Repair recognizes all of the AI SDK's settled terminal tool states — `output-available`, `output-error`, and `output-denied` (a user-denied approval) — via a single shared predicate, so a tool call that already has a provider-acceptable result is never re-flipped into a generic errored result. Previously `output-error` was re-flipped on every turn (clobbering a real `errorText` with the generic "interrupted" message and emitting spurious `chat:transcript:repaired` events/writes/broadcasts for the life of the conversation), and `output-denied` was converted into an errored result that lost the denial. A denied tool result is also now flushed to durable storage immediately (like other settled results) so it survives an eviction.
+
+- [#1623](https://github.com/cloudflare/agents/pull/1623) [`4c8b371`](https://github.com/cloudflare/agents/commit/4c8b3712b11d2b07298e384e5884844272f4697a) Thanks [@threepointone](https://github.com/threepointone)! - Fix chat recovery falsely marking a durable submission as `error` under repeated mid-turn deploys.
+
+  When several deploys interrupt a single turn, recovery runs a _chain_ of continuations. Three bugs combined to leave the submission in `error` even when the turn actually completed every step:
+  - **Lost ownership.** The submission link (`recoveredRequestId`) was derived from each continuation's own (fresh) requestId, so chained continuations dropped it — the continuation that finally completed the turn could no longer mark the submission `completed`.
+  - **Stale-continuation clobber.** A superseded continuation tripped the `conversation_changed` guard because the leaf had advanced via recovery's _own_ forward progress (a new assistant message), not a new user turn, and overwrote the still-running submission to `error`.
+  - **Premature `stable_timeout`.** A timeout while waiting for the isolate to settle (common while a deploy is in flight) failed the turn terminally at the first attempt.
+
+  Now: submission ownership is keyed off the stable recovery root and threaded through the entire continuation chain (including the terminal abandon paths — recovery exhaustion and `{ continue: false }` — which previously marked the submission by the per-continuation requestId and so left a chained submission stuck `running`); a superseded continuation skips benignly (only a genuinely newer user turn marks the submission `skipped`, never `error`); and a stable-state timeout reschedules within the `maxAttempts` budget. A turn that completes under deploy churn now ends `completed`, not `error`.
+
+  `@cloudflare/ai-chat` has the same recovery machinery but no durable-submission layer, so it receives the `stable_timeout` reschedule fix only: a transient stable-state timeout now retries within the attempt budget instead of permanently abandoning a recoverable turn at the first attempt.
+
+- [#1619](https://github.com/cloudflare/agents/pull/1619) [`6d1a8f9`](https://github.com/cloudflare/agents/commit/6d1a8f9d89f7df2919d70d611c97d2e0bbf3f3d9) Thanks [@threepointone](https://github.com/threepointone)! - Interrupted/failed chat turns are no longer silently "frozen" for clients that
+  reconnect after the failure. The terminal `MSG_CHAT_RESPONSE` broadcast (on a
+  turn error or exhausted recovery) is transient — a client disconnected at that
+  moment (e.g. during a deploy / WebSocket reconnect storm) misses it, and on
+  reconnect `onConnect` previously replayed only the current messages with no
+  terminal signal, so the turn appeared stuck with no completed response and no
+  error. Think now persists a durable record of the last terminal turn and
+  replays it on connect, so a reconnecting client learns the turn failed. The
+  record is cleared when a later turn completes; benign recovery skips (e.g.
+  `conversation_changed`, where a newer turn owns the UI) are intentionally not
+  surfaced.
+
 ## 0.7.3
 
 ### Patch Changes
