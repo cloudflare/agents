@@ -14,6 +14,27 @@ export type AgentToolTerminalStatus = Extract<
   "completed" | "error" | "aborted" | "interrupted"
 >;
 
+/**
+ * Structured failure envelope an `agentTool()` returns when a sub-agent run
+ * does not complete. Instead of an opaque error string the parent model would
+ * parrot back to the user, the caller (or an orchestration harness) gets a
+ * machine-readable signal:
+ *
+ * - `status` mirrors the underlying terminal status (`error` | `aborted` |
+ *   `interrupted`).
+ * - `retryable` is `true` only for a transient interruption — the child was
+ *   reset or superseded by a deploy / parent recovery and never reached a
+ *   logical outcome, so re-dispatching the same run is the right move. A
+ *   genuine `error` or an intentional `aborted` is `false`.
+ * - `error` stays human-readable for logs and UI.
+ */
+export type AgentToolFailure = {
+  ok: false;
+  status: Exclude<AgentToolTerminalStatus, "completed">;
+  error: string;
+  retryable: boolean;
+};
+
 export type AgentToolDisplayMetadata = {
   name?: string;
   icon?: string;

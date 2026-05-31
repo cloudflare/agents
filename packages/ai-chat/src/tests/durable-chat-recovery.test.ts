@@ -76,6 +76,18 @@ interface ChatRecoveryTestStub {
     firstSeenAt: number;
     lastAttemptAt: number;
   }): Promise<void>;
+  setForceStableTimeoutForTest(value: boolean): Promise<void>;
+  runChatRecoveryContinueDirectForTest(
+    data: Record<string, unknown>
+  ): Promise<void>;
+  preScheduleRecoveryContinueForTest(
+    data: Record<string, unknown>
+  ): Promise<void>;
+  getIncidentForTest(incidentId: string): Promise<{
+    attempt: number;
+    status: string;
+    reason?: string;
+  } | null>;
 }
 
 async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
@@ -837,5 +849,69 @@ describe("onChatRecovery", () => {
       (m: ChatMessage) => m.role === "assistant"
     );
     expect(assistantMessages).toHaveLength(1);
+  });
+
+  it("reschedules a continuation that times out waiting for stable state, within the attempt budget", async () => {
+    const agentStub = await getTestAgent(`stable-retry-${crypto.randomUUID()}`);
+    await agentStub.setForceStableTimeoutForTest(true);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-retry",
+      requestId: "root-retry",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    const continueData = {
+      incidentId: "inc-retry",
+      originalRequestId: "root-retry",
+      targetAssistantId: "a-x"
+    };
+    // Simulate the executing one-shot row that `alarm()` deletes after return.
+    await agentStub.preScheduleRecoveryContinueForTest(continueData);
+
+    await agentStub.runChatRecoveryContinueDirectForTest(continueData);
+
+    // The reschedule must create a NEW row (2 total), not dedup onto the
+    // executing one — otherwise the retry silently never fires.
+    expect(
+      await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
+    ).toBe(2);
+    const incident = await agentStub.getIncidentForTest("inc-retry");
+    expect(incident?.attempt).toBe(2);
+    expect(incident?.status).toBe("scheduled");
+  });
+
+  it("fails terminally once the stable-state retry budget is exhausted", async () => {
+    const agentStub = await getTestAgent(
+      `stable-exhaust-${crypto.randomUUID()}`
+    );
+    await agentStub.setForceStableTimeoutForTest(true);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-exhaust",
+      requestId: "root-exhaust",
+      recoveryKind: "continue",
+      attempt: 6,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    await agentStub.runChatRecoveryContinueDirectForTest({
+      incidentId: "inc-exhaust",
+      originalRequestId: "root-exhaust",
+      targetAssistantId: "a-x"
+    });
+
+    expect(
+      await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
+    ).toBe(0);
+    const incident = await agentStub.getIncidentForTest("inc-exhaust");
+    expect(incident?.status).toBe("failed");
+    expect(incident?.reason).toBe("stable_timeout");
   });
 });

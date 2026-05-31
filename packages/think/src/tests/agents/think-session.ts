@@ -486,6 +486,8 @@ export class ThinkTestAgent extends Think {
     message: string;
   } | null = null;
   private _stripTextResponseForTest = false;
+  private _stallAfterChunks: number | null = null;
+  private _streamChunkDelayMs: number | null = null;
   private _agentToolOutputForTest = new Map<string, unknown>();
   private _responseLog: ChatResponseResult[] = [];
 
@@ -695,10 +697,18 @@ export class ThinkTestAgent extends Think {
   protected override _transformInferenceResult(
     result: StreamableResult
   ): StreamableResult {
-    if (!this._errorConfig && !this._stripTextResponseForTest) return result;
+    if (
+      !this._errorConfig &&
+      !this._stripTextResponseForTest &&
+      this._stallAfterChunks == null &&
+      this._streamChunkDelayMs == null
+    )
+      return result;
 
     const config = this._errorConfig;
     const stripText = this._stripTextResponseForTest;
+    const stallAfter = this._stallAfterChunks;
+    const chunkDelayMs = this._streamChunkDelayMs;
 
     return {
       toUIMessageStream(options?: { sendReasoning?: boolean }) {
@@ -713,6 +723,17 @@ export class ThinkTestAgent extends Think {
           [Symbol.asyncIterator]() {
             return {
               async next() {
+                // Simulate a parked/hung provider: emit `stallAfter` chunks,
+                // then never resolve. The stall watchdog must abort the turn.
+                if (stallAfter != null && chunkCount >= stallAfter) {
+                  return new Promise<IteratorResult<unknown>>(() => {});
+                }
+                // Simulate a slow-but-steady stream: each chunk arrives after a
+                // delay. With a watchdog timeout larger than the delay, the
+                // watchdog must reset on every chunk and never fire.
+                if (chunkDelayMs != null) {
+                  await new Promise((r) => setTimeout(r, chunkDelayMs));
+                }
                 while (true) {
                   if (shouldThrow && config) {
                     await reader.cancel();
@@ -888,6 +909,63 @@ export class ThinkTestAgent extends Think {
       return await this.testChat("trigger error");
     } finally {
       this._errorConfig = null;
+    }
+  }
+
+  /**
+   * Emit `afterChunks` chunks then hang the stream forever. With
+   * `chatStreamStallTimeoutMs` set, the inactivity watchdog should abort the
+   * turn and surface a terminal stream error instead of parking indefinitely.
+   */
+  async testChatWithStall(
+    afterChunks: number,
+    timeoutMs: number
+  ): Promise<TestChatResult> {
+    this._stallAfterChunks = afterChunks;
+    this.chatStreamStallTimeoutMs = timeoutMs;
+    try {
+      return await this.testChat("trigger stall");
+    } finally {
+      this._stallAfterChunks = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
+  }
+
+  /**
+   * Stream each chunk after `delayMs` with the watchdog armed at `timeoutMs`
+   * (> delay). Proves the watchdog resets per chunk and does NOT false-fire on
+   * a slow-but-steady stream.
+   */
+  async testChatWithSlowStream(
+    delayMs: number,
+    timeoutMs: number
+  ): Promise<TestChatResult> {
+    this._streamChunkDelayMs = delayMs;
+    this.chatStreamStallTimeoutMs = timeoutMs;
+    try {
+      return await this.testChat("slow but steady");
+    } finally {
+      this._streamChunkDelayMs = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
+  }
+
+  /**
+   * Throw a stream error after `afterChunks` chunks with the watchdog armed.
+   * Guards that an in-band error under the watchdog wrapper terminates cleanly
+   * (the wrapper cancels the source on break without an unhandled rejection).
+   */
+  async testChatWithErrorUnderStallGuard(
+    timeoutMs: number,
+    errorMessage = "Mock error under guard"
+  ): Promise<TestChatResult> {
+    this._errorConfig = { afterChunks: 1, message: errorMessage };
+    this.chatStreamStallTimeoutMs = timeoutMs;
+    try {
+      return await this.testChat("error under guard");
+    } finally {
+      this._errorConfig = null;
+      this.chatStreamStallTimeoutMs = 0;
     }
   }
 
@@ -3737,6 +3815,129 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async waitUntilStableForTest(timeout?: number): Promise<boolean> {
     return this.waitUntilStable({ timeout: timeout ?? 5000 });
+  }
+
+  private _forceStableTimeout = false;
+
+  async setForceStableTimeoutForTest(value: boolean): Promise<void> {
+    this._forceStableTimeout = value;
+  }
+
+  protected override async waitUntilStable(options?: {
+    timeout?: number;
+  }): Promise<boolean> {
+    if (this._forceStableTimeout) return false;
+    return super.waitUntilStable(options);
+  }
+
+  /** Seed a `running` durable submission keyed by `requestId` (== submission id). */
+  async seedRunningSubmissionForTest(requestId: string): Promise<void> {
+    (
+      this as unknown as { _ensureSubmissionTable(): void }
+    )._ensureSubmissionTable();
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_think_submissions (
+        submission_id, idempotency_key, request_id, stream_id, status,
+        messages_json, metadata_json, error_message, created_at,
+        messages_applied_at, started_at, completed_at
+      ) VALUES (
+        ${requestId}, NULL, ${requestId}, NULL, 'running',
+        '[]', NULL, NULL, ${now}, ${now}, ${now}, NULL
+      )
+    `;
+  }
+
+  async getSubmissionStatusForTest(
+    submissionId: string
+  ): Promise<string | null> {
+    const rows = this.sql<{ status: string }>`
+      SELECT status FROM cf_think_submissions WHERE submission_id = ${submissionId}
+    `;
+    return rows[0]?.status ?? null;
+  }
+
+  async runChatRecoveryContinueForTestWith(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await (
+      this as unknown as {
+        _chatRecoveryContinue(d: unknown): Promise<void>;
+      }
+    )._chatRecoveryContinue(data);
+  }
+
+  async runChatRecoveryRetryForTestWith(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await (
+      this as unknown as {
+        _chatRecoveryRetry(d: unknown): Promise<void>;
+      }
+    )._chatRecoveryRetry(data);
+  }
+
+  /** Retry-path twin of `preScheduleRecoveryContinueForTest`. */
+  async preScheduleRecoveryRetryForTest(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await this.schedule(60, "_chatRecoveryRetry", data, {
+      idempotent: false
+    });
+  }
+
+  async getIncidentAttemptForTest(incidentId: string): Promise<{
+    attempt: number;
+    status: string;
+    reason?: string;
+  } | null> {
+    const incident = await this.ctx.storage.get<{
+      attempt: number;
+      status: string;
+      reason?: string;
+    }>(`cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`);
+    return incident
+      ? {
+          attempt: incident.attempt,
+          status: incident.status,
+          reason: incident.reason
+        }
+      : null;
+  }
+
+  /**
+   * Pre-insert a matching `_chatRecoveryContinue` schedule row to simulate the
+   * not-yet-deleted one-shot row that `alarm()` is executing — so a reschedule
+   * with `idempotent: true` would (incorrectly) dedup onto it.
+   */
+  async preScheduleRecoveryContinueForTest(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await this.schedule(60, "_chatRecoveryContinue", data, {
+      idempotent: false
+    });
+  }
+
+  async getScheduledChatRecoveryPayloadForTest(
+    callback = "_chatRecoveryContinue"
+    // Concrete, serializable return shape: a `Record<string, unknown>` collapses
+    // to `never` across the Durable Object RPC stub boundary (Workers RPC drops
+    // `unknown`-valued records as non-serializable), which made callers see
+    // `payload` as `never`. The scheduled payload only needs its recovery-link
+    // fields exposed for assertions.
+  ): Promise<{ recoveredRequestId?: string; requestId?: string } | null> {
+    const rows = this.sql<{ payload: string }>`
+      SELECT payload FROM cf_agents_schedules
+      WHERE callback = ${callback}
+      ORDER BY time ASC
+      LIMIT 1
+    `;
+    return rows[0]
+      ? (JSON.parse(rows[0].payload) as {
+          recoveredRequestId?: string;
+          requestId?: string;
+        })
+      : null;
   }
 }
 

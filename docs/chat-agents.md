@@ -680,7 +680,7 @@ const unsubscribe = subscribe("chat", (event) => {
 });
 ```
 
-Transcript repairs, such as removing orphaned tool calls before a provider call, are emitted on the `transcript` channel.
+Transcript repairs — healing orphaned tool calls (preserving them as errored results rather than deleting them, so the record survives and the model does not silently re-run the tool) and normalizing malformed/stringified or missing tool inputs before a provider call — are emitted on the `transcript` channel.
 
 #### Guarding against stale recoveries
 

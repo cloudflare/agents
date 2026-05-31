@@ -307,27 +307,30 @@ Script execution requires a Worker Loader binding:
 
 ### Configuration
 
-| Method / Property        | Default                            | Description                                                                                                                  |
-| ------------------------ | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `getModel()`             | throws                             | Return the `LanguageModel` to use                                                                                            |
-| `getSystemPrompt()`      | careful assistant operating prompt | System prompt (fallback when no context blocks)                                                                              |
-| `getTools()`             | `{}`                               | AI SDK `ToolSet` for the agentic loop                                                                                        |
-| `getMessengers()`        | `{}`                               | Messenger ingress and delivery declarations                                                                                  |
-| `getScheduledTasks()`    | `{}`                               | Code-declared recurring prompts                                                                                              |
-| `getDefaultTimezone()`   | `undefined`                        | Default timezone for wall-clock schedules                                                                                    |
-| `maxSteps`               | `10`                               | Max tool-call rounds per turn (property)                                                                                     |
-| `sendReasoning`          | `true`                             | Send reasoning chunks to chat clients                                                                                        |
-| `configureSession()`     | identity                           | Add context blocks, compaction, search, skills                                                                               |
-| `getSkills()`            | `[]`                               | First-class Agent Skills sources                                                                                             |
-| `getSkillScriptRunner()` | `null`                             | Optional runner for `run_skill_script`                                                                                       |
-| `getExtensions()`        | `[]`                               | Sandboxed extension declarations (load order)                                                                                |
-| `extensionLoader`        | `undefined`                        | `WorkerLoader` binding — enables extensions                                                                                  |
-| `workspaceBash`          | `true`                             | Include the default workspace `bash` tool                                                                                    |
-| `chatRecovery`           | `true`                             | Wrap turns in `runFiber` for durable execution. Set `{ maxAttempts, terminalMessage, onExhausted }` to tune bounded recovery |
+| Method / Property          | Default                            | Description                                                                                                                                            |
+| -------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `getModel()`               | throws                             | Return the `LanguageModel` to use                                                                                                                      |
+| `getSystemPrompt()`        | careful assistant operating prompt | System prompt (fallback when no context blocks)                                                                                                        |
+| `getTools()`               | `{}`                               | AI SDK `ToolSet` for the agentic loop                                                                                                                  |
+| `getMessengers()`          | `{}`                               | Messenger ingress and delivery declarations                                                                                                            |
+| `getScheduledTasks()`      | `{}`                               | Code-declared recurring prompts                                                                                                                        |
+| `getDefaultTimezone()`     | `undefined`                        | Default timezone for wall-clock schedules                                                                                                              |
+| `maxSteps`                 | `10`                               | Max tool-call rounds per turn (property)                                                                                                               |
+| `sendReasoning`            | `true`                             | Send reasoning chunks to chat clients                                                                                                                  |
+| `configureSession()`       | identity                           | Add context blocks, compaction, search, skills                                                                                                         |
+| `getSkills()`              | `[]`                               | First-class Agent Skills sources                                                                                                                       |
+| `getSkillScriptRunner()`   | `null`                             | Optional runner for `run_skill_script`                                                                                                                 |
+| `getExtensions()`          | `[]`                               | Sandboxed extension declarations (load order)                                                                                                          |
+| `extensionLoader`          | `undefined`                        | `WorkerLoader` binding — enables extensions                                                                                                            |
+| `workspaceBash`            | `true`                             | Include the default workspace `bash` tool                                                                                                              |
+| `chatRecovery`             | `true`                             | Wrap turns in `runFiber` for durable execution. Set `{ maxAttempts, terminalMessage, onExhausted }` to tune bounded recovery                           |
+| `chatStreamStallTimeoutMs` | `0` (off)                          | Inactivity watchdog: abort a turn whose model stream produces no chunk for this long, surfacing a terminal stream error instead of an infinite spinner |
 
 On each turn, Think appends a small capability block to the assembled system prompt. The block is based on the tools available for that turn, so models learn about workspace tools, context-loading tools, extension tools, sandboxed execution, MCP/client tools, and delegated-agent tools only when they are actually exposed.
 
 Think enables Durable Object eviction recovery by default. This is separate from client resumable streaming: resumable streaming handles browser disconnect/reconnect while the object keeps running, while `chatRecovery` recovers turns interrupted by process restarts, deploys, or object eviction.
+
+`chatStreamStallTimeoutMs` is a separate, opt-in safety net for a different failure: a model stream that **parks without ever throwing** (no chunk, no error, no `done`), which otherwise leaves the client spinning forever. When set, if no UI-message-stream chunk arrives within the window the watchdog aborts the turn — the read loop then exits with a terminal stream error (routed through `onChatError` with `stage: "stream"`) and a `chat:stream:stalled` observability event fires. It is **off by default** because it measures the gap _between_ stream chunks, which includes server-side tool execution time (no chunks flow while a tool runs) — set it comfortably above your slowest model time-to-first-token and slowest tool, e.g. `120_000`, or you will abort healthy long turns.
 
 Override `onChatRecovery(ctx)` when you need provider-specific recovery. The default behavior persists partial assistant output and continues or retries when safe:
 

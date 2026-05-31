@@ -5,7 +5,7 @@ interface ToolCallCardProps {
   part: {
     type: string;
     state?: string;
-    input: unknown;
+    input?: unknown;
     output?: unknown;
   };
 }

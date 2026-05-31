@@ -84,45 +84,63 @@ function mergeServerToolOutputs(
   incoming: UIMessage[],
   serverMessages: readonly UIMessage[]
 ): UIMessage[] {
-  const serverToolOutputs = new Map<string, unknown>();
+  // Index the server's RESOLVED tool parts so a stale client part (still in a
+  // pre-output state) can't clobber the server's terminal state on persist.
+  // All three terminal states must be protected, not just `output-available`:
+  // otherwise a client that hasn't seen the server's `output-error` /
+  // `output-denied` yet would persist its stale `input-available` over the
+  // resolved result, losing the error/denial.
+  const serverResolvedParts = new Map<string, Record<string, unknown>>();
   for (const msg of serverMessages) {
     if (msg.role !== "assistant") continue;
     for (const part of msg.parts) {
+      const record = part as Record<string, unknown>;
       if (
-        "toolCallId" in part &&
-        "state" in part &&
-        part.state === "output-available" &&
-        "output" in part
+        "toolCallId" in record &&
+        "state" in record &&
+        (record.state === "output-available" ||
+          record.state === "output-error" ||
+          record.state === "output-denied")
       ) {
-        serverToolOutputs.set(
-          part.toolCallId as string,
-          (part as { output: unknown }).output
-        );
+        serverResolvedParts.set(record.toolCallId as string, record);
       }
     }
   }
 
-  if (serverToolOutputs.size === 0) return incoming;
+  if (serverResolvedParts.size === 0) return incoming;
 
   return incoming.map((msg) => {
     if (msg.role !== "assistant") return msg;
 
     let hasChanges = false;
     const updatedParts = msg.parts.map((part) => {
+      const record = part as Record<string, unknown>;
       if (
-        "toolCallId" in part &&
-        "state" in part &&
-        (part.state === "input-available" ||
-          part.state === "approval-requested" ||
-          part.state === "approval-responded") &&
-        serverToolOutputs.has(part.toolCallId as string)
+        "toolCallId" in record &&
+        "state" in record &&
+        (record.state === "input-available" ||
+          record.state === "approval-requested" ||
+          record.state === "approval-responded") &&
+        serverResolvedParts.has(record.toolCallId as string)
       ) {
         hasChanges = true;
-        return {
+        const server = serverResolvedParts.get(record.toolCallId as string)!;
+        // Overlay the server's resolved state, keeping the client part's
+        // identity/input. Carry ONLY the result field that belongs to the
+        // server's terminal state — so a stray `output` left on an
+        // `output-error` part can't ride along and be misread as a result.
+        const merged: Record<string, unknown> = {
           ...part,
-          state: "output-available" as const,
-          output: serverToolOutputs.get(part.toolCallId as string)
+          state: server.state
         };
+        if (server.state === "output-available") {
+          if ("output" in server) merged.output = server.output;
+        } else if (server.state === "output-error") {
+          if ("errorText" in server) merged.errorText = server.errorText;
+        } else if (server.state === "output-denied") {
+          if ("approval" in server) merged.approval = server.approval;
+        }
+        return merged;
       }
       return part;
     }) as UIMessage["parts"];

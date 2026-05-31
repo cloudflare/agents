@@ -126,6 +126,9 @@ type ChatRecoveryIncident = {
 const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
 const DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS = 6;
 const DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS = 10_000;
+// Delay before retrying a recovery that timed out waiting for stable state.
+// Gives an actively-churning isolate (e.g. a deploy in flight) time to settle.
+const CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS = 3;
 const DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE =
   "The assistant was interrupted and could not recover. Please try again.";
 // Incidents that have not seen a new attempt within this window are assumed
@@ -3387,8 +3390,21 @@ export class AIChatAgent<
       });
       if (!ready) {
         console.warn(
-          "[AIChatAgent] _chatRecoveryContinue timed out waiting for stable state, skipping continuation"
+          "[AIChatAgent] _chatRecoveryContinue timed out waiting for stable state"
         );
+        // A stable-state timeout under deploy churn is usually transient (the
+        // isolate is still settling / another deploy is in flight). Reschedule
+        // within the attempt budget instead of permanently abandoning a
+        // recoverable turn; only give up once the budget is exhausted.
+        if (
+          await this._rescheduleRecoveryAfterStableTimeout(
+            "_chatRecoveryContinue",
+            data,
+            recoveryConfig.maxAttempts
+          )
+        ) {
+          return;
+        }
         await this._updateChatRecoveryIncident(
           data?.incidentId,
           "failed",
@@ -3399,6 +3415,13 @@ export class AIChatAgent<
 
       const targetId = data?.targetAssistantId;
       if (targetId && this._findLastAssistantMessage()?.id !== targetId) {
+        // The leaf moved, so this continuation is superseded — skip it.
+        // NOTE: unlike `@cloudflare/think`, AIChatAgent does NOT distinguish an
+        // assistant leaf (recovery's own forward progress) from a newer user
+        // turn here, because AIChatAgent has no durable-submission layer to
+        // protect — there is nothing to mark `skipped` vs leave `running`. If
+        // AIChatAgent ever gains submissions, mirror Think's split in
+        // `_chatRecoveryContinue` or this skip will silently clobber them.
         await this._updateChatRecoveryIncident(
           data?.incidentId,
           "skipped",
@@ -3438,6 +3461,45 @@ export class AIChatAgent<
     }
   }
 
+  /**
+   * Reschedule a recovery callback that timed out waiting for stable state,
+   * consuming one attempt. Returns `true` if rescheduled, `false` if the
+   * attempt budget is exhausted (caller should then fail terminally).
+   */
+  private async _rescheduleRecoveryAfterStableTimeout(
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
+    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
+    maxAttempts: number
+  ): Promise<boolean> {
+    const incidentKey = data?.incidentId
+      ? this._chatRecoveryIncidentKey(data.incidentId)
+      : null;
+    const incident = incidentKey
+      ? await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)
+      : null;
+    if (!incident || !incidentKey) return false;
+    const attempt = incident.attempt ?? 0;
+    if (attempt >= (incident.maxAttempts ?? maxAttempts)) return false;
+    await this.ctx.storage.put(incidentKey, {
+      ...incident,
+      attempt: attempt + 1,
+      status: "scheduled",
+      lastAttemptAt: Date.now(),
+      reason: "stable_timeout_retry"
+    });
+    // Must NOT be idempotent: this runs inside the currently-executing one-shot
+    // schedule row (deleted by `alarm()` only after we return). An idempotent
+    // reschedule would dedup onto that row and be deleted with it — the retry
+    // would never fire. A fresh delayed row survives.
+    await this.schedule(
+      CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+      callback,
+      data ?? {},
+      { idempotent: false }
+    );
+    return true;
+  }
+
   private _shouldRetryRecoveredPreStreamTurn(
     snapshot: ChatFiberSnapshot<"ai-chat-turn"> | null,
     streamId: string,
@@ -3475,8 +3537,17 @@ export class AIChatAgent<
       });
       if (!ready) {
         console.warn(
-          "[AIChatAgent] _chatRecoveryRetry timed out waiting for stable state, skipping retry"
+          "[AIChatAgent] _chatRecoveryRetry timed out waiting for stable state"
         );
+        if (
+          await this._rescheduleRecoveryAfterStableTimeout(
+            "_chatRecoveryRetry",
+            data,
+            recoveryConfig.maxAttempts
+          )
+        ) {
+          return;
+        }
         await this._updateChatRecoveryIncident(
           data?.incidentId,
           "failed",

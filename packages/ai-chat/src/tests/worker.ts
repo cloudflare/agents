@@ -1654,6 +1654,55 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return [...entries.values()];
   }
 
+  private _forceStableTimeout = false;
+
+  setForceStableTimeoutForTest(value: boolean): void {
+    this._forceStableTimeout = value;
+  }
+
+  override async waitUntilStable(options?: {
+    timeout?: number;
+  }): Promise<boolean> {
+    if (this._forceStableTimeout) return false;
+    return super.waitUntilStable(options);
+  }
+
+  async runChatRecoveryContinueDirectForTest(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await super._chatRecoveryContinue(
+      data as Parameters<AIChatAgent<Env>["_chatRecoveryContinue"]>[0]
+    );
+  }
+
+  /** Simulate the not-yet-deleted one-shot row `alarm()` is executing. */
+  async preScheduleRecoveryContinueForTest(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await this.schedule(60, "_chatRecoveryContinue", data, {
+      idempotent: false
+    });
+  }
+
+  async getIncidentForTest(incidentId: string): Promise<{
+    attempt: number;
+    status: string;
+    reason?: string;
+  } | null> {
+    const incident = await this.ctx.storage.get<{
+      attempt: number;
+      status: string;
+      reason?: string;
+    }>(`cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`);
+    return incident
+      ? {
+          attempt: incident.attempt,
+          status: incident.status,
+          reason: incident.reason
+        }
+      : null;
+  }
+
   /**
    * Simulate forward recovery progress by persisting one assistant message
    * (what `_persistOrphanedStream` does after a partial). Used to exercise the

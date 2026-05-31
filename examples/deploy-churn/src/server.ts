@@ -36,13 +36,16 @@ import type {
   ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
   ChatResponseResult,
-  ChunkContext
+  ChunkContext,
+  ThinkSubmissionInspection
 } from "@cloudflare/think";
-import { callable, routeAgentRequest } from "agents";
-import { generateText } from "ai";
-import type { LanguageModel, ModelMessage, UIMessage } from "ai";
+import { callable, getAgentByName, routeAgentRequest } from "agents";
+import { generateText, jsonSchema, tool } from "ai";
+import type { LanguageModel, ModelMessage, ToolSet, UIMessage } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { createAnthropic } from "@ai-sdk/anthropic";
+
+type Provider = "workers-ai" | "anthropic";
 
 type Env = {
   DeployChurnAgent: DurableObjectNamespace<DeployChurnAgent>;
@@ -188,6 +191,12 @@ const RECOVERY_CONTEXTS_KEY = "harness:recovery-contexts";
 const EXHAUSTED_KEY = "harness:exhausted";
 const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
 
+// Tool-rollback mode (real models + a non-idempotent tool). Config lives in a
+// SQL table because `getModel()`/`getTools()` are synchronous and must observe
+// the same provider/mode on a FRESH isolate (e.g. a recovery continuation after
+// a deploy) — `this.sql` is a synchronous, durable read.
+const DEFAULT_TOOL_STEPS = 24;
+
 const DEFAULT_DURATION_SECONDS = 90;
 const CHUNK_INTERVAL_MS = 1_000;
 const MAX_RECORDS = 200;
@@ -302,7 +311,15 @@ export class DeployChurnAgent extends Think<Env> {
     }
   };
 
+  // Allow a long, many-step tool loop so deploys can land between tool
+  // settlements (the window where a lost tool result forces a re-run).
+  override maxSteps = 80;
+
   override getModel(): LanguageModel {
+    // Tool-rollback mode: use a REAL model (Workers AI or Anthropic) so the
+    // agentic loop actually settles tool results that recovery must preserve.
+    if (this._harnessMode() === "tools") return this._realModel();
+
     const lastUser = [...this.messages]
       .reverse()
       .find((m: UIMessage) => m.role === "user");
@@ -317,7 +334,61 @@ export class DeployChurnAgent extends Think<Env> {
   }
 
   override getSystemPrompt(): string {
+    if (this._harnessMode() === "tools") {
+      const steps = this._toolSteps();
+      return [
+        "You are a deploy-churn durability probe.",
+        `Call the \`recordStep\` tool exactly once for each integer index from 1 to ${steps}, strictly in ascending order.`,
+        "Make ONE tool call per step and wait for its result before the next. Never call an index you have already recorded, and never skip one.",
+        "When you have recorded every index from 1 to " +
+          steps +
+          ", reply with the single word DONE and stop."
+      ].join("\n");
+    }
     return "Deploy-churn harness agent. Streams a deterministic slow response so a deploy can interrupt it.";
+  }
+
+  /**
+   * The non-idempotent tool whose re-execution after a deploy is the
+   * "rollback" we are hunting. Every EXECUTION appends a ledger row; a
+   * completed step that re-runs (because its settled result was lost on a
+   * superseded isolate) shows up as a DUPLICATE row for the same index.
+   */
+  override getTools(): ToolSet {
+    if (this._harnessMode() !== "tools") return {};
+    return {
+      recordStep: tool({
+        description:
+          "Record that you have reached a given step index. Call once per index, in order.",
+        inputSchema: jsonSchema<{ index: number }>({
+          type: "object",
+          properties: {
+            index: { type: "number", description: "The step index (1-based)." }
+          },
+          required: ["index"],
+          additionalProperties: false
+        }),
+        execute: async ({ index }, opts) => {
+          this._ensureLedgerTable();
+          const toolCallId =
+            (opts as { toolCallId?: string } | undefined)?.toolCallId ?? null;
+          this.sql`
+            INSERT INTO harness_ledger (idx, tool_call_id, at)
+            VALUES (${index}, ${toolCallId}, ${Date.now()})
+          `;
+          // Configurable in-flight window. A large delay (e.g. 12s) makes a real
+          // ~33s `wrangler deploy` reliably land DURING a tool execution, so we
+          // exercise the code-update reset mid-tool (not just between tools).
+          const delayMs = Number(this._harnessConfig("stepDelayMs")) || 250;
+          await new Promise((r) => setTimeout(r, delayMs));
+          const total =
+            this.sql<{ c: number }>`SELECT COUNT(*) AS c FROM harness_ledger`[0]
+              ?.c ?? 0;
+          this.log("tool:recordStep", { index, totalExecutions: total });
+          return { recorded: index, totalExecutions: total };
+        }
+      })
+    };
   }
 
   /** Single structured log line per event — queryable via tail / observability. */
@@ -339,6 +410,71 @@ export class DeployChurnAgent extends Think<Env> {
     list.push(entry);
     if (list.length > MAX_RECORDS) list.splice(0, list.length - MAX_RECORDS);
     await this.ctx.storage.put(key, list);
+  }
+
+  // ── Tool-rollback config (synchronous, durable, survives a deploy) ──────────
+
+  private _ensureHarnessConfigTable(): void {
+    this
+      .sql`CREATE TABLE IF NOT EXISTS harness_config (key TEXT PRIMARY KEY, value TEXT)`;
+  }
+
+  private _harnessConfig(key: string): string | null {
+    this._ensureHarnessConfigTable();
+    const rows = this.sql<{ value: string }>`
+      SELECT value FROM harness_config WHERE key = ${key}
+    `;
+    return rows[0]?.value ?? null;
+  }
+
+  private _setHarnessConfig(key: string, value: string): void {
+    this._ensureHarnessConfigTable();
+    this.sql`
+      INSERT INTO harness_config (key, value) VALUES (${key}, ${value})
+      ON CONFLICT(key) DO UPDATE SET value = ${value}
+    `;
+  }
+
+  private _harnessMode(): "mock" | "tools" {
+    return this._harnessConfig("mode") === "tools" ? "tools" : "mock";
+  }
+
+  private _harnessProvider(): Provider {
+    return this._harnessConfig("provider") === "anthropic"
+      ? "anthropic"
+      : "workers-ai";
+  }
+
+  private _toolSteps(): number {
+    const raw = Number(this._harnessConfig("steps"));
+    return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TOOL_STEPS;
+  }
+
+  private _realModel(): LanguageModel {
+    const provider = this._harnessProvider();
+    if (provider === "anthropic") {
+      const key = this.env.ANTHROPIC_API_KEY;
+      if (!key) {
+        throw new Error(
+          "ANTHROPIC_API_KEY not set (wrangler secret put ANTHROPIC_API_KEY)"
+        );
+      }
+      const modelId = this._harnessConfig("model") ?? DEFAULT_ANTHROPIC_MODEL;
+      return createAnthropic({ apiKey: key })(modelId);
+    }
+    const modelId = this._harnessConfig("model") ?? DEFAULT_WORKERS_AI_MODEL;
+    return createWorkersAI({ binding: this.env.AI })(modelId);
+  }
+
+  private _ensureLedgerTable(): void {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS harness_ledger (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        idx INTEGER,
+        tool_call_id TEXT,
+        at INTEGER
+      )
+    `;
   }
 
   // ── Turn lifecycle ────────────────────────────────────────────────────────
@@ -524,8 +660,155 @@ export class DeployChurnAgent extends Think<Env> {
         `${CHAT_RECOVERY_INCIDENT_KEY_PREFIX}${encodeURIComponent(incident.incidentId)}`
       );
     }
+    // Wipe submissions, the tool ledger, and tool config so a fresh run starts
+    // from zero. (Each orchestrator run also uses a fresh session/DO instance,
+    // so the durable transcript starts empty too.)
+    await this.deleteSubmissions();
+    this._ensureLedgerTable();
+    this.sql`DELETE FROM harness_ledger`;
+    this._ensureHarnessConfigTable();
+    this.sql`DELETE FROM harness_config`;
     this.log("harness:reset", { clearedIncidents: incidents.length });
     return { ok: true };
+  }
+
+  /**
+   * HTTP/RPC entry point for the tool-rollback probe: switch the agent to a
+   * REAL model + the non-idempotent `recordStep` tool, then kick off a durable
+   * background turn via `submitMessages` (survives disconnects and deploys).
+   * The turn asks the model to record N steps in order; a deploy mid-loop tests
+   * whether already-settled steps survive recovery or get rolled back & re-run.
+   */
+  @callable()
+  async startToolRun(
+    provider: Provider = "workers-ai",
+    steps: number = DEFAULT_TOOL_STEPS,
+    model?: string,
+    stepDelayMs?: number
+  ): Promise<{ submissionId: string; provider: Provider; steps: number }> {
+    const stepCount =
+      Number.isFinite(steps) && steps > 0
+        ? Math.min(Math.floor(steps), 200)
+        : DEFAULT_TOOL_STEPS;
+    this._setHarnessConfig("mode", "tools");
+    this._setHarnessConfig("provider", provider);
+    this._setHarnessConfig("steps", String(stepCount));
+    if (model) this._setHarnessConfig("model", model);
+    if (stepDelayMs && Number.isFinite(stepDelayMs) && stepDelayMs > 0) {
+      this._setHarnessConfig("stepDelayMs", String(Math.floor(stepDelayMs)));
+    }
+    this._ensureLedgerTable();
+
+    const submissionId = crypto.randomUUID();
+    await this.submitMessages(
+      [
+        {
+          id: `user-${Date.now()}`,
+          role: "user",
+          parts: [
+            {
+              type: "text",
+              text: `Record steps 1 through ${stepCount} in order using the recordStep tool, one per step.`
+            }
+          ]
+        }
+      ],
+      { submissionId }
+    );
+    this.log("tool:run:start", { provider, steps: stepCount, submissionId });
+    return { submissionId, provider, steps: stepCount };
+  }
+
+  @callable()
+  async getToolStatus(): Promise<{
+    mode: string;
+    provider: string;
+    steps: number;
+    ledger: {
+      totalExecutions: number;
+      uniqueIndices: number;
+      duplicateIndices: Array<{ index: number; executions: number }>;
+      maxIndex: number;
+    };
+    transcriptToolCalls: number;
+    submissions: ThinkSubmissionInspection[];
+    turns: TurnRecord[];
+    chatErrors: ChatErrorRecord[];
+    agentErrors: AgentErrorRecord[];
+    incidents: ChatRecoveryIncidentRecord[];
+    exhausted: unknown;
+    hasFiberRows: boolean;
+    assistantMessages: number;
+  }> {
+    const [turns, chatErrors, agentErrors, exhausted] = await Promise.all([
+      this.ctx.storage.get<TurnRecord[]>(TURNS_KEY),
+      this.ctx.storage.get<ChatErrorRecord[]>(CHAT_ERRORS_KEY),
+      this.ctx.storage.get<AgentErrorRecord[]>(AGENT_ERRORS_KEY),
+      this.ctx.storage.get(EXHAUSTED_KEY)
+    ]);
+    return {
+      mode: this._harnessMode(),
+      provider: this._harnessProvider(),
+      steps: this._toolSteps(),
+      ledger: this._ledgerSummary(),
+      transcriptToolCalls: this._transcriptToolCalls(),
+      submissions: await this.listSubmissions(),
+      turns: turns ?? [],
+      chatErrors: chatErrors ?? [],
+      agentErrors: agentErrors ?? [],
+      incidents: await this._listIncidents(),
+      exhausted: exhausted ?? null,
+      hasFiberRows: this._hasFiberRows(),
+      assistantMessages: this.messages.filter(
+        (m: UIMessage) => m.role === "assistant"
+      ).length
+    };
+  }
+
+  private _ledgerSummary(): {
+    totalExecutions: number;
+    uniqueIndices: number;
+    duplicateIndices: Array<{ index: number; executions: number }>;
+    maxIndex: number;
+  } {
+    try {
+      const rows = this.sql<{ idx: number; executions: number }>`
+        SELECT idx, COUNT(*) AS executions
+        FROM harness_ledger
+        GROUP BY idx
+        ORDER BY idx ASC
+      `;
+      const totalExecutions = rows.reduce((n, r) => n + r.executions, 0);
+      const duplicateIndices = rows
+        .filter((r) => r.executions > 1)
+        .map((r) => ({ index: r.idx, executions: r.executions }));
+      const maxIndex = rows.reduce((m, r) => Math.max(m, r.idx), 0);
+      return {
+        totalExecutions,
+        uniqueIndices: rows.length,
+        duplicateIndices,
+        maxIndex
+      };
+    } catch {
+      return {
+        totalExecutions: 0,
+        uniqueIndices: 0,
+        duplicateIndices: [],
+        maxIndex: 0
+      };
+    }
+  }
+
+  /** Count `recordStep` tool calls visible in the final durable transcript. */
+  private _transcriptToolCalls(): number {
+    let count = 0;
+    for (const message of this.messages) {
+      for (const part of message.parts) {
+        const type = (part as { type?: string }).type;
+        if (typeof type === "string" && type.startsWith("tool-")) count++;
+      }
+    }
+    return count;
   }
 
   private _hasFiberRows(): boolean {
@@ -572,6 +855,36 @@ export default {
       return Response.json(
         await probeTrailingRole(env, "user", provider, modelId)
       );
+    }
+
+    // ── Tool-rollback driver (plain HTTP — no browser, no WebSocket) ──────────
+    // Drives a durable tool-using turn via `submitMessages` and reads the
+    // rollback ledger, so the orchestrator can run real deploys against a long
+    // session and check whether completed tool calls get re-run.
+    if (url.pathname.startsWith("/drive/")) {
+      const session = url.searchParams.get("session") ?? "default";
+      const stub = await getAgentByName(env.DeployChurnAgent, session);
+
+      if (url.pathname === "/drive/start" && request.method === "POST") {
+        const provider: Provider =
+          url.searchParams.get("provider") === "anthropic"
+            ? "anthropic"
+            : "workers-ai";
+        const steps = Number(url.searchParams.get("steps") ?? "") || undefined;
+        const model = url.searchParams.get("model") ?? undefined;
+        const delayMs =
+          Number(url.searchParams.get("delayMs") ?? "") || undefined;
+        return Response.json(
+          await stub.startToolRun(provider, steps, model, delayMs)
+        );
+      }
+      if (url.pathname === "/drive/status") {
+        return Response.json(await stub.getToolStatus());
+      }
+      if (url.pathname === "/drive/reset" && request.method === "POST") {
+        return Response.json(await stub.reset());
+      }
+      return new Response("Not found", { status: 404 });
     }
 
     return (

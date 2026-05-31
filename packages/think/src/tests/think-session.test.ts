@@ -13,7 +13,8 @@ import type {
   ThinkProgrammaticTestAgent,
   ThinkAsyncHookTestAgent,
   ThinkRecoveryTestAgent,
-  ThinkNonRecoveryTestAgent
+  ThinkNonRecoveryTestAgent,
+  TestChatResult
 } from "./agents/think-session";
 import type { ChatResponseResult, SaveMessagesResult } from "../think";
 
@@ -455,6 +456,65 @@ describe("Think — error handling", () => {
         })
       })
     );
+  });
+
+  it("aborts a stalled stream via the inactivity watchdog instead of hanging forever", async () => {
+    const agent = await freshAgent(`stall-${crypto.randomUUID()}`);
+    const stalled: Array<{ requestId?: string; timeoutMs?: number }> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:stream:stalled") {
+        stalled.push(
+          event.payload as { requestId?: string; timeoutMs?: number }
+        );
+      }
+    });
+
+    let result: TestChatResult;
+    try {
+      // Emit one chunk, then hang forever. Without the watchdog this turn never
+      // resolves (the read loop parks on a promise that never settles); the test
+      // would hit the vitest timeout. With it, the turn ends terminally.
+      result = await agent.testChatWithStall(1, 50);
+    } finally {
+      unsubscribe();
+    }
+
+    expect(result.done).toBe(false);
+    expect(result.error).toContain("stalled");
+    expect(stalled).toHaveLength(1);
+    expect(stalled[0]?.timeoutMs).toBe(50);
+  });
+
+  it("does not fire the watchdog for a slow-but-steady stream (timer resets per chunk)", async () => {
+    const agent = await freshAgent(`slow-${crypto.randomUUID()}`);
+    const stalled: Array<unknown> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:stream:stalled") stalled.push(event.payload);
+    });
+
+    let result: TestChatResult;
+    try {
+      // Each chunk arrives at ~15ms; watchdog window is 200ms. The gap never
+      // exceeds the window, so the turn must complete normally.
+      result = await agent.testChatWithSlowStream(15, 200);
+    } finally {
+      unsubscribe();
+    }
+
+    expect(result.done).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(stalled).toHaveLength(0);
+  });
+
+  it("terminates cleanly on an in-band stream error while the watchdog is armed", async () => {
+    const agent = await freshAgent(`err-guard-${crypto.randomUUID()}`);
+    // An in-band error breaks the read loop without aborting the signal. With
+    // the watchdog wrapper active, the source must still be cancelled on break
+    // (no unhandled rejection — vitest would surface one as a test error).
+    const result = await agent.testChatWithErrorUnderStallGuard(5000);
+
+    expect(result.done).toBe(false);
+    expect(result.error).toContain("Mock error under guard");
   });
 
   it("should recover and continue chatting after error", async () => {
@@ -2590,6 +2650,347 @@ describe("Think — onChatRecovery", () => {
     const terminal = onConnect.find((m) => m.error === true && m.done === true);
     expect(terminal).toBeTruthy();
     expect(terminal?.body).toContain("chat recovery was disabled");
+  });
+
+  // ── Recovery under multi-deploy churn (chained continuations) ──────────────
+
+  it("schedules chained continuations against the recovery root submission, not the per-continuation requestId", async () => {
+    const agent = await freshRecoveryAgent(
+      `chain-ownership-${crypto.randomUUID()}`
+    );
+
+    // A running submission keyed by the recovery ROOT request id.
+    await agent.seedRunningSubmissionForTest("root-1");
+    await agent.persistTestMessage({
+      id: "u-1",
+      role: "user",
+      parts: [{ type: "text", text: "do it" }]
+    });
+    await agent.persistTestMessage({
+      id: "a-1",
+      role: "assistant",
+      parts: [{ type: "text", text: "Partial" }]
+    });
+
+    // A continuation turn (requestId "cont-2", DIFFERENT from the root) is
+    // interrupted mid-stream. Its snapshot carries the recovery root.
+    await agent.insertInterruptedStream("stream-2", "cont-2", [
+      { body: JSON.stringify({ type: "start", messageId: "a-1" }), index: 0 },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Partial" }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:cont-2", {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: "cont-2",
+        recoveryRootRequestId: "root-1",
+        continuation: true,
+        latestMessageId: "a-1",
+        latestMessageRole: "assistant",
+        latestUserMessageId: "u-1",
+        startedAt: Date.now()
+      },
+      user: null
+    });
+
+    await agent.triggerFiberRecovery();
+
+    // The scheduled continuation must still own the submission via the stable
+    // root id — otherwise the continuation that completes the turn can never
+    // mark the submission done (the bug under deploy churn).
+    const payload = await agent.getScheduledChatRecoveryPayloadForTest(
+      "_chatRecoveryContinue"
+    );
+    expect(payload?.recoveredRequestId).toBe("root-1");
+  });
+
+  it("marks the root submission errored when a chained continuation is abandoned (recovery disabled)", async () => {
+    const agent = await freshRecoveryAgent(
+      `chain-disabled-${crypto.randomUUID()}`
+    );
+    // Disabling recovery routes the interrupted continuation through
+    // `_markRecoveredSubmissionInterrupted`, which must key off the recovery
+    // ROOT (root-1) — the submission row still carries root-1, so passing the
+    // per-continuation id (cont-2) would miss it and leave it stuck `running`.
+    await agent.setRecoveryOverride({ continue: false });
+    await agent.seedRunningSubmissionForTest("root-1");
+    await agent.persistTestMessage({
+      id: "u-1",
+      role: "user",
+      parts: [{ type: "text", text: "do it" }]
+    });
+    await agent.persistTestMessage({
+      id: "a-1",
+      role: "assistant",
+      parts: [{ type: "text", text: "Partial" }]
+    });
+
+    await agent.insertInterruptedStream("stream-2", "cont-2", [
+      { body: JSON.stringify({ type: "start", messageId: "a-1" }), index: 0 },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Partial" }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:cont-2", {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: "cont-2",
+        recoveryRootRequestId: "root-1",
+        continuation: true,
+        latestMessageId: "a-1",
+        latestMessageRole: "assistant",
+        latestUserMessageId: "u-1",
+        startedAt: Date.now()
+      },
+      user: null
+    });
+
+    await agent.triggerFiberRecovery();
+
+    expect(await agent.getSubmissionStatusForTest("root-1")).toBe("error");
+  });
+
+  it("a superseded continuation (leaf moved to another assistant message) skips benignly without erroring the submission", async () => {
+    const agent = await freshRecoveryAgent(`superseded-${crypto.randomUUID()}`);
+    await agent.seedRunningSubmissionForTest("root-A");
+    // Leaf is a NEWER assistant message — recovery's own forward progress.
+    await agent.persistTestMessage({
+      id: "a-new",
+      role: "assistant",
+      parts: [{ type: "text", text: "progressed" }]
+    });
+    await agent.seedIncidentForTest({
+      incidentId: "inc-A",
+      requestId: "root-A",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    await agent.runChatRecoveryContinueForTestWith({
+      recoveredRequestId: "root-A",
+      targetAssistantId: "a-old-superseded",
+      incidentId: "inc-A",
+      originalRequestId: "root-A"
+    });
+
+    // Must NOT clobber the submission to error — the active continuation will
+    // complete it.
+    expect(await agent.getSubmissionStatusForTest("root-A")).toBe("running");
+  });
+
+  it("a genuinely superseding user turn marks the submission skipped, not errored", async () => {
+    const agent = await freshRecoveryAgent(`newuser-${crypto.randomUUID()}`);
+    await agent.seedRunningSubmissionForTest("root-B");
+    // Leaf is a USER message — a genuinely newer turn.
+    await agent.persistTestMessage({
+      id: "u-new",
+      role: "user",
+      parts: [{ type: "text", text: "new question" }]
+    });
+    await agent.seedIncidentForTest({
+      incidentId: "inc-B",
+      requestId: "root-B",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    await agent.runChatRecoveryContinueForTestWith({
+      recoveredRequestId: "root-B",
+      targetAssistantId: "a-old",
+      incidentId: "inc-B",
+      originalRequestId: "root-B"
+    });
+
+    expect(await agent.getSubmissionStatusForTest("root-B")).toBe("skipped");
+  });
+
+  it("reschedules a continuation that times out waiting for stable state, within the attempt budget", async () => {
+    const agent = await freshRecoveryAgent(
+      `stable-retry-${crypto.randomUUID()}`
+    );
+    await agent.setForceStableTimeoutForTest(true);
+    await agent.seedRunningSubmissionForTest("root-C");
+    await agent.seedIncidentForTest({
+      incidentId: "inc-C",
+      requestId: "root-C",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    const continueData = {
+      recoveredRequestId: "root-C",
+      targetAssistantId: "a-x",
+      incidentId: "inc-C",
+      originalRequestId: "root-C"
+    };
+    // Simulate the currently-executing one-shot schedule row (which `alarm()`
+    // deletes only after the callback returns). A buggy idempotent reschedule
+    // would dedup onto this and then vanish with it, stalling recovery.
+    await agent.preScheduleRecoveryContinueForTest(continueData);
+
+    await agent.runChatRecoveryContinueForTestWith(continueData);
+
+    // The reschedule must create a NEW row (2 total), not dedup onto the
+    // executing one — otherwise the retry silently never fires.
+    expect(
+      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
+    ).toBe(2);
+    expect(await agent.getSubmissionStatusForTest("root-C")).toBe("running");
+    const incident = await agent.getIncidentAttemptForTest("inc-C");
+    expect(incident?.attempt).toBe(2);
+    expect(incident?.status).toBe("scheduled");
+  });
+
+  it("reschedules a pre-stream retry that times out waiting for stable state, within the attempt budget", async () => {
+    const agent = await freshRecoveryAgent(
+      `stable-retry-pre-${crypto.randomUUID()}`
+    );
+    await agent.setForceStableTimeoutForTest(true);
+    await agent.seedRunningSubmissionForTest("root-R");
+    await agent.seedIncidentForTest({
+      incidentId: "inc-R",
+      requestId: "root-R",
+      recoveryKind: "retry",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    const retryData = {
+      recoveredRequestId: "root-R",
+      targetUserId: "u-x",
+      incidentId: "inc-R",
+      originalRequestId: "root-R"
+    };
+    // Simulate the executing one-shot row so a buggy idempotent reschedule
+    // would dedup onto it and vanish (the `_chatRecoveryRetry` twin of the
+    // continue-path test — guards the now-shared reschedule helper).
+    await agent.preScheduleRecoveryRetryForTest(retryData);
+
+    await agent.runChatRecoveryRetryForTestWith(retryData);
+
+    expect(
+      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryRetry")
+    ).toBe(2);
+    expect(await agent.getSubmissionStatusForTest("root-R")).toBe("running");
+    const incident = await agent.getIncidentAttemptForTest("inc-R");
+    expect(incident?.attempt).toBe(2);
+    expect(incident?.status).toBe("scheduled");
+  });
+
+  it("fails terminally once the stable-state retry budget is exhausted", async () => {
+    const agent = await freshRecoveryAgent(
+      `stable-exhaust-${crypto.randomUUID()}`
+    );
+    await agent.setForceStableTimeoutForTest(true);
+    await agent.seedRunningSubmissionForTest("root-D");
+    await agent.seedIncidentForTest({
+      incidentId: "inc-D",
+      requestId: "root-D",
+      recoveryKind: "continue",
+      attempt: 6,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    await agent.runChatRecoveryContinueForTestWith({
+      recoveredRequestId: "root-D",
+      targetAssistantId: "a-x",
+      incidentId: "inc-D",
+      originalRequestId: "root-D"
+    });
+
+    expect(
+      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
+    ).toBe(0);
+    expect(await agent.getSubmissionStatusForTest("root-D")).toBe("error");
+    const incident = await agent.getIncidentAttemptForTest("inc-D");
+    expect(incident?.status).toBe("failed");
+  });
+
+  it("re-reconstructing the same interrupted stream is idempotent (no duplicate, no loss)", async () => {
+    const agent = await freshRecoveryAgent(`dup-${crypto.randomUUID()}`);
+    // continue:false isolates the orphan-persist behavior from continuation.
+    await agent.setRecoveryOverride({ continue: false });
+    await agent.persistTestMessage({
+      id: "u-dup",
+      role: "user",
+      parts: [{ type: "text", text: "do it" }]
+    });
+    const snapshot = {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId: "req-dup",
+        continuation: false,
+        latestMessageId: "a-dup",
+        latestMessageRole: "assistant",
+        latestUserMessageId: "u-dup",
+        startedAt: Date.now()
+      },
+      user: null
+    };
+    const chunks = [
+      { body: JSON.stringify({ type: "start", messageId: "a-dup" }), index: 0 },
+      { body: JSON.stringify({ type: "text-start", id: "t" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", id: "t", delta: "Partial" }),
+        index: 2
+      }
+    ];
+
+    await agent.insertInterruptedStream(
+      "stream-dup",
+      "req-dup",
+      chunks,
+      "error"
+    );
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-dup",
+      snapshot
+    );
+    await agent.triggerFiberRecovery();
+
+    const afterFirst = (await agent.getStoredMessages()) as UIMessage[];
+    expect(afterFirst.filter((m) => m.role === "assistant")).toHaveLength(1);
+
+    // Simulate a SECOND eviction re-detecting the same fiber before the first
+    // recovery's cleanup deleted it (the `_persistOrphanedStream` window).
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-dup",
+      snapshot
+    );
+    await agent.triggerFiberRecovery();
+
+    const afterSecond = (await agent.getStoredMessages()) as UIMessage[];
+    const assistants = afterSecond.filter((m) => m.role === "assistant");
+    // Stable message id (from the `start` chunk) + upsert-by-id ⇒ a replace,
+    // not a duplicate — and the completed content is never lost.
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0].id).toBe("a-dup");
   });
 
   it("does not continue a recovered chat fiber whose stream already completed", async () => {

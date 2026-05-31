@@ -9,6 +9,7 @@
     "build": "vite build",
     "deploy": "vite build && wrangler deploy",
     "churn": "tsx scripts/churn.ts",
+    "rollback": "tsx scripts/deploy-rollback.ts",
     "tail": "tsx scripts/tail.ts",
     "types": "wrangler types env.d.ts --include-runtime false"
   },
