@@ -1718,6 +1718,24 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     await this.persistMessages(this.messages);
   }
 
+  /** Simulate recovery forward progress: advance the durable progress counter
+   *  exactly as `_persistOrphanedStream` does when it materializes a non-empty
+   *  partial. The recovery budget keys off this counter (not the live message
+   *  count), so this is how a test marks "the turn advanced". */
+  async bumpRecoveryProgressForTest(): Promise<void> {
+    const self = this as unknown as {
+      _bumpChatRecoveryProgress(): Promise<void>;
+    };
+    await self._bumpChatRecoveryProgress();
+  }
+
+  /** Simulate compaction collapsing the transcript by dropping all assistant
+   *  messages from the live cache. Used to prove the recovery progress signal
+   *  is compaction-immune (#1628). */
+  async dropAssistantMessagesForTest(): Promise<void> {
+    this.messages = this.messages.filter((m) => m.role !== "assistant");
+  }
+
   getPersistedMessages(): ChatMessage[] {
     return (
       this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||

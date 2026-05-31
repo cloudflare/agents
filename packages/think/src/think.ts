@@ -604,16 +604,23 @@ type ChatRecoveryIncident = {
   lastAttemptAt: number;
   reason?: string;
   /**
-   * High-water mark of a monotonic recovery-progress signal (count of persisted
-   * assistant messages) observed for this incident. Used to distinguish a turn
-   * that is making forward progress but keeps getting interrupted by isolate
-   * resets (deploys) — which should NOT exhaust the budget — from one that
-   * genuinely fails to advance.
+   * High-water mark of the durable, monotonic recovery-progress counter (see
+   * `_chatRecoveryProgressMarker`) observed for this incident. Used to
+   * distinguish a turn that is making forward progress but keeps getting
+   * interrupted by isolate resets (deploys) — which should NOT exhaust the
+   * budget — from one that genuinely fails to advance. Sourced from a persisted
+   * counter rather than the live transcript so compaction cannot lower it
+   * (#1628).
    */
   progress?: number;
 };
 
 const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
+// Durable, monotonic forward-progress counter for recovery budget resets.
+// Incremented once per non-empty partial materialized by
+// `_persistOrphanedStream`; never recomputed from the (compactable) transcript.
+// See `_chatRecoveryProgressMarker`.
+const CHAT_RECOVERY_PROGRESS_KEY = "cf:chat-recovery:progress";
 const DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS = 6;
 const DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS = 10_000;
 // Delay before retrying a continuation that timed out waiting for stable state.
@@ -6773,16 +6780,29 @@ export class Think<
   }
 
   /**
-   * Monotonic-ish recovery-progress signal: the number of persisted assistant
-   * messages. `_persistOrphanedStream` turns each interrupted partial into a
-   * persisted assistant message (and does not prune it), so this grows whenever
-   * recovery makes forward progress and never shrinks mid-incident.
+   * Monotonic forward-progress signal for recovery budget resets.
+   *
+   * This used to count assistant messages in `this.messages`, but that is
+   * recomputed from the live, mutable transcript. Compaction collapses older
+   * assistant messages into a summary, lowering the count — so a turn that had
+   * genuinely advanced could read as "no progress" between attempts and exhaust
+   * its budget prematurely (#1628). Instead we read a durably-persisted counter
+   * that only ever increments — bumped once per non-empty partial materialized
+   * by `_persistOrphanedStream`, which is the exact "forward progress" event the
+   * old message-count tracked — so compaction can never lower it.
    */
-  private _chatRecoveryProgressMarker(): number {
-    return this.messages.reduce(
-      (count, message) => (message.role === "assistant" ? count + 1 : count),
-      0
+  private async _chatRecoveryProgressMarker(): Promise<number> {
+    return (
+      (await this.ctx.storage.get<number>(CHAT_RECOVERY_PROGRESS_KEY)) ?? 0
     );
+  }
+
+  /** Advance the durable recovery-progress counter. Called when a partial
+   *  assistant message is materialized (real forward progress). */
+  private async _bumpChatRecoveryProgress(): Promise<void> {
+    const current =
+      (await this.ctx.storage.get<number>(CHAT_RECOVERY_PROGRESS_KEY)) ?? 0;
+    await this.ctx.storage.put(CHAT_RECOVERY_PROGRESS_KEY, current + 1);
   }
 
   /** Sweep recovery incidents that have been inactive past the TTL. */
@@ -6829,7 +6849,7 @@ export class Think<
     // attempt saw) as environmental and reset the budget, while a turn that
     // never advances still exhausts at `maxAttempts`.
     const prevProgress = existing?.progress ?? 0;
-    const currentProgress = this._chatRecoveryProgressMarker();
+    const currentProgress = await this._chatRecoveryProgressMarker();
     const madeProgress = existing != null && currentProgress > prevProgress;
     const windowExceeded =
       existing != null &&
@@ -7980,6 +8000,11 @@ export class Think<
 
     if (accumulator.parts.length > 0) {
       await this._persistAssistantMessage(accumulator.toMessage());
+      // Real forward progress: a non-empty partial was materialized. Advance
+      // the durable, compaction-immune progress counter so a deploy-churned
+      // turn that keeps producing content resets its recovery budget instead
+      // of exhausting it (#1628).
+      await this._bumpChatRecoveryProgress();
       this._broadcastMessages();
     }
   }

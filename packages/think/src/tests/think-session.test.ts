@@ -2215,9 +2215,9 @@ describe("Think — onChatRecovery", () => {
     expect((await agent.beginIncidentForTest(input)).attempt).toBe(1);
     expect((await agent.beginIncidentForTest(input)).attempt).toBe(2);
 
-    // Forward progress (an assistant message persisted, as `_persistOrphanedStream`
-    // does after a partial) resets the budget — this is the deploy-churn fix.
-    await agent.addAssistantMessageForTest("asst-1");
+    // Forward progress (the durable counter advances, as `_persistOrphanedStream`
+    // does after materializing a partial) resets the budget — the deploy-churn fix.
+    await agent.bumpRecoveryProgressForTest();
     const afterProgress = await agent.beginIncidentForTest(input);
     expect(afterProgress.attempt).toBe(1);
     expect(afterProgress.exhausted).toBe(false);
@@ -2227,6 +2227,32 @@ describe("Think — onChatRecovery", () => {
     const exhausted = await agent.beginIncidentForTest(input);
     expect(exhausted.attempt).toBe(3);
     expect(exhausted.exhausted).toBe(true);
+  });
+
+  it("detects forward progress even after compaction collapses the transcript (#1628)", async () => {
+    const agent = await freshRecoveryAgent("recovery-progress-compaction");
+    await agent.setChatRecoveryConfigForTest({ maxAttempts: 2 });
+
+    const input = {
+      requestId: "req-compact",
+      recoveryRootRequestId: "req-compact",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue" as const
+    };
+
+    // First detection opens the incident.
+    expect((await agent.beginIncidentForTest(input)).attempt).toBe(1);
+
+    // The turn advances (a partial is materialized) AND compaction then
+    // collapses every assistant message out of the live transcript. The old
+    // message-count marker would now read FEWER messages than the previous
+    // attempt and miss the progress; the durable counter is immune.
+    await agent.bumpRecoveryProgressForTest();
+    await agent.dropAssistantMessagesForTest();
+
+    const afterProgress = await agent.beginIncidentForTest(input);
+    expect(afterProgress.attempt).toBe(1);
+    expect(afterProgress.exhausted).toBe(false);
   });
 
   it("exhausts via the wall-clock window even while making progress", async () => {
@@ -2246,7 +2272,7 @@ describe("Think — onChatRecovery", () => {
     });
 
     // Even with fresh progress, the wall-clock ceiling terminalizes it.
-    await agent.addAssistantMessageForTest("asst-old");
+    await agent.bumpRecoveryProgressForTest();
     const next = await agent.beginIncidentForTest({
       requestId: "req-old-2",
       recoveryRootRequestId: "req-old",

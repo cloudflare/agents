@@ -49,6 +49,8 @@ interface ChatRecoveryTestStub {
   }): Promise<void>;
   getChatRecoveryIncidentsForTest(): Promise<unknown[]>;
   addAssistantMessageForTest(id: string): Promise<void>;
+  bumpRecoveryProgressForTest(): Promise<void>;
+  dropAssistantMessagesForTest(): Promise<void>;
   setRecoveryShouldThrowForTest(shouldThrow: boolean): Promise<void>;
   enableThrowingOnExhaustedForTest(
     maxAttempts: number,
@@ -263,9 +265,9 @@ describe("onChatRecovery", () => {
     expect((await agentStub.beginIncidentForTest(input)).attempt).toBe(1);
     expect((await agentStub.beginIncidentForTest(input)).attempt).toBe(2);
 
-    // Forward progress (an assistant message persisted, as `_persistOrphanedStream`
-    // does after a partial) resets the budget — this is the deploy-churn fix.
-    await agentStub.addAssistantMessageForTest("asst-1");
+    // Forward progress (the durable counter advances, as `_persistOrphanedStream`
+    // does after materializing a partial) resets the budget — the deploy-churn fix.
+    await agentStub.bumpRecoveryProgressForTest();
     const afterProgress = await agentStub.beginIncidentForTest(input);
     expect(afterProgress.attempt).toBe(1);
     expect(afterProgress.exhausted).toBe(false);
@@ -275,6 +277,33 @@ describe("onChatRecovery", () => {
     const exhausted = await agentStub.beginIncidentForTest(input);
     expect(exhausted.attempt).toBe(3);
     expect(exhausted.exhausted).toBe(true);
+  });
+
+  it("detects forward progress even after compaction collapses the transcript (#1628)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 2 });
+
+    const input = {
+      requestId: "req-compact",
+      recoveryRootRequestId: "req-compact",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue" as const
+    };
+
+    // First detection opens the incident.
+    expect((await agentStub.beginIncidentForTest(input)).attempt).toBe(1);
+
+    // The turn advances (a partial is materialized) AND compaction then
+    // collapses every assistant message out of the live transcript. The old
+    // message-count marker would now read FEWER messages than the previous
+    // attempt and miss the progress; the durable counter is immune.
+    await agentStub.bumpRecoveryProgressForTest();
+    await agentStub.dropAssistantMessagesForTest();
+
+    const afterProgress = await agentStub.beginIncidentForTest(input);
+    expect(afterProgress.attempt).toBe(1);
+    expect(afterProgress.exhausted).toBe(false);
   });
 
   it("exhausts via the wall-clock window even while making progress", async () => {
@@ -295,7 +324,7 @@ describe("onChatRecovery", () => {
     });
 
     // Even with fresh progress, the wall-clock ceiling terminalizes it.
-    await agentStub.addAssistantMessageForTest("asst-old");
+    await agentStub.bumpRecoveryProgressForTest();
     const next = await agentStub.beginIncidentForTest({
       requestId: "req-old-2",
       recoveryRootRequestId: "req-old",

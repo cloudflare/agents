@@ -3406,6 +3406,27 @@ export class ThinkRecoveryTestAgent extends Think {
     ];
   }
 
+  /** Simulate recovery forward progress: advance the durable progress counter
+   *  exactly as `_persistOrphanedStream` does when it materializes a non-empty
+   *  partial. The recovery budget keys off this counter (not the live message
+   *  count), so this is how a test marks "the turn advanced". */
+  async bumpRecoveryProgressForTest(): Promise<void> {
+    const self = this as unknown as {
+      _bumpChatRecoveryProgress(): Promise<void>;
+    };
+    await self._bumpChatRecoveryProgress();
+  }
+
+  /** Simulate compaction collapsing the transcript by dropping all assistant
+   *  messages from the live cache. Used to prove the recovery progress signal
+   *  is compaction-immune (#1628). */
+  async dropAssistantMessagesForTest(): Promise<void> {
+    const self = this as unknown as { _cachedMessages: UIMessage[] };
+    self._cachedMessages = self._cachedMessages.filter(
+      (m) => m.role !== "assistant"
+    );
+  }
+
   /**
    * Stream a couple of text chunks (throttled → buffered) then a settled tool
    * result, and report how many chunks are durably persisted (raw SQLite, no
