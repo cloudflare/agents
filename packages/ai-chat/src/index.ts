@@ -1385,7 +1385,7 @@ export class AIChatAgent<
         existingIdx >= 0
           ? this.messages.map((m, i) => (i === existingIdx ? message : m))
           : [...this.messages, message];
-      this.persistMessages(updatedMessages);
+      await this.persistMessages(updatedMessages);
       // Real forward progress: a non-empty partial was materialized. Advance
       // the durable, compaction-immune progress counter so a deploy-churned
       // turn that keeps producing content resets its recovery budget instead
