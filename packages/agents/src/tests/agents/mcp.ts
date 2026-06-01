@@ -38,6 +38,7 @@ type Props = {
 
 export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
   private tempToolHandle?: { remove: () => void };
+  private collisionBarrierResolvers: Array<() => void> = [];
 
   server = new McpServer(
     { name: "test-server", version: "1.0.0" },
@@ -60,6 +61,27 @@ export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
       },
       async ({ name }) => {
         return { content: [{ text: `Hello, ${name}!`, type: "text" }] };
+      }
+    );
+
+    this.server.registerTool(
+      "collisionBarrierEcho",
+      {
+        description: "Echo after two concurrent calls reach a barrier",
+        inputSchema: { label: z.string() }
+      },
+      async ({ label }) => {
+        await new Promise<void>((resolve) => {
+          this.collisionBarrierResolvers.push(resolve);
+          if (this.collisionBarrierResolvers.length === 2) {
+            for (const release of this.collisionBarrierResolvers) {
+              release();
+            }
+            this.collisionBarrierResolvers = [];
+          }
+        });
+
+        return { content: [{ text: `collision:${label}`, type: "text" }] };
       }
     );
 

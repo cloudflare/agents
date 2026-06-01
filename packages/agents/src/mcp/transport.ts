@@ -113,10 +113,12 @@ export class StreamableHTTPServerTransport implements Transport {
   private _started = false;
   private _eventStore?: EventStore;
 
-  // This is to keep track whether all messages from a single POST request have been answered.
-  // I's fine that we don't persist this since it's only for backwards compatibility as clients
-  // should no longer batch requests, per the spec.
-  private _requestResponseMap: Map<RequestId, JSONRPCMessage> = new Map();
+  // This tracks which messages on each POST stream have been answered.
+  // It is fine that we do not persist this since it only supports backwards
+  // compatibility for clients batching requests, which the spec discourages.
+  // Keying by stream avoids colliding ids on independent POST streams sharing
+  // completion state with one another.
+  private _streamResponseIds: Map<string, Set<RequestId>> = new Map();
 
   sessionId: string;
   onclose?: () => void;
@@ -378,7 +380,8 @@ export class StreamableHTTPServerTransport implements Transport {
     message: JSONRPCMessage,
     options?: { relatedRequestId?: RequestId }
   ): Promise<void> {
-    const { agent } = getCurrentAgent<McpAgent>();
+    const { agent, connection: originatingConnection } =
+      getCurrentAgent<McpAgent>();
     if (!agent) throw new Error("Agent was not found in send");
 
     let requestId = options?.relatedRequestId;
@@ -424,14 +427,29 @@ export class StreamableHTTPServerTransport implements Transport {
       return;
     }
 
-    // Get the response for this request. We look up by `requestIds` on
-    // connection state, which is set both for fresh POST connections and
-    // for resumed GET connections that inherited the POST's requestIds
-    // via Last-Event-ID.
-    const connection = Array.from(
+    // Get the stream for this request. Normally request ids uniquely identify
+    // a POST connection. If a client violates that constraint, prefer the
+    // connection whose handler is currently producing this message rather
+    // than leaking a plausible response to the first matching POST stream.
+    // Only prefer an originating connection while it is still live: after a
+    // POST stream disconnects, a resumed GET connection inherits requestIds
+    // and must be allowed to receive the eventual response.
+    const matchingConnections = Array.from(
       agent.getConnections<TransportConnState>()
-    ).find((conn) => conn.state?.requestIds?.includes(requestId as RequestId));
+    ).filter((conn) =>
+      conn.state?.requestIds?.includes(requestId as RequestId)
+    );
+    const connection =
+      matchingConnections.find(
+        (conn) => conn.id === originatingConnection?.id
+      ) ??
+      (matchingConnections.length === 1 ? matchingConnections[0] : undefined);
     if (!connection) {
+      if (matchingConnections.length > 1) {
+        throw new Error(
+          `Multiple connections established for request ID without an originating connection: ${String(requestId)}`
+        );
+      }
       throw new Error(
         `No connection established for request ID: ${String(requestId)}`
       );
@@ -448,16 +466,18 @@ export class StreamableHTTPServerTransport implements Transport {
     let shouldClose = false;
 
     if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
-      this._requestResponseMap.set(requestId, message);
+      let responseIds = this._streamResponseIds.get(streamId);
+      if (!responseIds) {
+        responseIds = new Set<RequestId>();
+        this._streamResponseIds.set(streamId, responseIds);
+      }
+      responseIds.add(requestId);
       const relatedIds = connection.state?.requestIds ?? [];
-      // Check if we have responses for all requests using this connection
-      shouldClose = relatedIds.every((id) => this._requestResponseMap.has(id));
+      // Check if we have responses for all requests using this connection.
+      shouldClose = relatedIds.every((id) => responseIds.has(id));
 
       if (shouldClose) {
-        // Clean up
-        for (const id of relatedIds) {
-          this._requestResponseMap.delete(id);
-        }
+        this._streamResponseIds.delete(streamId);
 
         // POST stream is fully responded — drop the persisted requestIds
         // mapping and the stored events. No client should resume past
