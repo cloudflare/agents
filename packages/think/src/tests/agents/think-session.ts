@@ -3444,11 +3444,11 @@ export class ThinkRecoveryTestAgent extends Think {
         chunk: unknown,
         chunkBody: string,
         state: { chunksSinceFlush: number; hasFlushedContent: boolean }
-      ): void;
+      ): Promise<void>;
     };
     const streamId = self._resumableStream.start("req-tool-durability");
     const state = { chunksSinceFlush: 0, hasFlushedContent: false };
-    const store = (chunk: Record<string, unknown>): void =>
+    const store = (chunk: Record<string, unknown>): Promise<void> =>
       self._storeChunkDurably(streamId, chunk, JSON.stringify(chunk), state);
     const rawCount = (): number => {
       const rows = this.sql<{ count: number }>`
@@ -3458,10 +3458,10 @@ export class ThinkRecoveryTestAgent extends Think {
       return rows[0]?.count ?? 0;
     };
 
-    store({ type: "text-delta", id: "t", delta: "hello " });
-    store({ type: "text-delta", id: "t", delta: "there" });
+    await store({ type: "text-delta", id: "t", delta: "hello " });
+    await store({ type: "text-delta", id: "t", delta: "there" });
     const bufferedTextCount = rawCount();
-    store({
+    await store({
       type: "tool-output-available",
       toolCallId: "tc1",
       output: { ok: true }
