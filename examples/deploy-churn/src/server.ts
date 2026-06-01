@@ -958,8 +958,11 @@ export class DeployChurnAgent extends Think<Env> {
       );
     }
     // Wipe submissions, the tool ledger, and tool config so a fresh run starts
-    // from zero. (Each orchestrator run also uses a fresh session/DO instance,
-    // so the durable transcript starts empty too.)
+    // from zero. Also clear the durable chat transcript: a REUSED session would
+    // otherwise keep the prior turn's tool result, so the sub-agent mock model
+    // (which only emits `runTask` when no tool result is present) would short-
+    // circuit to "DONE" and never dispatch the child.
+    await this.clearMessages();
     await this.deleteSubmissions();
     this._ensureLedgerTable();
     this.sql`DELETE FROM harness_ledger`;

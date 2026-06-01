@@ -7741,6 +7741,12 @@ export class Agent<
       abortListener = () => resolveAbort?.();
       signal.addEventListener("abort", abortListener, { once: true });
     }
+    // N9: track whether any chunk was forwarded since the last progress hook so
+    // a parent that is merely orchestrating a child still records forward
+    // progress for its OWN recovery budget — but ONLY when the child actually
+    // produces output (a silent/hung child forwards nothing → no credit → the
+    // parent still exhausts on its own no-progress timer).
+    let forwardedSinceProgress = false;
     try {
       const forwardChunk = (chunk: AgentToolStoredChunk) => {
         this._broadcastAgentToolEvent(parentToolCallId, next++, {
@@ -7748,6 +7754,7 @@ export class Agent<
           runId,
           body: chunk.body
         });
+        forwardedSinceProgress = true;
       };
       const forwardLine = (line: string) => {
         try {
@@ -7801,6 +7808,20 @@ export class Agent<
         } else {
           forwardChunk(value);
         }
+        if (forwardedSinceProgress) {
+          forwardedSinceProgress = false;
+          // Credit the parent's recovery progress for forwarding child output
+          // (no-op in the base Agent; chat-recovery subclasses override). Kept
+          // off the hot per-chunk path — runs once per read iteration and is
+          // throttled inside the override. Best-effort: progress crediting is
+          // advisory, so a bump failure must never break the child stream the
+          // user is watching.
+          try {
+            await this._onAgentToolStreamProgress();
+          } catch {
+            // Ignore and keep forwarding; the next iteration tries again.
+          }
+        }
       }
     } finally {
       if (abortListener && signal) {
@@ -7824,6 +7845,28 @@ export class Agent<
     }
     return next;
   }
+
+  /**
+   * Hook invoked by `_forwardAgentToolStream` after a child produces output that
+   * was forwarded to the parent's connections. Forwarding a sub-agent's stream
+   * is genuine forward progress for the *parent* turn (the parent is
+   * orchestrating the child), so chat-recovery subclasses (Think / AIChatAgent)
+   * override this to advance their recovery progress marker.
+   *
+   * Without it, a parent whose turn merely `await`s a sub-agent banks zero
+   * progress of its own, so under deploy churn the parent's no-progress recovery
+   * window exhausts and abandons the turn as `interrupted` — even though the
+   * child is healthily streaming and ultimately completes (observed in the
+   * `deploy-churn --mode subagent` harness: `attempt 6/6, stable_timeout,
+   * progress: 1`).
+   *
+   * Called ONLY after at least one chunk was actually forwarded — never merely
+   * because a child is attached — so a silent / hung child still lets the parent
+   * exhaust on its own timer. The base Agent has no recovery budget, so this is
+   * a no-op; subclasses should throttle the (durable) bump since this can be
+   * called repeatedly while a child streams.
+   */
+  protected async _onAgentToolStreamProgress(): Promise<void> {}
 
   private _broadcastAgentToolTerminal<Output>(
     parentToolCallId: string | undefined,

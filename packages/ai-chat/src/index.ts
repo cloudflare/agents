@@ -167,6 +167,14 @@ const CHAT_RECOVERY_ALARM_DEBOUNCE_MS = 30 * 1000;
 // NEVER reset by progress — the final hard stop so even a degenerate
 // slowly-progressing loop cannot run forever.
 const CHAT_RECOVERY_MAX_WINDOW_MS = 15 * 60 * 1000;
+// N9: while a parent re-attaches to and forwards a sub-agent's stream, credit
+// the parent's recovery progress at most this often. The marker only needs to
+// advance ≥once between recovery attempts (the no-progress window is minutes),
+// so this caps storage writes during high-rate child streaming. The throttle
+// state is in-memory (reset per isolate), so the first forwarded chunk after
+// ANY restart always bumps — guaranteeing every recovery attempt that observes
+// child output registers forward progress.
+const AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS = 5_000;
 
 type StreamResultStatus = {
   status: Exclude<SaveMessagesResult["status"], "skipped">;
@@ -3192,6 +3200,31 @@ export class AIChatAgent<
     const current =
       (await this.ctx.storage.get<number>(CHAT_RECOVERY_PROGRESS_KEY)) ?? 0;
     await this.ctx.storage.put(CHAT_RECOVERY_PROGRESS_KEY, current + 1);
+  }
+
+  /** In-memory wall-clock of the last N9 child-stream progress bump (reset per
+   *  isolate so the first forwarded chunk after a restart always credits). */
+  private _lastAgentToolStreamProgressAt = 0;
+
+  /**
+   * N9: forwarding a sub-agent's chunks IS forward progress for this parent
+   * turn, so credit the parent's recovery progress marker — otherwise a parent
+   * whose turn merely `await`s a child banks no progress of its own and its
+   * no-progress window exhausts while the child is healthily streaming. Only
+   * invoked after a child actually produced output (see
+   * `_forwardAgentToolStream`), so a silent child still lets the parent exhaust.
+   * Throttled (and reset per isolate) so we never write storage per token.
+   */
+  protected override async _onAgentToolStreamProgress(): Promise<void> {
+    const now = Date.now();
+    if (
+      now - this._lastAgentToolStreamProgressAt <
+      AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS
+    ) {
+      return;
+    }
+    this._lastAgentToolStreamProgressAt = now;
+    await this._bumpChatRecoveryProgress();
   }
 
   /** Sweep recovery incidents that have been inactive past the TTL. */

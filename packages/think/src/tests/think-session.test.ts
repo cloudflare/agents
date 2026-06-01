@@ -2241,6 +2241,69 @@ describe("Think — onChatRecovery", () => {
     expect(exhausted.exhausted).toBe(true);
   });
 
+  it("credits forwarding a sub-agent's stream as parent forward progress (N9)", async () => {
+    const agent = await freshRecoveryAgent("recovery-n9-child-progress");
+    await agent.setChatRecoveryConfigForTest({ maxAttempts: 2 });
+
+    const base = {
+      requestId: "req-n9",
+      recoveryRootRequestId: "req-n9",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue" as const
+    };
+    let t = 1_000_000;
+    const at = () => {
+      const nowMs = t;
+      t += 40_000;
+      return { ...base, nowMs };
+    };
+
+    // A parent whose turn merely awaits a sub-agent climbs toward the cap.
+    expect((await agent.beginIncidentForTest(at())).attempt).toBe(1);
+    expect((await agent.beginIncidentForTest(at())).attempt).toBe(2);
+
+    // Re-attaching and forwarding the child's stream IS the parent's forward
+    // progress (N9) — the durable marker advances through the real
+    // `_forwardAgentToolStream` path, so the budget resets just like in-band
+    // content does. Without this, the deploy-churn parent exhausts at `attempt
+    // 6/6, progress: 1` while the child streams healthily.
+    const forwarded = await agent.forwardChildStreamProgressForTest(3);
+    expect(forwarded.after).toBe(forwarded.start + 1);
+    const afterChildStream = await agent.beginIncidentForTest(at());
+    expect(afterChildStream.attempt).toBe(1);
+    expect(afterChildStream.exhausted).toBe(false);
+  });
+
+  it("does NOT credit a silent/hung sub-agent, so the parent still exhausts (N9)", async () => {
+    const agent = await freshRecoveryAgent("recovery-n9-silent-child");
+    await agent.setChatRecoveryConfigForTest({ maxAttempts: 2 });
+
+    const base = {
+      requestId: "req-n9-silent",
+      recoveryRootRequestId: "req-n9-silent",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue" as const
+    };
+    let t = 2_000_000;
+    const at = () => {
+      const nowMs = t;
+      t += 40_000;
+      return { ...base, nowMs };
+    };
+
+    expect((await agent.beginIncidentForTest(at())).attempt).toBe(1);
+    expect((await agent.beginIncidentForTest(at())).attempt).toBe(2);
+
+    // A re-attach where the child produces NO output forwards nothing, so the
+    // parent banks no progress and the cap still binds — a genuinely hung child
+    // must not pin the parent's recovery open forever.
+    const forwarded = await agent.forwardChildStreamProgressForTest(0);
+    expect(forwarded.after).toBe(forwarded.start);
+    const exhausted = await agent.beginIncidentForTest(at());
+    expect(exhausted.attempt).toBe(3);
+    expect(exhausted.exhausted).toBe(true);
+  });
+
   it("detects forward progress even after compaction collapses the transcript (#1628)", async () => {
     const agent = await freshRecoveryAgent("recovery-progress-compaction");
     await agent.setChatRecoveryConfigForTest({ maxAttempts: 2 });

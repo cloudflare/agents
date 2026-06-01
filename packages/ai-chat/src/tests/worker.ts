@@ -1796,6 +1796,43 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     await self._bumpChatRecoveryProgress();
   }
 
+  /** Simulate a parent re-attach that forwards `chunks` of a child's stream by
+   *  driving the real `_forwardAgentToolStream` over a synthetic child stream.
+   *  The in-memory throttle is reset first so this models a fresh post-restart
+   *  isolate. Returns the durable recovery-progress counter before/after so a
+   *  test can assert forwarding child output credits the PARENT's progress
+   *  marker (N9) — and that a SILENT child (chunks = 0) does NOT. */
+  async forwardChildStreamProgressForTest(chunks: number): Promise<{
+    start: number;
+    after: number;
+  }> {
+    const self = this as unknown as {
+      _forwardAgentToolStream(
+        stream: ReadableStream<{ body: string }>,
+        parentToolCallId: string | undefined,
+        runId: string,
+        sequence: number
+      ): Promise<number>;
+      _lastAgentToolStreamProgressAt: number;
+    };
+    self._lastAgentToolStreamProgressAt = 0;
+    const read = async (): Promise<number> =>
+      (await this.ctx.storage.get<number>("cf:chat-recovery:progress")) ?? 0;
+    const start = await read();
+    const bodies = Array.from({ length: chunks }, (_, i) => ({
+      body: `chunk-${i}`
+    }));
+    const stream = new ReadableStream<{ body: string }>({
+      start(controller) {
+        for (const b of bodies) controller.enqueue(b);
+        controller.close();
+      }
+    });
+    await self._forwardAgentToolStream(stream, undefined, "n9-probe-run", 1);
+    const after = await read();
+    return { start, after };
+  }
+
   /** Simulate compaction collapsing the transcript by dropping all assistant
    *  messages from the live cache. Used to prove the recovery progress signal
    *  is compaction-immune (#1628). */
