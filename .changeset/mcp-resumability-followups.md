@@ -23,7 +23,7 @@ Follow-up to #1583.
   connection at `send()` time to record the event; if the client had
   dropped (common during long tool calls on flaky networks) the event
   was lost. Now the transport falls back to a persisted
-  `requestId -> streamId` reverse lookup (`McpAgent.getStreamIdForRequestId`),
+  `requestId -> streamId` reverse lookup (`McpAgent.getStreamForRequestId`),
   stores the event, and writes to the wire only if a live connection is
   still attached. Reconnecting with `Last-Event-ID` replays anything
   that was missed.

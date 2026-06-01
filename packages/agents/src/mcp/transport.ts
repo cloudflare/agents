@@ -455,29 +455,34 @@ export class StreamableHTTPServerTransport implements Transport {
       }
       responseIds.add(requestId);
       shouldClose = relatedIds.every((id) => responseIds.has(id));
-
-      if (shouldClose) {
-        this._streamResponseIds.delete(streamId);
-        // Ordering: deleteStreamRequestIds → clearStream. The tiny
-        // window between these two awaits where a concurrent GET resume
-        // sees no persisted requestIds and starts iterating events
-        // that `clearStream` is about to delete is benign — the replay
-        // `send` callback writes synchronously to the WS, so the worst
-        // case is replaying a few events that are immediately garbage-
-        // collected.
-        await agent.deleteStreamRequestIds(streamId);
-        if (this._eventStore && isClearableEventStore(this._eventStore)) {
-          await this._eventStore.clearStream(streamId);
-        }
-      }
+      if (shouldClose) this._streamResponseIds.delete(streamId);
     }
 
-    // If `liveConnection` is null the close frame is intentionally
-    // dropped — there's nowhere to write it. The client's eventual
-    // reconnect with Last-Event-ID gets nothing back (cleanup ran above),
-    // and the spec lets them treat the response as final on its own.
+    // Write FIRST, clean up SECOND. If we cleared the stream before
+    // writing, a client that lost the WS pipe mid-flight could
+    // reconnect with Last-Event-ID and find the entire stream wiped,
+    // including events it hadn't yet received — the exact regression
+    // #1583 was opened against. With this ordering every event up to
+    // and including the final response stays replayable until either
+    // (a) it's actually written to a live connection, or (b) the
+    // final response lands with no connection, in which case we wipe
+    // immediately after since there's nothing to replay to.
     if (liveConnection) {
       this.writeSSEEvent(liveConnection, message, eventId, shouldClose);
+    }
+
+    if (shouldClose) {
+      // Ordering between these two awaits: a concurrent GET resume
+      // arriving in the window sees no persisted requestIds, treats
+      // the connection as a completed-POST one-shot replay, and
+      // starts iterating events that `clearStream` is about to
+      // delete. The replay `send` callback writes synchronously to
+      // the WS, so the worst case is replaying a few events that are
+      // immediately garbage-collected — benign.
+      await agent.deleteStreamRequestIds(streamId);
+      if (this._eventStore && isClearableEventStore(this._eventStore)) {
+        await this._eventStore.clearStream(streamId);
+      }
     }
   }
 
