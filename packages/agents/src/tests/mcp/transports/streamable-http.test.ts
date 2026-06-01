@@ -874,18 +874,18 @@ describe("Streamable HTTP Transport", () => {
       return { agent, transport };
     };
 
-    it("fans a server notification out to every standalone GET stream", async () => {
-      // Behavioural change: the standalone path used to be
-      // last-writer-wins (only the final `_standaloneSse` connection
-      // got the message). It now delivers to all of them, matching the
-      // spec's allowance for multiple concurrent SSE streams.
-      const first = makeConnection("sse-1", { _standaloneSse: true });
-      const second = makeConnection("sse-2", { _standaloneSse: true });
+    it("sends a server notification on exactly one standalone stream", async () => {
+      // MCP: the server MUST send each message on only one stream and
+      // MUST NOT broadcast across multiple. `handleGetRequest`
+      // supersedes prior standalone connections so only one is ever
+      // live; this asserts the send path honours that and never
+      // touches a POST bridge.
+      const standalone = makeConnection("sse-1", { _standaloneSse: true });
       const postBridge = makeConnection("post", {
         streamId: "post",
         requestIds: ["r1"]
       });
-      const { agent, transport } = makeTransport([first, second, postBridge]);
+      const { agent, transport } = makeTransport([standalone, postBridge]);
 
       const notification: JSONRPCNotification = {
         jsonrpc: "2.0",
@@ -903,20 +903,26 @@ describe("Streamable HTTP Transport", () => {
         () => transport.send(notification)
       );
 
-      expect(first.send).toHaveBeenCalledOnce();
-      expect(second.send).toHaveBeenCalledOnce();
+      expect(standalone.send).toHaveBeenCalledOnce();
       // The POST bridge is not a standalone stream — it must not receive it.
       expect(postBridge.send).not.toHaveBeenCalled();
     });
 
-    it("keeps fanning out when one standalone connection's send throws", async () => {
-      // A dead WS mid-loop must not block delivery to the rest.
-      const dead = makeConnection("sse-dead", { _standaloneSse: true });
-      dead.send.mockImplementation(() => {
-        throw new Error("socket gone");
+    it("stores but does not write when no standalone stream is live", async () => {
+      // No `_standaloneSse` connection attached: the event is stored
+      // for replay (verified elsewhere) and no live write happens.
+      const postBridge = makeConnection("post", {
+        streamId: "post",
+        requestIds: ["r1"]
       });
-      const live = makeConnection("sse-live", { _standaloneSse: true });
-      const { agent, transport } = makeTransport([dead, live]);
+      let stored = 0;
+      const { agent, transport } = makeTransport([postBridge]);
+      (transport as unknown as { _eventStore: unknown })._eventStore = {
+        storeEvent: async () => {
+          stored++;
+          return "_GET_stream:0";
+        }
+      };
 
       const notification: JSONRPCNotification = {
         jsonrpc: "2.0",
@@ -934,8 +940,8 @@ describe("Streamable HTTP Transport", () => {
         () => transport.send(notification)
       );
 
-      expect(dead.send).toHaveBeenCalledOnce();
-      expect(live.send).toHaveBeenCalledOnce();
+      expect(stored).toBe(1);
+      expect(postBridge.send).not.toHaveBeenCalled();
     });
 
     it("closes a stale POST connection when a GET resumes its stream", async () => {
@@ -987,6 +993,48 @@ describe("Streamable HTTP Transport", () => {
       // And it claims the persisted requestIds.
       expect(resuming.setState).toHaveBeenCalledWith(
         expect.objectContaining({ streamId: "stream-A", requestIds: ["r1"] })
+      );
+    });
+
+    it("supersedes a prior standalone GET when a fresh GET opens", async () => {
+      // MCP allows only one standalone GET per session. A fresh GET
+      // (no Last-Event-ID) closes the prior standalone connection
+      // rather than running two in parallel.
+      const priorStandalone = makeConnection("old-get", {
+        streamId: "_GET_stream",
+        _standaloneSse: true
+      });
+      const freshGet = makeConnection("new-get", {});
+      const { agent, transport } = makeTransport([priorStandalone, freshGet]);
+
+      const req = new Request("http://example.com/mcp", {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          "mcp-session-id": "session-id"
+        }
+      });
+
+      await agentContext.run(
+        {
+          agent,
+          connection: freshGet as unknown as Connection,
+          email: undefined,
+          request: req
+        },
+        () => transport.handleGetRequest(req)
+      );
+
+      expect(priorStandalone.close).toHaveBeenCalledWith(
+        1000,
+        "Superseded by resumed stream"
+      );
+      expect(freshGet.close).not.toHaveBeenCalled();
+      expect(freshGet.setState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          streamId: "_GET_stream",
+          _standaloneSse: true
+        })
       );
     });
   });

@@ -212,9 +212,12 @@ export class StreamableHTTPServerTransport implements Transport {
     //     server-initiated notifications continue to land here.
     //   - completed POST / unknown: this connection is a one-shot
     //     replay channel. No future messages will be routed to it.
-    //     Clients that want ongoing standalone notifications open a
-    //     second GET — the spec explicitly allows multiple
-    //     concurrent SSE streams per session.
+    //
+    // In every resumable case we supersede any prior connection bound
+    // to the same streamId by closing it, so there is at most one live
+    // connection per stream. This keeps `send()` routing deterministic
+    // and keeps us within the MCP rule that each message goes out on
+    // exactly one stream.
     if (this._eventStore && lastEventId) {
       const resumedStreamId =
         await this._eventStore.getStreamIdForEventId?.(lastEventId);
@@ -229,36 +232,50 @@ export class StreamableHTTPServerTransport implements Transport {
             await agent.getStreamRequestIds(resumedStreamId);
           if (persistedReqs && persistedReqs.length > 0) {
             resumeState.requestIds = persistedReqs;
-            // Close any prior connections still bound to this stream.
-            // Without this, `send()` could iterate to a stale POST
-            // bridge first and route tool progress there instead of
-            // the resumed GET. Closing rather than mutating sibling
-            // state mirrors how the SDK's `_streamMapping` gives
-            // last-writer-wins for free.
-            //
-            // Note: this also means two rapid GET resumes for the
-            // same stream will see the second close the first. That
-            // matches the last-writer-wins semantic and is what a
-            // client retrying a reconnect would expect anyway.
-            for (const other of agent.getConnections<TransportConnState>()) {
-              if (other.id === connection.id) continue;
-              if (other.state?.streamId !== resumedStreamId) continue;
-              other.close(1000, "Superseded by resumed stream");
-            }
           }
         }
+        this.supersedePriorStreamConnections(
+          agent,
+          connection.id,
+          resumedStreamId
+        );
         connection.setState(resumeState);
         await this.replayEvents(lastEventId);
         return;
       }
     }
 
-    // Fresh standalone listen stream.
+    // Fresh standalone listen stream. The MCP spec allows only one
+    // standalone GET per session, so supersede any existing one.
+    this.supersedePriorStreamConnections(
+      agent,
+      connection.id,
+      STANDALONE_STREAM_ID
+    );
     const standaloneState: TransportConnState = {
       streamId: STANDALONE_STREAM_ID,
       _standaloneSse: true
     };
     connection.setState(standaloneState);
+  }
+
+  /**
+   * Close any connection (other than `selfId`) currently bound to
+   * `streamId`, so at most one live connection serves a given stream.
+   * Closing rather than mutating sibling state mirrors how the SDK's
+   * single `_streamMapping` entry gives last-writer-wins for free, and
+   * keeps `send()` from routing to a stale bridge.
+   */
+  private supersedePriorStreamConnections(
+    agent: McpAgent,
+    selfId: string,
+    streamId: string
+  ): void {
+    for (const other of agent.getConnections<TransportConnState>()) {
+      if (other.id === selfId) continue;
+      if (other.state?.streamId !== streamId) continue;
+      other.close(1000, "Superseded by resumed stream");
+    }
   }
 
   /**
@@ -492,10 +509,14 @@ export class StreamableHTTPServerTransport implements Transport {
 
   /**
    * Server-initiated message on the standalone GET stream. Stored under
-   * a fixed streamId so the event is replayable even when no live
-   * connection is currently attached. Fanned out to every live
-   * standalone connection (the spec allows multiple concurrent SSE
-   * streams per session).
+   * a fixed streamId so it's replayable even when no live connection is
+   * currently attached.
+   *
+   * Sent on exactly one stream, per MCP: "the server MUST send each of
+   * its JSON-RPC messages on only one of the connected streams; it MUST
+   * NOT broadcast the same message across multiple streams."
+   * `handleGetRequest` supersedes prior standalone connections, so
+   * there is at most one to send on.
    */
   private async sendStandalone(message: JSONRPCMessage): Promise<void> {
     const { agent } = getCurrentAgent<McpAgent>();
@@ -506,16 +527,14 @@ export class StreamableHTTPServerTransport implements Transport {
       message
     );
 
-    // Per-connection try/catch so one dead WS can't block delivery
-    // to the rest. `writeSSEEvent` can throw if the underlying socket
-    // was torn down between iteration and send.
-    for (const conn of agent.getConnections<TransportConnState>()) {
-      if (!conn.state?._standaloneSse) continue;
-      try {
-        this.writeSSEEvent(conn, message, eventId);
-      } catch (error) {
-        this.onerror?.(error as Error);
-      }
+    const standalone = Array.from(
+      agent.getConnections<TransportConnState>()
+    ).find((conn) => conn.state?._standaloneSse);
+    // No live standalone stream: the event is stored above and replays
+    // when a client reconnects with Last-Event-ID. Per spec the server
+    // MAY send on the stream, so dropping the live write is fine.
+    if (standalone) {
+      this.writeSSEEvent(standalone, message, eventId);
     }
   }
 
