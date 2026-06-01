@@ -726,6 +726,11 @@ interface StreamCallback {
   onEvent(json: string): void | Promise<void>;
   onDone(): void | Promise<void>;
   onError(error: string): void | Promise<void>;
+  // Optional. The attempt was interrupted (a stream-stall watchdog abort routed
+  // into bounded recovery) and a scheduled continuation — in a later isolate,
+  // without this callback — owns the final outcome. NOT done, NOT a terminal
+  // error. Defaults to a no-op, so existing implementers are unaffected.
+  onInterrupted?(): void | Promise<void>;
 }
 
 const agent = await this.subAgent(MyAgent, "thread-1");
@@ -735,6 +740,17 @@ await agent.chat("Summarize the project", relay);
 `onStart` exposes the request id for RPC-safe cancellation. Call
 `agent.cancelChat(requestId, reason)` if the parent needs to stop the child turn
 after it has started.
+
+`onInterrupted` matters for a `chat()`-driven turn that is interrupted and
+recovers: the RPC promise resolves **cleanly** (the isolate is still alive), so a
+consumer that keys off the clean resolve would mis-read it as success and
+finalize whatever partial it had streamed. Treat `onInterrupted` as "not done,
+not failed — a continuation owns the answer": keep the channel open, show a
+recovering state, or re-attach, rather than finalizing the partial. (The built-in
+messenger delivery already does this — it surfaces an "interrupted, please retry"
+reply instead of posting the truncated partial.) Note: a deploy/eviction
+interruption kills the isolate before this can fire — the caller sees a transport
+break instead; `onInterrupted` covers the in-isolate stall→recovery path.
 
 Tools belong to the child agent; define them with `getTools()` or use
 `agentTool()` / `runAgentTool()` for parent-child orchestration.

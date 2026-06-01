@@ -21,12 +21,14 @@ type TestChatResult = {
   events: string[];
   done: boolean;
   error?: string;
+  interruptedCalls: number;
 };
 
 class TestCollectingCallback implements StreamCallback {
   events: string[] = [];
   doneCalled = false;
   errorMessage?: string;
+  interruptedCalls = 0;
   onStart(): void {}
   onEvent(json: string): void {
     this.events.push(json);
@@ -36,6 +38,9 @@ class TestCollectingCallback implements StreamCallback {
   }
   onError(error: string): void {
     this.errorMessage = error;
+  }
+  onInterrupted(): void {
+    this.interruptedCalls++;
   }
 }
 
@@ -276,7 +281,12 @@ export class LoopToolTestAgent extends Think {
   async testChat(message: string): Promise<TestChatResult> {
     const cb = new TestCollectingCallback();
     await this.chat(message, cb);
-    return { events: cb.events, done: cb.doneCalled, error: cb.errorMessage };
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
+    };
   }
 
   async getBeforeToolCallLog(): Promise<

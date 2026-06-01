@@ -48,6 +48,7 @@ export type TestChatResult = {
   events: string[];
   done: boolean;
   error?: string;
+  interruptedCalls: number;
 };
 
 /** Shallow JSON object for DO RPC returns (`Record<string, unknown>` fails RPC typing). */
@@ -455,6 +456,7 @@ class TestCollectingCallback implements StreamCallback {
   doneCalled = false;
   errorMessage?: string;
   requestId?: string;
+  interruptedCalls = 0;
 
   onStart(event: { requestId: string }): void {
     this.requestId = event.requestId;
@@ -470,6 +472,10 @@ class TestCollectingCallback implements StreamCallback {
 
   onError(error: string): void {
     this.errorMessage = error;
+  }
+
+  onInterrupted(): void {
+    this.interruptedCalls++;
   }
 }
 
@@ -826,7 +832,8 @@ export class ThinkTestAgent extends Think {
     return {
       events: cb.events,
       done: cb.doneCalled,
-      error: cb.errorMessage
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
     };
   }
 
@@ -870,7 +877,8 @@ export class ThinkTestAgent extends Think {
     return {
       events: cb.events,
       done: cb.doneCalled,
-      error: cb.errorMessage
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
     };
   }
 
@@ -890,7 +898,8 @@ export class ThinkTestAgent extends Think {
     return {
       events: cb.events,
       done: cb.doneCalled,
-      error: cb.errorMessage
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
     };
   }
 
@@ -965,6 +974,7 @@ export class ThinkTestAgent extends Think {
     timeoutMs: number
   ): Promise<{
     firstError: string | undefined;
+    firstInterruptedCalls: number;
     scheduledContinues: number;
     assistantMessages: number;
     finalAssistantText: string;
@@ -1007,6 +1017,7 @@ export class ThinkTestAgent extends Think {
         : "";
       return {
         firstError: first.error,
+        firstInterruptedCalls: first.interruptedCalls,
         scheduledContinues,
         assistantMessages: assistant.length,
         finalAssistantText
@@ -1233,7 +1244,7 @@ export class ThinkTestAgent extends Think {
 
     await this.chat(message, cb, { signal: controller.signal });
 
-    return { events, done: doneCalled, doneCalled };
+    return { events, done: doneCalled, doneCalled, interruptedCalls: 0 };
   }
 
   async testChatWithCancelChat(
@@ -1264,7 +1275,13 @@ export class ThinkTestAgent extends Think {
 
     await this.chat(message, cb);
 
-    return { events, done: doneCalled, doneCalled, requestId };
+    return {
+      events,
+      done: doneCalled,
+      doneCalled,
+      requestId,
+      interruptedCalls: 0
+    };
   }
 
   async setResponse(response: string): Promise<void> {
@@ -2049,7 +2066,8 @@ export class ThinkSessionTestAgent extends Think {
     return {
       events: cb.events,
       done: cb.doneCalled,
-      error: cb.errorMessage
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
     };
   }
 
@@ -2137,7 +2155,8 @@ export class ThinkAsyncConfigSessionAgent extends Think {
     return {
       events: cb.events,
       done: cb.doneCalled,
-      error: cb.errorMessage
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
     };
   }
 
@@ -2262,7 +2281,8 @@ export class ThinkConfigInSessionAgent extends Think<Cloudflare.Env> {
     return {
       events: cb.events,
       done: cb.doneCalled,
-      error: cb.errorMessage
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
     };
   }
 
@@ -2496,7 +2516,8 @@ export class ThinkToolsTestAgent extends Think {
     return {
       events: cb.events,
       done: cb.doneCalled,
-      error: cb.errorMessage
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
     };
   }
 
@@ -3202,7 +3223,8 @@ export class ThinkProgrammaticTestAgent extends Think {
     return {
       events: cb.events,
       done: cb.doneCalled,
-      error: cb.errorMessage
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
     };
   }
 }
@@ -3526,7 +3548,8 @@ export class ThinkAsyncHookTestAgent extends Think {
     return {
       events: cb.events,
       done: cb.doneCalled,
-      error: cb.errorMessage
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
     };
   }
 
@@ -3638,7 +3661,8 @@ export class ThinkRecoveryTestAgent extends Think {
     return {
       events: cb.events,
       done: cb.doneCalled,
-      error: cb.errorMessage
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
     };
   }
 
@@ -4554,7 +4578,8 @@ export class ThinkNonRecoveryTestAgent extends Think {
     return {
       events: cb.events,
       done: cb.doneCalled,
-      error: cb.errorMessage
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
     };
   }
 

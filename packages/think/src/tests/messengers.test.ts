@@ -13,7 +13,9 @@ import {
   defaultConversationName,
   deliverMessengerReply,
   defineMessengers,
+  EMPTY_MESSENGER_RESPONSE,
   ERROR_MESSENGER_RESPONSE,
+  INTERRUPTED_MESSENGER_RESPONSE,
   idempotencyKeyForEvent,
   MESSENGER_REPLY_FIBER_NAME,
   messengerReplyFailureMode,
@@ -508,6 +510,57 @@ describe("think messengers core", () => {
 
     expect(posts).toEqual(["hello"]);
     expect(stages).toEqual(["streaming", "completed"]);
+  });
+
+  it("surfaces the interrupted apology, not a truncated final reply, when the model turn is interrupted by recovery (#1644)", async () => {
+    const posts: string[] = [];
+    const stages: string[] = [];
+
+    await deliverMessengerReply({
+      event: baseEvent,
+      fiber: {
+        stash(snapshot: unknown) {
+          stages.push(
+            parseMessengerReplySnapshot(snapshot)?.stage ?? "unknown"
+          );
+        }
+      } as unknown as FiberContext,
+      surface: {
+        async post(message) {
+          if (isAsyncIterable(message)) {
+            posts.push(...(await collectText(message)));
+            return;
+          }
+          posts.push(typeof message === "string" ? message : message.markdown);
+        }
+      },
+      target: {
+        cancelChat() {
+          return Promise.resolve(false);
+        },
+        chat(_message, callback) {
+          callback.onStart({ requestId: "req-interrupted" });
+          callback.onEvent(
+            JSON.stringify({ type: "text-delta", delta: "partial answer" })
+          );
+          // The attempt is interrupted and routed into bounded recovery; the
+          // real answer is produced later by the continuation (WS only). A
+          // clean resolve must NOT be treated as completion.
+          callback.onInterrupted?.();
+          return Promise.resolve();
+        }
+      }
+    });
+
+    // The user is told the reply was interrupted (so they can retry) rather
+    // than receiving the truncated partial as the final answer...
+    expect(posts).toContain(INTERRUPTED_MESSENGER_RESPONSE);
+    // ...and the "empty response" fallback must NOT fire (the turn wasn't a
+    // completed-with-no-text turn — it was interrupted).
+    expect(posts).not.toContain(EMPTY_MESSENGER_RESPONSE);
+    // The one-shot delivery is checkpointed completed (recovery owns the WS
+    // answer; this surface won't receive it).
+    expect(stages).toContain("completed");
   });
 
   it("delivers successful replies with active messenger context and overflow chunks", async () => {

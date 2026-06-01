@@ -528,10 +528,31 @@ describe("Think — error handling", () => {
 
     // The stall did NOT terminalize — no terminal error surfaced...
     expect(result.firstError).toBeUndefined();
+    // ...the interrupted attempt signaled `onInterrupted` exactly once (NOT
+    // onDone/onError) so a `chat()` consumer doesn't read the clean resolve as
+    // a successful completion and finalize the truncated partial (#1644)...
+    expect(result.firstInterruptedCalls).toBe(1);
     // ...a continuation was scheduled...
     expect(result.scheduledContinues).toBeGreaterThanOrEqual(1);
     // ...and it streamed the turn to completion (recovered, not failed).
     expect(result.finalAssistantText.length).toBeGreaterThan(0);
+  });
+
+  it("does not call onInterrupted on a normally-completing or terminally-erroring turn (#1644)", async () => {
+    const ok = await freshAgent(`no-interrupt-ok-${crypto.randomUUID()}`);
+    const okResult = await ok.testChat("hello");
+    expect(okResult.done).toBe(true);
+    expect(okResult.interruptedCalls).toBe(0);
+
+    // A terminal in-band stream error fires onError, never onInterrupted.
+    const errAgent = await freshAgent(
+      `no-interrupt-err-${crypto.randomUUID()}`
+    );
+    const errResult = await errAgent.testChatWithError(
+      "boom under no-interrupt"
+    );
+    expect(errResult.error).toContain("boom under no-interrupt");
+    expect(errResult.interruptedCalls).toBe(0);
   });
 
   it("honors a per-turn TurnConfig.chatStreamStallTimeoutMs override even when the instance watchdog is off (#1626)", async () => {

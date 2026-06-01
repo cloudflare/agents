@@ -28,6 +28,7 @@ export class TextStreamCallback extends RpcTarget implements StreamCallback {
   private readonly visibleSoftLimit?: number;
   private chatRequestId?: string;
   private closed = false;
+  private interrupted = false;
   private error?: Error;
   private text = "";
   private visibleClosed = false;
@@ -62,6 +63,20 @@ export class TextStreamCallback extends RpcTarget implements StreamCallback {
 
   onError(error: string): void {
     this.fail(new Error(error));
+  }
+
+  onInterrupted(): void {
+    // The attempt was interrupted and a continuation (not this callback) owns
+    // the real answer — delivered only to WebSocket connections, never to this
+    // surface. Mark interrupted and stop the visible stream WITHOUT failing it,
+    // so delivery surfaces the interrupted apology instead of treating the
+    // partial as the final reply (#1644).
+    this.interrupted = true;
+    this.close();
+  }
+
+  wasInterrupted(): boolean {
+    return this.interrupted;
   }
 
   close(): void {
@@ -364,6 +379,27 @@ export async function deliverMessengerReply(
       );
     } else {
       await options.target.chat(userMessage, callback);
+    }
+    if (callback.wasInterrupted()) {
+      // The model turn was interrupted and routed into bounded recovery; the
+      // recovered answer is produced later by a scheduled continuation and
+      // broadcast only to WebSocket connections, NOT to this one-shot messenger
+      // delivery. Do NOT mark the turn complete or finalize the truncated
+      // partial as the reply — surface the interrupted apology so the user
+      // knows to retry (#1644). `completedModelTurn` stays false.
+      callback.close();
+      await post.catch(() => undefined);
+      await options.surface
+        .post(interruptedResponseText)
+        .catch(() => undefined);
+      await checkpoint(
+        messengerReplySnapshot(
+          "completed",
+          snapshotEvent,
+          options.snapshotThread
+        )
+      );
+      return;
     }
     completedModelTurn = true;
     callback.close();
