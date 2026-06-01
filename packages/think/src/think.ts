@@ -3545,13 +3545,111 @@ export class Think<
     `;
   }
 
+  /**
+   * Classify any in-flight chat-recovery on this child facet (#1630). A child
+   * facet is dedicated to a single agent-tool run, so any recovery incident is
+   * that run's. `detected`/`scheduled`/`attempting` mean recovery is still
+   * resolving the interrupted turn; `exhausted`/`failed` mean it gave up; a
+   * completed recovery deletes its incident.
+   */
+  private async _classifyAgentToolChildRecovery(): Promise<
+    "in-progress" | "failed" | "none"
+  > {
+    const entries = await this.ctx.storage.list<ChatRecoveryIncident>({
+      prefix: CHAT_RECOVERY_INCIDENT_KEY_PREFIX
+    });
+    let failed = false;
+    for (const incident of entries.values()) {
+      if (
+        incident.status === "detected" ||
+        incident.status === "scheduled" ||
+        incident.status === "attempting"
+      ) {
+        return "in-progress";
+      }
+      if (incident.status === "exhausted" || incident.status === "failed") {
+        failed = true;
+      }
+    }
+    return failed ? "failed" : "none";
+  }
+
   async inspectAgentToolRun(
     runId: string
   ): Promise<AgentToolRunInspection | null> {
     const row = this._readAgentToolChildRun(runId);
-    return row
-      ? this._inspectionFromChildRow(row, this.getAgentToolOutput(runId))
-      : null;
+    if (!row) return null;
+
+    if (
+      (row.status === "running" || row.status === "starting") &&
+      row.completed_at === null &&
+      !this._agentToolAbortControllers.has(runId)
+    ) {
+      // The original in-isolate run is gone (e.g. the parent was evicted while
+      // this child run was in flight, #1630). The child facet self-heals its
+      // interrupted turn via `chatRecovery`, but that recovery path never
+      // touches the run row — so without this reconcile the row strands
+      // `running` and the parent can only ever collect `interrupted`. While
+      // recovery is still resolving (active stream or in-progress incident)
+      // keep the row `running` so the parent's bounded re-attach keeps waiting;
+      // once settled, surface the REAL terminal from the durable transcript —
+      // a completed assistant response → `completed` (so the parent collects
+      // the recovered result instead of re-running the child's work), otherwise
+      // `error`.
+      const recovery = await this._classifyAgentToolChildRecovery();
+      const recovering =
+        recovery === "in-progress" || this._resumableStream.hasActiveStream();
+      if (!recovering) {
+        const finalText =
+          recovery === "failed" ? null : this._getAgentToolFinalText(runId);
+        if (finalText) {
+          const output = this.getAgentToolOutput(runId);
+          const summary = this.getAgentToolSummary(runId, output);
+          const completedAt = Date.now();
+          this.sql`
+            UPDATE cf_agent_tool_child_runs
+            SET status = 'completed',
+                summary = ${summary},
+                output_json = ${Think._stringifyAgentToolOutput(output)},
+                error_message = null,
+                completed_at = ${completedAt}
+            WHERE run_id = ${runId} AND completed_at IS NULL
+          `;
+        } else {
+          const error =
+            "Agent tool run was interrupted before the child could finish.";
+          this.sql`
+            UPDATE cf_agent_tool_child_runs
+            SET status = 'error',
+                error_message = ${error},
+                completed_at = ${Date.now()}
+            WHERE run_id = ${runId} AND completed_at IS NULL
+          `;
+        }
+        this._finalizeAgentToolChildRunTailers(runId);
+        const reconciled = this._readAgentToolChildRun(runId);
+        if (reconciled) {
+          return this._inspectionFromChildRow(
+            reconciled,
+            this.getAgentToolOutput(runId)
+          );
+        }
+      }
+    }
+
+    return this._inspectionFromChildRow(row, this.getAgentToolOutput(runId));
+  }
+
+  /** Release a re-attached run's live tail + per-run streaming bookkeeping. */
+  private _finalizeAgentToolChildRunTailers(runId: string): void {
+    for (const close of this._agentToolClosers.get(runId) ?? []) {
+      close();
+    }
+    this._agentToolClosers.delete(runId);
+    this._agentToolForwarders.delete(runId);
+    this._agentToolLiveSequences.delete(runId);
+    this._agentToolLastErrors.delete(runId);
+    this._agentToolPreTurnAssistantIds.delete(runId);
   }
 
   async getAgentToolChunks(
@@ -3673,8 +3771,14 @@ export class Think<
   }
 
   private _getAgentToolFinalText(runId: string): string | null {
-    const before = this._agentToolPreTurnAssistantIds.get(runId);
-    if (!before) return null;
+    // A child facet is dedicated to a single agent-tool run, so any assistant
+    // message it holds is that run's output. When the pre-turn snapshot is
+    // missing — e.g. reconciling after a real eviction, where the in-memory
+    // snapshot died with the original isolate (#1630) — treat it as empty so
+    // the recovered transcript's assistant text is still surfaced as the
+    // summary instead of being lost.
+    const before =
+      this._agentToolPreTurnAssistantIds.get(runId) ?? new Set<string>();
     for (const msg of this.messages) {
       if (msg.role !== "assistant" || before.has(msg.id)) continue;
       const text = msg.parts

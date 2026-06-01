@@ -48,6 +48,7 @@ type TaskStatus = {
   parentTaskExecutions: number;
   parentRecoveries: number;
   parentHasFiberRows: boolean;
+  parentChildStatus?: string | null;
   child: {
     totalExecutions: number;
     uniqueIndices: number;
@@ -296,7 +297,8 @@ describe("task amplification under rapid churn", () => {
 
   async function runAmplificationScenario(
     target: ParentTarget,
-    label: string
+    label: string,
+    options?: { expectParentCollectsCompleted?: boolean }
   ): Promise<void> {
     wrangler = startWrangler();
     await waitForReady();
@@ -316,14 +318,20 @@ describe("task amplification under rapid churn", () => {
       status = await readStatus(target);
       if (status) {
         console.log(
-          `[task-amp:${label}] poll: parentRuns=${status.parentTaskExecutions} parentRecov=${status.parentRecoveries} parentFibers=${status.parentHasFiberRows} child=${JSON.stringify(status.child)}`
+          `[task-amp:${label}] poll: parentRuns=${status.parentTaskExecutions} parentRecov=${status.parentRecoveries} parentFibers=${status.parentHasFiberRows} parentChild=${status.parentChildStatus ?? "?"} child=${JSON.stringify(status.child)}`
         );
-        if (
-          status.child &&
+        const childDone =
+          status.child != null &&
           status.child.maxIndex >= CHILD_STEPS &&
           !status.child.hasFiberRows &&
-          !status.parentHasFiberRows
-        ) {
+          !status.parentHasFiberRows;
+        // For the natural agentTool() path, also wait for the PARENT to collect
+        // the child's recovered result (#1630 / N6): the run row must settle
+        // `completed`, not be abandoned `interrupted`.
+        const parentCollected =
+          !options?.expectParentCollectsCompleted ||
+          status.parentChildStatus === "completed";
+        if (childDone && parentCollected) {
           break;
         }
       }
@@ -371,18 +379,25 @@ describe("task amplification under rapid churn", () => {
     // The whole child turn must not re-run: re-runs bounded by evictions, not
     // ~CHILD_STEPS × parentTaskExecutions.
     expect(childReRuns).toBeLessThan(CHILD_STEPS);
+    if (options?.expectParentCollectsCompleted) {
+      // The parent re-attached to its self-healed child and collected the REAL
+      // result instead of abandoning it as `interrupted` (#1630 / N6).
+      expect(s.parentChildStatus).toBe("completed");
+    }
   }
 
   it("does not re-run the whole child turn when the parent task step is evicted (stable runId)", async () => {
     await runAmplificationScenario(STABLE_RUNID_PARENT, "stable-runid");
-  });
+  }, 240_000);
 
   // #1630: the NATURAL agentTool() path (no hand-picked runId). On `main`
   // before the fix this AMPLIFIES — each recovery re-issue minted a fresh
   // nanoid → a brand-new child → the whole 30-step ledger re-ran. With the
   // fix, agentTool() derives a stable runId from the (recovery-preserved) tool
   // call id, so the re-issue re-attaches to the same idempotent child.
-  it("does not re-run the whole child turn via the natural agentTool() path (#1630)", async () => {
-    await runAmplificationScenario(NATURAL_AGENT_TOOL_PARENT, "natural");
-  });
+  it("does not re-run the whole child turn via the natural agentTool() path, and the parent collects the recovered result (#1630)", async () => {
+    await runAmplificationScenario(NATURAL_AGENT_TOOL_PARENT, "natural", {
+      expectParentCollectsCompleted: true
+    });
+  }, 240_000);
 });

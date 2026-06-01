@@ -626,6 +626,7 @@ export class ThinkAgentToolNaturalParentE2EAgent extends Think<Env> {
     parentTaskExecutions: number;
     parentRecoveries: number;
     parentHasFiberRows: boolean;
+    parentChildStatus: string | null;
     child: {
       totalExecutions: number;
       uniqueIndices: number;
@@ -637,6 +638,14 @@ export class ThinkAgentToolNaturalParentE2EAgent extends Think<Env> {
   }> {
     const parentRunRows = this.sql<{ c: number }>`
       SELECT COUNT(*) as c FROM cf_agent_tool_runs
+    `;
+    // The status the PARENT collected for the child run (#1630 / N6): after a
+    // real eviction the child self-heals its durable submission and the parent
+    // re-attaches and collects `completed` — not `interrupted` (abandoned).
+    const parentChildRunRows = this.sql<{ status: string }>`
+      SELECT status FROM cf_agent_tool_runs
+      WHERE run_id = ${NATURAL_CHILD_TASK_RUN_ID}
+      LIMIT 1
     `;
     const fiberRows = this.sql<{ c: number }>`
       SELECT COUNT(*) as c FROM cf_agents_runs
@@ -673,6 +682,7 @@ export class ThinkAgentToolNaturalParentE2EAgent extends Think<Env> {
       parentRecoveries:
         (await this.ctx.storage.get<number>("parent:recovery-count")) ?? 0,
       parentHasFiberRows: (fiberRows[0]?.c ?? 0) > 0,
+      parentChildStatus: parentChildRunRows[0]?.status ?? null,
       child
     };
   }
