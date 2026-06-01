@@ -6868,7 +6868,8 @@ export class Think<
               type: MSG_CHAT_RESPONSE,
               id: requestId,
               body: "",
-              done: true
+              done: true,
+              ...(continuation && { continuation: true })
             });
             doneSent = true;
           }
