@@ -60,6 +60,10 @@ type ThinkAgentToolParentStub = DurableObjectStub & {
     elapsedMs: number;
     status: string | null;
   }>;
+  reconcileParallelThinkChildrenForTest(): Promise<{
+    stuckStatus: string | null;
+    fastStatus: string | null;
+  }>;
   reconcileStuckThinkChildWithTimeoutForTest(runId?: string): Promise<{
     events: AgentToolEventMessage[];
     finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
@@ -359,6 +363,18 @@ describe("Think agent tools", () => {
         })
       }
     ]);
+  });
+
+  it("re-attaches still-running children in parallel so a hung child can't starve a sibling (#1630)", async () => {
+    const parent = await freshParent();
+
+    const { stuckStatus, fastStatus } =
+      await parent.reconcileParallelThinkChildrenForTest();
+
+    // The fast child completes during its own re-attach budget even though the
+    // (earlier-started) stuck child is still burning its budget in parallel.
+    expect(fastStatus).toBe("completed");
+    expect(stuckStatus).toBe("interrupted");
   });
 
   it("bounds Think recovery when child facet startup never completes", async () => {

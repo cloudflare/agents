@@ -3600,9 +3600,15 @@ export class Think<
       const recovering =
         recovery === "in-progress" || this._resumableStream.hasActiveStream();
       if (!recovering) {
-        const finalText =
-          recovery === "failed" ? null : this._getAgentToolFinalText(runId);
-        if (finalText) {
+        // A settled recovery that produced an assistant turn is `completed`,
+        // even if that turn ended on a tool result with no final text — keying
+        // off text alone would mis-seal a legitimately-finished (but text-less)
+        // run as `error`. `getAgentToolSummary` already falls back to "" when
+        // there is no final text.
+        const recoveredTurn =
+          recovery !== "failed" &&
+          this._hasRecoveredAgentToolAssistantTurn(runId);
+        if (recoveredTurn) {
           const output = this.getAgentToolOutput(runId);
           const summary = this.getAgentToolSummary(runId, output);
           const completedAt = Date.now();
@@ -3768,6 +3774,20 @@ export class Think<
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * Whether the run produced an assistant turn (text or tool-only). Used by the
+   * post-eviction reconcile to mark a settled run `completed` even when it ended
+   * without final text. A dedicated child facet starts with no assistant
+   * messages, so a missing in-memory pre-turn snapshot is treated as empty.
+   */
+  private _hasRecoveredAgentToolAssistantTurn(runId: string): boolean {
+    const before =
+      this._agentToolPreTurnAssistantIds.get(runId) ?? new Set<string>();
+    return this.messages.some(
+      (msg) => msg.role === "assistant" && !before.has(msg.id)
+    );
   }
 
   private _getAgentToolFinalText(runId: string): string | null {

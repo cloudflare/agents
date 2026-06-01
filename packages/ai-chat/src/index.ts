@@ -2624,11 +2624,14 @@ export class AIChatAgent<
         recovery === "in-progress" || this._resumableStream.hasActiveStream();
       if (!recovering) {
         const messagesAfterStart = this._getAgentToolMessagesAfterStart(runId);
-        const recoveredText =
-          recovery === "failed"
-            ? undefined
-            : AIChatAgent._extractLatestAssistantText(messagesAfterStart);
-        if (recoveredText && recoveredText.length > 0) {
+        // A settled recovery that produced an assistant turn is `completed`,
+        // even if it ended on a tool result with no final text — keying off
+        // text alone would mis-seal a legitimately-finished (but text-less) run
+        // as `error`. `getAgentToolSummary` falls back when there is no text.
+        const recoveredTurn =
+          recovery !== "failed" &&
+          messagesAfterStart.some((message) => message.role === "assistant");
+        if (recoveredTurn) {
           const input = AIChatAgent._parseAgentToolValue(row.input_json);
           const output = this.getAgentToolOutput(
             { runId, input },

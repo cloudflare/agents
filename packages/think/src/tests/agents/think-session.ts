@@ -1453,6 +1453,7 @@ export class ThinkAgentToolParent extends Agent {
     deferFinishHooks?: boolean;
     childInspectionTimeoutMs?: number;
     reattachTimeoutMs?: number;
+    totalRecoveryTimeoutMs?: number;
   }): Promise<Array<() => Promise<void>>> {
     return (
       this as unknown as {
@@ -1460,6 +1461,7 @@ export class ThinkAgentToolParent extends Agent {
           deferFinishHooks?: boolean;
           childInspectionTimeoutMs?: number;
           reattachTimeoutMs?: number;
+          totalRecoveryTimeoutMs?: number;
         }): Promise<Array<() => Promise<void>>>;
       }
     )._reconcileAgentToolRuns(options);
@@ -1590,6 +1592,66 @@ export class ThinkAgentToolParent extends Agent {
       finishes: this.finishes,
       elapsedMs: Date.now() - startedAt,
       status: this.getParentAgentToolStatusForTest(runId)
+    };
+  }
+
+  /**
+   * Two still-running children where the FIRST (by `started_at`) is hung and
+   * the second completes quickly. Re-attaches must run in parallel, each with
+   * its own budget, so the slow child can't starve the fast one against the
+   * shared inspect deadline (#1630). With the buggy serial design the slow
+   * child's re-attach burns the total-recovery deadline and the fast child is
+   * abandoned `interrupted` before it's ever re-attached.
+   */
+  async reconcileParallelThinkChildrenForTest(): Promise<{
+    stuckStatus: string | null;
+    fastStatus: string | null;
+  }> {
+    const stuckRunId = crypto.randomUUID();
+    const fastRunId = crypto.randomUUID();
+
+    const stuckChild = await this.subAgent(ThinkTestAgent, stuckRunId);
+    await stuckChild.setBeforeStepAsyncDelay(60_000);
+    const stuckStart = await stuckChild.startAgentToolRun("stuck child", {
+      runId: stuckRunId
+    });
+    // Ensure the stuck child sorts FIRST by started_at (it would be re-attached
+    // first and, serially, would consume the whole budget before the fast one).
+    this.insertRecoverableParentRunForTest(
+      stuckRunId,
+      "ThinkTestAgent",
+      "stuck child",
+      stuckStart.startedAt
+    );
+
+    const fastChild = await this.subAgent(ThinkTestAgent, fastRunId);
+    await fastChild.setBeforeStepAsyncDelay(200);
+    const fastStart = await fastChild.startAgentToolRun("fast child", {
+      runId: fastRunId
+    });
+    this.insertRecoverableParentRunForTest(
+      fastRunId,
+      "ThinkTestAgent",
+      "fast child",
+      Math.max(fastStart.startedAt, stuckStart.startedAt + 1)
+    );
+
+    this.events = [];
+    this.finishes = [];
+    try {
+      // Tiny inspect deadline + a re-attach budget larger than it: the serial
+      // design would let the stuck child's re-attach blow the deadline and
+      // starve the fast child; the parallel design collects the fast child.
+      await this.reconcileAgentToolRunsForTest({
+        totalRecoveryTimeoutMs: 300,
+        reattachTimeoutMs: 1500
+      });
+    } finally {
+      await stuckChild.cancelAgentToolRun(stuckRunId, "test cleanup");
+    }
+    return {
+      stuckStatus: this.getParentAgentToolStatusForTest(stuckRunId),
+      fastStatus: this.getParentAgentToolStatusForTest(fastRunId)
     };
   }
 

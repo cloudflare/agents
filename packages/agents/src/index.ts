@@ -8120,115 +8120,12 @@ export class Agent<
       runCount: recoveryRows.length,
       totalTimeoutMs
     });
-    for (const row of recoveryRows) {
-      let sequence = 1;
-      let completedAt: number | undefined;
-      let result: RunAgentToolResult;
-      const remainingMs = deadlineAt - Date.now();
-      if (remainingMs <= 0) {
-        this._emit("agent_tool:recovery:deadline", {
-          runId: row.run_id,
-          agentType: row.agent_type,
-          elapsedMs: Date.now() - startedAt
-        });
-        result = {
-          runId: row.run_id,
-          agentType: row.agent_type,
-          status: "interrupted",
-          error: "Agent tool run recovery deadline exceeded."
-        };
-      } else {
-        const childTimeout =
-          options?.childInspectionTimeoutMs ??
-          DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS;
-        const boundedChildTimeout =
-          childTimeout > 0 ? Math.min(childTimeout, remainingMs) : remainingMs;
-        const recovery = await this._inspectAgentToolRunForRecovery(
-          row,
-          sequence,
-          boundedChildTimeout
-        );
-        if (recovery.status === "inspected") {
-          const inspection = recovery.inspection;
-          const stillRunning =
-            !inspection ||
-            inspection.status === "running" ||
-            inspection.status === "starting";
-          if (
-            stillRunning &&
-            typeof recovery.adapter.tailAgentToolRun === "function"
-          ) {
-            // Still-running child with a tail-able adapter: re-attach and tail
-            // it to its real terminal result within the bounded re-attach budget
-            // instead of abandoning it as `interrupted` and re-running the
-            // child's already-completed work (#1630). `tailAgentToolRun` replays
-            // the stored chunks (afterSequence: -1) before streaming live, so we
-            // skip the separate stored-chunk broadcast here.
-            const reattach = await this._reattachAgentToolRunToTerminal(
-              recovery.adapter,
-              row,
-              sequence,
-              reattachTimeoutMs
-            );
-            sequence = reattach.sequence;
-            if (reattach.result) {
-              result = reattach.result;
-              completedAt = reattach.completedAt;
-            } else {
-              result = {
-                runId: row.run_id,
-                agentType: row.agent_type,
-                status: "interrupted",
-                error:
-                  "Agent tool run was still running and did not reach a terminal result within the re-attach budget."
-              };
-            }
-          } else {
-            try {
-              sequence = await this._broadcastAgentToolStoredChunksFromAdapter(
-                recovery.adapter,
-                row,
-                sequence,
-                undefined,
-                undefined,
-                boundedChildTimeout
-              );
-            } catch {
-              // Terminal reconciliation should still complete if chunk replay fails.
-            }
-            if (stillRunning) {
-              result = {
-                runId: row.run_id,
-                agentType: row.agent_type,
-                status: "interrupted",
-                error:
-                  "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
-              };
-            } else {
-              result = this._terminalResultFromInspection(
-                row.agent_type,
-                inspection
-              );
-              completedAt = inspection.completedAt;
-            }
-          }
-        } else if (recovery.status === "timed-out") {
-          result = {
-            runId: row.run_id,
-            agentType: row.agent_type,
-            status: "interrupted",
-            error: "Agent tool run inspection timed out during parent recovery."
-          };
-        } else {
-          result = {
-            runId: row.run_id,
-            agentType: row.agent_type,
-            status: "interrupted",
-            error:
-              "Agent tool run could not be inspected during parent recovery."
-          };
-        }
-      }
+    const finalizeRow = async (
+      row: AgentToolRunStorageRow,
+      result: RunAgentToolResult,
+      sequence: number,
+      completedAt: number | undefined
+    ): Promise<void> => {
       this._emit("agent_tool:recovery:row", {
         runId: row.run_id,
         agentType: row.agent_type,
@@ -8248,7 +8145,144 @@ export class Agent<
       if (deferredFinish) {
         deferredFinishes.push(deferredFinish);
       }
+    };
+
+    // Pass 1 — deadline-bounded inspect/classify sweep. Terminal and
+    // non-recoverable rows are finalized immediately; still-running tail-able
+    // children are queued for the parallel re-attach pass below. The shared
+    // `deadlineAt` only bounds this fast classification — re-attach (which can
+    // legitimately run for the child's lifetime) must NOT count against it, or
+    // one slow child would starve every later sibling of recovery (#1630).
+    const reattachQueue: Array<{
+      row: AgentToolRunStorageRow;
+      adapter: AgentToolChildAdapter;
+    }> = [];
+    for (const row of recoveryRows) {
+      const sequence = 1;
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0) {
+        this._emit("agent_tool:recovery:deadline", {
+          runId: row.run_id,
+          agentType: row.agent_type,
+          elapsedMs: Date.now() - startedAt
+        });
+        await finalizeRow(
+          row,
+          {
+            runId: row.run_id,
+            agentType: row.agent_type,
+            status: "interrupted",
+            error: "Agent tool run recovery deadline exceeded."
+          },
+          sequence,
+          undefined
+        );
+        continue;
+      }
+      const childTimeout =
+        options?.childInspectionTimeoutMs ??
+        DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS;
+      const boundedChildTimeout =
+        childTimeout > 0 ? Math.min(childTimeout, remainingMs) : remainingMs;
+      const recovery = await this._inspectAgentToolRunForRecovery(
+        row,
+        sequence,
+        boundedChildTimeout
+      );
+      if (recovery.status !== "inspected") {
+        await finalizeRow(
+          row,
+          {
+            runId: row.run_id,
+            agentType: row.agent_type,
+            status: "interrupted",
+            error:
+              recovery.status === "timed-out"
+                ? "Agent tool run inspection timed out during parent recovery."
+                : "Agent tool run could not be inspected during parent recovery."
+          },
+          sequence,
+          undefined
+        );
+        continue;
+      }
+      const inspection = recovery.inspection;
+      const stillRunning =
+        !inspection ||
+        inspection.status === "running" ||
+        inspection.status === "starting";
+      if (
+        stillRunning &&
+        typeof recovery.adapter.tailAgentToolRun === "function"
+      ) {
+        // Defer to the parallel re-attach pass — keep the row non-terminal so
+        // re-attach can collect the child's real terminal result. `tailAgentToolRun`
+        // replays stored chunks (afterSequence: -1), so no stored-chunk broadcast here.
+        reattachQueue.push({ row, adapter: recovery.adapter });
+        continue;
+      }
+      let sequenceAfterReplay = sequence;
+      try {
+        sequenceAfterReplay =
+          await this._broadcastAgentToolStoredChunksFromAdapter(
+            recovery.adapter,
+            row,
+            sequence,
+            undefined,
+            undefined,
+            boundedChildTimeout
+          );
+      } catch {
+        // Terminal reconciliation should still complete if chunk replay fails.
+      }
+      if (stillRunning) {
+        await finalizeRow(
+          row,
+          {
+            runId: row.run_id,
+            agentType: row.agent_type,
+            status: "interrupted",
+            error:
+              "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
+          },
+          sequenceAfterReplay,
+          undefined
+        );
+      } else {
+        await finalizeRow(
+          row,
+          this._terminalResultFromInspection(row.agent_type, inspection),
+          sequenceAfterReplay,
+          inspection.completedAt
+        );
+      }
     }
+
+    // Pass 2 — re-attach still-running children IN PARALLEL, each bounded by
+    // its own re-attach budget, so a slow/hung child only delays itself and can
+    // never cause a sibling run to be wrongly abandoned (#1630).
+    await Promise.all(
+      reattachQueue.map(async ({ row, adapter }) => {
+        const reattach = await this._reattachAgentToolRunToTerminal(
+          adapter,
+          row,
+          1,
+          reattachTimeoutMs
+        );
+        await finalizeRow(
+          row,
+          reattach.result ?? {
+            runId: row.run_id,
+            agentType: row.agent_type,
+            status: "interrupted",
+            error:
+              "Agent tool run was still running and did not reach a terminal result within the re-attach budget."
+          },
+          reattach.sequence,
+          reattach.completedAt
+        );
+      })
+    );
     this._emit("agent_tool:recovery:complete", {
       runCount: recoveryRows.length,
       elapsedMs: Date.now() - startedAt
