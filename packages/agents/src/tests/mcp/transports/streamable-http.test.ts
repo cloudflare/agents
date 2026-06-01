@@ -469,24 +469,38 @@ describe("Streamable HTTP Transport", () => {
       result: { content: "right response" }
     };
 
-    it("rejects duplicate live streams when no originating stream is available", async () => {
+    it("returns internal errors to duplicate live streams when no origin is available", async () => {
       const first = createConnection("first");
       const second = createConnection("second");
       const { agent, transport } = createTransport([first, second]);
 
-      await expect(
-        agentContext.run(
-          {
-            agent,
-            connection: undefined,
-            email: undefined,
-            request: undefined
-          },
-          () => transport.send(result)
-        )
-      ).rejects.toThrow(/Multiple connections established/);
-      expect(first.send).not.toHaveBeenCalled();
-      expect(second.send).not.toHaveBeenCalled();
+      await agentContext.run(
+        {
+          agent,
+          connection: undefined,
+          email: undefined,
+          request: undefined
+        },
+        () => transport.send(result)
+      );
+
+      for (const connection of [first, second]) {
+        expect(connection.send).toHaveBeenCalledOnce();
+        const event = JSON.parse(String(connection.send.mock.calls[0][0])) as {
+          event: string;
+          close?: boolean;
+        };
+        const error = parseSSEData(event.event) as {
+          error: { code: number; message: string };
+          id: string;
+        };
+        expect(error).toMatchObject({
+          error: { code: -32603, message: "Internal error" },
+          id: "same-id"
+        });
+        expect(event.event).not.toContain("right response");
+        expect(event.close).toBe(true);
+      }
     });
 
     it("routes to a live resumed stream instead of a stale originating stream", async () => {
