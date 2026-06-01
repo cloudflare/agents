@@ -3577,73 +3577,75 @@ export class Think<
   async inspectAgentToolRun(
     runId: string
   ): Promise<AgentToolRunInspection | null> {
-    const row = this._readAgentToolChildRun(runId);
+    let row = this._readAgentToolChildRun(runId);
     if (!row) return null;
+    // A `running`/`starting` row with no live abort controller means the
+    // original in-isolate run is gone (e.g. the parent was evicted while this
+    // child run was in flight, #1630) — lazily reconcile it from the child's
+    // own durable recovery before reporting.
+    if (this._isStaleAgentToolChildRun(row)) {
+      await this._reconcileStaleAgentToolChildRun(runId);
+      row = this._readAgentToolChildRun(runId) ?? row;
+    }
+    return this._inspectionFromChildRow(row, this.getAgentToolOutput(runId));
+  }
 
-    if (
+  private _isStaleAgentToolChildRun(row: AgentToolChildRunRow): boolean {
+    return (
       (row.status === "running" || row.status === "starting") &&
       row.completed_at === null &&
-      !this._agentToolAbortControllers.has(runId)
-    ) {
-      // The original in-isolate run is gone (e.g. the parent was evicted while
-      // this child run was in flight, #1630). The child facet self-heals its
-      // interrupted turn via `chatRecovery`, but that recovery path never
-      // touches the run row — so without this reconcile the row strands
-      // `running` and the parent can only ever collect `interrupted`. While
-      // recovery is still resolving (active stream or in-progress incident)
-      // keep the row `running` so the parent's bounded re-attach keeps waiting;
-      // once settled, surface the REAL terminal from the durable transcript —
-      // a completed assistant response → `completed` (so the parent collects
-      // the recovered result instead of re-running the child's work), otherwise
-      // `error`.
-      const recovery = await this._classifyAgentToolChildRecovery();
-      const recovering =
-        recovery === "in-progress" || this._resumableStream.hasActiveStream();
-      if (!recovering) {
-        // A settled recovery that produced an assistant turn is `completed`,
-        // even if that turn ended on a tool result with no final text — keying
-        // off text alone would mis-seal a legitimately-finished (but text-less)
-        // run as `error`. `getAgentToolSummary` already falls back to "" when
-        // there is no final text.
-        const recoveredTurn =
-          recovery !== "failed" &&
-          this._hasRecoveredAgentToolAssistantTurn(runId);
-        if (recoveredTurn) {
-          const output = this.getAgentToolOutput(runId);
-          const summary = this.getAgentToolSummary(runId, output);
-          const completedAt = Date.now();
-          this.sql`
-            UPDATE cf_agent_tool_child_runs
-            SET status = 'completed',
-                summary = ${summary},
-                output_json = ${Think._stringifyAgentToolOutput(output)},
-                error_message = null,
-                completed_at = ${completedAt}
-            WHERE run_id = ${runId} AND completed_at IS NULL
-          `;
-        } else {
-          const error =
-            "Agent tool run was interrupted before the child could finish.";
-          this.sql`
-            UPDATE cf_agent_tool_child_runs
-            SET status = 'error',
-                error_message = ${error},
-                completed_at = ${Date.now()}
-            WHERE run_id = ${runId} AND completed_at IS NULL
-          `;
-        }
-        this._finalizeAgentToolChildRunTailers(runId);
-        const reconciled = this._readAgentToolChildRun(runId);
-        if (reconciled) {
-          return this._inspectionFromChildRow(
-            reconciled,
-            this.getAgentToolOutput(runId)
-          );
-        }
-      }
-    }
+      !this._agentToolAbortControllers.has(row.run_id)
+    );
+  }
 
-    return this._inspectionFromChildRow(row, this.getAgentToolOutput(runId));
+  /**
+   * Reconcile a stale (post-eviction) child run row from the child's own
+   * durable recovery (#1630). The child facet self-heals its interrupted turn
+   * via `chatRecovery`, but that path never writes the run row, so without this
+   * the row strands `running` and the parent can only collect `interrupted`.
+   *
+   * Persisting the terminal here (rather than only computing it) is intentional:
+   * it's a lazy materialization of the run's true terminal that also lets a
+   * tailing parent's stream close promptly and makes subsequent inspects cheap.
+   * While recovery is still resolving (active stream or in-progress incident)
+   * the row is left `running` so the parent's bounded re-attach keeps waiting.
+   */
+  private async _reconcileStaleAgentToolChildRun(runId: string): Promise<void> {
+    const recovery = await this._classifyAgentToolChildRecovery();
+    if (recovery === "in-progress" || this._resumableStream.hasActiveStream()) {
+      return;
+    }
+    // A settled recovery that produced an assistant turn is `completed`, even if
+    // that turn ended on a tool result with no final text — keying off text
+    // alone would mis-seal a legitimately-finished (but text-less) run as
+    // `error`. `getAgentToolSummary` already falls back to "" when there is no
+    // final text.
+    const recoveredTurn =
+      recovery !== "failed" && this._hasRecoveredAgentToolAssistantTurn(runId);
+    if (recoveredTurn) {
+      const output = this.getAgentToolOutput(runId);
+      const summary = this.getAgentToolSummary(runId, output);
+      this.sql`
+        UPDATE cf_agent_tool_child_runs
+        SET status = 'completed',
+            summary = ${summary},
+            output_json = ${Think._stringifyAgentToolOutput(output)},
+            error_message = null,
+            completed_at = ${Date.now()}
+        WHERE run_id = ${runId} AND completed_at IS NULL
+      `;
+    } else {
+      const error =
+        "Agent tool run was interrupted before the child could finish.";
+      this.sql`
+        UPDATE cf_agent_tool_child_runs
+        SET status = 'error',
+            error_message = ${error},
+            completed_at = ${Date.now()}
+        WHERE run_id = ${runId} AND completed_at IS NULL
+      `;
+    }
+    this._finalizeAgentToolChildRunTailers(runId);
   }
 
   /** Release a re-attached run's live tail + per-run streaming bookkeeping. */

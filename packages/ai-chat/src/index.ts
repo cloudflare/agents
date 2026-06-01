@@ -2600,77 +2600,91 @@ export class AIChatAgent<
     return failed ? "failed" : "none";
   }
 
+  /**
+   * Reconcile a stale (post-eviction) child run row from the child's own
+   * durable recovery (#1630). The child facet self-heals its interrupted turn
+   * via `chatRecovery`, but that path never writes the run row, so without this
+   * the row strands `running` and the parent can only collect `interrupted`.
+   *
+   * Persisting the terminal here (rather than only computing it) is intentional:
+   * it's a lazy materialization of the run's true terminal that also lets a
+   * tailing parent's stream close promptly and makes subsequent inspects cheap.
+   * While recovery is still resolving (active stream or in-progress incident)
+   * the row is left `running` so the parent's bounded re-attach keeps waiting.
+   * Mutates `row` in place when it settles so the caller can report it.
+   */
+  private async _reconcileStaleAgentToolChildRun(
+    runId: string,
+    row: AIChatAgentToolRunRow
+  ): Promise<void> {
+    const recovery = await this._classifyAgentToolChildRecovery();
+    if (recovery === "in-progress" || this._resumableStream.hasActiveStream()) {
+      return;
+    }
+    const messagesAfterStart = this._getAgentToolMessagesAfterStart(runId);
+    // A settled recovery that produced an assistant turn is `completed`, even if
+    // it ended on a tool result with no final text — keying off text alone would
+    // mis-seal a legitimately-finished (but text-less) run as `error`.
+    // `getAgentToolSummary` falls back when there is no text.
+    const recoveredTurn =
+      recovery !== "failed" &&
+      messagesAfterStart.some((message) => message.role === "assistant");
+    if (recoveredTurn) {
+      const input = AIChatAgent._parseAgentToolValue(row.input_json);
+      const output = this.getAgentToolOutput(
+        { runId, input },
+        messagesAfterStart
+      );
+      const summary = this.getAgentToolSummary(
+        { runId, input },
+        output,
+        messagesAfterStart
+      );
+      const completedAt = Date.now();
+      this.sql`
+        update cf_ai_chat_agent_tool_runs
+        set status = 'completed',
+            output_json = ${AIChatAgent._stringifyAgentToolValue(output)},
+            summary = ${summary}, error_message = null,
+            completed_at = ${completedAt}
+        where run_id = ${runId} and status = 'running'
+      `;
+      row.status = "completed";
+      row.output_json = AIChatAgent._stringifyAgentToolValue(output);
+      row.summary = summary;
+      row.error_message = null;
+      row.completed_at = completedAt;
+      this._closeAgentToolTailers(runId);
+    } else {
+      const error =
+        "Agent tool run was interrupted before the child could finish.";
+      this.sql`
+        update cf_ai_chat_agent_tool_runs
+        set status = 'error', error_message = ${error}, completed_at = ${Date.now()}
+        where run_id = ${runId}
+      `;
+      row.status = "error";
+      row.error_message = error;
+      row.completed_at = Date.now();
+      this._closeAgentToolTailers(runId);
+    }
+  }
+
   async inspectAgentToolRun(
     runId: string
   ): Promise<AgentToolRunInspection | null> {
     const row = this._getAgentToolRunRow(runId);
     if (!row) return null;
 
+    // A `running` row with no live abort controller means the original
+    // in-isolate run is gone (e.g. the parent was evicted while this child run
+    // was in flight, #1630) — lazily reconcile it from the child's own durable
+    // recovery before reporting (mutates `row` in place when it settles).
     if (
       row.status === "running" &&
       !this._agentToolAbortControllers.has(runId)
     ) {
-      // The original in-isolate run is gone (e.g. the parent was evicted while
-      // this child run was in flight, #1630 / N6). Don't blindly seal it
-      // `error`: the child facet self-heals its interrupted turn via
-      // `chatRecovery`. While that recovery is still resolving — an active
-      // stream or an in-progress incident — keep the row `running` so the
-      // parent's bounded re-attach keeps waiting. Once recovery settles, surface
-      // the REAL terminal from the durable transcript: a completed assistant
-      // response → `completed` (so the parent collects it instead of re-running
-      // the child's work), otherwise `error`.
-      const recovery = await this._classifyAgentToolChildRecovery();
-      const recovering =
-        recovery === "in-progress" || this._resumableStream.hasActiveStream();
-      if (!recovering) {
-        const messagesAfterStart = this._getAgentToolMessagesAfterStart(runId);
-        // A settled recovery that produced an assistant turn is `completed`,
-        // even if it ended on a tool result with no final text — keying off
-        // text alone would mis-seal a legitimately-finished (but text-less) run
-        // as `error`. `getAgentToolSummary` falls back when there is no text.
-        const recoveredTurn =
-          recovery !== "failed" &&
-          messagesAfterStart.some((message) => message.role === "assistant");
-        if (recoveredTurn) {
-          const input = AIChatAgent._parseAgentToolValue(row.input_json);
-          const output = this.getAgentToolOutput(
-            { runId, input },
-            messagesAfterStart
-          );
-          const summary = this.getAgentToolSummary(
-            { runId, input },
-            output,
-            messagesAfterStart
-          );
-          const completedAt = Date.now();
-          this.sql`
-            update cf_ai_chat_agent_tool_runs
-            set status = 'completed',
-                output_json = ${AIChatAgent._stringifyAgentToolValue(output)},
-                summary = ${summary}, error_message = null,
-                completed_at = ${completedAt}
-            where run_id = ${runId} and status = 'running'
-          `;
-          row.status = "completed";
-          row.output_json = AIChatAgent._stringifyAgentToolValue(output);
-          row.summary = summary;
-          row.error_message = null;
-          row.completed_at = completedAt;
-          this._closeAgentToolTailers(runId);
-        } else {
-          const error =
-            "Agent tool run was interrupted before the child could finish.";
-          this.sql`
-            update cf_ai_chat_agent_tool_runs
-            set status = 'error', error_message = ${error}, completed_at = ${Date.now()}
-            where run_id = ${runId}
-          `;
-          row.status = "error";
-          row.error_message = error;
-          row.completed_at = Date.now();
-          this._closeAgentToolTailers(runId);
-        }
-      }
+      await this._reconcileStaleAgentToolChildRun(runId, row);
     }
 
     const streamId = row.request_id

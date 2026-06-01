@@ -7799,14 +7799,14 @@ export class Agent<
           // A concurrently-cancelled reader can't release; safe to ignore.
         }
       }
-      // When `aborted` (a bounded re-attach budget expired with a read still
-      // pending) we intentionally leave the reader as-is: the read was
-      // pre-caught above, so the abandoned stream resolves harmlessly once the
-      // still-running child reaches its own terminal. We deliberately do NOT
-      // cancel the RPC stream — cancelling a remote (child-facet) stream can
-      // surface a "Stream was cancelled" rejection from the RPC pump, and
-      // cancelling would also risk being read as a child cancel. The child must
-      // keep advancing so a later re-attach / inspect can collect its result.
+      // When `aborted` (re-attach budget expired with a read still pending) we
+      // deliberately do NOT cancel the reader: cancelling a remote child-facet
+      // RPC stream surfaces a "Stream was cancelled" rejection from the RPC pump
+      // that can't be reliably swallowed (verified). Instead we abandon the
+      // pre-caught read — it resolves harmlessly when the child reaches terminal
+      // and the adapter's tail fires its registered closer, releasing the reader
+      // + stream. That makes the hold BOUNDED by the child's own recovery
+      // (its turn is sealed within the chat-recovery ceiling), never unbounded.
     }
     return next;
   }
@@ -7967,15 +7967,29 @@ export class Agent<
     let nextSequence = sequence;
     if (!controller.signal.aborted) {
       try {
+        // Tail from the child's CURRENT last chunk, not from -1: a re-attach is
+        // re-syncing a client that already has the stored chunks (delivered via
+        // `_replayAgentToolRuns` on reconnect), so replaying them here would just
+        // duplicate the run's parts on a connected client (the client reducer
+        // appends by arrival order and ignores sequence). Forwarding only chunks
+        // produced *after* re-attach keeps the live stream correct without dupes.
+        let afterSequence = -1;
+        try {
+          const existing = await adapter.getAgentToolChunks(row.run_id);
+          const last = existing[existing.length - 1];
+          if (last) afterSequence = last.sequence;
+        } catch {
+          // Fall back to a full tail if the chunk probe fails.
+        }
         // NOTE: the signal is NOT forwarded to `tailAgentToolRun` — the child is
         // a separate facet reached over DO RPC and an AbortSignal can't be
         // serialized across it. We bound the wait parent-side instead: the
         // budget aborts our local controller, which makes `_forwardAgentToolStream`
-        // cancel its reader and stop tailing. That only releases the read view;
+        // stop tailing and release its reader. That only releases the read view;
         // it never cancels the child (the child must keep advancing toward its
         // own terminal so a later re-attach / inspect can still collect it).
         const stream = await adapter.tailAgentToolRun(row.run_id, {
-          afterSequence: -1
+          afterSequence
         });
         // Resolves when the child reaches terminal (the adapter closes the tail)
         // or when the budget aborts our controller (the reader is cancelled).
