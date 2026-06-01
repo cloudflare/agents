@@ -39,11 +39,18 @@ interface ChatRecoveryTestStub {
     Array<Array<{ name: string; description?: string }> | undefined>
   >;
   getScheduleCountForCallback(callback: string): Promise<number>;
+  getRunFiberCountForTest(): Promise<number>;
+  runAlarmForTest(): Promise<void>;
+  setSimulateSupersededIsolateForTest(value: boolean): Promise<void>;
+  getSupersededThrowsForTest(): Promise<number>;
   setChatRecoveryConfigForTest(config: {
     maxAttempts?: number;
     terminalMessage?: string;
   }): Promise<void>;
   getChatRecoveryIncidentsForTest(): Promise<unknown[]>;
+  addAssistantMessageForTest(id: string): Promise<void>;
+  bumpRecoveryProgressForTest(): Promise<void>;
+  dropAssistantMessagesForTest(): Promise<void>;
   setRecoveryShouldThrowForTest(shouldThrow: boolean): Promise<void>;
   enableThrowingOnExhaustedForTest(
     maxAttempts: number,
@@ -55,7 +62,19 @@ interface ChatRecoveryTestStub {
     recoveryRootRequestId?: string | null;
     latestUserMessageId?: string | null;
     recoveryKind: "retry" | "continue";
-  }): Promise<{ incidentId: string; attempt: number; exhausted: boolean }>;
+    nowMs?: number;
+  }): Promise<{
+    incidentId: string;
+    attempt: number;
+    exhausted: boolean;
+    reason?: string;
+  }>;
+  ageIncidentForTest(incidentId: string, ms: number): Promise<void>;
+  probeProgressReconnectImmunityForTest(): Promise<{
+    start: number;
+    afterFlush: number;
+    afterPersist: number;
+  }>;
   updateIncidentForTest(
     incidentId: string,
     status: string,
@@ -71,6 +90,18 @@ interface ChatRecoveryTestStub {
     firstSeenAt: number;
     lastAttemptAt: number;
   }): Promise<void>;
+  setForceStableTimeoutForTest(value: boolean): Promise<void>;
+  runChatRecoveryContinueDirectForTest(
+    data: Record<string, unknown>
+  ): Promise<void>;
+  preScheduleRecoveryContinueForTest(
+    data: Record<string, unknown>
+  ): Promise<void>;
+  getIncidentForTest(incidentId: string): Promise<{
+    attempt: number;
+    status: string;
+    reason?: string;
+  } | null>;
 }
 
 async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
@@ -211,6 +242,9 @@ describe("onChatRecovery", () => {
       recoveryKind: "continue"
     });
 
+    // Age past the alarm-debounce window so the second recovery counts as a
+    // genuinely separate attempt (not a collapsed reconnect-storm alarm) (#1637).
+    await agentStub.ageIncidentForTest("req-cap:", 40_000);
     await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-cap");
     await agentStub.triggerFiberRecovery();
 
@@ -230,6 +264,229 @@ describe("onChatRecovery", () => {
     });
   });
 
+  it("resets the attempt budget when recovery makes forward progress", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 2 });
+
+    const baseInput = {
+      requestId: "req-prog",
+      recoveryRootRequestId: "req-prog",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue" as const
+    };
+    // Space attempts >30s apart so alarm-debounce (#1637) doesn't collapse them.
+    let t = 1_000_000;
+    const at = () => {
+      const nowMs = t;
+      t += 40_000;
+      return { ...baseInput, nowMs };
+    };
+
+    // Two debounce-spaced detections with no progress climb toward the cap.
+    expect((await agentStub.beginIncidentForTest(at())).attempt).toBe(1);
+    expect((await agentStub.beginIncidentForTest(at())).attempt).toBe(2);
+
+    // Forward progress (the durable counter advances, as `_persistOrphanedStream`
+    // does after materializing a partial) resets the budget — the deploy-churn fix.
+    await agentStub.bumpRecoveryProgressForTest();
+    const afterProgress = await agentStub.beginIncidentForTest(at());
+    expect(afterProgress.attempt).toBe(1);
+    expect(afterProgress.exhausted).toBe(false);
+
+    // Without further progress it climbs again and still exhausts at the cap.
+    expect((await agentStub.beginIncidentForTest(at())).attempt).toBe(2);
+    const exhausted = await agentStub.beginIncidentForTest(at());
+    expect(exhausted.attempt).toBe(3);
+    expect(exhausted.exhausted).toBe(true);
+  });
+
+  it("detects forward progress even after compaction collapses the transcript (#1628)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 2 });
+
+    const base = {
+      requestId: "req-compact",
+      recoveryRootRequestId: "req-compact",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue" as const
+    };
+
+    // First detection opens the incident.
+    expect(
+      (await agentStub.beginIncidentForTest({ ...base, nowMs: 1_000_000 }))
+        .attempt
+    ).toBe(1);
+
+    // The turn advances (a partial is materialized) AND compaction then
+    // collapses every assistant message out of the live transcript. The old
+    // message-count marker would now read FEWER messages than the previous
+    // attempt and miss the progress; the durable counter is immune.
+    await agentStub.bumpRecoveryProgressForTest();
+    await agentStub.dropAssistantMessagesForTest();
+
+    const afterProgress = await agentStub.beginIncidentForTest({
+      ...base,
+      nowMs: 1_040_000
+    });
+    expect(afterProgress.attempt).toBe(1);
+    expect(afterProgress.exhausted).toBe(false);
+  });
+
+  it("exhausts via the wall-clock window even while making progress", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 6 });
+
+    // An incident that opened more than the 15-minute window ago.
+    await agentStub.seedIncidentForTest({
+      incidentId: "req-old:u1",
+      requestId: "req-old",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now() - 16 * 60 * 1000,
+      lastAttemptAt: Date.now() - 1000
+    });
+
+    // Even with fresh progress, the wall-clock ceiling terminalizes it.
+    await agentStub.bumpRecoveryProgressForTest();
+    const next = await agentStub.beginIncidentForTest({
+      requestId: "req-old-2",
+      recoveryRootRequestId: "req-old",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue"
+    });
+    expect(next.exhausted).toBe(true);
+
+    const incidents =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        status: string;
+        reason?: string;
+      }>;
+    expect(incidents[0]).toMatchObject({
+      status: "exhausted",
+      reason: "max_recovery_window_exceeded"
+    });
+  });
+
+  it("seals an incident after the no-progress window even below the attempt cap (#1637)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 100 });
+
+    const base = {
+      requestId: "req-np",
+      recoveryRootRequestId: "req-np",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue" as const
+    };
+    const t0 = 2_000_000;
+    expect(
+      (await agentStub.beginIncidentForTest({ ...base, nowMs: t0 })).exhausted
+    ).toBe(false);
+
+    // A later alarm past the 5-min no-progress window, no progress in between,
+    // seals it even though the attempt count is far below the cap.
+    const past = await agentStub.beginIncidentForTest({
+      ...base,
+      nowMs: t0 + 6 * 60 * 1000
+    });
+    expect(past.exhausted).toBe(true);
+    expect(past.reason).toBe("no_progress_timeout");
+  });
+
+  it("collapses a rollout's reconnect storm into one attempt via debounce (#1637)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 2 });
+
+    const base = {
+      requestId: "req-db",
+      recoveryRootRequestId: "req-db",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue" as const
+    };
+    const t0 = 3_000_000;
+
+    expect(
+      (await agentStub.beginIncidentForTest({ ...base, nowMs: t0 })).attempt
+    ).toBe(1);
+    // A burst within the debounce window must not advance the attempt count.
+    expect(
+      (await agentStub.beginIncidentForTest({ ...base, nowMs: t0 + 5_000 }))
+        .attempt
+    ).toBe(1);
+    expect(
+      (await agentStub.beginIncidentForTest({ ...base, nowMs: t0 + 20_000 }))
+        .attempt
+    ).toBe(1);
+    // Beyond the debounce window it's a genuinely separate attempt.
+    const later = await agentStub.beginIncidentForTest({
+      ...base,
+      nowMs: t0 + 60_000
+    });
+    expect(later.attempt).toBe(2);
+    expect(later.exhausted).toBe(false);
+  });
+
+  it("advances progress on streamed content but not on an orphan re-persist (reconnect-immune, #1637)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    const { start, afterFlush, afterPersist } =
+      await agentStub.probeProgressReconnectImmunityForTest();
+
+    // Streaming new content advanced progress.
+    expect(afterFlush).toBeGreaterThan(start);
+    // Re-persisting that same content (a recovery/reconnect would) must NOT be
+    // miscounted as new progress — otherwise a reconnecting client could reset
+    // the no-progress window of a stuck turn forever.
+    expect(afterPersist).toBe(afterFlush);
+  });
+
+  it("recovers when the continuation alarm fires on a superseded isolate", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    // Simulate a SUPERSEDED isolate before recovery schedules anything, so
+    // every run of the continuation throws the catchable "Durable Object reset
+    // because its code was updated." — no race with the real DO alarm.
+    await agentStub.setSimulateSupersededIsolateForTest(true);
+
+    // Interrupted chat turn: recovery schedules the continuation and, because
+    // recovery is "handled", deletes the orphaned fiber-ledger row. From here
+    // the only thing that can resume the turn is the scheduled continuation.
+    await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-stale");
+    await agentStub.triggerFiberRecovery();
+    expect(await agentStub.getRunFiberCountForTest()).toBe(0);
+
+    // Fire the continuation alarm on the superseded isolate. The first storage
+    // op throws for the whole invocation; `_executeScheduleCallback` would burn
+    // its in-process retries and (pre-fix) swallow the error, letting `alarm()`
+    // delete the one-shot row.
+    await agentStub.runAlarmForTest();
+    expect(await agentStub.getSupersededThrowsForTest()).toBeGreaterThanOrEqual(
+      1
+    );
+
+    // A deploy-class transient must not destroy recovery: the turn should still
+    // be resumable afterward — either the one-shot continuation row survives for
+    // a fresh-code re-run, or an orphaned fiber remains for the boot scan. On
+    // current main BOTH are gone, so this fails — that is the bug (the turn is
+    // permanently abandoned; #1615's progress logic never runs again).
+    const pendingContinuations = await agentStub.getScheduleCountForCallback(
+      "_chatRecoveryContinue"
+    );
+    const pendingFibers = await agentStub.getRunFiberCountForTest();
+    expect(pendingContinuations + pendingFibers).toBeGreaterThanOrEqual(1);
+
+    // Stop simulating so any platform-retried alarm can complete cleanly.
+    await agentStub.setSimulateSupersededIsolateForTest(false);
+  });
+
   it("shares one attempt budget when an incident flips between retry and continue", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
@@ -238,13 +495,16 @@ describe("onChatRecovery", () => {
       requestId: "req-flip",
       recoveryRootRequestId: "req-flip",
       latestUserMessageId: "user-flip",
-      recoveryKind: "retry"
+      recoveryKind: "retry",
+      nowMs: 1_000_000
     });
     const second = await agentStub.beginIncidentForTest({
       requestId: "req-flip-2",
       recoveryRootRequestId: "req-flip",
       latestUserMessageId: "user-flip",
-      recoveryKind: "continue"
+      recoveryKind: "continue",
+      // >30s after the first so alarm-debounce doesn't collapse the attempt.
+      nowMs: 1_040_000
     });
 
     expect(first.incidentId).toBe("req-flip:user-flip");
@@ -354,6 +614,8 @@ describe("onChatRecovery", () => {
         "__cf_internal_chat_turn:req-ex-throw"
       );
       await agentStub.triggerFiberRecovery();
+      // Past the alarm-debounce window → a genuinely separate attempt (#1637).
+      await agentStub.ageIncidentForTest("req-ex-throw:", 40_000);
       await agentStub.insertInterruptedFiber(
         "__cf_internal_chat_turn:req-ex-throw"
       );
@@ -724,5 +986,69 @@ describe("onChatRecovery", () => {
       (m: ChatMessage) => m.role === "assistant"
     );
     expect(assistantMessages).toHaveLength(1);
+  });
+
+  it("reschedules a continuation that times out waiting for stable state, within the attempt budget", async () => {
+    const agentStub = await getTestAgent(`stable-retry-${crypto.randomUUID()}`);
+    await agentStub.setForceStableTimeoutForTest(true);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-retry",
+      requestId: "root-retry",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    const continueData = {
+      incidentId: "inc-retry",
+      originalRequestId: "root-retry",
+      targetAssistantId: "a-x"
+    };
+    // Simulate the executing one-shot row that `alarm()` deletes after return.
+    await agentStub.preScheduleRecoveryContinueForTest(continueData);
+
+    await agentStub.runChatRecoveryContinueDirectForTest(continueData);
+
+    // The reschedule must create a NEW row (2 total), not dedup onto the
+    // executing one — otherwise the retry silently never fires.
+    expect(
+      await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
+    ).toBe(2);
+    const incident = await agentStub.getIncidentForTest("inc-retry");
+    expect(incident?.attempt).toBe(2);
+    expect(incident?.status).toBe("scheduled");
+  });
+
+  it("fails terminally once the stable-state retry budget is exhausted", async () => {
+    const agentStub = await getTestAgent(
+      `stable-exhaust-${crypto.randomUUID()}`
+    );
+    await agentStub.setForceStableTimeoutForTest(true);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-exhaust",
+      requestId: "root-exhaust",
+      recoveryKind: "continue",
+      attempt: 6,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    await agentStub.runChatRecoveryContinueDirectForTest({
+      incidentId: "inc-exhaust",
+      originalRequestId: "root-exhaust",
+      targetAssistantId: "a-x"
+    });
+
+    expect(
+      await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
+    ).toBe(0);
+    const incident = await agentStub.getIncidentForTest("inc-exhaust");
+    expect(incident?.status).toBe("failed");
+    expect(incident?.reason).toBe("stable_timeout");
   });
 });

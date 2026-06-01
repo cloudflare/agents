@@ -95,7 +95,23 @@ export class Assistant extends AIChatAgent<Env> {
 The generated tool calls `this.runAgentTool(ChildAgent, ...)`, streams
 `agent-tool-event` frames on the parent WebSocket, and returns the child
 summary to the parent model. If the run fails, aborts, or is interrupted, the
-tool returns a structured failure instead of an empty success value.
+tool returns a structured `AgentToolFailure` instead of an empty success value:
+
+```ts
+type AgentToolFailure = {
+  ok: false;
+  status: "error" | "aborted" | "interrupted";
+  error: string; // human-readable, safe to surface
+  retryable: boolean;
+};
+```
+
+`retryable` is `true` only for an `interrupted` run — the child was reset or
+superseded by a deploy or parent recovery and never reached a logical outcome,
+so re-dispatching the same call can succeed. A genuine `error` or an intentional
+`aborted` is `retryable: false`. This lets a parent prompt convention or an
+orchestration harness re-run a transient interruption rather than reporting it
+to the user as a final failure. `AgentToolFailure` is exported from `agents`.
 
 For `Think` children that do workflow-style work without user-facing assistant
 text, override `getAgentToolOutput()` and, if needed, `getAgentToolSummary()`.

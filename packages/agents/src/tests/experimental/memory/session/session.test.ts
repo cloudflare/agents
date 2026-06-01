@@ -1698,6 +1698,56 @@ describe("createCompactFunction", () => {
     });
     expect(summarizeCalls).toBe(1);
   });
+
+  it("uses the Session-flowed tokenCounter (CompactContext) when no explicit counter is given", async () => {
+    let summarizeCalls = 0;
+    const messages: SessionMessage[] = [
+      { id: "head", role: "user", parts: [{ type: "text", text: "start" }] },
+      ...Array.from(
+        { length: 8 },
+        (_, i): SessionMessage => ({
+          id: `tool-${i}`,
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-read_many",
+              toolCallId: `call-${i}`,
+              toolName: "read_many",
+              state: "output-available",
+              input: { glob: "**/*.ts" },
+              output: "x".repeat(4000)
+            }
+          ]
+        })
+      )
+    ];
+
+    // Budget set just above the heuristic total so the default heuristic
+    // protects the entire tail (the failure mode from the issue).
+    const heuristicTailTokens = estimateMessageTokens(messages.slice(1));
+    const compact = createCompactFunction({
+      summarize: async () => {
+        summarizeCalls++;
+        return "summary";
+      },
+      protectHead: 1,
+      minTailMessages: 1,
+      tailTokenBudget: heuristicTailTokens + 1
+    });
+
+    // No explicit counter and no context → heuristic under-counts → no-op.
+    expect(await compact(messages)).toBeNull();
+    expect(summarizeCalls).toBe(0);
+
+    // Same function, but the Session flows its authoritative counter via
+    // CompactContext (whole-prompt shape) → the boundary now compresses.
+    const result = await compact(messages, {
+      tokenCounter: ({ messages: counted }) =>
+        estimateMessageTokens(counted) * 5
+    });
+    expect(result).toMatchObject({ summary: "summary" });
+    expect(summarizeCalls).toBe(1);
+  });
 });
 
 // ── DO-backed tests (session isolation, system prompt persistence) ──

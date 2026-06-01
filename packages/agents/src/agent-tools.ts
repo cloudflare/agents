@@ -4,7 +4,8 @@ import type {
   ChatCapableAgentClass,
   RunAgentToolOptions,
   RunAgentToolResult,
-  AgentToolDisplayMetadata
+  AgentToolDisplayMetadata,
+  AgentToolFailure
 } from "./agent-tool-types";
 
 type SchemaLike<T = unknown> = {
@@ -46,8 +47,12 @@ function currentAgentToolRunner(): AgentToolRunner {
   return agent as AgentToolRunner;
 }
 
-function failure(error: string): { ok: false; error: string } {
-  return { ok: false, error };
+function failure(
+  status: AgentToolFailure["status"],
+  error: string,
+  retryable: boolean
+): AgentToolFailure {
+  return { ok: false, status, error, retryable };
 }
 
 /**
@@ -57,14 +62,14 @@ function failure(error: string): { ok: false; error: string } {
 export function agentTool<Input = unknown, Output = unknown>(
   cls: ChatCapableAgentClass,
   options: AgentToolFactoryOptions<Output>
-): Tool<Input, string | Output | { ok: false; error: string }> {
+): Tool<Input, string | Output | AgentToolFailure> {
   const createTool = tool as unknown as <I, O>(config: {
     description: string;
     inputSchema: unknown;
     execute: (input: I, options?: ToolExecutionOptions) => Promise<O>;
   }) => Tool<I, O>;
 
-  return createTool<Input, string | Output | { ok: false; error: string }>({
+  return createTool<Input, string | Output | AgentToolFailure>({
     description: options.description,
     inputSchema: options.inputSchema,
     execute: async (input: Input, executeOptions?: ToolExecutionOptions) => {
@@ -91,7 +96,9 @@ export function agentTool<Input = unknown, Output = unknown>(
         if (options.outputSchema) {
           if (result.output === undefined) {
             return failure(
-              "agent tool completed without structured output required by outputSchema"
+              "error",
+              "agent tool completed without structured output required by outputSchema",
+              false
             );
           }
           return options.outputSchema.parse(result.output);
@@ -100,12 +107,26 @@ export function agentTool<Input = unknown, Output = unknown>(
       }
 
       if (result.status === "aborted") {
-        return failure("agent tool run was cancelled");
+        // Intentional cancellation (parent/user stopped the run) — not retryable.
+        return failure(
+          "aborted",
+          result.error ?? "agent tool run was cancelled",
+          false
+        );
       }
       if (result.status === "interrupted") {
-        return failure("agent tool run was interrupted; no recoverable output");
+        // The child was reset/superseded by a deploy or parent recovery before
+        // it reached a logical outcome. Re-dispatching the run can succeed, so
+        // surface it as retryable rather than a terminal failure the parent
+        // would report to the user as final.
+        return failure(
+          "interrupted",
+          result.error ??
+            "agent tool run was interrupted before it finished; it can be retried",
+          true
+        );
       }
-      return failure(result.error ?? "agent tool run failed");
+      return failure("error", result.error ?? "agent tool run failed", false);
     }
   });
 }
@@ -117,6 +138,7 @@ export type {
   AgentToolEvent,
   AgentToolEventMessage,
   AgentToolEventState,
+  AgentToolFailure,
   AgentToolLifecycleResult,
   AgentToolRunInfo,
   AgentToolRunInspection,

@@ -541,16 +541,16 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this._startStream(requestId);
   }
 
-  testStoreStreamChunk(streamId: string, body: string): void {
-    this._storeStreamChunk(streamId, body);
+  async testStoreStreamChunk(streamId: string, body: string): Promise<void> {
+    await this._storeStreamChunk(streamId, body);
   }
 
-  testBroadcastLiveChunk(
+  async testBroadcastLiveChunk(
     requestId: string,
     streamId: string,
     body: string
-  ): void {
-    this._storeStreamChunk(streamId, body);
+  ): Promise<void> {
+    await this._storeStreamChunk(streamId, body);
     const message: OutgoingMessage = {
       body,
       done: false,
@@ -1519,6 +1519,34 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   recoveryShouldThrow = false;
   onExhaustedCalls = 0;
+  private _simulateSupersededIsolate = false;
+
+  /**
+   * Simulate the recovery continuation alarm firing on a SUPERSEDED isolate:
+   * the first storage op throws the catchable
+   * `Durable Object reset because its code was updated.` for the whole
+   * invocation. Used to reproduce the scheduled-callback abandonment path that
+   * #1615's `_beginChatRecoveryIncident` progress logic cannot reach.
+   */
+  _supersededThrows = 0;
+
+  override async _chatRecoveryContinue(
+    ...args: Parameters<AIChatAgent<Env>["_chatRecoveryContinue"]>
+  ): Promise<void> {
+    if (this._simulateSupersededIsolate) {
+      this._supersededThrows += 1;
+      throw new Error("Durable Object reset because its code was updated.");
+    }
+    return super._chatRecoveryContinue(...args);
+  }
+
+  setSimulateSupersededIsolateForTest(value: boolean): void {
+    this._simulateSupersededIsolate = value;
+  }
+
+  getSupersededThrowsForTest(): number {
+    return this._supersededThrows;
+  }
 
   override async onChatRecovery(
     ctx: ChatRecoveryContext
@@ -1566,15 +1594,71 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.chatRecovery = config;
   }
 
+  /** Stream content (which advances progress at production time) then re-persist
+   *  the same orphan, reading the recovery-progress counter at each step.
+   *  Proves progress advances on new content but NOT on a reconnect/recovery
+   *  re-persist (#1637 reconnect-immunity). */
+  async probeProgressReconnectImmunityForTest(): Promise<{
+    start: number;
+    afterFlush: number;
+    afterPersist: number;
+  }> {
+    const self = this as unknown as {
+      _resumableStream: { start(id: string): string };
+      _storeStreamChunk(streamId: string, body: string): Promise<void>;
+      _persistOrphanedStream(streamId: string): Promise<void>;
+    };
+    const read = async (): Promise<number> =>
+      (await this.ctx.storage.get<number>("cf:chat-recovery:progress")) ?? 0;
+
+    const start = await read();
+    const streamId = self._resumableStream.start("req-progress-immunity");
+    await self._storeStreamChunk(
+      streamId,
+      JSON.stringify({ type: "text-start", id: "t" })
+    );
+    await self._storeStreamChunk(
+      streamId,
+      JSON.stringify({
+        type: "tool-input-available",
+        toolCallId: "tc1",
+        toolName: "x",
+        input: {}
+      })
+    );
+    await self._storeStreamChunk(
+      streamId,
+      JSON.stringify({
+        type: "tool-output-available",
+        toolCallId: "tc1",
+        output: { ok: true }
+      })
+    );
+    const afterFlush = await read();
+
+    // A recovery/reconnect persist of the same already-streamed content must
+    // NOT be miscounted as new forward progress.
+    await self._persistOrphanedStream(streamId);
+    const afterPersist = await read();
+
+    return { start, afterFlush, afterPersist };
+  }
+
   async beginIncidentForTest(input: {
     requestId: string;
     recoveryRootRequestId?: string | null;
     latestUserMessageId?: string | null;
     recoveryKind: "retry" | "continue";
-  }): Promise<{ incidentId: string; attempt: number; exhausted: boolean }> {
+    nowMs?: number;
+  }): Promise<{
+    incidentId: string;
+    attempt: number;
+    exhausted: boolean;
+    reason?: string;
+  }> {
     const self = this as unknown as {
       _beginChatRecoveryIncident(i: typeof input): Promise<{
-        incident: { incidentId: string; attempt: number };
+        incident: { incidentId: string; attempt: number; reason?: string };
         exhausted: boolean;
       }>;
     };
@@ -1583,8 +1667,19 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return {
       incidentId: incident.incidentId,
       attempt: incident.attempt,
-      exhausted
+      exhausted,
+      reason: incident.reason
     };
+  }
+
+  /** Push an incident's `lastAttemptAt` back so a subsequent real-time recovery
+   *  isn't collapsed by alarm-debounce (#1637). */
+  async ageIncidentForTest(incidentId: string, ms: number): Promise<void> {
+    const key = `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`;
+    const inc = await this.ctx.storage.get<{ lastAttemptAt: number }>(key);
+    if (!inc) return;
+    inc.lastAttemptAt -= ms;
+    await this.ctx.storage.put(key, inc);
   }
 
   async updateIncidentForTest(
@@ -1624,6 +1719,88 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       prefix: "cf:chat-recovery:incident:"
     });
     return [...entries.values()];
+  }
+
+  private _forceStableTimeout = false;
+
+  setForceStableTimeoutForTest(value: boolean): void {
+    this._forceStableTimeout = value;
+  }
+
+  override async waitUntilStable(options?: {
+    timeout?: number;
+  }): Promise<boolean> {
+    if (this._forceStableTimeout) return false;
+    return super.waitUntilStable(options);
+  }
+
+  async runChatRecoveryContinueDirectForTest(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await super._chatRecoveryContinue(
+      data as Parameters<AIChatAgent<Env>["_chatRecoveryContinue"]>[0]
+    );
+  }
+
+  /** Simulate the not-yet-deleted one-shot row `alarm()` is executing. */
+  async preScheduleRecoveryContinueForTest(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await this.schedule(60, "_chatRecoveryContinue", data, {
+      idempotent: false
+    });
+  }
+
+  async getIncidentForTest(incidentId: string): Promise<{
+    attempt: number;
+    status: string;
+    reason?: string;
+  } | null> {
+    const incident = await this.ctx.storage.get<{
+      attempt: number;
+      status: string;
+      reason?: string;
+    }>(`cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`);
+    return incident
+      ? {
+          attempt: incident.attempt,
+          status: incident.status,
+          reason: incident.reason
+        }
+      : null;
+  }
+
+  /**
+   * Simulate forward recovery progress by persisting one assistant message
+   * (what `_persistOrphanedStream` does after a partial). Used to exercise the
+   * progress-aware attempt-budget reset in `_beginChatRecoveryIncident`.
+   */
+  async addAssistantMessageForTest(id: string): Promise<void> {
+    const message = {
+      id,
+      role: "assistant" as const,
+      parts: [{ type: "text" as const, text: "progress" }]
+    };
+    this.messages = [...this.messages, message];
+    await this.persistMessages(this.messages);
+  }
+
+  /** Simulate recovery forward progress: advance the durable progress counter
+   *  exactly as `_persistOrphanedStream` does when it materializes a non-empty
+   *  partial. The recovery budget keys off this counter (not the live message
+   *  count), so this is how a test marks "the turn advanced". */
+  async bumpRecoveryProgressForTest(): Promise<void> {
+    const self = this as unknown as {
+      _bumpChatRecoveryProgress(): Promise<void>;
+    };
+    await self._bumpChatRecoveryProgress();
+  }
+
+  /** Simulate compaction collapsing the transcript by dropping all assistant
+   *  messages from the live cache. Used to prove the recovery progress signal
+   *  is compaction-immune (#1628). */
+  async dropAssistantMessagesForTest(): Promise<void> {
+    this.messages = this.messages.filter((m) => m.role !== "assistant");
   }
 
   getPersistedMessages(): ChatMessage[] {
@@ -1733,6 +1910,27 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       WHERE callback = ${callback}
     `;
     return rows[0]?.count ?? 0;
+  }
+
+  getRunFiberCountForTest(): number {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_runs
+    `;
+    return rows[0]?.count ?? 0;
+  }
+
+  /**
+   * Run the real DO alarm handler (schedule dispatch + one-shot row delete).
+   * Swallows a thrown alarm the way the platform does — workerd absorbs a
+   * rejected alarm and retries it later under the at-least-once guarantee — so
+   * tests can inspect the post-alarm state.
+   */
+  async runAlarmForTest(): Promise<void> {
+    try {
+      await (this as unknown as { alarm(): Promise<void> }).alarm();
+    } catch {
+      // Platform absorbs and retries; intentionally swallowed for inspection.
+    }
   }
 
   async waitForIdleForTest(): Promise<void> {

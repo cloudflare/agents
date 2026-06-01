@@ -96,6 +96,7 @@ export type {
   AgentToolEvent,
   AgentToolEventMessage,
   AgentToolEventState,
+  AgentToolFailure,
   AgentToolLifecycleResult,
   AgentToolRunInfo,
   AgentToolRunInspection,
@@ -1205,6 +1206,25 @@ function resolveRetryConfig(
     baseDelayMs: taskRetry?.baseDelayMs ?? defaults.baseDelayMs,
     maxDelayMs: taskRetry?.maxDelayMs ?? defaults.maxDelayMs
   };
+}
+
+/**
+ * Whether an error is a Durable Object reset caused by a code update (deploy).
+ *
+ * This is a transient, environmental failure: the invocation started on a
+ * superseded isolate, so every `ctx.storage` op throws this for the entire
+ * life of the invocation (code never reloads mid-invocation) — but the next
+ * fresh invocation runs the new code and succeeds. workerd surfaces it as a
+ * plain `Error` with this message, so a message match is the only signal.
+ */
+function isDurableObjectCodeUpdateReset(error: unknown): boolean {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "";
+  return /reset because its code was updated/i.test(message);
 }
 
 export function getCurrentAgent<
@@ -5617,6 +5637,20 @@ export class Agent<
           return;
         }
 
+        // A one-shot row is deleted by `alarm()` once this returns normally.
+        // If it fails with a Durable Object code-update reset (a deploy
+        // superseded the isolate), burning in-process retries is futile (code
+        // never reloads mid-invocation) and swallowing the error would let
+        // `alarm()` delete the row — permanently abandoning the work (e.g. an
+        // interrupted chat-recovery continuation). For that transient we skip
+        // the doomed retries and re-throw so `alarm()` rejects, the one-shot
+        // row survives, and the platform re-runs it on a fresh isolate (= new
+        // code) under the at-least-once alarm guarantee.
+        const isOneShotSchedule =
+          row.type === "delayed" || row.type === "scheduled";
+        const shouldDeferReset = (error: unknown): boolean =>
+          isOneShotSchedule && isDurableObjectCodeUpdateReset(error);
+
         try {
           this._emit("schedule:execute", {
             callback: row.callback,
@@ -5641,9 +5675,19 @@ export class Agent<
                 ) => Promise<void>
               ).bind(this)(parsedPayload, row as unknown as Schedule<unknown>);
             },
-            { baseDelayMs, maxDelayMs }
+            {
+              baseDelayMs,
+              maxDelayMs,
+              shouldRetry: (error) => !shouldDeferReset(error)
+            }
           );
         } catch (e) {
+          if (shouldDeferReset(e)) {
+            console.warn(
+              `Deferring scheduled callback "${row.callback}" to a fresh invocation after a Durable Object code-update reset; the one-shot row is preserved and the alarm will re-run on new code.`
+            );
+            throw e;
+          }
           console.error(
             `error executing callback "${row.callback}" after ${maxAttempts} attempts`,
             e

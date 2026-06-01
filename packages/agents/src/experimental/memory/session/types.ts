@@ -50,6 +50,19 @@ export interface CompactAfterOptions {
   tokenCounter?: SessionTokenCounter;
 }
 
+/**
+ * Context the Session passes to the registered compaction function. Lets the
+ * same authoritative token accounting drive BOTH the "should we compact?"
+ * (`compactAfter`) and "what should we compact?" (boundary) decisions, so a
+ * consumer that wires a `tokenCounter` once doesn't hit the failure mode where
+ * compaction fires every turn but silently no-ops because the boundary logic
+ * used a different (under-counting) estimate.
+ */
+export interface CompactContext {
+  /** The Session's token counter (from `compactAfter`/options), if configured. */
+  tokenCounter?: SessionTokenCounter;
+}
+
 export type CompactionErrorHandler = (error: unknown) => void | Promise<void>;
 
 /**

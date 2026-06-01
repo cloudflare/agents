@@ -7,9 +7,16 @@
  */
 import { describe, it, expect, afterAll, beforeAll } from "vitest";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
+import { setDefaultAutoSelectFamily } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
+
+// Disable happy-eyeballs dual-stack racing. When a probe `fetch`/WebSocket
+// connects to a server that is mid-SIGKILL/restart, the abandoned racing socket
+// can throw a connect-time `setTypeOfService` EINVAL that surfaces as an
+// unhandled error and fails an otherwise-green chaos run.
+setDefaultAutoSelectFamily(false);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 18798;
@@ -106,7 +113,7 @@ function startWrangler(): ChildProcess {
   return child;
 }
 
-async function waitForReady(maxAttempts = 30, delayMs = 1000): Promise<void> {
+async function waitForReady(maxAttempts = 60, delayMs = 1000): Promise<void> {
   for (let i = 0; i < maxAttempts; i++) {
     try {
       const res = await fetch(`${BASE_URL}/`);
@@ -126,9 +133,15 @@ function killProcess(child: ChildProcess): Promise<void> {
       resolve();
       return;
     }
-    child.on("exit", () => resolve());
+    // Clear the fallback timer once the child exits — an uncleared timer keeps
+    // the vitest worker's event loop alive and can push teardown past the pool's
+    // termination window ("Timeout terminating forks worker").
+    const fallback = setTimeout(resolve, 3000);
+    child.on("exit", () => {
+      clearTimeout(fallback);
+      resolve();
+    });
     killProcessTree(child.pid);
-    setTimeout(resolve, 3000);
   });
 }
 

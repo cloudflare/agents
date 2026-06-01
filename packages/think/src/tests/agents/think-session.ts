@@ -154,6 +154,58 @@ function createMockModel(
   } as LanguageModel;
 }
 
+/**
+ * Mimics Claude 4.6+: rejects a request whose final message is an assistant
+ * message ("assistant prefill"). Reports the trailing role of each call so a
+ * test can assert the continuation never sends a trailing assistant message.
+ */
+function createPrefillRejectingModel(
+  response: string,
+  options: { onCall?: (lastRole: string | undefined) => void } = {}
+): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-prefill-rejecting",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream(callOptions: unknown) {
+      const prompt =
+        (callOptions as { prompt?: Array<{ role?: string }> }).prompt ?? [];
+      const lastRole = prompt[prompt.length - 1]?.role;
+      options.onCall?.(lastRole);
+      if (lastRole === "assistant") {
+        throw new Error(
+          "This model does not support assistant message prefill. The conversation must end with a user message."
+        );
+      }
+      _mockCallCount++;
+      const callId = _mockCallCount;
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: `t-${callId}` });
+          controller.enqueue({
+            type: "text-delta",
+            id: `t-${callId}`,
+            delta: response
+          });
+          controller.enqueue({ type: "text-end", id: `t-${callId}` });
+          controller.enqueue({
+            type: "finish",
+            finishReason: v3FinishReason("stop"),
+            usage: v3Usage(10, 5)
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
 function createReasoningMockModel(
   response: string,
   reasoning: string
@@ -434,6 +486,8 @@ export class ThinkTestAgent extends Think {
     message: string;
   } | null = null;
   private _stripTextResponseForTest = false;
+  private _stallAfterChunks: number | null = null;
+  private _streamChunkDelayMs: number | null = null;
   private _agentToolOutputForTest = new Map<string, unknown>();
   private _responseLog: ChatResponseResult[] = [];
 
@@ -643,10 +697,18 @@ export class ThinkTestAgent extends Think {
   protected override _transformInferenceResult(
     result: StreamableResult
   ): StreamableResult {
-    if (!this._errorConfig && !this._stripTextResponseForTest) return result;
+    if (
+      !this._errorConfig &&
+      !this._stripTextResponseForTest &&
+      this._stallAfterChunks == null &&
+      this._streamChunkDelayMs == null
+    )
+      return result;
 
     const config = this._errorConfig;
     const stripText = this._stripTextResponseForTest;
+    const stallAfter = this._stallAfterChunks;
+    const chunkDelayMs = this._streamChunkDelayMs;
 
     return {
       toUIMessageStream(options?: { sendReasoning?: boolean }) {
@@ -661,6 +723,17 @@ export class ThinkTestAgent extends Think {
           [Symbol.asyncIterator]() {
             return {
               async next() {
+                // Simulate a parked/hung provider: emit `stallAfter` chunks,
+                // then never resolve. The stall watchdog must abort the turn.
+                if (stallAfter != null && chunkCount >= stallAfter) {
+                  return new Promise<IteratorResult<unknown>>(() => {});
+                }
+                // Simulate a slow-but-steady stream: each chunk arrives after a
+                // delay. With a watchdog timeout larger than the delay, the
+                // watchdog must reset on every chunk and never fire.
+                if (chunkDelayMs != null) {
+                  await new Promise((r) => setTimeout(r, chunkDelayMs));
+                }
                 while (true) {
                   if (shouldThrow && config) {
                     await reader.cancel();
@@ -836,6 +909,63 @@ export class ThinkTestAgent extends Think {
       return await this.testChat("trigger error");
     } finally {
       this._errorConfig = null;
+    }
+  }
+
+  /**
+   * Emit `afterChunks` chunks then hang the stream forever. With
+   * `chatStreamStallTimeoutMs` set, the inactivity watchdog should abort the
+   * turn and surface a terminal stream error instead of parking indefinitely.
+   */
+  async testChatWithStall(
+    afterChunks: number,
+    timeoutMs: number
+  ): Promise<TestChatResult> {
+    this._stallAfterChunks = afterChunks;
+    this.chatStreamStallTimeoutMs = timeoutMs;
+    try {
+      return await this.testChat("trigger stall");
+    } finally {
+      this._stallAfterChunks = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
+  }
+
+  /**
+   * Stream each chunk after `delayMs` with the watchdog armed at `timeoutMs`
+   * (> delay). Proves the watchdog resets per chunk and does NOT false-fire on
+   * a slow-but-steady stream.
+   */
+  async testChatWithSlowStream(
+    delayMs: number,
+    timeoutMs: number
+  ): Promise<TestChatResult> {
+    this._streamChunkDelayMs = delayMs;
+    this.chatStreamStallTimeoutMs = timeoutMs;
+    try {
+      return await this.testChat("slow but steady");
+    } finally {
+      this._streamChunkDelayMs = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
+  }
+
+  /**
+   * Throw a stream error after `afterChunks` chunks with the watchdog armed.
+   * Guards that an in-band error under the watchdog wrapper terminates cleanly
+   * (the wrapper cancels the source on break without an unhandled rejection).
+   */
+  async testChatWithErrorUnderStallGuard(
+    timeoutMs: number,
+    errorMessage = "Mock error under guard"
+  ): Promise<TestChatResult> {
+    this._errorConfig = { afterChunks: 1, message: errorMessage };
+    this.chatStreamStallTimeoutMs = timeoutMs;
+    try {
+      return await this.testChat("error under guard");
+    } finally {
+      this._errorConfig = null;
+      this.chatStreamStallTimeoutMs = 0;
     }
   }
 
@@ -3132,12 +3262,28 @@ export class ThinkRecoveryTestAgent extends Think {
   private _turnClientToolNames: Array<string[]> = [];
   private _stashData: unknown = null;
   private _stashResult: { success: boolean; error?: string } | null = null;
+  private _rejectPrefill = false;
+  private _lastPromptRole: string | undefined;
+  private _throwBeforeTurnMessage: string | null = null;
 
   override getModel(): LanguageModel {
+    if (this._rejectPrefill) {
+      return createPrefillRejectingModel("Continued response.", {
+        onCall: (role) => {
+          this._lastPromptRole = role;
+        }
+      });
+    }
     return createMockModel("Continued response.");
   }
 
   override beforeTurn(ctx: TurnContext): void {
+    // Simulate a pre-stream failure (e.g. message reconciliation) that throws
+    // before any stream is produced, so it surfaces in `_handleChatRequest`'s
+    // outer catch rather than the stream-level `_fireResponseHook` path.
+    if (this._throwBeforeTurnMessage) {
+      throw new Error(this._throwBeforeTurnMessage);
+    }
     this._turnCallCount++;
     this._turnBodies.push(ctx.body);
     this._turnClientToolNames.push(Object.keys(ctx.tools));
@@ -3242,6 +3388,245 @@ export class ThinkRecoveryTestAgent extends Think {
     return [...entries.values()];
   }
 
+  /**
+   * Simulate forward recovery progress by adding one assistant message to the
+   * cached message list (what `_persistOrphanedStream` -> `_persistAssistantMessage`
+   * does after a partial). Used to exercise the progress-aware attempt-budget
+   * reset in `_beginChatRecoveryIncident`.
+   */
+  async addAssistantMessageForTest(id: string): Promise<void> {
+    const self = this as unknown as { _cachedMessages: UIMessage[] };
+    self._cachedMessages = [
+      ...self._cachedMessages,
+      {
+        id,
+        role: "assistant",
+        parts: [{ type: "text", text: "progress" }]
+      }
+    ];
+  }
+
+  /** Simulate recovery forward progress: advance the durable progress counter
+   *  exactly as `_persistOrphanedStream` does when it materializes a non-empty
+   *  partial. The recovery budget keys off this counter (not the live message
+   *  count), so this is how a test marks "the turn advanced". */
+  async bumpRecoveryProgressForTest(): Promise<void> {
+    const self = this as unknown as {
+      _bumpChatRecoveryProgress(): Promise<void>;
+    };
+    await self._bumpChatRecoveryProgress();
+  }
+
+  /** Simulate compaction collapsing the transcript by dropping all assistant
+   *  messages from the live cache. Used to prove the recovery progress signal
+   *  is compaction-immune (#1628). */
+  async dropAssistantMessagesForTest(): Promise<void> {
+    const self = this as unknown as { _cachedMessages: UIMessage[] };
+    self._cachedMessages = self._cachedMessages.filter(
+      (m) => m.role !== "assistant"
+    );
+  }
+
+  /**
+   * Stream a couple of text chunks (throttled → buffered) then a settled tool
+   * result, and report how many chunks are durably persisted (raw SQLite, no
+   * flush) before vs. after the tool result. Proves a settled tool result is
+   * flushed immediately rather than left in the in-memory buffer.
+   */
+  async probeToolResultDurabilityForTest(): Promise<{
+    bufferedTextCount: number;
+    afterToolOutputCount: number;
+  }> {
+    const self = this as unknown as {
+      _resumableStream: { start(id: string): string };
+      _storeChunkDurably(
+        streamId: string,
+        chunk: unknown,
+        chunkBody: string,
+        state: { chunksSinceFlush: number; hasFlushedContent: boolean }
+      ): Promise<void>;
+    };
+    const streamId = self._resumableStream.start("req-tool-durability");
+    const state = { chunksSinceFlush: 0, hasFlushedContent: false };
+    const store = (chunk: Record<string, unknown>): Promise<void> =>
+      self._storeChunkDurably(streamId, chunk, JSON.stringify(chunk), state);
+    const rawCount = (): number => {
+      const rows = this.sql<{ count: number }>`
+        SELECT COUNT(*) as count FROM cf_ai_chat_stream_chunks
+        WHERE stream_id = ${streamId}
+      `;
+      return rows[0]?.count ?? 0;
+    };
+
+    await store({ type: "text-delta", id: "t", delta: "hello " });
+    await store({ type: "text-delta", id: "t", delta: "there" });
+    const bufferedTextCount = rawCount();
+    await store({
+      type: "tool-output-available",
+      toolCallId: "tc1",
+      output: { ok: true }
+    });
+    const afterToolOutputCount = rawCount();
+    return { bufferedTextCount, afterToolOutputCount };
+  }
+
+  /** Stream content (which durably flushes) then re-persist the same orphan,
+   *  reading the recovery-progress counter at each step. Proves the production-
+   *  time signal advances on new content but NOT on a reconnect/recovery
+   *  re-persist (#1637 reconnect-immunity). */
+  async probeProgressReconnectImmunityForTest(): Promise<{
+    start: number;
+    afterFlush: number;
+    afterPersist: number;
+  }> {
+    const self = this as unknown as {
+      _resumableStream: { start(id: string): string };
+      _storeChunkDurably(
+        streamId: string,
+        chunk: unknown,
+        chunkBody: string,
+        state: { chunksSinceFlush: number; hasFlushedContent: boolean }
+      ): Promise<void>;
+      _persistOrphanedStream(streamId: string): Promise<void>;
+    };
+    const read = async (): Promise<number> =>
+      (await this.ctx.storage.get<number>("cf:chat-recovery:progress")) ?? 0;
+
+    const start = await read();
+    const streamId = self._resumableStream.start("req-progress-immunity");
+    const state = { chunksSinceFlush: 0, hasFlushedContent: false };
+    const store = (chunk: Record<string, unknown>): Promise<void> =>
+      self._storeChunkDurably(streamId, chunk, JSON.stringify(chunk), state);
+
+    await store({ type: "text-delta", id: "t", delta: "hello" });
+    await store({
+      type: "tool-input-available",
+      toolCallId: "tc1",
+      toolName: "x",
+      input: {}
+    });
+    await store({
+      type: "tool-output-available",
+      toolCallId: "tc1",
+      output: { ok: true }
+    });
+    const afterFlush = await read();
+
+    // A recovery/reconnect persist of the same already-streamed content must
+    // NOT be miscounted as new forward progress.
+    await self._persistOrphanedStream(streamId);
+    const afterPersist = await read();
+
+    return { start, afterFlush, afterPersist };
+  }
+
+  /** Seed a session that ends in a PARTIAL assistant message (the state a
+   * deploy-interrupted turn leaves behind, which `continueLastTurn` replays). */
+  async seedPartialAssistantTurnForTest(): Promise<void> {
+    const self = this as unknown as {
+      _upsertMessageInHistory(msg: UIMessage, parentId?: string): Promise<void>;
+    };
+    await self._upsertMessageInHistory({
+      id: "u1",
+      role: "user",
+      parts: [{ type: "text", text: "Say hello." }]
+    });
+    await self._upsertMessageInHistory(
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Sure, here is" }]
+      },
+      "u1"
+    );
+  }
+
+  /** Run `continueLastTurn` against a model that rejects assistant prefill. */
+  async runContinueWithPrefillRejectingModelForTest(): Promise<{
+    status: string;
+    error?: string;
+  }> {
+    this._rejectPrefill = true;
+    this.chatRecovery = false;
+    const result = await this.continueLastTurn();
+    return {
+      status: result.status,
+      ...(result.error !== undefined ? { error: result.error } : {})
+    };
+  }
+
+  getLastPromptRoleForTest(): string | undefined {
+    return this._lastPromptRole;
+  }
+
+  /** Drive the internal terminal-status hook (what `_streamResult` calls). */
+  async fireResponseHookForTest(result: {
+    requestId: string;
+    status: "completed" | "error" | "aborted";
+    error?: string;
+  }): Promise<void> {
+    const self = this as unknown as {
+      _fireResponseHook(r: unknown): Promise<void>;
+    };
+    await self._fireResponseHook({
+      message: {
+        id: `m-${result.requestId}`,
+        role: "assistant",
+        parts: [{ type: "text", text: "" }]
+      },
+      requestId: result.requestId,
+      continuation: false,
+      status: result.status,
+      ...(result.error !== undefined ? { error: result.error } : {})
+    });
+  }
+
+  /**
+   * Drive a real chat request through `_handleChatRequest` that fails before
+   * the stream starts (a `beforeTurn` throw stands in for a message
+   * reconciliation/persist failure). Recovery is disabled so the error reaches
+   * the outer catch instead of being intercepted by the recovery fiber.
+   */
+  async simulatePreStreamChatFailureForTest(input: {
+    requestId: string;
+    userText: string;
+    error: string;
+  }): Promise<void> {
+    this.chatRecovery = false;
+    this._throwBeforeTurnMessage = input.error;
+    const connection = { id: "c-prestream", send() {} };
+    const event = {
+      type: "chat-request" as const,
+      id: input.requestId,
+      init: {
+        method: "POST",
+        body: JSON.stringify({
+          messages: [
+            {
+              id: `u-${input.requestId}`,
+              role: "user",
+              parts: [{ type: "text", text: input.userText }]
+            }
+          ]
+        })
+      }
+    };
+    const self = this as unknown as {
+      _handleChatRequest(c: unknown, e: unknown): Promise<void>;
+    };
+    await self._handleChatRequest(connection, event);
+  }
+
+  /** What `onConnect` replays to a reconnecting client (no active stream). */
+  async getIdleConnectMessagesForTest(): Promise<
+    Array<Record<string, unknown>>
+  > {
+    const self = this as unknown as {
+      _buildIdleConnectMessages(): Promise<Array<Record<string, unknown>>>;
+    };
+    return self._buildIdleConnectMessages();
+  }
+
   async setRecoveryShouldThrowForTest(shouldThrow: boolean): Promise<void> {
     this._recoveryShouldThrow = shouldThrow;
   }
@@ -3270,10 +3655,16 @@ export class ThinkRecoveryTestAgent extends Think {
     recoveryRootRequestId?: string | null;
     latestUserMessageId?: string | null;
     recoveryKind: "retry" | "continue";
-  }): Promise<{ incidentId: string; attempt: number; exhausted: boolean }> {
+    nowMs?: number;
+  }): Promise<{
+    incidentId: string;
+    attempt: number;
+    exhausted: boolean;
+    reason?: string;
+  }> {
     const self = this as unknown as {
       _beginChatRecoveryIncident(i: typeof input): Promise<{
-        incident: { incidentId: string; attempt: number };
+        incident: { incidentId: string; attempt: number; reason?: string };
         exhausted: boolean;
       }>;
     };
@@ -3282,8 +3673,20 @@ export class ThinkRecoveryTestAgent extends Think {
     return {
       incidentId: incident.incidentId,
       attempt: incident.attempt,
-      exhausted
+      exhausted,
+      reason: incident.reason
     };
+  }
+
+  /** Push an incident's `lastAttemptAt` back so a subsequent real-time recovery
+   *  isn't collapsed by alarm-debounce (#1637) — lets flow tests simulate
+   *  genuinely-separate interruptions without real delays. */
+  async ageIncidentForTest(incidentId: string, ms: number): Promise<void> {
+    const key = `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`;
+    const inc = await this.ctx.storage.get<{ lastAttemptAt: number }>(key);
+    if (!inc) return;
+    inc.lastAttemptAt -= ms;
+    await this.ctx.storage.put(key, inc);
   }
 
   async updateIncidentForTest(
@@ -3501,6 +3904,129 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async waitUntilStableForTest(timeout?: number): Promise<boolean> {
     return this.waitUntilStable({ timeout: timeout ?? 5000 });
+  }
+
+  private _forceStableTimeout = false;
+
+  async setForceStableTimeoutForTest(value: boolean): Promise<void> {
+    this._forceStableTimeout = value;
+  }
+
+  protected override async waitUntilStable(options?: {
+    timeout?: number;
+  }): Promise<boolean> {
+    if (this._forceStableTimeout) return false;
+    return super.waitUntilStable(options);
+  }
+
+  /** Seed a `running` durable submission keyed by `requestId` (== submission id). */
+  async seedRunningSubmissionForTest(requestId: string): Promise<void> {
+    (
+      this as unknown as { _ensureSubmissionTable(): void }
+    )._ensureSubmissionTable();
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_think_submissions (
+        submission_id, idempotency_key, request_id, stream_id, status,
+        messages_json, metadata_json, error_message, created_at,
+        messages_applied_at, started_at, completed_at
+      ) VALUES (
+        ${requestId}, NULL, ${requestId}, NULL, 'running',
+        '[]', NULL, NULL, ${now}, ${now}, ${now}, NULL
+      )
+    `;
+  }
+
+  async getSubmissionStatusForTest(
+    submissionId: string
+  ): Promise<string | null> {
+    const rows = this.sql<{ status: string }>`
+      SELECT status FROM cf_think_submissions WHERE submission_id = ${submissionId}
+    `;
+    return rows[0]?.status ?? null;
+  }
+
+  async runChatRecoveryContinueForTestWith(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await (
+      this as unknown as {
+        _chatRecoveryContinue(d: unknown): Promise<void>;
+      }
+    )._chatRecoveryContinue(data);
+  }
+
+  async runChatRecoveryRetryForTestWith(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await (
+      this as unknown as {
+        _chatRecoveryRetry(d: unknown): Promise<void>;
+      }
+    )._chatRecoveryRetry(data);
+  }
+
+  /** Retry-path twin of `preScheduleRecoveryContinueForTest`. */
+  async preScheduleRecoveryRetryForTest(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await this.schedule(60, "_chatRecoveryRetry", data, {
+      idempotent: false
+    });
+  }
+
+  async getIncidentAttemptForTest(incidentId: string): Promise<{
+    attempt: number;
+    status: string;
+    reason?: string;
+  } | null> {
+    const incident = await this.ctx.storage.get<{
+      attempt: number;
+      status: string;
+      reason?: string;
+    }>(`cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`);
+    return incident
+      ? {
+          attempt: incident.attempt,
+          status: incident.status,
+          reason: incident.reason
+        }
+      : null;
+  }
+
+  /**
+   * Pre-insert a matching `_chatRecoveryContinue` schedule row to simulate the
+   * not-yet-deleted one-shot row that `alarm()` is executing — so a reschedule
+   * with `idempotent: true` would (incorrectly) dedup onto it.
+   */
+  async preScheduleRecoveryContinueForTest(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await this.schedule(60, "_chatRecoveryContinue", data, {
+      idempotent: false
+    });
+  }
+
+  async getScheduledChatRecoveryPayloadForTest(
+    callback = "_chatRecoveryContinue"
+    // Concrete, serializable return shape: a `Record<string, unknown>` collapses
+    // to `never` across the Durable Object RPC stub boundary (Workers RPC drops
+    // `unknown`-valued records as non-serializable), which made callers see
+    // `payload` as `never`. The scheduled payload only needs its recovery-link
+    // fields exposed for assertions.
+  ): Promise<{ recoveredRequestId?: string; requestId?: string } | null> {
+    const rows = this.sql<{ payload: string }>`
+      SELECT payload FROM cf_agents_schedules
+      WHERE callback = ${callback}
+      ORDER BY time ASC
+      LIMIT 1
+    `;
+    return rows[0]
+      ? (JSON.parse(rows[0].payload) as {
+          recoveredRequestId?: string;
+          requestId?: string;
+        })
+      : null;
   }
 }
 

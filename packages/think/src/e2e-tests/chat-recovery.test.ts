@@ -9,9 +9,16 @@
  */
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
+import { setDefaultAutoSelectFamily } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
+
+// Disable happy-eyeballs dual-stack racing. When a probe `fetch`/WebSocket
+// connects to a server that is mid-SIGKILL/restart, the abandoned racing socket
+// can throw a connect-time `setTypeOfService` EINVAL that surfaces as an
+// unhandled error and fails an otherwise-green chaos run.
+setDefaultAutoSelectFamily(false);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 18797;
@@ -124,7 +131,7 @@ function startWrangler(): ChildProcess {
   return child;
 }
 
-async function waitForReady(maxAttempts = 30, delayMs = 1000): Promise<void> {
+async function waitForReady(maxAttempts = 60, delayMs = 1000): Promise<void> {
   for (let i = 0; i < maxAttempts; i++) {
     try {
       const res = await fetch(`${AGENT_URL}/`);

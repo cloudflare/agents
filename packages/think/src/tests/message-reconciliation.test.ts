@@ -284,9 +284,20 @@ describe("Think — message reconciliation on incoming submits", () => {
     expect(lastResponse).toMatchObject({ status: "completed" });
 
     const messages = (await agent.getMessages()) as UIMessage[];
-    expect(messages.map((message) => message.id)).not.toContain(
-      "orphan-assistant"
+    // The interrupted orphan is PRESERVED (not deleted) and flipped to an
+    // errored result: the record survives in the transcript (no "disappearing"
+    // tool call) while the synthesized tool-result keeps the provider from
+    // 400ing (AI_MissingToolResultsError).
+    const orphan = messages.find(
+      (message) => message.id === "orphan-assistant"
     );
+    expect(orphan).toBeDefined();
+    const orphanToolPart = orphan!.parts.find((part) =>
+      (
+        (part as Record<string, unknown>).type as string | undefined
+      )?.startsWith("tool-")
+    ) as Record<string, unknown> | undefined;
+    expect(orphanToolPart?.state).toBe("output-error");
     expect(messages.some((message) => message.id === "user-b")).toBe(true);
 
     ws.close(1000);
@@ -331,6 +342,185 @@ describe("Think — message reconciliation on incoming submits", () => {
       (part) => (part as Record<string, unknown>).toolCallId === TOOL_CALL_ID
     ) as Record<string, unknown> | undefined;
     expect(toolPart?.input).toEqual({ prompt: "a cat" });
+
+    ws.close(1000);
+  });
+
+  it("parses a stringified ARRAY tool input back into structured form", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const ws = await connectWS(room);
+
+    await agent.setTextOnlyMode(true);
+
+    const userA = makeUserMessage("user-a", "batch these");
+    const assistantArrayInput: UIMessage = {
+      id: "assistant-array-input",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-batch",
+          toolCallId: TOOL_CALL_ID,
+          state: "output-available",
+          input: '[{"id":1},{"id":2}]',
+          output: { ok: true }
+        } as unknown as UIMessage["parts"][number]
+      ]
+    };
+    await agent.persistToolCallMessage([userA, assistantArrayInput]);
+
+    const responsePromise = waitForChatResponse(ws);
+    sendChatRequest(ws, [makeUserMessage("user-b", "continue")]);
+    const response = await responsePromise;
+
+    expect(response.done).toBe(true);
+    expect(response.error).toBeUndefined();
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const repaired = messages.find((m) => m.id === assistantArrayInput.id);
+    const toolPart = repaired!.parts.find(
+      (part) => (part as Record<string, unknown>).toolCallId === TOOL_CALL_ID
+    ) as Record<string, unknown> | undefined;
+    expect(toolPart?.input).toEqual([{ id: 1 }, { id: 2 }]);
+
+    ws.close(1000);
+  });
+
+  it("defaults a missing tool input to an empty object so the provider does not 400", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const ws = await connectWS(room);
+
+    await agent.setTextOnlyMode(true);
+
+    const userA = makeUserMessage("user-a", "create a cat");
+    // A settled tool call whose `input` was lost (provider-executed tool, a
+    // racey persist, etc.). Anthropic rejects a tool_use block with no input,
+    // so repair must default it to `{}` rather than leave it unrepaired.
+    const assistantMissingInput: UIMessage = {
+      id: "assistant-missing-input",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-generateImage",
+          toolCallId: TOOL_CALL_ID,
+          state: "output-available",
+          output: { url: "https://example.test/cat.png" }
+        } as unknown as UIMessage["parts"][number]
+      ]
+    };
+    await agent.persistToolCallMessage([userA, assistantMissingInput]);
+
+    const responsePromise = waitForChatResponse(ws);
+    sendChatRequest(ws, [makeUserMessage("user-b", "continue")]);
+    const response = await responsePromise;
+
+    expect(response.done).toBe(true);
+    expect(response.error).toBeUndefined();
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const repaired = messages.find(
+      (message) => message.id === assistantMissingInput.id
+    );
+    expect(repaired).toBeDefined();
+    const toolPart = repaired!.parts.find(
+      (part) => (part as Record<string, unknown>).toolCallId === TOOL_CALL_ID
+    ) as Record<string, unknown> | undefined;
+    expect(toolPart?.input).toEqual({});
+
+    ws.close(1000);
+  });
+
+  it("does not re-repair an already-errored tool call or clobber its errorText", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const ws = await connectWS(room);
+
+    await agent.setTextOnlyMode(true);
+
+    const userA = makeUserMessage("user-a", "create a cat");
+    // A tool that legitimately errored: state `output-error` with a real
+    // message and NO `output` field. Repair must treat `output-error` as
+    // settled — otherwise it re-flips the part every turn, clobbering the real
+    // errorText with the generic "interrupted" message and emitting spurious
+    // repair events/writes/broadcasts for the life of the conversation.
+    const REAL_ERROR = "Image provider rejected the prompt (content policy).";
+    const assistantErrored: UIMessage = {
+      id: "assistant-errored",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-generateImage",
+          toolCallId: TOOL_CALL_ID,
+          state: "output-error",
+          input: { prompt: "a cat" },
+          errorText: REAL_ERROR
+        } as unknown as UIMessage["parts"][number]
+      ]
+    };
+    await agent.persistToolCallMessage([userA, assistantErrored]);
+
+    const responsePromise = waitForChatResponse(ws);
+    sendChatRequest(ws, [makeUserMessage("user-b", "continue")]);
+    const response = await responsePromise;
+
+    expect(response.done).toBe(true);
+    expect(response.error).toBeUndefined();
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const errored = messages.find((m) => m.id === assistantErrored.id);
+    expect(errored).toBeDefined();
+    const toolPart = errored!.parts.find(
+      (part) => (part as Record<string, unknown>).toolCallId === TOOL_CALL_ID
+    ) as Record<string, unknown> | undefined;
+    expect(toolPart?.state).toBe("output-error");
+    // The real error survives — repair did not re-flip it to the generic text.
+    expect(toolPart?.errorText).toBe(REAL_ERROR);
+
+    ws.close(1000);
+  });
+
+  it("preserves a denied tool approval (output-denied) instead of flipping it to errored", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const ws = await connectWS(room);
+
+    await agent.setTextOnlyMode(true);
+
+    const userA = makeUserMessage("user-a", "delete everything");
+    // A user-denied tool approval. `output-denied` is a settled terminal state
+    // the provider accepts (convertToModelMessages turns it into a denial
+    // tool-result), so repair must NOT flip it to `output-error` — doing so
+    // loses the denial and mislabels it as "interrupted".
+    const assistantDenied: UIMessage = {
+      id: "assistant-denied",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-deleteFiles",
+          toolCallId: TOOL_CALL_ID,
+          state: "output-denied",
+          input: { path: "/" },
+          approval: { id: "appr-1", approved: false, reason: "Too dangerous" }
+        } as unknown as UIMessage["parts"][number]
+      ]
+    };
+    await agent.persistToolCallMessage([userA, assistantDenied]);
+
+    const responsePromise = waitForChatResponse(ws);
+    sendChatRequest(ws, [makeUserMessage("user-b", "continue")]);
+    const response = await responsePromise;
+
+    expect(response.done).toBe(true);
+    expect(response.error).toBeUndefined();
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const denied = messages.find((m) => m.id === assistantDenied.id);
+    expect(denied).toBeDefined();
+    const toolPart = denied!.parts.find(
+      (part) => (part as Record<string, unknown>).toolCallId === TOOL_CALL_ID
+    ) as Record<string, unknown> | undefined;
+    expect(toolPart?.state).toBe("output-denied");
 
     ws.close(1000);
   });

@@ -26,6 +26,14 @@
       {
         "name": "ThinkRecoveryHelperAgent",
         "class_name": "ThinkRecoveryHelperAgent"
+      },
+      {
+        "name": "ThinkToolRollbackE2EAgent",
+        "class_name": "ThinkToolRollbackE2EAgent"
+      },
+      {
+        "name": "ThinkTaskParentE2EAgent",
+        "class_name": "ThinkTaskParentE2EAgent"
       }
     ]
   },
@@ -37,6 +45,14 @@
         "ThinkRecoveryE2EAgent",
         "ThinkRecoveryHelperParent"
       ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["ThinkToolRollbackE2EAgent"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["ThinkTaskParentE2EAgent"]
     }
   ],
   "r2_buckets": [
