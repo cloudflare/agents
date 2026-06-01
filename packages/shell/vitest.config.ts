@@ -11,6 +11,7 @@ export default defineConfig({
   ],
   test: {
     name: "workers",
+    retry: 3,
     include: ["src/tests/**/*.test.ts"]
   }
 });

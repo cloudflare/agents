@@ -3,6 +3,8 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     name: "think-e2e",
+    // Retry flaky e2e runs (real `wrangler dev` + network) before failing.
+    retry: 3,
     // Run in Node.js — we spawn wrangler as a child process
     testTimeout: 120_000,
     hookTimeout: 60_000,

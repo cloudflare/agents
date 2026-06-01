@@ -6,6 +6,8 @@ const testsDir = import.meta.dirname;
 export default defineConfig({
   test: {
     name: "ai-chat-e2e",
+    // Retry flaky e2e runs (real `wrangler dev` + network) before failing.
+    retry: 3,
     include: [path.join(testsDir, "**/*.test.ts")],
     testTimeout: 120_000,
     hookTimeout: 60_000,
