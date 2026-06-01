@@ -1593,10 +1593,14 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   /** Capture the `onExhausted` context for assertions (instead of throwing). */
-  enableExhaustedCaptureForTest(maxAttempts: number): void {
+  enableExhaustedCaptureForTest(
+    maxAttempts: number,
+    terminalMessage?: string
+  ): void {
     this.exhaustedContexts = [];
     this.chatRecovery = {
       maxAttempts,
+      ...(terminalMessage ? { terminalMessage } : {}),
       onExhausted: (exhaustedCtx) => {
         this.exhaustedContexts.push(exhaustedCtx);
       }
@@ -1756,6 +1760,14 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   ): Promise<void> {
     await super._chatRecoveryContinue(
       data as Parameters<AIChatAgent<Env>["_chatRecoveryContinue"]>[0]
+    );
+  }
+
+  async runChatRecoveryRetryDirectForTest(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await super._chatRecoveryRetry(
+      data as Parameters<AIChatAgent<Env>["_chatRecoveryRetry"]>[0]
     );
   }
 

@@ -3119,10 +3119,11 @@ describe("Think — onChatRecovery", () => {
     expect(incident?.status).toBe("scheduled");
   });
 
-  it("fails terminally once the stable-state retry budget is exhausted", async () => {
+  it("exhausts via onExhausted once the stable-state continue budget is spent", async () => {
     const agent = await freshRecoveryAgent(
       `stable-exhaust-${crypto.randomUUID()}`
     );
+    await agent.enableExhaustedCaptureForTest(6, "the assistant gave up");
     await agent.setForceStableTimeoutForTest(true);
     await agent.seedRunningSubmissionForTest("root-D");
     await agent.seedIncidentForTest({
@@ -3143,12 +3144,185 @@ describe("Think — onChatRecovery", () => {
       originalRequestId: "root-D"
     });
 
+    // No re-arm: the budget is spent.
     expect(
       await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
     ).toBe(0);
+    // The submission is sealed (interrupted → error), not left running.
     expect(await agent.getSubmissionStatusForTest("root-D")).toBe("error");
+    // The incident is sealed `exhausted` (not the old silent `failed`), with a
+    // reason that pins the give-up to repeated stable-state timeouts.
     const incident = await agent.getIncidentAttemptForTest("inc-D");
-    expect(incident?.status).toBe("failed");
+    expect(incident?.status).toBe("exhausted");
+    expect(incident?.reason).toBe("stable_timeout");
+    // onExhausted fires exactly once — the regression this guards.
+    const exhausted = (await agent.getExhaustedContextsForTest()) as Array<{
+      reason: string;
+      recoveryKind: string;
+      terminalMessage: string;
+      recoveryRootRequestId: string;
+    }>;
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0].reason).toBe("stable_timeout");
+    expect(exhausted[0].recoveryKind).toBe("continue");
+    expect(exhausted[0].terminalMessage).toBe("the assistant gave up");
+    // The terminal banner is persisted so a reconnecting client isn't frozen.
+    const onConnect = (await agent.getIdleConnectMessagesForTest()) as Array<{
+      body?: string;
+      error?: boolean;
+      done?: boolean;
+    }>;
+    const terminal = onConnect.find((m) => m.error === true && m.done === true);
+    expect(terminal?.body).toBe("the assistant gave up");
+  });
+
+  it("exhausts via onExhausted once the stable-state retry budget is spent", async () => {
+    const agent = await freshRecoveryAgent(
+      `stable-exhaust-retry-${crypto.randomUUID()}`
+    );
+    await agent.enableExhaustedCaptureForTest(6, "retry gave up");
+    await agent.setForceStableTimeoutForTest(true);
+    await agent.seedRunningSubmissionForTest("root-RE");
+    await agent.seedIncidentForTest({
+      incidentId: "inc-RE",
+      requestId: "root-RE",
+      recoveryKind: "retry",
+      attempt: 6,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    await agent.runChatRecoveryRetryForTestWith({
+      recoveredRequestId: "root-RE",
+      targetUserId: "u-x",
+      incidentId: "inc-RE",
+      originalRequestId: "root-RE"
+    });
+
+    expect(
+      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryRetry")
+    ).toBe(0);
+    expect(await agent.getSubmissionStatusForTest("root-RE")).toBe("error");
+    const incident = await agent.getIncidentAttemptForTest("inc-RE");
+    expect(incident?.status).toBe("exhausted");
+    expect(incident?.reason).toBe("stable_timeout");
+    const exhausted = (await agent.getExhaustedContextsForTest()) as Array<{
+      reason: string;
+      recoveryKind: string;
+      terminalMessage: string;
+      recoveryRootRequestId: string;
+    }>;
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0].reason).toBe("stable_timeout");
+    expect(exhausted[0].recoveryKind).toBe("retry");
+    const onConnect = (await agent.getIdleConnectMessagesForTest()) as Array<{
+      body?: string;
+      error?: boolean;
+      done?: boolean;
+    }>;
+    const terminal = onConnect.find((m) => m.error === true && m.done === true);
+    expect(terminal?.body).toBe("retry gave up");
+  });
+
+  it("terminalizes a stable-state give-up even when the incident record is missing (silent-drop guard)", async () => {
+    const agent = await freshRecoveryAgent(
+      `stable-silent-drop-${crypto.randomUUID()}`
+    );
+    await agent.enableExhaustedCaptureForTest(6, "lost incident gave up");
+    await agent.setForceStableTimeoutForTest(true);
+    await agent.seedRunningSubmissionForTest("root-MISS");
+    // No incident is seeded: simulate a stale alarm firing after the incident
+    // record was swept/deleted. The reschedule helper finds nothing and the
+    // give-up must STILL terminalize — not drop the turn into an eternal
+    // spinner (the worst-case variant of the bug).
+
+    await agent.runChatRecoveryContinueForTestWith({
+      recoveredRequestId: "root-MISS",
+      targetAssistantId: "a-x",
+      incidentId: "inc-gone",
+      originalRequestId: "root-MISS"
+    });
+
+    expect(
+      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
+    ).toBe(0);
+    expect(await agent.getSubmissionStatusForTest("root-MISS")).toBe("error");
+    const exhausted = (await agent.getExhaustedContextsForTest()) as Array<{
+      reason: string;
+      recoveryKind: string;
+      terminalMessage: string;
+      recoveryRootRequestId: string;
+    }>;
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0].reason).toBe("stable_timeout");
+    expect(exhausted[0].recoveryRootRequestId).toBe("root-MISS");
+    const onConnect = (await agent.getIdleConnectMessagesForTest()) as Array<{
+      body?: string;
+      error?: boolean;
+      done?: boolean;
+    }>;
+    const terminal = onConnect.find((m) => m.error === true && m.done === true);
+    expect(terminal?.body).toBe("lost incident gave up");
+  });
+
+  it("terminalizes a stable-state give-up with no incidentId at all", async () => {
+    const agent = await freshRecoveryAgent(
+      `stable-no-incident-${crypto.randomUUID()}`
+    );
+    await agent.enableExhaustedCaptureForTest(6, "no incident gave up");
+    await agent.setForceStableTimeoutForTest(true);
+    await agent.seedRunningSubmissionForTest("root-NOID");
+
+    // Neither an incident record NOR an incidentId in the payload — the give-up
+    // synthesizes a terminal incident from the root request id so onExhausted
+    // still fires.
+    await agent.runChatRecoveryContinueForTestWith({
+      recoveredRequestId: "root-NOID",
+      targetAssistantId: "a-x",
+      originalRequestId: "root-NOID"
+    });
+
+    expect(await agent.getSubmissionStatusForTest("root-NOID")).toBe("error");
+    const exhausted = (await agent.getExhaustedContextsForTest()) as Array<{
+      reason: string;
+    }>;
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0].reason).toBe("stable_timeout");
+  });
+
+  it("does not re-fire onExhausted when a duplicate stable-state give-up runs (no submission)", async () => {
+    const agent = await freshRecoveryAgent(
+      `stable-exhaust-dup-${crypto.randomUUID()}`
+    );
+    await agent.enableExhaustedCaptureForTest(6, "gave up once");
+    await agent.setForceStableTimeoutForTest(true);
+    // No running submission seeded: the give-up reaches the exhaustion path
+    // directly (the submission-not-running short-circuit only fires when a
+    // `recoveredRequestId` is present), so the incident-status guard is what
+    // prevents a second onExhausted on a duplicate alarm.
+    await agent.seedIncidentForTest({
+      incidentId: "inc-dup",
+      requestId: "root-dup",
+      recoveryKind: "continue",
+      attempt: 6,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    const data = { incidentId: "inc-dup", originalRequestId: "root-dup" };
+    await agent.runChatRecoveryContinueForTestWith(data);
+    await agent.runChatRecoveryContinueForTestWith(data);
+
+    const exhausted = (await agent.getExhaustedContextsForTest()) as Array<{
+      reason: string;
+    }>;
+    expect(exhausted).toHaveLength(1);
+    const incident = await agent.getIncidentAttemptForTest("inc-dup");
+    expect(incident?.status).toBe("exhausted");
   });
 
   it("re-reconstructing the same interrupted stream is idempotent (no duplicate, no loss)", async () => {

@@ -97,6 +97,9 @@ interface ChatRecoveryTestStub {
   runChatRecoveryContinueDirectForTest(
     data: Record<string, unknown>
   ): Promise<void>;
+  runChatRecoveryRetryDirectForTest(
+    data: Record<string, unknown>
+  ): Promise<void>;
   preScheduleRecoveryContinueForTest(
     data: Record<string, unknown>
   ): Promise<void>;
@@ -105,6 +108,18 @@ interface ChatRecoveryTestStub {
     status: string;
     reason?: string;
   } | null>;
+  enableExhaustedCaptureForTest(
+    maxAttempts: number,
+    terminalMessage?: string
+  ): Promise<void>;
+  getExhaustedContextsForTest(): Promise<
+    Array<{
+      recoveryRootRequestId: string;
+      recoveryKind: "retry" | "continue";
+      reason: string;
+      terminalMessage: string;
+    }>
+  >;
 }
 
 async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
@@ -1089,10 +1104,11 @@ describe("onChatRecovery", () => {
     expect(incident?.status).toBe("scheduled");
   });
 
-  it("fails terminally once the stable-state retry budget is exhausted", async () => {
+  it("exhausts via onExhausted once the stable-state continue budget is spent", async () => {
     const agentStub = await getTestAgent(
       `stable-exhaust-${crypto.randomUUID()}`
     );
+    await agentStub.enableExhaustedCaptureForTest(6, "the assistant gave up");
     await agentStub.setForceStableTimeoutForTest(true);
     await agentStub.seedIncidentForTest({
       incidentId: "inc-exhaust",
@@ -1111,11 +1127,114 @@ describe("onChatRecovery", () => {
       targetAssistantId: "a-x"
     });
 
+    // No re-arm: the budget is spent.
     expect(
       await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
     ).toBe(0);
+    // The incident is sealed `exhausted` (not the old silent `failed`).
     const incident = await agentStub.getIncidentForTest("inc-exhaust");
-    expect(incident?.status).toBe("failed");
+    expect(incident?.status).toBe("exhausted");
     expect(incident?.reason).toBe("stable_timeout");
+    // onExhausted fires exactly once with the terminalMessage — the regression
+    // this guards (apps relying on it for the terminal banner).
+    const exhausted = await agentStub.getExhaustedContextsForTest();
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0].reason).toBe("stable_timeout");
+    expect(exhausted[0].recoveryKind).toBe("continue");
+    expect(exhausted[0].terminalMessage).toBe("the assistant gave up");
+  });
+
+  it("exhausts via onExhausted once the stable-state retry budget is spent", async () => {
+    const agentStub = await getTestAgent(
+      `stable-exhaust-retry-${crypto.randomUUID()}`
+    );
+    await agentStub.enableExhaustedCaptureForTest(6, "retry gave up");
+    await agentStub.setForceStableTimeoutForTest(true);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-exhaust-retry",
+      requestId: "root-exhaust-retry",
+      recoveryKind: "retry",
+      attempt: 6,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    await agentStub.runChatRecoveryRetryDirectForTest({
+      incidentId: "inc-exhaust-retry",
+      originalRequestId: "root-exhaust-retry",
+      targetUserId: "u-x"
+    });
+
+    expect(
+      await agentStub.getScheduleCountForCallback("_chatRecoveryRetry")
+    ).toBe(0);
+    const incident = await agentStub.getIncidentForTest("inc-exhaust-retry");
+    expect(incident?.status).toBe("exhausted");
+    expect(incident?.reason).toBe("stable_timeout");
+    const exhausted = await agentStub.getExhaustedContextsForTest();
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0].reason).toBe("stable_timeout");
+    expect(exhausted[0].recoveryKind).toBe("retry");
+    expect(exhausted[0].terminalMessage).toBe("retry gave up");
+  });
+
+  it("terminalizes a stable-state give-up even when the incident record is missing (silent-drop guard)", async () => {
+    const agentStub = await getTestAgent(
+      `stable-silent-drop-${crypto.randomUUID()}`
+    );
+    await agentStub.enableExhaustedCaptureForTest(6, "lost incident gave up");
+    await agentStub.setForceStableTimeoutForTest(true);
+    // No incident is seeded: simulate a stale alarm firing after the incident
+    // record was swept/deleted. The give-up must STILL terminalize through
+    // onExhausted rather than drop the turn into an eternal spinner.
+
+    await agentStub.runChatRecoveryContinueDirectForTest({
+      incidentId: "inc-gone",
+      originalRequestId: "root-missing",
+      targetAssistantId: "a-x"
+    });
+
+    const exhausted = await agentStub.getExhaustedContextsForTest();
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0].reason).toBe("stable_timeout");
+    expect(exhausted[0].recoveryRootRequestId).toBe("root-missing");
+    expect(exhausted[0].terminalMessage).toBe("lost incident gave up");
+  });
+
+  it("does not re-fire onExhausted when a duplicate stale alarm runs after exhaustion", async () => {
+    const agentStub = await getTestAgent(
+      `stable-exhaust-dup-${crypto.randomUUID()}`
+    );
+    await agentStub.enableExhaustedCaptureForTest(6, "gave up once");
+    await agentStub.setForceStableTimeoutForTest(true);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-dup",
+      requestId: "root-dup",
+      recoveryKind: "continue",
+      attempt: 6,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    const data = {
+      incidentId: "inc-dup",
+      originalRequestId: "root-dup",
+      targetAssistantId: "a-x"
+    };
+    // First give-up terminalizes; the incident is sealed `exhausted`.
+    await agentStub.runChatRecoveryContinueDirectForTest(data);
+    // A duplicate stale alarm fires the SAME callback again (ai-chat has no
+    // durable-submission short-circuit, so the incident-status guard is the
+    // only thing preventing a second terminal banner / onExhausted).
+    await agentStub.runChatRecoveryContinueDirectForTest(data);
+
+    const exhausted = await agentStub.getExhaustedContextsForTest();
+    expect(exhausted).toHaveLength(1);
+    const incident = await agentStub.getIncidentForTest("inc-dup");
+    expect(incident?.status).toBe("exhausted");
   });
 });

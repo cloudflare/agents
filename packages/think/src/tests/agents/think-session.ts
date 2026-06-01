@@ -3675,10 +3675,14 @@ export class ThinkRecoveryTestAgent extends Think {
   }
 
   /** Capture the `onExhausted` context for assertions (instead of throwing). */
-  async enableExhaustedCaptureForTest(maxAttempts: number): Promise<void> {
+  async enableExhaustedCaptureForTest(
+    maxAttempts: number,
+    terminalMessage?: string
+  ): Promise<void> {
     this._exhaustedContexts = [];
     this.chatRecovery = {
       maxAttempts,
+      ...(terminalMessage ? { terminalMessage } : {}),
       onExhausted: (exhaustedCtx) => {
         this._exhaustedContexts.push(exhaustedCtx);
       }

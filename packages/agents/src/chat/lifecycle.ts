@@ -157,7 +157,16 @@ export type ChatRecoveryExhaustedContext = Pick<
   | "partialText"
   | "partialParts"
 > & {
-  /** Why recovery stopped: `max_attempts_exceeded` or `max_recovery_window_exceeded`. */
+  /**
+   * Why recovery stopped. One of:
+   * - `max_attempts_exceeded` — the per-incident attempt budget was spent.
+   * - `no_progress_timeout` — no forward progress within the no-progress window.
+   * - `max_recovery_window_exceeded` — the absolute incident-age ceiling was hit.
+   * - `stable_timeout` — a recovery attempt kept timing out waiting for the
+   *   isolate to reach stable state until the budget drained (extreme churn).
+   *
+   * Treat this as an open string: new reasons may be added.
+   */
   reason: string;
   /** The terminal message shown to the user (from the `chatRecovery` config). */
   terminalMessage: string;
