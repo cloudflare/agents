@@ -27,6 +27,10 @@ import type {
  * stream. There is no background sweep — quiescent agents do no work,
  * and the DO itself dies with the session.
  *
+ * Standalone GET stream events (`_GET_stream`) are *not* cleared
+ * automatically; they accumulate for the lifetime of the DO. Bounded
+ * by session length in practice.
+ *
  * Trade-off: if the client TCP connection dies *after* the close
  * frame has been enqueued on the WS but before the bytes reach the
  * client, the final message is unreplayable. Every earlier event in

@@ -453,9 +453,15 @@ export class StreamableHTTPServerTransport implements Transport {
     // Write FIRST, clean up SECOND. Clearing before the write would
     // leave a mid-flight client with a wiped stream on reconnect.
     // `writeSSEEvent` is sync (enqueues, doesn't await), so the bytes
-    // are committed before any cleanup await can interleave.
+    // are committed before any cleanup await can interleave. Wrap in
+    // try/catch so a dead WS can't skip cleanup and orphan the
+    // stream-reqs + stored events.
     if (liveConnection) {
-      this.writeSSEEvent(liveConnection, message, eventId, shouldClose);
+      try {
+        this.writeSSEEvent(liveConnection, message, eventId, shouldClose);
+      } catch (error) {
+        this.onerror?.(error as Error);
+      }
     }
 
     if (shouldClose) {
