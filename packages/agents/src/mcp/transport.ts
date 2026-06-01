@@ -240,10 +240,16 @@ export class StreamableHTTPServerTransport implements Transport {
             // same stream will see the second close the first. That
             // matches the last-writer-wins semantic and is what a
             // client retrying a reconnect would expect anyway.
+            // Per-conn try/catch: close on an already-dead socket can
+            // throw; don't let it block the rest of the loop.
             for (const other of agent.getConnections<TransportConnState>()) {
               if (other.id === connection.id) continue;
               if (other.state?.streamId !== resumedStreamId) continue;
-              other.close(1000, "Superseded by resumed stream");
+              try {
+                other.close(1000, "Superseded by resumed stream");
+              } catch (error) {
+                this.onerror?.(error as Error);
+              }
             }
           }
         }
@@ -416,25 +422,11 @@ export class StreamableHTTPServerTransport implements Transport {
   }
 
   /**
-   * Single canonical send: store the event, decide whether this is the
-   * final response, run post-write cleanup, and write the SSE frame iff
-   * a live connection is attached.
-   *
-   * Called from both the live-connection happy path and the no-live-
-   * connection fallback. The caller resolves `streamId` and `relatedIds`
-   * (from connection state or persisted reverse lookup) and passes
-   * `liveConnection` as null when the originating WS has dropped.
-   *
-   * Ordering note: writeSSEEvent runs LAST. The previous version of
-   * this PR cleared events before writing the close frame, which
-   * deleted the very event the `id:` line referenced — a client
-   * losing the WS pipe at that exact moment could reconnect with
-   * Last-Event-ID and find nothing to replay. With cleanup after the
-   * write, every event up to and including the final response is
-   * replayable while the in-flight stream is open. Trade-off: if the
-   * WS message is enqueued but the client TCP dies before the bytes
-   * arrive, that one final message is lost. Accepted in exchange for
-   * not running any background cleanup.
+   * Store the event, decide whether this is the final response, write
+   * the SSE frame iff a live connection is attached, then run cleanup.
+   * Caller resolves `streamId` and `relatedIds` (from connection state
+   * or persisted reverse lookup) and passes `liveConnection` as null
+   * when the originating WS has dropped.
    */
   private async sendOnStream(
     agent: McpAgent,
@@ -458,27 +450,17 @@ export class StreamableHTTPServerTransport implements Transport {
       if (shouldClose) this._streamResponseIds.delete(streamId);
     }
 
-    // Write FIRST, clean up SECOND. If we cleared the stream before
-    // writing, a client that lost the WS pipe mid-flight could
-    // reconnect with Last-Event-ID and find the entire stream wiped,
-    // including events it hadn't yet received — the exact regression
-    // #1583 was opened against. With this ordering every event up to
-    // and including the final response stays replayable until either
-    // (a) it's actually written to a live connection, or (b) the
-    // final response lands with no connection, in which case we wipe
-    // immediately after since there's nothing to replay to.
+    // Write FIRST, clean up SECOND. Clearing before the write would
+    // leave a mid-flight client with a wiped stream on reconnect.
+    // `writeSSEEvent` is sync (enqueues, doesn't await), so the bytes
+    // are committed before any cleanup await can interleave.
     if (liveConnection) {
       this.writeSSEEvent(liveConnection, message, eventId, shouldClose);
     }
 
     if (shouldClose) {
-      // Ordering between these two awaits: a concurrent GET resume
-      // arriving in the window sees no persisted requestIds, treats
-      // the connection as a completed-POST one-shot replay, and
-      // starts iterating events that `clearStream` is about to
-      // delete. The replay `send` callback writes synchronously to
-      // the WS, so the worst case is replaying a few events that are
-      // immediately garbage-collected — benign.
+      // A concurrent GET resume between these awaits would replay
+      // events about to be deleted — benign.
       await agent.deleteStreamRequestIds(streamId);
       if (this._eventStore && isClearableEventStore(this._eventStore)) {
         await this._eventStore.clearStream(streamId);
@@ -490,11 +472,8 @@ export class StreamableHTTPServerTransport implements Transport {
     message: JSONRPCMessage,
     options?: { relatedRequestId?: RequestId }
   ): Promise<void> {
-    // A message either belongs to a specific client request (it's a
-    // response or a notification tagged with `relatedRequestId`) or
-    // it's server-initiated and rides the standalone GET stream.
-    // These two paths share nothing but the event store call, so they
-    // live in two separate helpers.
+    // Request-scoped (response / `relatedRequestId` notification) vs
+    // server-initiated on the standalone GET stream. Two helpers.
     const isResponse =
       isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message);
     const requestId = isResponse ? message.id : options?.relatedRequestId;
