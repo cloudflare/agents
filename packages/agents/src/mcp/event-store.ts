@@ -105,9 +105,9 @@ export class DurableObjectEventStore implements EventStore {
 
     const prefix = `${DurableObjectEventStore.EVENT_KEY_PREFIX}${streamId}:`;
     // `list({ start })` is inclusive, and we want strictly-after
-    // semantics. Appending `\x00` (the smallest byte) to `lastKey`
-    // produces a key that sorts immediately after it, so the list
-    // result excludes `lastKey` itself without needing a post-filter.
+    // semantics. Appending `\x00` (the smallest byte) to the last
+    // event's key produces a key that sorts immediately after it, so
+    // the list excludes the boundary event without a post-filter.
     const startKey = `${DurableObjectEventStore.EVENT_KEY_PREFIX}${lastEventId}\x00`;
     // DO `storage.list()` with no `limit` loads everything into memory.
     // Stream histories are normally small (progress events + result),
