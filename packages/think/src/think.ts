@@ -576,6 +576,21 @@ type ChatRecoveryContinueData = {
   recoveredRequestId?: string;
 };
 
+/**
+ * Thrown by `_iterateWithStallWatchdog` when the inactivity watchdog fires
+ * (a model/transport stream that parks without ever throwing). Distinct from
+ * in-band model/stream errors so the read-loop catch can route a stall into
+ * bounded recovery (#1626) — a transient hang is retried within the existing
+ * recovery budget — while genuine errors stay terminal.
+ */
+class ChatStreamStalledError extends Error {
+  readonly isChatStreamStall = true;
+  constructor(message: string) {
+    super(message);
+    this.name = "ChatStreamStalledError";
+  }
+}
+
 type ChatRecoveryKind = "retry" | "continue";
 
 type ChatRecoveryIncident = {
@@ -6393,6 +6408,41 @@ export class Think<
         });
       }
     } catch (error) {
+      // #1626: a stream-stall watchdog abort is a recoverable interruption, not
+      // a terminal error. Persist the settled partial (re-anchor), route into
+      // bounded recovery, and suppress the terminal error when a continuation is
+      // scheduled; fall through to terminal only once the budget is exhausted.
+      if (error instanceof ChatStreamStalledError) {
+        if (!assistantMsg && accumulator.parts.length > 0) {
+          assistantMsg = accumulator.toMessage();
+          await this._persistAssistantMessage(assistantMsg);
+          this._broadcastMessages();
+        }
+        if (
+          await this._routeStallToBoundedRecovery({
+            requestId,
+            targetAssistantId: assistantMsg?.id
+          })
+        ) {
+          if (!streamFinalized) {
+            this._resumableStream.complete(streamId);
+            streamFinalized = true;
+          }
+          if (!doneSent) {
+            this._broadcastChat({
+              type: MSG_CHAT_RESPONSE,
+              id: requestId,
+              body: "",
+              done: true
+            });
+            doneSent = true;
+          }
+          // No `callback.onError`/response hook: the scheduled continuation owns
+          // the real terminal outcome (mirrors a deploy-interrupted attempt).
+          return;
+        }
+        // Budget exhausted — fall through to the terminal path below.
+      }
       if (!streamFinalized) {
         this._resumableStream.markError(streamId);
         streamFinalized = true;
@@ -6547,7 +6597,7 @@ export class Think<
           timer = setTimeout(() => {
             stalled = true;
             reject(
-              new Error(
+              new ChatStreamStalledError(
                 `Chat stream stalled: no activity for ${timeoutMs}ms; the turn was aborted by the stall watchdog.`
               )
             );
@@ -6695,6 +6745,51 @@ export class Think<
       });
       doneSent = true;
     } catch (error) {
+      // #1626: a stream-stall watchdog abort is a recoverable interruption, not
+      // a terminal error. Persist the settled partial (so the continuation
+      // re-anchors without re-running completed tool calls), then route into
+      // bounded recovery; only fall through to the terminal path below once the
+      // budget is exhausted.
+      if (error instanceof ChatStreamStalledError) {
+        let targetAssistantId: string | undefined;
+        if (
+          this._turnQueue.generation === clearGen &&
+          accumulator.parts.length > 0
+        ) {
+          const partial = accumulator.toMessage();
+          await this._persistAssistantMessage(partial, parentId);
+          this._broadcastMessages();
+          targetAssistantId = partial.id;
+        }
+        if (
+          await this._routeStallToBoundedRecovery({
+            requestId,
+            targetAssistantId
+          })
+        ) {
+          // Recovering: close the stream cleanly (no terminal error frame); the
+          // scheduled continuation drives the turn to completion. Report
+          // `interrupted` so the caller does not terminalize the turn.
+          this._resumableStream.complete(streamId);
+          this._pendingResumeConnections.clear();
+          if (!doneSent) {
+            this._broadcastChat({
+              type: MSG_CHAT_RESPONSE,
+              id: requestId,
+              body: "",
+              done: true
+            });
+            doneSent = true;
+          }
+          // `aborted` (not `error`): this attempt was aborted by the watchdog;
+          // the scheduled continuation owns the real terminal outcome. No
+          // response hook fires here (the continuation fires it), mirroring how
+          // a deploy-interrupted attempt is superseded by its continuation.
+          return { status: "aborted" };
+        }
+        // Budget exhausted — fall through to the terminal path (the watchdog's
+        // original "kill the spinner" guarantee, now after bounded retries).
+      }
       streamError = error instanceof Error ? error.message : "Stream error";
       if (options?.captureProgrammaticStreamError) {
         this._programmaticStreamErrors.set(requestId, streamError);
@@ -7657,6 +7752,73 @@ export class Think<
    * one path can't silently diverge from the other. Mirrors the same helper in
    * `@cloudflare/ai-chat`.
    */
+  /**
+   * Route a stream-stall watchdog abort into bounded recovery instead of a
+   * terminal error (#1626). A stall happens inside a LIVE isolate (no DO
+   * restart), so the normal restart-detected recovery path never runs — we
+   * open/advance a recovery incident here and schedule a continuation, reusing
+   * the SAME budget (`maxAttempts` + wall-clock window + progress-aware reset)
+   * as deploy/eviction recovery. A transient hang recovers; a persistently
+   * hanging provider exhausts the budget and the caller falls back to terminal
+   * (the watchdog's original "kill the spinner" guarantee, just after bounded
+   * retries). Idempotency matches deploy recovery: settled tool results are
+   * durable and won't re-run, but a tool that was mid-execution when the stall
+   * fired re-runs on the continuation.
+   *
+   * Returns `true` if a continuation was scheduled (caller suppresses the
+   * terminal error), `false` if the budget is exhausted (caller falls through
+   * to the existing terminal path; the incident is already marked exhausted).
+   */
+  private async _routeStallToBoundedRecovery(input: {
+    requestId: string;
+    targetAssistantId?: string;
+  }): Promise<boolean> {
+    // Stall-recovery is automatic only when chat recovery is enabled (the
+    // default for Think). With recovery off, a stall stays terminal — there is
+    // no budget/continuation machinery to route into.
+    if (!this._resolveChatRecoveryConfig().enabled) return false;
+    const recoveryRootRequestId =
+      this._activeChatRecoveryRootRequestId ?? input.requestId;
+    const latestUserMessageId =
+      [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
+    const { incident, exhausted } = await this._beginChatRecoveryIncident({
+      requestId: input.requestId,
+      recoveryRootRequestId,
+      latestUserMessageId,
+      recoveryKind: "continue"
+    });
+    if (exhausted) return false;
+    await this._updateChatRecoveryIncident(incident.incidentId, "scheduled");
+    this._emit("chat:recovery:scheduled", {
+      incidentId: incident.incidentId,
+      requestId: input.requestId,
+      attempt: incident.attempt,
+      maxAttempts: incident.maxAttempts,
+      recoveryKind: "continue"
+    });
+    // If a durable submission is running for this turn, the continuation must
+    // complete it (otherwise the submission hangs) — same as deploy recovery.
+    const recoveredRequestId = this._hasRunningSubmission(recoveryRootRequestId)
+      ? recoveryRootRequestId
+      : undefined;
+    await this.schedule(
+      0,
+      "_chatRecoveryContinue",
+      {
+        ...(input.targetAssistantId
+          ? { targetAssistantId: input.targetAssistantId }
+          : {}),
+        originalRequestId: recoveryRootRequestId,
+        incidentId: incident.incidentId,
+        lastBody: this._lastBody ?? null,
+        lastClientTools: this._lastClientTools ?? null,
+        ...(recoveredRequestId ? { recoveredRequestId } : {})
+      },
+      { idempotent: true }
+    );
+    return true;
+  }
+
   private async _rescheduleRecoveryAfterStableTimeout(
     callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,

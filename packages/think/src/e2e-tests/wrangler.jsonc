@@ -36,6 +36,10 @@
         "class_name": "ThinkPersistFalseE2EAgent"
       },
       {
+        "name": "ThinkStallRecoveryE2EAgent",
+        "class_name": "ThinkStallRecoveryE2EAgent"
+      },
+      {
         "name": "ThinkTaskParentE2EAgent",
         "class_name": "ThinkTaskParentE2EAgent"
       },
@@ -69,6 +73,10 @@
     {
       "tag": "v5",
       "new_sqlite_classes": ["ThinkPersistFalseE2EAgent"]
+    },
+    {
+      "tag": "v6",
+      "new_sqlite_classes": ["ThinkStallRecoveryE2EAgent"]
     }
   ],
   "r2_buckets": [

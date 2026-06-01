@@ -26,6 +26,7 @@ type Env = {
   ThinkRecoveryHelperAgent: DurableObjectNamespace<ThinkRecoveryHelperAgent>;
   ThinkToolRollbackE2EAgent: DurableObjectNamespace<ThinkToolRollbackE2EAgent>;
   ThinkPersistFalseE2EAgent: DurableObjectNamespace<ThinkPersistFalseE2EAgent>;
+  ThinkStallRecoveryE2EAgent: DurableObjectNamespace<ThinkStallRecoveryE2EAgent>;
   ThinkTaskParentE2EAgent: DurableObjectNamespace<ThinkTaskParentE2EAgent>;
   ThinkAgentToolNaturalParentE2EAgent: DurableObjectNamespace<ThinkAgentToolNaturalParentE2EAgent>;
   AI: Ai;
@@ -503,6 +504,107 @@ export class ThinkRecoveryE2EAgent extends Think<Env> {
       SELECT COUNT(*) as count FROM cf_agents_runs
     `;
     return rows[0].count > 0;
+  }
+}
+
+/**
+ * #1626 stall-recovery: the FIRST inference streams a little text then hangs
+ * forever (a parked provider/transport); later inferences stream a full
+ * response. With `chatStreamStallTimeoutMs` armed + chatRecovery on, the
+ * watchdog aborts the hung first attempt and routes it into bounded recovery;
+ * the scheduled continuation (a later, non-stalling inference) completes the
+ * turn — instead of failing terminally.
+ */
+function createStallThenStreamMockModel(nextCall: () => number): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-stall-then-stream",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream() {
+      // The counter lives on the agent instance (survives the stall, which does
+      // NOT restart the isolate), so only the FIRST inference stalls; the
+      // recovery continuation streams to completion.
+      const stallThisCall = nextCall() === 1;
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: "t-stall" });
+          controller.enqueue({
+            type: "text-delta",
+            id: "t-stall",
+            delta: "partial "
+          });
+          if (stallThisCall) {
+            // Park forever — the inactivity watchdog must abort this attempt.
+            await new Promise(() => {});
+            return;
+          }
+          controller.enqueue({
+            type: "text-delta",
+            id: "t-stall",
+            delta: "RECOVERED"
+          });
+          controller.enqueue({ type: "text-end", id: "t-stall" });
+          controller.enqueue({
+            type: "finish",
+            finishReason: v3FinishReason("stop"),
+            usage: v3Usage(10, 5)
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+export class ThinkStallRecoveryE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override chatRecovery = true;
+  // Small window so the e2e is fast: the first inference hangs, the watchdog
+  // fires within ~2s, and the scheduled continuation completes the turn.
+  override chatStreamStallTimeoutMs = 2_000;
+  private _inferenceCount = 0;
+
+  override getModel(): LanguageModel {
+    return createStallThenStreamMockModel(() => ++this._inferenceCount);
+  }
+
+  override getSystemPrompt(): string {
+    return "Stall-recovery e2e agent.";
+  }
+
+  @callable()
+  async getStallStatus(): Promise<{
+    assistantMessages: number;
+    finalText: string;
+    hasFiberRows: boolean;
+  }> {
+    const assistant = this.messages.filter((m) => m.role === "assistant");
+    const final = assistant[assistant.length - 1];
+    const finalText = final
+      ? final.parts
+          .filter((p): p is { type: "text"; text: string } => p.type === "text")
+          .map((p) => p.text)
+          .join("")
+      : "";
+    const fiberRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    return {
+      assistantMessages: assistant.length,
+      finalText,
+      hasFiberRows: (fiberRows[0]?.c ?? 0) > 0
+    };
+  }
+
+  @callable()
+  override async getMessages(): Promise<UIMessage[]> {
+    return this.messages;
   }
 }
 

@@ -517,6 +517,23 @@ describe("Think — error handling", () => {
     expect(result.error).toContain("Mock error under guard");
   });
 
+  it("routes a stream-stall watchdog abort into bounded recovery instead of failing terminally (#1626)", async () => {
+    const agent = await freshAgent(`stall-recover-${crypto.randomUUID()}`);
+    // The first inference hangs after 1 chunk → the watchdog aborts it. Instead
+    // of a terminal error, the turn is routed into bounded recovery; the
+    // scheduled continuation streams normally to completion.
+    // Stall after 3 UI chunks (past the first text-delta) so the partial has
+    // settled content to re-anchor the continuation.
+    const result = await agent.testChatWithStallThenRecover(3, 50);
+
+    // The stall did NOT terminalize — no terminal error surfaced...
+    expect(result.firstError).toBeUndefined();
+    // ...a continuation was scheduled...
+    expect(result.scheduledContinues).toBeGreaterThanOrEqual(1);
+    // ...and it streamed the turn to completion (recovered, not failed).
+    expect(result.finalAssistantText.length).toBeGreaterThan(0);
+  });
+
   it("should recover and continue chatting after error", async () => {
     const agent = await freshAgent("err-recover");
 

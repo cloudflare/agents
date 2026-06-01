@@ -488,6 +488,10 @@ export class ThinkTestAgent extends Think {
   } | null = null;
   private _stripTextResponseForTest = false;
   private _stallAfterChunks: number | null = null;
+  // #1626 stall-recovery: when set, only the first N inferences stall (then the
+  // continuation streams normally). `null` = every inference stalls (the
+  // original terminal-watchdog behavior).
+  private _stallAttemptsRemaining: number | null = null;
   private _streamChunkDelayMs: number | null = null;
   private _agentToolOutputForTest = new Map<string, unknown>();
   private _responseLog: ChatResponseResult[] = [];
@@ -708,7 +712,17 @@ export class ThinkTestAgent extends Think {
 
     const config = this._errorConfig;
     const stripText = this._stripTextResponseForTest;
-    const stallAfter = this._stallAfterChunks;
+    // Per-inference stall gating: if attempt-limited (#1626), only stall while
+    // attempts remain (decrement here so the continuation inference streams).
+    let willStall = this._stallAfterChunks != null;
+    if (willStall && this._stallAttemptsRemaining != null) {
+      if (this._stallAttemptsRemaining > 0) {
+        this._stallAttemptsRemaining--;
+      } else {
+        willStall = false;
+      }
+    }
+    const stallAfter = willStall ? this._stallAfterChunks : null;
     const chunkDelayMs = this._streamChunkDelayMs;
 
     return {
@@ -924,10 +938,82 @@ export class ThinkTestAgent extends Think {
   ): Promise<TestChatResult> {
     this._stallAfterChunks = afterChunks;
     this.chatStreamStallTimeoutMs = timeoutMs;
+    // Assert the watchdog → TERMINAL behavior with recovery OFF. (With recovery
+    // on — the Think default — a stall now routes into bounded recovery; see
+    // `testChatWithStallThenRecover`.)
+    const prevRecovery = this.chatRecovery;
+    this.chatRecovery = false;
     try {
       return await this.testChat("trigger stall");
     } finally {
       this._stallAfterChunks = null;
+      this.chatStreamStallTimeoutMs = 0;
+      this.chatRecovery = prevRecovery;
+    }
+  }
+
+  /**
+   * #1626: the FIRST inference hangs after `afterChunks` chunks (watchdog
+   * aborts it), which must now route into bounded recovery instead of failing
+   * terminally; the scheduled continuation then streams normally to completion.
+   * Returns whether the first turn surfaced a terminal error (it must NOT), the
+   * scheduled-continue count, and the recovered transcript so a test can assert
+   * the turn recovered. chatRecovery stays at its default (`true`).
+   */
+  async testChatWithStallThenRecover(
+    afterChunks: number,
+    timeoutMs: number
+  ): Promise<{
+    firstError: string | undefined;
+    scheduledContinues: number;
+    assistantMessages: number;
+    finalAssistantText: string;
+  }> {
+    this._stallAfterChunks = afterChunks;
+    this._stallAttemptsRemaining = 1;
+    this.chatStreamStallTimeoutMs = timeoutMs;
+    try {
+      const first = await this.testChat("trigger stall then recover");
+      const scheduled = this.sql<{ payload: string }>`
+        SELECT payload FROM cf_agents_schedules
+        WHERE callback = '_chatRecoveryContinue'
+        ORDER BY time ASC LIMIT 1
+      `;
+      const scheduledContinues =
+        this.sql<{ count: number }>`
+          SELECT COUNT(*) as count FROM cf_agents_schedules
+          WHERE callback = '_chatRecoveryContinue'
+        `[0]?.count ?? 0;
+      // Drive the scheduled continuation — this inference streams normally (the
+      // stall budget is exhausted), so the turn completes.
+      if (scheduled[0]) {
+        await (
+          this as unknown as {
+            _chatRecoveryContinue(d: unknown): Promise<void>;
+          }
+        )._chatRecoveryContinue(JSON.parse(scheduled[0].payload));
+      }
+
+      const messages = await this.getMessages();
+      const assistant = messages.filter((m) => m.role === "assistant");
+      const finalAssistant = assistant[assistant.length - 1];
+      const finalAssistantText = finalAssistant
+        ? finalAssistant.parts
+            .filter(
+              (p): p is { type: "text"; text: string } => p.type === "text"
+            )
+            .map((p) => p.text)
+            .join("")
+        : "";
+      return {
+        firstError: first.error,
+        scheduledContinues,
+        assistantMessages: assistant.length,
+        finalAssistantText
+      };
+    } finally {
+      this._stallAfterChunks = null;
+      this._stallAttemptsRemaining = null;
       this.chatStreamStallTimeoutMs = 0;
     }
   }
