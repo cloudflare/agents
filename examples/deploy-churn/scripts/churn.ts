@@ -140,6 +140,11 @@ const MONITOR = !args.has("no-monitor");
 // "partysocket" = the REAL frontend client (default backoff: 3s→10s, factor 1.3,
 //                 retryCount reset after 5s uptime) via `useAgent`/usePartySocket.
 const CLIENT = opt("client", "CLIENT", "raw");
+// "chat" (default) probes chat recovery; "subagent" probes #1630 sub-agent
+// re-attach: a parent drives a child via agentTool, deploys land mid-child-loop,
+// and we check whether the parent collects the recovered child vs re-runs it.
+const MODE = opt("mode", "MODE", "chat");
+const SUB_AGENT_CHILD_STEPS = 30;
 
 const httpOrigin = BASE_URL.replace(/\/$/, "");
 const wsOrigin = httpOrigin.replace(/^http/, "ws");
@@ -415,6 +420,179 @@ async function snapshot(tag: string): Promise<AgentStatus | null> {
   }
 }
 
+// ── sub-agent re-attach mode (#1630) ────────────────────────────────────────
+
+type SubAgentStatus = {
+  parentChildStatus: string | null;
+  childRunRowCount: number;
+  parentHasFiberRows: boolean;
+  turns: TurnRecord[];
+  incidents: IncidentRecord[];
+  child: {
+    totalExecutions: number;
+    uniqueIndices: number;
+    maxIndex: number;
+    duplicates: Array<{ index: number; count: number }>;
+    recoveryCount: number;
+    assistantMessages: number;
+    hasFiberRows: boolean;
+  } | null;
+};
+
+async function subSnapshot(tag: string): Promise<SubAgentStatus | null> {
+  try {
+    const status = (await rpc("getSubAgentStatus")) as SubAgentStatus;
+    record("subagent:status", {
+      tag,
+      parentChildStatus: status.parentChildStatus,
+      childRunRowCount: status.childRunRowCount,
+      parentHasFiberRows: status.parentHasFiberRows,
+      child: status.child
+    });
+    return status;
+  } catch (e) {
+    record("subagent:status:error", {
+      tag,
+      error: e instanceof Error ? e.message : String(e)
+    });
+    return null;
+  }
+}
+
+async function mainSubAgent(): Promise<void> {
+  record("run:start", {
+    mode: "subagent",
+    baseUrl: httpOrigin,
+    agentWsUrl: AGENT_WS_URL,
+    session: SESSION,
+    deploys: DEPLOYS,
+    midTurnDelaySeconds: MID_TURN_DELAY,
+    betweenSeconds: BETWEEN,
+    settleSeconds: SETTLE,
+    childSteps: SUB_AGENT_CHILD_STEPS,
+    timeline: timelinePath
+  });
+
+  if (INITIAL_DEPLOY) {
+    await runDeploy("initial");
+    await sleep(5000);
+  }
+
+  if (RESET) {
+    try {
+      await rpc("reset");
+      record("reset:ok");
+    } catch (e) {
+      record("reset:error", {
+        error: e instanceof Error ? e.message : String(e)
+      });
+    }
+  }
+
+  // Switch the parent into sub-agent (agentTool) mode, then kick the turn.
+  await rpc("configureSubAgentRun");
+  record("subagent:configured");
+
+  const monitor = MONITOR ? startConnectionMonitor() : { stop: () => {} };
+
+  const turnRequestId = await startTurn("Run the seeding task via runTask.");
+  record("turn:sent", { requestId: turnRequestId });
+
+  record("mid-turn:wait", { seconds: MID_TURN_DELAY });
+  await sleep(MID_TURN_DELAY * 1000);
+  await subSnapshot("before-deploys");
+
+  const versions: Array<string | null> = [];
+  for (let i = 1; i <= DEPLOYS; i++) {
+    const { versionId } = await runDeploy(`churn-${i}/${DEPLOYS}`);
+    versions.push(versionId);
+    await subSnapshot(`after-deploy-${i}`);
+    if (BETWEEN > 0 && i < DEPLOYS) await sleep(BETWEEN * 1000);
+  }
+
+  record("settle:wait", { seconds: SETTLE });
+  const settleDeadline = Date.now() + SETTLE * 1000;
+  let lastStatus: SubAgentStatus | null = null;
+  while (Date.now() < settleDeadline) {
+    await sleep(3000);
+    lastStatus = await subSnapshot("settling");
+    if (!lastStatus) continue;
+    const collected = lastStatus.parentChildStatus === "completed";
+    const childDone =
+      lastStatus.child != null &&
+      lastStatus.child.maxIndex >= SUB_AGENT_CHILD_STEPS &&
+      !lastStatus.child.hasFiberRows &&
+      !lastStatus.parentHasFiberRows;
+    if (collected && childDone) break;
+  }
+
+  monitor.stop();
+
+  const child = lastStatus?.child ?? null;
+  const childReRuns = child ? child.totalExecutions - child.uniqueIndices : -1;
+  const collected = lastStatus?.parentChildStatus === "completed";
+  const childComplete =
+    child != null && child.uniqueIndices >= SUB_AGENT_CHILD_STEPS;
+  // RE-ATTACHED: child ran every step exactly once-ish (re-runs bounded by
+  // evictions, not ~STEPS×re-issues) AND the parent collected its real result.
+  // AMPLIFIED: the parent abandoned + re-ran the child (high re-runs) or never
+  // collected (parent stuck interrupted/error while child completed).
+  const amplified = child != null && childReRuns >= SUB_AGENT_CHILD_STEPS;
+  const verdict = {
+    mode: "subagent",
+    reattached: collected && childComplete && !amplified,
+    amplified,
+    parentChildStatus: lastStatus?.parentChildStatus ?? null,
+    childRunRowCount: lastStatus?.childRunRowCount ?? null,
+    childUnique: child?.uniqueIndices ?? null,
+    childTotal: child?.totalExecutions ?? null,
+    childReRuns,
+    childRecoveries: child?.recoveryCount ?? null,
+    childDuplicates: child?.duplicates ?? [],
+    parentHasFiberRows: lastStatus?.parentHasFiberRows ?? null,
+    incidents: lastStatus?.incidents ?? [],
+    deployVersions: versions
+  };
+  record("verdict", verdict);
+
+  const summary = {
+    runId,
+    config: {
+      mode: "subagent",
+      baseUrl: httpOrigin,
+      agentWsUrl: AGENT_WS_URL,
+      session: SESSION,
+      deploys: DEPLOYS,
+      midTurnDelaySeconds: MID_TURN_DELAY,
+      betweenSeconds: BETWEEN,
+      settleSeconds: SETTLE,
+      childSteps: SUB_AGENT_CHILD_STEPS
+    },
+    verdict,
+    finalStatus: lastStatus,
+    timeline: timelinePath
+  };
+  fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
+
+  console.log("\n──────────── VERDICT (sub-agent / #1630) ────────────");
+  if (verdict.reattached) {
+    console.log(
+      `RE-ATTACHED: parent collected the recovered child (status=completed); child ran all ${SUB_AGENT_CHILD_STEPS} steps with ${childReRuns} re-runs (bounded by ${child?.recoveryCount ?? 0} recoveries).`
+    );
+  } else if (verdict.amplified) {
+    console.log(
+      `AMPLIFIED: child re-ran already-completed work (${childReRuns} re-runs across ${child?.uniqueIndices ?? 0} unique steps).`
+    );
+  } else {
+    console.log(
+      `INCONCLUSIVE / NOT COLLECTED: parentChildStatus=${verdict.parentChildStatus}, childUnique=${verdict.childUnique}/${SUB_AGENT_CHILD_STEPS}, childReRuns=${childReRuns}.`
+    );
+  }
+  console.log(`\nTimeline:  ${timelinePath}`);
+  console.log(`Summary:   ${summaryPath}`);
+  timelineStream.end();
+}
+
 // ── main ──────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -596,7 +774,7 @@ async function main(): Promise<void> {
   timelineStream.end();
 }
 
-main()
+(MODE === "subagent" ? mainSubAgent : main)()
   .then(() => {
     // Force exit: lingering reconnect timers / sockets can keep the event loop
     // alive after the verdict is written.

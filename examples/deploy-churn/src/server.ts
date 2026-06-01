@@ -40,6 +40,7 @@ import type {
   ThinkSubmissionInspection
 } from "@cloudflare/think";
 import { callable, getAgentByName, routeAgentRequest } from "agents";
+import { agentTool } from "agents/agent-tools";
 import { generateText, jsonSchema, tool } from "ai";
 import type { LanguageModel, ModelMessage, ToolSet, UIMessage } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
@@ -49,6 +50,7 @@ type Provider = "workers-ai" | "anthropic";
 
 type Env = {
   DeployChurnAgent: DurableObjectNamespace<DeployChurnAgent>;
+  DeployChurnSubAgentChild: DurableObjectNamespace<DeployChurnSubAgentChild>;
   AI: Ai;
   ANTHROPIC_API_KEY?: string;
 };
@@ -282,6 +284,280 @@ function createFailingModel(): LanguageModel {
   } as LanguageModel;
 }
 
+// ── Sub-agent (agentTool) re-attach under real deploys (#1630) ──────────────
+//
+// The `DeployChurnAgent` above probes CHAT recovery. This pair probes SUB-AGENT
+// recovery: a parent drives a child via `agentTool()`, and a real deploy lands
+// while the child's multi-step tool loop is in flight. The question (the #1630
+// bug): does the parent RE-ATTACH and collect the child's recovered result, or
+// ABANDON it and re-run the child's already-completed work (amplification)?
+//
+// Both are LLM-free / deterministic (mock models), mirroring the proven
+// packages/think SIGKILL e2e (`ThinkToolRollbackE2EAgent` + the natural
+// `agentTool()` parent) but exercised under REAL `wrangler deploy` churn.
+
+const SUB_AGENT_CHILD_STEPS = 30;
+const SUB_AGENT_CHILD_STEP_DELAY_MS = 1_500;
+// The fixed tool-call id the single-task parent model emits → `agentTool()`
+// derives the stable child runId `agent-tool:<toolCallId>` from it.
+const SUB_AGENT_TOOL_CALL_ID = "subagent-task";
+const SUB_AGENT_CHILD_RUN_ID = `agent-tool:${SUB_AGENT_TOOL_CALL_ID}`;
+
+const v3FinishReason = (unified: "stop" | "tool-calls") => ({
+  unified,
+  raw: undefined
+});
+const v3Usage = (inputTokens: number, outputTokens: number) => ({
+  inputTokens: {
+    total: inputTokens,
+    noCache: inputTokens,
+    cacheRead: 0,
+    cacheWrite: 0
+  },
+  outputTokens: { total: outputTokens, text: outputTokens, reasoning: 0 }
+});
+
+/**
+ * Deterministic agentic-loop model: each step counts how many `recordStep`
+ * results already exist in the prompt and emits the NEXT `recordStep(index)`
+ * call, so the step it picks is driven entirely by the conversation history the
+ * recovery path reconstructs. If recovery loses a settled step, it re-emits a
+ * lower index, which the non-idempotent child ledger surfaces as a duplicate
+ * row (the "rollback depth" / amplification signal).
+ */
+function createToolLoopMockModel(totalSteps: number): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "deploy-churn",
+    modelId: "mock-tool-loop",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream(options: Record<string, unknown>) {
+      const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+      const completed = messages.filter(
+        (m): m is Record<string, unknown> =>
+          typeof m === "object" &&
+          m !== null &&
+          (m as Record<string, unknown>).role === "tool"
+      ).length;
+      const nextIndex = completed + 1;
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (nextIndex > totalSteps) {
+            controller.enqueue({ type: "text-start", id: "done" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "done",
+              delta: "DONE"
+            });
+            controller.enqueue({ type: "text-end", id: "done" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("stop"),
+              usage: v3Usage(10, 5)
+            });
+          } else {
+            const id = `tc-${nextIndex}`;
+            const input = JSON.stringify({ index: nextIndex });
+            controller.enqueue({
+              type: "tool-input-start",
+              id,
+              toolName: "recordStep"
+            });
+            controller.enqueue({ type: "tool-input-delta", id, delta: input });
+            controller.enqueue({ type: "tool-input-end", id });
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: id,
+              toolName: "recordStep",
+              input
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("tool-calls"),
+              usage: v3Usage(10, 5)
+            });
+          }
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+/** Parent model: emit ONE `runTask` tool call (fixed id), then finish. */
+function createSingleTaskMockModel(): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "deploy-churn",
+    modelId: "mock-single-task",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream(options: Record<string, unknown>) {
+      const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+      const hasToolResult = messages.some(
+        (m): m is Record<string, unknown> =>
+          typeof m === "object" &&
+          m !== null &&
+          (m as Record<string, unknown>).role === "tool"
+      );
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (!hasToolResult) {
+            const input = JSON.stringify({ taskId: 1 });
+            controller.enqueue({
+              type: "tool-input-start",
+              id: SUB_AGENT_TOOL_CALL_ID,
+              toolName: "runTask"
+            });
+            controller.enqueue({
+              type: "tool-input-delta",
+              id: SUB_AGENT_TOOL_CALL_ID,
+              delta: input
+            });
+            controller.enqueue({
+              type: "tool-input-end",
+              id: SUB_AGENT_TOOL_CALL_ID
+            });
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: SUB_AGENT_TOOL_CALL_ID,
+              toolName: "runTask",
+              input
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("tool-calls"),
+              usage: v3Usage(10, 5)
+            });
+          } else {
+            controller.enqueue({ type: "text-start", id: "done" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "done",
+              delta: "DONE"
+            });
+            controller.enqueue({ type: "text-end", id: "done" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("stop"),
+              usage: v3Usage(10, 5)
+            });
+          }
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+/**
+ * The sub-agent child: a long, recoverable `recordStep` tool loop with a
+ * non-idempotent ledger. A deploy mid-loop tests whether already-recorded steps
+ * survive the child's own `chatRecovery` (no duplicate rows) — and whether the
+ * parent collects this child's terminal instead of re-running it.
+ */
+export class DeployChurnSubAgentChild extends Think<Env> {
+  static options = { keepAliveIntervalMs: 5_000 };
+  override chatRecovery = true;
+  override maxSteps = 500;
+  private _ledgerReady = false;
+
+  override getModel(): LanguageModel {
+    return createToolLoopMockModel(SUB_AGENT_CHILD_STEPS);
+  }
+
+  override getSystemPrompt(): string {
+    return "Record each step in order using the recordStep tool.";
+  }
+
+  override getTools(): ToolSet {
+    return {
+      recordStep: tool({
+        description:
+          "Record a step by its index. Call once per index, in order.",
+        inputSchema: jsonSchema<{ index: number }>({
+          type: "object",
+          properties: { index: { type: "number" } },
+          required: ["index"],
+          additionalProperties: false
+        }),
+        execute: async ({ index }) => {
+          this._ensureLedger();
+          this
+            .sql`INSERT INTO tool_ledger (idx, at) VALUES (${index}, ${Date.now()})`;
+          // Widen the in-flight window so a real ~33s deploy lands mid-tool.
+          await new Promise((r) =>
+            setTimeout(r, SUB_AGENT_CHILD_STEP_DELAY_MS)
+          );
+          return { recorded: index };
+        }
+      })
+    };
+  }
+
+  override async onChatRecovery(): Promise<ChatRecoveryOptions> {
+    const n = (await this.ctx.storage.get<number>("child:recovery-count")) ?? 0;
+    await this.ctx.storage.put("child:recovery-count", n + 1);
+    return { continue: true };
+  }
+
+  private _ensureLedger(): void {
+    if (this._ledgerReady) return;
+    this
+      .sql`CREATE TABLE IF NOT EXISTS tool_ledger (seq INTEGER PRIMARY KEY AUTOINCREMENT, idx INTEGER, at INTEGER)`;
+    this._ledgerReady = true;
+  }
+
+  @callable()
+  async getLedgerStatus(): Promise<{
+    totalExecutions: number;
+    uniqueIndices: number;
+    maxIndex: number;
+    duplicates: Array<{ index: number; count: number }>;
+    recoveryCount: number;
+    assistantMessages: number;
+    hasFiberRows: boolean;
+  }> {
+    this._ensureLedger();
+    const rows = this.sql<{ idx: number; count: number }>`
+      SELECT idx, COUNT(*) as count FROM tool_ledger GROUP BY idx ORDER BY idx
+    `;
+    const fiberRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    return {
+      totalExecutions: rows.reduce((n, r) => n + r.count, 0),
+      uniqueIndices: rows.length,
+      maxIndex: rows.reduce((m, r) => Math.max(m, r.idx), 0),
+      duplicates: rows
+        .filter((r) => r.count > 1)
+        .map((r) => ({ index: r.idx, count: r.count })),
+      recoveryCount:
+        (await this.ctx.storage.get<number>("child:recovery-count")) ?? 0,
+      assistantMessages: this.messages.filter((m) => m.role === "assistant")
+        .length,
+      hasFiberRows: (fiberRows[0]?.c ?? 0) > 0
+    };
+  }
+
+  @callable()
+  async resetChild(): Promise<{ ok: true }> {
+    this._ensureLedger();
+    this.sql`DELETE FROM tool_ledger`;
+    await this.ctx.storage.delete("child:recovery-count");
+    return { ok: true };
+  }
+}
+
 export class DeployChurnAgent extends Think<Env> {
   // Wake quickly after eviction so alarm-driven recovery is observable.
   static options = { keepAliveIntervalMs: 5_000 };
@@ -316,6 +592,8 @@ export class DeployChurnAgent extends Think<Env> {
   override maxSteps = 80;
 
   override getModel(): LanguageModel {
+    // Sub-agent mode: emit ONE `runTask` tool call; the child does the work.
+    if (this._harnessMode() === "subagent") return createSingleTaskMockModel();
     // Tool-rollback mode: use a REAL model (Workers AI or Anthropic) so the
     // agentic loop actually settles tool results that recovery must preserve.
     if (this._harnessMode() === "tools") return this._realModel();
@@ -334,6 +612,9 @@ export class DeployChurnAgent extends Think<Env> {
   }
 
   override getSystemPrompt(): string {
+    if (this._harnessMode() === "subagent") {
+      return "Call the runTask tool exactly once, then reply with the single word DONE.";
+    }
     if (this._harnessMode() === "tools") {
       const steps = this._toolSteps();
       return [
@@ -355,6 +636,19 @@ export class DeployChurnAgent extends Think<Env> {
    * superseded isolate) shows up as a DUPLICATE row for the same index.
    */
   override getTools(): ToolSet {
+    if (this._harnessMode() === "subagent") {
+      return {
+        runTask: agentTool(DeployChurnSubAgentChild, {
+          description: "Run the seeding task as a child agent.",
+          inputSchema: jsonSchema<{ taskId: number }>({
+            type: "object",
+            properties: { taskId: { type: "number" } },
+            required: ["taskId"],
+            additionalProperties: false
+          })
+        })
+      };
+    }
     if (this._harnessMode() !== "tools") return {};
     return {
       recordStep: tool({
@@ -435,8 +729,11 @@ export class DeployChurnAgent extends Think<Env> {
     `;
   }
 
-  private _harnessMode(): "mock" | "tools" {
-    return this._harnessConfig("mode") === "tools" ? "tools" : "mock";
+  private _harnessMode(): "mock" | "tools" | "subagent" {
+    const mode = this._harnessConfig("mode");
+    if (mode === "tools") return "tools";
+    if (mode === "subagent") return "subagent";
+    return "mock";
   }
 
   private _harnessProvider(): Provider {
@@ -668,8 +965,95 @@ export class DeployChurnAgent extends Think<Env> {
     this.sql`DELETE FROM harness_ledger`;
     this._ensureHarnessConfigTable();
     this.sql`DELETE FROM harness_config`;
+    // Sub-agent harness: clear the parent's launched-run records + reset the
+    // child facet so a fresh subagent run starts from zero.
+    try {
+      this.sql`DELETE FROM cf_agent_tool_runs`;
+    } catch {
+      // Table not created until the first agent-tool run.
+    }
+    try {
+      const child = await this.subAgent(
+        DeployChurnSubAgentChild,
+        SUB_AGENT_CHILD_RUN_ID
+      );
+      await child.resetChild();
+    } catch {
+      // Child facet may not exist yet.
+    }
     this.log("harness:reset", { clearedIncidents: incidents.length });
     return { ok: true };
+  }
+
+  /**
+   * Switch the agent into sub-agent mode: a `runTask` `agentTool()` parent over
+   * the `DeployChurnSubAgentChild` ledger. The orchestrator then sends a normal
+   * chat turn (which triggers the single `runTask` call) and fires real deploys
+   * mid-child-loop. Returns the stable child runId so the orchestrator can poll.
+   */
+  @callable()
+  async configureSubAgentRun(): Promise<{ ok: true; childRunId: string }> {
+    this._setHarnessConfig("mode", "subagent");
+    this.log("subagent:configured", { childRunId: SUB_AGENT_CHILD_RUN_ID });
+    return { ok: true, childRunId: SUB_AGENT_CHILD_RUN_ID };
+  }
+
+  @callable()
+  async getSubAgentStatus(): Promise<{
+    parentChildStatus: string | null;
+    childRunRowCount: number;
+    parentHasFiberRows: boolean;
+    turns: TurnRecord[];
+    incidents: ChatRecoveryIncidentRecord[];
+    child: {
+      totalExecutions: number;
+      uniqueIndices: number;
+      maxIndex: number;
+      duplicates: Array<{ index: number; count: number }>;
+      recoveryCount: number;
+      assistantMessages: number;
+      hasFiberRows: boolean;
+    } | null;
+  }> {
+    let parentChildStatus: string | null = null;
+    let childRunRowCount = 0;
+    try {
+      const rows = this.sql<{ status: string }>`
+        SELECT status FROM cf_agent_tool_runs WHERE run_id = ${SUB_AGENT_CHILD_RUN_ID} LIMIT 1
+      `;
+      parentChildStatus = rows[0]?.status ?? null;
+      childRunRowCount =
+        this.sql<{ c: number }>`SELECT COUNT(*) AS c FROM cf_agent_tool_runs`[0]
+          ?.c ?? 0;
+    } catch {
+      // Parent agent-tool table not created until the first run.
+    }
+    let child: {
+      totalExecutions: number;
+      uniqueIndices: number;
+      maxIndex: number;
+      duplicates: Array<{ index: number; count: number }>;
+      recoveryCount: number;
+      assistantMessages: number;
+      hasFiberRows: boolean;
+    } | null = null;
+    try {
+      const stub = await this.subAgent(
+        DeployChurnSubAgentChild,
+        SUB_AGENT_CHILD_RUN_ID
+      );
+      child = await stub.getLedgerStatus();
+    } catch {
+      child = null;
+    }
+    return {
+      parentChildStatus,
+      childRunRowCount,
+      parentHasFiberRows: this._hasFiberRows(),
+      turns: (await this.ctx.storage.get<TurnRecord[]>(TURNS_KEY)) ?? [],
+      incidents: await this._listIncidents(),
+      child
+    };
   }
 
   /**
