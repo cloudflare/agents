@@ -8031,6 +8031,25 @@ export class Think<
    * terminal banner regressed to an eternal spinner when recovery gave up under
    * extreme churn (the stable-state wait timing out every attempt until the
    * budget drained). Shared by `_chatRecoveryRetry` and `_chatRecoveryContinue`.
+   *
+   * Exactly-once terminalization is defended by two independent guards:
+   *  1. The `stored?.status === "exhausted"` re-entry guard below — once an
+   *     incident is sealed, a duplicate stale alarm (or retried callback)
+   *     returns before re-firing. The sealed incident is re-persisted even when
+   *     the record was found missing, so a swept record is re-armed for the
+   *     guard on the next alarm.
+   *  2. The durable-submission paths additionally short-circuit earlier at the
+   *     `submission_not_running` check (the submission is already `error` after
+   *     the first give-up). This is the ONLY guard `@cloudflare/ai-chat` lacks
+   *     (no submission layer), so guard #1 carries it there.
+   *
+   * Two residual at-least-once edges, both deliberately accepted as "deliver a
+   * second banner" ≫ "silently drop the turn":
+   *  • No `incidentId` at all in the payload (only reachable via a direct/test
+   *    invocation — every production scheduler carries one): the synthesized
+   *    incident can't be persisted (no key), so guard #1 can't arm.
+   *  • The record is swept AGAIN between two alarms (guard #1 re-persists on the
+   *    first, so this needs a second independent sweep) — vanishingly unlikely.
    */
   private async _exhaustRecoveryAfterStableTimeout(
     callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
@@ -8044,12 +8063,9 @@ export class Think<
       ? await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)
       : null;
 
-    // Re-entry guard: a duplicate stale alarm (or a retried callback) must not
-    // fire `onExhausted` / broadcast the terminal banner twice. Once an
-    // incident is sealed `exhausted`, terminalization already happened. (The
-    // durable-submission paths also short-circuit earlier via the
-    // submission-not-running check, but this covers callers with no submission
-    // — e.g. `@cloudflare/ai-chat`.)
+    // Re-entry guard #1 (see method doc): a sealed incident means
+    // terminalization already happened, so a duplicate stale alarm must not
+    // re-fire `onExhausted` / re-broadcast the banner.
     if (stored?.status === "exhausted") return;
 
     const rootRequestId =

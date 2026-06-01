@@ -3828,6 +3828,22 @@ export class AIChatAgent<
    * `onExhausted` for the terminal banner regressed to an eternal spinner when
    * recovery gave up under extreme churn. Shared by `_chatRecoveryRetry` and
    * `_chatRecoveryContinue`; mirrors the same helper in `@cloudflare/think`.
+   *
+   * Exactly-once terminalization here rests SOLELY on the
+   * `stored?.status === "exhausted"` re-entry guard below — unlike
+   * `@cloudflare/think`, `@cloudflare/ai-chat` has no durable-submission layer
+   * to short-circuit a duplicate alarm earlier. The sealed incident is
+   * re-persisted even when the record was found missing, so a swept record is
+   * re-armed for the guard on the next alarm.
+   *
+   * Two residual at-least-once edges, both deliberately accepted as "deliver a
+   * second banner" ≫ "silently drop the turn":
+   *  • No `incidentId` at all in the payload (only reachable via a direct/test
+   *    invocation — every production scheduler carries one): the synthesized
+   *    incident can't be persisted (no key), so the guard can't arm.
+   *  • The record is swept AGAIN between two alarms (the guard re-persists on
+   *    the first, so this needs a second independent sweep) — vanishingly
+   *    unlikely.
    */
   private async _exhaustRecoveryAfterStableTimeout(
     callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
@@ -3841,9 +3857,9 @@ export class AIChatAgent<
       ? await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)
       : null;
 
-    // Re-entry guard: a duplicate stale alarm (or a retried callback) must not
-    // fire `onExhausted` / broadcast the terminal banner twice. Once an
-    // incident is sealed `exhausted`, terminalization already happened.
+    // Re-entry guard (see method doc): a sealed incident means terminalization
+    // already happened, so a duplicate stale alarm must not re-fire
+    // `onExhausted` / re-broadcast the banner. This is ai-chat's ONLY guard.
     if (stored?.status === "exhausted") return;
 
     const rootRequestId =
