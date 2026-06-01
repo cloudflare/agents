@@ -1452,12 +1452,14 @@ export class ThinkAgentToolParent extends Agent {
   private async reconcileAgentToolRunsForTest(options?: {
     deferFinishHooks?: boolean;
     childInspectionTimeoutMs?: number;
+    reattachTimeoutMs?: number;
   }): Promise<Array<() => Promise<void>>> {
     return (
       this as unknown as {
         _reconcileAgentToolRuns(options?: {
           deferFinishHooks?: boolean;
           childInspectionTimeoutMs?: number;
+          reattachTimeoutMs?: number;
         }): Promise<Array<() => Promise<void>>>;
       }
     )._reconcileAgentToolRuns(options);
@@ -1508,6 +1510,13 @@ export class ThinkAgentToolParent extends Agent {
     };
   }
 
+  /**
+   * A still-running child that reaches terminal *during* the parent's bounded
+   * re-attach window: reconciliation should tail it to terminal and finalize
+   * the parent row `completed` instead of abandoning it `interrupted` (#1630).
+   * The child completes shortly after start (small before-step delay) and the
+   * re-attach budget is generous, so the parent collects the real result.
+   */
   async reconcileRunningThinkChildForTest(
     input: string,
     runId = crypto.randomUUID()
@@ -1517,7 +1526,10 @@ export class ThinkAgentToolParent extends Agent {
     status: string | null;
   }> {
     const child = await this.subAgent(ThinkTestAgent, runId);
-    await child.setBeforeStepAsyncDelay(10_000);
+    // Short delay: the child is genuinely still running when reconciliation
+    // starts, then reaches terminal a moment later — within the re-attach
+    // budget — so the parent tails it to `completed`.
+    await child.setBeforeStepAsyncDelay(200);
     const started = await child.startAgentToolRun(input, { runId });
     this.insertRecoverableParentRunForTest(
       runId,
@@ -1528,14 +1540,55 @@ export class ThinkAgentToolParent extends Agent {
 
     this.events = [];
     this.finishes = [];
+    await this.reconcileAgentToolRunsForTest({ reattachTimeoutMs: 30_000 });
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      status: this.getParentAgentToolStatusForTest(runId)
+    };
+  }
+
+  /**
+   * A tail-able child whose turn never reaches terminal: reconciliation must
+   * re-attach, tail until the bounded re-attach budget is spent, then seal the
+   * parent row `interrupted` so a genuinely hung child can never block recovery
+   * forever (#1630). A small budget threaded through the test seam keeps it
+   * fast.
+   */
+  async reattachStuckTailableThinkChildForTest(
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    elapsedMs: number;
+    status: string | null;
+  }> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    // Long delay → the child stays `running` for the whole (small) re-attach
+    // budget, so the parent times out and interrupts.
+    await child.setBeforeStepAsyncDelay(60_000);
+    const started = await child.startAgentToolRun("stuck tailable child", {
+      runId
+    });
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "ThinkTestAgent",
+      "stuck tailable child",
+      started.startedAt
+    );
+
+    this.events = [];
+    this.finishes = [];
+    const startedAt = Date.now();
     try {
-      await this.reconcileAgentToolRunsForTest();
+      await this.reconcileAgentToolRunsForTest({ reattachTimeoutMs: 200 });
     } finally {
       await child.cancelAgentToolRun(runId, "test cleanup");
     }
     return {
       events: this.events,
       finishes: this.finishes,
+      elapsedMs: Date.now() - startedAt,
       status: this.getParentAgentToolStatusForTest(runId)
     };
   }

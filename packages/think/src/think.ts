@@ -3569,13 +3569,42 @@ export class Think<
 
   async tailAgentToolRun(
     runId: string,
-    options?: { afterSequence?: number }
+    options?: { afterSequence?: number; signal?: AbortSignal }
   ): Promise<ReadableStream<AgentToolStoredChunk>> {
     const self = this;
+    const signal = options?.signal;
+    let closed = false;
+    let forward: ((chunk: AgentToolStoredChunk) => void) | undefined;
+    const detach = () => {
+      if (forward) {
+        self._agentToolForwarders.get(runId)?.delete(forward);
+        forward = undefined;
+      }
+    };
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
+        const close = () => {
+          if (closed) return;
+          closed = true;
+          detach();
+          try {
+            controller.close();
+          } catch {
+            // Already closed.
+          }
+        };
+        // Honor an external abort (e.g. a bounded re-attach budget) so a parent
+        // tailing a still-running child can stop waiting without cancelling the
+        // child itself — closing the stream unblocks the parent's forwarder.
+        if (signal?.aborted) {
+          close();
+          return;
+        }
+        signal?.addEventListener("abort", close, { once: true });
+
         const replayed = await self.getAgentToolChunks(runId, options);
         for (const chunk of replayed) {
+          if (closed) return;
           controller.enqueue(
             agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
           );
@@ -3586,21 +3615,24 @@ export class Think<
         }
         const row = self._readAgentToolChildRun(runId);
         if (!row || row.completed_at !== null) {
-          controller.close();
+          close();
           return;
         }
-        const forward = (chunk: AgentToolStoredChunk) => {
-          if (chunk.sequence > (options?.afterSequence ?? -1)) {
+        forward = (chunk: AgentToolStoredChunk) => {
+          if (closed || chunk.sequence <= (options?.afterSequence ?? -1)) {
+            return;
+          }
+          try {
             controller.enqueue(
               agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
             );
-          }
-        };
-        const close = () => {
-          try {
-            controller.close();
           } catch {
-            // Already closed.
+            // The consumer detached (e.g. a parent's re-attach budget expired
+            // and cancelled the reader) between the RPC cancel arriving and our
+            // `cancel`/`close` running. Drop the chunk instead of surfacing a
+            // "Stream was cancelled" rejection; the child run is unaffected.
+            closed = true;
+            detach();
           }
         };
         const forwarders = self._agentToolForwarders.get(runId) ?? new Set();
@@ -3610,8 +3642,13 @@ export class Think<
         closers.add(close);
         self._agentToolClosers.set(runId, closers);
       },
-      cancel(reason) {
-        void self.cancelAgentToolRun(runId, reason);
+      cancel() {
+        // A consumer detaching from the tail (e.g. a parent's bounded re-attach
+        // budget expiring, via reader.cancel()) is read-only — it must NOT
+        // cancel the child run. Explicit cancellation flows through
+        // cancelAgentToolRun. Mirrors @cloudflare/ai-chat's read-only tail.
+        closed = true;
+        detach();
       }
     });
     return stream as unknown as ReadableStream<AgentToolStoredChunk>;

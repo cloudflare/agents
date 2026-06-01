@@ -2670,10 +2670,17 @@ export class AIChatAgent<
             this._agentToolForwarders.get(runId) ??
             new Set<(chunk: AgentToolStoredChunk) => void>();
           const forward = (chunk: AgentToolStoredChunk) => {
-            if (!closed) {
+            if (closed) return;
+            try {
               controller.enqueue(
                 agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
               );
+            } catch {
+              // The consumer detached (e.g. a parent's bounded re-attach budget
+              // expired) between the read view closing and our close() running.
+              // Drop the chunk instead of surfacing a stream rejection; the
+              // child run is unaffected.
+              close();
             }
           };
           forwarders.add(forward);

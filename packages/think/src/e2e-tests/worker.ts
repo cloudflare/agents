@@ -5,6 +5,7 @@
  */
 import { createWorkersAI } from "workers-ai-provider";
 import { Agent, callable, routeAgentRequest } from "agents";
+import { agentTool } from "agents/agent-tools";
 import { RpcTarget } from "cloudflare:workers";
 import { tool } from "ai";
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
@@ -25,6 +26,7 @@ type Env = {
   ThinkRecoveryHelperAgent: DurableObjectNamespace<ThinkRecoveryHelperAgent>;
   ThinkToolRollbackE2EAgent: DurableObjectNamespace<ThinkToolRollbackE2EAgent>;
   ThinkTaskParentE2EAgent: DurableObjectNamespace<ThinkTaskParentE2EAgent>;
+  ThinkAgentToolNaturalParentE2EAgent: DurableObjectNamespace<ThinkAgentToolNaturalParentE2EAgent>;
   AI: Ai;
   R2: R2Bucket;
 };
@@ -568,6 +570,106 @@ export class ThinkTaskParentE2EAgent extends Think<Env> {
     }
     return {
       parentTaskExecutions: parentRuns,
+      parentRecoveries:
+        (await this.ctx.storage.get<number>("parent:recovery-count")) ?? 0,
+      parentHasFiberRows: (fiberRows[0]?.c ?? 0) > 0,
+      child
+    };
+  }
+}
+
+// The stable runId agentTool() derives from the mock model's tool call id
+// ("task-1") — `agent-tool:${toolCallId}`. getTaskStatus uses it to find the
+// child facet.
+const NATURAL_CHILD_TASK_RUN_ID = "agent-tool:task-1";
+
+/**
+ * Same shape as {@link ThinkTaskParentE2EAgent}, but the seeding task is wired
+ * through `agentTool()` — the NATURAL path that does not hand-pick a stable
+ * runId (#1630). Before the fix, `agentTool()` minted a fresh `nanoid` per
+ * call, so a turn re-run by recovery spawned a brand-new child and re-ran the
+ * whole ledger ("amplification"). After the fix, `agentTool()` derives a stable
+ * runId from the (recovery-preserved) tool call id, so the re-issue re-attaches
+ * to the same idempotent child instead of re-running its work.
+ */
+export class ThinkAgentToolNaturalParentE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override chatRecovery = true;
+  override maxSteps = 50;
+
+  override getModel(): LanguageModel {
+    return createSingleTaskMockModel();
+  }
+
+  override getSystemPrompt(): string {
+    return "Run the seeding task exactly once using runTask.";
+  }
+
+  override getTools(): ToolSet {
+    return {
+      runTask: agentTool(ThinkToolRollbackE2EAgent, {
+        description: "Run the seeding task as a child agent.",
+        inputSchema: z.object({ taskId: z.number() })
+      })
+    };
+  }
+
+  override async onChatRecovery(): Promise<ChatRecoveryOptions> {
+    const n =
+      (await this.ctx.storage.get<number>("parent:recovery-count")) ?? 0;
+    await this.ctx.storage.put("parent:recovery-count", n + 1);
+    return { continue: true };
+  }
+
+  @callable()
+  async getTaskStatus(): Promise<{
+    parentTaskExecutions: number;
+    parentRecoveries: number;
+    parentHasFiberRows: boolean;
+    child: {
+      totalExecutions: number;
+      uniqueIndices: number;
+      maxIndex: number;
+      duplicates: Array<{ index: number; count: number }>;
+      recoveryCount: number;
+      hasFiberRows: boolean;
+    } | null;
+  }> {
+    const parentRunRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agent_tool_runs
+    `;
+    const fiberRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    let child: {
+      totalExecutions: number;
+      uniqueIndices: number;
+      maxIndex: number;
+      duplicates: Array<{ index: number; count: number }>;
+      recoveryCount: number;
+      hasFiberRows: boolean;
+    } | null = null;
+    try {
+      const childStub = await this.subAgent(
+        ThinkToolRollbackE2EAgent,
+        NATURAL_CHILD_TASK_RUN_ID
+      );
+      const ledger = await childStub.getLedgerStatus();
+      child = {
+        totalExecutions: ledger.totalExecutions,
+        uniqueIndices: ledger.uniqueIndices,
+        maxIndex: ledger.maxIndex,
+        duplicates: ledger.duplicates,
+        recoveryCount: ledger.recoveryCount,
+        hasFiberRows: ledger.hasFiberRows
+      };
+    } catch {
+      child = null;
+    }
+    return {
+      // The agentTool() path doesn't write a parent_task_log; the parent run
+      // row count is the closest analogue to "how many times the task ran".
+      parentTaskExecutions: parentRunRows[0]?.c ?? 0,
       parentRecoveries:
         (await this.ctx.storage.get<number>("parent:recovery-count")) ?? 0,
       parentHasFiberRows: (fiberRows[0]?.c ?? 0) > 0,

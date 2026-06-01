@@ -108,4 +108,24 @@ describe("agentTool failure envelope", () => {
 
     expect(out).toBe("all done");
   });
+
+  it("derives a stable runId from the tool call id so recovery re-attaches instead of re-running (#1630)", async () => {
+    let captured: RunAgentToolOptions | undefined;
+    await runWithStub(
+      {
+        runId: "agent-tool:call-1",
+        agentType: "Child",
+        status: "completed",
+        summary: "done"
+      },
+      (options) => {
+        captured = options;
+      }
+    );
+
+    // Stable, derived from the (recovery-preserved) toolCallId — NOT a fresh
+    // nanoid — so a re-issued turn resolves to the same child run.
+    expect(captured?.runId).toBe("agent-tool:call-1");
+    expect(captured?.parentToolCallId).toBe("call-1");
+  });
 });

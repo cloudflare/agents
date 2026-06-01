@@ -34,6 +34,10 @@
       {
         "name": "ThinkTaskParentE2EAgent",
         "class_name": "ThinkTaskParentE2EAgent"
+      },
+      {
+        "name": "ThinkAgentToolNaturalParentE2EAgent",
+        "class_name": "ThinkAgentToolNaturalParentE2EAgent"
       }
     ]
   },
@@ -53,6 +57,10 @@
     {
       "tag": "v3",
       "new_sqlite_classes": ["ThinkTaskParentE2EAgent"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["ThinkAgentToolNaturalParentE2EAgent"]
     }
   ],
   "r2_buckets": [

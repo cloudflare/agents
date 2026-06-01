@@ -257,6 +257,10 @@ export type AgentObservabilityEvent =
       { runId: string; agentType: string; elapsedMs?: number }
     >
   | BaseEvent<
+      "agent_tool:recovery:reattach",
+      { runId: string; agentType: string; budgetMs: number }
+    >
+  | BaseEvent<
       "agent_tool:recovery:complete",
       { runCount: number; elapsedMs?: number }
     >
