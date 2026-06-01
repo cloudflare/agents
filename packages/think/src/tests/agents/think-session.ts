@@ -1019,6 +1019,66 @@ export class ThinkTestAgent extends Think {
   }
 
   /**
+   * #1626 review #3: `TurnConfig.chatStreamStallTimeoutMs` (returned from
+   * `beforeTurn`) overrides the instance-level timeout for a SINGLE turn. Here
+   * the instance watchdog is OFF (`0`) but the per-turn override arms it — so a
+   * stall still fires and routes into bounded recovery. (If the override were
+   * NOT applied, the instance-off watchdog would never fire and `testChat` would
+   * hang; a returning, recovered result proves the override took effect.)
+   */
+  async testChatWithPerTurnStallOverride(perTurnTimeoutMs: number): Promise<{
+    firstError: string | undefined;
+    scheduledContinues: number;
+    finalAssistantText: string;
+  }> {
+    this.chatStreamStallTimeoutMs = 0; // instance watchdog OFF
+    this._turnConfigOverride = { chatStreamStallTimeoutMs: perTurnTimeoutMs };
+    this._stallAfterChunks = 3;
+    this._stallAttemptsRemaining = 1;
+    try {
+      const first = await this.testChat("per-turn stall override");
+      const scheduled = this.sql<{ payload: string }>`
+        SELECT payload FROM cf_agents_schedules
+        WHERE callback = '_chatRecoveryContinue'
+        ORDER BY time ASC LIMIT 1
+      `;
+      const scheduledContinues =
+        this.sql<{ count: number }>`
+          SELECT COUNT(*) as count FROM cf_agents_schedules
+          WHERE callback = '_chatRecoveryContinue'
+        `[0]?.count ?? 0;
+      if (scheduled[0]) {
+        await (
+          this as unknown as {
+            _chatRecoveryContinue(d: unknown): Promise<void>;
+          }
+        )._chatRecoveryContinue(JSON.parse(scheduled[0].payload));
+      }
+      const messages = await this.getMessages();
+      const assistant = messages.filter((m) => m.role === "assistant");
+      const finalAssistant = assistant[assistant.length - 1];
+      const finalAssistantText = finalAssistant
+        ? finalAssistant.parts
+            .filter(
+              (p): p is { type: "text"; text: string } => p.type === "text"
+            )
+            .map((p) => p.text)
+            .join("")
+        : "";
+      return {
+        firstError: first.error,
+        scheduledContinues,
+        finalAssistantText
+      };
+    } finally {
+      this._stallAfterChunks = null;
+      this._stallAttemptsRemaining = null;
+      this._turnConfigOverride = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
+  }
+
+  /**
    * Stream each chunk after `delayMs` with the watchdog armed at `timeoutMs`
    * (> delay). Proves the watchdog resets per chunk and does NOT false-fire on
    * a slow-but-steady stream.
@@ -4043,6 +4103,121 @@ export class ThinkRecoveryTestAgent extends Think {
       `cf:chat-recovery:incident:${encodeURIComponent(incident.incidentId)}`,
       incident
     );
+  }
+
+  /**
+   * #1626: directly exercise the exhausted branch of `_routeStallToBoundedRecovery`.
+   * Seeds an incident at the budget edge (attempt = maxAttempts, aged past the
+   * 30s debounce), then routes one more stall. The route must advance the
+   * incident past the budget and deliver the SAME terminal UX as deploy-recovery
+   * exhaustion (fires `onExhausted`, marks the incident `exhausted`, broadcasts
+   * the configured `terminalMessage`) — NOT leak the raw stall error.
+   *
+   * Driven at the seam (not via the full watchdog/continuation machinery, which
+   * the recover unit test + e2e already cover) so the exhaustion assertion is
+   * deterministic and free of turn-queue/generation timing.
+   */
+  async testStallRouteExhaustion(
+    maxAttempts: number,
+    terminalMessage: string
+  ): Promise<{
+    outcome: string;
+    exhaustedContexts: number;
+    exhaustedReason: string | undefined;
+    incidentStatus: string | undefined;
+    terminalBroadcast: string | undefined;
+  }> {
+    const captured: ChatRecoveryExhaustedContext[] = [];
+    this.chatRecovery = {
+      maxAttempts,
+      terminalMessage,
+      onExhausted: (ctx) => {
+        captured.push(ctx);
+      }
+    };
+    // A user message must be the latest leaf so `latestUserMessageId` resolves
+    // to the same identity the route computes.
+    const userId = `user-${crypto.randomUUID()}`;
+    const self = this as unknown as { _cachedMessages: UIMessage[] };
+    self._cachedMessages = [
+      ...self._cachedMessages,
+      { id: userId, role: "user", parts: [{ type: "text", text: "hi" }] }
+    ];
+    const requestId = `stall-exhaust-${crypto.randomUUID()}`;
+    // Open the incident at attempt = maxAttempts, then age it past the debounce
+    // so the route's begin advances to maxAttempts + 1 → exhausted.
+    const begun = await this.beginIncidentForTest({
+      requestId,
+      recoveryRootRequestId: requestId,
+      latestUserMessageId: userId,
+      recoveryKind: "continue"
+    });
+    for (let i = begun.attempt; i < maxAttempts; i++) {
+      await this.ageIncidentForTest(begun.incidentId, 60_000);
+      await this.beginIncidentForTest({
+        requestId,
+        recoveryRootRequestId: requestId,
+        latestUserMessageId: userId,
+        recoveryKind: "continue"
+      });
+    }
+    await this.ageIncidentForTest(begun.incidentId, 60_000);
+
+    let terminalBroadcast: string | undefined;
+    const realBroadcast = (
+      this as unknown as {
+        _broadcastChat(m: {
+          body?: string;
+          error?: boolean;
+          done?: boolean;
+        }): void;
+      }
+    )._broadcastChat.bind(this);
+    (
+      this as unknown as {
+        _broadcastChat: (m: {
+          body?: string;
+          error?: boolean;
+          done?: boolean;
+        }) => void;
+      }
+    )._broadcastChat = (m) => {
+      if (m.error && m.done) terminalBroadcast = m.body;
+      realBroadcast(m);
+    };
+
+    let outcome: string;
+    try {
+      outcome = await (
+        this as unknown as {
+          _routeStallToBoundedRecovery(i: {
+            requestId: string;
+            streamId: string;
+            partialParts: unknown[];
+            targetAssistantId?: string;
+          }): Promise<string>;
+        }
+      )._routeStallToBoundedRecovery({
+        requestId,
+        streamId: "stall-stream",
+        partialParts: []
+      });
+    } finally {
+      (
+        this as unknown as { _broadcastChat: (m: unknown) => void }
+      )._broadcastChat = realBroadcast as (m: unknown) => void;
+    }
+
+    const incidents = await this.ctx.storage.list<{ status: string }>({
+      prefix: "cf:chat-recovery:incident:"
+    });
+    return {
+      outcome,
+      exhaustedContexts: captured.length,
+      exhaustedReason: captured[0]?.reason,
+      incidentStatus: [...incidents.values()][0]?.status,
+      terminalBroadcast
+    };
   }
 
   async setStashData(data: unknown): Promise<void> {

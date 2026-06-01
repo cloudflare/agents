@@ -534,6 +534,17 @@ describe("Think — error handling", () => {
     expect(result.finalAssistantText.length).toBeGreaterThan(0);
   });
 
+  it("honors a per-turn TurnConfig.chatStreamStallTimeoutMs override even when the instance watchdog is off (#1626)", async () => {
+    const agent = await freshAgent(`stall-perturn-${crypto.randomUUID()}`);
+    // Instance watchdog is OFF; only the per-turn override (from beforeTurn)
+    // arms it. The stall must still fire + route into bounded recovery.
+    const result = await agent.testChatWithPerTurnStallOverride(50);
+
+    expect(result.firstError).toBeUndefined();
+    expect(result.scheduledContinues).toBeGreaterThanOrEqual(1);
+    expect(result.finalAssistantText.length).toBeGreaterThan(0);
+  });
+
   it("should recover and continue chatting after error", async () => {
     const agent = await freshAgent("err-recover");
 
@@ -3609,6 +3620,24 @@ describe("Think — onChatRecovery", () => {
     expect(ctx.streamId).toBe("stream-exctx");
     expect(typeof ctx.createdAt).toBe("number");
     expect(ctx.createdAt).toBeGreaterThan(0);
+  });
+
+  it("routes a stall through the SAME exhaustion path as deploy recovery once the budget is spent — fires onExhausted + delivers terminalMessage, not the raw stall error (#1626)", async () => {
+    const agent = await freshRecoveryAgent("stall-route-exhaust");
+    const terminalMessage = "The assistant was interrupted. Please try again.";
+    const result = await agent.testStallRouteExhaustion(1, terminalMessage);
+
+    // The route reports exhaustion (not "scheduled"/"disabled")...
+    expect(result.outcome).toBe("exhausted");
+    // ...routed through `_exhaustChatRecovery` (deploy-recovery's path), so the
+    // configured `onExhausted` hook fired exactly once with the right reason...
+    expect(result.exhaustedContexts).toBe(1);
+    expect(result.exhaustedReason).toBe("max_attempts_exceeded");
+    // ...the incident is durably sealed `exhausted`...
+    expect(result.incidentStatus).toBe("exhausted");
+    // ...and the user sees the CONFIGURED terminalMessage, not the raw
+    // "Chat stream stalled..." error.
+    expect(result.terminalBroadcast).toBe(terminalMessage);
   });
 });
 

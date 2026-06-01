@@ -1085,6 +1085,16 @@ export interface TurnConfig {
    * for this turn. Defaults to the instance-level `sendReasoning` setting.
    */
   sendReasoning?: boolean;
+  /**
+   * Override the stream-stall inactivity watchdog timeout for THIS turn only
+   * (ms; `0` disables it for this turn). Defaults to the instance-level
+   * `chatStreamStallTimeoutMs`. Because the watchdog measures the gap between
+   * UI-message-stream chunks — which includes server-side tool execution — a
+   * turn known to invoke a slow tool can raise (or disable) the timeout for
+   * just that turn instead of permanently widening the global window. Auto-
+   * resets after the turn.
+   */
+  chatStreamStallTimeoutMs?: number;
   /** Maximum number of tokens to generate for this turn. */
   maxOutputTokens?: Parameters<typeof streamText>[0]["maxOutputTokens"];
   /** Temperature setting for this turn. */
@@ -2234,8 +2244,20 @@ export class Think<
    * and your slowest tool execution, or you will abort healthy long turns.
    *
    * Default `0` (disabled) — opt in by setting a value (e.g. `120_000`).
+   *
+   * Can be overridden per-turn via `TurnConfig.chatStreamStallTimeoutMs`
+   * (returned from `beforeTurn`) for turns with known-slow tools.
    */
   chatStreamStallTimeoutMs = 0;
+
+  /**
+   * Per-turn stall-watchdog timeout resolved from `TurnConfig` in
+   * `_runInferenceLoop`, read by the stream loop when arming the watchdog.
+   * `undefined` falls back to the instance-level `chatStreamStallTimeoutMs`.
+   * Turns are serialized, so a single active value is safe; it is reset at the
+   * top of every `_runInferenceLoop`.
+   */
+  private _activeStallTimeoutMs: number | undefined;
 
   /**
    * Configure the session. Called once during `onStart`.
@@ -2611,6 +2633,9 @@ export class Think<
    * for interception, and calls streamText.
    */
   private async _runInferenceLoop(input: TurnInput): Promise<StreamableResult> {
+    // Reset the per-turn watchdog override; `beforeTurn` may set it below. A
+    // turn that doesn't override falls back to the instance-level value.
+    this._activeStallTimeoutMs = undefined;
     if (this.waitForMcpConnections) {
       const timeout =
         typeof this.waitForMcpConnections === "object"
@@ -2716,6 +2741,11 @@ export class Think<
     const finalTools: ToolSet = this._wrapToolsWithDecision(mergedTools);
     const finalMaxSteps = config.maxSteps ?? this.maxSteps;
     const finalSendReasoning = config.sendReasoning ?? this.sendReasoning;
+    // Resolve the per-turn stall-watchdog override (explicit `0` = off for this
+    // turn). Read by `_streamResult` / `_streamResultToRpcCallback` when arming
+    // the watchdog. `??` so a `0` override is honored, not treated as "unset".
+    this._activeStallTimeoutMs =
+      config.chatStreamStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
     const finalOutput = workflowOutput ?? config.output;
     const finalStopWhen = [
       stepCountIs(finalMaxSteps),
@@ -6299,7 +6329,8 @@ export class Think<
     let streamError: string | undefined;
     let pendingRpcError: string | undefined;
 
-    const stallTimeoutMs = this.chatStreamStallTimeoutMs;
+    const stallTimeoutMs =
+      this._activeStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
     try {
       this._insideInferenceLoop = true;
       const flushState = { chunksSinceFlush: 0, hasFlushedContent: false };
@@ -6418,12 +6449,13 @@ export class Think<
           await this._persistAssistantMessage(assistantMsg);
           this._broadcastMessages();
         }
-        if (
-          await this._routeStallToBoundedRecovery({
-            requestId,
-            targetAssistantId: assistantMsg?.id
-          })
-        ) {
+        const outcome = await this._routeStallToBoundedRecovery({
+          requestId,
+          streamId,
+          partialParts: (assistantMsg ?? accumulator.toMessage()).parts,
+          targetAssistantId: assistantMsg?.id
+        });
+        if (outcome === "scheduled") {
           if (!streamFinalized) {
             this._resumableStream.complete(streamId);
             streamFinalized = true;
@@ -6441,7 +6473,21 @@ export class Think<
           // the real terminal outcome (mirrors a deploy-interrupted attempt).
           return;
         }
-        // Budget exhausted — fall through to the terminal path below.
+        if (outcome === "exhausted") {
+          // `_routeStallToBoundedRecovery` already delivered the terminal UX
+          // (configured `terminalMessage` + done/error frame + `onExhausted` +
+          // submission interrupted), identical to deploy-recovery exhaustion.
+          // Finalize the stream and return WITHOUT the generic terminal path,
+          // which would otherwise re-broadcast the raw stall error.
+          if (!streamFinalized) {
+            this._resumableStream.markError(streamId);
+            streamFinalized = true;
+          }
+          doneSent = true;
+          return;
+        }
+        // outcome === "disabled" (chat recovery off): fall through to the
+        // generic terminal path below (unchanged watchdog behavior).
       }
       if (!streamFinalized) {
         this._resumableStream.markError(streamId);
@@ -6668,7 +6714,8 @@ export class Think<
     let output: unknown;
     const flushState = { chunksSinceFlush: 0, hasFlushedContent: false };
 
-    const stallTimeoutMs = this.chatStreamStallTimeoutMs;
+    const stallTimeoutMs =
+      this._activeStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
     try {
       this._insideInferenceLoop = true;
       try {
@@ -6752,24 +6799,25 @@ export class Think<
       // budget is exhausted.
       if (error instanceof ChatStreamStalledError) {
         let targetAssistantId: string | undefined;
+        const partialMsg = accumulator.toMessage();
         if (
           this._turnQueue.generation === clearGen &&
           accumulator.parts.length > 0
         ) {
-          const partial = accumulator.toMessage();
-          await this._persistAssistantMessage(partial, parentId);
+          await this._persistAssistantMessage(partialMsg, parentId);
           this._broadcastMessages();
-          targetAssistantId = partial.id;
+          targetAssistantId = partialMsg.id;
         }
-        if (
-          await this._routeStallToBoundedRecovery({
-            requestId,
-            targetAssistantId
-          })
-        ) {
+        const outcome = await this._routeStallToBoundedRecovery({
+          requestId,
+          streamId,
+          partialParts: partialMsg.parts,
+          targetAssistantId
+        });
+        if (outcome === "scheduled") {
           // Recovering: close the stream cleanly (no terminal error frame); the
           // scheduled continuation drives the turn to completion. Report
-          // `interrupted` so the caller does not terminalize the turn.
+          // `aborted` so the caller does not terminalize the turn.
           this._resumableStream.complete(streamId);
           this._pendingResumeConnections.clear();
           if (!doneSent) {
@@ -6787,8 +6835,20 @@ export class Think<
           // a deploy-interrupted attempt is superseded by its continuation.
           return { status: "aborted" };
         }
-        // Budget exhausted — fall through to the terminal path (the watchdog's
-        // original "kill the spinner" guarantee, now after bounded retries).
+        if (outcome === "exhausted") {
+          // `_routeStallToBoundedRecovery` already delivered the terminal UX
+          // (configured `terminalMessage` + done/error frame + `onExhausted` +
+          // submission interrupted), identical to deploy-recovery exhaustion.
+          // Finalize the stream and report `aborted` (not `error`) so the caller
+          // does not re-run the generic terminal path on top of it.
+          this._resumableStream.markError(streamId);
+          this._pendingResumeConnections.clear();
+          doneSent = true;
+          return { status: "aborted" };
+        }
+        // outcome === "disabled" (chat recovery off): fall through to the
+        // generic terminal path (the watchdog's original "kill the spinner"
+        // guarantee, unchanged).
       }
       streamError = error instanceof Error ? error.message : "Stream error";
       if (options?.captureProgrammaticStreamError) {
@@ -7386,6 +7446,102 @@ export class Think<
     // the TTL sweep; only successful (completed) incidents are deleted eagerly.
   }
 
+  /**
+   * Route a stream-stall watchdog abort into bounded recovery instead of a
+   * terminal error (#1626). A stall happens inside a LIVE isolate (no DO
+   * restart), so the normal restart-detected recovery path never runs — we
+   * open/advance a recovery incident here and schedule a continuation, reusing
+   * the SAME budget (`maxAttempts` + wall-clock window + progress-aware reset)
+   * as deploy/eviction recovery. A transient hang recovers; a persistently
+   * hanging provider exhausts the budget. Idempotency matches deploy recovery:
+   * settled tool results are durable and won't re-run, but a tool that was
+   * mid-execution when the stall fired re-runs on the continuation.
+   *
+   * Returns:
+   * - `"scheduled"` — a continuation was scheduled; the caller suppresses the
+   *   terminal error and closes the stream cleanly.
+   * - `"exhausted"` — the budget is spent; this routes through the SAME
+   *   `_exhaustChatRecovery` path as deploy recovery (fires `onExhausted`,
+   *   emits `chat:recovery:exhausted`, marks the submission interrupted, and
+   *   delivers the configured `terminalMessage`). The caller must NOT run the
+   *   generic terminal path — the terminal UX is already delivered.
+   * - `"disabled"` — chat recovery is off; the caller falls through to the
+   *   generic terminal error (the watchdog's original "kill the spinner"
+   *   behavior, unchanged).
+   */
+  private async _routeStallToBoundedRecovery(input: {
+    requestId: string;
+    streamId: string;
+    partialParts: MessagePart[];
+    targetAssistantId?: string;
+  }): Promise<"scheduled" | "exhausted" | "disabled"> {
+    // Stall-recovery is automatic only when chat recovery is enabled (the
+    // default for Think). With recovery off, a stall stays terminal — there is
+    // no budget/continuation machinery to route into.
+    if (!this._resolveChatRecoveryConfig().enabled) return "disabled";
+    const recoveryRootRequestId =
+      this._activeChatRecoveryRootRequestId ?? input.requestId;
+    const latestUserMessageId =
+      [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
+    const { incident, config, exhausted } =
+      await this._beginChatRecoveryIncident({
+        requestId: input.requestId,
+        recoveryRootRequestId,
+        latestUserMessageId,
+        recoveryKind: "continue"
+      });
+    if (exhausted) {
+      // Budget spent: deliver the SAME terminal UX as deploy-recovery
+      // exhaustion (terminalMessage + onExhausted + chat:recovery:exhausted +
+      // submission interrupted) instead of letting the raw stall error leak
+      // out. `firstSeenAt` is the closest available turn-start proxy here.
+      const partialText = input.partialParts
+        .filter(
+          (p): p is { type: "text"; text: string } =>
+            (p as { type?: string }).type === "text"
+        )
+        .map((p) => p.text)
+        .join("");
+      await this._exhaustChatRecovery(
+        incident,
+        config,
+        { text: partialText, parts: input.partialParts },
+        input.streamId,
+        incident.firstSeenAt
+      );
+      return "exhausted";
+    }
+    await this._updateChatRecoveryIncident(incident.incidentId, "scheduled");
+    this._emit("chat:recovery:scheduled", {
+      incidentId: incident.incidentId,
+      requestId: input.requestId,
+      attempt: incident.attempt,
+      maxAttempts: incident.maxAttempts,
+      recoveryKind: "continue"
+    });
+    // If a durable submission is running for this turn, the continuation must
+    // complete it (otherwise the submission hangs) — same as deploy recovery.
+    const recoveredRequestId = this._hasRunningSubmission(recoveryRootRequestId)
+      ? recoveryRootRequestId
+      : undefined;
+    await this.schedule(
+      0,
+      "_chatRecoveryContinue",
+      {
+        ...(input.targetAssistantId
+          ? { targetAssistantId: input.targetAssistantId }
+          : {}),
+        originalRequestId: recoveryRootRequestId,
+        incidentId: incident.incidentId,
+        lastBody: this._lastBody ?? null,
+        lastClientTools: this._lastClientTools ?? null,
+        ...(recoveredRequestId ? { recoveredRequestId } : {})
+      },
+      { idempotent: true }
+    );
+    return "scheduled";
+  }
+
   protected override async _handleInternalFiberRecovery(
     ctx: FiberRecoveryContext
   ): Promise<boolean> {
@@ -7752,73 +7908,6 @@ export class Think<
    * one path can't silently diverge from the other. Mirrors the same helper in
    * `@cloudflare/ai-chat`.
    */
-  /**
-   * Route a stream-stall watchdog abort into bounded recovery instead of a
-   * terminal error (#1626). A stall happens inside a LIVE isolate (no DO
-   * restart), so the normal restart-detected recovery path never runs — we
-   * open/advance a recovery incident here and schedule a continuation, reusing
-   * the SAME budget (`maxAttempts` + wall-clock window + progress-aware reset)
-   * as deploy/eviction recovery. A transient hang recovers; a persistently
-   * hanging provider exhausts the budget and the caller falls back to terminal
-   * (the watchdog's original "kill the spinner" guarantee, just after bounded
-   * retries). Idempotency matches deploy recovery: settled tool results are
-   * durable and won't re-run, but a tool that was mid-execution when the stall
-   * fired re-runs on the continuation.
-   *
-   * Returns `true` if a continuation was scheduled (caller suppresses the
-   * terminal error), `false` if the budget is exhausted (caller falls through
-   * to the existing terminal path; the incident is already marked exhausted).
-   */
-  private async _routeStallToBoundedRecovery(input: {
-    requestId: string;
-    targetAssistantId?: string;
-  }): Promise<boolean> {
-    // Stall-recovery is automatic only when chat recovery is enabled (the
-    // default for Think). With recovery off, a stall stays terminal — there is
-    // no budget/continuation machinery to route into.
-    if (!this._resolveChatRecoveryConfig().enabled) return false;
-    const recoveryRootRequestId =
-      this._activeChatRecoveryRootRequestId ?? input.requestId;
-    const latestUserMessageId =
-      [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
-    const { incident, exhausted } = await this._beginChatRecoveryIncident({
-      requestId: input.requestId,
-      recoveryRootRequestId,
-      latestUserMessageId,
-      recoveryKind: "continue"
-    });
-    if (exhausted) return false;
-    await this._updateChatRecoveryIncident(incident.incidentId, "scheduled");
-    this._emit("chat:recovery:scheduled", {
-      incidentId: incident.incidentId,
-      requestId: input.requestId,
-      attempt: incident.attempt,
-      maxAttempts: incident.maxAttempts,
-      recoveryKind: "continue"
-    });
-    // If a durable submission is running for this turn, the continuation must
-    // complete it (otherwise the submission hangs) — same as deploy recovery.
-    const recoveredRequestId = this._hasRunningSubmission(recoveryRootRequestId)
-      ? recoveryRootRequestId
-      : undefined;
-    await this.schedule(
-      0,
-      "_chatRecoveryContinue",
-      {
-        ...(input.targetAssistantId
-          ? { targetAssistantId: input.targetAssistantId }
-          : {}),
-        originalRequestId: recoveryRootRequestId,
-        incidentId: incident.incidentId,
-        lastBody: this._lastBody ?? null,
-        lastClientTools: this._lastClientTools ?? null,
-        ...(recoveredRequestId ? { recoveredRequestId } : {})
-      },
-      { idempotent: true }
-    );
-    return true;
-  }
-
   private async _rescheduleRecoveryAfterStableTimeout(
     callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
