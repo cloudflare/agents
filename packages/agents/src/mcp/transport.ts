@@ -415,22 +415,38 @@ export class StreamableHTTPServerTransport implements Transport {
     this.onclose?.();
   }
 
+  /**
+   * Single canonical send: store the event, decide whether this is the
+   * final response, run post-write cleanup, and write the SSE frame iff
+   * a live connection is attached.
+   *
+   * Called from both the live-connection happy path and the no-live-
+   * connection fallback. The caller resolves `streamId` and `relatedIds`
+   * (from connection state or persisted reverse lookup) and passes
+   * `liveConnection` as null when the originating WS has dropped.
+   *
+   * Ordering note: writeSSEEvent runs LAST. The previous version of
+   * this PR cleared events before writing the close frame, which
+   * deleted the very event the `id:` line referenced — a client
+   * losing the WS pipe at that exact moment could reconnect with
+   * Last-Event-ID and find nothing to replay. With cleanup after the
+   * write, every event up to and including the final response is
+   * replayable while the in-flight stream is open. Trade-off: if the
+   * WS message is enqueued but the client TCP dies before the bytes
+   * arrive, that one final message is lost. Accepted in exchange for
+   * not running any background cleanup.
+   */
   private async sendOnStream(
     agent: McpAgent,
-    connection: Connection<TransportConnState>,
+    streamId: string,
+    relatedIds: RequestId[],
+    liveConnection: Connection<TransportConnState> | null,
     message: JSONRPCMessage,
     requestId: RequestId
   ): Promise<void> {
-    const streamId = connection.state?.streamId ?? connection.id;
-
-    let eventId: string | undefined;
-
-    if (this._eventStore) {
-      eventId = await this._eventStore.storeEvent(streamId, message);
-    }
+    const eventId = await this._eventStore?.storeEvent(streamId, message);
 
     let shouldClose = false;
-
     if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
       let responseIds = this._streamResponseIds.get(streamId);
       if (!responseIds) {
@@ -438,22 +454,31 @@ export class StreamableHTTPServerTransport implements Transport {
         this._streamResponseIds.set(streamId, responseIds);
       }
       responseIds.add(requestId);
-      const relatedIds = connection.state?.requestIds ?? [];
-      // Check if we have responses for all requests using this connection.
       shouldClose = relatedIds.every((id) => responseIds.has(id));
 
       if (shouldClose) {
         this._streamResponseIds.delete(streamId);
-
-        // POST stream is fully responded — drop the persisted requestIds
-        // mapping and the stored events. No client should resume past
-        // this point.
+        // Ordering: deleteStreamRequestIds → clearStream. The tiny
+        // window between these two awaits where a concurrent GET resume
+        // sees no persisted requestIds and starts iterating events
+        // that `clearStream` is about to delete is benign — the replay
+        // `send` callback writes synchronously to the WS, so the worst
+        // case is replaying a few events that are immediately garbage-
+        // collected.
         await agent.deleteStreamRequestIds(streamId);
-        const clearable = this._eventStore as ClearableEventStore | undefined;
-        await clearable?.clearStream?.(streamId);
+        if (this._eventStore && isClearableEventStore(this._eventStore)) {
+          await this._eventStore.clearStream(streamId);
+        }
       }
     }
-    this.writeSSEEvent(connection, message, eventId, shouldClose);
+
+    // If `liveConnection` is null the close frame is intentionally
+    // dropped — there's nowhere to write it. The client's eventual
+    // reconnect with Last-Event-ID gets nothing back (cleanup ran above),
+    // and the spec lets them treat the response as final on its own.
+    if (liveConnection) {
+      this.writeSSEEvent(liveConnection, message, eventId, shouldClose);
+    }
   }
 
   async send(
@@ -512,17 +537,10 @@ export class StreamableHTTPServerTransport implements Transport {
 
   /**
    * Message scoped to a specific in-flight client request: a tool
-   * response, error, or progress notification. Stored unconditionally
-   * so a client that reconnects with Last-Event-ID can replay it, and
-   * written to the wire if the originating connection is still live.
-   *
-   * On the final response of a POST stream the persisted requestIds
-   * mapping and the stored events are both dropped — *after* the write,
-   * so the `id:` referenced by the close frame is still resolvable up
-   * to the moment the client receives it. Trade-off: if the WS pipe
-   * is enqueued but the client TCP dies before the bytes arrive, that
-   * one final message is lost. Accepted in exchange for not running
-   * any background cleanup.
+   * response, error, or progress notification. Resolves which stream
+   * owns the request id (live POST connection, resumed GET, or
+   * persisted reverse lookup for a dropped WS) and delegates to
+   * {@link sendOnStream} for the actual store / write / cleanup.
    */
   private async sendForRequest(
     message: JSONRPCMessage,
@@ -546,8 +564,7 @@ export class StreamableHTTPServerTransport implements Transport {
     const liveConnection =
       matchingConnections.find(
         (conn) => conn.id === originatingConnection?.id
-      ) ??
-      (matchingConnections.length === 1 ? matchingConnections[0] : undefined);
+      ) ?? (matchingConnections.length === 1 ? matchingConnections[0] : null);
 
     // Ambiguous routing: multiple live POST connections claim the same
     // request id, none of which is the originating connection. Terminate
@@ -560,72 +577,44 @@ export class StreamableHTTPServerTransport implements Transport {
       };
       await Promise.all(
         matchingConnections.map((candidate) =>
-          this.sendOnStream(agent, candidate, routingError, requestId)
+          this.sendOnStream(
+            agent,
+            candidate.state?.streamId ?? candidate.id,
+            candidate.state?.requestIds ?? [],
+            candidate,
+            routingError,
+            requestId
+          )
         )
       );
       return;
     }
 
-    // Happy path: a single live connection owns this request. `sendOnStream`
-    // stores the event, decides shouldClose, writes the SSE frame, and runs
-    // post-write cleanup.
-    if (liveConnection) {
-      await this.sendOnStream(agent, liveConnection, message, requestId);
-      return;
-    }
-
-    // No live connection. Fall back to the persisted `requestId -> streamId`
-    // reverse lookup so we can still record the event for replay when the
-    // originating WS has dropped — mirrors the SDK's
-    // `_requestToStreamMapping`. The fallback returns `requestIds` alongside
-    // `streamId` so we don't need a second storage read to decide
-    // shouldClose below.
-    const stored = await agent.getStreamForRequestId(requestId);
-    if (!stored) {
-      throw new Error(
-        `No active stream found for request ID: ${String(requestId)}`
-      );
-    }
-    const { streamId, requestIds: persistedRequestIds } = stored;
-
-    const eventId = await this._eventStore?.storeEvent(streamId, message);
-
-    const isResponse =
-      isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message);
-    let shouldClose = false;
-    if (isResponse) {
-      let responseIds = this._streamResponseIds.get(streamId);
-      if (!responseIds) {
-        responseIds = new Set<RequestId>();
-        this._streamResponseIds.set(streamId, responseIds);
+    // Resolve streamId + relatedIds. Prefer the live connection's state;
+    // when the originating WS has dropped fall back to the persisted
+    // reverse lookup so the event can still be stored for replay —
+    // mirrors the SDK's `_requestToStreamMapping` which outlives
+    // connection loss.
+    let streamId = liveConnection?.state?.streamId;
+    let relatedIds = liveConnection?.state?.requestIds;
+    if (!streamId) {
+      const stored = await agent.getStreamForRequestId(requestId);
+      if (!stored) {
+        throw new Error(
+          `No active stream found for request ID: ${String(requestId)}`
+        );
       }
-      responseIds.add(requestId);
-      shouldClose = persistedRequestIds.every((id) => responseIds.has(id));
-      if (shouldClose) this._streamResponseIds.delete(streamId);
+      streamId = stored.streamId;
+      relatedIds = stored.requestIds;
     }
 
-    // The close frame (shouldClose=true) is intentionally dropped here —
-    // there's no live connection to write it to. The client's eventual
-    // reconnect with Last-Event-ID will replay the final event (until
-    // cleanup runs below), receive no further messages, and the spec lets
-    // them treat the response as final on its own. Trade-off called out
-    // in send()'s docstring: the only message that can be lost is the one
-    // already enqueued on a dropped WS pipe.
-    void eventId;
-
-    if (shouldClose) {
-      // Ordering note: there is a tiny window between the
-      // `deleteStreamRequestIds` await and the `clearStream` await where a
-      // concurrent GET resume on this stream would find no persisted
-      // requestIds, treat the connection as a completed-POST one-shot
-      // replay, and start iterating events that `clearStream` is about to
-      // delete. The replay `send` callback writes synchronously to the WS,
-      // so the worst case is replaying a few events that are immediately
-      // garbage-collected — benign.
-      await agent.deleteStreamRequestIds(streamId);
-      if (this._eventStore && isClearableEventStore(this._eventStore)) {
-        await this._eventStore.clearStream(streamId);
-      }
-    }
+    await this.sendOnStream(
+      agent,
+      streamId,
+      relatedIds ?? [],
+      liveConnection,
+      message,
+      requestId
+    );
   }
 }
