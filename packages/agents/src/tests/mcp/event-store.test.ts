@@ -100,6 +100,25 @@ describe("DurableObjectEventStore", () => {
     expect(ids).toEqual(sorted);
   });
 
+  it("issues globally-unique ids across streams in a session", async () => {
+    // MCP: the SSE event id MUST be globally unique across all streams
+    // within a session. Our ids are `<streamId>:<seqHex>`, so two
+    // streams can reuse the same seq yet never collide.
+    const seen = new Set<string>();
+    for (const stream of ["a", "b", "c"]) {
+      for (let i = 0; i < 4; i++) {
+        const id = await store.storeEvent(stream, msg(i));
+        expect(seen.has(id)).toBe(false);
+        seen.add(id);
+      }
+    }
+    expect(seen.size).toBe(12);
+    // Same seq across streams produces distinct ids.
+    const seqSuffix = (1).toString(16).padStart(16, "0");
+    expect(seen.has(`a:${seqSuffix}`)).toBe(true);
+    expect(seen.has(`b:${seqSuffix}`)).toBe(true);
+  });
+
   it("getStreamIdForEventId extracts the stream id without a storage hit", async () => {
     const id = await store.storeEvent("stream-xyz", msg(1));
     storage.putCalls = 0; // reset
