@@ -240,16 +240,10 @@ export class StreamableHTTPServerTransport implements Transport {
             // same stream will see the second close the first. That
             // matches the last-writer-wins semantic and is what a
             // client retrying a reconnect would expect anyway.
-            // Per-conn try/catch: close on an already-dead socket can
-            // throw; don't let it block the rest of the loop.
             for (const other of agent.getConnections<TransportConnState>()) {
               if (other.id === connection.id) continue;
               if (other.state?.streamId !== resumedStreamId) continue;
-              try {
-                other.close(1000, "Superseded by resumed stream");
-              } catch (error) {
-                this.onerror?.(error as Error);
-              }
+              other.close(1000, "Superseded by resumed stream");
             }
           }
         }
