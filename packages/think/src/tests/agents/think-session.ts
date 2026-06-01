@@ -1407,6 +1407,51 @@ export class ThinkAgentToolParent extends Agent {
     });
   }
 
+  /**
+   * A run that was previously sealed `interrupted` (recovery gave up) but whose
+   * child has since reached terminal. Re-issuing with the same runId must
+   * RE-ATTACH and repair the parent row to the child's real result, not return
+   * the stale `interrupted` (#1630 — `interrupted` is a soft, repairable
+   * terminal). Without the fix, the model would see a retryable failure and
+   * re-run the child's already-completed work.
+   */
+  async reissueInterruptedThinkChildForTest(
+    input: string,
+    runId = crypto.randomUUID()
+  ): Promise<{ status: string | null; reissueStatus: string }> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    const started = await child.startAgentToolRun(input, { runId });
+    await this.waitForTerminalInspectionForTest(child, runId);
+
+    // Seal the parent row `interrupted`, as a prior recovery that exhausted its
+    // re-attach budget would have.
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, input_preview,
+        input_redacted, status, display_metadata, display_order,
+        started_at, completed_at
+      ) VALUES (
+        ${runId}, 'think-tool-call', 'ThinkTestAgent',
+        ${JSON.stringify(input)}, 1, 'interrupted',
+        ${JSON.stringify({ name: "think child" })}, 0,
+        ${started.startedAt}, ${Date.now()}
+      )
+    `;
+
+    this.events = [];
+    this.finishes = [];
+    const result = await this.runAgentTool(ThinkTestAgent, {
+      runId,
+      parentToolCallId: "think-tool-call",
+      input,
+      inputPreview: input
+    });
+    return {
+      status: this.getParentAgentToolStatusForTest(runId),
+      reissueStatus: result.status
+    };
+  }
+
   private insertRecoverableParentRunForTest(
     runId: string,
     agentType: string,

@@ -64,6 +64,10 @@ type ThinkAgentToolParentStub = DurableObjectStub & {
     stuckStatus: string | null;
     fastStatus: string | null;
   }>;
+  reissueInterruptedThinkChildForTest(
+    input: string,
+    runId?: string
+  ): Promise<{ status: string | null; reissueStatus: string }>;
   reconcileStuckThinkChildWithTimeoutForTest(runId?: string): Promise<{
     events: AgentToolEventMessage[];
     finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
@@ -375,6 +379,23 @@ describe("Think agent tools", () => {
     // (earlier-started) stuck child is still burning its budget in parallel.
     expect(fastStatus).toBe("completed");
     expect(stuckStatus).toBe("interrupted");
+  });
+
+  it("repairs an interrupted run by re-attaching on re-issue (#1630)", async () => {
+    const parent = await freshParent();
+    const runId = crypto.randomUUID();
+
+    const { status, reissueStatus } =
+      await parent.reissueInterruptedThinkChildForTest(
+        "repair after interrupt",
+        runId
+      );
+
+    // `interrupted` is soft: a re-issue re-attaches and collects the child's
+    // real (completed) result, repairing the parent row instead of returning
+    // the stale interrupted.
+    expect(reissueStatus).toBe("completed");
+    expect(status).toBe("completed");
   });
 
   it("bounds Think recovery when child facet startup never completes", async () => {

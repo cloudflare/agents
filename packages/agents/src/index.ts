@@ -7116,7 +7116,15 @@ export class Agent<
     const agentType = cls.name;
     const existing = this._readAgentToolRun(runId);
     if (existing) {
-      if (this._isAgentToolTerminal(existing.status)) {
+      // HARD terminals (completed/error/aborted) are returned as-is. `interrupted`
+      // is a SOFT terminal — recovery gave up once, but the child may have
+      // reached its real terminal since — so it falls through to the re-attach
+      // path below (which can repair the row), exactly like a non-terminal run.
+      if (
+        existing.status === "completed" ||
+        existing.status === "error" ||
+        existing.status === "aborted"
+      ) {
         if (existing.status === "completed" && existing.output_json == null) {
           try {
             const child = await this.subAgent(
@@ -7143,7 +7151,8 @@ export class Agent<
         }
         return this._resultFromAgentToolRow<Output>(existing);
       }
-      // Duplicate non-terminal runId: the child is still in flight (typically a
+      // Non-terminal or soft-terminal (`interrupted`) runId: the child may still
+      // be in flight or may have reached terminal since we gave up (typically a
       // re-issue after parent recovery re-runs the same turn with a stable
       // runId — the documented "correct pattern"). Re-attach to the live child
       // and tail it to terminal instead of abandoning it as `interrupted` and
@@ -7573,6 +7582,11 @@ export class Agent<
     result: RunAgentToolResult<Output>,
     completedAt = Date.now()
   ): void {
+    // `interrupted` is a SOFT terminal — recovery gave up collecting, but the
+    // child (a durable facet) may still reach its real terminal. So it is NOT
+    // in the guard below: a later child completion (via a re-issue's re-attach,
+    // #1630) can repair an `interrupted` row to `completed`/`error`. The three
+    // HARD terminals are never overwritten.
     this.sql`
       UPDATE cf_agent_tool_runs
       SET status = ${result.status},
@@ -7581,7 +7595,7 @@ export class Agent<
           error_message = ${result.error ?? null},
           completed_at = ${completedAt}
       WHERE run_id = ${runId}
-        AND status NOT IN ('completed', 'error', 'aborted', 'interrupted')
+        AND status NOT IN ('completed', 'error', 'aborted')
     `;
     if (result.status === "completed" && result.output !== undefined) {
       this.sql`
@@ -8230,8 +8244,9 @@ export class Agent<
         typeof recovery.adapter.tailAgentToolRun === "function"
       ) {
         // Defer to the parallel re-attach pass — keep the row non-terminal so
-        // re-attach can collect the child's real terminal result. `tailAgentToolRun`
-        // replays stored chunks (afterSequence: -1), so no stored-chunk broadcast here.
+        // re-attach can collect the child's real terminal result. No stored-chunk
+        // broadcast here: re-attach forwards only new chunks, and a reconnected
+        // client already replays stored chunks via `_replayAgentToolRuns`.
         reattachQueue.push({ row, adapter: recovery.adapter });
         continue;
       }
