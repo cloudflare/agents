@@ -65,6 +65,7 @@ export { AbortRegistry } from "./abort-registry";
 export {
   applyToolUpdate,
   toolResultUpdate,
+  crossMessageToolResultUpdate,
   toolApprovalUpdate,
   type ToolPartUpdate
 } from "./tool-state";

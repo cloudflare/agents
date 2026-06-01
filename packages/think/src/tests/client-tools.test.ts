@@ -1,6 +1,7 @@
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
+import { subscribe } from "agents/observability";
 import type { UIMessage } from "ai";
 import type { ChatResponseResult } from "../think";
 
@@ -801,6 +802,53 @@ describe("Think — auto-continuation", () => {
     });
 
     await closeWS(ws);
+  });
+
+  it("treats a pending approved tool as complete — no spurious transcript-repair backstop (#1627)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setServerApprovalToolMode(true);
+
+    // While its continuation runs, the approved tool sits at
+    // `approval-responded` with no result yet. It must NOT be flagged by the
+    // incomplete-tool-call backstop: `convertToModelMessages` keeps and
+    // executes the call, so flagging it would log a misleading "repair gap"
+    // warning and emit a spurious `chat:transcript:repaired` event.
+    const repairedToolCallIds: Array<string[] | undefined> = [];
+    const unsubscribe = subscribe("transcript", (event) => {
+      if (event.type === "chat:transcript:repaired" && event.name === room) {
+        repairedToolCallIds.push(event.payload.toolCallIds);
+      }
+    });
+
+    try {
+      const { ws } = await connectWS(room);
+      await collectMessages(ws, 3);
+
+      const initialDone = waitForDone(ws, 15000);
+      sendChatRequest(ws, [makeUserMessage("update my trigger")]);
+      await initialDone;
+
+      const continuationDone = waitForDone(ws, 15000);
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_APPROVAL,
+          toolCallId: "tc-server-approval-1",
+          approved: true,
+          autoContinue: true
+        })
+      );
+      await continuationDone;
+
+      expect(await agent.getServerApprovalToolExecutions()).toBe(1);
+      expect(
+        repairedToolCallIds.some((ids) => ids?.includes("tc-server-approval-1"))
+      ).toBe(false);
+
+      await closeWS(ws);
+    } finally {
+      unsubscribe();
+    }
   });
 
   it("does not execute a rejected server approval tool and retains denial", async () => {

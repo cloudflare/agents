@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   applyToolUpdate,
   toolResultUpdate,
+  crossMessageToolResultUpdate,
   toolApprovalUpdate
 } from "../tool-state";
 
@@ -49,6 +50,122 @@ describe("toolResultUpdate", () => {
       state: "input-available"
     });
     expect(applied.errorText).toBe("Tool execution denied by user");
+  });
+});
+
+describe("crossMessageToolResultUpdate", () => {
+  it("matches the broad set of pre-terminal and terminal states", () => {
+    const update = crossMessageToolResultUpdate("tc1", "output-available", 1);
+    expect(update.matchStates).toEqual([
+      "input-streaming",
+      "input-available",
+      "approval-requested",
+      "approval-responded",
+      "output-available",
+      "output-error",
+      "output-denied"
+    ]);
+  });
+
+  it("resolves an approved tool part to output-available", () => {
+    const update = crossMessageToolResultUpdate("tc1", "output-available", {
+      enabled: true
+    });
+    const applied = update.apply(makePart("tc1", "approval-responded"));
+    expect(applied.state).toBe("output-available");
+    expect(applied.output).toEqual({ enabled: true });
+    // A final result is marked non-preliminary so settled detection works.
+    expect(applied.preliminary).toBe(false);
+  });
+
+  it("preserves a streamed preliminary flag when present", () => {
+    const update = crossMessageToolResultUpdate(
+      "tc1",
+      "output-available",
+      "partial",
+      undefined,
+      true
+    );
+    const applied = update.apply(makePart("tc1", "approval-responded"));
+    expect(applied.state).toBe("output-available");
+    expect(applied.output).toBe("partial");
+    expect(applied.preliminary).toBe(true);
+  });
+
+  it("resolves to output-error with the provided errorText", () => {
+    const update = crossMessageToolResultUpdate(
+      "tc1",
+      "output-error",
+      undefined,
+      "Trigger update failed"
+    );
+    const applied = update.apply(makePart("tc1", "approval-responded"));
+    expect(applied.state).toBe("output-error");
+    expect(applied.errorText).toBe("Trigger update failed");
+  });
+
+  it("uses a default errorText when none is provided", () => {
+    const update = crossMessageToolResultUpdate("tc1", "output-error");
+    const applied = update.apply(makePart("tc1", "approval-responded"));
+    expect(applied.errorText).toBe("Tool execution failed");
+  });
+
+  it("is first-write-wins: returns the same reference for a settled part", () => {
+    const update = crossMessageToolResultUpdate(
+      "tc1",
+      "output-available",
+      "replayed-output"
+    );
+
+    for (const state of ["output-available", "output-error", "output-denied"]) {
+      const part = makePart("tc1", state, { output: "original" });
+      const applied = update.apply(part);
+      // Same reference signals an idempotent no-op so callers skip the
+      // durable write + broadcast — and the original output is never lost.
+      expect(applied).toBe(part);
+      expect(applied.output).toBe("original");
+    }
+  });
+
+  it("does not overwrite an errored tool on replay", () => {
+    const update = crossMessageToolResultUpdate(
+      "tc1",
+      "output-available",
+      "late-success"
+    );
+    const part = makePart("tc1", "output-error", { errorText: "boom" });
+    const applied = update.apply(part);
+    expect(applied).toBe(part);
+    expect(applied.state).toBe("output-error");
+    expect(applied.errorText).toBe("boom");
+  });
+
+  it("matches a terminal part via applyToolUpdate but yields an unchanged reference", () => {
+    // toolResultUpdate would return null here (terminal not in its match
+    // states); the cross-message builder matches so a replay still resolves
+    // to the part, but apply leaves it untouched.
+    const parts = [makePart("tc1", "output-available", { output: "done" })];
+    const result = applyToolUpdate(
+      parts,
+      crossMessageToolResultUpdate("tc1", "output-available", "done-again")
+    );
+    expect(result).not.toBeNull();
+    expect(result!.parts[result!.index]).toBe(parts[result!.index]);
+  });
+
+  it("transitions a fresh approval-responded part via applyToolUpdate", () => {
+    const parts = [
+      makePart("tc1", "approval-responded", { approval: { approved: true } })
+    ];
+    const result = applyToolUpdate(
+      parts,
+      crossMessageToolResultUpdate("tc1", "output-available", { ok: 1 })
+    );
+    expect(result).not.toBeNull();
+    expect(result!.parts[0]).not.toBe(parts[0]);
+    expect(result!.parts[0]).toEqual(
+      expect.objectContaining({ state: "output-available", output: { ok: 1 } })
+    );
   });
 });
 
