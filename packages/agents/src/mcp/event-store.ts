@@ -100,19 +100,22 @@ export class DurableObjectEventStore implements EventStore {
     if (!streamId) return "";
 
     const prefix = `${DurableObjectEventStore.EVENT_KEY_PREFIX}${streamId}:`;
-    const lastKey = `${DurableObjectEventStore.EVENT_KEY_PREFIX}${lastEventId}`;
+    // `list({ start })` is inclusive, and we want strictly-after
+    // semantics. Appending `\x00` (the smallest byte) to `lastKey`
+    // produces a key that sorts immediately after it, so the list
+    // result excludes `lastKey` itself without needing a post-filter.
+    const startKey = `${DurableObjectEventStore.EVENT_KEY_PREFIX}${lastEventId}\x00`;
     // DO `storage.list()` with no `limit` loads everything into memory.
     // Stream histories are normally small (progress events + result),
     // but cap the batch defensively. Clients can reconnect again to
     // drain past the cap if they ever produce that many events.
     const rows = await this.storage.list<JSONRPCMessage>({
       prefix,
-      start: lastKey,
+      start: startKey,
       limit: DurableObjectEventStore.REPLAY_LIMIT
     });
 
     for (const [key, message] of rows) {
-      if (key <= lastKey) continue;
       const eventId = key.slice(
         DurableObjectEventStore.EVENT_KEY_PREFIX.length
       );

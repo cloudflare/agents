@@ -103,27 +103,43 @@ export abstract class McpAgent<
 
   /**
    * Reverse lookup: find which POST stream a given `requestId` belongs
-   * to. Used by the transport when the originating WS has dropped, so
-   * `send()` can still record events for replay (mirrors the SDK's
-   * `_requestToStreamMapping` which outlives connection loss).
+   * to, and return the stream's full `requestIds` list in the same
+   * pass. Used by the transport when the originating WS has dropped,
+   * so `send()` can still record events for replay and decide whether
+   * the stream is fully responded — mirrors the SDK's
+   * `_requestToStreamMapping` which outlives connection loss.
+   *
+   * Returning `requestIds` alongside `streamId` lets `send()` skip a
+   * second `getStreamRequestIds` read on the same key.
    *
    * O(n) in the number of in-flight POST streams — single-digit in
    * practice since each stream is cleaned up on its final response.
    * The `limit` is a defensive ceiling so an abandoned-POST leak can't
-   * unbounded-load this scan.
+   * unbounded-load this scan; if you hit it, something else has gone
+   * wrong and `send()` will throw `No active stream found`.
    *
    * @internal
    */
-  async getStreamIdForRequestId(
+  async getStreamForRequestId(
     requestId: RequestId
-  ): Promise<string | undefined> {
+  ): Promise<{ streamId: string; requestIds: RequestId[] } | undefined> {
+    const STREAM_REQS_SCAN_LIMIT = 1000;
     const rows = await this.ctx.storage.list<RequestId[]>({
       prefix: McpAgent.STREAM_REQS_KEY_PREFIX,
-      limit: 1000
+      limit: STREAM_REQS_SCAN_LIMIT
     });
+    if (rows.size === STREAM_REQS_SCAN_LIMIT) {
+      console.warn(
+        `McpAgent: getStreamForRequestId hit the ${STREAM_REQS_SCAN_LIMIT}-key scan cap; ` +
+          `stale __mcp_stream_reqs__ entries may be accumulating from abandoned POSTs`
+      );
+    }
     for (const [key, requestIds] of rows) {
       if (requestIds?.includes(requestId)) {
-        return key.slice(McpAgent.STREAM_REQS_KEY_PREFIX.length);
+        return {
+          streamId: key.slice(McpAgent.STREAM_REQS_KEY_PREFIX.length),
+          requestIds
+        };
       }
     }
     return undefined;
@@ -642,6 +658,7 @@ export {
 export { getMcpAuthContext, type McpAuthContext } from "./auth-context";
 
 export { DurableObjectEventStore } from "./event-store";
+export type { ClearableEventStore } from "./transport";
 
 export {
   WorkerTransport,

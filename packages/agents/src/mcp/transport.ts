@@ -491,14 +491,20 @@ export class StreamableHTTPServerTransport implements Transport {
     // Find the live connection for this request, if any. Falls back to
     // the persisted `requestId -> streamId` reverse lookup so we can
     // still record the event for replay when the originating WS has
-    // dropped — mirrors the SDK's `_requestToStreamMapping`.
+    // dropped — mirrors the SDK's `_requestToStreamMapping`. The
+    // fallback returns `requestIds` alongside `streamId` so we don't
+    // need a second storage read to decide `shouldClose` below.
     const liveConnection = Array.from(
       agent.getConnections<TransportConnState>()
     ).find((conn) => conn.state?.requestIds?.includes(requestId));
 
-    const streamId =
-      liveConnection?.state?.streamId ??
-      (await agent.getStreamIdForRequestId(requestId));
+    let streamId = liveConnection?.state?.streamId;
+    let persistedRequestIds: RequestId[] | undefined;
+    if (!streamId) {
+      const stored = await agent.getStreamForRequestId(requestId);
+      streamId = stored?.streamId;
+      persistedRequestIds = stored?.requestIds;
+    }
     if (!streamId) {
       throw new Error(
         `No active stream found for request ID: ${String(requestId)}`
@@ -513,15 +519,19 @@ export class StreamableHTTPServerTransport implements Transport {
     if (isResponse) {
       this._requestResponseMap.set(requestId, message);
       const relatedIds =
-        liveConnection?.state?.requestIds ??
-        (await agent.getStreamRequestIds(streamId)) ??
-        [];
+        liveConnection?.state?.requestIds ?? persistedRequestIds ?? [];
       shouldClose = relatedIds.every((id) => this._requestResponseMap.has(id));
       if (shouldClose) {
         for (const id of relatedIds) this._requestResponseMap.delete(id);
       }
     }
 
+    // If `liveConnection` is null the close frame (shouldClose=true)
+    // is intentionally dropped here — there's nowhere to send it. The
+    // client's eventual reconnect with Last-Event-ID will replay the
+    // final event (until cleanup runs below), receive no further
+    // messages, and the spec lets them treat the response as final on
+    // its own. This is the trade-off called out in send()'s docstring.
     if (liveConnection) {
       this.writeSSEEvent(liveConnection, message, eventId, shouldClose);
     }

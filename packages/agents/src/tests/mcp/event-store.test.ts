@@ -272,8 +272,10 @@ describe("DurableObjectEventStore", () => {
           sent.push(id);
         }
       });
-      expect(sent.length).toBeLessThanOrEqual(1000);
-      expect(sent.length).toBeGreaterThan(0);
+      // The cap is exact: REPLAY_LIMIT (1000) events per call.
+      // `start: lastKey + "\x00"` excludes the boundary key, so all
+      // 1000 slots carry replayable events.
+      expect(sent.length).toBe(1000);
     });
   });
 });
