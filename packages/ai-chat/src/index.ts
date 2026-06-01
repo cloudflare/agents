@@ -135,9 +135,10 @@ type ChatRecoveryIncident = {
 
 const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
 // Durable, monotonic forward-progress counter for recovery budget resets.
-// Incremented once per non-empty partial materialized by
-// `_persistOrphanedStream`; never recomputed from the (compactable) transcript.
-// See `_chatRecoveryProgressMarker`.
+// Bumped at production time when new content is streamed (`_storeStreamChunk`),
+// so it reflects genuinely new content and is immune to reconnects/re-persists;
+// never recomputed from the (compactable) transcript. See
+// `_chatRecoveryProgressMarker`.
 const CHAT_RECOVERY_PROGRESS_KEY = "cf:chat-recovery:progress";
 // Secondary backstop only. The primary recovery bound is the no-progress
 // wall clock below; with alarm debounce this cap rarely binds (it catches a
@@ -1303,9 +1304,39 @@ export class AIChatAgent<
     }
   }
 
-  /** @internal Delegate to _resumableStream */
-  protected _storeStreamChunk(streamId: string, body: string) {
+  /** @internal Delegate to _resumableStream. Also advances the recovery
+   *  progress counter at production time (see `_maybeBumpRecoveryProgress`). */
+  protected async _storeStreamChunk(streamId: string, body: string) {
     this._resumableStream.storeChunk(streamId, body);
+    let type: string | undefined;
+    try {
+      type = (JSON.parse(body) as { type?: string }).type;
+    } catch {
+      // non-JSON chunk body — nothing to credit
+    }
+    await this._maybeBumpRecoveryProgress(type);
+  }
+
+  /** Advance the recovery-progress counter when a chunk represents genuinely
+   *  new produced content — a started text/reasoning segment or a settled tool
+   *  input/output. Bumped at production time (the streaming path), so it
+   *  reflects real forward progress and is immune to client reconnects /
+   *  recovery re-persists (which replay or re-materialize stored chunks rather
+   *  than flow through here). This is what the recovery no-progress window keys
+   *  off (#1637), and stays compaction-proof (#1628). */
+  private async _maybeBumpRecoveryProgress(
+    type: string | undefined
+  ): Promise<void> {
+    if (
+      type === "text-start" ||
+      type === "reasoning-start" ||
+      type === "tool-input-available" ||
+      type === "tool-output-available" ||
+      type === "tool-output-error" ||
+      type === "tool-output-denied"
+    ) {
+      await this._bumpChatRecoveryProgress();
+    }
   }
 
   /** @internal Delegate to _resumableStream */
@@ -1406,11 +1437,9 @@ export class AIChatAgent<
           ? this.messages.map((m, i) => (i === existingIdx ? message : m))
           : [...this.messages, message];
       await this.persistMessages(updatedMessages);
-      // Real forward progress: a non-empty partial was materialized. Advance
-      // the durable, compaction-immune progress counter so a deploy-churned
-      // turn that keeps producing content resets its recovery budget instead
-      // of exhausting it (#1628).
-      await this._bumpChatRecoveryProgress();
+      // NOTE: progress is bumped at production/flush time in `_storeStreamChunk`
+      // (#1637), NOT here — persisting on recovery or a client reconnect must
+      // not be miscounted as new forward progress.
     }
   }
 
@@ -1484,7 +1513,7 @@ export class AIChatAgent<
    * @param event - The text event payload (text-start, text-delta with delta, or text-end)
    * @param continuation - Whether this is a continuation of a previous stream
    */
-  private _broadcastTextEvent(
+  private async _broadcastTextEvent(
     streamId: string,
     event:
       | { type: "text-start"; id: string }
@@ -1493,7 +1522,7 @@ export class AIChatAgent<
     continuation: boolean
   ) {
     const body = JSON.stringify(event);
-    this._storeStreamChunk(streamId, body);
+    await this._storeStreamChunk(streamId, body);
     this._broadcastChatMessage({
       body,
       done: false,
@@ -3043,9 +3072,11 @@ export class AIChatAgent<
    * assistant messages into a summary, lowering the count — so a turn that had
    * genuinely advanced could read as "no progress" between attempts and exhaust
    * its budget prematurely (#1628). Instead we read a durably-persisted counter
-   * that only ever increments — bumped once per non-empty partial materialized
-   * by `_persistOrphanedStream`, which is the exact "forward progress" event the
-   * old message-count tracked — so compaction can never lower it.
+   * that only ever increments — bumped at production time when new content is
+   * streamed (see `_storeStreamChunk` / `_maybeBumpRecoveryProgress`), which is
+   * genuine forward progress and is immune to client reconnects / recovery
+   * re-persists — so compaction can never lower it and a reconnect can't fake
+   * it (#1637).
    */
   private async _chatRecoveryProgressMarker(): Promise<number> {
     return (
@@ -3053,8 +3084,9 @@ export class AIChatAgent<
     );
   }
 
-  /** Advance the durable recovery-progress counter. Called when a partial
-   *  assistant message is materialized (real forward progress). */
+  /** Advance the durable recovery-progress counter. Called from
+   *  `_maybeBumpRecoveryProgress` when new content is streamed (real,
+   *  reconnect-immune forward progress). */
   private async _bumpChatRecoveryProgress(): Promise<void> {
     const current =
       (await this.ctx.storage.get<number>(CHAT_RECOVERY_PROGRESS_KEY)) ?? 0;
@@ -4768,7 +4800,7 @@ export class AIChatAgent<
 
             // Store chunk for replay and broadcast to clients
             const chunkBody = JSON.stringify(eventToSend);
-            this._storeStreamChunk(streamId, chunkBody);
+            await this._storeStreamChunk(streamId, chunkBody);
             this._broadcastChatMessage({
               body: chunkBody,
               done: false,
@@ -4833,7 +4865,7 @@ export class AIChatAgent<
       // Skip broadcasting text-start — the client already has this part
     } else {
       // if not AI SDK SSE format, we need to inject text-start and text-end events ourselves
-      this._broadcastTextEvent(
+      await this._broadcastTextEvent(
         streamId,
         { type: "text-start", id },
         continuation
@@ -4871,7 +4903,7 @@ export class AIChatAgent<
         if (abortSignal?.aborted) break;
         textPart.state = "done";
 
-        this._broadcastTextEvent(
+        await this._broadcastTextEvent(
           streamId,
           { type: "text-end", id },
           continuation
@@ -4896,7 +4928,7 @@ export class AIChatAgent<
       // Accumulate into the single text part to preserve exact formatting
       if (chunk.length > 0) {
         textPart.text += chunk;
-        this._broadcastTextEvent(
+        await this._broadcastTextEvent(
           streamId,
           { type: "text-delta", id, delta: chunk },
           continuation
@@ -4907,7 +4939,7 @@ export class AIChatAgent<
     // If we exited due to abort, send a done signal so clients know the stream ended
     if (!streamCompleted.value) {
       textPart.state = "done";
-      this._broadcastTextEvent(
+      await this._broadcastTextEvent(
         streamId,
         { type: "text-end", id },
         continuation
