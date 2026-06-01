@@ -376,6 +376,14 @@ protected override repairInterruptedToolPart(
 }
 ```
 
+While a turn is being recovered, Think broadcasts a `cf_agent_chat_recovering`
+status (and replays it on connect) so clients can show a "recovering…" indicator
+instead of looking frozen — surface it on the client with `useAgentChat`'s
+`isRecovering` flag. It is set when a recovery continuation is scheduled and
+cleared on every terminal outcome, so the indicator never spins forever. To
+record recovery counts or reasons in your own analytics, subscribe to the
+`chat:recovery:*` observability events and route them to your sink.
+
 ### Scheduled tasks
 
 Use `getScheduledTasks()` for code-declared recurring prompts or deterministic

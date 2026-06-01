@@ -183,6 +183,7 @@ const MSG_CHAT_CLEAR = CHAT_MESSAGE_TYPES.CHAT_CLEAR;
 const MSG_STREAM_RESUMING = CHAT_MESSAGE_TYPES.STREAM_RESUMING;
 const MSG_STREAM_RESUME_NONE = CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE;
 const MSG_MESSAGE_UPDATED = CHAT_MESSAGE_TYPES.MESSAGE_UPDATED;
+const MSG_CHAT_RECOVERING = CHAT_MESSAGE_TYPES.CHAT_RECOVERING;
 
 function sendIfOpen(connection: Connection, message: string): boolean {
   try {
@@ -711,6 +712,13 @@ function ensureValidContinueCheckpoint(
 // were disconnected (e.g. during a deploy/WS reconnect storm) is not silently
 // frozen — the terminal `MSG_CHAT_RESPONSE` broadcast is otherwise transient.
 const CHAT_LAST_TERMINAL_KEY = "cf:chat:last-terminal";
+
+// Durable record of an in-progress durable recovery, so a "recovering…" status
+// can be broadcast live AND replayed to a client that connects mid-recovery
+// (#1620). Set when a recovery continuation/retry is scheduled; cleared on every
+// terminal outcome (completed/skipped/failed/exhausted) so the indicator can't
+// spin forever.
+const CHAT_RECOVERING_KEY = "cf:chat:recovering";
 
 /**
  * Callback interface for streaming chat events from a Think sub-agent.
@@ -7483,6 +7491,25 @@ export class Think<
         ...(reason ? { reason } : {})
       });
     }
+
+    // Live "recovering…" status (#1620): a scheduled continuation/retry means
+    // recovery is in progress; a terminal incident state resolves it. Keyed by
+    // the recovery-root request id so it lines up with the turn the client is
+    // watching. (Exhaustion + normal completion also clear via
+    // `_recordTerminalChatStatus`; this covers the benign-skip / failed paths
+    // that never reach a turn-level terminal.)
+    if (status === "scheduled") {
+      await this._setChatRecovering(
+        true,
+        incident.recoveryRootRequestId ?? incident.requestId
+      );
+    } else if (
+      status === "completed" ||
+      status === "skipped" ||
+      status === "failed"
+    ) {
+      await this._setChatRecovering(false);
+    }
   }
 
   private async _exhaustChatRecovery(
@@ -8760,6 +8787,10 @@ export class Think<
     } else {
       await this.ctx.storage.delete(CHAT_LAST_TERMINAL_KEY);
     }
+    // Any terminal turn outcome resolves an in-progress recovery (#1620): a
+    // recovered turn that completes, errors, or is exhausted must clear the
+    // "recovering…" indicator so it never spins forever.
+    await this._setChatRecovering(false);
   }
 
   private async _pendingTerminalChatResponse(): Promise<{
@@ -8771,6 +8802,47 @@ export class Think<
         CHAT_LAST_TERMINAL_KEY
       )) ?? null
     );
+  }
+
+  /**
+   * Set or clear the live "recovering…" status for a durable chat turn (#1620).
+   * Persists a durable record (replayed on connect via `_buildIdleConnectMessages`)
+   * and broadcasts a `MSG_CHAT_RECOVERING` frame — but only on a genuine
+   * transition, so a deploy/reconnect storm (which re-detects recovery many
+   * times) doesn't spam the wire. Cleared on every terminal outcome so the
+   * indicator can't spin forever.
+   */
+  private async _setChatRecovering(
+    active: boolean,
+    requestId?: string
+  ): Promise<void> {
+    const existing = await this.ctx.storage.get<{
+      requestId?: string;
+      at?: number;
+    }>(CHAT_RECOVERING_KEY);
+    // A record older than the max recovery window is stale: the owning incident
+    // was abandoned without ever reaching a terminal (e.g. the DO went idle
+    // before recovery could exhaust), so its terminal-clear never ran. Treat it
+    // as not-recovering so a stuck record can neither pin the indicator "on"
+    // forever nor suppress a genuinely-new recovering signal.
+    const activeExisting =
+      existing && Date.now() - (existing.at ?? 0) < CHAT_RECOVERY_MAX_WINDOW_MS;
+    if (active) {
+      if (activeExisting) return; // already recovering — idempotent, no re-broadcast
+      await this.ctx.storage.put(CHAT_RECOVERING_KEY, {
+        ...(requestId ? { requestId } : {}),
+        at: Date.now()
+      });
+    } else {
+      if (!existing) return; // not recovering — nothing to clear
+      await this.ctx.storage.delete(CHAT_RECOVERING_KEY);
+      requestId = requestId ?? existing.requestId;
+    }
+    this._broadcastChat({
+      type: MSG_CHAT_RECOVERING,
+      recovering: active,
+      ...(requestId ? { id: requestId } : {})
+    });
   }
 
   /**
@@ -8793,6 +8865,26 @@ export class Think<
         body: pending.body,
         done: true,
         error: true
+      });
+    }
+    // Replay an in-progress "recovering…" status so a client that connects
+    // mid-recovery reads the turn as working rather than frozen (#1620). It's
+    // mutually exclusive with `pending` (a terminal outcome clears recovering).
+    // Skip a stale record (older than the max recovery window) so a turn whose
+    // recovery was abandoned without a terminal can't show "recovering…"
+    // forever on reconnect.
+    const recovering = await this.ctx.storage.get<{
+      requestId?: string;
+      at?: number;
+    }>(CHAT_RECOVERING_KEY);
+    if (
+      recovering &&
+      Date.now() - (recovering.at ?? 0) < CHAT_RECOVERY_MAX_WINDOW_MS
+    ) {
+      messages.push({
+        type: MSG_CHAT_RECOVERING,
+        recovering: true,
+        ...(recovering.requestId ? { id: recovering.requestId } : {})
       });
     }
     return messages;

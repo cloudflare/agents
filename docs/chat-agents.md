@@ -682,6 +682,12 @@ const unsubscribe = subscribe("chat", (event) => {
 });
 ```
 
+#### Recovering status on the client
+
+While a turn is being recovered, the agent broadcasts a `cf_agent_chat_recovering` status frame so clients can show a "recovering…" indicator instead of looking frozen. It is set when a recovery continuation is scheduled and cleared on every terminal outcome (so the indicator never spins forever). `@cloudflare/think` also replays it on connect, so a client that joins mid-recovery still learns the turn is working. Consume it via `useAgentChat`'s `isRecovering` flag (see [Client API](#useagentchat)). The signal is purely advisory and backward-compatible — clients that do not understand it ignore it.
+
+> `@cloudflare/ai-chat` broadcasts the live signal but does not yet replay it on connect (a client connecting mid-recovery will not be re-told until it reconnects to an active stream).
+
 Transcript repairs — healing orphaned tool calls (preserving them as errored results rather than deleting them, so the record survives and the model does not silently re-run the tool) and normalizing malformed/stringified or missing tool inputs before a provider call — are emitted on the `transcript` channel.
 
 #### Guarding against stale recoveries
@@ -805,7 +811,8 @@ function Chat() {
     setMessages,
     status,
     isServerStreaming,
-    isStreaming
+    isStreaming,
+    isRecovering
   } = useAgentChat({ agent });
 
   // ...
@@ -828,17 +835,18 @@ function Chat() {
 
 ### Return Values
 
-| Property                  | Type                               | Description                                                                |
-| ------------------------- | ---------------------------------- | -------------------------------------------------------------------------- |
-| `messages`                | `ChatMessage[]`                    | Current conversation messages                                              |
-| `sendMessage`             | `(message) => void`                | Send a message                                                             |
-| `clearHistory`            | `() => void`                       | Clear conversation (client and server)                                     |
-| `addToolOutput`           | `({ toolCallId, output }) => void` | Provide output for a client-side tool                                      |
-| `addToolApprovalResponse` | `({ id, approved }) => void`       | Approve or reject a tool requiring approval                                |
-| `setMessages`             | `(messages \| updater) => void`    | Set messages directly (syncs to server)                                    |
-| `status`                  | `string`                           | `"idle"`, `"submitted"`, `"streaming"`, or `"error"`                       |
-| `isServerStreaming`       | `boolean`                          | `true` when a server-initiated stream is active (e.g. from `saveMessages`) |
-| `isStreaming`             | `boolean`                          | `true` when any stream is active (client or server-initiated)              |
+| Property                  | Type                               | Description                                                                                                                                                                                                                                   |
+| ------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `messages`                | `ChatMessage[]`                    | Current conversation messages                                                                                                                                                                                                                 |
+| `sendMessage`             | `(message) => void`                | Send a message                                                                                                                                                                                                                                |
+| `clearHistory`            | `() => void`                       | Clear conversation (client and server)                                                                                                                                                                                                        |
+| `addToolOutput`           | `({ toolCallId, output }) => void` | Provide output for a client-side tool                                                                                                                                                                                                         |
+| `addToolApprovalResponse` | `({ id, approved }) => void`       | Approve or reject a tool requiring approval                                                                                                                                                                                                   |
+| `setMessages`             | `(messages \| updater) => void`    | Set messages directly (syncs to server)                                                                                                                                                                                                       |
+| `status`                  | `string`                           | `"idle"`, `"submitted"`, `"streaming"`, or `"error"`                                                                                                                                                                                          |
+| `isServerStreaming`       | `boolean`                          | `true` when a server-initiated stream is active (e.g. from `saveMessages`)                                                                                                                                                                    |
+| `isStreaming`             | `boolean`                          | `true` when any stream is active (client or server-initiated)                                                                                                                                                                                 |
+| `isRecovering`            | `boolean`                          | `true` while a durable turn is being recovered (interrupted and resuming). Distinct from `isStreaming` — a recovering turn is not producing tokens yet. Render a "recovering…" hint; most UIs treat `isStreaming \|\| isRecovering` as "busy" |
 
 ## Tools
 

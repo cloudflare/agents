@@ -2215,6 +2215,42 @@ describe("Think — onChatRecovery", () => {
     expect(afterOk.some((m) => m.error === true)).toBe(false);
   });
 
+  it("broadcasts + hydrates a 'recovering…' status, cleared on terminal (#1620)", async () => {
+    const agent = await freshRecoveryAgent(`recovering-${crypto.randomUUID()}`);
+    await agent.seedIncidentForTest({
+      incidentId: "inc-rec",
+      requestId: "root-rec",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "attempting",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    // Scheduling a recovery continuation marks the turn "recovering".
+    await agent.updateIncidentForTest("inc-rec", "scheduled");
+    const onConnect = (await agent.getIdleConnectMessagesForTest()) as Array<{
+      type: string;
+      recovering?: boolean;
+      id?: string;
+    }>;
+    const recovering = onConnect.find(
+      (m) => m.type === "cf_agent_chat_recovering"
+    );
+    // A client connecting mid-recovery learns the turn is working, not frozen.
+    expect(recovering?.recovering).toBe(true);
+    expect(recovering?.id).toBe("root-rec");
+
+    // A terminal outcome clears it so the indicator can't spin forever.
+    await agent.updateIncidentForTest("inc-rec", "failed", "boom");
+    const afterTerminal =
+      (await agent.getIdleConnectMessagesForTest()) as Array<{ type: string }>;
+    expect(
+      afterTerminal.some((m) => m.type === "cf_agent_chat_recovering")
+    ).toBe(false);
+  });
+
   it("flushes a settled tool result to durable storage immediately", async () => {
     const agent = await freshRecoveryAgent("tool-result-durability");
 

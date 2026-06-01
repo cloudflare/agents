@@ -153,6 +153,14 @@ const DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS = 10_000;
 const CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS = 3;
 const DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE =
   "The assistant was interrupted and could not recover. Please try again.";
+// Durable record of an in-progress recovery so a "recovering…" status (#1620)
+// can be broadcast live and survives the set/clear happening in different
+// isolates (a continuation runs in a later alarm invocation). NOTE: unlike
+// `@cloudflare/think`, AIChatAgent has no connect-time replay yet (it lacks the
+// idle-connect hydration path) — a client that connects mid-recovery won't be
+// re-told until #1645 adds hydration. The live broadcast + reliable clear work
+// regardless.
+const CHAT_RECOVERING_KEY = "cf:chat:recovering";
 // Incidents that have not seen a new attempt within this window are assumed
 // abandoned and swept so durable storage does not grow without bound.
 const CHAT_RECOVERY_INCIDENT_TTL_MS = 60 * 60 * 1000;
@@ -3412,6 +3420,21 @@ export class AIChatAgent<
         ...(reason ? { reason } : {})
       });
     }
+
+    // Live "recovering…" status (#1620): a scheduled continuation/retry means
+    // recovery is in progress; a terminal incident state resolves it.
+    if (status === "scheduled") {
+      await this._setChatRecovering(
+        true,
+        incident.recoveryRootRequestId ?? incident.requestId
+      );
+    } else if (
+      status === "completed" ||
+      status === "skipped" ||
+      status === "failed"
+    ) {
+      await this._setChatRecovering(false);
+    }
   }
 
   private async _exhaustChatRecovery(
@@ -3451,8 +3474,49 @@ export class AIChatAgent<
       id: incident.requestId,
       type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
     });
+    // Exhaustion resolves recovery — clear the "recovering…" status (#1620).
+    await this._setChatRecovering(false);
     // The exhausted record is retained for inspection and reclaimed later by
     // the TTL sweep; only successful (completed) incidents are deleted eagerly.
+  }
+
+  /**
+   * Set or clear the live "recovering…" status (#1620). Persists a durable
+   * record (so set/clear stay consistent across the isolates a recovery spans)
+   * and broadcasts a `CF_AGENT_CHAT_RECOVERING` frame on a genuine transition.
+   * NOTE: AIChatAgent does not yet replay this on connect (no idle-connect
+   * hydration; tracked in #1645) — this is the live signal only.
+   */
+  private async _setChatRecovering(
+    active: boolean,
+    requestId?: string
+  ): Promise<void> {
+    const existing = await this.ctx.storage.get<{
+      requestId?: string;
+      at?: number;
+    }>(CHAT_RECOVERING_KEY);
+    // A record older than the max recovery window is stale: the owning incident
+    // was abandoned without a terminal (e.g. the DO went idle before recovery
+    // could exhaust). Treat it as not-recovering so it can't suppress a
+    // genuinely-new recovering signal.
+    const activeExisting =
+      existing && Date.now() - (existing.at ?? 0) < CHAT_RECOVERY_MAX_WINDOW_MS;
+    if (active) {
+      if (activeExisting) return; // already recovering — idempotent, no re-broadcast
+      await this.ctx.storage.put(CHAT_RECOVERING_KEY, {
+        ...(requestId ? { requestId } : {}),
+        at: Date.now()
+      });
+    } else {
+      if (!existing) return; // not recovering — nothing to clear
+      await this.ctx.storage.delete(CHAT_RECOVERING_KEY);
+      requestId = requestId ?? existing.requestId;
+    }
+    this._broadcastChatMessage({
+      type: MessageType.CF_AGENT_CHAT_RECOVERING,
+      recovering: active,
+      ...(requestId ? { id: requestId } : {})
+    });
   }
 
   protected override async _handleInternalFiberRecovery(

@@ -24,7 +24,17 @@ export enum MessageType {
   /** Server notifies client that a message was updated (e.g., tool result applied) */
   CF_AGENT_MESSAGE_UPDATED = "cf_agent_message_updated",
   /** Client sends tool approval response to server (for tools with needsApproval) */
-  CF_AGENT_TOOL_APPROVAL = "cf_agent_tool_approval"
+  CF_AGENT_TOOL_APPROVAL = "cf_agent_tool_approval",
+
+  /**
+   * Server→client progress hint: a durable chat turn is being recovered
+   * (interrupted by a deploy/eviction or a stream-stall watchdog abort and now
+   * resuming). Sent when a recovery continuation is scheduled and cleared on
+   * every terminal outcome. (`@cloudflare/think` also replays it on connect;
+   * `@cloudflare/ai-chat` broadcasts the live signal only — see #1645.)
+   * Backward-compatible — clients that don't understand it ignore it. See #1620.
+   */
+  CF_AGENT_CHAT_RECOVERING = "cf_agent_chat_recovering"
 }
 
 /**
@@ -74,6 +84,18 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
   | {
       /** Server responds to resume request when no active stream exists */
       type: MessageType.CF_AGENT_STREAM_RESUME_NONE;
+    }
+  | {
+      /**
+       * Progress hint: a durable chat turn is being recovered (`recovering:
+       * true`) or recovery has resolved (`recovering: false`). Purely advisory;
+       * a client renders a "recovering…" indicator while true.
+       */
+      type: MessageType.CF_AGENT_CHAT_RECOVERING;
+      /** Whether recovery is in progress (true) or has resolved (false). */
+      recovering: boolean;
+      /** The recovery-root request id of the turn being recovered, if known. */
+      id?: string;
     };
 
 /**

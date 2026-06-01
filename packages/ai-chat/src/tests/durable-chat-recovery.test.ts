@@ -108,6 +108,7 @@ interface ChatRecoveryTestStub {
     status: string;
     reason?: string;
   } | null>;
+  getChatRecoveringForTest(): Promise<{ requestId?: string } | null>;
   enableExhaustedCaptureForTest(
     maxAttempts: number,
     terminalMessage?: string
@@ -1236,5 +1237,26 @@ describe("onChatRecovery", () => {
     expect(exhausted).toHaveLength(1);
     const incident = await agentStub.getIncidentForTest("inc-dup");
     expect(incident?.status).toBe("exhausted");
+  });
+
+  it("tracks a durable 'recovering…' record, cleared on terminal (#1620)", async () => {
+    const agentStub = await getTestAgent(`recovering-${crypto.randomUUID()}`);
+    const begun = await agentStub.beginIncidentForTest({
+      requestId: "root-rec",
+      recoveryRootRequestId: "root-rec",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue"
+    });
+
+    // Scheduling marks the turn "recovering" (durable so set/clear stay
+    // consistent across the isolates a recovery spans).
+    await agentStub.updateIncidentForTest(begun.incidentId, "scheduled");
+    expect((await agentStub.getChatRecoveringForTest())?.requestId).toBe(
+      "root-rec"
+    );
+
+    // A terminal outcome clears it so the indicator can't spin forever.
+    await agentStub.updateIncidentForTest(begun.incidentId, "failed", "boom");
+    expect(await agentStub.getChatRecoveringForTest()).toBeNull();
   });
 });

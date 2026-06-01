@@ -620,6 +620,16 @@ export function useAgentChat<
    */
   isStreaming: boolean;
   /**
+   * `true` while a durable chat turn is being recovered (interrupted by a
+   * deploy/eviction or a stream-stall watchdog abort and now resuming, #1620).
+   * Distinct from `isStreaming` — a recovering turn isn't producing tokens yet,
+   * so a client can show a "recovering…" hint instead of looking frozen. Most
+   * UIs treat `isStreaming || isRecovering` as "busy". Driven by the server's
+   * `CF_AGENT_CHAT_RECOVERING` frames (also replayed on connect for
+   * `@cloudflare/think`); cleared automatically on the next stream or terminal.
+   */
+  isRecovering: boolean;
+  /**
    * `true` when the current `status`/`isServerStreaming` activity is
    * driven by a server-pushed tool continuation (i.e. the server is
    * auto-continuing the conversation after `addToolOutput` or
@@ -1679,6 +1689,11 @@ export function useAgentChat<
   const streamStateRef = useRef<BroadcastStreamState>({ status: "idle" });
 
   const [isServerStreaming, setIsServerStreaming] = useState(false);
+  // #1620: a durable chat turn is being recovered (interrupted by a
+  // deploy/eviction or a stream-stall watchdog abort and now resuming). Driven
+  // by the server's `CF_AGENT_CHAT_RECOVERING` frames; surfaced as a "working,
+  // not frozen" hint distinct from active streaming.
+  const [isRecovering, setIsRecovering] = useState(false);
 
   useEffect(() => {
     const localResponseIds = localResponseMessageIdsRef.current;
@@ -1704,8 +1719,17 @@ export function useAgentChat<
             type: "clear"
           }).state;
           setIsServerStreaming(false);
+          setIsRecovering(false);
           // Shared local-state reset — see `resetLocalChatState`.
           resetLocalChatState();
+          break;
+
+        case MessageType.CF_AGENT_CHAT_RECOVERING:
+          // Durable recovery progress hint (#1620): show "recovering…" while a
+          // turn is being resumed. Cleared by the server's `recovering: false`
+          // frame on any terminal outcome (and locally on stream-resume /
+          // terminal response / clear below, for a snappy handoff).
+          setIsRecovering(Boolean(data.recovering));
           break;
 
         case MessageType.CF_AGENT_CHAT_MESSAGES:
@@ -1815,6 +1839,9 @@ export function useAgentChat<
           }).state;
           customTransport.observeServerTurn(data.id);
           setIsServerStreaming(true);
+          // The recovered turn is now streaming live to us — it's no longer
+          // "recovering", it's producing the answer (#1620).
+          setIsRecovering(false);
           agentRef.current.send(
             JSON.stringify({
               type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
@@ -1922,6 +1949,8 @@ export function useAgentChat<
           }
           if (data.done) {
             customTransport.handleServerTurnCompleted(data.id);
+            // A terminal turn outcome resolves any in-progress recovery (#1620).
+            setIsRecovering(false);
           }
           const completedObservedToolContinuation =
             data.done &&
@@ -1968,6 +1997,7 @@ export function useAgentChat<
       agent.removeEventListener("message", onAgentMessage);
       streamStateRef.current = { status: "idle" };
       setIsServerStreaming(false);
+      setIsRecovering(false);
       protectedStreamingAssistantRef.current = null;
       localResponseIds.clear();
     };
@@ -2228,6 +2258,14 @@ export function useAgentChat<
     messages: messagesWithToolResults,
     isServerStreaming: effectiveIsServerStreaming,
     isStreaming,
+    /**
+     * True while a durable chat turn is being recovered (interrupted by a
+     * deploy/eviction or a stream-stall watchdog abort and now resuming, #1620).
+     * Distinct from `isStreaming` — a recovering turn isn't producing tokens
+     * yet. Render a "recovering…" hint; most UIs treat `isStreaming ||
+     * isRecovering` as "busy". Cleared automatically on the next stream/terminal.
+     */
+    isRecovering,
     isToolContinuation,
     sendMessage: sendMessageWithStreamingProtection,
     stop: stopWithToolContinuationAbort,

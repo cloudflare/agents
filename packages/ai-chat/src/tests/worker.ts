@@ -1780,6 +1780,14 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     });
   }
 
+  async getChatRecoveringForTest(): Promise<{ requestId?: string } | null> {
+    return (
+      (await this.ctx.storage.get<{ requestId?: string }>(
+        "cf:chat:recovering"
+      )) ?? null
+    );
+  }
+
   async getIncidentForTest(incidentId: string): Promise<{
     attempt: number;
     status: string;

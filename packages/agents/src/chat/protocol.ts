@@ -17,5 +17,12 @@ export const CHAT_MESSAGE_TYPES = {
   STREAM_RESUME_NONE: "cf_agent_stream_resume_none",
   TOOL_RESULT: "cf_agent_tool_result",
   TOOL_APPROVAL: "cf_agent_tool_approval",
-  MESSAGE_UPDATED: "cf_agent_message_updated"
+  MESSAGE_UPDATED: "cf_agent_message_updated",
+  // Server→client: a durable chat turn is being recovered (interrupted by a
+  // deploy/eviction or a stream-stall watchdog abort and now resuming). Sent
+  // when a recovery continuation is scheduled and cleared on every terminal
+  // outcome; `@cloudflare/think` also replays it on connect so a client that
+  // joins mid-recovery learns it. Purely a progress hint — backward-compatible
+  // (clients that don't understand it ignore it). See issue #1620.
+  CHAT_RECOVERING: "cf_agent_chat_recovering"
 } as const;

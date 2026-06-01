@@ -150,7 +150,8 @@ function App() {
     )
   });
 
-  const { messages, sendMessage, isStreaming, stop } = useAgentChat({ agent });
+  const { messages, sendMessage, isStreaming, isRecovering, stop } =
+    useAgentChat({ agent });
 
   // Poll the agent's recovery view so we can watch incidents/turns evolve while
   // deploys churn underneath. Cheap RPC; harness-only.
@@ -396,6 +397,18 @@ function App() {
       </div>
 
       <div className="border-t border-kumo-line bg-kumo-base">
+        {/* #1620: a live "recovering…" hint from `useAgentChat.isRecovering`, so
+            a turn being recovered across a deploy reads as working, not frozen. */}
+        {isRecovering && (
+          <div className="max-w-5xl mx-auto px-5 pt-3">
+            <span className="inline-flex items-center gap-2 rounded-full border border-kumo-line bg-kumo-base px-3 py-1">
+              <span className="size-2 rounded-full bg-kumo-accent animate-pulse" />
+              <Text size="xs" variant="secondary">
+                Recovering the interrupted turn…
+              </Text>
+            </span>
+          </div>
+        )}
         <form
           onSubmit={(e) => {
             e.preventDefault();

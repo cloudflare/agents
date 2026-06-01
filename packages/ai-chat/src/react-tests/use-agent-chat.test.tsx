@@ -2176,6 +2176,64 @@ describe("useAgentChat tool continuation status (issue #1157)", () => {
       .toHaveTextContent("ready");
   });
 
+  it("surfaces isRecovering from CF_AGENT_CHAT_RECOVERING, cleared on resolve (#1620)", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "recovering-status",
+      url: "ws://localhost:3000/agents/chat/recovering-status?_pk=abc"
+    });
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve([]),
+        resume: false
+      });
+      return <div data-testid="recovering">{String(chat.isRecovering)}</div>;
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("recovering"))
+      .toHaveTextContent("false");
+
+    // Server reports the turn is being recovered → the hook surfaces it.
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_chat_recovering",
+        recovering: true,
+        id: "root-1"
+      });
+      await sleep(10);
+    });
+    await expect
+      .element(screen.getByTestId("recovering"))
+      .toHaveTextContent("true");
+
+    // Recovery resolves → cleared (so a "recovering…" indicator can't stick).
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_chat_recovering",
+        recovering: false,
+        id: "root-1"
+      });
+      await sleep(10);
+    });
+    await expect
+      .element(screen.getByTestId("recovering"))
+      .toHaveTextContent("false");
+  });
+
   it("defers tool continuation resume until the active request settles", async () => {
     const consoleErrorSpy = vi
       .spyOn(console, "error")
