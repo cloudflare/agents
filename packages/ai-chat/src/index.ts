@@ -167,6 +167,14 @@ const CHAT_RECOVERY_ALARM_DEBOUNCE_MS = 30 * 1000;
 // NEVER reset by progress — the final hard stop so even a degenerate
 // slowly-progressing loop cannot run forever.
 const CHAT_RECOVERY_MAX_WINDOW_MS = 15 * 60 * 1000;
+// N9: while a parent re-attaches to and forwards a sub-agent's stream, credit
+// the parent's recovery progress at most this often. The marker only needs to
+// advance ≥once between recovery attempts (the no-progress window is minutes),
+// so this caps storage writes during high-rate child streaming. The throttle
+// state is in-memory (reset per isolate), so the first forwarded chunk after
+// ANY restart always bumps — guaranteeing every recovery attempt that observes
+// child output registers forward progress.
+const AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS = 5_000;
 
 type StreamResultStatus = {
   status: Exclude<SaveMessagesResult["status"], "skipped">;
@@ -2571,16 +2579,91 @@ export class AIChatAgent<
     this._closeAgentToolTailers(runId);
   }
 
-  async inspectAgentToolRun(
-    runId: string
-  ): Promise<AgentToolRunInspection | null> {
-    const row = this._getAgentToolRunRow(runId);
-    if (!row) return null;
+  /**
+   * Classify any in-flight chat-recovery on this child facet (#1630 / N6). A
+   * child facet is dedicated to a single agent-tool run, so any recovery
+   * incident is that run's. Incidents in `detected`/`scheduled`/`attempting`
+   * mean recovery is still resolving the interrupted turn; `exhausted`/`failed`
+   * mean recovery gave up; a completed recovery deletes its incident.
+   */
+  private async _classifyAgentToolChildRecovery(): Promise<
+    "in-progress" | "failed" | "none"
+  > {
+    const entries = await this.ctx.storage.list<ChatRecoveryIncident>({
+      prefix: CHAT_RECOVERY_INCIDENT_KEY_PREFIX
+    });
+    let failed = false;
+    for (const incident of entries.values()) {
+      if (
+        incident.status === "detected" ||
+        incident.status === "scheduled" ||
+        incident.status === "attempting"
+      ) {
+        return "in-progress";
+      }
+      if (incident.status === "exhausted" || incident.status === "failed") {
+        failed = true;
+      }
+    }
+    return failed ? "failed" : "none";
+  }
 
-    if (
-      row.status === "running" &&
-      !this._agentToolAbortControllers.has(runId)
-    ) {
+  /**
+   * Reconcile a stale (post-eviction) child run row from the child's own
+   * durable recovery (#1630). The child facet self-heals its interrupted turn
+   * via `chatRecovery`, but that path never writes the run row, so without this
+   * the row strands `running` and the parent can only collect `interrupted`.
+   *
+   * Persisting the terminal here (rather than only computing it) is intentional:
+   * it's a lazy materialization of the run's true terminal that also lets a
+   * tailing parent's stream close promptly and makes subsequent inspects cheap.
+   * While recovery is still resolving (active stream or in-progress incident)
+   * the row is left `running` so the parent's bounded re-attach keeps waiting.
+   * Mutates `row` in place when it settles so the caller can report it.
+   */
+  private async _reconcileStaleAgentToolChildRun(
+    runId: string,
+    row: AIChatAgentToolRunRow
+  ): Promise<void> {
+    const recovery = await this._classifyAgentToolChildRecovery();
+    if (recovery === "in-progress" || this._resumableStream.hasActiveStream()) {
+      return;
+    }
+    const messagesAfterStart = this._getAgentToolMessagesAfterStart(runId);
+    // A settled recovery that produced an assistant turn is `completed`, even if
+    // it ended on a tool result with no final text — keying off text alone would
+    // mis-seal a legitimately-finished (but text-less) run as `error`.
+    // `getAgentToolSummary` falls back when there is no text.
+    const recoveredTurn =
+      recovery !== "failed" &&
+      messagesAfterStart.some((message) => message.role === "assistant");
+    if (recoveredTurn) {
+      const input = AIChatAgent._parseAgentToolValue(row.input_json);
+      const output = this.getAgentToolOutput(
+        { runId, input },
+        messagesAfterStart
+      );
+      const summary = this.getAgentToolSummary(
+        { runId, input },
+        output,
+        messagesAfterStart
+      );
+      const completedAt = Date.now();
+      this.sql`
+        update cf_ai_chat_agent_tool_runs
+        set status = 'completed',
+            output_json = ${AIChatAgent._stringifyAgentToolValue(output)},
+            summary = ${summary}, error_message = null,
+            completed_at = ${completedAt}
+        where run_id = ${runId} and status = 'running'
+      `;
+      row.status = "completed";
+      row.output_json = AIChatAgent._stringifyAgentToolValue(output);
+      row.summary = summary;
+      row.error_message = null;
+      row.completed_at = completedAt;
+      this._closeAgentToolTailers(runId);
+    } else {
       const error =
         "Agent tool run was interrupted before the child could finish.";
       this.sql`
@@ -2591,6 +2674,25 @@ export class AIChatAgent<
       row.status = "error";
       row.error_message = error;
       row.completed_at = Date.now();
+      this._closeAgentToolTailers(runId);
+    }
+  }
+
+  async inspectAgentToolRun(
+    runId: string
+  ): Promise<AgentToolRunInspection | null> {
+    const row = this._getAgentToolRunRow(runId);
+    if (!row) return null;
+
+    // A `running` row with no live abort controller means the original
+    // in-isolate run is gone (e.g. the parent was evicted while this child run
+    // was in flight, #1630) — lazily reconcile it from the child's own durable
+    // recovery before reporting (mutates `row` in place when it settles).
+    if (
+      row.status === "running" &&
+      !this._agentToolAbortControllers.has(runId)
+    ) {
+      await this._reconcileStaleAgentToolChildRun(runId, row);
     }
 
     const streamId = row.request_id
@@ -2670,10 +2772,17 @@ export class AIChatAgent<
             this._agentToolForwarders.get(runId) ??
             new Set<(chunk: AgentToolStoredChunk) => void>();
           const forward = (chunk: AgentToolStoredChunk) => {
-            if (!closed) {
+            if (closed) return;
+            try {
               controller.enqueue(
                 agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
               );
+            } catch {
+              // The consumer detached (e.g. a parent's bounded re-attach budget
+              // expired) between the read view closing and our close() running.
+              // Drop the chunk instead of surfacing a stream rejection; the
+              // child run is unaffected.
+              close();
             }
           };
           forwarders.add(forward);
@@ -3093,6 +3202,51 @@ export class AIChatAgent<
     await this.ctx.storage.put(CHAT_RECOVERY_PROGRESS_KEY, current + 1);
   }
 
+  /** In-memory wall-clock of the last N9 child-stream progress bump (reset per
+   *  isolate so the first forwarded chunk after a restart always credits). */
+  private _lastAgentToolStreamProgressAt = 0;
+
+  /**
+   * N9: forwarding a sub-agent's chunks IS forward progress for this parent
+   * turn, so credit the parent's recovery progress marker — otherwise a parent
+   * whose turn merely `await`s a child banks no progress of its own and its
+   * no-progress window exhausts while the child is healthily streaming. Only
+   * invoked after a child actually produced output (see
+   * `_forwardAgentToolStream`), so a silent child still lets the parent exhaust.
+   * Throttled (and reset per isolate) so we never write storage per token.
+   */
+  protected override async _onAgentToolStreamProgress(): Promise<void> {
+    const now = Date.now();
+    if (
+      now - this._lastAgentToolStreamProgressAt <
+      AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS
+    ) {
+      return;
+    }
+    this._lastAgentToolStreamProgressAt = now;
+    await this._bumpChatRecoveryProgress();
+  }
+
+  /** Whether a reconstructed partial carries any settled (provider-accepted)
+   *  tool result — the completed, often non-idempotent work that a
+   *  `{ persist: false }` recovery return would silently discard.
+   *  `convertToModelMessages` treats `output-available` / `output-error` /
+   *  `output-denied` (or a part carrying `output`/`result`) as settled. */
+  private _partialHasSettledToolResults(parts: MessagePart[]): boolean {
+    return parts.some((part) => {
+      const record = part as Record<string, unknown>;
+      const type = typeof record.type === "string" ? record.type : "";
+      if (!(type.startsWith("tool-") || type === "dynamic-tool")) return false;
+      if ("output" in record || "result" in record) return true;
+      const state = typeof record.state === "string" ? record.state : "";
+      return (
+        state === "output-available" ||
+        state === "output-error" ||
+        state === "output-denied"
+      );
+    });
+  }
+
   /** Sweep recovery incidents that have been inactive past the TTL. */
   private async _sweepStaleChatRecoveryIncidents(now: number): Promise<void> {
     const entries = await this.ctx.storage.list<ChatRecoveryIncident>({
@@ -3324,6 +3478,15 @@ export class AIChatAgent<
       ? this._getPartialStreamText(streamId)
       : { text: "", parts: [] as MessagePart[] };
 
+    // Only persist while the stream is still active. The ACK handler (client
+    // reconnect → replayChunks) may have already persisted + completed the
+    // orphaned stream before fiber recovery runs; persisting again on the same
+    // chunks would double the assistant message's parts.
+    const streamStillActive =
+      streamId &&
+      this._resumableStream.hasActiveStream() &&
+      this._resumableStream.activeStreamId === streamId;
+
     const shouldRetryPreStream = this._shouldRetryRecoveredPreStreamTurn(
       recoverySnapshot,
       streamId ?? "",
@@ -3343,6 +3506,13 @@ export class AIChatAgent<
       });
 
     if (exhausted) {
+      // Preserve the settled partial before sealing the turn. Exhaustion is
+      // decided BEFORE `onChatRecovery` is consulted, so without this the
+      // settled (often non-idempotent) tool results the turn already produced
+      // are discarded and the model re-runs them on the next message (#1631).
+      if (streamStillActive) {
+        await this._persistOrphanedStream(streamId);
+      }
       await this._exhaustChatRecovery(incident, config);
       return true;
     }
@@ -3370,17 +3540,17 @@ export class AIChatAgent<
           createdAt: ctx.createdAt
         })) ?? {};
 
-      // Only persist and complete if the stream is still active. The ACK
-      // handler (client reconnect → replayChunks) may have already persisted
-      // the orphaned stream and completed it before fiber recovery runs.
-      // Without this guard, _persistOrphanedStream runs twice on the same
-      // chunks, doubling the assistant message's parts.
-      const streamStillActive =
-        streamId &&
-        this._resumableStream.hasActiveStream() &&
-        this._resumableStream.activeStreamId === streamId;
-
-      if (options.persist !== false && streamStillActive) {
+      // Settled work — completed, often non-idempotent tool results — is NEVER
+      // dropped by recovery. `persist: false` only suppresses persistence of a
+      // partial that has nothing settled to lose; a partial carrying settled
+      // tool results is persisted regardless, so an app can never accidentally
+      // discard completed work (and never needs `{ persist: true }` just to be
+      // safe). A safe default beats a warning about an unsafe one (#1631).
+      if (
+        streamStillActive &&
+        (options.persist !== false ||
+          this._partialHasSettledToolResults(partial.parts))
+      ) {
         await this._persistOrphanedStream(streamId);
       }
 

@@ -50,6 +50,9 @@ interface ChatRecoveryTestStub {
   getChatRecoveryIncidentsForTest(): Promise<unknown[]>;
   addAssistantMessageForTest(id: string): Promise<void>;
   bumpRecoveryProgressForTest(): Promise<void>;
+  forwardChildStreamProgressForTest(
+    chunks: number
+  ): Promise<{ start: number; after: number }>;
   dropAssistantMessagesForTest(): Promise<void>;
   setRecoveryShouldThrowForTest(shouldThrow: boolean): Promise<void>;
   enableThrowingOnExhaustedForTest(
@@ -296,6 +299,70 @@ describe("onChatRecovery", () => {
 
     // Without further progress it climbs again and still exhausts at the cap.
     expect((await agentStub.beginIncidentForTest(at())).attempt).toBe(2);
+    const exhausted = await agentStub.beginIncidentForTest(at());
+    expect(exhausted.attempt).toBe(3);
+    expect(exhausted.exhausted).toBe(true);
+  });
+
+  it("credits forwarding a sub-agent's stream as parent forward progress (N9)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 2 });
+
+    const baseInput = {
+      requestId: "req-n9",
+      recoveryRootRequestId: "req-n9",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue" as const
+    };
+    let t = 1_000_000;
+    const at = () => {
+      const nowMs = t;
+      t += 40_000;
+      return { ...baseInput, nowMs };
+    };
+
+    // A parent whose turn merely awaits a sub-agent climbs toward the cap.
+    expect((await agentStub.beginIncidentForTest(at())).attempt).toBe(1);
+    expect((await agentStub.beginIncidentForTest(at())).attempt).toBe(2);
+
+    // Re-attaching and forwarding the child's stream IS the parent's forward
+    // progress (N9) — the durable marker advances through the real
+    // `_forwardAgentToolStream` path, so the budget resets just like in-band
+    // content does. Without this the deploy-churn parent exhausts while the
+    // child streams healthily.
+    const forwarded = await agentStub.forwardChildStreamProgressForTest(3);
+    expect(forwarded.after).toBe(forwarded.start + 1);
+    const afterChildStream = await agentStub.beginIncidentForTest(at());
+    expect(afterChildStream.attempt).toBe(1);
+    expect(afterChildStream.exhausted).toBe(false);
+  });
+
+  it("does NOT credit a silent/hung sub-agent, so the parent still exhausts (N9)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 2 });
+
+    const baseInput = {
+      requestId: "req-n9-silent",
+      recoveryRootRequestId: "req-n9-silent",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue" as const
+    };
+    let t = 2_000_000;
+    const at = () => {
+      const nowMs = t;
+      t += 40_000;
+      return { ...baseInput, nowMs };
+    };
+
+    expect((await agentStub.beginIncidentForTest(at())).attempt).toBe(1);
+    expect((await agentStub.beginIncidentForTest(at())).attempt).toBe(2);
+
+    // A re-attach where the child produces NO output forwards nothing, so the
+    // parent banks no progress and the cap still binds.
+    const forwarded = await agentStub.forwardChildStreamProgressForTest(0);
+    expect(forwarded.after).toBe(forwarded.start);
     const exhausted = await agentStub.beginIncidentForTest(at());
     expect(exhausted.attempt).toBe(3);
     expect(exhausted.exhausted).toBe(true);

@@ -1796,6 +1796,43 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     await self._bumpChatRecoveryProgress();
   }
 
+  /** Simulate a parent re-attach that forwards `chunks` of a child's stream by
+   *  driving the real `_forwardAgentToolStream` over a synthetic child stream.
+   *  The in-memory throttle is reset first so this models a fresh post-restart
+   *  isolate. Returns the durable recovery-progress counter before/after so a
+   *  test can assert forwarding child output credits the PARENT's progress
+   *  marker (N9) — and that a SILENT child (chunks = 0) does NOT. */
+  async forwardChildStreamProgressForTest(chunks: number): Promise<{
+    start: number;
+    after: number;
+  }> {
+    const self = this as unknown as {
+      _forwardAgentToolStream(
+        stream: ReadableStream<{ body: string }>,
+        parentToolCallId: string | undefined,
+        runId: string,
+        sequence: number
+      ): Promise<number>;
+      _lastAgentToolStreamProgressAt: number;
+    };
+    self._lastAgentToolStreamProgressAt = 0;
+    const read = async (): Promise<number> =>
+      (await this.ctx.storage.get<number>("cf:chat-recovery:progress")) ?? 0;
+    const start = await read();
+    const bodies = Array.from({ length: chunks }, (_, i) => ({
+      body: `chunk-${i}`
+    }));
+    const stream = new ReadableStream<{ body: string }>({
+      start(controller) {
+        for (const b of bodies) controller.enqueue(b);
+        controller.close();
+      }
+    });
+    await self._forwardAgentToolStream(stream, undefined, "n9-probe-run", 1);
+    const after = await read();
+    return { start, after };
+  }
+
   /** Simulate compaction collapsing the transcript by dropping all assistant
    *  messages from the live cache. Used to prove the recovery progress signal
    *  is compaction-immune (#1628). */
@@ -2557,12 +2594,14 @@ export class AIChatAgentToolParent extends Agent<Env> {
   private async reconcileAgentToolRunsForTest(options?: {
     deferFinishHooks?: boolean;
     childInspectionTimeoutMs?: number;
+    reattachTimeoutMs?: number;
   }): Promise<Array<() => Promise<void>>> {
     return (
       this as unknown as {
         _reconcileAgentToolRuns(options?: {
           deferFinishHooks?: boolean;
           childInspectionTimeoutMs?: number;
+          reattachTimeoutMs?: number;
         }): Promise<Array<() => Promise<void>>>;
       }
     )._reconcileAgentToolRuns(options);
@@ -2611,16 +2650,24 @@ export class AIChatAgentToolParent extends Agent<Env> {
     return { events: this.events, finishes: this.finishes, inspection };
   }
 
+  /**
+   * A still-running child that reaches terminal *during* the parent's bounded
+   * re-attach window: reconciliation should tail it to terminal and finalize
+   * the parent row `completed` instead of abandoning it `interrupted` (#1630).
+   */
   async reconcileRunningChildForTest(
     input: AgentToolInput,
     runId = crypto.randomUUID()
   ): Promise<{
     events: AgentToolEventMessage[];
     finishes: AgentToolFinishForTest[];
+    status: string | null;
   }> {
     const child = await this.subAgent(AIChatAgentToolChild, runId);
+    // Short delay: still running when reconciliation starts, then terminal a
+    // moment later — within the generous re-attach budget.
     const started = await child.startAgentToolRun(
-      { ...input, delayMs: input.delayMs ?? 10_000 },
+      { ...input, delayMs: input.delayMs ?? 200 },
       { runId }
     );
     this.insertRecoverableParentRunForTest(
@@ -2632,13 +2679,55 @@ export class AIChatAgentToolParent extends Agent<Env> {
 
     this.events = [];
     this.finishes = [];
+    await this.reconcileAgentToolRunsForTest({ reattachTimeoutMs: 30_000 });
+
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      status: this.getParentAgentToolStatusForTest(runId)
+    };
+  }
+
+  /**
+   * A tail-able child whose turn never reaches terminal: reconciliation must
+   * re-attach, tail until the bounded re-attach budget is spent, then seal the
+   * parent row `interrupted` so a genuinely hung child can never block recovery
+   * forever (#1630). A small budget threaded through the seam keeps it fast.
+   */
+  async reattachStuckTailableChildForTest(
+    runId = crypto.randomUUID()
+  ): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: AgentToolFinishForTest[];
+    elapsedMs: number;
+    status: string | null;
+  }> {
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const started = await child.startAgentToolRun(
+      { prompt: "stuck tailable child", delayMs: 60_000 },
+      { runId }
+    );
+    this.insertRecoverableParentRunForTest(
+      runId,
+      "AIChatAgentToolChild",
+      "stuck tailable child",
+      started.startedAt
+    );
+
+    this.events = [];
+    this.finishes = [];
+    const startedAt = Date.now();
     try {
-      await this.reconcileAgentToolRunsForTest();
+      await this.reconcileAgentToolRunsForTest({ reattachTimeoutMs: 200 });
     } finally {
       await child.cancelAgentToolRun(runId, "test cleanup");
     }
-
-    return { events: this.events, finishes: this.finishes };
+    return {
+      events: this.events,
+      finishes: this.finishes,
+      elapsedMs: Date.now() - startedAt,
+      status: this.getParentAgentToolStatusForTest(runId)
+    };
   }
 
   async reconcileMissingChildForTest(runId = crypto.randomUUID()): Promise<{

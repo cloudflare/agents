@@ -657,6 +657,14 @@ const CHAT_RECOVERY_ALARM_DEBOUNCE_MS = 30 * 1000;
 // NEVER reset by progress — the final hard stop so even a degenerate
 // slowly-progressing loop cannot run forever.
 const CHAT_RECOVERY_MAX_WINDOW_MS = 15 * 60 * 1000;
+// N9: while a parent re-attaches to and forwards a sub-agent's stream, credit
+// the parent's recovery progress at most this often. The marker only needs to
+// advance ≥once between recovery attempts (the no-progress window is minutes),
+// so this caps storage writes during high-rate child streaming. The throttle
+// state is in-memory (reset per isolate), so the first forwarded chunk after
+// ANY restart always bumps — guaranteeing every recovery attempt that observes
+// child output registers forward progress.
+const AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS = 5_000;
 
 // Ephemeral user message appended when a model request would otherwise end in
 // an assistant message (see `ensureValidContinueCheckpoint`).
@@ -1580,6 +1588,37 @@ export class Think<
     return ids;
   }
 
+  /**
+   * Repair a single interrupted tool call — a tool part with no settled result,
+   * left behind when a stream was cut off mid-flight. Returns the replacement
+   * part that takes its place in the transcript. `input` has already been
+   * normalized to a valid object.
+   *
+   * The default flips it to an errored tool result so the record survives (no
+   * "disappearing" tool call) and `convertToModelMessages` still gets a
+   * tool-result for it (avoiding `AI_MissingToolResultsError`).
+   *
+   * Override to customize the repaired shape for client-resolved tools — e.g.
+   * convert an interrupted `ask_user` (a question with no server `execute`,
+   * normally answered by the user's next message) into a plain text part
+   * carrying the question prose, so the model sees it as ordinary conversation
+   * rather than a tool error and compaction keeps the question verbatim. This
+   * runs DURING transcript repair — before the repaired transcript is persisted
+   * and sent to the model — so the conversion shapes the current turn, not just
+   * the next one. A returned tool part MUST carry a settled result
+   * (`output-available` / `output-error` / `output-denied` or an
+   * `output`/`result` field); returning a non-tool part (e.g. text) is fine.
+   */
+  protected repairInterruptedToolPart(
+    part: UIMessage["parts"][number]
+  ): UIMessage["parts"][number] {
+    return {
+      ...part,
+      state: "output-error",
+      errorText: "The tool call was interrupted before a result was recorded."
+    } as UIMessage["parts"][number];
+  }
+
   private _repairToolTranscriptParts(messages: UIMessage[]): {
     messages: UIMessage[];
     removedToolCalls: number;
@@ -1608,19 +1647,21 @@ export class Think<
         }
 
         if (!this._toolPartHasSettledResult(record)) {
-          // Preserve the interrupted/abandoned tool call as an errored result
-          // instead of deleting it. Deleting makes the call "disappear" from the
-          // (broadcast) transcript and lets the model silently re-run it; an
-          // errored result keeps the user-visible record AND gives conversion a
-          // tool-result so the provider doesn't 400 (AI_MissingToolResultsError).
+          // Preserve the interrupted/abandoned tool call instead of deleting
+          // it. Deleting makes the call "disappear" from the (broadcast)
+          // transcript and lets the model silently re-run it. `input` is
+          // normalized to a valid object first, then `repairInterruptedToolPart`
+          // decides the replacement shape (default: an errored result, so
+          // conversion still gets a tool-result and the provider doesn't 400
+          // with AI_MissingToolResultsError). Subclasses can override it to
+          // preserve client-resolved tools (e.g. `ask_user`) as text.
           const normalized = this._normalizeToolInput(record);
-          parts.push({
-            ...part,
-            input: normalized.input,
-            state: "output-error",
-            errorText:
-              "The tool call was interrupted before a result was recorded."
-          } as UIMessage["parts"][number]);
+          parts.push(
+            this.repairInterruptedToolPart({
+              ...part,
+              input: normalized.input
+            } as UIMessage["parts"][number])
+          );
           if (normalized.changed) normalizedInputs++;
           removedToolCalls++;
           messageChanged = true;
@@ -3545,13 +3586,119 @@ export class Think<
     `;
   }
 
+  /**
+   * Classify any in-flight chat-recovery on this child facet (#1630). A child
+   * facet is dedicated to a single agent-tool run, so any recovery incident is
+   * that run's. `detected`/`scheduled`/`attempting` mean recovery is still
+   * resolving the interrupted turn; `exhausted`/`failed` mean it gave up; a
+   * completed recovery deletes its incident.
+   */
+  private async _classifyAgentToolChildRecovery(): Promise<
+    "in-progress" | "failed" | "none"
+  > {
+    const entries = await this.ctx.storage.list<ChatRecoveryIncident>({
+      prefix: CHAT_RECOVERY_INCIDENT_KEY_PREFIX
+    });
+    let failed = false;
+    for (const incident of entries.values()) {
+      if (
+        incident.status === "detected" ||
+        incident.status === "scheduled" ||
+        incident.status === "attempting"
+      ) {
+        return "in-progress";
+      }
+      if (incident.status === "exhausted" || incident.status === "failed") {
+        failed = true;
+      }
+    }
+    return failed ? "failed" : "none";
+  }
+
   async inspectAgentToolRun(
     runId: string
   ): Promise<AgentToolRunInspection | null> {
-    const row = this._readAgentToolChildRun(runId);
-    return row
-      ? this._inspectionFromChildRow(row, this.getAgentToolOutput(runId))
-      : null;
+    let row = this._readAgentToolChildRun(runId);
+    if (!row) return null;
+    // A `running`/`starting` row with no live abort controller means the
+    // original in-isolate run is gone (e.g. the parent was evicted while this
+    // child run was in flight, #1630) — lazily reconcile it from the child's
+    // own durable recovery before reporting.
+    if (this._isStaleAgentToolChildRun(row)) {
+      await this._reconcileStaleAgentToolChildRun(runId);
+      row = this._readAgentToolChildRun(runId) ?? row;
+    }
+    return this._inspectionFromChildRow(row, this.getAgentToolOutput(runId));
+  }
+
+  private _isStaleAgentToolChildRun(row: AgentToolChildRunRow): boolean {
+    return (
+      (row.status === "running" || row.status === "starting") &&
+      row.completed_at === null &&
+      !this._agentToolAbortControllers.has(row.run_id)
+    );
+  }
+
+  /**
+   * Reconcile a stale (post-eviction) child run row from the child's own
+   * durable recovery (#1630). The child facet self-heals its interrupted turn
+   * via `chatRecovery`, but that path never writes the run row, so without this
+   * the row strands `running` and the parent can only collect `interrupted`.
+   *
+   * Persisting the terminal here (rather than only computing it) is intentional:
+   * it's a lazy materialization of the run's true terminal that also lets a
+   * tailing parent's stream close promptly and makes subsequent inspects cheap.
+   * While recovery is still resolving (active stream or in-progress incident)
+   * the row is left `running` so the parent's bounded re-attach keeps waiting.
+   */
+  private async _reconcileStaleAgentToolChildRun(runId: string): Promise<void> {
+    const recovery = await this._classifyAgentToolChildRecovery();
+    if (recovery === "in-progress" || this._resumableStream.hasActiveStream()) {
+      return;
+    }
+    // A settled recovery that produced an assistant turn is `completed`, even if
+    // that turn ended on a tool result with no final text — keying off text
+    // alone would mis-seal a legitimately-finished (but text-less) run as
+    // `error`. `getAgentToolSummary` already falls back to "" when there is no
+    // final text.
+    const recoveredTurn =
+      recovery !== "failed" && this._hasRecoveredAgentToolAssistantTurn(runId);
+    if (recoveredTurn) {
+      const output = this.getAgentToolOutput(runId);
+      const summary = this.getAgentToolSummary(runId, output);
+      this.sql`
+        UPDATE cf_agent_tool_child_runs
+        SET status = 'completed',
+            summary = ${summary},
+            output_json = ${Think._stringifyAgentToolOutput(output)},
+            error_message = null,
+            completed_at = ${Date.now()}
+        WHERE run_id = ${runId} AND completed_at IS NULL
+      `;
+    } else {
+      const error =
+        "Agent tool run was interrupted before the child could finish.";
+      this.sql`
+        UPDATE cf_agent_tool_child_runs
+        SET status = 'error',
+            error_message = ${error},
+            completed_at = ${Date.now()}
+        WHERE run_id = ${runId} AND completed_at IS NULL
+      `;
+    }
+    this._finalizeAgentToolChildRunTailers(runId);
+  }
+
+  /** Release a re-attached run's live tail + per-run streaming bookkeeping. */
+  private _finalizeAgentToolChildRunTailers(runId: string): void {
+    for (const close of this._agentToolClosers.get(runId) ?? []) {
+      close();
+    }
+    this._agentToolClosers.delete(runId);
+    this._agentToolForwarders.delete(runId);
+    this._agentToolLiveSequences.delete(runId);
+    this._agentToolLastErrors.delete(runId);
+    this._agentToolPreTurnAssistantIds.delete(runId);
   }
 
   async getAgentToolChunks(
@@ -3569,13 +3716,42 @@ export class Think<
 
   async tailAgentToolRun(
     runId: string,
-    options?: { afterSequence?: number }
+    options?: { afterSequence?: number; signal?: AbortSignal }
   ): Promise<ReadableStream<AgentToolStoredChunk>> {
     const self = this;
+    const signal = options?.signal;
+    let closed = false;
+    let forward: ((chunk: AgentToolStoredChunk) => void) | undefined;
+    const detach = () => {
+      if (forward) {
+        self._agentToolForwarders.get(runId)?.delete(forward);
+        forward = undefined;
+      }
+    };
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
+        const close = () => {
+          if (closed) return;
+          closed = true;
+          detach();
+          try {
+            controller.close();
+          } catch {
+            // Already closed.
+          }
+        };
+        // Honor an external abort (e.g. a bounded re-attach budget) so a parent
+        // tailing a still-running child can stop waiting without cancelling the
+        // child itself — closing the stream unblocks the parent's forwarder.
+        if (signal?.aborted) {
+          close();
+          return;
+        }
+        signal?.addEventListener("abort", close, { once: true });
+
         const replayed = await self.getAgentToolChunks(runId, options);
         for (const chunk of replayed) {
+          if (closed) return;
           controller.enqueue(
             agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
           );
@@ -3586,21 +3762,24 @@ export class Think<
         }
         const row = self._readAgentToolChildRun(runId);
         if (!row || row.completed_at !== null) {
-          controller.close();
+          close();
           return;
         }
-        const forward = (chunk: AgentToolStoredChunk) => {
-          if (chunk.sequence > (options?.afterSequence ?? -1)) {
+        forward = (chunk: AgentToolStoredChunk) => {
+          if (closed || chunk.sequence <= (options?.afterSequence ?? -1)) {
+            return;
+          }
+          try {
             controller.enqueue(
               agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
             );
-          }
-        };
-        const close = () => {
-          try {
-            controller.close();
           } catch {
-            // Already closed.
+            // The consumer detached (e.g. a parent's re-attach budget expired
+            // and cancelled the reader) between the RPC cancel arriving and our
+            // `cancel`/`close` running. Drop the chunk instead of surfacing a
+            // "Stream was cancelled" rejection; the child run is unaffected.
+            closed = true;
+            detach();
           }
         };
         const forwarders = self._agentToolForwarders.get(runId) ?? new Set();
@@ -3610,8 +3789,13 @@ export class Think<
         closers.add(close);
         self._agentToolClosers.set(runId, closers);
       },
-      cancel(reason) {
-        void self.cancelAgentToolRun(runId, reason);
+      cancel() {
+        // A consumer detaching from the tail (e.g. a parent's bounded re-attach
+        // budget expiring, via reader.cancel()) is read-only — it must NOT
+        // cancel the child run. Explicit cancellation flows through
+        // cancelAgentToolRun. Mirrors @cloudflare/ai-chat's read-only tail.
+        closed = true;
+        detach();
       }
     });
     return stream as unknown as ReadableStream<AgentToolStoredChunk>;
@@ -3635,9 +3819,29 @@ export class Think<
     }
   }
 
+  /**
+   * Whether the run produced an assistant turn (text or tool-only). Used by the
+   * post-eviction reconcile to mark a settled run `completed` even when it ended
+   * without final text. A dedicated child facet starts with no assistant
+   * messages, so a missing in-memory pre-turn snapshot is treated as empty.
+   */
+  private _hasRecoveredAgentToolAssistantTurn(runId: string): boolean {
+    const before =
+      this._agentToolPreTurnAssistantIds.get(runId) ?? new Set<string>();
+    return this.messages.some(
+      (msg) => msg.role === "assistant" && !before.has(msg.id)
+    );
+  }
+
   private _getAgentToolFinalText(runId: string): string | null {
-    const before = this._agentToolPreTurnAssistantIds.get(runId);
-    if (!before) return null;
+    // A child facet is dedicated to a single agent-tool run, so any assistant
+    // message it holds is that run's output. When the pre-turn snapshot is
+    // missing — e.g. reconciling after a real eviction, where the in-memory
+    // snapshot died with the original isolate (#1630) — treat it as empty so
+    // the recovered transcript's assistant text is still surfaced as the
+    // summary instead of being lost.
+    const before =
+      this._agentToolPreTurnAssistantIds.get(runId) ?? new Set<string>();
     for (const msg of this.messages) {
       if (msg.role !== "assistant" || before.has(msg.id)) continue;
       const text = msg.parts
@@ -6845,6 +7049,31 @@ export class Think<
     await this.ctx.storage.put(CHAT_RECOVERY_PROGRESS_KEY, current + 1);
   }
 
+  /** In-memory wall-clock of the last N9 child-stream progress bump (reset per
+   *  isolate so the first forwarded chunk after a restart always credits). */
+  private _lastAgentToolStreamProgressAt = 0;
+
+  /**
+   * N9: forwarding a sub-agent's chunks IS forward progress for this parent
+   * turn, so credit the parent's recovery progress marker — otherwise a parent
+   * whose turn merely `await`s a child banks no progress of its own and its
+   * no-progress window exhausts while the child is healthily streaming. Only
+   * invoked after a child actually produced output (see
+   * `_forwardAgentToolStream`), so a silent child still lets the parent exhaust.
+   * Throttled (and reset per isolate) so we never write storage per token.
+   */
+  protected override async _onAgentToolStreamProgress(): Promise<void> {
+    const now = Date.now();
+    if (
+      now - this._lastAgentToolStreamProgressAt <
+      AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS
+    ) {
+      return;
+    }
+    this._lastAgentToolStreamProgressAt = now;
+    await this._bumpChatRecoveryProgress();
+  }
+
   /** Sweep recovery incidents that have been inactive past the TTL. */
   private async _sweepStaleChatRecoveryIncidents(now: number): Promise<void> {
     const entries = await this.ctx.storage.list<ChatRecoveryIncident>({
@@ -7125,6 +7354,21 @@ export class Think<
       });
 
     if (exhausted) {
+      // Preserve the settled partial before sealing the turn. Exhaustion is
+      // decided BEFORE `onChatRecovery` is consulted, so without this the
+      // settled (often non-idempotent) tool results the turn already produced
+      // are discarded and the model re-runs them on the next message (#1631).
+      // Same gating as the normal path below so an already-persisted partial is
+      // never duplicated.
+      if (
+        await this._shouldPersistOrphanedPartial(streamId, {
+          streamStillActive: Boolean(streamStillActive),
+          streamIsTerminal,
+          snapshot: recoverySnapshot
+        })
+      ) {
+        await this._persistOrphanedStream(streamId);
+      }
       await this._exhaustChatRecovery(incident, config);
       return true;
     }
@@ -7152,14 +7396,22 @@ export class Think<
           createdAt: ctx.createdAt
         })) ?? {};
 
-      const streamAlreadyPersisted =
-        streamIsTerminal &&
-        (await this._hasPersistedRecoveredAssistant(recoverySnapshot));
+      const shouldPersist = await this._shouldPersistOrphanedPartial(streamId, {
+        streamStillActive: Boolean(streamStillActive),
+        streamIsTerminal,
+        snapshot: recoverySnapshot
+      });
 
+      // Settled work — completed, often non-idempotent tool results — is NEVER
+      // dropped by recovery. `persist: false` only suppresses persistence of a
+      // partial that has nothing settled to lose; a partial carrying settled
+      // tool results is persisted regardless, so an app can never accidentally
+      // discard completed work (and never needs `{ persist: true }` just to be
+      // safe). A safe default beats a warning about an unsafe one (#1631).
       if (
-        options.persist !== false &&
-        streamId &&
-        (streamStillActive || (streamIsTerminal && !streamAlreadyPersisted))
+        shouldPersist &&
+        (options.persist !== false ||
+          this._partialHasSettledToolResults(partial.parts))
       ) {
         await this._persistOrphanedStream(streamId);
       }
@@ -7338,6 +7590,44 @@ export class Think<
       lastLeaf?.role === "assistant" &&
       lastLeaf.id !== snapshot?.latestMessageId
     );
+  }
+
+  /**
+   * Whether the orphaned stream's partial should be materialized into an
+   * assistant message: there is a stream, and it is either still active or
+   * terminal-but-not-yet-persisted. Shared by the normal recovery path AND the
+   * exhaustion path so neither discards settled work nor duplicates a partial
+   * an earlier attempt already saved.
+   */
+  private async _shouldPersistOrphanedPartial(
+    streamId: string,
+    opts: {
+      streamStillActive: boolean;
+      streamIsTerminal: boolean;
+      snapshot: ChatFiberSnapshot<"think-chat-turn"> | null;
+    }
+  ): Promise<boolean> {
+    if (!streamId) return false;
+    const alreadyPersisted =
+      opts.streamIsTerminal &&
+      (await this._hasPersistedRecoveredAssistant(opts.snapshot));
+    return (
+      opts.streamStillActive || (opts.streamIsTerminal && !alreadyPersisted)
+    );
+  }
+
+  /** Whether a reconstructed partial carries any settled (provider-accepted)
+   *  tool result — the completed, often non-idempotent work that a
+   *  `{ persist: false }` recovery return would silently discard. */
+  private _partialHasSettledToolResults(parts: MessagePart[]): boolean {
+    return parts.some((part) => {
+      const record = part as Record<string, unknown>;
+      const type = typeof record.type === "string" ? record.type : "";
+      return (
+        (type.startsWith("tool-") || type === "dynamic-tool") &&
+        this._toolPartHasSettledResult(record)
+      );
+    });
   }
 
   /**

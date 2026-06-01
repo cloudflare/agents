@@ -5,6 +5,7 @@
  */
 import { createWorkersAI } from "workers-ai-provider";
 import { Agent, callable, routeAgentRequest } from "agents";
+import { agentTool } from "agents/agent-tools";
 import { RpcTarget } from "cloudflare:workers";
 import { tool } from "ai";
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
@@ -24,7 +25,9 @@ type Env = {
   ThinkRecoveryHelperParent: DurableObjectNamespace<ThinkRecoveryHelperParent>;
   ThinkRecoveryHelperAgent: DurableObjectNamespace<ThinkRecoveryHelperAgent>;
   ThinkToolRollbackE2EAgent: DurableObjectNamespace<ThinkToolRollbackE2EAgent>;
+  ThinkPersistFalseE2EAgent: DurableObjectNamespace<ThinkPersistFalseE2EAgent>;
   ThinkTaskParentE2EAgent: DurableObjectNamespace<ThinkTaskParentE2EAgent>;
+  ThinkAgentToolNaturalParentE2EAgent: DurableObjectNamespace<ThinkAgentToolNaturalParentE2EAgent>;
   AI: Ai;
   R2: R2Bucket;
 };
@@ -205,6 +208,107 @@ export class ThinkToolRollbackE2EAgent extends Think<Env> {
   @callable()
   override async getMessages(): Promise<UIMessage[]> {
     return this.messages;
+  }
+}
+
+/**
+ * #1631 (R1) e2e: a `recordStep` tool loop whose `onChatRecovery` returns
+ * `{ persist: false, continue: false }` — the explicit "stop this turn"
+ * override. Under a real SIGKILL, recovery fires and returns persist:false;
+ * R1 guarantees the SETTLED tool results produced before the kill are still
+ * preserved in the durable transcript (never dropped), while continue:false
+ * stops the turn (no re-run). This proves the persist:false no-loss default
+ * survives a REAL process kill, not just a unit-seeded incident.
+ */
+export class ThinkPersistFalseE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override chatRecovery = true;
+  override maxSteps = 500;
+  private _ledgerReady = false;
+
+  override getModel(): LanguageModel {
+    return createToolLoopMockModel(TOOL_ROLLBACK_TOTAL_STEPS);
+  }
+
+  override getSystemPrompt(): string {
+    return "Record each step in order using the recordStep tool.";
+  }
+
+  override getTools(): ToolSet {
+    return {
+      recordStep: tool({
+        description: "Record a step by its index.",
+        inputSchema: z.object({ index: z.number() }),
+        execute: async ({ index }) => {
+          this._ensureLedger();
+          this
+            .sql`INSERT INTO tool_ledger (idx, at) VALUES (${index}, ${Date.now()})`;
+          await new Promise((r) => setTimeout(r, TOOL_ROLLBACK_EXEC_DELAY_MS));
+          return { recorded: index };
+        }
+      })
+    };
+  }
+
+  override async onChatRecovery(): Promise<ChatRecoveryOptions> {
+    const n = (await this.ctx.storage.get<number>("tool:recovery-count")) ?? 0;
+    await this.ctx.storage.put("tool:recovery-count", n + 1);
+    // Explicit "stop this turn" — but R1 must STILL preserve the settled work.
+    return { persist: false, continue: false };
+  }
+
+  private _ensureLedger(): void {
+    if (this._ledgerReady) return;
+    this
+      .sql`CREATE TABLE IF NOT EXISTS tool_ledger (seq INTEGER PRIMARY KEY AUTOINCREMENT, idx INTEGER, at INTEGER)`;
+    this._ledgerReady = true;
+  }
+
+  @callable()
+  async getPersistFalseStatus(): Promise<{
+    totalExecutions: number;
+    uniqueIndices: number;
+    maxIndex: number;
+    recoveryCount: number;
+    assistantMessages: number;
+    settledToolPartsInTranscript: number;
+    hasFiberRows: boolean;
+  }> {
+    this._ensureLedger();
+    const rows = this.sql<{ idx: number; count: number }>`
+      SELECT idx, COUNT(*) as count FROM tool_ledger GROUP BY idx ORDER BY idx
+    `;
+    const fiberRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    const assistant = this.messages.filter((m) => m.role === "assistant");
+    const settledToolPartsInTranscript = assistant.reduce((n, m) => {
+      return (
+        n +
+        m.parts.filter((p) => {
+          const part = p as {
+            type?: unknown;
+            output?: unknown;
+            state?: unknown;
+          };
+          return (
+            typeof part.type === "string" &&
+            part.type.startsWith("tool-") &&
+            (part.output !== undefined || part.state === "output-available")
+          );
+        }).length
+      );
+    }, 0);
+    return {
+      totalExecutions: rows.reduce((n, r) => n + r.count, 0),
+      uniqueIndices: rows.length,
+      maxIndex: rows.reduce((m, r) => Math.max(m, r.idx), 0),
+      recoveryCount:
+        (await this.ctx.storage.get<number>("tool:recovery-count")) ?? 0,
+      assistantMessages: assistant.length,
+      settledToolPartsInTranscript,
+      hasFiberRows: (fiberRows[0]?.c ?? 0) > 0
+    };
   }
 }
 
@@ -571,6 +675,116 @@ export class ThinkTaskParentE2EAgent extends Think<Env> {
       parentRecoveries:
         (await this.ctx.storage.get<number>("parent:recovery-count")) ?? 0,
       parentHasFiberRows: (fiberRows[0]?.c ?? 0) > 0,
+      child
+    };
+  }
+}
+
+// The stable runId agentTool() derives from the mock model's tool call id
+// ("task-1") — `agent-tool:${toolCallId}`. getTaskStatus uses it to find the
+// child facet.
+const NATURAL_CHILD_TASK_RUN_ID = "agent-tool:task-1";
+
+/**
+ * Same shape as {@link ThinkTaskParentE2EAgent}, but the seeding task is wired
+ * through `agentTool()` — the NATURAL path that does not hand-pick a stable
+ * runId (#1630). Before the fix, `agentTool()` minted a fresh `nanoid` per
+ * call, so a turn re-run by recovery spawned a brand-new child and re-ran the
+ * whole ledger ("amplification"). After the fix, `agentTool()` derives a stable
+ * runId from the (recovery-preserved) tool call id, so the re-issue re-attaches
+ * to the same idempotent child instead of re-running its work.
+ */
+export class ThinkAgentToolNaturalParentE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override chatRecovery = true;
+  override maxSteps = 50;
+
+  override getModel(): LanguageModel {
+    return createSingleTaskMockModel();
+  }
+
+  override getSystemPrompt(): string {
+    return "Run the seeding task exactly once using runTask.";
+  }
+
+  override getTools(): ToolSet {
+    return {
+      runTask: agentTool(ThinkToolRollbackE2EAgent, {
+        description: "Run the seeding task as a child agent.",
+        inputSchema: z.object({ taskId: z.number() })
+      })
+    };
+  }
+
+  override async onChatRecovery(): Promise<ChatRecoveryOptions> {
+    const n =
+      (await this.ctx.storage.get<number>("parent:recovery-count")) ?? 0;
+    await this.ctx.storage.put("parent:recovery-count", n + 1);
+    return { continue: true };
+  }
+
+  @callable()
+  async getTaskStatus(): Promise<{
+    parentTaskExecutions: number;
+    parentRecoveries: number;
+    parentHasFiberRows: boolean;
+    parentChildStatus: string | null;
+    child: {
+      totalExecutions: number;
+      uniqueIndices: number;
+      maxIndex: number;
+      duplicates: Array<{ index: number; count: number }>;
+      recoveryCount: number;
+      hasFiberRows: boolean;
+    } | null;
+  }> {
+    const parentRunRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agent_tool_runs
+    `;
+    // The status the PARENT collected for the child run (#1630 / N6): after a
+    // real eviction the child self-heals its durable submission and the parent
+    // re-attaches and collects `completed` — not `interrupted` (abandoned).
+    const parentChildRunRows = this.sql<{ status: string }>`
+      SELECT status FROM cf_agent_tool_runs
+      WHERE run_id = ${NATURAL_CHILD_TASK_RUN_ID}
+      LIMIT 1
+    `;
+    const fiberRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    let child: {
+      totalExecutions: number;
+      uniqueIndices: number;
+      maxIndex: number;
+      duplicates: Array<{ index: number; count: number }>;
+      recoveryCount: number;
+      hasFiberRows: boolean;
+    } | null = null;
+    try {
+      const childStub = await this.subAgent(
+        ThinkToolRollbackE2EAgent,
+        NATURAL_CHILD_TASK_RUN_ID
+      );
+      const ledger = await childStub.getLedgerStatus();
+      child = {
+        totalExecutions: ledger.totalExecutions,
+        uniqueIndices: ledger.uniqueIndices,
+        maxIndex: ledger.maxIndex,
+        duplicates: ledger.duplicates,
+        recoveryCount: ledger.recoveryCount,
+        hasFiberRows: ledger.hasFiberRows
+      };
+    } catch {
+      child = null;
+    }
+    return {
+      // The agentTool() path doesn't write a parent_task_log; the parent run
+      // row count is the closest analogue to "how many times the task ran".
+      parentTaskExecutions: parentRunRows[0]?.c ?? 0,
+      parentRecoveries:
+        (await this.ctx.storage.get<number>("parent:recovery-count")) ?? 0,
+      parentHasFiberRows: (fiberRows[0]?.c ?? 0) > 0,
+      parentChildStatus: parentChildRunRows[0]?.status ?? null,
       child
     };
   }

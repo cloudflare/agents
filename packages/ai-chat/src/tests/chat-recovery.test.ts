@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "agents";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
@@ -37,6 +37,21 @@ interface ChatTestStub {
   ): Promise<void>;
   insertInterruptedFiber(name: string, snapshot?: unknown): Promise<void>;
   triggerFiberRecovery(): Promise<void>;
+  setChatRecoveryConfigForTest(config: {
+    maxAttempts?: number;
+    terminalMessage?: string;
+  }): Promise<void>;
+  seedIncidentForTest(incident: {
+    incidentId: string;
+    requestId: string;
+    recoveryKind: "retry" | "continue";
+    attempt: number;
+    maxAttempts: number;
+    status: string;
+    firstSeenAt: number;
+    lastAttemptAt: number;
+  }): Promise<void>;
+  getChatRecoveryIncidentsForTest(): Promise<Array<{ status: string }>>;
 }
 
 interface SlowStreamStub {
@@ -546,6 +561,182 @@ describe("chatRecovery", () => {
       expect(lastCtx.recoveryData).toEqual(stashedData);
       expect(lastCtx.partialText).toBe("Partial with stash");
       expect(lastCtx.streamId).toBe("stream-stash");
+    });
+  });
+
+  describe("recovery preserves settled work (#1631)", () => {
+    it("persists the settled partial when the recovery budget is exhausted", async () => {
+      const room = crypto.randomUUID();
+      const stub = (await getAgentByName(
+        env.ChatRecoveryTestAgent,
+        room
+      )) as unknown as ChatTestStub;
+      // maxAttempts: 1 so a seeded attempt at the cap exhausts on the next wake.
+      await stub.setChatRecoveryConfigForTest({ maxAttempts: 1 });
+
+      // text PLUS a settled (completed, non-idempotent) tool call — the work
+      // the budget-exhaustion path used to discard and force the model to re-run.
+      await stub.insertInterruptedStream("stream-exh", "req-exh", [
+        {
+          body: JSON.stringify({ type: "start", messageId: "a-exh" }),
+          index: 0
+        },
+        {
+          body: JSON.stringify({
+            type: "tool-input-available",
+            toolCallId: "tc-exh",
+            toolName: "writeFile",
+            input: { path: "out.txt" }
+          }),
+          index: 1
+        },
+        {
+          body: JSON.stringify({
+            type: "tool-output-available",
+            toolCallId: "tc-exh",
+            output: { bytesWritten: 12 }
+          }),
+          index: 2
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 3 },
+        {
+          body: JSON.stringify({ type: "text-delta", delta: "did real work" }),
+          index: 4
+        }
+      ]);
+      await stub.insertInterruptedFiber("__cf_internal_chat_turn:req-exh");
+      // Seed an incident already at the cap so this recovery exhausts.
+      // `lastAttemptAt` is aged past the alarm-debounce window (#1637/#1638) so
+      // this wake counts as a genuine new attempt (1 → 2 > maxAttempts) rather
+      // than being collapsed as a debounced reconnect (which would hold the
+      // attempt at 1 and never exhaust).
+      await stub.seedIncidentForTest({
+        incidentId: "req-exh:",
+        requestId: "req-exh",
+        recoveryKind: "continue",
+        attempt: 1,
+        maxAttempts: 1,
+        status: "scheduled",
+        firstSeenAt: Date.now() - 60_000,
+        lastAttemptAt: Date.now() - 60_000
+      });
+
+      await stub.triggerFiberRecovery();
+
+      // Exhaustion seals the turn but must NOT discard the settled partial.
+      const messages = await stub.getPersistedMessages();
+      const assistantMsgs = messages.filter((m) => m.role === "assistant");
+      expect(assistantMsgs).toHaveLength(1);
+      expect(extractAssistantText(messages)).toContain("did real work");
+      // The settled tool result is preserved (not just the text).
+      const settledTool = assistantMsgs[0]?.parts?.find((p) => {
+        const part = p as { type?: unknown; output?: unknown; state?: unknown };
+        return (
+          typeof part.type === "string" &&
+          part.type.startsWith("tool-") &&
+          (part.output !== undefined || part.state === "output-available")
+        );
+      });
+      expect(settledTool).toBeDefined();
+
+      const incidents = await stub.getChatRecoveryIncidentsForTest();
+      expect(incidents[0]?.status).toBe("exhausted");
+    });
+
+    it("never drops settled tool results on { persist: false } — preserves them anyway", async () => {
+      const room = crypto.randomUUID();
+      const stub = (await getAgentByName(
+        env.ChatRecoveryTestAgent,
+        room
+      )) as unknown as ChatTestStub;
+      await stub.setRecoveryOverride({ persist: false, continue: false });
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await stub.insertInterruptedStream("stream-settled", "req-settled", [
+          {
+            body: JSON.stringify({ type: "start", messageId: "a-settled" }),
+            index: 0
+          },
+          {
+            body: JSON.stringify({
+              type: "tool-input-available",
+              toolCallId: "tc1",
+              toolName: "calc",
+              input: { x: 1 }
+            }),
+            index: 1
+          },
+          {
+            body: JSON.stringify({
+              type: "tool-output-available",
+              toolCallId: "tc1",
+              output: { result: 42 }
+            }),
+            index: 2
+          }
+        ]);
+        await stub.insertInterruptedFiber(
+          "__cf_internal_chat_turn:req-settled"
+        );
+
+        await stub.triggerFiberRecovery();
+
+        // R1: settled work is preserved regardless of `persist: false` — the
+        // assistant partial with the completed tool call IS persisted, with no
+        // warning (a safe default beats a warning about an unsafe one).
+        const messages = await stub.getPersistedMessages();
+        const assistantMsgs = messages.filter((m) => m.role === "assistant");
+        expect(assistantMsgs).toHaveLength(1);
+        const hasSettledTool = assistantMsgs[0]?.parts?.some((p) => {
+          const type = (p as { type?: unknown }).type;
+          return typeof type === "string" && type.startsWith("tool-");
+        });
+        expect(hasSettledTool).toBe(true);
+        expect(warnSpy).not.toHaveBeenCalled();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("honors { persist: false } for a text-only partial with no settled work", async () => {
+      const room = crypto.randomUUID();
+      const stub = (await getAgentByName(
+        env.ChatRecoveryTestAgent,
+        room
+      )) as unknown as ChatTestStub;
+      await stub.setRecoveryOverride({ persist: false, continue: false });
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await stub.insertInterruptedStream("stream-textonly", "req-textonly", [
+          {
+            body: JSON.stringify({ type: "start", messageId: "a-textonly" }),
+            index: 0
+          },
+          { body: JSON.stringify({ type: "text-start" }), index: 1 },
+          {
+            body: JSON.stringify({
+              type: "text-delta",
+              delta: "just prose, no tools"
+            }),
+            index: 2
+          }
+        ]);
+        await stub.insertInterruptedFiber(
+          "__cf_internal_chat_turn:req-textonly"
+        );
+
+        await stub.triggerFiberRecovery();
+
+        // No settled tool results to preserve, so `persist: false` is honored —
+        // nothing is persisted, and there is no warning.
+        const messages = await stub.getPersistedMessages();
+        expect(messages.filter((m) => m.role === "assistant")).toHaveLength(0);
+        expect(warnSpy).not.toHaveBeenCalled();
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
   });
 

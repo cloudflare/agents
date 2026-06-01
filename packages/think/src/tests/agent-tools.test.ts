@@ -54,6 +54,20 @@ type ThinkAgentToolParentStub = DurableObjectStub & {
     finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
     status: string | null;
   }>;
+  reattachStuckTailableThinkChildForTest(runId?: string): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
+    elapsedMs: number;
+    status: string | null;
+  }>;
+  reconcileParallelThinkChildrenForTest(): Promise<{
+    stuckStatus: string | null;
+    fastStatus: string | null;
+  }>;
+  reissueInterruptedThinkChildForTest(
+    input: string,
+    runId?: string
+  ): Promise<{ status: string | null; reissueStatus: string }>;
   reconcileStuckThinkChildWithTimeoutForTest(runId?: string): Promise<{
     events: AgentToolEventMessage[];
     finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
@@ -294,16 +308,49 @@ describe("Think agent tools", () => {
     });
   });
 
-  it("recovers still-running Think child rows as interrupted", async () => {
+  it("re-attaches a still-running Think child and finalizes it completed (#1630)", async () => {
     const parent = await freshParent();
     const runId = crypto.randomUUID();
 
     const { events, finishes, status } =
       await parent.reconcileRunningThinkChildForTest(
-        "still running Think child",
+        "child completes during reattach",
         runId
       );
 
+    expect(status).toBe("completed");
+    expect(finishes).toEqual([
+      {
+        run: expect.objectContaining({
+          runId,
+          parentToolCallId: "think-tool-call",
+          agentType: "ThinkTestAgent",
+          status: "completed",
+          inputPreview: "child completes during reattach"
+        }),
+        result: expect.objectContaining({
+          status: "completed"
+        })
+      }
+    ]);
+    expect(events.at(-1)).toMatchObject({
+      event: {
+        kind: "finished",
+        runId
+      }
+    });
+  });
+
+  it("bounds re-attach when a tail-able Think child never reaches terminal (#1630)", async () => {
+    const parent = await freshParent();
+    const runId = crypto.randomUUID();
+
+    const { finishes, elapsedMs, status } =
+      await parent.reattachStuckTailableThinkChildForTest(runId);
+
+    // Sealed after the (small) bounded re-attach budget, not immediately and
+    // not never: a genuinely hung child can't block recovery forever.
+    expect(elapsedMs).toBeLessThan(5000);
     expect(status).toBe("interrupted");
     expect(finishes).toEqual([
       {
@@ -311,24 +358,44 @@ describe("Think agent tools", () => {
           runId,
           parentToolCallId: "think-tool-call",
           agentType: "ThinkTestAgent",
-          status: "interrupted",
-          inputPreview: "still running Think child"
+          status: "interrupted"
         }),
         result: expect.objectContaining({
           status: "interrupted",
           error:
-            "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
+            "Agent tool run was still running and did not reach a terminal result within the re-attach budget."
         })
       }
     ]);
-    expect(events.at(-1)).toMatchObject({
-      event: {
-        kind: "interrupted",
-        runId,
-        error:
-          "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
-      }
-    });
+  });
+
+  it("re-attaches still-running children in parallel so a hung child can't starve a sibling (#1630)", async () => {
+    const parent = await freshParent();
+
+    const { stuckStatus, fastStatus } =
+      await parent.reconcileParallelThinkChildrenForTest();
+
+    // The fast child completes during its own re-attach budget even though the
+    // (earlier-started) stuck child is still burning its budget in parallel.
+    expect(fastStatus).toBe("completed");
+    expect(stuckStatus).toBe("interrupted");
+  });
+
+  it("repairs an interrupted run by re-attaching on re-issue (#1630)", async () => {
+    const parent = await freshParent();
+    const runId = crypto.randomUUID();
+
+    const { status, reissueStatus } =
+      await parent.reissueInterruptedThinkChildForTest(
+        "repair after interrupt",
+        runId
+      );
+
+    // `interrupted` is soft: a re-issue re-attaches and collects the child's
+    // real (completed) result, repairing the parent row instead of returning
+    // the stale interrupted.
+    expect(reissueStatus).toBe("completed");
+    expect(status).toBe("completed");
   });
 
   it("bounds Think recovery when child facet startup never completes", async () => {

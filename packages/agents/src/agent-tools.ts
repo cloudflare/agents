@@ -82,10 +82,24 @@ export function agentTool<Input = unknown, Output = unknown>(
             }
           : undefined;
 
+      // Derive a STABLE runId from the tool call id (#1630). A tool call's id is
+      // preserved in the transcript, so when a parent turn is re-run by chat
+      // recovery after a deploy / eviction, the same `agentTool()` call resolves
+      // to the same runId — turning the re-issue into a duplicate that
+      // `runAgentTool` re-attaches to the still-running child, instead of a
+      // fresh `nanoid` that spawns a brand-new child and re-runs already-
+      // completed work ("the agent went all the way back"). Falls back to a
+      // fresh id only when there is no tool call id (rare; preserves prior
+      // behavior).
+      const runId = executeOptions?.toolCallId
+        ? `agent-tool:${executeOptions.toolCallId}`
+        : undefined;
+
       const result = await currentAgentToolRunner().runAgentTool<Input, Output>(
         cls,
         {
           input,
+          runId,
           parentToolCallId: executeOptions?.toolCallId,
           signal: executeOptions?.abortSignal,
           display

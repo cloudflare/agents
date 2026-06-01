@@ -651,7 +651,9 @@ Common return values:
 
 - `{}` — persist partial + auto-continue (default, works with providers that support assistant prefill)
 - `{ continue: false }` — persist partial but do not auto-continue (handle continuation yourself)
-- `{ persist: false, continue: false }` — handle everything yourself (e.g., retrieve a completed response from the provider)
+- `{ persist: false, continue: false }` — do not persist the unsettled remainder and handle everything yourself (e.g., retrieve a completed response from the provider)
+
+Settled work is never dropped: `persist: false` only suppresses persistence of a partial that has nothing settled to lose. A partial that already carries settled tool results (completed, often non-idempotent work) is persisted regardless, so an app cannot accidentally discard completed tool calls — and never needs `{ persist: true }` just to stay safe.
 
 When recovery happens before any stream chunks were written, there is no partial assistant message to continue. If the latest persisted message is still the unanswered user message from the interrupted turn, the framework retries that turn automatically unless `continue` is `false`.
 

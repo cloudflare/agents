@@ -7,7 +7,10 @@ import type {
   JSONRPCNotification,
   JSONRPCResultResponse
 } from "@modelcontextprotocol/sdk/types.js";
-import { describe, expect, it } from "vitest";
+import type { Connection } from "partyserver";
+import { describe, expect, it, vi } from "vitest";
+import { __DO_NOT_USE_WILL_BREAK__agentContext as agentContext } from "../../../internal_context";
+import { StreamableHTTPServerTransport } from "../../../mcp/transport";
 import worker from "../../worker";
 import {
   TEST_MESSAGES,
@@ -390,6 +393,161 @@ describe("Streamable HTTP Transport", () => {
 
       await reader1?.cancel();
       await reader2?.cancel();
+    });
+
+    it("keeps colliding request ids on their originating POST streams", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+      const collidingRequest = (label: string): JSONRPCMessage => ({
+        id: "same-id",
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          arguments: { label },
+          name: "collisionBarrierEcho"
+        }
+      });
+
+      const [responseA, responseB] = await Promise.all([
+        sendPostRequest(ctx, baseUrl, collidingRequest("A"), sessionId),
+        sendPostRequest(ctx, baseUrl, collidingRequest("B"), sessionId)
+      ]);
+      const readerA = responseA.body?.getReader();
+      const readerB = responseB.body?.getReader();
+      expect(readerA).toBeTruthy();
+      expect(readerB).toBeTruthy();
+      if (!readerA || !readerB) throw new Error("No POST stream reader");
+
+      const [frameA, frameB] = await Promise.all([
+        readSSEEventWithTimeout(readerA, 1000),
+        readSSEEventWithTimeout(readerB, 1000)
+      ]);
+
+      expect(frameA).not.toBeNull();
+      expect(frameB).not.toBeNull();
+      expect(frameA).toContain("collision:A");
+      expect(frameB).toContain("collision:B");
+
+      await readerA.cancel();
+      await readerB.cancel();
+    });
+  });
+
+  describe("Ambiguous request id routing", () => {
+    const createConnection = (
+      id: string,
+      requestIds: string[] = ["same-id"]
+    ) => ({
+      id,
+      state: { streamId: id, requestIds },
+      send: vi.fn()
+    });
+
+    const createTransport = (
+      liveConnections: ReturnType<typeof createConnection>[]
+    ) => {
+      const agent = {
+        deleteStreamRequestIds: vi.fn(async () => undefined),
+        getConnections: () => liveConnections,
+        getSessionId: () => "session-id"
+      };
+      const transport = agentContext.run(
+        {
+          agent,
+          connection: undefined,
+          email: undefined,
+          request: undefined
+        },
+        () => new StreamableHTTPServerTransport({})
+      );
+      return { agent, transport };
+    };
+
+    const result = {
+      id: "same-id",
+      jsonrpc: "2.0" as const,
+      result: { content: "right response" }
+    };
+
+    it("returns internal errors to duplicate live streams when no origin is available", async () => {
+      const first = createConnection("first");
+      const second = createConnection("second");
+      const { agent, transport } = createTransport([first, second]);
+
+      await agentContext.run(
+        {
+          agent,
+          connection: undefined,
+          email: undefined,
+          request: undefined
+        },
+        () => transport.send(result)
+      );
+
+      for (const connection of [first, second]) {
+        expect(connection.send).toHaveBeenCalledOnce();
+        const event = JSON.parse(String(connection.send.mock.calls[0][0])) as {
+          event: string;
+          close?: boolean;
+        };
+        const error = parseSSEData(event.event) as {
+          error: { code: number; message: string };
+          id: string;
+        };
+        expect(error).toMatchObject({
+          error: { code: -32603, message: "Internal error" },
+          id: "same-id"
+        });
+        expect(event.event).not.toContain("right response");
+        expect(event.close).toBe(true);
+      }
+    });
+
+    it("routes to a live resumed stream instead of a stale originating stream", async () => {
+      const staleOrigin = createConnection("closed-post");
+      const resumed = createConnection("resumed-get");
+      const { agent, transport } = createTransport([resumed]);
+
+      await agentContext.run(
+        {
+          agent,
+          connection: staleOrigin as unknown as Connection,
+          email: undefined,
+          request: undefined
+        },
+        () => transport.send(result)
+      );
+
+      expect(staleOrigin.send).not.toHaveBeenCalled();
+      expect(resumed.send).toHaveBeenCalledOnce();
+    });
+
+    it("tracks colliding batch response completion independently per stream", async () => {
+      const batch = createConnection("batch", ["same-id", "batch-only"]);
+      const colliding = createConnection("colliding");
+      const { agent, transport } = createTransport([batch, colliding]);
+      const sendFrom = (
+        connection: ReturnType<typeof createConnection>,
+        id: string
+      ) =>
+        agentContext.run(
+          {
+            agent,
+            connection: connection as unknown as Connection,
+            email: undefined,
+            request: undefined
+          },
+          () => transport.send({ ...result, id })
+        );
+
+      await sendFrom(batch, "same-id");
+      await sendFrom(colliding, "same-id");
+      await sendFrom(batch, "batch-only");
+
+      const finalBatchEvent = JSON.parse(
+        String(batch.send.mock.calls.at(-1)?.[0])
+      ) as { close?: boolean };
+      expect(finalBatchEvent.close).toBe(true);
     });
   });
 

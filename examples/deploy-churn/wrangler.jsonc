@@ -14,6 +14,10 @@
       {
         "class_name": "DeployChurnAgent",
         "name": "DeployChurnAgent"
+      },
+      {
+        "class_name": "DeployChurnSubAgentChild",
+        "name": "DeployChurnSubAgentChild"
       }
     ]
   },
@@ -21,6 +25,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["DeployChurnAgent"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["DeployChurnSubAgentChild"]
     }
   ],
   // Required so the deployed Worker's structured logs are queryable via the

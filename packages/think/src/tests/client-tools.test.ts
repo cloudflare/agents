@@ -1931,3 +1931,78 @@ describe("Think — messageConcurrency", () => {
     await closeWS(ws);
   });
 });
+
+describe("repairInterruptedToolPart override (#1631)", () => {
+  it("converts an interrupted ask_user into a text part carrying the prompt", async () => {
+    const agent = await freshAgent();
+    const messages = [
+      { id: "u1", role: "user", parts: [{ type: "text", text: "hi" }] },
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-ask_user",
+            toolCallId: "tc1",
+            state: "input-available",
+            input: { prompt: "Ship it tonight?" }
+          }
+        ]
+      }
+    ] as unknown as UIMessage[];
+
+    const repaired = await agent.repairToolTranscriptPartsForTest(messages);
+    const part = (repaired[1] as UIMessage).parts[0] as Record<string, unknown>;
+    // The client-resolved question is preserved as prose, not flipped to a
+    // generic errored tool result.
+    expect(part.type).toBe("text");
+    expect(part.text).toBe("Ship it tonight?");
+  });
+
+  it("falls back to the default errored-result repair for non-ask_user tools", async () => {
+    const agent = await freshAgent();
+    const messages = [
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      }
+    ] as unknown as UIMessage[];
+
+    const repaired = await agent.repairToolTranscriptPartsForTest(messages);
+    const part = (repaired[0] as UIMessage).parts[0] as Record<string, unknown>;
+    expect(part.type).toBe("tool-client_action");
+    expect(part.state).toBe("output-error");
+  });
+
+  it("leaves a settled ask_user untouched (only interrupted calls are repaired)", async () => {
+    const agent = await freshAgent();
+    const messages = [
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-ask_user",
+            toolCallId: "tc1",
+            state: "output-available",
+            input: { prompt: "Q?" },
+            output: { answer: "yes" }
+          }
+        ]
+      }
+    ] as unknown as UIMessage[];
+
+    const repaired = await agent.repairToolTranscriptPartsForTest(messages);
+    const part = (repaired[0] as UIMessage).parts[0] as Record<string, unknown>;
+    expect(part.type).toBe("tool-ask_user");
+    expect(part.state).toBe("output-available");
+  });
+});

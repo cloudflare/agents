@@ -64,6 +64,13 @@ type ParentStub = DurableObjectStub & {
   ): Promise<{
     events: AgentToolEventMessage[];
     finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
+    status: string | null;
+  }>;
+  reattachStuckTailableChildForTest(runId?: string): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
+    elapsedMs: number;
+    status: string | null;
   }>;
   reconcileMissingChildForTest(runId?: string): Promise<{
     events: AgentToolEventMessage[];
@@ -263,40 +270,65 @@ describe("AIChatAgent as an agent-tool child", () => {
     });
   });
 
-  it("marks still-running recovered children interrupted and emits lifecycle events", async () => {
+  it("re-attaches a still-running recovered child and finalizes it completed (#1630)", async () => {
     const parent = await getParent();
     const runId = crypto.randomUUID();
 
-    const { events, finishes } = await parent.reconcileRunningChildForTest(
-      { prompt: "still running child" },
-      runId
-    );
+    const { events, finishes, status } =
+      await parent.reconcileRunningChildForTest(
+        { prompt: "child completes during reattach" },
+        runId
+      );
 
+    expect(status).toBe("completed");
     expect(finishes).toEqual([
       {
         run: expect.objectContaining({
           runId,
           parentToolCallId: "test-tool-call",
           agentType: "AIChatAgentToolChild",
-          status: "interrupted",
-          inputPreview: "still running child"
+          status: "completed",
+          inputPreview: "child completes during reattach"
+        }),
+        result: expect.objectContaining({
+          status: "completed"
+        })
+      }
+    ]);
+    expect(events.map((event) => event.event.kind)).toContain("finished");
+    expect(events.at(-1)).toMatchObject({
+      parentToolCallId: "test-tool-call",
+      event: {
+        kind: "finished",
+        runId
+      }
+    });
+  });
+
+  it("bounds re-attach when a tail-able child never reaches terminal (#1630)", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    const { finishes, elapsedMs, status } =
+      await parent.reattachStuckTailableChildForTest(runId);
+
+    expect(elapsedMs).toBeLessThan(5000);
+    expect(status).toBe("interrupted");
+    expect(finishes).toEqual([
+      {
+        run: expect.objectContaining({
+          runId,
+          parentToolCallId: "test-tool-call",
+          agentType: "AIChatAgentToolChild",
+          status: "interrupted"
         }),
         result: expect.objectContaining({
           status: "interrupted",
           error:
-            "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
+            "Agent tool run was still running and did not reach a terminal result within the re-attach budget."
         })
       }
     ]);
-    expect(events.at(-1)).toMatchObject({
-      parentToolCallId: "test-tool-call",
-      event: {
-        kind: "interrupted",
-        runId,
-        error:
-          "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
-      }
-    });
   });
 
   it("marks uninspectable recovered children interrupted and emits lifecycle events", async () => {

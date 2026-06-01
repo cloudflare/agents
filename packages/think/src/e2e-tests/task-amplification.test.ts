@@ -25,15 +25,30 @@ setDefaultAutoSelectFamily(false);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 18795;
 const AGENT_URL = `http://127.0.0.1:${PORT}`;
-const AGENT_SLUG = "think-task-parent-e2-e-agent";
-const AGENT_NAME = "task-parent-e2e";
 const PERSIST_DIR = path.join(__dirname, ".wrangler-task-amp-state");
 const CHILD_STEPS = 30;
+
+type ParentTarget = { slug: string; name: string };
+
+// The hand-picked stable-runId parent ("the correct pattern").
+const STABLE_RUNID_PARENT: ParentTarget = {
+  slug: "think-task-parent-e2-e-agent",
+  name: "task-parent-e2e"
+};
+// The NATURAL agentTool() parent — no hand-picked runId (#1630). Before the
+// fix this amplified (fresh nanoid per re-issue → brand-new child); after the
+// fix agentTool() derives a stable runId from the tool call id so it
+// re-attaches to the same idempotent child.
+const NATURAL_AGENT_TOOL_PARENT: ParentTarget = {
+  slug: "think-agent-tool-natural-parent-e2-e-agent",
+  name: "natural-parent-e2e"
+};
 
 type TaskStatus = {
   parentTaskExecutions: number;
   parentRecoveries: number;
   parentHasFiberRows: boolean;
+  parentChildStatus?: string | null;
   child: {
     totalExecutions: number;
     uniqueIndices: number;
@@ -172,8 +187,8 @@ async function restartWrangler(child: ChildProcess): Promise<ChildProcess> {
   return next;
 }
 
-function sendChatMessage(text: string): Promise<void> {
-  const url = `${AGENT_URL}/agents/${AGENT_SLUG}/${AGENT_NAME}`;
+function sendChatMessage(text: string, target: ParentTarget): Promise<void> {
+  const url = `${AGENT_URL}/agents/${target.slug}/${target.name}`;
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
     const timeout = setTimeout(() => {
@@ -214,9 +229,10 @@ function sendChatMessage(text: string): Promise<void> {
 
 async function callAgent(
   method: string,
+  target: ParentTarget,
   args: unknown[] = []
 ): Promise<unknown> {
-  const url = `${AGENT_URL}/agents/${AGENT_SLUG}/${AGENT_NAME}`;
+  const url = `${AGENT_URL}/agents/${target.slug}/${target.name}`;
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
     const id = crypto.randomUUID();
@@ -246,9 +262,9 @@ async function callAgent(
   });
 }
 
-async function readStatus(): Promise<TaskStatus | null> {
+async function readStatus(target: ParentTarget): Promise<TaskStatus | null> {
   try {
-    return (await callAgent("getTaskStatus")) as TaskStatus;
+    return (await callAgent("getTaskStatus", target)) as TaskStatus;
   } catch {
     return null;
   }
@@ -279,15 +295,19 @@ describe("task amplification under rapid churn", () => {
     }
   });
 
-  it("does not re-run the whole child turn when the parent task step is evicted", async () => {
+  async function runAmplificationScenario(
+    target: ParentTarget,
+    label: string,
+    options?: { expectParentCollectsCompleted?: boolean }
+  ): Promise<void> {
     wrangler = startWrangler();
     await waitForReady();
 
-    await sendChatMessage("seed the database");
+    await sendChatMessage("seed the database", target);
 
     for (let i = 0; i < 3; i++) {
       await sleep(3000);
-      console.log(`[task-amp] churn cycle ${i + 1}`);
+      console.log(`[task-amp:${label}] churn cycle ${i + 1}`);
       wrangler = await restartWrangler(wrangler);
     }
 
@@ -295,17 +315,23 @@ describe("task amplification under rapid churn", () => {
     const deadline = Date.now() + 180_000;
     while (Date.now() < deadline) {
       await sleep(3000);
-      status = await readStatus();
+      status = await readStatus(target);
       if (status) {
         console.log(
-          `[task-amp] poll: parentRuns=${status.parentTaskExecutions} parentRecov=${status.parentRecoveries} parentFibers=${status.parentHasFiberRows} child=${JSON.stringify(status.child)}`
+          `[task-amp:${label}] poll: parentRuns=${status.parentTaskExecutions} parentRecov=${status.parentRecoveries} parentFibers=${status.parentHasFiberRows} parentChild=${status.parentChildStatus ?? "?"} child=${JSON.stringify(status.child)}`
         );
-        if (
-          status.child &&
+        const childDone =
+          status.child != null &&
           status.child.maxIndex >= CHILD_STEPS &&
           !status.child.hasFiberRows &&
-          !status.parentHasFiberRows
-        ) {
+          !status.parentHasFiberRows;
+        // For the natural agentTool() path, also wait for the PARENT to collect
+        // the child's recovered result (#1630 / N6): the run row must settle
+        // `completed`, not be abandoned `interrupted`.
+        const parentCollected =
+          !options?.expectParentCollectsCompleted ||
+          status.parentChildStatus === "completed";
+        if (childDone && parentCollected) {
           break;
         }
       }
@@ -318,6 +344,7 @@ describe("task amplification under rapid churn", () => {
       ? child.totalExecutions - child.uniqueIndices
       : -1;
     const summary = {
+      label,
       at: new Date().toISOString(),
       parentTaskExecutions: s.parentTaskExecutions,
       parentRecoveries: s.parentRecoveries,
@@ -334,7 +361,7 @@ describe("task amplification under rapid churn", () => {
             ? "BOUNDED"
             : "AMPLIFIED"
     };
-    console.log(`[task-amp] FINAL: ${JSON.stringify(summary)}`);
+    console.log(`[task-amp:${label}] FINAL: ${JSON.stringify(summary)}`);
     try {
       fs.appendFileSync(
         "/tmp/task-amplification.log",
@@ -352,5 +379,25 @@ describe("task amplification under rapid churn", () => {
     // The whole child turn must not re-run: re-runs bounded by evictions, not
     // ~CHILD_STEPS × parentTaskExecutions.
     expect(childReRuns).toBeLessThan(CHILD_STEPS);
-  });
+    if (options?.expectParentCollectsCompleted) {
+      // The parent re-attached to its self-healed child and collected the REAL
+      // result instead of abandoning it as `interrupted` (#1630 / N6).
+      expect(s.parentChildStatus).toBe("completed");
+    }
+  }
+
+  it("does not re-run the whole child turn when the parent task step is evicted (stable runId)", async () => {
+    await runAmplificationScenario(STABLE_RUNID_PARENT, "stable-runid");
+  }, 240_000);
+
+  // #1630: the NATURAL agentTool() path (no hand-picked runId). On `main`
+  // before the fix this AMPLIFIES — each recovery re-issue minted a fresh
+  // nanoid → a brand-new child → the whole 30-step ledger re-ran. With the
+  // fix, agentTool() derives a stable runId from the (recovery-preserved) tool
+  // call id, so the re-issue re-attaches to the same idempotent child.
+  it("does not re-run the whole child turn via the natural agentTool() path, and the parent collects the recovered result (#1630)", async () => {
+    await runAmplificationScenario(NATURAL_AGENT_TOOL_PARENT, "natural", {
+      expectParentCollectsCompleted: true
+    });
+  }, 240_000);
 });

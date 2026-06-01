@@ -128,10 +128,12 @@ export class StreamableHTTPServerTransport implements Transport {
   private _started = false;
   private _eventStore?: EventStore | ClearableEventStore;
 
-  // This is to keep track whether all messages from a single POST request have been answered.
-  // I's fine that we don't persist this since it's only for backwards compatibility as clients
-  // should no longer batch requests, per the spec.
-  private _requestResponseMap: Map<RequestId, JSONRPCMessage> = new Map();
+  // This tracks which messages on each POST stream have been answered.
+  // It is fine that we do not persist this since it only supports backwards
+  // compatibility for clients batching requests, which the spec discourages.
+  // Keying by stream avoids colliding ids on independent POST streams sharing
+  // completion state with one another.
+  private _streamResponseIds: Map<string, Set<RequestId>> = new Map();
 
   sessionId: string;
   onclose?: () => void;
@@ -413,6 +415,47 @@ export class StreamableHTTPServerTransport implements Transport {
     this.onclose?.();
   }
 
+  private async sendOnStream(
+    agent: McpAgent,
+    connection: Connection<TransportConnState>,
+    message: JSONRPCMessage,
+    requestId: RequestId
+  ): Promise<void> {
+    const streamId = connection.state?.streamId ?? connection.id;
+
+    let eventId: string | undefined;
+
+    if (this._eventStore) {
+      eventId = await this._eventStore.storeEvent(streamId, message);
+    }
+
+    let shouldClose = false;
+
+    if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
+      let responseIds = this._streamResponseIds.get(streamId);
+      if (!responseIds) {
+        responseIds = new Set<RequestId>();
+        this._streamResponseIds.set(streamId, responseIds);
+      }
+      responseIds.add(requestId);
+      const relatedIds = connection.state?.requestIds ?? [];
+      // Check if we have responses for all requests using this connection.
+      shouldClose = relatedIds.every((id) => responseIds.has(id));
+
+      if (shouldClose) {
+        this._streamResponseIds.delete(streamId);
+
+        // POST stream is fully responded — drop the persisted requestIds
+        // mapping and the stored events. No client should resume past
+        // this point.
+        await agent.deleteStreamRequestIds(streamId);
+        const clearable = this._eventStore as ClearableEventStore | undefined;
+        await clearable?.clearStream?.(streamId);
+      }
+    }
+    this.writeSSEEvent(connection, message, eventId, shouldClose);
+  }
+
   async send(
     message: JSONRPCMessage,
     options?: { relatedRequestId?: RequestId }
@@ -425,6 +468,9 @@ export class StreamableHTTPServerTransport implements Transport {
     const isResponse =
       isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message);
     const requestId = isResponse ? message.id : options?.relatedRequestId;
+    const { agent, connection: originatingConnection } =
+      getCurrentAgent<McpAgent>();
+    if (!agent) throw new Error("Agent was not found in send");
 
     if (requestId === undefined) {
       if (isResponse) {
@@ -506,6 +552,40 @@ export class StreamableHTTPServerTransport implements Transport {
       persistedRequestIds = stored?.requestIds;
     }
     if (!streamId) {
+    // Get the stream for this request. Normally request ids uniquely identify
+    // a POST connection. If a client violates that constraint, prefer the
+    // connection whose handler is currently producing this message rather
+    // than leaking a plausible response to the first matching POST stream.
+    // Only prefer an originating connection while it is still live: after a
+    // POST stream disconnects, a resumed GET connection inherits requestIds
+    // and must be allowed to receive the eventual response.
+    const matchingConnections = Array.from(
+      agent.getConnections<TransportConnState>()
+    ).filter((conn) =>
+      conn.state?.requestIds?.includes(requestId as RequestId)
+    );
+    const connection =
+      matchingConnections.find(
+        (conn) => conn.id === originatingConnection?.id
+      ) ??
+      (matchingConnections.length === 1 ? matchingConnections[0] : undefined);
+    if (!connection) {
+      if (matchingConnections.length > 1) {
+        // No candidate can safely receive the original result. Terminate each
+        // affected request with a protocol error rather than returning a 500
+        // or exposing another request's plausible-looking response.
+        const routingError: JSONRPCMessage = {
+          jsonrpc: "2.0",
+          id: requestId,
+          error: { code: -32603, message: "Internal error" }
+        };
+        await Promise.all(
+          matchingConnections.map((candidate) =>
+            this.sendOnStream(agent, candidate, routingError, requestId)
+          )
+        );
+        return;
+      }
       throw new Error(
         `No active stream found for request ID: ${String(requestId)}`
       );
@@ -550,5 +630,6 @@ export class StreamableHTTPServerTransport implements Transport {
         await this._eventStore.clearStream(streamId);
       }
     }
+    await this.sendOnStream(agent, connection, message, requestId);
   }
 }
