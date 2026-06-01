@@ -1599,10 +1599,16 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     recoveryRootRequestId?: string | null;
     latestUserMessageId?: string | null;
     recoveryKind: "retry" | "continue";
-  }): Promise<{ incidentId: string; attempt: number; exhausted: boolean }> {
+    nowMs?: number;
+  }): Promise<{
+    incidentId: string;
+    attempt: number;
+    exhausted: boolean;
+    reason?: string;
+  }> {
     const self = this as unknown as {
       _beginChatRecoveryIncident(i: typeof input): Promise<{
-        incident: { incidentId: string; attempt: number };
+        incident: { incidentId: string; attempt: number; reason?: string };
         exhausted: boolean;
       }>;
     };
@@ -1611,8 +1617,19 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return {
       incidentId: incident.incidentId,
       attempt: incident.attempt,
-      exhausted
+      exhausted,
+      reason: incident.reason
     };
+  }
+
+  /** Push an incident's `lastAttemptAt` back so a subsequent real-time recovery
+   *  isn't collapsed by alarm-debounce (#1637). */
+  async ageIncidentForTest(incidentId: string, ms: number): Promise<void> {
+    const key = `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`;
+    const inc = await this.ctx.storage.get<{ lastAttemptAt: number }>(key);
+    if (!inc) return;
+    inc.lastAttemptAt -= ms;
+    await this.ctx.storage.put(key, inc);
   }
 
   async updateIncidentForTest(

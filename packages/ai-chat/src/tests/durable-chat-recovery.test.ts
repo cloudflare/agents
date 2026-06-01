@@ -62,7 +62,14 @@ interface ChatRecoveryTestStub {
     recoveryRootRequestId?: string | null;
     latestUserMessageId?: string | null;
     recoveryKind: "retry" | "continue";
-  }): Promise<{ incidentId: string; attempt: number; exhausted: boolean }>;
+    nowMs?: number;
+  }): Promise<{
+    incidentId: string;
+    attempt: number;
+    exhausted: boolean;
+    reason?: string;
+  }>;
+  ageIncidentForTest(incidentId: string, ms: number): Promise<void>;
   updateIncidentForTest(
     incidentId: string,
     status: string,
@@ -230,6 +237,9 @@ describe("onChatRecovery", () => {
       recoveryKind: "continue"
     });
 
+    // Age past the alarm-debounce window so the second recovery counts as a
+    // genuinely separate attempt (not a collapsed reconnect-storm alarm) (#1637).
+    await agentStub.ageIncidentForTest("req-cap:", 40_000);
     await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-cap");
     await agentStub.triggerFiberRecovery();
 
@@ -254,27 +264,34 @@ describe("onChatRecovery", () => {
     const agentStub = await getTestAgent(room);
     await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 2 });
 
-    const input = {
+    const baseInput = {
       requestId: "req-prog",
       recoveryRootRequestId: "req-prog",
       latestUserMessageId: "u1",
       recoveryKind: "continue" as const
     };
+    // Space attempts >30s apart so alarm-debounce (#1637) doesn't collapse them.
+    let t = 1_000_000;
+    const at = () => {
+      const nowMs = t;
+      t += 40_000;
+      return { ...baseInput, nowMs };
+    };
 
-    // Two consecutive detections with no progress climb toward the cap.
-    expect((await agentStub.beginIncidentForTest(input)).attempt).toBe(1);
-    expect((await agentStub.beginIncidentForTest(input)).attempt).toBe(2);
+    // Two debounce-spaced detections with no progress climb toward the cap.
+    expect((await agentStub.beginIncidentForTest(at())).attempt).toBe(1);
+    expect((await agentStub.beginIncidentForTest(at())).attempt).toBe(2);
 
     // Forward progress (the durable counter advances, as `_persistOrphanedStream`
     // does after materializing a partial) resets the budget — the deploy-churn fix.
     await agentStub.bumpRecoveryProgressForTest();
-    const afterProgress = await agentStub.beginIncidentForTest(input);
+    const afterProgress = await agentStub.beginIncidentForTest(at());
     expect(afterProgress.attempt).toBe(1);
     expect(afterProgress.exhausted).toBe(false);
 
     // Without further progress it climbs again and still exhausts at the cap.
-    expect((await agentStub.beginIncidentForTest(input)).attempt).toBe(2);
-    const exhausted = await agentStub.beginIncidentForTest(input);
+    expect((await agentStub.beginIncidentForTest(at())).attempt).toBe(2);
+    const exhausted = await agentStub.beginIncidentForTest(at());
     expect(exhausted.attempt).toBe(3);
     expect(exhausted.exhausted).toBe(true);
   });
@@ -284,7 +301,7 @@ describe("onChatRecovery", () => {
     const agentStub = await getTestAgent(room);
     await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 2 });
 
-    const input = {
+    const base = {
       requestId: "req-compact",
       recoveryRootRequestId: "req-compact",
       latestUserMessageId: "u1",
@@ -292,7 +309,10 @@ describe("onChatRecovery", () => {
     };
 
     // First detection opens the incident.
-    expect((await agentStub.beginIncidentForTest(input)).attempt).toBe(1);
+    expect(
+      (await agentStub.beginIncidentForTest({ ...base, nowMs: 1_000_000 }))
+        .attempt
+    ).toBe(1);
 
     // The turn advances (a partial is materialized) AND compaction then
     // collapses every assistant message out of the live transcript. The old
@@ -301,7 +321,10 @@ describe("onChatRecovery", () => {
     await agentStub.bumpRecoveryProgressForTest();
     await agentStub.dropAssistantMessagesForTest();
 
-    const afterProgress = await agentStub.beginIncidentForTest(input);
+    const afterProgress = await agentStub.beginIncidentForTest({
+      ...base,
+      nowMs: 1_040_000
+    });
     expect(afterProgress.attempt).toBe(1);
     expect(afterProgress.exhausted).toBe(false);
   });
@@ -342,6 +365,66 @@ describe("onChatRecovery", () => {
       status: "exhausted",
       reason: "max_recovery_window_exceeded"
     });
+  });
+
+  it("seals an incident after the no-progress window even below the attempt cap (#1637)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 100 });
+
+    const base = {
+      requestId: "req-np",
+      recoveryRootRequestId: "req-np",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue" as const
+    };
+    const t0 = 2_000_000;
+    expect(
+      (await agentStub.beginIncidentForTest({ ...base, nowMs: t0 })).exhausted
+    ).toBe(false);
+
+    // A later alarm past the 5-min no-progress window, no progress in between,
+    // seals it even though the attempt count is far below the cap.
+    const past = await agentStub.beginIncidentForTest({
+      ...base,
+      nowMs: t0 + 6 * 60 * 1000
+    });
+    expect(past.exhausted).toBe(true);
+    expect(past.reason).toBe("no_progress_timeout");
+  });
+
+  it("collapses a rollout's reconnect storm into one attempt via debounce (#1637)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setChatRecoveryConfigForTest({ maxAttempts: 2 });
+
+    const base = {
+      requestId: "req-db",
+      recoveryRootRequestId: "req-db",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue" as const
+    };
+    const t0 = 3_000_000;
+
+    expect(
+      (await agentStub.beginIncidentForTest({ ...base, nowMs: t0 })).attempt
+    ).toBe(1);
+    // A burst within the debounce window must not advance the attempt count.
+    expect(
+      (await agentStub.beginIncidentForTest({ ...base, nowMs: t0 + 5_000 }))
+        .attempt
+    ).toBe(1);
+    expect(
+      (await agentStub.beginIncidentForTest({ ...base, nowMs: t0 + 20_000 }))
+        .attempt
+    ).toBe(1);
+    // Beyond the debounce window it's a genuinely separate attempt.
+    const later = await agentStub.beginIncidentForTest({
+      ...base,
+      nowMs: t0 + 60_000
+    });
+    expect(later.attempt).toBe(2);
+    expect(later.exhausted).toBe(false);
   });
 
   it("recovers when the continuation alarm fires on a superseded isolate", async () => {
@@ -392,13 +475,16 @@ describe("onChatRecovery", () => {
       requestId: "req-flip",
       recoveryRootRequestId: "req-flip",
       latestUserMessageId: "user-flip",
-      recoveryKind: "retry"
+      recoveryKind: "retry",
+      nowMs: 1_000_000
     });
     const second = await agentStub.beginIncidentForTest({
       requestId: "req-flip-2",
       recoveryRootRequestId: "req-flip",
       latestUserMessageId: "user-flip",
-      recoveryKind: "continue"
+      recoveryKind: "continue",
+      // >30s after the first so alarm-debounce doesn't collapse the attempt.
+      nowMs: 1_040_000
     });
 
     expect(first.incidentId).toBe("req-flip:user-flip");
@@ -508,6 +594,8 @@ describe("onChatRecovery", () => {
         "__cf_internal_chat_turn:req-ex-throw"
       );
       await agentStub.triggerFiberRecovery();
+      // Past the alarm-debounce window → a genuinely separate attempt (#1637).
+      await agentStub.ageIncidentForTest("req-ex-throw:", 40_000);
       await agentStub.insertInterruptedFiber(
         "__cf_internal_chat_turn:req-ex-throw"
       );
