@@ -729,17 +729,26 @@ export interface StreamCallback {
   onError(error: string): void | Promise<void>;
   /**
    * The current attempt was interrupted (a stream-stall watchdog abort routed
-   * into bounded recovery, #1626) and a scheduled continuation — running in a
-   * LATER isolate invocation, without this callback — owns the final outcome.
-   * This is NOT `onDone` (the turn did not complete) and NOT `onError` (it is
-   * not a terminal failure): the callback contract `onStart → onEvent* →
-   * (onDone | onError)` would otherwise be silently abandoned, and a consumer
-   * that treats the clean resolve as success finalizes a truncated partial.
+   * into bounded recovery, #1626) and its final outcome will NOT arrive through
+   * this callback. One of two things is true:
+   *  - a scheduled continuation — running in a LATER isolate invocation, without
+   *    this callback — will produce the answer (delivered to other channels,
+   *    e.g. WebSocket connections), OR
+   *  - the recovery budget was exhausted, so the turn was already terminalized
+   *    out-of-band (the configured `terminalMessage` + `onExhausted`) and is
+   *    terminally over — there is NO continuation to come.
    *
-   * Consumers should AVOID finalizing on this signal — keep the channel open,
-   * show a "recovering…" state, or re-attach — rather than treating the clean
-   * resolve as completion. Optional → defaults to a no-op, so this is fully
-   * backward-compatible.
+   * This is NOT `onDone` (this attempt did not complete) and NOT `onError` (the
+   * raw stall is not surfaced as a terminal error here); without it the contract
+   * `onStart → onEvent* → (onDone | onError)` is silently abandoned and a
+   * consumer that treats the clean resolve as success finalizes a truncated
+   * partial.
+   *
+   * Consumers should AVOID finalizing the partial on this signal — surface a
+   * "recovering…" / "interrupted, please retry" state, or re-attach via a
+   * durable channel — but must ALSO NOT block indefinitely waiting for a
+   * continuation: per the exhausted case above, one may never come. Optional →
+   * defaults to a no-op, so this is fully backward-compatible.
    *
    * Note: a deploy/eviction interruption kills the isolate (and this callback)
    * before this can fire — the caller observes a transport break instead. This
