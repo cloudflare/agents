@@ -18,6 +18,7 @@ import type {
   SaveMessagesResult,
   ChatRecoveryConfig,
   ChatRecoveryContext,
+  ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
   ThinkSubmissionInspection,
   ThinkSubmissionStatus,
@@ -3404,6 +3405,7 @@ export class ThinkRecoveryTestAgent extends Think {
 
   private _recoveryContexts: Array<{
     incidentId: string;
+    recoveryRootRequestId: string;
     attempt: number;
     maxAttempts: number;
     recoveryKind: "retry" | "continue";
@@ -3416,6 +3418,7 @@ export class ThinkRecoveryTestAgent extends Think {
   }> = [];
   private _recoveryOverride: ChatRecoveryOptions = {};
   private _recoveryShouldThrow = false;
+  private _exhaustedContexts: ChatRecoveryExhaustedContext[] = [];
   private _onExhaustedCalls = 0;
   private _turnCallCount = 0;
   private _turnBodies: Array<Record<string, unknown> | undefined> = [];
@@ -3466,6 +3469,7 @@ export class ThinkRecoveryTestAgent extends Think {
   ): Promise<ChatRecoveryOptions> {
     this._recoveryContexts.push({
       incidentId: ctx.incidentId,
+      recoveryRootRequestId: ctx.recoveryRootRequestId,
       attempt: ctx.attempt,
       maxAttempts: ctx.maxAttempts,
       recoveryKind: ctx.recoveryKind,
@@ -3509,6 +3513,7 @@ export class ThinkRecoveryTestAgent extends Think {
   async getRecoveryContexts(): Promise<
     Array<{
       incidentId: string;
+      recoveryRootRequestId: string;
       attempt: number;
       maxAttempts: number;
       recoveryKind: "retry" | "continue";
@@ -3521,6 +3526,41 @@ export class ThinkRecoveryTestAgent extends Think {
     }>
   > {
     return this._recoveryContexts;
+  }
+
+  /** Capture the `onExhausted` context for assertions (instead of throwing). */
+  async enableExhaustedCaptureForTest(maxAttempts: number): Promise<void> {
+    this._exhaustedContexts = [];
+    this.chatRecovery = {
+      maxAttempts,
+      onExhausted: (exhaustedCtx) => {
+        this._exhaustedContexts.push(exhaustedCtx);
+      }
+    };
+  }
+
+  // Explicit serializable return shape (rather than `ChatRecoveryExhaustedContext[]`):
+  // the context's `partialParts: MessagePart[]` is a deeply-generic AI SDK union
+  // that the RPC stub-type machinery cannot instantiate (TS2589), which also
+  // poisons sibling stub methods. `unknown[]` keeps the RPC type shallow; the
+  // test only reads the scalar fields below.
+  async getExhaustedContextsForTest(): Promise<
+    Array<{
+      incidentId: string;
+      requestId: string;
+      recoveryRootRequestId: string;
+      attempt: number;
+      maxAttempts: number;
+      recoveryKind: "retry" | "continue";
+      streamId: string;
+      createdAt: number;
+      partialText: string;
+      partialParts: unknown[];
+      reason: string;
+      terminalMessage: string;
+    }>
+  > {
+    return this._exhaustedContexts;
   }
 
   async getTurnBodies(): Promise<Array<Record<string, unknown> | undefined>> {

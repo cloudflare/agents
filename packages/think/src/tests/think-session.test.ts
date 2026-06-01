@@ -3501,6 +3501,98 @@ describe("Think — onChatRecovery", () => {
       warnSpy.mockRestore();
     }
   });
+
+  it("exposes recoveryRootRequestId on the onChatRecovery context (#1631)", async () => {
+    const agent = await freshRecoveryAgent("recovery-root-id");
+
+    await agent.insertInterruptedStream("stream-root", "req-root", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "a-root" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "partial" }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-root");
+
+    await agent.triggerFiberRecovery();
+
+    // Cast the RPC return to the shape under test — the stub type machinery
+    // collapses these complex recovery-context returns to `never` at the call
+    // site (same quirk handled elsewhere in these tests).
+    const contexts = (await agent.getRecoveryContexts()) as Array<{
+      recoveryRootRequestId: string;
+    }>;
+    expect(contexts.length).toBeGreaterThanOrEqual(1);
+    // The stable incident root (constant across chained continuations) is now a
+    // first-class field — no re-deriving identity from message IDs.
+    expect(contexts[0]?.recoveryRootRequestId).toBe("req-root");
+  });
+
+  it("onExhausted context carries terminalMessage, recoveryRootRequestId, and the partial (#1631)", async () => {
+    const agent = await freshRecoveryAgent("exhausted-ctx");
+    await agent.enableExhaustedCaptureForTest(1);
+
+    await agent.insertInterruptedStream(
+      "stream-exctx",
+      "req-exctx",
+      [
+        {
+          body: JSON.stringify({ type: "start", messageId: "a-exctx" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({
+            type: "text-delta",
+            delta: "work before giving up"
+          }),
+          index: 2
+        }
+      ],
+      "completed"
+    );
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-exctx");
+    // `lastAttemptAt` aged past the alarm-debounce window (#1637/#1638) so this
+    // wake counts as a genuine new attempt (1 → 2 > maxAttempts) and exhausts,
+    // rather than being collapsed as a debounced reconnect.
+    await agent.seedIncidentForTest({
+      incidentId: "req-exctx:",
+      requestId: "req-exctx",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 1,
+      status: "scheduled",
+      firstSeenAt: Date.now() - 60_000,
+      lastAttemptAt: Date.now() - 60_000
+    });
+
+    await agent.triggerFiberRecovery();
+
+    const exhausted = (await agent.getExhaustedContextsForTest()) as Array<{
+      recoveryRootRequestId: string;
+      terminalMessage: string;
+      partialText: string;
+      reason: string;
+      streamId: string;
+      createdAt: number;
+    }>;
+    expect(exhausted).toHaveLength(1);
+    const ctx = exhausted[0];
+    // Enough to render/persist a terminal banner AND emit correlated telemetry
+    // without re-deriving anything (the streamId + createdAt let a consumer
+    // compute msSinceTurnStart and correlate the failure — D4).
+    expect(ctx.recoveryRootRequestId).toBe("req-exctx");
+    expect(ctx.terminalMessage.length).toBeGreaterThan(0);
+    expect(ctx.partialText).toContain("work before giving up");
+    expect(ctx.reason).toBe("max_attempts_exceeded");
+    expect(ctx.streamId).toBe("stream-exctx");
+    expect(typeof ctx.createdAt).toBe("number");
+    expect(ctx.createdAt).toBeGreaterThan(0);
+  });
 });
 
 // ── waitUntilStable / hasPendingInteraction ───────────────────────
