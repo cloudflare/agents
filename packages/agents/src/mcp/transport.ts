@@ -439,7 +439,7 @@ export class StreamableHTTPServerTransport implements Transport {
   private async sendOnStream(
     agent: McpAgent,
     streamId: string,
-    relatedIds: RequestId[],
+    relatedIds: readonly RequestId[],
     liveConnection: Connection<TransportConnState> | null,
     message: JSONRPCMessage,
     requestId: RequestId
