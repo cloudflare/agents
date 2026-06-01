@@ -2375,6 +2375,20 @@ describe("Think — onChatRecovery", () => {
     expect(later.exhausted).toBe(false);
   });
 
+  it("advances progress on durable flush but not on an orphan re-persist (reconnect-immune, #1637)", async () => {
+    const agent = await freshRecoveryAgent("recovery-progress-immunity");
+
+    const { start, afterFlush, afterPersist } =
+      await agent.probeProgressReconnectImmunityForTest();
+
+    // Streaming new content durably flushed → progress advanced.
+    expect(afterFlush).toBeGreaterThan(start);
+    // Re-persisting that same content (a recovery/reconnect would) must NOT be
+    // miscounted as new progress — otherwise a reconnecting client could reset
+    // the no-progress window of a stuck turn forever.
+    expect(afterPersist).toBe(afterFlush);
+  });
+
   it("shares one attempt budget when an incident flips between retry and continue", async () => {
     const agent = await freshRecoveryAgent("recovery-kind-flip");
 

@@ -625,9 +625,10 @@ type ChatRecoveryIncident = {
 
 const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
 // Durable, monotonic forward-progress counter for recovery budget resets.
-// Incremented once per non-empty partial materialized by
-// `_persistOrphanedStream`; never recomputed from the (compactable) transcript.
-// See `_chatRecoveryProgressMarker`.
+// Bumped on each durable content flush (`_storeChunkDurably`) — production time,
+// so it reflects genuinely new content and is immune to reconnects/re-persists;
+// never recomputed from the (compactable) transcript. See
+// `_chatRecoveryProgressMarker`.
 const CHAT_RECOVERY_PROGRESS_KEY = "cf:chat-recovery:progress";
 // Secondary backstop only. The primary recovery bound is the no-progress
 // wall clock below; with alarm debounce this cap rarely binds (it catches a
@@ -6124,7 +6125,12 @@ export class Think<
           }
 
           const chunkBody = JSON.stringify(chunk);
-          this._storeChunkDurably(streamId, streamChunk, chunkBody, flushState);
+          await this._storeChunkDurably(
+            streamId,
+            streamChunk,
+            chunkBody,
+            flushState
+          );
           this._broadcastChat({
             type: MSG_CHAT_RESPONSE,
             id: requestId,
@@ -6278,12 +6284,12 @@ export class Think<
    * tool-call-level recovery durability (recovery loses at most the in-flight
    * step, never an already-completed tool call).
    */
-  private _storeChunkDurably(
+  private async _storeChunkDurably(
     streamId: string,
     chunk: StreamChunkData,
     chunkBody: string,
     state: { chunksSinceFlush: number; hasFlushedContent: boolean }
-  ): void {
+  ): Promise<void> {
     this._resumableStream.storeChunk(streamId, chunkBody);
     state.chunksSinceFlush++;
     if (
@@ -6296,6 +6302,13 @@ export class Think<
       this._resumableStream.flushBuffer();
       state.chunksSinceFlush = 0;
       state.hasFlushedContent = true;
+      // Forward progress: new durable content was just flushed. Advance the
+      // monotonic, compaction-immune progress counter HERE (production time)
+      // rather than in `_persistOrphanedStream` — so it bumps only on genuinely
+      // new content and is immune to client reconnects / recovery re-persists
+      // (which don't flow through this path). This is what the recovery
+      // no-progress window keys off (#1637), and stays compaction-proof (#1628).
+      await this._bumpChatRecoveryProgress();
     }
   }
 
@@ -6447,7 +6460,12 @@ export class Think<
           }
 
           const chunkBody = JSON.stringify(chunk);
-          this._storeChunkDurably(streamId, streamChunk, chunkBody, flushState);
+          await this._storeChunkDurably(
+            streamId,
+            streamChunk,
+            chunkBody,
+            flushState
+          );
           this._broadcastChat({
             type: MSG_CHAT_RESPONSE,
             id: requestId,
@@ -6807,9 +6825,10 @@ export class Think<
    * assistant messages into a summary, lowering the count — so a turn that had
    * genuinely advanced could read as "no progress" between attempts and exhaust
    * its budget prematurely (#1628). Instead we read a durably-persisted counter
-   * that only ever increments — bumped once per non-empty partial materialized
-   * by `_persistOrphanedStream`, which is the exact "forward progress" event the
-   * old message-count tracked — so compaction can never lower it.
+   * that only ever increments — bumped at production time when new content is
+   * durably flushed (see `_storeChunkDurably`), which is genuine forward
+   * progress and is immune to client reconnects / recovery re-persists — so
+   * compaction can never lower it and a reconnect can't fake it (#1637).
    */
   private async _chatRecoveryProgressMarker(): Promise<number> {
     return (
@@ -6817,8 +6836,9 @@ export class Think<
     );
   }
 
-  /** Advance the durable recovery-progress counter. Called when a partial
-   *  assistant message is materialized (real forward progress). */
+  /** Advance the durable recovery-progress counter. Called from
+   *  `_storeChunkDurably` when new content is durably flushed (real, reconnect-
+   *  immune forward progress). */
   private async _bumpChatRecoveryProgress(): Promise<void> {
     const current =
       (await this.ctx.storage.get<number>(CHAT_RECOVERY_PROGRESS_KEY)) ?? 0;
@@ -8048,11 +8068,9 @@ export class Think<
 
     if (accumulator.parts.length > 0) {
       await this._persistAssistantMessage(accumulator.toMessage());
-      // Real forward progress: a non-empty partial was materialized. Advance
-      // the durable, compaction-immune progress counter so a deploy-churned
-      // turn that keeps producing content resets its recovery budget instead
-      // of exhausting it (#1628).
-      await this._bumpChatRecoveryProgress();
+      // NOTE: progress is bumped at production/flush time in `_storeChunkDurably`
+      // (#1637), NOT here — persisting on recovery or a client reconnect must
+      // not be miscounted as new forward progress.
       this._broadcastMessages();
     }
   }
