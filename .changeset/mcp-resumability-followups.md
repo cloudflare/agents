@@ -31,11 +31,19 @@ Follow-up to #1583.
 - **Resumed connection registers under the source streamId**, matching
   the SDK reference. For an active POST stream the persisted
   `requestIds` are restored so future tool messages route to the new
-  WS, and any prior connection that still claimed those `requestIds`
-  has them stripped to prevent stale POST bridges from winning the
-  routing race against the resumed GET. For the standalone listen
-  stream the connection takes over that role. For a completed POST the
-  connection serves as a one-shot replay channel.
+  WS. For the standalone listen stream the connection takes over that
+  role. For a completed POST the connection serves as a one-shot
+  replay channel. In every resumable case any prior connection bound
+  to the same streamId is closed, so there is at most one live
+  connection per stream and routing stays deterministic.
+
+- **One stream per message, per the MCP spec.** The spec requires the
+  server to send each message on exactly one connected stream and
+  forbids broadcasting the same message across streams. Server-
+  initiated notifications go to the single standalone GET stream (the
+  transport supersedes any prior standalone GET when a new one opens),
+  and POST responses go to their own stream. Events are still stored
+  for replay when no live stream is attached.
 
 - **Cleanup is immediate, not background.** Each POST stream's events
   are cleared the moment the close frame is written. No alarms, no
@@ -43,10 +51,8 @@ Follow-up to #1583.
   POST streams plus the standalone GET stream. Multi-key deletes are
   chunked at the Durable Object 128-key limit, and `replayEventsAfter`
   uses an explicit `limit` so a pathological history can't OOM the DO.
-
-- **Standalone notifications fan out to every standalone GET**, matching
-  the spec's allowance for multiple concurrent SSE streams per session
-  instead of the previous last-writer-wins behaviour.
+  Standalone GET events are not cleared automatically; they accumulate
+  for the lifetime of the session's Durable Object.
 
 - **`DurableObjectEventStore` is exported** so callers embedding
   `WorkerTransport` inside an Agent / Durable Object can wire up
