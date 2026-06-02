@@ -4248,6 +4248,110 @@ export class ThinkRecoveryTestAgent extends Think {
     };
   }
 
+  /**
+   * Drive `_handleRecoveryCallbackError` (the catch path of
+   * `_chatRecoveryContinue` / `_chatRecoveryRetry`) and report the outcome.
+   *
+   * - A non-reset throw must terminalize (fire `onExhausted` + broadcast the
+   *   terminal banner, seal the incident `exhausted`) and NOT re-throw — so
+   *   `Agent._executeScheduleCallback` doesn't swallow it and delete the
+   *   one-shot row with no terminal UX.
+   * - A deploy code-update reset must re-throw (so the platform re-runs
+   *   recovery on the fresh isolate) and NOT terminalize.
+   */
+  async testRecoveryCallbackError(input: {
+    reset: boolean;
+    maxAttempts?: number;
+    terminalMessage?: string;
+  }): Promise<{
+    threw: boolean;
+    exhaustedContexts: number;
+    exhaustedReason: string | undefined;
+    terminalBroadcast: string | undefined;
+    incidentStatus: string | undefined;
+  }> {
+    const maxAttempts = input.maxAttempts ?? 5;
+    const terminalMessage =
+      input.terminalMessage ?? "Conversation interrupted.";
+    const captured: ChatRecoveryExhaustedContext[] = [];
+    this.chatRecovery = {
+      maxAttempts,
+      terminalMessage,
+      onExhausted: (ctx) => {
+        captured.push(ctx);
+      }
+    };
+
+    const requestId = `recovery-error-${crypto.randomUUID()}`;
+    const begun = await this.beginIncidentForTest({
+      requestId,
+      recoveryRootRequestId: requestId,
+      latestUserMessageId: null,
+      recoveryKind: "continue"
+    });
+
+    let terminalBroadcast: string | undefined;
+    const realBroadcast = (
+      this as unknown as {
+        _broadcastChat(m: {
+          body?: string;
+          error?: boolean;
+          done?: boolean;
+        }): void;
+      }
+    )._broadcastChat.bind(this);
+    (
+      this as unknown as {
+        _broadcastChat: (m: {
+          body?: string;
+          error?: boolean;
+          done?: boolean;
+        }) => void;
+      }
+    )._broadcastChat = (m) => {
+      if (m.error && m.done) terminalBroadcast = m.body;
+      realBroadcast(m);
+    };
+
+    const error = input.reset
+      ? new Error("Durable Object reset because its code was updated.")
+      : new Error("transient storage failure mid-recovery");
+
+    let threw = false;
+    try {
+      await (
+        this as unknown as {
+          _handleRecoveryCallbackError(
+            callback: string,
+            data: unknown,
+            error: unknown
+          ): Promise<void>;
+        }
+      )._handleRecoveryCallbackError(
+        "_chatRecoveryContinue",
+        { incidentId: begun.incidentId, originalRequestId: requestId },
+        error
+      );
+    } catch {
+      threw = true;
+    } finally {
+      (
+        this as unknown as { _broadcastChat: (m: unknown) => void }
+      )._broadcastChat = realBroadcast as (m: unknown) => void;
+    }
+
+    const incidents = await this.ctx.storage.list<{ status: string }>({
+      prefix: "cf:chat-recovery:incident:"
+    });
+    return {
+      threw,
+      exhaustedContexts: captured.length,
+      exhaustedReason: captured[0]?.reason,
+      terminalBroadcast,
+      incidentStatus: [...incidents.values()][0]?.status
+    };
+  }
+
   async setStashData(data: unknown): Promise<void> {
     this._stashData = data;
   }

@@ -7274,10 +7274,11 @@ export class Think<
   // ── Stability + pending interactions ─────────────────────────────
 
   protected hasPendingInteraction(): boolean {
+    const clientResolvable = this._clientResolvableToolNames();
     return this.messages.some(
       (message) =>
         message.role === "assistant" &&
-        this._messageHasPendingInteraction(message)
+        this._messageHasPendingInteraction(message, clientResolvable)
     );
   }
 
@@ -7346,13 +7347,74 @@ export class Think<
     return result;
   }
 
-  private _messageHasPendingInteraction(message: UIMessage): boolean {
-    return message.parts.some(
-      (part) =>
-        "state" in part &&
-        ((part as Record<string, unknown>).state === "input-available" ||
-          (part as Record<string, unknown>).state === "approval-requested")
+  private _messageHasPendingInteraction(
+    message: UIMessage,
+    clientResolvable: Set<string>
+  ): boolean {
+    return message.parts.some((part) =>
+      this._partAwaitsClientInteraction(part, clientResolvable)
     );
+  }
+
+  /**
+   * Names of the tools whose interrupted `input-available` part can still be
+   * resolved by the CLIENT after a restart — i.e. the client tools (no server
+   * `execute`) from the last request, which the SPA answers by replaying a
+   * `tool-result` over the WebSocket. A server tool is intentionally absent:
+   * its `execute()` promise died with the evicted isolate, so nothing will
+   * ever post its result.
+   */
+  private _clientResolvableToolNames(): Set<string> {
+    const names = new Set<string>();
+    for (const tool of this._lastClientTools ?? []) {
+      if (tool?.name) names.add(tool.name);
+    }
+    return names;
+  }
+
+  /** Extract a tool part's name from its `tool-<name>` / `dynamic-tool` shape. */
+  private _toolPartName(record: Record<string, unknown>): string | undefined {
+    const type = typeof record.type === "string" ? record.type : "";
+    if (type === "dynamic-tool") {
+      return typeof record.toolName === "string" ? record.toolName : undefined;
+    }
+    if (type.startsWith("tool-")) {
+      return type.slice("tool-".length);
+    }
+    return undefined;
+  }
+
+  /**
+   * Whether a part is still awaiting a CLIENT interaction that can genuinely
+   * arrive after a restart, so `waitUntilStable` must keep waiting for it:
+   *  - `approval-requested`: a reconnecting client can replay the approval.
+   *  - `input-available` for a CLIENT tool: the SPA can replay the
+   *    `tool-result` (this is why client-tool recovery works — see the
+   *    `tool-result` handler, which sets `_pendingInteractionPromise`).
+   *
+   * A SERVER tool's `input-available` is deliberately NOT pending. After an
+   * eviction its `execute()` promise is gone and no interaction will ever
+   * resolve it, so treating it as pending wedges `waitUntilStable` forever:
+   * the recovery continuation times out every attempt, burns the attempt
+   * budget on a wait that can never converge, and — if any transient
+   * storage/schedule error throws on the way — the one-shot recovery alarm row
+   * is swallowed and deleted with no terminal `onExhausted` (the half-finished
+   * message wedges silently). Excluding it lets `waitUntilStable` converge so
+   * `continueLastTurn` runs, where the existing transcript-repair pass
+   * (`_repairTranscriptForProvider`) flips the orphan to an errored result and
+   * the model proceeds.
+   */
+  private _partAwaitsClientInteraction(
+    part: UIMessage["parts"][number],
+    clientResolvable: Set<string>
+  ): boolean {
+    if (!("state" in part)) return false;
+    const record = part as Record<string, unknown>;
+    const state = record.state;
+    if (state === "approval-requested") return true;
+    if (state !== "input-available") return false;
+    const toolName = this._toolPartName(record);
+    return toolName != null && clientResolvable.has(toolName);
   }
 
   // ── Chat recovery via fibers ───────────────────────────────────
@@ -7666,6 +7728,20 @@ export class Think<
     } catch (error) {
       console.error("[Think] chatRecovery onExhausted hook threw", error);
     }
+    // Deliver the user-visible terminal banner BEFORE the bookkeeping storage
+    // writes below. A `ctx.storage` write can reject mid-deploy (the exact
+    // window recovery exhausts in), and if it threw before this broadcast the
+    // user would be left staring at a half-finished message with no terminal
+    // resolution. The broadcast itself touches no storage, so ordering it first
+    // makes the banner resilient to a failing `_markRecoveredSubmissionInterrupted`
+    // / `_recordTerminalChatStatus`.
+    this._broadcastChat({
+      type: MSG_CHAT_RESPONSE,
+      id: incident.requestId,
+      body: config.terminalMessage,
+      done: true,
+      error: true
+    });
     // The submission is keyed by the recovery ROOT request id; `incident.requestId`
     // is the latest per-continuation id and won't match a chained submission.
     await this._markRecoveredSubmissionInterrupted(
@@ -7677,13 +7753,6 @@ export class Think<
       incident.requestId,
       config.terminalMessage
     );
-    this._broadcastChat({
-      type: MSG_CHAT_RESPONSE,
-      id: incident.requestId,
-      body: config.terminalMessage,
-      done: true,
-      error: true
-    });
     // The exhausted record is retained for inspection and reclaimed later by
     // the TTL sweep; only successful (completed) incidents are deleted eagerly.
   }
@@ -8205,19 +8274,26 @@ export class Think<
   }
 
   /**
-   * Terminalize a recovery turn that has run out of stable-state-timeout retry
-   * budget — or whose incident record has vanished — by routing through the
-   * SAME `_exhaustChatRecovery` path as deploy-recovery and stall exhaustion
+   * Terminalize a recovery turn that is giving up — whether because the
+   * stable-state-timeout retry budget drained, or because the recovery
+   * continuation threw a non-recoverable error — by routing through the SAME
+   * `_exhaustChatRecovery` path as deploy-recovery and stall exhaustion
    * (#1626/#1631). It fires `onExhausted`, emits `chat:recovery:exhausted`,
    * marks the durable submission interrupted, records the terminal chat status,
-   * and delivers the configured `terminalMessage`.
+   * and delivers the configured `terminalMessage`. `reason` carries the cause
+   * (`stable_timeout` for a budget give-up, `recovery_error` for a thrown
+   * error) through to `onExhausted` / `chat:recovery:exhausted`.
    *
    * This replaces the older give-up that only set the incident to `failed` and
    * completed the recovered submission as `error`, which bypassed
    * `_exhaustChatRecovery` entirely — so an app relying on `onExhausted` for the
    * terminal banner regressed to an eternal spinner when recovery gave up under
-   * extreme churn (the stable-state wait timing out every attempt until the
-   * budget drained). Shared by `_chatRecoveryRetry` and `_chatRecoveryContinue`.
+   * extreme churn. The error path matters just as much: a non-reset throw in a
+   * recovery callback is SWALLOWED by `Agent._executeScheduleCallback` (only a
+   * code-update reset is re-thrown to preserve the one-shot row), so without
+   * routing it here the alarm row is deleted with no terminal UX at all — the
+   * half-finished message wedges silently. Shared by `_chatRecoveryRetry` and
+   * `_chatRecoveryContinue`.
    *
    * Exactly-once terminalization is defended by two independent guards:
    *  1. The `stored?.status === "exhausted"` re-entry guard below — once an
@@ -8238,17 +8314,34 @@ export class Think<
    *  • The record is swept AGAIN between two alarms (guard #1 re-persists on the
    *    first, so this needs a second independent sweep) — vanishingly unlikely.
    */
-  private async _exhaustRecoveryAfterStableTimeout(
+  private async _exhaustRecoveryGiveUp(
     callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
-    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
+    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
+    reason: string
   ): Promise<void> {
     const config = this._resolveChatRecoveryConfig();
     const incidentKey = data?.incidentId
       ? this._chatRecoveryIncidentKey(data.incidentId)
       : null;
-    const stored = incidentKey
-      ? await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)
-      : null;
+    // The incident read/write below are best-effort: they back the re-entry
+    // guard, not the terminal UX. Under deploy storage stress they can reject,
+    // but terminalization MUST still fire — a failed bookkeeping op here is
+    // exactly what used to drop the turn silently. So tolerate a failed read
+    // (synthesize the incident) and a failed write (accept a possible second
+    // banner) rather than letting either abort `_exhaustChatRecovery`.
+    let stored: ChatRecoveryIncident | null = null;
+    if (incidentKey) {
+      try {
+        stored =
+          (await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)) ??
+          null;
+      } catch (readError) {
+        console.error(
+          "[Think] failed to read recovery incident during give-up; synthesizing",
+          readError
+        );
+      }
+    }
 
     // Re-entry guard #1 (see method doc): a sealed incident means
     // terminalization already happened, so a duplicate stale alarm must not
@@ -8263,10 +8356,8 @@ export class Think<
       stored?.requestId ??
       "";
 
-    // `stable_timeout` distinguishes a give-up driven by repeated stable-state
-    // timeouts from the generic max-attempts / no-progress exhaustion reasons.
     const incident: ChatRecoveryIncident = stored
-      ? { ...stored, status: "exhausted", reason: "stable_timeout" }
+      ? { ...stored, status: "exhausted", reason }
       : {
           // Silent-drop guard: the incident record is gone (no `incidentId`, or
           // it was swept/deleted before this stale alarm fired). Synthesize a
@@ -8283,13 +8374,21 @@ export class Think<
           status: "exhausted",
           firstSeenAt: Date.now(),
           lastAttemptAt: Date.now(),
-          reason: "stable_timeout"
+          reason
         };
 
     // Persist the sealed incident (retained for inspection / TTL sweep) so the
     // re-entry guard above sees `exhausted` if a duplicate stale alarm fires.
+    // Best-effort: a failed persist must not block terminalization below.
     if (incidentKey) {
-      await this.ctx.storage.put(incidentKey, incident);
+      try {
+        await this.ctx.storage.put(incidentKey, incident);
+      } catch (writeError) {
+        console.error(
+          "[Think] failed to persist sealed recovery incident during give-up",
+          writeError
+        );
+      }
     }
 
     const streamId = this._resolveRecoveryStreamId(
@@ -8306,6 +8405,89 @@ export class Think<
       streamId,
       incident.firstSeenAt
     );
+  }
+
+  /**
+   * Give-up after the stable-state-timeout retry budget drained. Thin wrapper
+   * over `_exhaustRecoveryGiveUp` so the give-up cause is recorded as
+   * `stable_timeout`.
+   */
+  private _exhaustRecoveryAfterStableTimeout(
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
+    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
+  ): Promise<void> {
+    return this._exhaustRecoveryGiveUp(callback, data, "stable_timeout");
+  }
+
+  /**
+   * Whether an error is a Durable Object reset caused by a code update
+   * (deploy). Mirrors the private check in the base `Agent`
+   * (`isDurableObjectCodeUpdateReset`): the invocation started on a superseded
+   * isolate, so every op throws for its whole life, but a fresh invocation on
+   * the new code succeeds. `Agent._executeScheduleCallback` re-throws this for
+   * a one-shot row (preserving it for the platform to re-run on the new code),
+   * so a recovery callback must NOT terminalize on it — recovery will re-run.
+   */
+  private _isDeployCodeUpdateReset(error: unknown): boolean {
+    const message =
+      error instanceof Error
+        ? error.message
+        : typeof error === "string"
+          ? error
+          : "";
+    return /reset because its code was updated/i.test(message);
+  }
+
+  /**
+   * Handle an error thrown by `_chatRecoveryContinue` / `_chatRecoveryRetry`
+   * after the incident was opened.
+   *
+   * - A deploy code-update reset is re-thrown (after marking the incident
+   *   `failed` for observability) so `Agent._executeScheduleCallback` preserves
+   *   the one-shot alarm row and the platform re-runs recovery on the fresh
+   *   isolate — the turn can still recover, so it must NOT terminalize.
+   * - Any OTHER error is terminalized through the give-up path
+   *   (`onExhausted` + the `terminalMessage` banner) and NOT re-thrown. This is
+   *   the fix for the silent-seal failure mode: `_executeScheduleCallback`
+   *   swallows a non-reset throw and then `alarm()` deletes the one-shot row, so
+   *   without terminalizing here the half-finished turn is dropped with no
+   *   terminal event and no banner (the user stares at a frozen message until
+   *   they send something new).
+   */
+  private async _handleRecoveryCallbackError(
+    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
+    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
+    error: unknown
+  ): Promise<void> {
+    if (this._isDeployCodeUpdateReset(error)) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this._updateChatRecoveryIncident(
+        data?.incidentId,
+        "failed",
+        message
+      );
+      if (data?.recoveredRequestId) {
+        await this._completeRecoveredSubmission(
+          data.recoveredRequestId,
+          "error",
+          null,
+          message
+        );
+      }
+      throw error;
+    }
+    // Preserve the underlying error for operators — the give-up path records
+    // only the `recovery_error` category on the incident / `onExhausted` ctx,
+    // so without this log the actual cause (e.g. a transient storage reject)
+    // would be lost. Mirrors `Agent._executeScheduleCallback`'s own logging.
+    console.error(
+      `[Think] ${callback} threw during recovery; terminalizing instead of leaving the turn wedged`,
+      error
+    );
+    // `_exhaustRecoveryGiveUp` marks the submission interrupted + records the
+    // terminal chat status itself (via `_exhaustChatRecovery`), so it fully
+    // replaces the old mark-failed + complete-as-error bookkeeping here.
+    await this._exhaustRecoveryGiveUp(callback, data, "recovery_error");
   }
 
   async _chatRecoveryRetry(data?: ChatRecoveryRetryData): Promise<void> {
@@ -8428,20 +8610,11 @@ export class Think<
         );
       }
     } catch (error) {
-      await this._updateChatRecoveryIncident(
-        data?.incidentId,
-        "failed",
-        error instanceof Error ? error.message : String(error)
+      await this._handleRecoveryCallbackError(
+        "_chatRecoveryRetry",
+        data,
+        error
       );
-      if (data?.recoveredRequestId) {
-        await this._completeRecoveredSubmission(
-          data.recoveredRequestId,
-          "error",
-          null,
-          error instanceof Error ? error.message : String(error)
-        );
-      }
-      throw error;
     } finally {
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
       if (recoveredSubmission) {
@@ -8656,20 +8829,11 @@ export class Think<
         );
       }
     } catch (error) {
-      await this._updateChatRecoveryIncident(
-        data?.incidentId,
-        "failed",
-        error instanceof Error ? error.message : String(error)
+      await this._handleRecoveryCallbackError(
+        "_chatRecoveryContinue",
+        data,
+        error
       );
-      if (data?.recoveredRequestId) {
-        await this._completeRecoveredSubmission(
-          data.recoveredRequestId,
-          "error",
-          null,
-          error instanceof Error ? error.message : String(error)
-        );
-      }
-      throw error;
     } finally {
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
       if (recoveredSubmission) {

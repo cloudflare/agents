@@ -3870,6 +3870,44 @@ describe("Think — onChatRecovery", () => {
     // "Chat stream stalled..." error.
     expect(result.terminalBroadcast).toBe(terminalMessage);
   });
+
+  it("terminalizes a non-reset throw in a recovery callback instead of letting it be swallowed + silently sealed", async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-terminalize");
+    const terminalMessage = "The assistant was interrupted. Please try again.";
+
+    const result = await agent.testRecoveryCallbackError({
+      reset: false,
+      maxAttempts: 5,
+      terminalMessage
+    });
+
+    // The catch must NOT re-throw — re-throwing a non-reset error lets
+    // Agent._executeScheduleCallback swallow it and delete the one-shot row
+    // with no terminal UX (the silent-seal bug).
+    expect(result.threw).toBe(false);
+    // Instead it routes through the give-up path: onExhausted fires once with
+    // the recovery_error reason, the banner is delivered, the incident sealed.
+    expect(result.exhaustedContexts).toBe(1);
+    expect(result.exhaustedReason).toBe("recovery_error");
+    expect(result.terminalBroadcast).toBe(terminalMessage);
+    expect(result.incidentStatus).toBe("exhausted");
+  });
+
+  it("re-throws a deploy code-update reset (preserve the row to re-run on the fresh isolate) and does NOT terminalize", async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-reset");
+
+    const result = await agent.testRecoveryCallbackError({
+      reset: true,
+      maxAttempts: 5
+    });
+
+    // A code-update reset is re-thrown so the platform re-runs recovery on the
+    // new code — it must NOT terminalize (the turn can still recover).
+    expect(result.threw).toBe(true);
+    expect(result.exhaustedContexts).toBe(0);
+    expect(result.terminalBroadcast).toBeUndefined();
+    expect(result.incidentStatus).toBe("failed");
+  });
 });
 
 // ── waitUntilStable / hasPendingInteraction ───────────────────────
@@ -3891,8 +3929,15 @@ describe("Think — waitUntilStable", () => {
     expect(stable).toBe(true);
   });
 
-  it("detects pending tool interaction", async () => {
+  it("detects a pending CLIENT-tool interaction (the SPA can still replay the tool-result)", async () => {
     const agent = await freshRecoveryAgent("stable-pending");
+
+    // `client_action` is a client tool (no server execute); its
+    // `input-available` orphan is resolved by the SPA replaying a tool-result
+    // over the WebSocket, so recovery must keep waiting for it.
+    await agent.setRequestContextForTest(undefined, [
+      { name: "client_action" }
+    ]);
 
     await agent.persistTestMessage({
       id: "user-1",
@@ -3916,6 +3961,46 @@ describe("Think — waitUntilStable", () => {
 
     const hasPending = await agent.hasPendingInteractionForTest();
     expect(hasPending).toBe(true);
+  });
+
+  it("does NOT block stability on a dead SERVER-tool input-available orphan", async () => {
+    const agent = await freshRecoveryAgent("stable-server-orphan");
+
+    // `preview_tool` is a SERVER tool (has execute) — it is NOT in the client
+    // tool set. After an eviction mid-execute(), its in-flight promise is gone
+    // and nothing will ever post a result, so it must NOT keep waitUntilStable
+    // open (otherwise the recovery continuation can never converge — the
+    // server-tool recovery deadlock). The orphan is instead flipped to an
+    // errored result by the transcript-repair pass once the wait converges.
+    await agent.setRequestContextForTest(undefined, [
+      { name: "client_action" }
+    ]);
+
+    await agent.persistTestMessage({
+      id: "user-1",
+      role: "user",
+      parts: [{ type: "text", text: "Render a preview" }]
+    } as UIMessage);
+
+    await agent.persistTestMessage({
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-preview_tool",
+          toolCallId: "tc-server-1",
+          toolName: "preview_tool",
+          state: "input-available",
+          input: { url: "https://example.com" }
+        }
+      ]
+    } as unknown as UIMessage);
+
+    const hasPending = await agent.hasPendingInteractionForTest();
+    expect(hasPending).toBe(false);
+
+    const stable = await agent.waitUntilStableForTest(1000);
+    expect(stable).toBe(true);
   });
 
   it("detects pending approval", async () => {
