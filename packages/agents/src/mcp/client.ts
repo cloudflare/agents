@@ -1696,6 +1696,23 @@ export class MCPClientManager {
   }
 
   /**
+   * Resolve a live connection by server id. The in-memory `mcpConnections`
+   * map can diverge from storage-backed `listServers()` — stale id after a
+   * reconnect, restore still in flight post-hibernation, or a removed
+   * connection. Throw a named error instead of the opaque "Cannot read
+   * properties of undefined (reading 'client')" so callers can react.
+   */
+  #requireConnection(serverId: string): MCPClientConnection {
+    const connection = this.mcpConnections[serverId];
+    if (connection === undefined) {
+      throw new Error(
+        `No active MCP connection for serverId "${serverId}". The server may not be connected yet, may have been removed, or the id may be stale after a reconnect.`
+      );
+    }
+    return connection;
+  }
+
+  /**
    * Namespaced version of callTool
    */
   async callTool(
@@ -1707,7 +1724,7 @@ export class MCPClientManager {
   ) {
     const { serverId, ...mcpParams } = params;
     const unqualifiedName = mcpParams.name.replace(`${serverId}.`, "");
-    return this.mcpConnections[serverId].client.callTool(
+    return this.#requireConnection(serverId).client.callTool(
       {
         ...mcpParams,
         name: unqualifiedName
@@ -1724,7 +1741,7 @@ export class MCPClientManager {
     params: ReadResourceRequest["params"] & { serverId: string },
     options: RequestOptions
   ) {
-    return this.mcpConnections[params.serverId].client.readResource(
+    return this.#requireConnection(params.serverId).client.readResource(
       params,
       options
     );
@@ -1737,7 +1754,7 @@ export class MCPClientManager {
     params: GetPromptRequest["params"] & { serverId: string },
     options: RequestOptions
   ) {
-    return this.mcpConnections[params.serverId].client.getPrompt(
+    return this.#requireConnection(params.serverId).client.getPrompt(
       params,
       options
     );

@@ -4037,3 +4037,78 @@ describe("MCPClientManager OAuth Integration", () => {
     });
   });
 });
+
+describe("MCPClientManager missing-connection guards", () => {
+  let manager: TestMCPClientManager;
+
+  beforeEach(() => {
+    const mockDOStorage = {
+      sql: { exec: () => [][Symbol.iterator]() },
+      get: async () => undefined,
+      put: async () => {},
+      kv: {
+        get: () => undefined,
+        put: () => {},
+        list: vi.fn(),
+        delete: vi.fn()
+      }
+    } as unknown as DurableObjectStorage;
+
+    manager = new TestMCPClientManager("test-client", "1.0.0", {
+      storage: mockDOStorage
+    });
+  });
+
+  function makeReadyConnection(): MCPClientConnection {
+    const connection = new MCPClientConnection(
+      new URL("http://example.com"),
+      { name: "test-client", version: "1.0.0" },
+      { transport: { type: "auto" }, client: {} }
+    );
+    connection.connectionState = "ready";
+    connection.client.callTool = vi.fn().mockResolvedValue({ content: [] });
+    connection.client.readResource = vi
+      .fn()
+      .mockResolvedValue({ contents: [] });
+    connection.client.getPrompt = vi.fn().mockResolvedValue({ messages: [] });
+    return connection;
+  }
+
+  it("callTool throws a named error when the connection is missing", async () => {
+    await expect(
+      manager.callTool({ serverId: "ghost", name: "do_thing", arguments: {} })
+    ).rejects.toThrow(/No active MCP connection for serverId "ghost"/);
+  });
+
+  it("readResource throws a named error when the connection is missing", () => {
+    expect(() =>
+      manager.readResource(
+        { serverId: "ghost", uri: "file://x" },
+        {} as never
+      )
+    ).toThrow(/No active MCP connection for serverId "ghost"/);
+  });
+
+  it("getPrompt throws a named error when the connection is missing", () => {
+    expect(() =>
+      manager.getPrompt({ serverId: "ghost", name: "p" }, {} as never)
+    ).toThrow(/No active MCP connection for serverId "ghost"/);
+  });
+
+  it("callTool reaches the underlying client when the connection exists", async () => {
+    const connection = makeReadyConnection();
+    manager.mcpConnections["live"] = connection;
+
+    await manager.callTool({
+      serverId: "live",
+      name: "do_thing",
+      arguments: { a: 1 }
+    });
+
+    expect(connection.client.callTool).toHaveBeenCalledWith(
+      { name: "do_thing", arguments: { a: 1 } },
+      undefined,
+      undefined
+    );
+  });
+});
