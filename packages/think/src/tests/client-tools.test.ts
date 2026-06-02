@@ -1073,6 +1073,103 @@ describe("Think — auto-continuation", () => {
     expect(result).toBe(2);
   });
 
+  it("applies a client tool result delivered before the assistant message is persisted (#1649)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    // Deterministic reproduction of the streaming race: the tool call exists
+    // ONLY in the in-flight accumulator (not yet persisted) when the result
+    // arrives. A storage-only apply misses it, and the end-of-stream persist
+    // then writes `input-available`, which transcript repair later errors with
+    // "The tool call was interrupted before a result was recorded." Applying to
+    // the accumulator lets the result ride into the persist.
+    const result = await agent.simulateMidStreamClientToolResult({
+      toolCallId: "tc-midstream-1",
+      output: "mid-stream result"
+    });
+    expect(result.state).toBe("output-available");
+    expect(result.output).toBe("mid-stream result");
+  });
+
+  it("applies a client tool approval delivered before the assistant message is persisted (#1649)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    // Approvals flow through the same `_applyToolUpdateToMessages` path, so the
+    // mid-stream fix must cover them too: an `approval-requested` part that
+    // exists only in the in-flight accumulator must reach `approval-responded`
+    // rather than being dropped and repaired as interrupted.
+    const result = await agent.simulateMidStreamClientToolApproval({
+      toolCallId: "tc-midstream-approval-1",
+      approved: true
+    });
+    expect(result.state).toBe("approval-responded");
+  });
+
+  it("applies a client tool result that arrives mid-stream over the WebSocket (#1649)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    // Hold the stream open after the client tool call so the result can arrive
+    // before the end-of-stream persist (the real #1649 window).
+    await agent.setSlowClientToolStreamMode(true, 25, 16);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const repairedToolCallIds: Array<string[] | undefined> = [];
+    const unsubscribe = subscribe("transcript", (event) => {
+      if (event.type === "chat:transcript:repaired" && event.name === room) {
+        repairedToolCallIds.push(event.payload.toolCallIds);
+      }
+    });
+
+    try {
+      sendChatRequest(ws, [makeUserMessage("do the thing")], {
+        clientTools: [{ name: "client_action", description: "A client tool" }]
+      });
+
+      // Wait until the streaming turn has exposed the client tool call, then
+      // resolve it WHILE the stream is still open — deterministic, no timing
+      // guess. On `main` this result lands before the message is persisted and
+      // is dropped.
+      await waitUntil(async () => {
+        const state = await agent.streamingToolCallState("tc-client-1");
+        if (state === undefined) return false;
+        if (state !== "input-available") {
+          throw new Error(`unexpected streaming tool state: ${state}`);
+        }
+        return true;
+      }, 8000);
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_RESULT,
+          toolCallId: "tc-client-1",
+          toolName: "client_action",
+          output: "mid-stream output",
+          autoContinue: true
+        })
+      );
+
+      // The continuation only runs once the result has been recorded, so
+      // waiting for it confirms the result survived.
+      await waitUntil(async () => {
+        const log = (await agent.getResponseLog()) as ChatResponseResult[];
+        return log.some((entry) => entry.continuation);
+      }, 8000);
+      await delay(100);
+
+      const messages = (await agent.getMessages()) as UIMessage[];
+      const toolPart = messages
+        .flatMap((m) => m.parts as Array<Record<string, unknown>>)
+        .find((p) => p.toolCallId === "tc-client-1");
+      expect(toolPart?.state).toBe("output-available");
+      expect(toolPart?.output).toBe("mid-stream output");
+      // The result was applied in time, so repair never errored the call.
+      expect(repairedToolCallIds.flat()).not.toContain("tc-client-1");
+    } finally {
+      unsubscribe();
+    }
+
+    await closeWS(ws);
+  }, 25000);
+
   it("does not clobber siblings when parallel results arrive concurrently (#1649)", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

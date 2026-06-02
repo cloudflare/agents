@@ -10,7 +10,7 @@ import { tool } from "ai";
 import { z } from "zod";
 import { Think } from "../../think";
 import type { ChatResponseResult, MessageConcurrency } from "../../think";
-import type { ClientToolSchema } from "agents/chat";
+import { StreamAccumulator, type ClientToolSchema } from "agents/chat";
 
 function createClientToolMockModel(): LanguageModel {
   let callCount = 0;
@@ -51,6 +51,105 @@ function createClientToolMockModel(): LanguageModel {
               type: "tool-input-end",
               id: "tc-client-1"
             });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "tool-calls",
+              usage: { inputTokens: 10, outputTokens: 5 }
+            });
+          } else {
+            controller.enqueue({ type: "text-start", id: "t-cont" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-cont",
+              delta: "Continuation after tool"
+            });
+            controller.enqueue({ type: "text-end", id: "t-cont" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "stop",
+              usage: { inputTokens: 20, outputTokens: 10 }
+            });
+          }
+
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+// Emits a client tool call (`tc-client-1`), then keeps the stream OPEN for a
+// while (a series of timed gaps) before finishing. That open window is the
+// #1649 race: the `tool-input-available` chunk has already been broadcast to
+// the client — which can resolve the tool and send `cf_agent_tool_result` —
+// but the assistant message hasn't been persisted yet. On the continuation
+// invocation it emits plain text.
+function createSlowClientToolMockModel(
+  delayMs: number,
+  trailingGaps: number
+): LanguageModel {
+  let callCount = 0;
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-slow-client-tool",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream(options: Record<string, unknown>) {
+      callCount++;
+      const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+      const hasToolResult = messages.some(
+        (m: unknown) =>
+          typeof m === "object" &&
+          m !== null &&
+          (m as Record<string, unknown>).role === "tool"
+      );
+
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+
+          if (!hasToolResult && callCount === 1) {
+            controller.enqueue({
+              type: "tool-input-start",
+              id: "tc-client-1",
+              toolName: "client_action"
+            });
+            controller.enqueue({
+              type: "tool-input-delta",
+              id: "tc-client-1",
+              delta: JSON.stringify({ action: "do_thing" })
+            });
+            controller.enqueue({
+              type: "tool-input-end",
+              id: "tc-client-1"
+            });
+            // Finalize the tool call NOW so the SDK emits `tool-input-available`
+            // mid-stream (a tool part left at `input-streaming` is only promoted
+            // at `finish`, which is too late to model the race).
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "tc-client-1",
+              toolName: "client_action",
+              input: JSON.stringify({ action: "do_thing" })
+            });
+            // Hold the stream open with trailing text so a client tool result
+            // can arrive before the end-of-stream persist (the #1649 window).
+            // Streaming real chunks (not silent gaps) keeps the stall watchdog
+            // happy and guarantees the tool call is already in the accumulator.
+            controller.enqueue({ type: "text-start", id: "t-trail" });
+            for (let i = 0; i < trailingGaps; i++) {
+              await new Promise((r) => setTimeout(r, delayMs));
+              controller.enqueue({
+                type: "text-delta",
+                id: "t-trail",
+                delta: "."
+              });
+            }
+            controller.enqueue({ type: "text-end", id: "t-trail" });
             controller.enqueue({
               type: "finish",
               finishReason: "tool-calls",
@@ -241,6 +340,9 @@ function createTextOnlyMockModel(): LanguageModel {
 export class ThinkClientToolsAgent extends Think {
   private _useTextOnly = false;
   private _useSlowStream = false;
+  private _useSlowClientToolStream = false;
+  private _slowClientToolDelayMs = 30;
+  private _slowClientToolGaps = 12;
   private _useServerApprovalTool = false;
   private _serverApprovalToolExecutions = 0;
   private _serverApprovalToolFails = false;
@@ -259,6 +361,11 @@ export class ThinkClientToolsAgent extends Think {
   getModel(): LanguageModel {
     if (this._useSlowStream)
       return createSlowMockModel(this._slowDelayMs, this._slowChunkCount);
+    if (this._useSlowClientToolStream)
+      return createSlowClientToolMockModel(
+        this._slowClientToolDelayMs,
+        this._slowClientToolGaps
+      );
     if (this._useTextOnly) return createTextOnlyMockModel();
     if (this._useServerApprovalTool) return createServerApprovalToolMockModel();
     return createClientToolMockModel();
@@ -310,6 +417,128 @@ export class ThinkClientToolsAgent extends Think {
     this._useSlowStream = enabled;
     if (delayMs !== undefined) this._slowDelayMs = delayMs;
     if (chunkCount !== undefined) this._slowChunkCount = chunkCount;
+  }
+
+  async setSlowClientToolStreamMode(
+    enabled: boolean,
+    delayMs?: number,
+    trailingGaps?: number
+  ): Promise<void> {
+    this._useSlowClientToolStream = enabled;
+    if (delayMs !== undefined) this._slowClientToolDelayMs = delayMs;
+    if (trailingGaps !== undefined) this._slowClientToolGaps = trailingGaps;
+  }
+
+  /**
+   * The state of a tool part in the in-flight streaming accumulator, or
+   * undefined if no stream is active or the call isn't present yet. Lets a
+   * test deterministically wait until the streaming turn has exposed a tool
+   * call (so it can send the result mid-stream) instead of racing on timing.
+   */
+  async streamingToolCallState(
+    toolCallId: string
+  ): Promise<string | undefined> {
+    const acc = (
+      this as unknown as {
+        _streamingAssistant: {
+          parts: Array<Record<string, unknown>>;
+        } | null;
+      }
+    )._streamingAssistant;
+    if (!acc) return undefined;
+    const part = acc.parts.find((p) => p.toolCallId === toolCallId);
+    return part?.state as string | undefined;
+  }
+
+  /**
+   * Deterministic reproduction of the #1649 "result arrives before persist"
+   * race without depending on stream timing: a client tool call lives ONLY in
+   * the in-flight accumulator (not yet persisted), a tool result is applied,
+   * then the stream's end-of-stream persist runs. Returns the persisted state
+   * so the test can assert the result survived (`output-available`) rather than
+   * being dropped and later repaired (`input-available` → errored).
+   */
+  async simulateMidStreamClientToolResult(opts: {
+    toolCallId: string;
+    output: string;
+  }): Promise<{ state: string; output: string }> {
+    const internal = this as unknown as {
+      _streamingAssistant: StreamAccumulator | null;
+      _applyToolResult(toolCallId: string, output: unknown): Promise<void>;
+      _persistAssistantMessage(msg: UIMessage): Promise<void>;
+    };
+
+    const accumulator = new StreamAccumulator({
+      messageId: crypto.randomUUID(),
+      existingParts: [
+        {
+          type: "tool-client_action",
+          toolCallId: opts.toolCallId,
+          toolName: "client_action",
+          state: "input-available",
+          input: { action: "do_thing" }
+        } as unknown as UIMessage["parts"][number]
+      ]
+    });
+
+    // The assistant message exists ONLY in the accumulator — a storage read
+    // would not find it (mirrors a turn mid-stream, before persist).
+    internal._streamingAssistant = accumulator;
+    // A client tool result arrives over the WebSocket while the stream is open.
+    await internal._applyToolResult(opts.toolCallId, opts.output);
+    // The stream ends and persists the accumulated message.
+    await internal._persistAssistantMessage(accumulator.toMessage());
+    internal._streamingAssistant = null;
+
+    const messages = (await this.getMessages()) as UIMessage[];
+    const part = messages
+      .flatMap((m) => m.parts as Array<Record<string, unknown>>)
+      .find((p) => p.toolCallId === opts.toolCallId);
+    return {
+      state: (part?.state as string) ?? "missing",
+      output: (part?.output as string) ?? ""
+    };
+  }
+
+  /**
+   * Same mid-stream race as {@link simulateMidStreamClientToolResult}, but for
+   * an approval response: an `approval-requested` part lives only in the
+   * in-flight accumulator when the approval arrives. Confirms the fix covers
+   * the approval path (shared `_applyToolUpdateToMessages`), not just results.
+   */
+  async simulateMidStreamClientToolApproval(opts: {
+    toolCallId: string;
+    approved: boolean;
+  }): Promise<{ state: string }> {
+    const internal = this as unknown as {
+      _streamingAssistant: StreamAccumulator | null;
+      _applyToolApproval(toolCallId: string, approved: boolean): Promise<void>;
+      _persistAssistantMessage(msg: UIMessage): Promise<void>;
+    };
+
+    const accumulator = new StreamAccumulator({
+      messageId: crypto.randomUUID(),
+      existingParts: [
+        {
+          type: "tool-client_action",
+          toolCallId: opts.toolCallId,
+          toolName: "client_action",
+          state: "approval-requested",
+          input: { action: "do_thing" }
+        } as unknown as UIMessage["parts"][number]
+      ]
+    });
+
+    internal._streamingAssistant = accumulator;
+    await internal._applyToolApproval(opts.toolCallId, opts.approved);
+    await internal._persistAssistantMessage(accumulator.toMessage());
+    internal._streamingAssistant = null;
+
+    const messages = (await this.getMessages()) as UIMessage[];
+    const part = messages
+      .flatMap((m) => m.parts as Array<Record<string, unknown>>)
+      .find((p) => p.toolCallId === opts.toolCallId);
+    return { state: (part?.state as string) ?? "missing" };
   }
 
   async getCapturedClientTools(): Promise<ClientToolSchema[] | undefined> {
