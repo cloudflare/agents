@@ -962,6 +962,107 @@ describe("Think — auto-continuation", () => {
 
     await closeWS(ws);
   });
+
+  it("waits for ALL parallel client-tool results before continuing (#1649)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // Seed an assistant turn that emitted TWO parallel client tool calls — the
+    // shape `addToolOutput` produces when the model fans out in a single step.
+    await agent.persistToolCallMessage([
+      makeUserMessage("use two tools"),
+      {
+        id: "assistant-parallel",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-fast",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "fast" }
+          },
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-slow",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "slow" }
+          }
+        ]
+      } as unknown as UIMessage
+    ]);
+    await agent.clearResponseLog();
+
+    // A premature continuation (firing on the fast result while `tc-slow` is
+    // still in flight) would flip `tc-slow` to errored via transcript repair
+    // and emit a repaired event for it.
+    const repairedToolCallIds: Array<string[] | undefined> = [];
+    const unsubscribe = subscribe("transcript", (event) => {
+      if (event.type === "chat:transcript:repaired" && event.name === room) {
+        repairedToolCallIds.push(event.payload.toolCallIds);
+      }
+    });
+
+    try {
+      // Fast tool resolves immediately, with autoContinue.
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_RESULT,
+          toolCallId: "tc-fast",
+          toolName: "client_action",
+          output: "fast output",
+          autoContinue: true
+        })
+      );
+
+      // Wait well past the 50ms coalesce window WITHOUT sending the slow
+      // result. The old behavior fired a continuation here (it saw only the
+      // fast result and treated `tc-slow` as an orphan).
+      await delay(400);
+
+      let log = (await agent.getResponseLog()) as ChatResponseResult[];
+      expect(log.filter((entry) => entry.continuation).length).toBe(0);
+
+      // Slow tool resolves later, with autoContinue: this completes the batch
+      // and must trigger exactly ONE continuation.
+      const continuationDone = waitForDone(ws, 15000);
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_RESULT,
+          toolCallId: "tc-slow",
+          toolName: "client_action",
+          output: "slow output",
+          autoContinue: true
+        })
+      );
+      await continuationDone;
+      await delay(200);
+
+      log = (await agent.getResponseLog()) as ChatResponseResult[];
+      expect(log.filter((entry) => entry.continuation).length).toBe(1);
+
+      // `tc-slow` was never flipped to errored by a premature repair.
+      expect(repairedToolCallIds.flat()).not.toContain("tc-slow");
+
+      const messages = (await agent.getMessages()) as UIMessage[];
+      const assistant = messages.find((m) => m.id === "assistant-parallel")!;
+      const partFor = (toolCallId: string) =>
+        assistant.parts.find(
+          (p) => (p as Record<string, unknown>).toolCallId === toolCallId
+        ) as Record<string, unknown>;
+      expect(partFor("tc-fast").state).toBe("output-available");
+      expect(partFor("tc-fast").output).toBe("fast output");
+      expect(partFor("tc-slow").state).toBe("output-available");
+      expect(partFor("tc-slow").output).toBe("slow output");
+    } finally {
+      unsubscribe();
+    }
+
+    await closeWS(ws);
+  });
 });
 
 // ── Client tool schemas ──────────────────────────────────────────
@@ -1463,7 +1564,7 @@ describe("resume coordination during pending continuation", () => {
 // ── Deferred continuation ────────────────────────────────────────
 
 describe("deferred continuation", () => {
-  it("deferred tool result runs after active continuation completes", async () => {
+  it("coalesces parallel tool results into a single continuation regardless of arrival order (#1649)", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
     const { ws } = await connectWS(room);
@@ -1509,7 +1610,11 @@ describe("deferred continuation", () => {
         ]
       } as unknown as UIMessage
     ]);
+    await agent.clearResponseLog();
 
+    // First result arrives and auto-continues — but the second tool call is
+    // still in flight, so no continuation may run yet (it would error the
+    // sibling via transcript repair).
     ws.send(
       JSON.stringify({
         type: MSG_TOOL_RESULT,
@@ -1520,10 +1625,13 @@ describe("deferred continuation", () => {
       })
     );
 
-    const firstDone = waitForDone(ws, 10000);
-    await firstDone;
-    await delay(100);
+    // Hold past the coalesce window with the batch still incomplete.
+    await delay(300);
+    let log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.filter((entry) => entry.continuation).length).toBe(0);
 
+    // Second result completes the batch: exactly one continuation runs.
+    const continuationDone = waitForDone(ws, 10000);
     ws.send(
       JSON.stringify({
         type: MSG_TOOL_RESULT,
@@ -1533,9 +1641,11 @@ describe("deferred continuation", () => {
         autoContinue: true
       })
     );
+    await continuationDone;
+    await delay(200);
 
-    const secondDone = waitForDone(ws, 10000);
-    await secondDone;
+    log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.filter((entry) => entry.continuation).length).toBe(1);
 
     const stored = await agent.getMessages();
     const assistantMessages = (stored as UIMessage[]).filter(

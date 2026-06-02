@@ -925,6 +925,8 @@ describe("Client tools continuation", () => {
         }
       ]);
 
+      // Parallel tool calls in one step: both results must arrive before the
+      // continuation runs (#1649). The first alone must NOT start a turn.
       ws.send(
         JSON.stringify({
           type: MessageType.CF_AGENT_TOOL_RESULT,
@@ -934,7 +936,18 @@ describe("Client tools continuation", () => {
           autoContinue: true
         })
       );
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_RESULT,
+          toolCallId: "call_second_stream_error",
+          toolName: "secondTool",
+          output: { ok: true },
+          autoContinue: true
+        })
+      );
 
+      // The single continuation becomes active (its error stream is delayed
+      // 250ms) once the batch is complete.
       let activeContinuation:
         | Awaited<ReturnType<typeof agentStub.getContinuationStateForTest>>
         | undefined;
@@ -948,16 +961,6 @@ describe("Client tools continuation", () => {
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
       expect(activeContinuation).toBeDefined();
-
-      ws.send(
-        JSON.stringify({
-          type: MessageType.CF_AGENT_TOOL_RESULT,
-          toolCallId: "call_second_stream_error",
-          toolName: "secondTool",
-          output: { ok: true },
-          autoContinue: true
-        })
-      );
 
       await agentStub.waitForIdleForTest();
       await new Promise((resolve) => setTimeout(resolve, 300));

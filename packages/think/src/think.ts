@@ -653,6 +653,18 @@ const CHAT_RECOVERY_PROGRESS_KEY = "cf:chat-recovery:progress";
 // first under normal deploy cadence (#1637).
 const DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS = 10;
 const DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS = 10_000;
+// Auto-continuation barrier (#1649): when the model emits parallel tool calls,
+// the client answers each one independently and sends a `tool-result` with
+// `autoContinue` per result. A fast tool's result must NOT trigger inference
+// while a slower sibling is still `input-available` — doing so feeds the
+// provider an incomplete tool-result set (MissingToolResultsError) or, with the
+// transcript-repair backstop, silently flips the in-flight sibling to errored
+// and runs a spurious extra continuation. So we hold the continuation until the
+// step's batch settles (no `input-available`/`approval-requested` siblings),
+// bounded by this timeout so a genuinely orphaned tool call (e.g. the client
+// disconnected mid-batch) still falls through to the repair backstop instead of
+// pinning the continuation open forever.
+const AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS = 60_000;
 // Delay before retrying a continuation that timed out waiting for stable state.
 // Gives an actively-churning isolate (e.g. a deploy in flight) time to settle.
 const CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS = 3;
@@ -1893,6 +1905,10 @@ export class Think<
   private _lastBody: Record<string, unknown> | undefined;
   private _continuation = new ContinuationState<Connection>();
   private _continuationTimer: ReturnType<typeof setTimeout> | null = null;
+  // True while a continuation is parked on the parallel-tool-batch barrier
+  // (#1649) waiting for in-flight tool results/approvals to settle. Prevents a
+  // second barrier wait (and a double-fire) when more results arrive mid-wait.
+  private _continuationBarrierActive = false;
   private _insideResponseHook = false;
   private _insideInferenceLoop = false;
   private _pendingInteractionPromise: Promise<boolean> | null = null;
@@ -6297,6 +6313,7 @@ export class Think<
     }
     this._submitConcurrency.reset();
     this._pendingInteractionPromise = null;
+    this._continuationBarrierActive = false;
     this._continuation.sendResumeNone();
     this._continuation.clearAll();
   }
@@ -8678,13 +8695,131 @@ export class Think<
       this._continuationTimer = null;
       const pending = this._continuation.pending;
       if (!pending) return;
-      this._fireAutoContinuation(pending.connection);
+      this._fireAutoContinuationWhenStable(pending.connection);
     }, 50);
+  }
+
+  /**
+   * Fire an auto-continuation, but only once the model's parallel tool-call
+   * batch is fully answered (#1649). When the model emits several tool calls in
+   * one step the client answers each independently, so the first `autoContinue`
+   * arrives while slower siblings are still `input-available`. Continuing then
+   * would feed the provider an incomplete tool-result set
+   * (`MissingToolResultsError`) or, via the transcript-repair backstop, silently
+   * error the in-flight sibling and run a spurious extra continuation. We hold
+   * the continuation on a barrier until the batch settles. The wait is bounded
+   * (`AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS`) so a genuinely orphaned tool
+   * call — e.g. the client disconnected mid-batch — still falls through to the
+   * repair backstop rather than pinning the continuation open forever.
+   */
+  private _fireAutoContinuationWhenStable(connection: Connection): void {
+    if (!this._continuation.pending) return;
+    // The continuation is already running (a sibling result re-armed the timer
+    // after it started). New results coalesce/defer into it — don't double-fire.
+    if (this._continuation.pending.pastCoalesce) return;
+    // A barrier wait is already in progress; it will fire once stable. Each
+    // newly-arrived result re-arms the 50ms timer, but only one wait must run.
+    if (this._continuationBarrierActive) return;
+    // Fast path: no apply in flight and the leaf step is not mid-batch.
+    if (!this._pendingInteractionPromise && !this._hasIncompleteToolBatch()) {
+      this._fireAutoContinuation(connection);
+      return;
+    }
+    this._continuationBarrierActive = true;
+    // keepAlive so the isolate stays up while the (typically sub-second)
+    // remainder of the tool batch lands — the pending-continuation state is
+    // in-memory, so hibernating mid-wait would drop it.
+    this.keepAliveWhile(() => this._awaitToolBatch())
+      .catch(() => {})
+      .finally(() => {
+        this._continuationBarrierActive = false;
+        // Fire whether the batch settled or the wait timed out: on timeout the
+        // transcript-repair backstop handles the genuine orphan exactly as it
+        // did before this barrier existed.
+        const pending = this._continuation.pending;
+        if (pending) this._fireAutoContinuation(pending.connection);
+      });
+  }
+
+  /**
+   * Block until the latest assistant step's parallel tool batch is fully
+   * answered, or `AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS` elapses. Awaits the
+   * in-flight tool-result apply when one exists (so a sibling that lands
+   * mid-wait is observed promptly) and polls otherwise.
+   */
+  private async _awaitToolBatch(): Promise<void> {
+    const deadline = Date.now() + AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      // The pending continuation was cleared (chat clear / turn reset) — nothing
+      // to wait for; bail so the isolate isn't held by a stale wait.
+      if (!this._continuation.pending) return;
+      const pending = this._pendingInteractionPromise;
+      if (pending) {
+        try {
+          await pending;
+        } catch {
+          // Ignore — re-evaluate the batch below.
+        }
+        continue;
+      }
+      if (!this._hasIncompleteToolBatch()) return;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    // Timed out with the batch still incomplete: a sibling tool result never
+    // arrived (e.g. the client disconnected mid-batch). Proceed anyway — the
+    // transcript-repair backstop errors the unanswered call rather than
+    // pinning the continuation open forever.
+    console.warn(
+      `[Think] Auto-continuation proceeding after waiting ${AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS}ms for unanswered parallel tool result(s) (#1649).`
+    );
+  }
+
+  /**
+   * `true` when the latest assistant message is mid-batch: it carries at least
+   * one settled tool result AND at least one tool call/approval still awaiting a
+   * client result. That is the #1649 signature — the model fanned out parallel
+   * tool calls and only some have been answered. Scoped to the leaf (the step
+   * the continuation answers) so an unrelated dangling tool in an earlier
+   * message doesn't block a legitimate follow-up continuation.
+   */
+  private _hasIncompleteToolBatch(): boolean {
+    const leaf = [...this.messages]
+      .reverse()
+      .find((message) => message.role === "assistant");
+    if (!leaf) return false;
+    let hasPending = false;
+    let hasSettled = false;
+    for (const part of leaf.parts) {
+      const record = part as Record<string, unknown>;
+      const state = record.state;
+      if (state === "input-available" || state === "approval-requested") {
+        hasPending = true;
+      } else if (
+        typeof record.type === "string" &&
+        record.type.startsWith("tool-") &&
+        (state === "output-available" ||
+          state === "output-error" ||
+          state === "output-denied" ||
+          state === "approval-responded")
+      ) {
+        hasSettled = true;
+      }
+      if (hasPending && hasSettled) return true;
+    }
+    return false;
   }
 
   private _fireAutoContinuation(connection: Connection): void {
     const pending = this._continuation.pending;
     if (!pending) return;
+
+    // Cancel any still-armed coalesce timer so a sibling result that re-armed
+    // it during a barrier wait can't fire a duplicate continuation after this
+    // one starts (#1649).
+    if (this._continuationTimer) {
+      clearTimeout(this._continuationTimer);
+      this._continuationTimer = null;
+    }
 
     const { requestId, clientTools } = pending;
     const abortSignal = this._aborts.getSignal(requestId);
@@ -8746,7 +8881,7 @@ export class Think<
     );
     if (!pending) return;
 
-    this._fireAutoContinuation(pending.connection);
+    this._fireAutoContinuationWhenStable(pending.connection);
   }
 
   // ── Response hook ──────────────────────────────────────────────

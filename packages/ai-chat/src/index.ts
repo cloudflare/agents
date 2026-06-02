@@ -148,6 +148,15 @@ const CHAT_RECOVERY_PROGRESS_KEY = "cf:chat-recovery:progress";
 // first under normal deploy cadence (#1637).
 const DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS = 10;
 const DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS = 10_000;
+// Auto-continuation barrier (#1649): when the model emits parallel tool calls,
+// the client answers each one independently and sends a tool result with
+// `autoContinue` per result. A fast tool's result must NOT trigger inference
+// while a slower sibling is still `input-available` — that feeds the provider
+// an incomplete tool-result set. So we wait until the transcript is stable (no
+// `input-available`/`approval-requested` parts) before continuing, bounded by
+// this timeout so a genuinely orphaned tool call (e.g. the client disconnected
+// mid-batch) still falls through instead of pinning the continuation open.
+const AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS = 60_000;
 // Delay before retrying a recovery that timed out waiting for stable state.
 // Gives an actively-churning isolate (e.g. a deploy in flight) time to settle.
 const CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS = 3;
@@ -2090,7 +2099,7 @@ export class AIChatAgent<
     while (true) {
       const prerequisite = this._continuation.pending?.prerequisite;
       if (!prerequisite) {
-        return true;
+        break;
       }
 
       const applied = await prerequisite;
@@ -2103,9 +2112,88 @@ export class AIChatAgent<
       );
 
       if (this._continuation.pending?.prerequisite === prerequisite) {
-        return true;
+        break;
       }
     }
+
+    // #1649 barrier: the prior step may have emitted parallel tool calls. The
+    // client answers each one independently, so the result that triggered this
+    // continuation can arrive while slower siblings are still `input-available`
+    // (or `approval-requested`). Continuing now would send the provider an
+    // incomplete tool-result set. Hold until the batch settles, bounded so a
+    // genuinely orphaned tool call (client disconnected mid-batch) still falls
+    // through rather than pinning the continuation open forever.
+    await this._awaitPendingInteractionBarrier();
+    return true;
+  }
+
+  /**
+   * Block until the latest assistant step's parallel tool batch is fully
+   * answered, or `AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS` elapses. Awaits the
+   * in-flight tool-result apply when one exists (so a sibling that lands
+   * mid-wait is observed promptly) and polls otherwise. Runs inside the
+   * continuation turn, so — unlike `waitUntilStable` — it must not wait on the
+   * turn queue (that would deadlock).
+   */
+  private async _awaitPendingInteractionBarrier(): Promise<void> {
+    const deadline = Date.now() + AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      // The pending continuation was cleared (chat clear / turn reset) — nothing
+      // to wait for; bail so the turn isn't held by a stale wait.
+      if (!this._continuation.pending) return;
+      const pending = this._pendingInteractionPromise;
+      if (pending) {
+        try {
+          await pending;
+        } catch {
+          // Ignore — re-evaluate the batch below.
+        }
+        continue;
+      }
+      if (!this._hasIncompleteToolBatch()) return;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    // Timed out with the batch still incomplete: a sibling tool result never
+    // arrived (e.g. the client disconnected mid-batch). Proceed anyway rather
+    // than pinning the continuation turn open forever.
+    console.warn(
+      `[AIChatAgent] Auto-continuation proceeding after waiting ${AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS}ms for unanswered parallel tool result(s) (#1649).`
+    );
+  }
+
+  /**
+   * `true` when the latest assistant message is mid-batch: it carries at least
+   * one settled tool result AND at least one tool call/approval still awaiting a
+   * client result. That is the #1649 signature — the model fanned out parallel
+   * tool calls and only some have been answered. Scoped to the leaf (the step
+   * the continuation answers) so an unrelated dangling tool in an earlier
+   * message doesn't block a legitimate follow-up continuation.
+   */
+  private _hasIncompleteToolBatch(): boolean {
+    const leaf = [...this.messages]
+      .reverse()
+      .find((message) => message.role === "assistant");
+    if (!leaf) return false;
+    let hasPending = false;
+    let hasSettled = false;
+    for (const part of leaf.parts) {
+      const record = part as Record<string, unknown>;
+      const state = record.state;
+      if (state === "input-available" || state === "approval-requested") {
+        hasPending = true;
+      } else if (
+        typeof record.type === "string" &&
+        record.type.startsWith("tool-") &&
+        (state === "output-available" ||
+          state === "output-error" ||
+          state === "output-denied" ||
+          state === "approval-responded")
+      ) {
+        hasSettled = true;
+      }
+      if (hasPending && hasSettled) return true;
+    }
+    return false;
   }
 
   private _queueAutoContinuation(requestId: string) {
