@@ -147,6 +147,43 @@ the child facet until `clearAgentToolRuns()` deletes retained runs.
 See the full [Agent Tools guide](../../docs/agent-tools.md) for rendering,
 drill-in, and cleanup patterns.
 
+## Browser tools
+
+Think can expose Browser Rendering through a code-mode tool. Browser sessions
+can be one-shot or reused across tool calls. Use dynamic sessions for one-shot
+by default, but allowing the agent to persist the session by calling
+`cdp.startSession()`.
+
+```ts
+import { Think } from "@cloudflare/think";
+import {
+  createBrowserTools,
+  DurableBrowserSessionStore
+} from "@cloudflare/think/tools/browser";
+
+export class Assistant extends Think<Env> {
+  getTools() {
+    return {
+      ...createBrowserTools({
+        browser: this.env.BROWSER,
+        loader: this.env.LOADER,
+        session: {
+          mode: "dynamic",
+          key: "default",
+          store: new DurableBrowserSessionStore(this.ctx.storage),
+          keepAliveMs: 600_000
+        }
+      })
+    };
+  }
+}
+```
+
+For login, MFA, CAPTCHA, or other human handoff flows, call
+`cdp.sessionInfo()` and share the page target's `devtoolsFrontendUrl` with the
+user. When browsing is done, call `cdp.closeSession()` so Browser Run does not
+stay alive until its inactivity timeout.
+
 ## Built-in workspace
 
 Every Think agent gets `this.workspace` — a virtual filesystem backed by the DO's SQLite storage. Workspace tools (`read`, `write`, `edit`, `list`, `find`, `grep`, `delete`, `bash`) are automatically available to the model.
@@ -301,6 +338,7 @@ Script execution requires a Worker Loader binding:
 | `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
 | `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
 | `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
+| `@cloudflare/think/tools/browser`       | `createBrowserTools()` — Browser Rendering via code mode      |
 | `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
 
 ## Think

@@ -1,9 +1,5 @@
 import type { ToolProvider } from "@cloudflare/codemode";
-import {
-  DynamicWorkerExecutor,
-  resolveProvider,
-  truncateResponse
-} from "@cloudflare/codemode";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import { createBrowserSessionManager } from "./session-manager";
 import type {
   BrowserSessionManager,
@@ -16,21 +12,6 @@ export type BrowserToolsOptions = BrowserProviderOptions & {
   /** Execution timeout in milliseconds (default: 30000) */
   timeout?: number;
 };
-
-export interface BrowserToolHandlerOptions {
-  /** Browser Rendering binding (Fetcher) — used in production */
-  browser?: Fetcher;
-  /** Optional CDP base URL override (e.g. http://localhost:9222) */
-  cdpUrl?: string;
-  /** Headers to send with CDP URL discovery requests (e.g. Access headers) */
-  cdpHeaders?: Record<string, string>;
-  /** Loader binding for sandboxed code execution */
-  loader: WorkerLoader;
-  /** Execution timeout in milliseconds (default: 30000) */
-  timeout?: number;
-  /** Optional browser session lifecycle. Defaults to one fresh session per runtime. */
-  session?: BrowserSessionOptions;
-}
 
 type BrowserProviderConnectionOptions =
   | {
@@ -97,78 +78,6 @@ interface SearchableCdpSpec {
 
 const MISSING_BROWSER_CONFIG =
   "Either 'browser' (Fetcher binding) or 'cdpUrl' must be provided";
-
-export const SEARCH_DESCRIPTION = `Search the Chrome DevTools Protocol spec using JavaScript code.
-
-Available in your code:
-
-declare const spec: {
-  get(): Promise<{
-    domains: Array<{
-      name: string;
-      description?: string;
-      commands: Array<{ name: string; method: string; description?: string }>;
-      events: Array<{ name: string; event: string; description?: string }>;
-      types: Array<{ id: string; name: string; description?: string }>;
-    }>;
-  }>;
-};
-
-Write an async arrow function in JavaScript. Do NOT use TypeScript syntax.
-
-Example:
-async () => {
-  const s = await spec.get();
-  return s.domains
-    .find(d => d.name === "Network")
-    .commands.filter(c => c.description?.toLowerCase().includes("intercept"))
-    .map(c => ({ method: c.method, description: c.description }));
-}`;
-
-export const EXECUTE_DESCRIPTION = `Execute CDP commands against a live browser session using JavaScript code.
-
-Available in your code:
-
-declare const cdp: {
-  send(method: string, params?: unknown, options?: {
-    timeoutMs?: number;
-    sessionId?: string;
-  }): Promise<unknown>;
-  attachToTarget(targetId: string, options?: {
-    timeoutMs?: number;
-  }): Promise<string>;
-  getDebugLog(limit?: number): Promise<unknown[]>;
-  clearDebugLog(): Promise<void>;
-};
-
-Write an async arrow function in JavaScript. Do NOT use TypeScript syntax.
-
-For page-scoped commands such as Page.*, Runtime.*, and DOM.*, first create or select a target, call cdp.attachToTarget(targetId), and pass the returned sessionId in command options.
-
-Example:
-async () => {
-  return await cdp.send("Browser.getVersion");
-}
-
-Page example:
-async () => {
-  const { targetId } = await cdp.send("Target.createTarget", {
-    url: "about:blank"
-  });
-  const sessionId = await cdp.attachToTarget(targetId);
-  await cdp.send("Page.enable", {}, { sessionId });
-  await cdp.send(
-    "Page.navigate",
-    { url: "https://example.com" },
-    { sessionId }
-  );
-  const { result } = await cdp.send(
-    "Runtime.evaluate",
-    { expression: "document.title" },
-    { sessionId }
-  );
-  return result.value;
-}`;
 
 const specCache = new Map<
   string,
@@ -432,35 +341,6 @@ function warnExperimentalBrowserProvider(): void {
   );
 }
 
-function formatError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function toBrowserProviderOptions(
-  options: BrowserToolHandlerOptions
-): BrowserProviderOptions {
-  if (options.cdpUrl) {
-    return {
-      cdpUrl: options.cdpUrl,
-      cdpHeaders: options.cdpHeaders,
-      timeout: options.timeout
-    };
-  }
-  if (options.browser) {
-    return {
-      browser: options.browser,
-      timeout: options.timeout,
-      session: options.session
-    };
-  }
-  throw new Error(MISSING_BROWSER_CONFIG);
-}
-
-export interface ToolResult {
-  text: string;
-  isError?: boolean;
-}
-
 async function loadCdpSpec(
   options: BrowserProviderOptions
 ): Promise<SearchableCdpSpec> {
@@ -601,48 +481,4 @@ export function createBrowserExecutor(options: BrowserToolsOptions) {
     loader: options.loader,
     timeout: options.timeout
   });
-}
-
-export function createBrowserToolHandlers(options: BrowserToolHandlerOptions) {
-  const executor = new DynamicWorkerExecutor({
-    loader: options.loader,
-    timeout: options.timeout
-  });
-
-  async function search(code: string): Promise<ToolResult> {
-    try {
-      const result = await executor.execute(code, [
-        {
-          name: "spec",
-          fns: {
-            get: async () => loadCdpSpec(toBrowserProviderOptions(options))
-          }
-        }
-      ]);
-      if (result.error) {
-        return { text: result.error, isError: true };
-      }
-      return { text: truncateResponse(result.result) };
-    } catch (error) {
-      return { text: formatError(error), isError: true };
-    }
-  }
-
-  async function execute(code: string): Promise<ToolResult> {
-    try {
-      const result = await executor.execute(code, [
-        resolveProvider(
-          createBrowserProvider(toBrowserProviderOptions(options))
-        )
-      ]);
-      if (result.error) {
-        return { text: result.error, isError: true };
-      }
-      return { text: truncateResponse(result.result) };
-    } catch (error) {
-      return { text: formatError(error), isError: true };
-    }
-  }
-
-  return { search, execute };
 }

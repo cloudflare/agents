@@ -306,16 +306,17 @@ Add the Browser Rendering and Worker Loader bindings in `wrangler.jsonc`:
 }
 ```
 
-This adds two tools to your agent:
+This adds a browser code-mode tool to your agent:
 
-| Tool              | Description                                                                             |
-| ----------------- | --------------------------------------------------------------------------------------- |
-| `browser_search`  | Query the CDP protocol spec to discover commands, events, and types                     |
-| `browser_execute` | Run CDP commands against a live browser session (screenshots, DOM reads, JS evaluation) |
+| Tool              | Description                                                                                                        |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `browser_execute` | Query the CDP protocol spec and run CDP commands against a live browser session (screenshots, DOM reads, JS evals) |
 
-Both tools use the code-mode pattern — the model writes JavaScript async arrow functions that run in a sandboxed Worker isolate. In `browser_search`, the sandbox has access to `spec.get()` which returns the full normalized CDP protocol. In `browser_execute`, the sandbox has access to `cdp.send()`, `cdp.attachToTarget()`, and debug log helpers.
+The tool uses the code-mode pattern — the model writes JavaScript async arrow functions that run in a sandboxed Worker isolate. The sandbox has access to `cdp.spec()` for protocol discovery, plus `cdp.send()`, `cdp.attachToTarget()`, and debug log helpers for live browser commands.
 
-Each `browser_execute` call opens a fresh browser session and closes it when the code finishes. For page-scoped CDP commands (`Page.*`, `Runtime.*`, `DOM.*`), the model must create a target, attach to it, and pass the `sessionId`.
+By default, each `browser_execute` call opens a fresh browser session and closes it when the code finishes. `createBrowserTools` also accepts the same session options as `agents/browser`, including `{ mode: "reuse", store }` and `{ mode: "dynamic", store }`. Reusable and dynamic sessions expose `cdp.startSession()`, `cdp.sessionInfo()`, `cdp.closeSession()`, and `cdp.resetSession()` inside the sandbox. Dynamic mode remains one-shot until the code calls `cdp.startSession()`.
+
+For page-scoped CDP commands (`Page.*`, `Runtime.*`, `DOM.*`), the model must create a target, attach to it, and pass the `sessionId`.
 
 ### Combining with Other Tools
 

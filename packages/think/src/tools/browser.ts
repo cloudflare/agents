@@ -1,71 +1,50 @@
 import type { ToolSet } from "ai";
 import {
-  createBrowserToolHandlers,
-  SEARCH_DESCRIPTION,
-  EXECUTE_DESCRIPTION
+  createBrowserExecutor,
+  createBrowserProvider,
+  DurableBrowserSessionStore,
+  type BrowserProvider,
+  type BrowserProviderOptions,
+  type BrowserSessionInfo,
+  type BrowserSessionOptions,
+  type BrowserSessionStore,
+  type BrowserToolsOptions,
+  type StoredBrowserSession
 } from "agents/browser";
-import { tool } from "ai";
-import { z } from "zod";
+import { truncateResult } from "@cloudflare/codemode";
+import { createCodeTool } from "@cloudflare/codemode/ai";
 
-export interface CreateBrowserToolsOptions {
-  /**
-   * Browser Rendering binding (Fetcher).
-   *
-   * This is the primary way to connect — works both locally in
-   * `wrangler dev` and when deployed to Cloudflare Workers.
-   *
-   * Requires `"browser": { "binding": "BROWSER" }` in wrangler.jsonc.
-   */
-  browser?: Fetcher;
+export type CreateBrowserToolsOptions = BrowserToolsOptions;
 
-  /**
-   * Optional CDP base URL override (e.g. `http://localhost:9222`).
-   *
-   * Use when connecting to a manually managed Chrome instance or
-   * a remote CDP endpoint behind a tunnel.
-   */
-  cdpUrl?: string;
-
-  /**
-   * Headers to send with CDP URL discovery requests.
-   * Useful when the CDP endpoint requires authentication
-   * (e.g. Cloudflare Access headers).
-   */
-  cdpHeaders?: Record<string, string>;
-
-  /**
-   * WorkerLoader binding for sandboxed code execution.
-   *
-   * Requires `"worker_loaders": [{ "binding": "LOADER" }]` in wrangler.jsonc.
-   */
-  loader: WorkerLoader;
-
-  /**
-   * Execution timeout in milliseconds. Defaults to 30000 (30s).
-   */
-  timeout?: number;
-}
+export {
+  createBrowserProvider,
+  DurableBrowserSessionStore,
+  type BrowserProvider,
+  type BrowserProviderOptions,
+  type BrowserSessionInfo,
+  type BrowserSessionOptions,
+  type BrowserSessionStore,
+  type StoredBrowserSession
+};
 
 /**
  * Create browser automation tools for Think agents.
  *
- * Returns a `ToolSet` with two tools:
+ * Returns a `ToolSet` with a code mode tool backed by `createBrowserProvider()`.
+ * The provider exposes `cdp.spec()` for protocol discovery and `cdp.send()` for
+ * live browser commands.
  *
- * - **`browser_search`** — query the Chrome DevTools Protocol spec
- *   to discover commands, events, and types. The LLM writes JavaScript
- *   that runs against a cached, normalized copy of the protocol.
- *
- * - **`browser_execute`** — run CDP commands against a live browser
- *   session. Each call opens a fresh session, exposes a `cdp` helper,
- *   and closes the session on completion.
- *
- * Both tools use the code-mode pattern: the LLM writes JavaScript
- * async arrow functions that execute in a sandboxed Worker isolate.
+ * Use this helper when you do not already expose a code mode tool. If your
+ * agent already has code mode, prefer adding `createBrowserProvider()` to that
+ * tool instead of registering a second code execution tool.
  *
  * @example
  * ```ts
  * import { Think } from "@cloudflare/think";
- * import { createBrowserTools } from "@cloudflare/think/tools/browser";
+ * import {
+ *   createBrowserTools,
+ *   DurableBrowserSessionStore
+ * } from "@cloudflare/think/tools/browser";
  *
  * export class MyAgent extends Think<Env> {
  *   getModel() {
@@ -77,6 +56,12 @@ export interface CreateBrowserToolsOptions {
  *       ...createBrowserTools({
  *         browser: this.env.BROWSER,
  *         loader: this.env.LOADER,
+ *         session: {
+ *           mode: "dynamic",
+ *           key: "default",
+ *           store: new DurableBrowserSessionStore(this.ctx.storage),
+ *           keepAliveMs: 600_000
+ *         }
  *       }),
  *     };
  *   }
@@ -86,45 +71,11 @@ export interface CreateBrowserToolsOptions {
 export function createBrowserTools(
   options: CreateBrowserToolsOptions
 ): ToolSet {
-  const handlers = createBrowserToolHandlers({
-    browser: options.browser,
-    cdpUrl: options.cdpUrl,
-    cdpHeaders: options.cdpHeaders,
-    loader: options.loader,
-    timeout: options.timeout
-  });
-
   return {
-    browser_search: tool({
-      description: SEARCH_DESCRIPTION,
-      inputSchema: z.object({
-        code: z
-          .string()
-          .describe("JavaScript async arrow function that queries the CDP spec")
-      }),
-      execute: async ({ code }) => {
-        const result = await handlers.search(code);
-        if (result.isError) {
-          throw new Error(result.text);
-        }
-        return result.text;
-      }
-    }),
-
-    browser_execute: tool({
-      description: EXECUTE_DESCRIPTION,
-      inputSchema: z.object({
-        code: z
-          .string()
-          .describe("JavaScript async arrow function that uses the cdp helper")
-      }),
-      execute: async ({ code }) => {
-        const result = await handlers.execute(code);
-        if (result.isError) {
-          throw new Error(result.text);
-        }
-        return result.text;
-      }
+    browser_execute: createCodeTool({
+      tools: [createBrowserProvider(options)],
+      executor: createBrowserExecutor(options),
+      transformResult: truncateResult
     })
   };
 }

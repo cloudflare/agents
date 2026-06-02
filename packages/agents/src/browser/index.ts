@@ -32,14 +32,9 @@ export {
 } from "./session-manager";
 
 export {
-  EXECUTE_DESCRIPTION,
-  SEARCH_DESCRIPTION,
-  type BrowserToolHandlerOptions,
   type BrowserToolsOptions,
   type BrowserProvider,
   type BrowserProviderOptions,
-  type ToolResult,
   createBrowserExecutor,
-  createBrowserToolHandlers,
   createBrowserProvider
 } from "./shared";

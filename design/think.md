@@ -372,12 +372,9 @@ The LLM writes JavaScript code. The tool sends it to a dynamic Worker isolate vi
 
 ### Browser tools (`@cloudflare/think/tools/browser`)
 
-Two AI SDK tools for CDP-based browser automation:
+An AI SDK code-mode tool for CDP-based browser automation. The model writes JavaScript against the `cdp` provider namespace: `cdp.spec()` for protocol discovery, `cdp.send()` for commands, `cdp.attachToTarget()` for page-scoped sessions, and debug log helpers.
 
-- **`browser_search`** — query the CDP protocol spec to discover commands, events, and types. The model writes JavaScript that runs against a normalized copy of the protocol, exposed via `spec.get()`.
-- **`browser_execute`** — run CDP commands against a live browser session. The model writes JavaScript that calls `cdp.send()`, `cdp.attachToTarget()`, and debug log helpers.
-
-Both tools delegate to `createBrowserToolHandlers` from `agents/browser`, reusing the same code-mode sandbox and CDP session management. Requires a Browser Rendering binding (`browser`) and a `WorkerLoader` (`loader`).
+The tool delegates to `createBrowserProvider()` from `agents/browser`, reusing the same code-mode sandbox and CDP session management. Requires a Browser Rendering binding (`browser`) and a `WorkerLoader` (`loader`).
 
 ```typescript
 createBrowserTools({
