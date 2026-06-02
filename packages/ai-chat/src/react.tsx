@@ -1378,6 +1378,7 @@ export function useAgentChat<
     markInitialMessagesSeeded();
     setMessages([]);
     setClientToolResults(new Map());
+    setPendingOnToolCallIds(new Set());
     resetToolContinuation();
     processedToolCalls.current.clear();
     localResponseMessageIdsRef.current.clear();
@@ -1694,10 +1695,16 @@ export function useAgentChat<
 
         // Call the onToolCall callback
         // The callback is responsible for calling addToolOutput when ready
-        const result = currentOnToolCall({
-          toolCall: { toolCallId, toolName, input: part.input },
-          addToolOutput
-        });
+        let result: ReturnType<OnToolCallCallback>;
+        try {
+          result = currentOnToolCall({
+            toolCall: { toolCallId, toolName, input: part.input },
+            addToolOutput
+          });
+        } catch (error) {
+          finishOnToolCall(toolCallId);
+          throw error;
+        }
         void Promise.resolve(result).finally(() => {
           finishOnToolCall(toolCallId);
         });
