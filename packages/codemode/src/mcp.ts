@@ -9,45 +9,19 @@ import {
 } from "./json-schema-types";
 import { normalizeCode } from "./normalize";
 import { sanitizeToolName } from "./utils";
+import {
+  CHARS_PER_TOKEN,
+  MAX_CHARS,
+  MAX_TOKENS,
+  TRUNCATION_MARKER,
+  sandboxResponseText,
+  truncateResponse
+} from "./truncate";
 import type { Executor } from "./executor";
 
 import type { JSONSchema7 } from "json-schema";
 
 // -- Shared utilities --
-
-const CHARS_PER_TOKEN = 4;
-const MAX_TOKENS = 6000;
-const MAX_CHARS = MAX_TOKENS * CHARS_PER_TOKEN;
-const TRUNCATION_MARKER = "--- TRUNCATED ---";
-const TRUNCATION_FOOTER_PREFIX = `\n\n${TRUNCATION_MARKER}\nResponse was ~`;
-const MAX_SANDBOX_TRUNCATED_CHARS = MAX_CHARS + 512;
-
-function truncateResponse(content: unknown): string {
-  const text =
-    typeof content === "string"
-      ? content
-      : (JSON.stringify(content, null, 2) ?? "undefined");
-
-  if (text.length <= MAX_CHARS) {
-    return text;
-  }
-
-  const truncated = text.slice(0, MAX_CHARS);
-  const estimatedTokens = Math.ceil(text.length / CHARS_PER_TOKEN);
-
-  return `${truncated}\n\n${TRUNCATION_MARKER}\nResponse was ~${estimatedTokens.toLocaleString()} tokens (limit: ${MAX_TOKENS.toLocaleString()}). Use more specific queries to reduce response size.`;
-}
-
-function sandboxResponseText(content: unknown): string {
-  if (
-    typeof content === "string" &&
-    content.length <= MAX_SANDBOX_TRUNCATED_CHARS &&
-    content.slice(MAX_CHARS).startsWith(TRUNCATION_FOOTER_PREFIX)
-  ) {
-    return content;
-  }
-  return truncateResponse(content);
-}
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

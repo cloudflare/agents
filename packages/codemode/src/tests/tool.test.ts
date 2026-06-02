@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { createCodeTool } from "../tool";
+import { truncateResult } from "../truncate";
 import { z } from "zod";
 import type { ToolDescriptors } from "../tool-types";
 import type { Executor, ExecuteResult, ResolvedProvider } from "../executor";
@@ -290,6 +291,64 @@ describe("createCodeTool", () => {
       result: { answer: 42 },
       logs: ["hello", "world"]
     });
+  });
+
+  it("should transform successful results", async () => {
+    const { executor } = createMockExecutor({
+      result: { answer: 42 },
+      logs: ["hello"]
+    });
+    const codeTool = createCodeTool({
+      tools,
+      executor,
+      transformResult: (result) => JSON.stringify(result)
+    });
+
+    const output = await codeTool.execute?.(
+      { code: "async () => 42" },
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+    );
+
+    expect(output).toEqual({
+      result: '{"answer":42}',
+      logs: ["hello"]
+    });
+  });
+
+  it("should preserve structured results when truncation is not needed", async () => {
+    const value = { image: "data:image/png;base64,test" };
+    const { executor } = createMockExecutor({ result: value });
+    const codeTool = createCodeTool({
+      tools,
+      executor,
+      transformResult: truncateResult
+    });
+
+    const output = await codeTool.execute?.(
+      { code: "async () => ({ image: 'data:image/png;base64,test' })" },
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+    );
+
+    expect(output).toEqual({ result: value });
+  });
+
+  it("should truncate oversized results", async () => {
+    const { executor } = createMockExecutor({
+      result: { value: "x".repeat(25_000) }
+    });
+    const codeTool = createCodeTool({
+      tools,
+      executor,
+      transformResult: truncateResult
+    });
+
+    const output = await codeTool.execute?.(
+      { code: "async () => ({ value: 'x'.repeat(25000) })" },
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+    );
+
+    const result = (output as { result: string } | undefined)?.result;
+    expect(result).toContain("--- TRUNCATED ---");
   });
 
   it("should throw when executor returns error", async () => {

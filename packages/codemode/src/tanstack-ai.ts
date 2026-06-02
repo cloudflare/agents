@@ -245,7 +245,8 @@ export function createCodeTool(options: CreateCodeToolOptions): ServerTool {
 
     resolvedProviders.push({
       name: providerName,
-      fns: extractFns(filtered)
+      fns: extractFns(filtered),
+      createRuntime: provider.createRuntime
     });
   }
 
@@ -264,7 +265,12 @@ export function createCodeTool(options: CreateCodeToolOptions): ServerTool {
   });
 
   return def.server(async ({ code }) =>
-    runCode({ code, executor, providers: resolvedProviders })
+    runCode({
+      code,
+      executor,
+      providers: resolvedProviders,
+      transformResult: options.transformResult
+    })
   );
 }
 

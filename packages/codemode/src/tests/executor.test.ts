@@ -83,6 +83,18 @@ describe("ToolDispatcher", () => {
       data: "AQID"
     });
   });
+
+  it("should reject calls after execution disposal", async () => {
+    let live = false;
+    const fn = vi.fn(async () => "called");
+    const dispatcher = new ToolDispatcher({ fn }, { isLive: () => live });
+
+    const resJson = await dispatcher.call("fn", "{}");
+    const data = JSON.parse(resJson);
+
+    expect(data.error).toBe("Execution has been disposed");
+    expect(fn).not.toHaveBeenCalled();
+  });
 });
 
 describe("DynamicWorkerExecutor", () => {
@@ -226,6 +238,97 @@ describe("DynamicWorkerExecutor", () => {
     });
     expect(getWeather).toHaveBeenCalledTimes(1);
     expect(searchWeb).toHaveBeenCalledTimes(1);
+  });
+
+  it("should let a provider runtime replace tools and share scoped state", async () => {
+    const fallbackQuery = vi.fn(async () => "fallback");
+    const dispose = vi.fn(async () => undefined);
+    let created = 0;
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute(
+      `async () => {
+        const a = await db.query({ sql: "select 1" });
+        const b = await db.mutate({ sql: "update things" });
+        const c = await db.query({ sql: "select 2" });
+        return { a, b, c };
+      }`,
+      [
+        {
+          name: "db",
+          fns: { query: fallbackQuery },
+          createRuntime: () => {
+            created++;
+            let connection: { id: number; calls: number } | undefined;
+            const getConnection = () => {
+              connection ??= { id: created, calls: 0 };
+              return connection;
+            };
+
+            return {
+              fns: {
+                query: async (...args: unknown[]) => {
+                  const input = args[0] as { sql: string };
+                  const conn = getConnection();
+                  conn.calls++;
+                  return {
+                    connectionId: conn.id,
+                    calls: conn.calls,
+                    sql: input.sql
+                  };
+                },
+                mutate: async (...args: unknown[]) => {
+                  const input = args[0] as { sql: string };
+                  const conn = getConnection();
+                  conn.calls++;
+                  return {
+                    connectionId: conn.id,
+                    calls: conn.calls,
+                    sql: input.sql
+                  };
+                }
+              },
+              dispose
+            };
+          }
+        }
+      ]
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toEqual({
+      a: { connectionId: 1, calls: 1, sql: "select 1" },
+      b: { connectionId: 1, calls: 2, sql: "update things" },
+      c: { connectionId: 1, calls: 3, sql: "select 2" }
+    });
+    expect(fallbackQuery).not.toHaveBeenCalled();
+    expect(created).toBe(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("should dispose provider runtimes after code errors", async () => {
+    const dispose = vi.fn(async () => undefined);
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute(
+      `async () => {
+        await resource.open({});
+        throw new Error("boom after tool");
+      }`,
+      [
+        {
+          name: "resource",
+          fns: {},
+          createRuntime: () => ({
+            fns: { open: async () => "opened" },
+            dispose
+          })
+        }
+      ]
+    );
+
+    expect(result.error).toBe("boom after tool");
+    expect(dispose).toHaveBeenCalledTimes(1);
   });
 
   it("should return a clear error for provider names reserved by the sandbox codec", async () => {
@@ -421,6 +524,28 @@ describe("DynamicWorkerExecutor", () => {
     );
 
     expect(result.error).toContain("timed out");
+  });
+
+  it("should not dispatch late tool calls after timeout", async () => {
+    const late = vi.fn(async () => "late");
+    const executor = new DynamicWorkerExecutor({
+      loader: env.LOADER,
+      timeout: 50
+    });
+
+    const result = await executor.execute(
+      `async () => {
+        setTimeout(() => {
+          codemode.late({}).catch(() => undefined);
+        }, 100);
+        await new Promise(r => setTimeout(r, 500));
+      }`,
+      [codemodeProvider({ late })]
+    );
+
+    expect(result.error).toContain("timed out");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(late).not.toHaveBeenCalled();
   });
 });
 

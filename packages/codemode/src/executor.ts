@@ -9,7 +9,9 @@ import { RpcTarget } from "cloudflare:workers";
 import type {
   ExecuteResult,
   Executor,
-  ResolvedProvider
+  ProviderRuntime,
+  ResolvedProvider,
+  ToolFunction
 } from "./executor-types";
 import { normalizeCode } from "./normalize";
 import { sanitizeToolName } from "./utils";
@@ -18,7 +20,9 @@ import type { ToolSet } from "ai";
 export type {
   ExecuteResult,
   Executor,
-  ResolvedProvider
+  ProviderRuntime,
+  ResolvedProvider,
+  ToolFunction
 } from "./executor-types";
 
 const BINARY_TAG = "__codemode_binary_v1__";
@@ -183,7 +187,19 @@ export interface ToolProvider {
 
   /** Type declarations for the LLM. Auto-generated from `tools` if omitted. */
   types?: string;
+
+  /**
+   * Optional per-execution runtime. Runtime fns replace same-named tool fns for
+   * this code block and may share scoped state across multiple tool calls.
+   */
+  createRuntime?: () => ProviderRuntime | Promise<ProviderRuntime>;
 }
+
+interface ExecutionGuard {
+  isLive(): boolean;
+}
+
+const EXECUTION_DISPOSED_ERROR = "Execution has been disposed";
 
 // ── ToolDispatcher ────────────────────────────────────────────────────
 
@@ -193,19 +209,31 @@ export interface ToolProvider {
  * evaluate() method — no globalOutbound or Fetcher bindings needed.
  */
 export class ToolDispatcher extends RpcTarget {
-  #fns: Record<string, (...args: unknown[]) => Promise<unknown>>;
-  constructor(fns: Record<string, (...args: unknown[]) => Promise<unknown>>) {
+  #fns: Record<string, ToolFunction>;
+  #guard: ExecutionGuard;
+
+  constructor(
+    fns: Record<string, ToolFunction>,
+    guard: ExecutionGuard = { isLive: () => true }
+  ) {
     super();
     this.#fns = fns;
+    this.#guard = guard;
   }
 
   async call(name: string, argsJson?: string): Promise<string> {
+    if (!this.#guard.isLive()) {
+      return stringifyForCodemode({ error: EXECUTION_DISPOSED_ERROR });
+    }
     const fn = this.#fns[name];
     if (!fn) {
       return stringifyForCodemode({ error: `Tool "${name}" not found` });
     }
     try {
       const args = argsJson ? parseForCodemode(argsJson) : [];
+      if (!this.#guard.isLive()) {
+        return stringifyForCodemode({ error: EXECUTION_DISPOSED_ERROR });
+      }
       const result = await fn(...(Array.isArray(args) ? args : [args]));
       return stringifyForCodemode({ result });
     } catch (err) {
@@ -274,9 +302,7 @@ export class DynamicWorkerExecutor implements Executor {
 
   async execute(
     code: string,
-    providersOrFns:
-      | ResolvedProvider[]
-      | Record<string, (...args: unknown[]) => Promise<unknown>>
+    providersOrFns: ResolvedProvider[] | Record<string, ToolFunction>
   ): Promise<ExecuteResult> {
     // Backwards compat: detect old `execute(code, fns)` signature.
     let providers: ResolvedProvider[];
@@ -329,8 +355,45 @@ export class DynamicWorkerExecutor implements Executor {
       seenNames.add(provider.name);
     }
 
+    let activeProviders = providers;
+    const runtimes: ProviderRuntime[] = [];
+    let disposeError: string | undefined;
+    let disposed = false;
+    const guard = { isLive: () => !disposed };
+    const disposeRuntimes = async () => {
+      for (const runtime of [...runtimes].reverse()) {
+        if (!runtime.dispose) continue;
+        try {
+          await runtime.dispose();
+        } catch (err) {
+          disposeError = err instanceof Error ? err.message : String(err);
+        }
+      }
+    };
+
+    try {
+      activeProviders = [];
+      for (const provider of providers) {
+        const runtime = provider.createRuntime
+          ? await provider.createRuntime()
+          : undefined;
+        if (runtime) runtimes.push(runtime);
+        activeProviders.push({
+          name: provider.name,
+          fns: { ...provider.fns, ...(runtime?.fns ?? {}) }
+        });
+      }
+    } catch (err) {
+      disposed = true;
+      await disposeRuntimes();
+      return {
+        result: undefined,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+
     // Generate a Proxy global for each provider namespace.
-    const proxyInits = providers.map(
+    const proxyInits = activeProviders.map(
       (p) =>
         `    const ${p.name} = new Proxy({}, {\n` +
         `      get: (_, toolName) => async (...args) => {\n` +
@@ -378,16 +441,15 @@ export class DynamicWorkerExecutor implements Executor {
     // Sanitize fn keys so raw tool names (e.g. "github.list-issues") become
     // valid JS identifiers (e.g. "github_list_issues") on the proxy.
     const dispatchers: Record<string, ToolDispatcher> = {};
-    for (const provider of providers) {
-      const sanitizedFns: Record<
-        string,
-        (...args: unknown[]) => Promise<unknown>
-      > = {};
+    for (const provider of activeProviders) {
+      const sanitizedFns: Record<string, ToolFunction> = {};
       const sanitizedNames = new Map<string, string>();
       for (const [name, fn] of Object.entries(provider.fns)) {
         const sanitizedName = sanitizeToolName(name);
         const existingName = sanitizedNames.get(sanitizedName);
         if (existingName && existingName !== name) {
+          disposed = true;
+          await disposeRuntimes();
           return {
             result: undefined,
             error:
@@ -398,33 +460,54 @@ export class DynamicWorkerExecutor implements Executor {
         sanitizedNames.set(sanitizedName, name);
         sanitizedFns[sanitizedName] = fn;
       }
-      dispatchers[provider.name] = new ToolDispatcher(sanitizedFns);
+      dispatchers[provider.name] = new ToolDispatcher(sanitizedFns, guard);
     }
 
-    const worker = this.#loader.get(`codemode-${crypto.randomUUID()}`, () => ({
-      compatibilityDate: "2025-06-01",
-      compatibilityFlags: ["nodejs_compat"],
-      mainModule: "executor.js",
-      modules: {
-        ...this.#modules,
-        "executor.js": executorModule
-      },
-      globalOutbound: this.#globalOutbound
-    }));
+    let executeResult: ExecuteResult;
+    try {
+      const worker = this.#loader.get(
+        `codemode-${crypto.randomUUID()}`,
+        () => ({
+          compatibilityDate: "2025-06-01",
+          compatibilityFlags: ["nodejs_compat"],
+          mainModule: "executor.js",
+          modules: {
+            ...this.#modules,
+            "executor.js": executorModule
+          },
+          globalOutbound: this.#globalOutbound
+        })
+      );
 
-    const entrypoint = worker.getEntrypoint() as unknown as {
-      evaluate(dispatchers: Record<string, ToolDispatcher>): Promise<{
-        result: unknown;
-        error?: string;
-        logs?: string[];
-      }>;
-    };
-    const response = await entrypoint.evaluate(dispatchers);
+      const entrypoint = worker.getEntrypoint() as unknown as {
+        evaluate(dispatchers: Record<string, ToolDispatcher>): Promise<{
+          result: unknown;
+          error?: string;
+          logs?: string[];
+        }>;
+      };
+      const response = await entrypoint.evaluate(dispatchers);
 
-    if (response.error) {
-      return { result: undefined, error: response.error, logs: response.logs };
+      executeResult = response.error
+        ? { result: undefined, error: response.error, logs: response.logs }
+        : { result: response.result, logs: response.logs };
+    } catch (err) {
+      executeResult = {
+        result: undefined,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    } finally {
+      disposed = true;
+      await disposeRuntimes();
     }
 
-    return { result: response.result, logs: response.logs };
+    if (disposeError && !executeResult.error) {
+      return {
+        result: undefined,
+        error: `Runtime dispose failed: ${disposeError}`
+      };
+    }
+
+    return executeResult;
   }
 }

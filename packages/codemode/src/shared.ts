@@ -6,6 +6,7 @@
  */
 
 import type { Executor, ToolProvider, ToolProviderTools } from "./executor";
+import type { CodeResultTransform } from "./executor-types";
 
 export const DEFAULT_DESCRIPTION = `Execute code to achieve a goal.
 
@@ -25,6 +26,10 @@ export interface CreateCodeToolOptions {
    * Custom tool description. Use {{types}} as a placeholder for the generated type definitions.
    */
   description?: string;
+  /**
+   * Optional final result transform applied before returning the code tool output.
+   */
+  transformResult?: CodeResultTransform;
 }
 
 export type CodeInput = { code: string };

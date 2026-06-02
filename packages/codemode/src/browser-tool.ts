@@ -14,6 +14,7 @@ import {
 import { runCode } from "./run-code";
 import { sanitizeToolName } from "./utils";
 import type { Executor, ResolvedProvider } from "./executor-types";
+import type { CodeResultTransform } from "./executor-types";
 import type { CodeInput, CodeOutput } from "./shared";
 import { IframeSandboxExecutor } from "./iframe-executor";
 
@@ -84,6 +85,10 @@ export interface CreateBrowserCodeToolOptions {
    * Custom tool description. Use `{{types}}` as a placeholder for generated type definitions.
    */
   description?: string;
+  /**
+   * Optional final result transform applied before returning the code tool output.
+   */
+  transformResult?: CodeResultTransform;
 }
 
 // -- Implementation --
@@ -211,6 +216,11 @@ export function createBrowserCodeTool(
       required: ["result"]
     },
     execute: async ({ code }) =>
-      runCode({ code, executor, providers: resolvedProviders })
+      runCode({
+        code,
+        executor,
+        providers: resolvedProviders,
+        transformResult: options.transformResult
+      })
   };
 }

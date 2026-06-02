@@ -1,3 +1,4 @@
+import type { CodeResultTransform } from "./executor-types";
 import type { CodeOutput } from "./shared";
 import type { Executor, ResolvedProvider } from "./executor";
 import { normalizeCode } from "./normalize";
@@ -5,11 +6,13 @@ import { normalizeCode } from "./normalize";
 export async function runCode({
   code,
   executor,
-  providers
+  providers,
+  transformResult
 }: {
   code: string;
   executor: Executor;
   providers: ResolvedProvider[];
+  transformResult?: CodeResultTransform;
 }): Promise<CodeOutput> {
   const executeResult = await executor.execute(normalizeCode(code), providers);
 
@@ -20,7 +23,11 @@ export async function runCode({
     throw new Error(`Code execution failed: ${executeResult.error}${logCtx}`);
   }
 
+  const result = transformResult
+    ? transformResult(executeResult.result)
+    : executeResult.result;
+
   return executeResult.logs?.length
-    ? { result: executeResult.result, logs: executeResult.logs }
-    : { result: executeResult.result };
+    ? { result, logs: executeResult.logs }
+    : { result };
 }
