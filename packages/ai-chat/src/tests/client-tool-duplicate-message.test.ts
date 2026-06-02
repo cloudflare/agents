@@ -374,6 +374,80 @@ describe("Client-side tool duplicate message prevention", () => {
     ws.close(1000);
   });
 
+  it("holds the barrier when a settled dynamic-tool sits beside a pending tool (#1649)", async () => {
+    const room = crypto.randomUUID();
+    const res = await exports.default.fetch(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    // Parallel batch mixing a `dynamic-tool` part with a regular tool part.
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Use a dynamic tool and a regular tool" }]
+      },
+      {
+        id: "assistant-dynamic",
+        role: "assistant",
+        parts: [
+          {
+            type: "dynamic-tool",
+            toolName: "dynAction",
+            toolCallId: "call_dyn",
+            state: "input-available",
+            input: { which: "dyn" }
+          },
+          {
+            type: "tool-testTool",
+            toolCallId: "call_reg",
+            state: "input-available",
+            input: { which: "reg" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    // Resolve the dynamic tool first (autoContinue). The regular tool is still
+    // pending → the continuation must NOT run yet.
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId: "call_dyn",
+        toolName: "dynAction",
+        output: { which: "dyn" },
+        autoContinue: true
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect(await agentStub.getChatMessageCallCountForTest()).toBe(0);
+
+    // Resolve the regular tool: batch complete → exactly one continuation.
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId: "call_reg",
+        toolName: "testTool",
+        output: { which: "reg" },
+        autoContinue: true
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    await agentStub.waitForIdleForTest();
+
+    expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
+
+    ws.close(1000);
+  });
+
   it("preserves earlier assistant parts across chained continuation approvals (#1160)", async () => {
     const room = crypto.randomUUID();
     const res = await exports.default.fetch(

@@ -1063,6 +1063,76 @@ describe("Think — auto-continuation", () => {
 
     await closeWS(ws);
   });
+
+  it("holds the barrier when a settled dynamic-tool sits beside a pending tool (#1649)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // Parallel batch mixing a `dynamic-tool` part with a regular tool part —
+    // both `input-available`. `dynamic-tool` must be recognized as a tool so a
+    // settled one still counts toward the mid-batch barrier.
+    await agent.persistToolCallMessage([
+      makeUserMessage("use a dynamic tool and a regular tool"),
+      {
+        id: "assistant-dynamic",
+        role: "assistant",
+        parts: [
+          {
+            type: "dynamic-tool",
+            toolName: "dyn_action",
+            toolCallId: "tc-dyn",
+            state: "input-available",
+            input: { action: "dyn" }
+          },
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-reg",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "reg" }
+          }
+        ]
+      } as unknown as UIMessage
+    ]);
+    await agent.clearResponseLog();
+
+    // Resolve the dynamic tool first (autoContinue). The regular tool is still
+    // pending, so the continuation must NOT run yet.
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-dyn",
+        toolName: "dyn_action",
+        output: "dyn output",
+        autoContinue: true
+      })
+    );
+
+    await delay(400);
+    let log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.filter((entry) => entry.continuation).length).toBe(0);
+
+    // Resolve the regular tool: now the batch is complete → one continuation.
+    const continuationDone = waitForDone(ws, 15000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-reg",
+        toolName: "client_action",
+        output: "reg output",
+        autoContinue: true
+      })
+    );
+    await continuationDone;
+    await delay(200);
+
+    log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.filter((entry) => entry.continuation).length).toBe(1);
+
+    await closeWS(ws);
+  });
 });
 
 // ── Client tool schemas ──────────────────────────────────────────

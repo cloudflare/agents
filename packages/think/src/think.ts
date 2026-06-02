@@ -8809,7 +8809,7 @@ export class Think<
         hasPending = true;
       } else if (
         typeof record.type === "string" &&
-        record.type.startsWith("tool-") &&
+        (record.type.startsWith("tool-") || record.type === "dynamic-tool") &&
         (state === "output-available" ||
           state === "output-error" ||
           state === "output-denied" ||
