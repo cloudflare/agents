@@ -1398,4 +1398,16 @@ describe("Client tools continuation", () => {
       wsB.close(1000);
     }
   });
+
+  it("serializes overlapping tool-result applies so neither clobbers the other (#1649, defensive)", async () => {
+    // ai-chat's apply is synchronous today so it doesn't exhibit the #1649
+    // clobber, but the interaction-apply queue guards the invariant. Two
+    // overlapping read-modify-writes: without serialization the second reads
+    // the stale value before the first commits and the result is 1; serialized,
+    // the second waits and it is 2.
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    const result = await agentStub.testInteractionApplySerialization();
+    expect(result).toBe(2);
+  });
 });

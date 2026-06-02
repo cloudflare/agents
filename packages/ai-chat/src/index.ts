@@ -409,6 +409,15 @@ export class AIChatAgent<
   private _pendingInteractionPromise: Promise<boolean> | null = null;
 
   /**
+   * Serialization tail for client-tool result/approval applies (#1649). Each
+   * apply is a read-modify-write of the full message; running siblings from a
+   * parallel tool batch concurrently lets last-write-wins clobber the others
+   * back to `input-available`. Chaining every apply off this tail makes them
+   * commit atomically in arrival order.
+   */
+  private _interactionApplyTail: Promise<void> = Promise.resolve();
+
+  /**
    * Tracks the ID of a streaming message that was persisted early due to
    * a tool entering approval-requested state. When set, stream completion
    * updates the existing persisted message instead of appending a new one.
@@ -1096,21 +1105,15 @@ export class AIChatAgent<
 
           this._emit("tool:result", { toolCallId, toolName });
 
-          const applyPromise = this._applyToolResult(
-            toolCallId,
-            toolName,
-            output,
-            overrideState,
-            errorText
+          const applyPromise = this._enqueueInteractionApply(() =>
+            this._applyToolResult(
+              toolCallId,
+              toolName,
+              output,
+              overrideState,
+              errorText
+            )
           );
-          this._pendingInteractionPromise = applyPromise;
-          applyPromise
-            .finally(() => {
-              if (this._pendingInteractionPromise === applyPromise) {
-                this._pendingInteractionPromise = null;
-              }
-            })
-            .catch(() => {});
 
           if (autoContinue) {
             this._enqueueAutoContinuation(
@@ -1128,15 +1131,9 @@ export class AIChatAgent<
         if (data.type === MessageType.CF_AGENT_TOOL_APPROVAL) {
           const { toolCallId, approved, autoContinue } = data;
           this._emit("tool:approval", { toolCallId, approved });
-          const approvalPromise = this._applyToolApproval(toolCallId, approved);
-          this._pendingInteractionPromise = approvalPromise;
-          approvalPromise
-            .finally(() => {
-              if (this._pendingInteractionPromise === approvalPromise) {
-                this._pendingInteractionPromise = null;
-              }
-            })
-            .catch(() => {});
+          const approvalPromise = this._enqueueInteractionApply(() =>
+            this._applyToolApproval(toolCallId, approved)
+          );
 
           if (autoContinue) {
             this._enqueueAutoContinuation(
@@ -1928,6 +1925,9 @@ export class AIChatAgent<
     this._abortRegistry.destroyAll();
     this._submitConcurrency.reset();
     this._pendingInteractionPromise = null;
+    // Drop the apply chain so new interactions don't serialize behind a stale
+    // (possibly hung) apply from the turn we just reset (#1649).
+    this._interactionApplyTail = Promise.resolve();
     this._continuation.sendResumeNone();
     this._continuation.clearAll();
     this._pendingChatResponseResults.length = 0;
@@ -4842,6 +4842,44 @@ export class AIChatAgent<
       );
     }
     return false;
+  }
+
+  /**
+   * Serialize a client-tool result/approval apply behind any in-flight apply
+   * (#1649, defensive). Each apply is a read-modify-write of the message and
+   * parallel tool results arrive as independent WebSocket messages. Today
+   * `_findAndUpdateToolPart` performs that read-modify-write synchronously (no
+   * await between reading `this.messages` and the SQLite write), so concurrent
+   * applies can't actually interleave — unlike Think, ai-chat does not exhibit
+   * the #1649 clobber. This queue is a guard so the invariant survives if the
+   * apply ever gains an await between read and write (e.g. async storage): each
+   * apply commits atomically in arrival order.
+   *
+   * `_pendingInteractionPromise` is set to the newest link so the barrier's
+   * single-slot wake-up observes the latest apply; because the chain is serial,
+   * awaiting it transitively waits for every predecessor.
+   *
+   * @internal
+   */
+  protected _enqueueInteractionApply(
+    apply: () => Promise<boolean>
+  ): Promise<boolean> {
+    // `.then(apply, apply)` runs regardless of a predecessor's outcome so one
+    // rejected apply can't poison the rest of the batch.
+    const resultPromise = this._interactionApplyTail.then(apply, apply);
+    this._interactionApplyTail = resultPromise.then(
+      () => undefined,
+      () => undefined
+    );
+    this._pendingInteractionPromise = resultPromise;
+    resultPromise
+      .finally(() => {
+        if (this._pendingInteractionPromise === resultPromise) {
+          this._pendingInteractionPromise = null;
+        }
+      })
+      .catch(() => {});
+    return resultPromise;
   }
 
   /**

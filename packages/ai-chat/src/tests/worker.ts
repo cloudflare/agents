@@ -536,6 +536,27 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return messageWithToolOutput;
   }
 
+  /**
+   * Drives two overlapping read-modify-write applies through the
+   * interaction-apply queue (#1649). Each apply reads a shared counter, yields
+   * across an async gap, then writes `read + 1`. Without serialization both
+   * read 0 before either writes, so the result is 1 (one update clobbered).
+   * With serialization the second apply waits for the first, yielding 2.
+   */
+  async testInteractionApplySerialization(): Promise<number> {
+    let shared = 0;
+    const rmw = (gapMs: number) => async () => {
+      const read = shared;
+      await new Promise((resolve) => setTimeout(resolve, gapMs));
+      shared = read + 1;
+      return true;
+    };
+    const first = this._enqueueInteractionApply(rmw(30));
+    const second = this._enqueueInteractionApply(rmw(0));
+    await Promise.all([first, second]);
+    return shared;
+  }
+
   // Resumable streaming test helpers
 
   testStartStream(requestId: string): string {

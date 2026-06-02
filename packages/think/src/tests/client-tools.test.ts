@@ -1064,6 +1064,106 @@ describe("Think — auto-continuation", () => {
     await closeWS(ws);
   });
 
+  it("serializes overlapping tool-result applies so neither clobbers the other (#1649)", async () => {
+    const agent = await freshAgent();
+    // Two overlapping read-modify-writes through the interaction-apply queue.
+    // Without serialization the second reads the stale value before the first
+    // commits and the result is 1; serialized, the second waits and it is 2.
+    const result = await agent.testInteractionApplySerialization();
+    expect(result).toBe(2);
+  });
+
+  it("does not clobber siblings when parallel results arrive concurrently (#1649)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // Three parallel client tool calls in a single assistant step.
+    await agent.persistToolCallMessage([
+      makeUserMessage("use three tools"),
+      {
+        id: "assistant-concurrent",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-a",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "a" }
+          },
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-b",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "b" }
+          },
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-c",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "c" }
+          }
+        ]
+      } as unknown as UIMessage
+    ]);
+    await agent.clearResponseLog();
+
+    const repairedToolCallIds: Array<string[] | undefined> = [];
+    const unsubscribe = subscribe("transcript", (event) => {
+      if (event.type === "chat:transcript:repaired" && event.name === room) {
+        repairedToolCallIds.push(event.payload.toolCallIds);
+      }
+    });
+
+    try {
+      // Fire all three results back-to-back WITHOUT awaiting between sends. Each
+      // apply is a read-modify-write of the whole assistant message; without
+      // serialization they read the same all-`input-available` snapshot and the
+      // last write clobbers its siblings back to `input-available`.
+      const continuationDone = waitForDone(ws, 15000);
+      for (const id of ["tc-a", "tc-b", "tc-c"]) {
+        ws.send(
+          JSON.stringify({
+            type: MSG_TOOL_RESULT,
+            toolCallId: id,
+            toolName: "client_action",
+            output: `${id} output`,
+            autoContinue: true
+          })
+        );
+      }
+      await continuationDone;
+      await delay(200);
+
+      // All three results survived — none was clobbered back to input-available.
+      const messages = (await agent.getMessages()) as UIMessage[];
+      const assistant = messages.find((m) => m.id === "assistant-concurrent")!;
+      const partFor = (toolCallId: string) =>
+        assistant.parts.find(
+          (p) => (p as Record<string, unknown>).toolCallId === toolCallId
+        ) as Record<string, unknown>;
+      for (const id of ["tc-a", "tc-b", "tc-c"]) {
+        expect(partFor(id).state).toBe("output-available");
+        expect(partFor(id).output).toBe(`${id} output`);
+      }
+
+      // No sibling was flipped to errored by a premature repair.
+      expect(repairedToolCallIds.flat()).toEqual([]);
+
+      // Exactly one continuation ran for the completed batch.
+      const log = (await agent.getResponseLog()) as ChatResponseResult[];
+      expect(log.filter((entry) => entry.continuation).length).toBe(1);
+    } finally {
+      unsubscribe();
+    }
+
+    await closeWS(ws);
+  });
+
   it("holds the barrier when a settled dynamic-tool sits beside a pending tool (#1649)", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

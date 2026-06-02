@@ -1912,6 +1912,12 @@ export class Think<
   private _insideResponseHook = false;
   private _insideInferenceLoop = false;
   private _pendingInteractionPromise: Promise<boolean> | null = null;
+  // Serialization tail for client-tool result/approval applies (#1649). Each
+  // apply is a read-modify-write of the full message; running siblings from a
+  // parallel tool batch concurrently lets last-write-wins clobber the others
+  // back to `input-available`. Chaining every apply off this tail makes them
+  // commit atomically in arrival order.
+  private _interactionApplyTail: Promise<void> = Promise.resolve();
   private _submitConcurrency = new SubmitConcurrencyController({
     defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS
   });
@@ -5913,23 +5919,14 @@ export class Think<
           this._lastClientTools = event.clientTools as ClientToolSchema[];
           this._persistClientTools();
         }
-        const resultPromise = Promise.resolve().then(async () => {
-          await this._applyToolResult(
+        this._enqueueInteractionApply(() =>
+          this._applyToolResult(
             event.toolCallId,
             event.output,
             event.state as "output-error" | undefined,
             event.errorText
-          );
-          return true;
-        });
-        this._pendingInteractionPromise = resultPromise;
-        resultPromise
-          .finally(() => {
-            if (this._pendingInteractionPromise === resultPromise) {
-              this._pendingInteractionPromise = null;
-            }
-          })
-          .catch(() => {});
+          )
+        );
         if (event.autoContinue) {
           this._scheduleAutoContinuation(connection);
         }
@@ -5937,18 +5934,9 @@ export class Think<
       }
 
       case "tool-approval": {
-        const approvalPromise = Promise.resolve().then(async () => {
-          await this._applyToolApproval(event.toolCallId, event.approved);
-          return true;
-        });
-        this._pendingInteractionPromise = approvalPromise;
-        approvalPromise
-          .finally(() => {
-            if (this._pendingInteractionPromise === approvalPromise) {
-              this._pendingInteractionPromise = null;
-            }
-          })
-          .catch(() => {});
+        this._enqueueInteractionApply(() =>
+          this._applyToolApproval(event.toolCallId, event.approved)
+        );
         if (event.autoContinue) {
           this._scheduleAutoContinuation(connection);
         }
@@ -6313,6 +6301,9 @@ export class Think<
     }
     this._submitConcurrency.reset();
     this._pendingInteractionPromise = null;
+    // Drop the apply chain so new interactions don't serialize behind a stale
+    // (possibly hung) apply from the turn we just reset (#1649).
+    this._interactionApplyTail = Promise.resolve();
     this._continuationBarrierActive = false;
     this._continuation.sendResumeNone();
     this._continuation.clearAll();
@@ -7099,6 +7090,49 @@ export class Think<
   }
 
   // ── Tool state updates (shared primitives from agents/chat) ─────
+
+  /**
+   * Serialize a client-tool result/approval apply behind any in-flight apply
+   * (#1649). Parallel tool results arrive as independent WebSocket messages,
+   * and each apply is a read-modify-write of the full message in durable
+   * storage. Running them concurrently means every apply reads the same
+   * snapshot (all siblings still `input-available`), patches only its own part,
+   * and writes the whole message back — so the last write clobbers the others
+   * back to `input-available`, and the auto-continuation barrier later times
+   * out and the transcript-repair backstop errors the lost siblings.
+   *
+   * Chaining each apply off `_interactionApplyTail` makes the read-modify-write
+   * atomic per result and in arrival order. `_pendingInteractionPromise` is set
+   * to the newest link so the barrier's single-slot wake-up still observes the
+   * latest apply; because the chain is serial, awaiting it transitively waits
+   * for every predecessor.
+   *
+   * @internal
+   */
+  protected _enqueueInteractionApply(
+    apply: () => Promise<void>
+  ): Promise<boolean> {
+    const run = async (): Promise<boolean> => {
+      await apply();
+      return true;
+    };
+    // `.then(run, run)` runs regardless of a predecessor's outcome so one
+    // rejected apply can't poison the rest of the batch.
+    const resultPromise = this._interactionApplyTail.then(run, run);
+    this._interactionApplyTail = resultPromise.then(
+      () => undefined,
+      () => undefined
+    );
+    this._pendingInteractionPromise = resultPromise;
+    resultPromise
+      .finally(() => {
+        if (this._pendingInteractionPromise === resultPromise) {
+          this._pendingInteractionPromise = null;
+        }
+      })
+      .catch(() => {});
+    return resultPromise;
+  }
 
   private async _applyToolResult(
     toolCallId: string,
