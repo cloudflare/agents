@@ -2582,3 +2582,60 @@ describe("repairInterruptedToolPart override (#1631)", () => {
     expect(part.state).toBe("output-available");
   });
 });
+
+describe("malformed tool_use.input repair (provider 400 wedge)", () => {
+  // A settled tool call whose `input` is a non-object 400s every later turn
+  // with `tool_use.input: Input should be an object`. Read-side repair must
+  // unwedge sessions corrupted before the write-side guard shipped.
+  it.each([
+    ["empty string", ""],
+    ["null", null],
+    ["array", [{ id: 1 }]],
+    ["number", 7]
+  ])("normalizes settled tool input %s to {}", async (_label, value) => {
+    const agent = await freshAgent();
+    const messages = [
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-doThing",
+            toolCallId: "tc1",
+            state: "output-available",
+            input: value,
+            output: { ok: true }
+          }
+        ]
+      }
+    ] as unknown as UIMessage[];
+
+    const repaired = await agent.repairToolTranscriptPartsForTest(messages);
+    const part = (repaired[0] as UIMessage).parts[0] as Record<string, unknown>;
+    expect(part.input).toEqual({});
+    expect(part.state).toBe("output-available");
+  });
+
+  it("parses a stringified-JSON object input", async () => {
+    const agent = await freshAgent();
+    const messages = [
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-doThing",
+            toolCallId: "tc1",
+            state: "output-available",
+            input: '{"prompt":"a cat"}',
+            output: { ok: true }
+          }
+        ]
+      }
+    ] as unknown as UIMessage[];
+
+    const repaired = await agent.repairToolTranscriptPartsForTest(messages);
+    const part = (repaired[0] as UIMessage).parts[0] as Record<string, unknown>;
+    expect(part.input).toEqual({ prompt: "a cat" });
+  });
+});

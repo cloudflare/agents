@@ -146,6 +146,7 @@ import {
   toolApprovalUpdate,
   parseProtocolMessage,
   applyChunkToParts,
+  normalizeToolInput,
   reconcileMessages,
   resolveToolMergeId,
   createChatFiberSnapshot,
@@ -1587,33 +1588,20 @@ export class Think<
   /**
    * Normalize a tool part's `input` into something the provider will accept.
    *
-   * Two malformed shapes 400 modern providers (and persist forever once
-   * written): a stringified-JSON `input` (e.g. `'{"prompt":"a cat"}'` instead
-   * of the object) and a missing/`null` `input` on a settled or interrupted
-   * tool call (Anthropic rejects a `tool_use` block whose `input` is absent).
-   * We parse the former and default the latter to an empty object so the
-   * tool-call/tool-result pair stays valid. Any other value is left untouched.
+   * Malformed shapes 400 modern providers and persist forever once written:
+   * a stringified-JSON `input` (e.g. `'{"prompt":"a cat"}'` instead of the
+   * object), and any non-object `input` — `null`, `undefined`, `""`, an array,
+   * or a primitive — on a settled or interrupted tool call (Anthropic rejects
+   * a `tool_use` block whose `input` is not an object). We parse the former and
+   * default the latter to an empty object so the tool-call/tool-result pair
+   * stays valid. Delegates to the shared `normalizeToolInput` so the read-side
+   * repair and the write-side accumulator guard enforce the same invariant.
    */
   private _normalizeToolInput(record: Record<string, unknown>): {
     input: unknown;
     changed: boolean;
   } {
-    const raw = "input" in record ? record.input : undefined;
-    if (typeof raw === "string") {
-      const trimmed = raw.trim();
-      // Stringified JSON object or array — parse back into structured input.
-      if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-        try {
-          return { input: JSON.parse(raw) as unknown, changed: true };
-        } catch {
-          return { input: raw, changed: false };
-        }
-      }
-    }
-    if (raw === undefined || raw === null) {
-      return { input: {}, changed: true };
-    }
-    return { input: raw, changed: false };
+    return normalizeToolInput("input" in record ? record.input : undefined);
   }
 
   /**
@@ -6445,6 +6433,18 @@ export class Think<
           if (action?.type === "error") {
             streamError = action.error;
             this._emit("message:error", { error: streamError });
+            // An AI-SDK error surfaces as a stream error part (not a thrown
+            // exception), so it lands here rather than in the `catch` below.
+            // Bridge it to `chat:request:failed` too — observers shouldn't have
+            // to know whether the failure threw or arrived as a chunk (the
+            // post-`beforeTurn`, in-stream provider 400 class), and turn-count
+            // telemetry needs the failed signal to balance `turn.started`.
+            this._emit("chat:request:failed", {
+              requestId,
+              stage: "stream",
+              messagesPersisted: true,
+              error: streamError
+            });
             this._broadcastChat({
               type: MSG_CHAT_RESPONSE,
               id: requestId,
@@ -6869,6 +6869,18 @@ export class Think<
               this._programmaticStreamErrors.set(requestId, streamError);
             }
             this._emit("message:error", { error: streamError });
+            // An AI-SDK error surfaces as a stream error part (not a thrown
+            // exception), so it lands here rather than in the `catch` below.
+            // Bridge it to `chat:request:failed` too — observers shouldn't have
+            // to know whether the failure threw or arrived as a chunk (the
+            // post-`beforeTurn`, in-stream provider 400 class), and turn-count
+            // telemetry needs the failed signal to balance `turn.started`.
+            this._emit("chat:request:failed", {
+              requestId,
+              stage: "stream",
+              messagesPersisted: true,
+              error: streamError
+            });
             this._broadcastChat({
               type: MSG_CHAT_RESPONSE,
               id: requestId,

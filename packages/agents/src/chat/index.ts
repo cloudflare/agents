@@ -1,6 +1,7 @@
 export {
   applyChunkToParts,
   isReplayChunk,
+  normalizeToolInput,
   type MessageParts,
   type MessagePart,
   type StreamChunkData

@@ -458,6 +458,68 @@ describe("Think — error handling", () => {
     );
   });
 
+  it("bridges an in-band stream error to chat:request:failed", async () => {
+    // An AI-SDK error arrives as a stream error part, not a thrown exception,
+    // so it takes the `action.type === "error"` branch. That branch must still
+    // emit chat:request:failed so observability/turn-count telemetry sees it.
+    const agent = await freshAgent(`inband-failed-${crypto.randomUUID()}`);
+    const events: Array<{ type: string; payload: { stage?: string } }> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:request:failed") {
+        events.push(event);
+      }
+    });
+
+    try {
+      await agent.runInBandStreamErrorForTest("In-band failed event");
+    } finally {
+      unsubscribe();
+    }
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "chat:request:failed",
+        payload: expect.objectContaining({
+          stage: "stream",
+          messagesPersisted: true,
+          error: "In-band failed event"
+        })
+      })
+    );
+  });
+
+  it("bridges an in-band stream error to chat:request:failed on the RPC path", async () => {
+    // The programmatic chat() RPC path streams through
+    // `_streamResultToRpcCallback`, a separate error-chunk branch from the WS
+    // path above — it must emit chat:request:failed too.
+    const agent = await freshAgent(`rpc-inband-failed-${crypto.randomUUID()}`);
+    const events: Array<{ type: string; payload: { stage?: string } }> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:request:failed") {
+        events.push(event);
+      }
+    });
+
+    try {
+      await agent.setInBandErrorResponse("RPC failed event");
+      const result = await agent.testChat("trigger rpc in-band error");
+      expect(result.error).toContain("RPC failed event");
+    } finally {
+      unsubscribe();
+    }
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "chat:request:failed",
+        payload: expect.objectContaining({
+          stage: "stream",
+          messagesPersisted: true,
+          error: "RPC failed event"
+        })
+      })
+    );
+  });
+
   it("aborts a stalled stream via the inactivity watchdog instead of hanging forever", async () => {
     const agent = await freshAgent(`stall-${crypto.randomUUID()}`);
     const stalled: Array<{ requestId?: string; timeoutMs?: number }> = [];

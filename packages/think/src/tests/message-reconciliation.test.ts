@@ -346,7 +346,11 @@ describe("Think — message reconciliation on incoming submits", () => {
     ws.close(1000);
   });
 
-  it("parses a stringified ARRAY tool input back into structured form", async () => {
+  it("coerces an array tool input to {} (Anthropic rejects non-object input)", async () => {
+    // Verified against the live Anthropic Messages API: a `tool_use` block whose
+    // `input` is an array (or a string that parses to one) 400s with
+    // `tool_use.input: Input should be an object`, exactly like ""/null. So an
+    // array input must be coerced to {} on the read path, not preserved.
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
     const ws = await connectWS(room);
@@ -381,7 +385,7 @@ describe("Think — message reconciliation on incoming submits", () => {
     const toolPart = repaired!.parts.find(
       (part) => (part as Record<string, unknown>).toolCallId === TOOL_CALL_ID
     ) as Record<string, unknown> | undefined;
-    expect(toolPart?.input).toEqual([{ id: 1 }, { id: 2 }]);
+    expect(toolPart?.input).toEqual({});
 
     ws.close(1000);
   });
