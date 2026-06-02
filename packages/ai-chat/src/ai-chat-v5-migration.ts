@@ -18,6 +18,11 @@ import { normalizeToolInput } from "agents/chat";
  * framework-side `convertToModelMessages` to hook) unwedges them without
  * per-DO storage surgery. Only malformed inputs are touched; a healthy message
  * is returned by reference so the persistence cache stays a no-op.
+ *
+ * An absent `input` key is treated as `undefined` (→ `{}`): a JSON round-trip of
+ * `input: undefined` drops the key entirely (e.g. a tool call interrupted at the
+ * `tool-input-start` stage), so the missing-key case must coerce too. Mirrors
+ * the read-side repair in `@cloudflare/think`.
  */
 function normalizeToolPartInputs(message: UIMessage): UIMessage {
   const parts = message.parts;
@@ -25,7 +30,7 @@ function normalizeToolPartInputs(message: UIMessage): UIMessage {
     const record = part as Record<string, unknown>;
     const type = typeof record.type === "string" ? record.type : "";
     if (!(type.startsWith("tool-") || type === "dynamic-tool")) return false;
-    return "input" in record && normalizeToolInput(record.input).changed;
+    return normalizeToolInput(record.input).changed;
   };
 
   if (!parts.some(isMalformedToolPart)) return message;

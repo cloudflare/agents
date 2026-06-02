@@ -78,6 +78,28 @@ describe("AI SDK v5 Migration", () => {
       }
     });
 
+    it("heals a tool part with an absent input key (undefined dropped on serialize)", () => {
+      // A JSON round-trip of `input: undefined` drops the key entirely (e.g. a
+      // tool call interrupted at tool-input-start). The repair must still coerce.
+      const result = autoTransformMessage({
+        id: "tool-no-input",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-doThing",
+            toolCallId: "call_1",
+            state: "output-available",
+            output: { ok: true }
+            // note: no `input` key at all
+          }
+        ]
+      } as unknown as UIMessage);
+      const part = result.parts[0] as Record<string, unknown>;
+      expect(part.input).toEqual({});
+      expect(part.state).toBe("output-available");
+      expect(part.output).toEqual({ ok: true });
+    });
+
     it("parses a stringified-JSON tool input on an already-v5 message", () => {
       const result = autoTransformMessage({
         id: "tool-str",
