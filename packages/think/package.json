@@ -21,8 +21,8 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "@cloudflare/codemode": ">=0.3.4 <1.0.0",
-    "@cloudflare/shell": ">=0.3.4 <1.0.0",
+    "@cloudflare/codemode": ">=0.3.8 <1.0.0",
+    "@cloudflare/shell": ">=0.3.8 <1.0.0",
     "chat": "^4.29.0",
     "just-bash": "^3.0.1"
   },
@@ -33,7 +33,7 @@
   },
   "peerDependencies": {
     "@chat-adapter/telegram": "^4.29.0",
-    "agents": ">=0.13.2 <1.0.0",
+    "agents": ">=0.14.0 <1.0.0",
     "ai": "^6.0.182",
     "zod": "^4.0.0"
   },
