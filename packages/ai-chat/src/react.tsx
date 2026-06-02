@@ -1430,6 +1430,18 @@ export function useAgentChat<
 
   const pendingConfirmationsRef = useRef(pendingConfirmations);
   pendingConfirmationsRef.current = pendingConfirmations;
+  const [pendingOnToolCallIds, setPendingOnToolCallIds] = useState<Set<string>>(
+    () => new Set()
+  );
+
+  const finishOnToolCall = useCallback((toolCallId: string) => {
+    setPendingOnToolCallIds((prev) => {
+      if (!prev.has(toolCallId)) return prev;
+      const next = new Set(prev);
+      next.delete(toolCallId);
+      return next;
+    });
+  }, []);
 
   // ── DEPRECATED: automatic tool resolution effect ────────────────────
   // This entire useEffect is deprecated. Use onToolCall instead.
@@ -1651,6 +1663,14 @@ export function useAgentChat<
         // Mark as processed to prevent re-triggering
         processedToolCalls.current.add(toolCallId);
 
+        // track pending `onToolCall` calls to derive streaming state
+        setPendingOnToolCallIds((prev) => {
+          if (prev.has(toolCallId)) return prev;
+          const next = new Set(prev);
+          next.add(toolCallId);
+          return next;
+        });
+
         // Create addToolOutput function for this specific tool call
         const addToolOutput = (opts: AddToolOutputOptions) => {
           sendToolOutputToServer(
@@ -1674,17 +1694,16 @@ export function useAgentChat<
 
         // Call the onToolCall callback
         // The callback is responsible for calling addToolOutput when ready
-        currentOnToolCall({
-          toolCall: {
-            toolCallId,
-            toolName,
-            input: part.input
-          },
+        const result = currentOnToolCall({
+          toolCall: { toolCallId, toolName, input: part.input },
           addToolOutput
+        });
+        void Promise.resolve(result).finally(() => {
+          finishOnToolCall(toolCallId);
         });
       }
     }
-  }, [chatMessages, sendToolOutputToServer, addToolResult]);
+  }, [chatMessages, sendToolOutputToServer, addToolResult, finishOnToolCall]);
 
   const streamStateRef = useRef<BroadcastStreamState>({ status: "idle" });
 
@@ -2218,10 +2237,10 @@ export function useAgentChat<
   // execute, which drops `status` back to "ready" while the client's
   // async `onToolCall` handler is still running. Without this signal,
   // consumers see a blank "nothing happening" window for the full
-  // duration of `tool.execute()` — often a `fetch` taking seconds.
+  // duration of the client-side work — often a `fetch` taking seconds.
   //
-  // We scope this to tool calls that have an actual handler:
-  //   - `onToolCall` is provided (new, supported path), OR
+  // We scope this to tool calls that have actual client-side work in flight:
+  //   - an `onToolCall` callback promise is still pending, OR
   //   - a matching entry in the deprecated `tools` option has `execute`.
   // Tools waiting on explicit user confirmation are excluded — nothing
   // is happening until the user acts, so the "busy" indicator would be
@@ -2234,8 +2253,7 @@ export function useAgentChat<
   const lastAssistantMessage =
     messagesWithToolResults[messagesWithToolResults.length - 1];
   const hasPendingClientToolCalls = (() => {
-    const hasOnToolCall = !!onToolCall;
-    if (!hasOnToolCall && !tools) return false;
+    if (pendingOnToolCallIds.size === 0 && !tools) return false;
     if (!lastAssistantMessage || lastAssistantMessage.role !== "assistant") {
       return false;
     }
@@ -2244,7 +2262,8 @@ export function useAgentChat<
       if (part.state !== "input-available") continue;
       const toolName = getToolName(part);
       if (toolsRequiringConfirmation.includes(toolName)) continue;
-      if (hasOnToolCall || tools?.[toolName]?.execute) return true;
+      if (pendingOnToolCallIds.has(part.toolCallId)) return true;
+      if (tools?.[toolName]?.execute) return true;
     }
     return false;
   })();

@@ -4789,6 +4789,91 @@ describe("useAgentChat isServerStreaming / isStreaming (issue #1226)", () => {
   });
 });
 
+// Issue #1614: Previously, we derived "isStreaming" from the presence of
+// an input-available message part, and a definition of `onToolCall`. This caused
+// a problem because a server-side MCP tool call could remain in input-available
+// after an abort/reconnect, and if onToolCall was defined, the app would appear
+// to stay busy even though no client work was pending.
+describe("useAgentChat isStreaming with stale server-side (MCP) tool calls (issue #1614)", () => {
+  it("does not stay busy for a stale server-side tool call that onToolCall does not handle", async () => {
+    const agent = createAgent({
+      name: "mcp-tool-abort",
+      url: "ws://localhost:3000/agents/chat/mcp-tool-abort?_pk=abc",
+      send: () => {}
+    });
+
+    // A tool call the model made that is fulfilled SERVER-SIDE (e.g. via MCP).
+    // It sits in input-available while the server runs it.
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-mcp-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-searchDatabase",
+            toolCallId: "mcp-call-1",
+            state: "input-available",
+            input: { query: "SELECT 1" }
+          }
+        ]
+      }
+    ];
+
+    // The app defines onToolCall for its OWN client tools (here, getLocation).
+    // It deliberately does not handle searchDatabase — that's the server's job.
+    const onToolCall = vi.fn(
+      async ({
+        toolCall,
+        addToolOutput
+      }: {
+        toolCall: { toolName: string; toolCallId: string };
+        addToolOutput: (r: { toolCallId: string; output: unknown }) => void;
+      }) => {
+        if (toolCall.toolName === "getLocation") {
+          addToolOutput({
+            toolCallId: toolCall.toolCallId,
+            output: { lat: 51.5, lng: -0.1 }
+          });
+        }
+        // searchDatabase (MCP) is intentionally not handled here.
+      }
+    );
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        onToolCall
+      });
+      return (
+        <div>
+          <div data-testid="isStreaming">{String(chat.isStreaming)}</div>
+          <div data-testid="status">{chat.status}</div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+      return screen;
+    });
+
+    // A persisted server-side tool part by itself does not prove anything is
+    // still running after abort/reload. Without an active server stream or a
+    // pending client tool callback, the hook must not stay busy forever.
+    await expect
+      .element(screen.getByTestId("isStreaming"))
+      .toHaveTextContent("false");
+  });
+});
+
 describe("useAgentChat tool approval continuations (issue #1108)", () => {
   function createAgentWithTarget({ name, url }: { name: string; url: string }) {
     const target = new EventTarget();
