@@ -2134,6 +2134,12 @@ export class AIChatAgent<
    * mid-wait is observed promptly) and polls otherwise. Runs inside the
    * continuation turn, so — unlike `waitUntilStable` — it must not wait on the
    * turn queue (that would deadlock).
+   *
+   * No concurrent-entry guard is needed (unlike Think's `_continuationBarrier
+   * Active`): this runs inside the exclusive continuation turn, and a sibling
+   * result arriving while it waits hits the merge branch of
+   * `_enqueueAutoContinuation` (it updates `pending.prerequisite`) rather than
+   * enqueuing a second turn — so the turn queue serializes barrier waits.
    */
   private async _awaitPendingInteractionBarrier(): Promise<void> {
     const deadline = Date.now() + AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS;
@@ -2143,6 +2149,10 @@ export class AIChatAgent<
       if (!this._continuation.pending) return;
       const pending = this._pendingInteractionPromise;
       if (pending) {
+        // `_pendingInteractionPromise` is a single slot — awaiting it is only a
+        // "wake up as soon as an apply lands" optimization, NOT the correctness
+        // gate (that is `_hasIncompleteToolBatch()`, re-checked each loop). If
+        // sibling results overwrite the slot, each apply still patches the cache.
         try {
           await pending;
         } catch {
@@ -2170,9 +2180,16 @@ export class AIChatAgent<
    * message doesn't block a legitimate follow-up continuation.
    */
   private _hasIncompleteToolBatch(): boolean {
-    const leaf = [...this.messages]
-      .reverse()
-      .find((message) => message.role === "assistant");
+    // Zero-allocation backward scan for the latest assistant message — this
+    // runs on every barrier poll tick, and `this.messages` can be large.
+    const messages = this.messages;
+    let leaf: (typeof messages)[number] | undefined;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "assistant") {
+        leaf = messages[i];
+        break;
+      }
+    }
     if (!leaf) return false;
     let hasPending = false;
     let hasSettled = false;
