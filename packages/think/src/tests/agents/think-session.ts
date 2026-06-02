@@ -4260,7 +4260,7 @@ export class ThinkRecoveryTestAgent extends Think {
    *   recovery on the fresh isolate) and NOT terminalize.
    */
   async testRecoveryCallbackError(input: {
-    reset: boolean;
+    errorMessage: string;
     maxAttempts?: number;
     terminalMessage?: string;
   }): Promise<{
@@ -4313,9 +4313,7 @@ export class ThinkRecoveryTestAgent extends Think {
       realBroadcast(m);
     };
 
-    const error = input.reset
-      ? new Error("Durable Object reset because its code was updated.")
-      : new Error("transient storage failure mid-recovery");
+    const error = new Error(input.errorMessage);
 
     let threw = false;
     try {

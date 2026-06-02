@@ -3876,7 +3876,7 @@ describe("Think — onChatRecovery", () => {
     const terminalMessage = "The assistant was interrupted. Please try again.";
 
     const result = await agent.testRecoveryCallbackError({
-      reset: false,
+      errorMessage: "transient storage failure mid-recovery",
       maxAttempts: 5,
       terminalMessage
     });
@@ -3897,12 +3897,30 @@ describe("Think — onChatRecovery", () => {
     const agent = await freshRecoveryAgent("recovery-throw-reset");
 
     const result = await agent.testRecoveryCallbackError({
-      reset: true,
+      errorMessage: "Durable Object reset because its code was updated.",
       maxAttempts: 5
     });
 
     // A code-update reset is re-thrown so the platform re-runs recovery on the
     // new code — it must NOT terminalize (the turn can still recover).
+    expect(result.threw).toBe(true);
+    expect(result.exhaustedContexts).toBe(0);
+    expect(result.terminalBroadcast).toBeUndefined();
+    expect(result.incidentStatus).toBe("failed");
+  });
+
+  it('re-throws a "This script has been upgraded" supersede (defer + re-run) and does NOT terminalize', async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-script-upgraded");
+
+    // Same superseded-isolate class as a code-update reset — in-process retry
+    // is futile, but the platform re-runs recovery on the new version. It must
+    // re-throw (defer), NOT terminalize via onExhausted.
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage:
+        "This script has been upgraded. Please send a new request to connect to the new version.",
+      maxAttempts: 5
+    });
+
     expect(result.threw).toBe(true);
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();

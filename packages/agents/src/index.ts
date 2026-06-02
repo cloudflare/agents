@@ -1218,13 +1218,24 @@ function resolveRetryConfig(
 }
 
 /**
- * Whether an error is a Durable Object reset caused by a code update (deploy).
+ * Whether an error is a transient "superseded isolate" failure — the invocation
+ * is running on an isolate the platform has replaced with a new version (a
+ * deploy / code update). For the rest of that invocation every operation throws
+ * the same error (code never reloads mid-invocation), so in-process retries are
+ * futile; but the next fresh invocation runs the new code and succeeds.
  *
- * This is a transient, environmental failure: the invocation started on a
- * superseded isolate, so every `ctx.storage` op throws this for the entire
- * life of the invocation (code never reloads mid-invocation) — but the next
- * fresh invocation runs the new code and succeeds. workerd surfaces it as a
- * plain `Error` with this message, so a message match is the only signal.
+ * workerd surfaces this as a plain `Error` with one of a few messages, all the
+ * same failure class — a message match is the only signal:
+ *   - "Durable Object reset because its code was updated."  (DO storage op on a
+ *     superseded isolate / deploy bounce)
+ *   - "This script has been upgraded. Please send a new request to connect to
+ *     the new version."  (a stub/connection to a superseded script; the message
+ *     literally instructs the caller to retry on the new version)
+ *
+ * NOTE: "Network connection lost." is deliberately NOT included — it is a
+ * connection error, not an isolate replacement, and may succeed on in-process
+ * retry (it is gated by the CF `retryable` property via `isErrorRetryable`),
+ * so it stays on the normal retry path rather than the immediate-defer path.
  */
 function isDurableObjectCodeUpdateReset(error: unknown): boolean {
   const message =
@@ -1233,7 +1244,9 @@ function isDurableObjectCodeUpdateReset(error: unknown): boolean {
       : typeof error === "string"
         ? error
         : "";
-  return /reset because its code was updated/i.test(message);
+  return /reset because its code was updated|script has been upgraded/i.test(
+    message
+  );
 }
 
 export function getCurrentAgent<
@@ -5647,14 +5660,16 @@ export class Agent<
         }
 
         // A one-shot row is deleted by `alarm()` once this returns normally.
-        // If it fails with a Durable Object code-update reset (a deploy
-        // superseded the isolate), burning in-process retries is futile (code
-        // never reloads mid-invocation) and swallowing the error would let
-        // `alarm()` delete the row — permanently abandoning the work (e.g. an
-        // interrupted chat-recovery continuation). For that transient we skip
-        // the doomed retries and re-throw so `alarm()` rejects, the one-shot
-        // row survives, and the platform re-runs it on a fresh isolate (= new
-        // code) under the at-least-once alarm guarantee.
+        // If it fails with a superseded-isolate error (a deploy / code update
+        // replaced the isolate — "reset because its code was updated" or "this
+        // script has been upgraded"), burning in-process retries is futile
+        // (code never reloads mid-invocation) and swallowing the error would
+        // let `alarm()` delete the row — permanently abandoning the work (e.g.
+        // an interrupted chat-recovery continuation, or a queued submission's
+        // drain alarm, leaving the submission orphaned with no driver). For
+        // that transient we skip the doomed retries and re-throw so `alarm()`
+        // rejects, the one-shot row survives, and the platform re-runs it on a
+        // fresh isolate (= new code) under the at-least-once alarm guarantee.
         const isOneShotSchedule =
           row.type === "delayed" || row.type === "scheduled";
         const shouldDeferReset = (error: unknown): boolean =>

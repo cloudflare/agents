@@ -389,6 +389,54 @@ export class TestScheduleAgent extends Agent {
     return result[0].count;
   }
 
+  // --- Superseded-isolate (deploy/code-update) defer test helpers ---
+
+  private _platformErrorForTest = "";
+
+  // One-shot callback that throws a configurable error. Used to assert that
+  // `_executeScheduleCallback` DEFERS (re-throws → preserves the row so the
+  // platform re-runs it) for the superseded-isolate error family, vs SWALLOWS
+  // + deletes the row for other errors.
+  async platformErrorCallbackForTest(): Promise<void> {
+    throw new Error(this._platformErrorForTest);
+  }
+
+  // Schedule a one-shot throwing callback (due now), drive `alarm()` once
+  // in-instance, and report whether the alarm rejected (deferred) and whether
+  // the one-shot row survived. Deterministic — no reliance on the external
+  // alarm scheduler's timing.
+  @callable()
+  async runOneShotThrowingForTest(
+    message: string
+  ): Promise<{ threw: boolean; remaining: number }> {
+    this._platformErrorForTest = message;
+    // Retry disabled so a non-deferred error fails fast and deterministically
+    // instead of burning the default in-process retries with backoff.
+    const schedule = await this.schedule(
+      60,
+      "platformErrorCallbackForTest",
+      undefined,
+      { retry: { maxAttempts: 1 } }
+    );
+    // Backdate so the row is due when alarm() scans `time <= now`.
+    this.sql`
+      UPDATE cf_agents_schedules
+      SET time = ${Math.floor(Date.now() / 1000) - 1}
+      WHERE id = ${schedule.id}
+    `;
+    let threw = false;
+    try {
+      await this.alarm();
+    } catch {
+      // A deferred (re-thrown) error rejects alarm(); a swallowed one does not.
+      threw = true;
+    }
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_schedules WHERE id = ${schedule.id}
+    `;
+    return { threw, remaining: rows[0].count };
+  }
+
   @callable()
   async insertStaleDelayedRows(count: number, cb: string): Promise<void> {
     const past = Math.floor(Date.now() / 1000) - 60;

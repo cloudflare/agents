@@ -8420,13 +8420,19 @@ export class Think<
   }
 
   /**
-   * Whether an error is a Durable Object reset caused by a code update
-   * (deploy). Mirrors the private check in the base `Agent`
-   * (`isDurableObjectCodeUpdateReset`): the invocation started on a superseded
-   * isolate, so every op throws for its whole life, but a fresh invocation on
-   * the new code succeeds. `Agent._executeScheduleCallback` re-throws this for
-   * a one-shot row (preserving it for the platform to re-run on the new code),
-   * so a recovery callback must NOT terminalize on it — recovery will re-run.
+   * Whether an error is a transient "superseded isolate" failure — a deploy /
+   * code update replaced the isolate mid-invocation. Mirrors the base `Agent`
+   * check (`isDurableObjectCodeUpdateReset`) and MUST stay in lockstep with it:
+   * the base `_executeScheduleCallback` re-throws this class for a one-shot row
+   * (preserving it so the platform re-runs on the new code), so a recovery
+   * callback must also re-throw — NOT terminalize — since recovery will re-run
+   * and succeed on the fresh isolate. The matched family (kept identical to the
+   * base):
+   *   - "Durable Object reset because its code was updated." (deploy bounce)
+   *   - "This script has been upgraded. Please send a new request to connect to
+   *     the new version." (a stub/connection to a superseded script)
+   * "Network connection lost." is intentionally excluded (a connection error,
+   * not an isolate replacement — see the base helper's note).
    */
   private _isDeployCodeUpdateReset(error: unknown): boolean {
     const message =
@@ -8435,7 +8441,9 @@ export class Think<
         : typeof error === "string"
           ? error
           : "";
-    return /reset because its code was updated/i.test(message);
+    return /reset because its code was updated|script has been upgraded/i.test(
+      message
+    );
   }
 
   /**
