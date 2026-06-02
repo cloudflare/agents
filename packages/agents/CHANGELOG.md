@@ -1,5 +1,306 @@
 # @cloudflare/agents
 
+## 0.14.0
+
+### Minor Changes
+
+- [#1623](https://github.com/cloudflare/agents/pull/1623) [`4c8b371`](https://github.com/cloudflare/agents/commit/4c8b3712b11d2b07298e384e5884844272f4697a) Thanks [@threepointone](https://github.com/threepointone)! - `agentTool()` now returns a structured failure envelope instead of an opaque error string, so a parent agent can tell a transient interruption apart from a terminal failure.
+
+  Previously every non-completed sub-agent run collapsed to `{ ok: false, error: string }`. A child that was reset/superseded by a deploy or parent recovery (`interrupted`) looked identical to a genuine failure or an intentional cancellation, so the parent model would often parrot the interruption text back to the user as if the work had permanently failed.
+
+  The failure value is now `AgentToolFailure`:
+
+  ```ts
+  type AgentToolFailure = {
+    ok: false;
+    status: "error" | "aborted" | "interrupted";
+    error: string; // still human-readable
+    retryable: boolean;
+  };
+  ```
+
+  - `interrupted` → `retryable: true` (the run never reached a logical outcome; re-dispatching can succeed), and now surfaces the underlying interruption reason via `error`.
+  - `aborted` (intentional cancellation) and `error` (genuine failure) → `retryable: false`.
+
+  This is backward compatible for consumers that read `ok`/`error`; the new `status` and `retryable` fields let an orchestration harness (or a parent prompt convention) re-run an interrupted sub-agent automatically rather than reporting it as final. `AgentToolFailure` is exported from `agents`.
+
+- [#1636](https://github.com/cloudflare/agents/pull/1636) [`f5a0d00`](https://github.com/cloudflare/agents/commit/f5a0d00cf59b19cd4db54c7de6e441b8da669521) Thanks [@threepointone](https://github.com/threepointone)! - Expose recovery incident identity and enrich the `onExhausted` payload so
+  products can build a terminal-state policy without re-deriving anything ([#1631](https://github.com/cloudflare/agents/issues/1631)).
+
+  - `ChatRecoveryContext` (the `onChatRecovery` argument) now includes
+    `recoveryRootRequestId` — the stable request ID for the whole continuation
+    chain. Unlike `requestId`, it doesn't change across chained continuations, so
+    it's the right key for per-incident budget tracking / fresh-incident detection
+    without re-deriving identity from message IDs.
+  - `ChatRecoveryExhaustedContext` (the `onExhausted` argument) now carries
+    `recoveryRootRequestId`, `terminalMessage` (the exact text shown to the user),
+    `partialText` / `partialParts` (what the turn produced before it was given up
+    on), and `streamId` / `createdAt` — enough to render or persist a user-facing
+    terminal banner AND emit correlated terminal telemetry (e.g. time-since-turn-start,
+    stream correlation) directly, without re-deriving anything.
+
+  All fields are additive. Applied across `agents` (shared types),
+  `@cloudflare/think`, and `@cloudflare/ai-chat`.
+
+- [#1584](https://github.com/cloudflare/agents/pull/1584) [`87006e2`](https://github.com/cloudflare/agents/commit/87006e27498ee535feabd2a9bd207366f33621be) Thanks [@threepointone](https://github.com/threepointone)! - Add a framework-agnostic Agent Skills engine at `agents/skills`: skill sources (`fromManifest`, R2), a `SkillRegistry` that produces a catalog prompt and AI SDK activation tools (`activate_skill`, `read_skill_resource`, `run_skill_script`), binary-safe resource reads, and qualified cross-skill resource paths. Bundled skills are imported through the Agents Vite plugin with the `agents:skills` specifier (defaulting to a `./skills` directory), typed via ambient declarations shipped from `agents`. `@cloudflare/think` re-exports the engine as `skills` and wires `getSkills()` into the turn; any AI SDK caller (including `@cloudflare/ai-chat`) can build a `SkillRegistry` directly.
+
+  Skill loading is resilient: duplicate or failing sources are skipped with a warning (first source wins) instead of throwing. Optional, experimental script execution (`skills.runner`) runs function-style JavaScript/TypeScript (`export default run(input, ctx)` with `ctx = { skill, files, workspace, tools, output }`) plus path-based Python and Bash, all behind a single capability and permission bridge.
+
+- [#1648](https://github.com/cloudflare/agents/pull/1648) [`d6827ab`](https://github.com/cloudflare/agents/commit/d6827ab03fa703058e755d17e3f5db0cd90c94b6) Thanks [@threepointone](https://github.com/threepointone)! - Surface a live "recovering…" status to chat clients during durable recovery ([#1620](https://github.com/cloudflare/agents/issues/1620))
+
+  When a durable chat turn is interrupted (a deploy/eviction, or a stream-stall
+  watchdog abort) and resumes, clients had no "in progress" signal — the turn
+  looked frozen until it completed or a terminal error was replayed. A new
+  `cf_agent_chat_recovering` protocol frame is now broadcast on recovery schedule
+  and cleared on every terminal outcome (completed/skipped/failed/exhausted), so
+  the indicator can't spin forever. In `@cloudflare/think` it's also persisted and
+  replayed on connect, so a client that joins mid-recovery learns the turn is
+  working. `useAgentChat` exposes a new `isRecovering` flag (distinct from
+  `isStreaming` — a recovering turn isn't producing tokens yet); most UIs render
+  `isStreaming || isRecovering` as "busy". Backward-compatible: clients that don't
+  understand the frame ignore it.
+
+  > Note: `@cloudflare/ai-chat` broadcasts the live signal but does not yet replay
+  > it on connect (it has no idle-connect hydration path; tracked in [#1645](https://github.com/cloudflare/agents/issues/1645)).
+  > `@cloudflare/think` has both.
+
+  For recovery telemetry, subscribe to the `chat:recovery:*` observability events
+  and route them to your analytics sink.
+
+- [#1611](https://github.com/cloudflare/agents/pull/1611) [`02f9380`](https://github.com/cloudflare/agents/commit/02f93809587aca310ad39fa5683de57ee9f6e070) Thanks [@threepointone](https://github.com/threepointone)! - Add bounded, observable recovery foundations for durable chat turns and fibers.
+
+  - Add dedicated recovery observability channels/events for fibers, chat recovery, transcript repair, and agent-tool recovery.
+  - Bound internal framework fiber recovery hooks and parent agent-tool recovery scans so startup and recovery work cannot wedge indefinitely.
+  - Add shared chat recovery incident tracking with attempt counts, configurable `chatRecovery` defaults, and terminal exhaustion behavior for `AIChatAgent` and `Think`. Think recovery now exhausts after six failed attempts by default and sends a terminal error frame instead of spinning indefinitely.
+  - Keep the recovery attempt budget bounded even when an interrupted turn flips between `retry` and `continue` recovery kinds (the incident identity no longer includes the kind), guard a throwing `onExhausted` hook so the terminal UX is still delivered, mark incidents `failed` when the recovery dispatch throws, and reclaim incident records on success plus a TTL sweep for abandoned ones so durable storage does not grow without bound.
+  - Bound generic unmanaged fiber recovery with a configurable `fiberRecoveryMaxAgeMs` so a repeatedly-throwing `onFiberRecovered()` hook cannot re-trigger forever across restarts.
+  - Surface Think post-persist chat request failures through `onChatError(error, ctx)` and `chat:request:failed`.
+  - Repair incomplete Think tool-call transcripts before provider calls and allow `createCompactFunction()` to use a supplied token counter for tail budgeting.
+
+- [#1640](https://github.com/cloudflare/agents/pull/1640) [`edb126a`](https://github.com/cloudflare/agents/commit/edb126a72d1a6b52fa0057191d6d461ee902e914) Thanks [@threepointone](https://github.com/threepointone)! - Re-attach to a still-running sub-agent (`agentTool()`) run on parent recovery instead of abandoning and re-running it ([#1630](https://github.com/cloudflare/agents/issues/1630)).
+
+  When a parent agent was interrupted (deploy / Durable Object eviction) while a child `agentTool()` run was still in flight, recovery marked the run `interrupted` within a ~5s window and the parent re-issued the task — re-running the child's already-completed work. For long-running children under continuous deploys this surfaced to users as "the agent went all the way back and lost the files it already wrote."
+
+  Three changes fix this:
+
+  - **Stable child runId.** `agentTool()` now derives the child `runId` from the (recovery-preserved) tool call id (`agent-tool:<toolCallId>`) instead of minting a fresh `nanoid` per call. A turn re-run by chat recovery now resolves to the **same** idempotent child facet rather than spawning a brand-new one, so completed child work is never re-run.
+  - **Bounded re-attach.** A duplicate non-terminal `runId` (in `runAgentTool`) and a still-running child during startup reconciliation now **tail the live child to its real terminal result** and collect it, instead of immediately sealing `interrupted`. Re-attach is bounded by a generous wall-clock budget (`DEFAULT_AGENT_TOOL_REATTACH_TIMEOUT_MS`, 120s, internal): a child that keeps advancing toward terminal within the window is collected; a genuinely hung child still seals `interrupted` so recovery can never block forever.
+  - **Durable child-run reconcile.** A child facet self-heals its interrupted turn via its own `chatRecovery`, but that recovery path never wrote the child's agent-tool run row — so after a real eviction the row stranded `running` (think) / was force-errored (ai-chat) and the parent could never collect the recovered result. Both `@cloudflare/think` and `@cloudflare/ai-chat` now reconcile a stale child-run row from the durable transcript on inspect: while recovery is still resolving the row stays `running`; once it settles, a completed assistant response surfaces as `completed` (so the parent collects the real result) and an empty/failed recovery as `error`. This keeps the child's own (working) recovery path untouched.
+
+  No new public configuration. Adds an internal `agent_tool:recovery:reattach` observability event. `@cloudflare/think` and `@cloudflare/ai-chat` child tails are now read-only on consumer detach (a parent's re-attach budget expiring never cancels the still-running child).
+
+- [#1598](https://github.com/cloudflare/agents/pull/1598) [`f5e37bf`](https://github.com/cloudflare/agents/commit/f5e37bfa313634105fd0bdb7912498f9f92b24c6) Thanks [@threepointone](https://github.com/threepointone)! - Add `ThinkWorkflow` with durable `step.prompt()` support for Workflow-owned Think reasoning steps.
+
+### Patch Changes
+
+- [#1623](https://github.com/cloudflare/agents/pull/1623) [`4c8b371`](https://github.com/cloudflare/agents/commit/4c8b3712b11d2b07298e384e5884844272f4697a) Thanks [@threepointone](https://github.com/threepointone)! - Compaction: the Session's `tokenCounter` now also drives the bundled `createCompactFunction`'s boundary ("what to compress") decision, not just the fire/no-fire trigger. Fixes [#1593](https://github.com/cloudflare/agents/issues/1593).
+
+  Previously a `tokenCounter` configured on `Session.compactAfter()` only influenced _whether_ compaction fired; the boundary walk inside `createCompactFunction` still used the Workers-safe `chars/4` heuristic. On tool-heavy agent histories that heuristic under-counts badly, so the configured tail budget covered the entire history and `compressEnd <= compressStart` — compaction fired every turn but silently returned `null`, never shortening history (strictly worse than not configuring it).
+
+  Now the Session passes its counter to the compaction function via a new `CompactContext` argument, and `createCompactFunction` uses it for the tail-budget walk when no explicit `tokenCounter` was given on `CompactOptions`. So a single `tokenCounter` on `compactAfter()` drives both "should we compact?" and "what should we compact?". When the trigger fires but compaction still returns `null` (e.g. no counter configured and the heuristic protects everything), the Session logs a one-time warning instead of looping silently.
+
+  `CompactFunction` gains an optional second `context?: CompactContext` argument (backward compatible — existing one-arg functions are unaffected).
+
+  Note: the flowed counter is invoked per-message during the tail walk. A tokenizer-style counter gives accurate per-message budgeting; a usage-only counter that reports a fixed whole-prompt total degrades the tail budget to `minTailMessages` (compaction still runs and context stays bounded, but the byte budget is effectively ignored). For precise budgeting with such counters, pass an explicit per-message `CompactOptions.tokenCounter`.
+
+- [#1617](https://github.com/cloudflare/agents/pull/1617) [`5e60034`](https://github.com/cloudflare/agents/commit/5e60034e371577a2117ac4b39242e68fde3ebc93) Thanks [@threepointone](https://github.com/threepointone)! - Scheduled callbacks no longer drop their work when an alarm fires on an isolate
+  that a deploy has just superseded. In that window the first `ctx.storage` op
+  throws `Durable Object reset because its code was updated.` for the entire
+  invocation (code never reloads mid-invocation). Previously
+  `Agent._executeScheduleCallback` burned its in-process retries (all doomed),
+  swallowed the error, and `alarm()` deleted the one-shot row — permanently
+  abandoning the work even though the next fresh invocation would succeed. This
+  was a second deploy-churn abandonment path for chat recovery
+  (`_chatRecoveryContinue` / `_chatRecoveryRetry`) that the progress-aware budget
+  in `@cloudflare/think` / `@cloudflare/ai-chat` could not reach, because the
+  continuation was deleted before it could be re-detected.
+
+  For a one-shot schedule failing with this transient, the SDK now skips the
+  doomed in-process retries and re-throws so `alarm()` rejects: the one-shot row
+  survives and Cloudflare re-runs the alarm on a fresh isolate (= new code) under
+  the at-least-once alarm guarantee, so the work auto-resumes once the deploy
+  settles. All other callbacks and error classes keep the existing behavior.
+
+- [#1608](https://github.com/cloudflare/agents/pull/1608) [`7c17736`](https://github.com/cloudflare/agents/commit/7c17736fafa58c218181d7dcb30e36d3605d4395) Thanks [@cjol](https://github.com/cjol)! - Fix auto-continuation stream resumes so immediate client-tool resume requests attach to the pending continuation instead of receiving `cf_agent_stream_resume_none`.
+
+- [#1639](https://github.com/cloudflare/agents/pull/1639) [`6bac0f4`](https://github.com/cloudflare/agents/commit/6bac0f432a40f71ef6651cba778e2d909f20a0f9) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Prevent MCP Streamable HTTP result responses from crossing between concurrent
+  POST streams when a reused session receives duplicate in-flight JSON-RPC
+  request ids. Responses now prefer the live connection that originated their
+  request and return JSON-RPC internal errors instead of guessing when no origin
+  can safely disambiguate colliding streams.
+
+  Completion tracking for batched POST streams is now scoped per stream so an id
+  collision on another POST cannot prevent the original stream from closing.
+
+- [#1629](https://github.com/cloudflare/agents/pull/1629) [`7d38363`](https://github.com/cloudflare/agents/commit/7d383638970622cdde89b2330b1193ec5b91c204) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fix server-side `needsApproval` tool continuations remaining stuck after the
+  user approves them. Think now keeps approved/denied/errored tool parts in the
+  model transcript, updates its live transcript before an immediate continuation,
+  and persists and broadcasts terminal tool output emitted for a prior assistant
+  message. Continuation response frames are also labelled consistently so
+  `useAgentChat` can apply streamed continuation updates to the active UI state.
+  A pending `approval-responded` tool is no longer mis-reported by the
+  incomplete-tool-call backstop, so approval continuations stop logging a false
+  "repair gap" warning and emitting a spurious `chat:transcript:repaired` event.
+
+  The cross-message tool result now flows through `StreamAccumulator`'s
+  `cross-message-tool-update` action and a shared, replay-safe
+  `crossMessageToolResultUpdate` builder (exported from `agents/chat`): it matches
+  terminal states for first-write-wins idempotency against provider replays (e.g.
+  the OpenAI Responses API, [#1404](https://github.com/cloudflare/agents/issues/1404)), preserves a streamed `preliminary` flag, and
+  lets `Think` skip redundant writes/broadcasts when a result is already settled.
+
+- [#1607](https://github.com/cloudflare/agents/pull/1607) [`f82d897`](https://github.com/cloudflare/agents/commit/f82d897822d5e59ed790b76025bb5d99efd2f647) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Tighten SSE resumability in `McpAgent`'s streamable HTTP transport.
+  Follow-up to [#1583](https://github.com/cloudflare/agents/issues/1583).
+
+  - **Final tool response is now actually replayable.** The previous code
+    stored the final response in the event store and then immediately
+    called `clearStream(streamId)` on `shouldClose`, deleting every event
+    for that stream — including the one just written. A client that lost
+    the connection mid-flight could reconnect with `Last-Event-ID` and
+    find nothing to replay. Fixed by flipping the order: write the SSE
+    event to the wire **first**, then drop the persisted
+    `streamId -> requestIds` mapping and clear the stored events. Every
+    event up to and including the final response is replayable while the
+    in-flight stream is open; the trade-off is that if the WS pipe is
+    enqueued but the client TCP dies before the bytes arrive, that one
+    final message is lost.
+
+  - **POST event store writes are unconditional**, matching the
+    standalone path. Previously the transport relied on a live WS
+    connection at `send()` time to record the event; if the client had
+    dropped (common during long tool calls on flaky networks) the event
+    was lost. Now the transport falls back to a persisted
+    `requestId -> streamId` reverse lookup (`McpAgent.getStreamForRequestId`),
+    stores the event, and writes to the wire only if a live connection is
+    still attached. Reconnecting with `Last-Event-ID` replays anything
+    that was missed.
+
+  - **Resumed connection registers under the source streamId**, matching
+    the SDK reference. For an active POST stream the persisted
+    `requestIds` are restored so future tool messages route to the new
+    WS. For the standalone listen stream the connection takes over that
+    role. For a completed POST the connection serves as a one-shot
+    replay channel. In every resumable case any prior connection bound
+    to the same streamId is closed, so there is at most one live
+    connection per stream and routing stays deterministic.
+
+  - **One stream per message, per the MCP spec.** The spec requires the
+    server to send each message on exactly one connected stream and
+    forbids broadcasting the same message across streams. Server-
+    initiated notifications go to the single standalone GET stream (the
+    transport supersedes any prior standalone GET when a new one opens),
+    and POST responses go to their own stream. Events are still stored
+    for replay when no live stream is attached.
+
+  - **Cleanup is immediate, not background.** Each POST stream's events
+    are cleared the moment the close frame is written. No alarms, no
+    metadata index, no sweep. Storage cost is bounded by the in-flight
+    POST streams plus the standalone GET stream. Multi-key deletes are
+    chunked at the Durable Object 128-key limit, and `replayEventsAfter`
+    uses an explicit `limit` so a pathological history can't OOM the DO.
+    Standalone GET events are not cleared automatically; they accumulate
+    for the lifetime of the session's Durable Object.
+
+  - **`DurableObjectEventStore` is exported** so callers embedding
+    `WorkerTransport` inside an Agent / Durable Object can wire up
+    resumability with `new DurableObjectEventStore(this.ctx.storage)`.
+
+- [#1602](https://github.com/cloudflare/agents/pull/1602) [`cfc75bc`](https://github.com/cloudflare/agents/commit/cfc75bc95498fb515af7e11d16f3f48ba0c5b363) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Fix SSE keepalive and enable resumability on the MCP transports ([#1583](https://github.com/cloudflare/agents/issues/1583)).
+
+  The MCP transports had a defective SSE keepalive (`event: ping\ndata: \n\n`
+  — a named event the SSE parser dispatched with empty data, firing
+  `addEventListener("ping", …)` on the client) and no recovery path for the
+  ~5 min Cloudflare edge idle-stream watchdog. This change makes
+  resumability the first-class recovery mechanism while keeping the
+  keepalive available when resumability isn't configured.
+
+  - **GET (standalone listen stream)** — when an `EventStore` is configured,
+    no keepalive; idle drops are recovered by clients reconnecting with
+    `Last-Event-ID`. Without an `EventStore`, the comment-frame keepalive
+    (`: keepalive\n\n` every 25s) keeps long-lived listeners alive.
+  - **POST (tool response stream)** — always keepalive. In-flight tool
+    calls survive the ~5 min idle watchdog. POST streams can additionally
+    be resumed via `Last-Event-ID` when an `EventStore` is configured: a
+    reconnecting GET inherits the original POST's `requestIds` so
+    subsequent tool messages route to the resumed connection.
+  - **Storage bounds** — `DurableObjectEventStore` now wraps each event
+    with a write timestamp and exposes `sweep(maxAgeMs)`. `McpAgent`
+    schedules a recurring sweep (default hourly, 24 hr TTL) so events from
+    abandoned POST streams whose clients never returned don't accumulate
+    forever in Durable Object storage. Streams that close cleanly are
+    cleared in full on the final response.
+
+  Also fixed: a pre-existing bug where an `McpAgent` GET stream that
+  reconnected with `Last-Event-ID` received the replayed backlog but
+  wasn't re-tagged as the standalone SSE stream, so subsequent
+  server-initiated notifications had no connection to land on.
+
+  All changes are additive — patch-level, no breaking changes.
+  `DurableObjectEventStore` is exported from `agents/mcp` for stateful
+  `WorkerTransport` callers (e.g. the elicitation example, which now
+  wires resumability via `eventStore: new DurableObjectEventStore(this.ctx.storage)`).
+
+- [#1641](https://github.com/cloudflare/agents/pull/1641) [`3aa1936`](https://github.com/cloudflare/agents/commit/3aa1936eb17bfff05eaa0dc225176bf408ddea78) Thanks [@threepointone](https://github.com/threepointone)! - Count a sub-agent's progress as the orchestrating parent's recovery progress
+
+  A parent turn whose work is "run a sub-agent and await its result" produced no
+  recoverable content of its own, so under deploy churn the **parent's** own
+  chat-recovery no-progress window could exhaust while the child was still
+  healthily streaming — abandoning the turn as `interrupted` and collecting an
+  interrupted result even though the child went on to complete. (Reproduced by
+  the `examples/deploy-churn --mode subagent` harness: the parent exhausted at
+  `attempt 6/6` with `progress: 1` while the child self-healed all 30 steps.)
+
+  Forwarding a child's stream to the parent's connections is now treated as
+  genuine forward progress for the parent's recovery budget: `Think` and
+  `AIChatAgent` advance their durable recovery-progress marker (throttled) each
+  time `_forwardAgentToolStream` forwards child output, so a parent that keeps
+  re-attaching to and streaming a live child survives churn indefinitely. The
+  credit is only granted when the child actually produces output — a silent or
+  hung child still lets the parent exhaust on its own no-progress timer, so a
+  stuck sub-agent can never pin a parent's recovery open forever.
+
+  This completes the sub-agent recovery story started by the stable-runId +
+  bounded re-attach fix ([#1630](https://github.com/cloudflare/agents/issues/1630)): the child self-heals and the parent both
+  re-attaches to it _and_ keeps its own recovery alive while doing so.
+
+- [#1604](https://github.com/cloudflare/agents/pull/1604) [`dfb3ecd`](https://github.com/cloudflare/agents/commit/dfb3ecdd7790dd0ba76257eb5ba02460470a516e) Thanks [@threepointone](https://github.com/threepointone)! - Recover stale agent-tool runs after startup and bound child inspection so wedged child facets cannot prevent a parent Agent from booting.
+
+- [#1623](https://github.com/cloudflare/agents/pull/1623) [`4c8b371`](https://github.com/cloudflare/agents/commit/4c8b3712b11d2b07298e384e5884844272f4697a) Thanks [@threepointone](https://github.com/threepointone)! - Message reconciliation now protects **all** resolved terminal tool states from being clobbered by a stale client message — not just `output-available`.
+
+  `reconcileMessages` (used at persistence time by both Think and AIChatAgent) merges the server's resolved tool result into an incoming client message that still shows a pre-output state (`input-available` / `approval-requested` / `approval-responded`). Previously it only carried over `output-available`, so if the server had already resolved a tool to `output-error` or `output-denied` and the client persisted a stale `input-available` (e.g. a reconnect/optimistic race before it saw the resolution), the stale state overwrote the server's terminal result — losing the error or the user's denial.
+
+  The merge now indexes `output-available`, `output-error`, and `output-denied` server parts and overlays the appropriate result field (`output` / `errorText` / `approval`) onto the stale client part.
+
+- [#1558](https://github.com/cloudflare/agents/pull/1558) [`67ff1ba`](https://github.com/cloudflare/agents/commit/67ff1ba15c2f09e4fc4c596549c84d473a6c7920) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Fix RPC MCP response routing for overlapping requests by correlating responses to JSON-RPC request ids.
+
+- [#1596](https://github.com/cloudflare/agents/pull/1596) [`091cb0f`](https://github.com/cloudflare/agents/commit/091cb0fac3ecf3857f94851660c5dd7f434fe0eb) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Support stable, caller-supplied server ids in `addMcpServer` for connector-style integrations.
+
+  Both the HTTP and RPC overloads of `addMcpServer` now accept an optional `id` field on their options object. When provided, this id replaces the generated `nanoid(8)` as the server's id in storage, restore, `listServers()`, `listTools()`, `getAITools()` (so tool keys become e.g. `tool_github_create_pull_request` instead of opaque connection ids), and OAuth state.
+
+  The supplied id is normalized via the exported `normalizeServerId` helper so that values like `"GitHub MCP!"` become `"github-mcp"` — guaranteeing the id is safe to embed in AI SDK tool names and storage keys.
+
+  **Fully additive — no user code breaks.** If you add `{ id: "github" }` to an existing `addMcpServer` call for a server that's already registered under an auto-generated nanoid, the SDK transparently migrates the existing storage row, in-memory connection, and OAuth-related DO storage keys to the new stable id. No `removeMcpServer` step required, no stale rows, no broken hibernation restore.
+
+  `addMcpServer` only throws on a genuinely ambiguous collision: the same stable id already belongs to a _different_ `(name, url)` server.
+
+  ```ts
+  await this.addMcpServer("GitHub", env.MCP_SESSION, {
+    id: "github",
+    props: { token: "..." },
+  });
+  // tools surface as `tool_github_<name>`
+  ```
+
+  Closes [#1564](https://github.com/cloudflare/agents/issues/1564).
+
+- [#1623](https://github.com/cloudflare/agents/pull/1623) [`4c8b371`](https://github.com/cloudflare/agents/commit/4c8b3712b11d2b07298e384e5884844272f4697a) Thanks [@threepointone](https://github.com/threepointone)! - Add an opt-in inactivity watchdog for the streaming read loop, so a hung provider/transport surfaces a terminal error instead of an infinite spinner.
+
+  Previously, if a model stream parked without ever throwing — no chunk, no error, no `done` — the chat read loop would wait forever and the client would spin indefinitely. There was no detection for a silently hung turn (only recovery-path `stable_timeout`, which guards recovery scheduling, not a live stream).
+
+  Set `chatStreamStallTimeoutMs` on a Think subclass to arm it: if no UI-message-stream chunk arrives within that window, the watchdog aborts the turn and the loop exits with a terminal stream error (routed through `onChatError` with `stage: "stream"`), emitting a new `chat:stream:stalled` observability event.
+
+  It is **off by default** (`0`) and applies to both the WebSocket turn loop and the `chat()` / sub-agent callback loop. Note it measures the gap _between_ stream chunks, which includes server-side tool execution time (no chunks flow while a tool runs) — set it comfortably above your slowest model time-to-first-token and slowest tool, or you will abort healthy long turns. A good starting point is `120_000`.
+
 ## 0.13.3
 
 ### Patch Changes
