@@ -8432,7 +8432,9 @@ export class Think<
    *   - "This script has been upgraded. Please send a new request to connect to
    *     the new version." (a stub/connection to a superseded script)
    * "Network connection lost." is intentionally excluded (a connection error,
-   * not an isolate replacement — see the base helper's note).
+   * not an isolate replacement — see the base helper's note). The match stays
+   * close to the verbatim platform strings so an ordinary error mentioning
+   * those words isn't misclassified as a supersede.
    */
   private _isDeployCodeUpdateReset(error: unknown): boolean {
     const message =
@@ -8441,7 +8443,7 @@ export class Think<
         : typeof error === "string"
           ? error
           : "";
-    return /reset because its code was updated|script has been upgraded/i.test(
+    return /reset because its code was updated|this script has been upgraded/i.test(
       message
     );
   }

@@ -1062,5 +1062,19 @@ describe("schedule operations", () => {
       expect(threw).toBe(false);
       expect(remaining).toBe(0);
     });
+
+    it("does NOT treat an ordinary error that merely mentions an upgraded script as a supersede", async () => {
+      // Guards the tightened matcher: only the verbatim platform phrase ("this
+      // script has been upgraded") defers; a lookalike app error is swallowed.
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "no-defer-lookalike"
+      );
+      const { threw, remaining } = await agentStub.runOneShotThrowingForTest(
+        "Your subscription script has been upgraded to the new plan."
+      );
+      expect(threw).toBe(false);
+      expect(remaining).toBe(0);
+    });
   });
 });

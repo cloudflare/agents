@@ -1232,6 +1232,12 @@ function resolveRetryConfig(
  *     the new version."  (a stub/connection to a superseded script; the message
  *     literally instructs the caller to retry on the new version)
  *
+ * The match stays close to the verbatim platform strings (rather than a loose
+ * "upgraded"/"reset" substring) so an ordinary application error that happens
+ * to mention those words is NOT misclassified as a supersede — a false positive
+ * would defer + re-run a genuinely-failing callback on the platform's alarm
+ * retries instead of abandoning it.
+ *
  * NOTE: "Network connection lost." is deliberately NOT included — it is a
  * connection error, not an isolate replacement, and may succeed on in-process
  * retry (it is gated by the CF `retryable` property via `isErrorRetryable`),
@@ -1244,7 +1250,7 @@ function isDurableObjectCodeUpdateReset(error: unknown): boolean {
       : typeof error === "string"
         ? error
         : "";
-  return /reset because its code was updated|script has been upgraded/i.test(
+  return /reset because its code was updated|this script has been upgraded/i.test(
     message
   );
 }
