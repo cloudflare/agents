@@ -39,15 +39,18 @@ export class CdpSession {
   #debugLog: DebugEntry[] = [];
   #defaultTimeoutMs: number;
   #dispose?: () => void;
+  readonly sessionId?: string;
 
   constructor(
     socket: WebSocket,
     defaultTimeoutMs = DEFAULT_TIMEOUT_MS,
-    dispose?: () => void
+    dispose?: () => void,
+    sessionId?: string
   ) {
     this.#socket = socket;
     this.#defaultTimeoutMs = defaultTimeoutMs;
     this.#dispose = dispose;
+    this.sessionId = sessionId;
 
     socket.addEventListener("message", (event) => this.#handleMessage(event));
     socket.addEventListener("error", () => {
@@ -141,13 +144,17 @@ export class CdpSession {
     this.#debugLog = [];
   }
 
-  close(): void {
-    this.#rejectAll(new Error("CDP session closed"));
+  disconnect(): void {
+    this.#rejectAll(new Error("CDP session disconnected"));
     try {
       this.#socket.close(1000, "Done");
     } catch {
       // socket may already be closed
     }
+  }
+
+  close(): void {
+    this.disconnect();
     this.#dispose?.();
   }
 
@@ -246,11 +253,16 @@ export async function connectBrowser(
   }
 
   ws.accept();
-  return new CdpSession(ws, timeoutMs, () => {
-    void browser.fetch(`https://localhost/v1/devtools/browser/${sessionId}`, {
-      method: "DELETE"
-    });
-  });
+  return new CdpSession(
+    ws,
+    timeoutMs,
+    () => {
+      void browser.fetch(`https://localhost/v1/devtools/browser/${sessionId}`, {
+        method: "DELETE"
+      });
+    },
+    sessionId
+  );
 }
 
 const LOCALHOST_HOSTS = new Set([

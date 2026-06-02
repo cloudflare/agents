@@ -2,10 +2,9 @@
 
 Browser tools give your agents full access to the Chrome DevTools Protocol (CDP) through the code mode pattern. Instead of a fixed set of browser actions (click, screenshot, navigate), the LLM writes JavaScript code that runs CDP commands against a live browser session — accessing all domains, commands, events, and types in the protocol.
 
-Two tools are provided:
+One code-mode tool is provided:
 
-- **`browser_search`** — query the CDP spec to discover commands, events, and types. The spec is fetched dynamically from the browser's CDP endpoint and cached for performance.
-- **`browser_execute`** — run CDP commands against a live browser via a `cdp` helper. Each call opens a fresh browser session, executes the code, and closes it.
+- **`browser_execute`** — query the CDP spec and run CDP commands against a live browser via a `cdp` helper. Each call opens a fresh browser session, executes the code, and closes it by default.
 
 > **Experimental** — this feature may have breaking changes in future releases.
 
@@ -57,6 +56,8 @@ const browserTools = createBrowserTools({
 
 If you need to connect to a custom CDP endpoint instead of the Browser Rendering binding, pass `cdpUrl`.
 
+For agent-controlled persistent sessions, pass `session: { mode: "dynamic", store }`. Until the model calls `cdp.startSession()` inside `browser_execute`, browser calls stay one-shot.
+
 ### 3. Use with streamText
 
 Pass browser tools alongside your other tools:
@@ -75,18 +76,18 @@ const result = streamText({
 });
 ```
 
-When the LLM uses `browser_search`, the `code` field must be JavaScript:
+When the LLM needs to inspect the CDP spec, it can call `cdp.spec()` inside `browser_execute`:
 
 ```javascript
 async () => {
-  const s = await spec.get();
+  const s = await cdp.spec();
   return s.domains
     .find((d) => d.name === "Network")
     .commands.map((c) => ({ method: c.method, description: c.description }));
 };
 ```
 
-When the LLM uses `browser_execute`, the `code` field must be JavaScript:
+Browser commands use the same `browser_execute` tool:
 
 ```javascript
 async () => {
@@ -161,8 +162,10 @@ const stream = chat({
 
 ## Execution model
 
-- `browser_search` fetches the live CDP protocol from the browser's `/json/protocol` endpoint and caches it briefly.
+- `cdp.spec()` fetches the live CDP protocol from the browser's `/json/protocol` endpoint and caches it briefly.
 - `browser_execute` opens a fresh browser session for the call, exposes a small `cdp` helper API to sandboxed code, and closes the session when execution finishes.
+- With `session.mode: "reuse"`, every `browser_execute` call uses a reusable Browser Run session until `cdp.closeSession()` is called.
+- With `session.mode: "dynamic"`, `browser_execute` is one-shot until the model calls `cdp.startSession()`; subsequent calls reuse that Browser Run session until `cdp.closeSession()` is called.
 - LLM-generated code runs in a Worker sandbox. CDP traffic stays in the host worker.
 
 ## CDP helper API
@@ -199,11 +202,19 @@ Get recent CDP debug log entries (sends, receives, errors). Defaults to the last
 
 Clear the debug log buffer.
 
+### Reusable session helpers
+
+When `session.mode` is `"reuse"` or `"dynamic"`, `browser_execute` also exposes `cdp.startSession()`, `cdp.sessionInfo()`, `cdp.closeSession()`, and `cdp.resetSession()`.
+
+`cdp.sessionInfo()` returns target metadata. When Browser Rendering provides Live View metadata, targets include `devtoolsFrontendUrl` so you can surface an inspectable browser URL in your UI.
+
+Use `cdp.closeSession()` when persistent browsing is complete to release Browser Run resources.
+
 ## Configuration
 
 ### `createBrowserTools(options)`
 
-Returns AI SDK tools (`browser_search` and `browser_execute`).
+Returns an AI SDK `browser_execute` tool.
 
 | Option       | Type                     | Default  | Description                                            |
 | ------------ | ------------------------ | -------- | ------------------------------------------------------ |
@@ -212,8 +223,13 @@ Returns AI SDK tools (`browser_search` and `browser_execute`).
 | `cdpHeaders` | `Record<string, string>` | —        | Headers for CDP URL discovery (e.g. Cloudflare Access) |
 | `loader`     | `WorkerLoader`           | required | Worker Loader binding for sandboxed execution          |
 | `timeout`    | `number`                 | `30000`  | Execution timeout in milliseconds                      |
+| `session`    | `BrowserSessionOptions`  | one-shot | Browser Run session policy                             |
 
-Either `browser` or `cdpUrl` must be provided. When both are set, `cdpUrl` takes priority.
+Either `browser` or `cdpUrl` must be provided.
+
+`session` defaults to `{ mode: "one-shot" }`, which opens a fresh browser for each execution. Persistent Browser Run sessions use `{ mode: "reuse", store }` or `{ mode: "dynamic", store }`, where `store` is a `BrowserSessionStore`. Use `new DurableBrowserSessionStore(this.ctx.storage)` inside an Agent or Durable Object to persist the Browser Run session id. You can also pass `key` to isolate users or workflows and `keepAliveMs` to request a Browser Run inactivity timeout.
+
+Reusable and dynamic sessions require the Browser Rendering `browser` binding. They are not supported with `cdpUrl`, because custom CDP endpoints are externally managed.
 
 ### Raw access
 
@@ -224,7 +240,7 @@ import {
   CdpSession,
   connectBrowser,
   connectUrl,
-  createBrowserToolHandlers
+  createBrowserProvider
 } from "agents/browser";
 
 // Connect to a custom CDP endpoint
@@ -249,9 +265,9 @@ Use `cdpUrl` only when you intentionally want to connect to some other CDP-compa
 
 ## Current limitations
 
-- **One session per execute call** — each `browser_execute` invocation opens a fresh browser session. Multi-step workflows must be completed within a single code block.
+- **One-shot by default** — each `browser_execute` invocation opens a fresh browser session unless you configure `session: { mode: "reuse" | "dynamic", store }`.
 - **Local development depends on Wrangler support** — if Browser Rendering local mode is unavailable in your environment, upgrade Wrangler or provide `cdpUrl` explicitly.
-- **No authenticated sessions** — the browser starts without any cookies or login state. A future Browser Isolation integration could enable user-authenticated sessions.
+- **No pre-authenticated sessions** — the browser starts without cookies or login state. Reusable sessions can retain cookies and storage after login until you call `cdp.closeSession()` or Browser Run expires the session.
 - Requires `@cloudflare/codemode` as a peer dependency
 - Limited to JavaScript execution in the sandbox (no TypeScript syntax)
 

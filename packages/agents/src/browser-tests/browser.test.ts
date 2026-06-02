@@ -144,6 +144,39 @@ async function callAgent(
   });
 }
 
+const WAIT_FOR_PAGE_CONDITION = `
+async function waitForPageCondition(sessionId, condition) {
+  const expression = \`new Promise((resolve, reject) => {
+    const deadline = Date.now() + 5000;
+    const check = () => {
+      try {
+        if (document.readyState === "complete" && Boolean(\${condition})) {
+          resolve(true);
+          return;
+        }
+        if (Date.now() > deadline) {
+          reject(new Error("Timed out waiting for page condition"));
+          return;
+        }
+        requestAnimationFrame(check);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    check();
+  })\`;
+  const evaluation = await cdp.send(
+    "Runtime.evaluate",
+    { expression, awaitPromise: true, returnByValue: true },
+    { sessionId, timeoutMs: 6000 }
+  );
+  if (evaluation.exceptionDetails) {
+    throw new Error("Page readiness check failed");
+  }
+  return evaluation.result?.value === true;
+}
+`;
+
 // ── Tests ─────────────────────────────────────────────────────────────
 
 describe("browser tools e2e", () => {
@@ -168,11 +201,11 @@ describe("browser tools e2e", () => {
     }
   }, 30000);
 
-  describe("cdp spec search", () => {
+  describe("cdp spec", () => {
     it("should fetch and query the CDP spec", async () => {
-      const result = (await callAgent("testSearch", [
+      const result = (await callAgent("testExecute", [
         `async () => {
-          const s = await spec.get();
+          const s = await cdp.spec();
           return {
             domainCount: s.domains.length,
             hasNetwork: s.domains.some(d => d.name === "Network"),
@@ -189,9 +222,9 @@ describe("browser tools e2e", () => {
     });
 
     it("should find Network domain commands", async () => {
-      const result = (await callAgent("testSearch", [
+      const result = (await callAgent("testExecute", [
         `async () => {
-          const s = await spec.get();
+          const s = await cdp.spec();
           const network = s.domains.find(d => d.name === "Network");
           return {
             hasEnable: network.commands.some(c => c.name === "enable"),
@@ -207,7 +240,7 @@ describe("browser tools e2e", () => {
     });
 
     it("should handle errors in search code gracefully", async () => {
-      const result = (await callAgent("testSearch", [
+      const result = (await callAgent("testExecute", [
         "async () => { throw new Error('search test error'); }"
       ])) as { text: string; isError?: boolean };
 
@@ -314,18 +347,95 @@ describe("browser tools e2e", () => {
 
       expect(result.isError).toBe(true);
     });
+
+    it("should omit reusable session helpers from one-shot sessions", async () => {
+      const result = (await callAgent("testExecute", [
+        "async () => await cdp.closeSession()"
+      ])) as { text: string; isError?: boolean };
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain('Tool "closeSession" not found');
+    });
+
+    it("should execute browser and state providers together", async () => {
+      const result = (await callAgent("testExecuteCombinedProviders", [
+        `async () => {
+          const version = await cdp.send("Browser.getVersion");
+          const echoed = await state.echo({ product: version.product });
+          return { hasProduct: !!version.product, echoed };
+        }`
+      ])) as { text: string; isError?: boolean };
+
+      expect(result.isError).toBeFalsy();
+      const parsed = JSON.parse(result.text);
+      expect(parsed.hasProduct).toBe(true);
+      expect(parsed.echoed).toEqual({
+        provider: "state",
+        value: { product: expect.any(String) }
+      });
+    });
+
+    it("should expose reusable session lifecycle helpers inside cdp", async () => {
+      const createResult = (await callAgent("testExecuteReuse", [
+        `async () => {
+          await cdp.send("Browser.getVersion");
+          const info = await cdp.sessionInfo();
+          return { sessionId: info.sessionId, targetCount: info.targets?.length ?? 0 };
+        }`
+      ])) as { text: string; isError?: boolean };
+
+      expect(createResult.isError).toBeFalsy();
+      const info = JSON.parse(createResult.text);
+      expect(info.sessionId).toBeTruthy();
+      expect(info.targetCount).toBeGreaterThanOrEqual(0);
+
+      const closeResult = (await callAgent("testExecuteReuse", [
+        "async () => await cdp.closeSession()"
+      ])) as { text: string; isError?: boolean };
+
+      expect(closeResult.isError).toBeFalsy();
+      expect(JSON.parse(closeResult.text)).toEqual({ status: "closed" });
+    });
+
+    it("should let dynamic sessions start from the cdp provider", async () => {
+      const noSessionResult = (await callAgent("testExecuteDynamic", [
+        "async () => await cdp.sessionInfo()"
+      ])) as { text: string; isError?: boolean };
+
+      expect(noSessionResult.isError).toBeFalsy();
+      expect(JSON.parse(noSessionResult.text)).toEqual({ status: "none" });
+
+      const startResult = (await callAgent("testExecuteDynamic", [
+        "async () => await cdp.startSession()"
+      ])) as { text: string; isError?: boolean };
+
+      expect(startResult.isError).toBeFalsy();
+      const started = JSON.parse(startResult.text);
+      expect(started.sessionId).toBeTruthy();
+
+      const infoResult = (await callAgent("testExecuteDynamic", [
+        "async () => await cdp.sessionInfo()"
+      ])) as { text: string; isError?: boolean };
+
+      expect(infoResult.isError).toBeFalsy();
+      expect(JSON.parse(infoResult.text).sessionId).toBe(started.sessionId);
+
+      await callAgent("testExecuteDynamic", [
+        "async () => await cdp.closeSession()"
+      ]);
+    });
   });
 
   describe("integration scenarios", () => {
     it("should navigate to a page and get its title", async () => {
       const result = (await callAgent("testExecute", [
         `async () => {
+          ${WAIT_FOR_PAGE_CONDITION}
           const { targetId } = await cdp.send("Target.createTarget", { url: "about:blank" });
           const sessionId = await cdp.attachToTarget(targetId);
           await cdp.send("Runtime.enable", {}, { sessionId });
           await cdp.send("Page.navigate", { url: "data:text/html,<title>Test Title</title><body>Hello</body>" }, { sessionId });
-          // Small delay for page load
-          await new Promise(r => setTimeout(r, 100));
+          await waitForPageCondition(sessionId, "document.title === 'Test Title'");
           const { result: titleResult } = await cdp.send("Runtime.evaluate", { expression: "document.title" }, { sessionId });
           return { title: titleResult.value };
         }`
@@ -339,11 +449,16 @@ describe("browser tools e2e", () => {
     it("should take a screenshot", async () => {
       const result = (await callAgent("testExecute", [
         `async () => {
+          ${WAIT_FOR_PAGE_CONDITION}
           const { targetId } = await cdp.send("Target.createTarget", { url: "about:blank" });
           const sessionId = await cdp.attachToTarget(targetId);
           await cdp.send("Page.enable", {}, { sessionId });
+          await cdp.send("Runtime.enable", {}, { sessionId });
           await cdp.send("Page.navigate", { url: "data:text/html,<body style='background:red;width:100px;height:100px;'>" }, { sessionId });
-          await new Promise(r => setTimeout(r, 100));
+          await waitForPageCondition(
+            sessionId,
+            "document.body && getComputedStyle(document.body).backgroundColor === 'rgb(255, 0, 0)'"
+          );
           const { data } = await cdp.send("Page.captureScreenshot", {}, { sessionId });
           return { hasData: !!data, dataLength: data?.length || 0 };
         }`

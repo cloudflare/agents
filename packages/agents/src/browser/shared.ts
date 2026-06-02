@@ -1,9 +1,23 @@
-import type { ResolvedProvider } from "@cloudflare/codemode";
-import { DynamicWorkerExecutor } from "@cloudflare/codemode";
-import { CdpSession, connectBrowser, connectUrl } from "./cdp-session";
-import { truncateResponse } from "./truncate";
+import type { ToolProvider } from "@cloudflare/codemode";
+import {
+  DynamicWorkerExecutor,
+  resolveProvider,
+  truncateResponse
+} from "@cloudflare/codemode";
+import { createBrowserSessionManager } from "./session-manager";
+import type {
+  BrowserSessionManager,
+  BrowserSessionOptions
+} from "./session-manager";
 
-export interface BrowserToolsOptions {
+export type BrowserToolsOptions = BrowserProviderOptions & {
+  /** Loader binding for sandboxed code execution */
+  loader: WorkerLoader;
+  /** Execution timeout in milliseconds (default: 30000) */
+  timeout?: number;
+};
+
+export interface BrowserToolHandlerOptions {
   /** Browser Rendering binding (Fetcher) — used in production */
   browser?: Fetcher;
   /** Optional CDP base URL override (e.g. http://localhost:9222) */
@@ -14,7 +28,38 @@ export interface BrowserToolsOptions {
   loader: WorkerLoader;
   /** Execution timeout in milliseconds (default: 30000) */
   timeout?: number;
+  /** Optional browser session lifecycle. Defaults to one fresh session per runtime. */
+  session?: BrowserSessionOptions;
 }
+
+type BrowserProviderConnectionOptions =
+  | {
+      /** Browser Rendering binding (Fetcher) — used in production */
+      browser: Fetcher;
+      cdpUrl?: never;
+      cdpHeaders?: never;
+      /** Optional browser session lifecycle. Defaults to one fresh session per runtime. */
+      session?: BrowserSessionOptions;
+    }
+  | {
+      /** Optional CDP base URL override (e.g. http://localhost:9222) */
+      cdpUrl: string;
+      /** Headers to send with CDP URL discovery requests (e.g. Access headers) */
+      cdpHeaders?: Record<string, string>;
+      browser?: never;
+      /** cdpUrl sessions are externally managed and cannot use SDK-owned reuse. */
+      session?: { mode?: "one-shot" };
+    };
+
+export type BrowserProviderOptions = BrowserProviderConnectionOptions & {
+  /** CDP command timeout in milliseconds (default: 10000) */
+  timeout?: number;
+};
+
+export type BrowserProvider = ToolProvider & {
+  name: "cdp";
+  sessionManager: BrowserSessionManager;
+};
 
 interface RawCdpCommand {
   name: string;
@@ -50,12 +95,8 @@ interface SearchableCdpSpec {
   }>;
 }
 
-const specCache = new Map<
-  string,
-  { spec: SearchableCdpSpec; cachedAt: number }
->();
-
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const MISSING_BROWSER_CONFIG =
+  "Either 'browser' (Fetcher binding) or 'cdpUrl' must be provided";
 
 export const SEARCH_DESCRIPTION = `Search the Chrome DevTools Protocol spec using JavaScript code.
 
@@ -83,6 +124,58 @@ async () => {
     .commands.filter(c => c.description?.toLowerCase().includes("intercept"))
     .map(c => ({ method: c.method, description: c.description }));
 }`;
+
+export const EXECUTE_DESCRIPTION = `Execute CDP commands against a live browser session using JavaScript code.
+
+Available in your code:
+
+declare const cdp: {
+  send(method: string, params?: unknown, options?: {
+    timeoutMs?: number;
+    sessionId?: string;
+  }): Promise<unknown>;
+  attachToTarget(targetId: string, options?: {
+    timeoutMs?: number;
+  }): Promise<string>;
+  getDebugLog(limit?: number): Promise<unknown[]>;
+  clearDebugLog(): Promise<void>;
+};
+
+Write an async arrow function in JavaScript. Do NOT use TypeScript syntax.
+
+For page-scoped commands such as Page.*, Runtime.*, and DOM.*, first create or select a target, call cdp.attachToTarget(targetId), and pass the returned sessionId in command options.
+
+Example:
+async () => {
+  return await cdp.send("Browser.getVersion");
+}
+
+Page example:
+async () => {
+  const { targetId } = await cdp.send("Target.createTarget", {
+    url: "about:blank"
+  });
+  const sessionId = await cdp.attachToTarget(targetId);
+  await cdp.send("Page.enable", {}, { sessionId });
+  await cdp.send(
+    "Page.navigate",
+    { url: "https://example.com" },
+    { sessionId }
+  );
+  const { result } = await cdp.send(
+    "Runtime.evaluate",
+    { expression: "document.title" },
+    { sessionId }
+  );
+  return result.value;
+}`;
+
+const specCache = new Map<
+  string,
+  { spec: SearchableCdpSpec; cachedAt: number }
+>();
+
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 function normalizeCdpSpec(spec: {
   domains?: RawCdpDomain[];
@@ -207,53 +300,160 @@ async function fetchCdpSpecFromBrowser(
   });
 }
 
-export const EXECUTE_DESCRIPTION = `Execute CDP commands against a live browser session using JavaScript code.
-
-Available in your code:
-
-declare const cdp: {
-  send(method: string, params?: unknown, options?: {
-    timeoutMs?: number;
-    sessionId?: string;
-  }): Promise<unknown>;
-  attachToTarget(targetId: string, options?: {
-    timeoutMs?: number;
-  }): Promise<string>;
-  getDebugLog(limit?: number): Promise<unknown[]>;
-  clearDebugLog(): Promise<void>;
+const CDP_BASE_TYPES = `
+type CdpSendOptions = {
+	timeoutMs?: number;
+	sessionId?: string;
 };
 
-Write an async arrow function in JavaScript. Do NOT use TypeScript syntax.
+type CdpAttachOptions = {
+	timeoutMs?: number;
+};
 
-For page-scoped commands such as Page.*, Runtime.*, and DOM.*, first create or select a target, call cdp.attachToTarget(targetId), and pass the returned sessionId in command options.
+type CdpSpec = {
+	domains: Array<{
+		name: string;
+		description?: string;
+		commands: Array<{ name: string; method: string; description?: string }>;
+		events: Array<{ name: string; event: string; description?: string }>;
+		types: Array<{ id: string; name: string; description?: string }>;
+	}>;
+};
+`.trim();
 
-Example:
-async () => {
-  return await cdp.send("Browser.getVersion");
+const CDP_SESSION_TYPES = `
+type BrowserSessionInfo = {
+	sessionId: string;
+	targets?: Array<{
+		id: string;
+		type?: string;
+		url?: string;
+		title?: string;
+		description?: string;
+		devtoolsFrontendUrl?: string;
+		webSocketDebuggerUrl?: string;
+	}>;
+	webSocketDebuggerUrl?: string;
+};
+`.trim();
+
+const CDP_BASE_METHOD_TYPES = `
+declare const cdp: {
+	/**
+	 * Fetch and inspect the live Chrome DevTools Protocol metadata.
+	 * Use this before unfamiliar CDP work to discover domains, commands,
+	 * events, parameter names, and result shapes. The returned command
+	 * entries include fully qualified method names such as "Page.navigate".
+	 */
+	spec: () => Promise<CdpSpec>;
+	/**
+	 * Send a Chrome DevTools Protocol command to the browser-level CDP session.
+	 * This lazily creates/connects the Browser Run session on first use.
+	 * Browser.* and Target.* commands usually do not need options.sessionId.
+	 * Page.*, Runtime.*, DOM.*, Network.*, and other target-scoped commands must
+	 * pass options.sessionId from cdp.attachToTarget(); without it, Chrome may
+	 * report the command as not found on the browser session.
+	 */
+	send: (method: string, params?: unknown, options?: CdpSendOptions) => Promise<unknown>;
+	/**
+	 * Attach to a target and return the CDP session id for target-scoped commands.
+	 * Use this after Target.createTarget or Target.getTargets before calling Page.*,
+	 * Runtime.*, DOM.*, Network.*, or other target-scoped domains.
+	 * Example: const { targetId } = await cdp.send("Target.createTarget", { url: "about:blank" });
+	 * const sessionId = await cdp.attachToTarget(targetId);
+	 * await cdp.send("Page.navigate", { url }, { sessionId });
+	 */
+	attachToTarget: (targetId: string, options?: CdpAttachOptions) => Promise<string>;
+	/**
+	 * Return recent CDP debug entries from this code block's browser connection.
+	 * Use this to diagnose command timeouts, target-session mistakes, and CDP errors.
+	 */
+	getDebugLog: (limit?: number) => Promise<unknown[]>;
+	/**
+	 * Clear this code block's CDP debug log.
+	 */
+	clearDebugLog: () => Promise<void>;
+`.trimEnd();
+
+const CDP_SESSION_METHOD_TYPES = `
+	/**
+	 * Start or ensure a reusable Browser Run session and return its metadata.
+	 * In dynamic mode, browser calls are one-shot until this is called. Use this
+	 * only when the task needs browser tabs, cookies, localStorage, or navigation
+	 * state to persist across multiple execute calls.
+	 */
+	startSession: () => Promise<BrowserSessionInfo>;
+	/**
+	 * Return metadata for the reusable Browser Run session, including active
+	 * targets and page URLs. This releases the current CDP WebSocket lease before
+	 * reading session metadata, but keeps the Browser Run session alive.
+	 * It is safe to call this to check whether a reusable session is active.
+	 * For human-in-the-loop flows such as login, MFA, CAPTCHA, or sensitive form
+	 * entry, share a page target's devtoolsFrontendUrl with the user so they can control
+	 * the live browser, then poll or wait for navigation before resuming.
+	 * This does not create a session. It returns { status: "none" } before the
+	 * first browser command, or after cdp.closeSession(). Use cdp.resetSession()
+	 * if you need to create a fresh session before issuing commands.
+	 */
+	sessionInfo: () => Promise<BrowserSessionInfo | { status: "none" }>;
+	/**
+	 * Close the reusable Browser Run session and clear stored session state.
+	 * Call this when the browsing task is complete or the user asks to close the
+	 * browser, otherwise Browser Run may continue until its inactivity timeout.
+	 */
+	closeSession: () => Promise<{ status: "closed" }>;
+	/**
+	 * Close the current reusable Browser Run session and create a fresh one.
+	 * Use this when stale tabs, cookies, storage, or page state are interfering
+	 * with the task.
+	 */
+	resetSession: () => Promise<BrowserSessionInfo>;
+`.trimEnd();
+
+function createCdpTypes(reusableSession: boolean): string {
+  return [
+    CDP_BASE_TYPES,
+    reusableSession ? CDP_SESSION_TYPES : undefined,
+    reusableSession
+      ? `${CDP_BASE_METHOD_TYPES}\n${CDP_SESSION_METHOD_TYPES}\n};`
+      : `${CDP_BASE_METHOD_TYPES}\n};`
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
-Page example:
-async () => {
-  const { targetId } = await cdp.send("Target.createTarget", {
-    url: "about:blank"
-  });
-  const sessionId = await cdp.attachToTarget(targetId);
-  await cdp.send("Page.enable", {}, { sessionId });
-  await cdp.send(
-    "Page.navigate",
-    { url: "https://example.com" },
-    { sessionId }
+let didWarnExperimental = false;
+
+function warnExperimentalBrowserProvider(): void {
+  if (didWarnExperimental) return;
+  didWarnExperimental = true;
+  console.warn(
+    "[agents/browser] Browser code-mode provider is experimental and may change in a future release."
   );
-  const { result } = await cdp.send(
-    "Runtime.evaluate",
-    { expression: "document.title" },
-    { sessionId }
-  );
-  return result.value;
-}`;
+}
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function toBrowserProviderOptions(
+  options: BrowserToolHandlerOptions
+): BrowserProviderOptions {
+  if (options.cdpUrl) {
+    return {
+      cdpUrl: options.cdpUrl,
+      cdpHeaders: options.cdpHeaders,
+      timeout: options.timeout
+    };
+  }
+  if (options.browser) {
+    return {
+      browser: options.browser,
+      timeout: options.timeout,
+      session: options.session
+    };
+  }
+  throw new Error(MISSING_BROWSER_CONFIG);
 }
 
 export interface ToolResult {
@@ -261,15 +461,149 @@ export interface ToolResult {
   isError?: boolean;
 }
 
-let didWarnExperimental = false;
-
-export function createBrowserToolHandlers(options: BrowserToolsOptions) {
-  if (!didWarnExperimental) {
-    didWarnExperimental = true;
-    console.warn(
-      "[agents/browser] Browser tools are experimental and may change in a future release."
-    );
+async function loadCdpSpec(
+  options: BrowserProviderOptions
+): Promise<SearchableCdpSpec> {
+  if (options.cdpUrl) {
+    return fetchCdpSpecFromUrl(options.cdpUrl, options.cdpHeaders);
   }
+  if (options.browser) {
+    return fetchCdpSpecFromBrowser(options.browser);
+  }
+  throw new Error(MISSING_BROWSER_CONFIG);
+}
+
+function createCdpRuntime(
+  sessionManager: BrowserSessionManager,
+  reusableSession: boolean
+) {
+  let lease: Awaited<ReturnType<BrowserSessionManager["acquire"]>> | undefined;
+  let leasePromise: ReturnType<BrowserSessionManager["acquire"]> | undefined;
+  let disposed = false;
+
+  const assertLive = () => {
+    if (disposed) {
+      throw new Error("Browser runtime has been disposed");
+    }
+  };
+
+  const getSession = async () => {
+    assertLive();
+    leasePromise ??= sessionManager.acquire();
+    const acquiredLease = await leasePromise;
+    lease = acquiredLease;
+    if (disposed) {
+      lease = undefined;
+      leasePromise = undefined;
+      await acquiredLease.release();
+      assertLive(); // throw an error after releasing lease
+    }
+    return acquiredLease.session;
+  };
+
+  const releaseLease = async () => {
+    const currentLease =
+      lease ??
+      (leasePromise ? await leasePromise.catch(() => undefined) : undefined);
+    lease = undefined;
+    leasePromise = undefined;
+    await currentLease?.release();
+  };
+
+  const fns: Record<string, (...args: unknown[]) => Promise<unknown>> = {
+    send: async (method: unknown, params: unknown, opts: unknown) => {
+      const session = await getSession();
+      return session.send(
+        method as string,
+        params,
+        opts as { timeoutMs?: number; sessionId?: string }
+      );
+    },
+    attachToTarget: async (targetId: unknown, opts: unknown) => {
+      const session = await getSession();
+      return session.attachToTarget(
+        targetId as string,
+        opts as { timeoutMs?: number }
+      );
+    },
+    getDebugLog: async (limit: unknown) => {
+      const session = await getSession();
+      return session.getDebugLog(limit as number | undefined);
+    },
+    clearDebugLog: async () => {
+      const session = await getSession();
+      return session.clearDebugLog();
+    }
+  };
+
+  if (reusableSession) {
+    fns.startSession = async () => {
+      assertLive();
+      await releaseLease();
+      return sessionManager.start();
+    };
+    fns.sessionInfo = async () => {
+      assertLive();
+      await releaseLease();
+      return (await sessionManager.info()) ?? { status: "none" };
+    };
+    fns.closeSession = async () => {
+      assertLive();
+      await releaseLease();
+      await sessionManager.close();
+      return { status: "closed" };
+    };
+    fns.resetSession = async () => {
+      assertLive();
+      await releaseLease();
+      return sessionManager.reset();
+    };
+  }
+
+  return {
+    fns,
+    dispose: async () => {
+      disposed = true;
+      await releaseLease();
+    }
+  };
+}
+
+/**
+ * Create a codemode provider for browser automation via Chrome DevTools Protocol.
+ *
+ * Exposes a `cdp` namespace inside code mode for protocol discovery and live
+ * browser commands.
+ */
+export function createBrowserProvider(
+  options: BrowserProviderOptions
+): BrowserProvider {
+  warnExperimentalBrowserProvider();
+  const sessionManager = createBrowserSessionManager(options);
+  const sessionMode = options.session?.mode;
+  const reusableSession = sessionMode === "reuse" || sessionMode === "dynamic";
+  return {
+    name: "cdp",
+    sessionManager,
+    types: createCdpTypes(reusableSession),
+    tools: {
+      spec: {
+        description: "Search and inspect Chrome DevTools Protocol metadata",
+        execute: async () => loadCdpSpec(options)
+      }
+    },
+    createRuntime: () => createCdpRuntime(sessionManager, reusableSession)
+  };
+}
+
+export function createBrowserExecutor(options: BrowserToolsOptions) {
+  return new DynamicWorkerExecutor({
+    loader: options.loader,
+    timeout: options.timeout
+  });
+}
+
+export function createBrowserToolHandlers(options: BrowserToolHandlerOptions) {
   const executor = new DynamicWorkerExecutor({
     loader: options.loader,
     timeout: options.timeout
@@ -277,29 +611,14 @@ export function createBrowserToolHandlers(options: BrowserToolsOptions) {
 
   async function search(code: string): Promise<ToolResult> {
     try {
-      let specSource: SearchableCdpSpec;
-
-      if (options.cdpUrl) {
-        specSource = await fetchCdpSpecFromUrl(
-          options.cdpUrl,
-          options.cdpHeaders
-        );
-      } else if (options.browser) {
-        specSource = await fetchCdpSpecFromBrowser(options.browser);
-      } else {
-        return {
-          text: "Either 'browser' (Fetcher binding) or 'cdpUrl' must be provided",
-          isError: true
-        };
-      }
-
-      const providers: ResolvedProvider[] = [
+      const result = await executor.execute(code, [
         {
           name: "spec",
-          fns: { get: async () => specSource }
+          fns: {
+            get: async () => loadCdpSpec(toBrowserProviderOptions(options))
+          }
         }
-      ];
-      const result = await executor.execute(code, providers);
+      ]);
       if (result.error) {
         return { text: result.error, isError: true };
       }
@@ -310,53 +629,18 @@ export function createBrowserToolHandlers(options: BrowserToolsOptions) {
   }
 
   async function execute(code: string): Promise<ToolResult> {
-    let session: CdpSession | undefined;
     try {
-      if (options.cdpUrl) {
-        session = await connectUrl(options.cdpUrl, {
-          timeoutMs: options.timeout,
-          headers: options.cdpHeaders
-        });
-      } else if (options.browser) {
-        session = await connectBrowser(options.browser, options.timeout);
-      } else {
-        return {
-          text: "Either 'browser' (Fetcher binding) or 'cdpUrl' must be provided",
-          isError: true
-        };
-      }
-
-      const providers: ResolvedProvider[] = [
-        {
-          name: "cdp",
-          fns: {
-            send: async (method: unknown, params: unknown, opts: unknown) =>
-              session!.send(
-                method as string,
-                params,
-                opts as { timeoutMs?: number; sessionId?: string }
-              ),
-            attachToTarget: async (targetId: unknown, opts: unknown) =>
-              session!.attachToTarget(
-                targetId as string,
-                opts as { timeoutMs?: number }
-              ),
-            getDebugLog: async (limit: unknown) =>
-              session!.getDebugLog(limit as number | undefined),
-            clearDebugLog: async () => session!.clearDebugLog()
-          }
-        }
-      ];
-
-      const result = await executor.execute(code, providers);
+      const result = await executor.execute(code, [
+        resolveProvider(
+          createBrowserProvider(toBrowserProviderOptions(options))
+        )
+      ]);
       if (result.error) {
         return { text: result.error, isError: true };
       }
       return { text: truncateResponse(result.result) };
     } catch (error) {
       return { text: formatError(error), isError: true };
-    } finally {
-      session?.close();
     }
   }
 

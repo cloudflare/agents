@@ -1,20 +1,29 @@
-import { toolDefinition } from "@tanstack/ai";
 import type { ServerTool } from "@tanstack/ai";
-import { z } from "zod";
+import { truncateResult } from "@cloudflare/codemode";
+import { createCodeTool } from "@cloudflare/codemode/tanstack-ai";
 import {
-  createBrowserToolHandlers,
-  SEARCH_DESCRIPTION,
-  EXECUTE_DESCRIPTION,
+  createBrowserExecutor,
+  createBrowserProvider,
   type BrowserToolsOptions
 } from "./shared";
 
-export type { BrowserToolsOptions } from "./shared";
+export {
+  createBrowserProvider,
+  type BrowserProvider,
+  type BrowserProviderOptions,
+  type BrowserToolsOptions
+} from "./shared";
 
 /**
  * Create TanStack AI tools for browser automation via CDP code mode.
  *
- * Returns an array of `ServerTool`s: `browser_search` (query the CDP spec)
- * and `browser_execute` (run CDP commands against a live browser).
+ * Returns an array with a code mode tool backed by `createBrowserProvider()`.
+ * The provider exposes `cdp.spec()` for protocol discovery and `cdp.send()` for
+ * live browser commands.
+ *
+ * Use this helper when you do not already expose a code mode tool. If your
+ * agent already has code mode, prefer adding `createBrowserProvider()` to that
+ * tool instead of registering a second code execution tool.
  *
  * @example
  * ```ts
@@ -34,39 +43,11 @@ export type { BrowserToolsOptions } from "./shared";
  * ```
  */
 export function createBrowserTools(options: BrowserToolsOptions): ServerTool[] {
-  const handlers = createBrowserToolHandlers(options);
-
-  const search = toolDefinition({
-    name: "browser_search" as const,
-    description: SEARCH_DESCRIPTION,
-    inputSchema: z.object({
-      code: z.string().meta({
-        description: "JavaScript async arrow function that queries the CDP spec"
-      })
+  return [
+    createCodeTool({
+      tools: [createBrowserProvider(options)],
+      executor: createBrowserExecutor(options),
+      transformResult: truncateResult
     })
-  }).server(async ({ code }) => {
-    const result = await handlers.search(code);
-    if (result.isError) {
-      throw new Error(result.text);
-    }
-    return { text: result.text };
-  });
-
-  const execute = toolDefinition({
-    name: "browser_execute" as const,
-    description: EXECUTE_DESCRIPTION,
-    inputSchema: z.object({
-      code: z.string().meta({
-        description: "JavaScript async arrow function that uses the cdp helper"
-      })
-    })
-  }).server(async ({ code }) => {
-    const result = await handlers.execute(code);
-    if (result.isError) {
-      throw new Error(result.text);
-    }
-    return { text: result.text };
-  });
-
-  return [search, execute];
+  ];
 }

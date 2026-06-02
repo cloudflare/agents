@@ -251,8 +251,7 @@
   ],
   "nx": {
     "implicitDependencies": [
-      "!@cloudflare/ai-chat",
-      "!@cloudflare/codemode"
+      "!@cloudflare/ai-chat"
     ]
   },
   "scripts": {
