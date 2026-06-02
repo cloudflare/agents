@@ -81,6 +81,8 @@ cd examples/playground   # or any example
 npm run dev              # starts Vite dev server + Workers runtime via @cloudflare/vite-plugin
 ```
 
+Example apps will normally hot reload when the dev server is running. When the dev server is running, make sure to rebuild changed packages (`npm run build`) to see changes reflected in the running app.
+
 ## Code standards
 
 ### TypeScript
