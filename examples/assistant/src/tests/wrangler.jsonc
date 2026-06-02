@@ -19,6 +19,7 @@
   // that would otherwise drive `saveMessages` → auto-turn (e.g. a
   // full `postDailySummaryPrompt` round-trip) are intentionally
   // out of scope; see `daily-summary.test.ts`.
+  "browser": { "binding": "BROWSER" },
   "durable_objects": {
     "bindings": [
       {
@@ -39,6 +40,10 @@
     {
       "new_sqlite_classes": ["AssistantDirectory"],
       "tag": "v1"
+    },
+    {
+      "new_sqlite_classes": ["MyAssistant"],
+      "tag": "v2"
     }
   ]
 }

@@ -16,6 +16,9 @@
       "@cloudflare/think/tools/execute": [
         "../../packages/think/src/tools/execute.ts"
       ],
+      "@cloudflare/think/tools/browser": [
+        "../../packages/think/src/tools/browser.ts"
+      ],
       "@cloudflare/think/tools/extensions": [
         "../../packages/think/src/tools/extensions.ts"
       ]

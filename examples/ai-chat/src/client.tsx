@@ -92,43 +92,62 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function getScreenshotPreview(output: unknown): {
-  src: string;
-  base64Length: number;
-} | null {
-  if (!isRecord(output) || typeof output.data !== "string") {
+function normalizeImageSrc(image: string): string {
+  return image.startsWith("data:") ? image : `data:image/png;base64,${image}`;
+}
+
+type BrowserRichResult = {
+  src?: string;
+  button?: { url: string; text: string };
+};
+
+function getBrowserRichResult(output: unknown): BrowserRichResult | null {
+  if (!isRecord(output)) {
     return null;
   }
 
-  const format = output.format;
-  const mimeType =
-    format === "jpeg" || format === "jpg" ? "image/jpeg" : "image/png";
+  const result = isRecord(output.result) ? output.result : undefined;
+  if (!result) {
+    return null;
+  }
+
+  const src =
+    typeof result.image === "string"
+      ? normalizeImageSrc(result.image)
+      : undefined;
+
+  const button = result.button;
+  const normalizedButton =
+    isRecord(button) &&
+    typeof button.url === "string" &&
+    typeof button.text === "string"
+      ? { url: button.url, text: button.text }
+      : undefined;
+
+  if (!src && !normalizedButton) {
+    return null;
+  }
 
   return {
-    src: `data:${mimeType};base64,${output.data}`,
-    base64Length: output.data.length
+    src,
+    button: normalizedButton
   };
 }
 
 function formatToolOutput(
   output: unknown,
-  screenshotPreview: {
-    base64Length: number;
-  } | null
+  browserRichResult: BrowserRichResult | null
 ): string {
   if (typeof output === "string") {
     return output;
   }
 
-  if (screenshotPreview && isRecord(output)) {
-    return JSON.stringify(
-      {
-        ...output,
-        data: `[base64 image data omitted: ${screenshotPreview.base64Length} chars]`
-      },
-      null,
-      2
-    );
+  if (browserRichResult && isRecord(output)) {
+    const redacted = {
+      ...output,
+      result: "[rich browser result rendered above]"
+    };
+    return JSON.stringify(redacted, null, 2);
   }
 
   return JSON.stringify(output, null, 2);
@@ -520,9 +539,9 @@ function Chat() {
                     | undefined;
                   const toolOutput = (part as { output?: unknown }).output;
                   const errorText = (part as { errorText?: string }).errorText;
-                  const screenshotPreview =
+                  const browserRichResult =
                     toolName === "browser_execute"
-                      ? getScreenshotPreview(toolOutput)
+                      ? getBrowserRichResult(toolOutput)
                       : null;
                   const hasCode =
                     toolInput != null &&
@@ -654,17 +673,29 @@ function Chat() {
                             <span className="text-[10px] uppercase tracking-wider text-kumo-inactive font-semibold">
                               Output
                             </span>
-                            {screenshotPreview && (
+                            {browserRichResult?.src && (
                               <div className="mt-1 rounded-lg bg-kumo-elevated p-2">
                                 <img
-                                  src={screenshotPreview.src}
-                                  alt="Browser screenshot captured by browser_execute"
+                                  src={browserRichResult.src}
+                                  alt="Browser result returned by browser_execute"
                                   className="block max-h-80 w-full rounded-md object-contain"
                                 />
                               </div>
                             )}
+                            {browserRichResult?.button && (
+                              <div className="mt-2">
+                                <a
+                                  href={browserRichResult.button.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="inline-flex rounded-lg bg-kumo-primary px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90"
+                                >
+                                  {browserRichResult.button.text}
+                                </a>
+                              </div>
+                            )}
                             <pre className="mt-1 p-2 rounded-lg bg-kumo-elevated text-xs font-mono text-kumo-subtle overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap break-all">
-                              {formatToolOutput(toolOutput, screenshotPreview)}
+                              {formatToolOutput(toolOutput, browserRichResult)}
                             </pre>
                           </div>
                         )}

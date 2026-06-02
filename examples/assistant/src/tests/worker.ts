@@ -35,6 +35,7 @@ import type { AssistantDirectory, MyAssistant } from "../server";
 export type Env = {
   AssistantDirectory: DurableObjectNamespace<AssistantDirectory>;
   MyAssistant: DurableObjectNamespace<MyAssistant>;
+  BROWSER: Fetcher;
   LOADER: WorkerLoader;
 };
 

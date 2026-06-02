@@ -79,6 +79,30 @@ describe("SharedWorkspace — cross-chat round-trip", () => {
     expect(result).toBeNull();
   });
 
+  it("readWorkspaceFileDataUrl returns image bytes as a data URL", async () => {
+    const directory = await getAgentByName(
+      env.AssistantDirectory,
+      uniqueDirectoryName()
+    );
+    const { id } = await directory.createChat();
+    const child = await getSubAgentByName(directory, MyAssistant, id);
+
+    await directory.writeFileBytes(
+      "/screenshots/test.png",
+      new Uint8Array([137, 80, 78, 71]),
+      "image/png"
+    );
+
+    const result = await child.readWorkspaceFileDataUrl(
+      "/screenshots/test.png"
+    );
+
+    expect(result).toEqual({
+      dataUrl: "data:image/png;base64,iVBORw==",
+      mimeType: "image/png"
+    });
+  });
+
   it("listWorkspaceFiles handles errors as an empty list (proxy doesn't throw)", async () => {
     const directory = await getAgentByName(
       env.AssistantDirectory,

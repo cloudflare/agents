@@ -7,7 +7,7 @@ A complete chat application built with `@cloudflare/ai-chat` showcasing the reco
 **Server (`src/server.ts`):**
 
 - `toUIMessageStreamResponse()` -- the simplest streaming pattern
-- Browser Rendering tools via `agents/browser/ai`
+- Browser Rendering tools via `agents/browser/ai`, including dynamic Browser Run sessions
 - Server-side tools with `execute` (weather lookup)
 - Client-side tools without `execute` (browser timezone)
 - Tool approval with `needsApproval` (calculation with amount threshold)
@@ -37,9 +37,14 @@ Recent Wrangler releases run the Browser Rendering binding locally, so no separa
 ## Try it
 
 - "Open https://example.com and tell me the page title" -- uses the browser binding and CDP tools
-- "Search the CDP spec for screenshot commands" -- exercises `browser_search`
+- "Search the CDP spec for screenshot commands" -- exercises `cdp.spec()` inside `browser_execute`
 - "Take a screenshot of https://example.com" -- exercises `browser_execute` and renders the image inline
+- "Keep the browser open while I compare several pages" -- lets the agent call `cdp.startSession()` before browser work
+- "Open a site and let me log in manually" -- lets the agent share a Browser Run Live View URL from `cdp.sessionInfo()`
+- "Close the browser session" -- calls `cdp.closeSession()` from `browser_execute` to release Browser Run explicitly
 - "What's the weather in London?" -- server-side tool, executes automatically
 - "What timezone am I in?" -- client-side tool, browser provides the result
 - "Calculate 150 \* 3, amount is $450" -- requires approval before executing
 - Have a long conversation -- old tool calls are pruned from LLM context automatically
+
+Rich browser results expect `browser_execute` code to return `{ image?: string, button?: { url: string, text: string } }`. Use `image` for screenshot data URLs and `button` for links such as Browser Run Live View handoff URLs.

@@ -1,6 +1,7 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest, callable } from "agents";
 import { createBrowserTools } from "agents/browser/ai";
+import { DurableBrowserSessionStore } from "agents/browser";
 import {
   AIChatAgent,
   type OnChatMessageOptions,
@@ -68,7 +69,13 @@ export class ChatAgent extends AIChatAgent {
     const mcpTools = this.mcp.getAITools();
     const browserTools = createBrowserTools({
       browser: this.env.BROWSER,
-      loader: this.env.LOADER
+      loader: this.env.LOADER,
+      session: {
+        mode: "dynamic",
+        key: "default",
+        store: new DurableBrowserSessionStore(this.ctx.storage),
+        keepAliveMs: 600_000
+      }
     });
     const workersai = createWorkersAI({ binding: this.env.AI });
 
@@ -80,20 +87,24 @@ export class ChatAgent extends AIChatAgent {
       system:
         "You are a helpful assistant. You can check the weather, get the user's timezone, " +
         "run calculations, and use a browser to inspect web pages via Chrome DevTools Protocol. " +
+        "Browser use is one-shot by default. If a task needs browser state to persist across multiple browser calls, use browser_execute to call cdp.startSession() before browsing. " +
         "For page-scoped browser commands, create a target, attach with cdp.attachToTarget(targetId), " +
         "and pass the returned sessionId to Page, Runtime, and DOM commands. " +
+        "For login, MFA, CAPTCHA, or sensitive input flows, use cdp.sessionInfo() to get the page target's devtoolsFrontendUrl, share that Live View URL with the user, and wait for them to finish before continuing. " +
+        "When browser_execute should render a rich UI result, return { image?: string, button?: { url: string, text: string } }. For screenshots, set image to a data URL like `data:image/png;base64,${screenshot.data}`. For human handoff, return a button with the Live View URL. Don't ever try to type out base64 directly, even in your reasoning steps. " +
+        "When the user is done browsing or asks to close the browser, use browser_execute to call cdp.closeSession() to avoid unnecessary Browser Run usage. " +
         "For calculations with large numbers (over 1000), you need user approval first.",
       // Prune old tool calls and reasoning to save tokens on long conversations
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
-        toolCalls: "before-last-2-messages",
+        toolCalls: "before-last-10-messages",
         reasoning: "before-last-message"
       }),
       tools: {
         // MCP tools from connected servers
         ...mcpTools,
 
-        // Browser tools: search CDP spec + execute CDP commands
+        // Browser tool: code mode with cdp.spec() + CDP command helpers
         ...browserTools,
 
         // Server-side tool: executes automatically

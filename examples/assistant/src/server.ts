@@ -96,6 +96,10 @@ import {
   handleLogout
 } from "./auth";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
+import {
+  createBrowserProvider,
+  DurableBrowserSessionStore
+} from "@cloudflare/think/tools/browser";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { createExtensionTools } from "@cloudflare/think/tools/extensions";
 import { createCompactFunction } from "agents/experimental/memory/utils";
@@ -863,6 +867,7 @@ export class MyAssistant extends Think<Env> {
 
 Be concise. Prefer short, direct answers over lengthy explanations.
 The execute tool runs JavaScript you write in a sandboxed environment. Use it for multi-file operations, data transformations, or any task that would require many sequential tool calls.
+Inside execute, use cdp.* for browser inspection and state.* for workspace filesystem operations. For example, you can take a screenshot with cdp.send("Page.captureScreenshot") and save it with state.writeFileBytes(...) in the same execute call.
 You can create extensions: new tools that persist across conversations. Offer to create one when a recurring task would benefit from it.
 When you learn something about the user or their project, save it to memory.`
         }
@@ -898,6 +903,17 @@ When you learn something about the user or their project, save it to memory.`
     return {
       execute: createExecuteTool({
         tools: createWorkspaceTools(this.workspace),
+        providers: [
+          createBrowserProvider({
+            browser: this.env.BROWSER,
+            session: {
+              mode: "dynamic",
+              key: "default",
+              store: new DurableBrowserSessionStore(this.ctx.storage),
+              keepAliveMs: 600_000
+            }
+          })
+        ],
         // `state.*` inside the sandbox is backed by the SHARED workspace
         // too — `createWorkspaceStateBackend` accepts our `SharedWorkspace`
         // proxy because it satisfies the `WorkspaceFsLike` interface from
@@ -1095,6 +1111,23 @@ When you learn something about the user or their project, save it to memory.`
   }
 
   @callable()
+  async readWorkspaceFileDataUrl(path: string) {
+    try {
+      const [bytes, stat] = await Promise.all([
+        this.workspace.readFileBytes(path),
+        this.workspace.stat(path)
+      ]);
+      if (!bytes || !stat) return null;
+      return {
+        dataUrl: `data:${stat.mimeType};base64,${bytesToBase64(bytes)}`,
+        mimeType: stat.mimeType
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  @callable()
   async listExtensions() {
     if (!this.extensionManager) return [];
     return this.extensionManager.list();
@@ -1114,6 +1147,15 @@ function createJsonResponse(body: unknown, init?: ResponseInit) {
   const headers = new Headers(init?.headers);
   headers.set("Cache-Control", "no-store");
   return Response.json(body, { ...init, headers });
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
 }
 
 // ── Worker ────────────────────────────────────────────────────────────

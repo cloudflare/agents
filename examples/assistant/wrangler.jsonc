@@ -1,6 +1,7 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "ai": { "binding": "AI", "remote": true },
+  "browser": { "binding": "BROWSER" },
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
@@ -30,6 +31,10 @@
     {
       "new_sqlite_classes": ["AssistantDirectory"],
       "tag": "v1"
+    },
+    {
+      "new_sqlite_classes": ["MyAssistant"],
+      "tag": "v2"
     }
   ],
   "name": "think-assistant",

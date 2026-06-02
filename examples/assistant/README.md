@@ -29,6 +29,9 @@ the sub-agent routing primitive from `agents`.
 - **Think base class** — `getModel()`, `configureSession()`, `getTools()`, `maxSteps` for a batteries-included agent
 - **Built-in workspace** — file tools (read, write, edit, find, grep, delete) auto-wired on every turn
 - **Sandboxed code execution** — `createExecuteTool` lets the LLM write and run JavaScript in a Dynamic Worker via `@cloudflare/codemode`
+- **Browser + workspace in one code block** — the execute sandbox exposes both
+  `cdp.*` and `state.*`, so the agent can inspect a page, take a screenshot,
+  and save it to the shared workspace in one tool call
 - **Self-authored extensions** — `extensionLoader` + `createExtensionTools` let the agent create new tools at runtime
 - **Persistent memory** — context blocks (`soul`, `memory`) the model can read and write across sessions
 - **Non-destructive compaction** — older messages summarized when context overflows, originals preserved
@@ -142,6 +145,11 @@ proxy that forwards every call to `AssistantDirectory.workspace` over
 a DO RPC hop:
 
 ```ts
+import {
+  createBrowserProvider,
+  DurableBrowserSessionStore
+} from "@cloudflare/think/tools/browser";
+
 class MyAssistant extends Think<Env> {
   override workspace: WorkspaceFsLike = new SharedWorkspace(this);
 
@@ -149,6 +157,15 @@ class MyAssistant extends Think<Env> {
     return {
       execute: createExecuteTool({
         tools: createWorkspaceTools(this.workspace),
+        providers: [
+          createBrowserProvider({
+            browser: this.env.BROWSER,
+            session: {
+              mode: "dynamic",
+              store: new DurableBrowserSessionStore(this.ctx.storage)
+            }
+          })
+        ],
         // state.* in the sandbox also hits the shared workspace,
         // because SharedWorkspace satisfies WorkspaceFsLike.
         state: createWorkspaceStateBackend(this.workspace),
@@ -183,6 +200,12 @@ That one type annotation unlocks two things at once:
   like `state.planEdits` and `state.applyEdits` run against the shared
   workspace, so a plan composed in one chat can mutate files another
   chat just created.
+
+The same `execute` call also gets a `cdp.*` namespace from
+`createBrowserProvider`. That lets the model do browser work and filesystem
+work together, for example capture a screenshot and save it as
+`/screenshots/example.png` with `state.writeFileBytes(...)` without a second
+tool call.
 
 The parent DO and the child facet live on the same machine, so each
 RPC hop is in-process and cheap (no network, no serialization across

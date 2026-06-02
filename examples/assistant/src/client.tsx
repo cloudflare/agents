@@ -78,6 +78,52 @@ import {
   startGitHubLogin,
   type AuthUser
 } from "./auth-client";
+
+type WorkspaceFile = {
+  name: string;
+  type: string;
+  size?: number;
+  mimeType?: string;
+};
+
+type ViewedWorkspaceFile =
+  | {
+      kind: "text";
+      path: string;
+      content: string;
+    }
+  | {
+      kind: "image";
+      path: string;
+      dataUrl: string;
+      mimeType?: string;
+    };
+
+const imageExtensions = new Set([
+  "avif",
+  "gif",
+  "jpg",
+  "jpeg",
+  "png",
+  "svg",
+  "webp"
+]);
+
+function isImageFile(file: WorkspaceFile): boolean {
+  if (file.mimeType?.startsWith("image/")) return true;
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  return extension ? imageExtensions.has(extension) : false;
+}
+
+function joinWorkspacePath(base: string, name: string): string {
+  return base === "/" ? `/${name}` : `${base}/${name}`;
+}
+
+function parentWorkspacePath(path: string): string {
+  if (path === "/") return "/";
+  const parent = path.split("/").slice(0, -1).join("/");
+  return parent || "/";
+}
 import { useChats } from "./use-chats";
 import type { ChatSummary } from "./server";
 
@@ -197,13 +243,11 @@ function Chat({
 
   const [showFilesPanel, setShowFilesPanel] = useState(false);
   const filesPanelRef = useRef<HTMLDivElement>(null);
-  const [workspaceFiles, setWorkspaceFiles] = useState<
-    { name: string; type: string; size?: number }[]
-  >([]);
-  const [fileContent, setFileContent] = useState<{
-    path: string;
-    content: string;
-  } | null>(null);
+  const [workspacePath, setWorkspacePath] = useState("/");
+  const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFile[]>([]);
+  const [fileContent, setFileContent] = useState<ViewedWorkspaceFile | null>(
+    null
+  );
 
   const [showExtensionsPanel, setShowExtensionsPanel] = useState(false);
   const extensionsPanelRef = useRef<HTMLDivElement>(null);
@@ -295,16 +339,17 @@ function Chat({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [showConfigPanel]);
 
-  const refreshWorkspaceFiles = useCallback(async () => {
-    try {
-      const files = await agent.call("listWorkspaceFiles", ["/"]);
-      setWorkspaceFiles(
-        files as { name: string; type: string; size?: number }[]
-      );
-    } catch {
-      setWorkspaceFiles([]);
-    }
-  }, [agent]);
+  const refreshWorkspaceFiles = useCallback(
+    async (path = workspacePath) => {
+      try {
+        const files = await agent.call("listWorkspaceFiles", [path]);
+        setWorkspaceFiles(files as WorkspaceFile[]);
+      } catch {
+        setWorkspaceFiles([]);
+      }
+    },
+    [agent, workspacePath]
+  );
 
   // Live-refresh the file browser when the shared workspace changes in
   // another chat (or this one). `workspaceRevision` is incremented by
@@ -314,8 +359,8 @@ function Chat({
   // panel-open via the existing click handler.
   useEffect(() => {
     if (!showFilesPanel) return;
-    void refreshWorkspaceFiles();
-  }, [showFilesPanel, workspaceRevision, refreshWorkspaceFiles]);
+    void refreshWorkspaceFiles(workspacePath);
+  }, [showFilesPanel, workspacePath, workspaceRevision, refreshWorkspaceFiles]);
 
   const refreshExtensions = useCallback(async () => {
     try {
@@ -672,11 +717,11 @@ function Chat({
                 icon={<FolderOpenIcon size={16} />}
                 onClick={() => {
                   setShowFilesPanel(!showFilesPanel);
-                  if (!showFilesPanel) refreshWorkspaceFiles();
+                  if (!showFilesPanel) refreshWorkspaceFiles(workspacePath);
                 }}
               />
               {showFilesPanel && (
-                <div className="absolute right-0 top-full mt-2 w-80 z-50">
+                <div className="absolute right-0 top-full mt-2 w-80 sm:w-[32rem] z-50">
                   <Surface className="rounded-xl ring ring-kumo-line shadow-lg p-4 space-y-3">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
@@ -717,48 +762,133 @@ function Chat({
                             {fileContent.path}
                           </span>
                         </div>
-                        <pre className="text-xs font-mono bg-kumo-elevated p-3 rounded-lg overflow-auto max-h-60 whitespace-pre-wrap">
-                          {fileContent.content}
-                        </pre>
+                        {fileContent.kind === "image" ? (
+                          <div className="bg-kumo-elevated p-2 rounded-lg overflow-auto max-h-80">
+                            <img
+                              src={fileContent.dataUrl}
+                              alt={fileContent.path}
+                              className="max-w-full h-auto rounded-md mx-auto"
+                            />
+                          </div>
+                        ) : (
+                          <pre className="text-xs font-mono bg-kumo-elevated p-3 rounded-lg overflow-auto max-h-60 whitespace-pre-wrap">
+                            {fileContent.content}
+                          </pre>
+                        )}
                       </div>
                     ) : workspaceFiles.length === 0 ? (
-                      <span className="text-xs text-kumo-subtle block">
-                        No files yet. Ask the assistant to create some.
-                      </span>
-                    ) : (
-                      <div className="space-y-1 max-h-60 overflow-y-auto">
-                        {workspaceFiles.map((f) => (
-                          <button
-                            key={f.name}
-                            className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-kumo-elevated text-left transition-colors"
-                            onClick={async () => {
-                              if (f.type === "file") {
-                                const content = await agent.call(
-                                  "readWorkspaceFile",
-                                  [`/${f.name}`]
-                                );
-                                if (content)
-                                  setFileContent({
-                                    path: `/${f.name}`,
-                                    content: content as string
-                                  });
-                              }
+                      <div className="space-y-2">
+                        {workspacePath !== "/" && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              const parent = parentWorkspacePath(workspacePath);
+                              setWorkspacePath(parent);
+                              void refreshWorkspaceFiles(parent);
                             }}
                           >
-                            <FileTextIcon
-                              size={14}
-                              className="text-kumo-subtle shrink-0"
-                            />
-                            <span className="text-sm text-kumo-default truncate">
-                              {f.name}
-                            </span>
-                            {f.size != null && (
-                              <span className="text-xs text-kumo-inactive ml-auto">
-                                {f.size}b
+                            <CaretLeftIcon size={12} /> Back
+                          </Button>
+                        )}
+                        <span className="text-xs text-kumo-subtle block">
+                          No files yet. Ask the assistant to create some.
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          {workspacePath !== "/" && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => {
+                                const parent =
+                                  parentWorkspacePath(workspacePath);
+                                setWorkspacePath(parent);
+                                void refreshWorkspaceFiles(parent);
+                              }}
+                            >
+                              <CaretLeftIcon size={12} /> Back
+                            </Button>
+                          )}
+                          <span className="text-xs font-mono text-kumo-subtle truncate">
+                            {workspacePath}
+                          </span>
+                        </div>
+                        <div className="space-y-1 max-h-60 overflow-y-auto">
+                          {workspaceFiles.map((f) => (
+                            <button
+                              key={f.name}
+                              className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-kumo-elevated text-left transition-colors"
+                              onClick={async () => {
+                                const path = joinWorkspacePath(
+                                  workspacePath,
+                                  f.name
+                                );
+                                if (f.type === "directory") {
+                                  setFileContent(null);
+                                  setWorkspacePath(path);
+                                  await refreshWorkspaceFiles(path);
+                                  return;
+                                }
+
+                                if (f.type === "file") {
+                                  if (isImageFile(f)) {
+                                    const result = (await agent.call(
+                                      "readWorkspaceFileDataUrl",
+                                      [path]
+                                    )) as {
+                                      dataUrl: string;
+                                      mimeType?: string;
+                                    } | null;
+                                    if (result) {
+                                      setFileContent({
+                                        kind: "image",
+                                        path,
+                                        dataUrl: result.dataUrl,
+                                        mimeType: result.mimeType
+                                      });
+                                    }
+                                    return;
+                                  }
+
+                                  const content = await agent.call(
+                                    "readWorkspaceFile",
+                                    [path]
+                                  );
+                                  if (content) {
+                                    setFileContent({
+                                      kind: "text",
+                                      path,
+                                      content: content as string
+                                    });
+                                  }
+                                }
+                              }}
+                            >
+                              {f.type === "directory" ? (
+                                <FolderOpenIcon
+                                  size={14}
+                                  className="text-kumo-accent shrink-0"
+                                />
+                              ) : (
+                                <FileTextIcon
+                                  size={14}
+                                  className="text-kumo-subtle shrink-0"
+                                />
+                              )}
+                              <span className="text-sm text-kumo-default truncate">
+                                {f.name}
                               </span>
-                            )}
-                          </button>
-                        ))}
+                              {f.type === "file" && f.size != null && (
+                                <span className="text-xs text-kumo-inactive ml-auto">
+                                  {f.size}b
+                                </span>
+                              )}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     )}
                   </Surface>
