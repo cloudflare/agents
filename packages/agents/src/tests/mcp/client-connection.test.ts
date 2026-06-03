@@ -6,6 +6,16 @@ import { z } from "zod";
 import { MCPClientConnection } from "../../mcp/client-connection";
 import type { MCPObservabilityEvent } from "../../observability/mcp";
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 /**
  * Mock MCP server for testing different scenarios
  */
@@ -804,15 +814,11 @@ describe("MCP Client Connection Integration", () => {
       expect(connection.connectionState).toBe("ready");
     });
 
-    it("should preserve PKCE verifier during multiple saveCodeVerifier calls", async () => {
-      // Mock storage to simulate DurableObject storage behavior
-      const storageData = new Map<string, unknown>();
-
-      // This test verifies the PKCE preservation logic in DurableObjectOAuthClientProvider
+    it("should mark connection as connecting while OAuth token exchange is pending", async () => {
       const mockAuthProvider = {
         authUrl: undefined,
-        clientId: "test-client-id",
-        serverId: "test-server-id",
+        clientId: undefined,
+        serverId: undefined,
         redirectUrl: "http://localhost:3000/callback",
         clientMetadata: {
           client_name: "test-client",
@@ -824,47 +830,37 @@ describe("MCP Client Connection Integration", () => {
         clientInformation: vi.fn(),
         saveClientInformation: vi.fn(),
         redirectToAuthorization: vi.fn(),
-        // Mock actual preservation behavior: simulate storage-based preservation
-        saveCodeVerifier: vi
-          .fn()
-          .mockImplementation(async (verifier: string) => {
-            // Simulate the actual preservation logic from DurableObjectOAuthClientProvider
-            const existingVerifier = storageData.get("verifier-key");
-            if (existingVerifier) {
-              // Preserve existing verifier (don't overwrite) - this is the expected behavior
-              return;
-            }
-            // Save first verifier
-            storageData.set("verifier-key", verifier);
-          }),
-        codeVerifier: vi.fn().mockImplementation(async () => {
-          const stored = storageData.get("verifier-key");
-          if (!stored) throw new Error("No code verifier found");
-          return stored as string;
-        }),
+        saveCodeVerifier: vi.fn(),
+        codeVerifier: vi.fn(),
         checkState: vi.fn().mockResolvedValue({ valid: true }),
         consumeState: vi.fn().mockResolvedValue(undefined),
         deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
       };
-
-      // Test the PKCE preservation logic - this tests EXPECTED behavior
-      await mockAuthProvider.saveCodeVerifier("original-verifier");
-      await mockAuthProvider.saveCodeVerifier("should-be-ignored");
-
-      // EXPECTED: Original verifier should be preserved, second one ignored
-      const retrievedVerifier = await mockAuthProvider.codeVerifier();
-      expect(retrievedVerifier).toBe("original-verifier");
-
-      // Verify both calls were made but only first one was stored
-      expect(mockAuthProvider.saveCodeVerifier).toHaveBeenCalledTimes(2);
-      expect(mockAuthProvider.saveCodeVerifier).toHaveBeenNthCalledWith(
-        1,
-        "original-verifier"
+      const connection = new MCPClientConnection(
+        new URL(serverUrl),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: {
+            type: "streamable-http",
+            authProvider: mockAuthProvider
+          },
+          client: {}
+        }
       );
-      expect(mockAuthProvider.saveCodeVerifier).toHaveBeenNthCalledWith(
-        2,
-        "should-be-ignored"
-      );
+      const finishAuthComplete = createDeferred<void>();
+      const mockTransport = {
+        finishAuth: vi.fn().mockReturnValue(finishAuthComplete.promise)
+      };
+      connection.getTransport = vi.fn().mockReturnValue(mockTransport);
+      connection.connectionState = "authenticating";
+
+      const authorizationPromise =
+        connection.completeAuthorization("auth-code");
+
+      expect(connection.connectionState).toBe("connecting");
+      finishAuthComplete.resolve(undefined);
+      await authorizationPromise;
+      expect(connection.connectionState).toBe("connecting");
     });
   });
 

@@ -4,6 +4,39 @@ import type { AgentMcpOAuthProvider } from "../../mcp/do-oauth-client-provider";
 import type { MCPClientConnection } from "../../mcp/client-connection";
 import type { MCPClientOAuthResult } from "../../mcp/client.ts";
 
+function base64UrlEncode(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+async function createCodeChallenge(verifier: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(verifier)
+  );
+  return base64UrlEncode(new Uint8Array(digest));
+}
+
+async function createAuthorizationUrl(
+  state: string,
+  verifier: string
+): Promise<URL> {
+  const authUrl = new URL("https://auth.example.com/authorize");
+  authUrl.searchParams.set("state", state);
+  authUrl.searchParams.set(
+    "code_challenge",
+    await createCodeChallenge(verifier)
+  );
+  authUrl.searchParams.set("code_challenge_method", "S256");
+  return authUrl;
+}
+
 // Test Agent for OAuth client side flows
 export class TestOAuthAgent extends Agent {
   async onRequest(_request: Request): Promise<Response> {
@@ -219,6 +252,68 @@ export class TestOAuthAgent extends Agent {
         provider instanceof DurableObjectOAuthClientProvider,
       callbackUrl: String(provider.redirectUrl ?? "")
     };
+  }
+
+  async testPkceVerifierStateCorrelation(): Promise<{
+    state1Verifier: string;
+    state2Verifier: string;
+    staleStateIgnoredVerifier: string;
+  }> {
+    const provider = new DurableObjectOAuthClientProvider(
+      this.ctx.storage,
+      `pkce-correlation-${crypto.randomUUID()}`,
+      "https://client.example.com/callback"
+    );
+    provider.serverId = `server-${crypto.randomUUID()}`;
+    provider.clientId = `client-${crypto.randomUUID()}`;
+
+    const verifier1 = `verifier-one-${crypto.randomUUID()}`;
+    const verifier2 = `verifier-two-${crypto.randomUUID()}`;
+
+    const state1 = await provider.state();
+    await provider.saveCodeVerifier(verifier1);
+    await provider.redirectToAuthorization(
+      await createAuthorizationUrl(state1, verifier1)
+    );
+
+    const state2 = await provider.state();
+    await provider.saveCodeVerifier(verifier2);
+    await provider.redirectToAuthorization(
+      await createAuthorizationUrl(state2, verifier2)
+    );
+
+    const statefulProvider = provider as DurableObjectOAuthClientProvider & {
+      runWithCodeVerifierState?: <T>(
+        state: string,
+        callback: () => Promise<T>
+      ) => Promise<T>;
+    };
+    if (!statefulProvider.runWithCodeVerifierState) {
+      throw new Error("PKCE verifier state context is not available");
+    }
+
+    const state1Verifier = await statefulProvider.runWithCodeVerifierState(
+      state1,
+      () => provider.codeVerifier()
+    );
+    const state2Verifier = await statefulProvider.runWithCodeVerifierState(
+      state2,
+      () => provider.codeVerifier()
+    );
+
+    await provider.consumeState(state1);
+    const verifier3 = `verifier-three-${crypto.randomUUID()}`;
+    const state3 = await provider.state();
+    await provider.saveCodeVerifier(verifier3);
+    await provider.redirectToAuthorization(
+      await createAuthorizationUrl(state3, verifier3)
+    );
+    const staleStateIgnoredVerifier =
+      await statefulProvider.runWithCodeVerifierState(state3, () =>
+        provider.codeVerifier()
+      );
+
+    return { state1Verifier, state2Verifier, staleStateIgnoredVerifier };
   }
 }
 
