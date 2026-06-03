@@ -1,5 +1,35 @@
 # @cloudflare/think
 
+## 0.8.1
+
+### Patch Changes
+
+- [#1657](https://github.com/cloudflare/agents/pull/1657) [`7bff8d7`](https://github.com/cloudflare/agents/commit/7bff8d74c927a53ec11ee4a89dc6cff6b63db0ad) Thanks [@threepointone](https://github.com/threepointone)! - fix(think): apply client-tool results that arrive mid-stream so they aren't dropped ([#1649](https://github.com/cloudflare/agents/issues/1649) follow-up)
+
+  The serialization fix in [#1657](https://github.com/cloudflare/agents/issues/1657) stopped parallel results from clobbering each other, but a deeper window remained: during a streaming turn the assistant message lives only in the in-flight `StreamAccumulator` until `_persistAssistantMessage` writes it at the turn boundary. The `tool-input-available` chunk is broadcast to the client mid-stream, so a fast client can resolve the tool and send `cf_agent_tool_result` before the message is ever persisted. `_applyToolUpdateToMessages` only scanned durable storage, so the apply silently no-op'd, the end-of-stream persist then wrote `input-available`, and the auto-continuation's transcript repair errored the call with "The tool call was interrupted before a result was recorded."
+
+  `_applyToolUpdateToMessages` now applies the update to the in-flight accumulator (in place, so it rides into the eventual persist) in addition to durable storage, mirroring `@cloudflare/ai-chat`'s `_streamingMessage` handling. The accumulator is exposed via `_streamingAssistant` for the duration of each streaming turn and cleared on every exit path and on `resetTurnState`. Applying to both locations is monotonic, so a stall-recovery partial persist can't downgrade an already-applied result back to `input-available`.
+
+- [#1665](https://github.com/cloudflare/agents/pull/1665) [`13d6db0`](https://github.com/cloudflare/agents/commit/13d6db042315937ed8d393775f3d576d56984f44) Thanks [@threepointone](https://github.com/threepointone)! - Avoid starting empty submission and workflow notification drains during agent startup, preventing short-lived facet initializations from leaving background keep-alive work behind.
+
+- [#1661](https://github.com/cloudflare/agents/pull/1661) [`41315b6`](https://github.com/cloudflare/agents/commit/41315b602c4d68dbd5cad99cc949fbf13e256c51) Thanks [@threepointone](https://github.com/threepointone)! - Unwedge sessions corrupted by a malformed `tool_use.input`, and make the failure observable.
+  1. **Read-side repair gap.** Transcript repair already normalized a `null`/`undefined`/stringified-JSON tool input, but left an empty string `""`, an array, and other non-object primitives untouched — so a session that persisted one of those shapes before the write-side guard shipped kept 400ing forever with `tool_use.input: Input should be an object` (Anthropic rejects array inputs the same way it rejects `""`/`null`). `_normalizeToolInput` now delegates to the shared `normalizeToolInput`, collapsing any non-object input to `{}` so the pre-send repair pass rescues the session on its next turn.
+
+  2. **Observability.** An AI-SDK provider error surfaces as a stream error part, not a thrown exception, so it took the in-band `error` branch that emitted `message:error` but never `chat:request:failed`. That branch now also emits `chat:request:failed` (`stage: "stream"`), so observers and turn-count telemetry see the post-`beforeTurn`, in-stream failure class without needing to know whether the error threw or arrived as a chunk.
+
+- [#1657](https://github.com/cloudflare/agents/pull/1657) [`7bff8d7`](https://github.com/cloudflare/agents/commit/7bff8d74c927a53ec11ee4a89dc6cff6b63db0ad) Thanks [@threepointone](https://github.com/threepointone)! - fix(think): serialize parallel client-tool result/approval applies so siblings aren't clobbered ([#1649](https://github.com/cloudflare/agents/issues/1649) follow-up)
+
+  The auto-continuation barrier added in [#1651](https://github.com/cloudflare/agents/issues/1651) stopped premature continuation, but a deeper race remained in Think. Each `tool-result`/`tool-approval` WebSocket message fired an independent read-modify-write of the whole assistant message, and `_applyToolUpdateToMessages` awaits a storage read before its write. When the model fanned out parallel tool calls, the concurrent applies all read the same `input-available` snapshot, each patched only its own part, and the last write clobbered its siblings back to `input-available`. The continuation barrier then timed out and the transcript-repair backstop errored the lost calls with "The tool call was interrupted before a result was recorded."
+
+  Applies are now chained off a serialization tail so each read-modify-write commits atomically in arrival order. `_pendingInteractionPromise` still tracks the newest link, so the barrier's single-slot wake-up transitively waits for every predecessor.
+
+  The same serialization is applied to `@cloudflare/ai-chat` defensively: its apply is currently synchronous (no await between the message read and the SQLite write), so it does not exhibit this clobber today, but the queue keeps the invariant safe if that ever changes.
+
+- [#1659](https://github.com/cloudflare/agents/pull/1659) [`f99f890`](https://github.com/cloudflare/agents/commit/f99f89022ced86115fa81f652e49ecb74340dbf2) Thanks [@threepointone](https://github.com/threepointone)! - Fix two chat-recovery failures that could leave a turn wedged at a half-finished assistant message after a deploy/eviction, with no terminal banner.
+  1. **Server-tool recovery deadlock.** When a server-side tool's `execute()` was interrupted by an eviction, the recovered turn's orphaned tool part was left at `input-available` — but no client `tool-result` will ever arrive for a server tool, so `waitUntilStable` could never converge. The recovery continuation burned its whole attempt budget on a wait that could not succeed. `waitUntilStable` now treats an `input-available` part as pending only when it is genuinely client-resolvable (a registered client tool whose result the SPA can replay, or an `approval-requested` part). A dead server-tool orphan no longer blocks stability, so recovery converges and the existing transcript-repair pass flips the orphan to an errored result and the model continues the turn.
+
+  2. **Silent seal on a thrown recovery callback.** A non-reset error thrown by `_chatRecoveryContinue` / `_chatRecoveryRetry` was re-thrown and then swallowed by the scheduler, which deleted the one-shot recovery alarm row — terminating the turn with no `onExhausted` event and no terminal banner. The recovery callbacks now terminalize a non-reset throw through the same exhaustion path (firing `onExhausted` with reason `recovery_error` and delivering the `terminalMessage`), while still re-throwing a genuine Durable Object code-update reset so the platform re-runs recovery on the fresh isolate. The terminal banner is also now broadcast before the bookkeeping storage writes in the exhaustion path, and those writes are best-effort, so a storage failure during give-up can no longer suppress the user-visible terminalization.
+
 ## 0.8.0
 
 ### Minor Changes

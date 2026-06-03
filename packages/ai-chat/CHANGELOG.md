@@ -1,5 +1,25 @@
 # @cloudflare/ai-chat
 
+## 0.8.1
+
+### Patch Changes
+
+- [#1661](https://github.com/cloudflare/agents/pull/1661) [`41315b6`](https://github.com/cloudflare/agents/commit/41315b602c4d68dbd5cad99cc949fbf13e256c51) Thanks [@threepointone](https://github.com/threepointone)! - Heal a malformed `tool_use.input` when loading persisted messages.
+
+  `AIChatAgent` delegates `convertToModelMessages` to your `onChatMessage`, so it has no framework-side pre-send pass to repair a transcript. A session that persisted a non-object tool `input` — `null`, `undefined`, `""`, an array, or a raw string — before the write-side guard shipped would therefore keep 400ing with `tool_use.input: Input should be an object` on every turn, wedged across reconnects/redeploys/evictions.
+
+  `autoTransformMessage` (run on every load) now normalizes malformed tool inputs to `{}` (parsing stringified-JSON objects, and leaving healthy object inputs untouched), so existing wedged sessions self-heal on their next load without per-DO storage surgery. Healthy messages are returned by reference, so the persistence cache stays a no-op for them.
+
+- [#1654](https://github.com/cloudflare/agents/pull/1654) [`f34cd30`](https://github.com/cloudflare/agents/commit/f34cd30253f1e808677c9621905395150503420e) Thanks [@cjol](https://github.com/cjol)! - Fix `isStreaming` staying true after aborting during server-side tool calls.
+
+- [#1657](https://github.com/cloudflare/agents/pull/1657) [`7bff8d7`](https://github.com/cloudflare/agents/commit/7bff8d74c927a53ec11ee4a89dc6cff6b63db0ad) Thanks [@threepointone](https://github.com/threepointone)! - fix(think): serialize parallel client-tool result/approval applies so siblings aren't clobbered ([#1649](https://github.com/cloudflare/agents/issues/1649) follow-up)
+
+  The auto-continuation barrier added in [#1651](https://github.com/cloudflare/agents/issues/1651) stopped premature continuation, but a deeper race remained in Think. Each `tool-result`/`tool-approval` WebSocket message fired an independent read-modify-write of the whole assistant message, and `_applyToolUpdateToMessages` awaits a storage read before its write. When the model fanned out parallel tool calls, the concurrent applies all read the same `input-available` snapshot, each patched only its own part, and the last write clobbered its siblings back to `input-available`. The continuation barrier then timed out and the transcript-repair backstop errored the lost calls with "The tool call was interrupted before a result was recorded."
+
+  Applies are now chained off a serialization tail so each read-modify-write commits atomically in arrival order. `_pendingInteractionPromise` still tracks the newest link, so the barrier's single-slot wake-up transitively waits for every predecessor.
+
+  The same serialization is applied to `@cloudflare/ai-chat` defensively: its apply is currently synchronous (no await between the message read and the SQLite write), so it does not exhibit this clobber today, but the queue keeps the invariant safe if that ever changes.
+
 ## 0.8.0
 
 ### Minor Changes

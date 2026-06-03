@@ -1,5 +1,27 @@
 # @cloudflare/agents
 
+## 0.14.1
+
+### Patch Changes
+
+- [#1659](https://github.com/cloudflare/agents/pull/1659) [`f99f890`](https://github.com/cloudflare/agents/commit/f99f89022ced86115fa81f652e49ecb74340dbf2) Thanks [@threepointone](https://github.com/threepointone)! - Recover one-shot scheduled work (alarms) killed by a `"This script has been upgraded…"` deploy/code-update, not just `"Durable Object reset because its code was updated."`.
+
+  `_executeScheduleCallback` only re-runs a one-shot schedule row after a superseded-isolate error if the error matched `/reset because its code was updated/i`. The platform also surfaces the same failure class as `"This script has been upgraded. Please send a new request to connect to the new version."` (a stub/connection to a superseded script), which fell through to the swallow-and-delete branch — the one-shot row was deleted and the work abandoned. For a queued submission this orphaned the pending row with no driver (no alarm, no retry) until something unrelated woke the Durable Object, leaving the user on an indefinite spinner.
+
+  The superseded-isolate matcher now recognizes both messages, so either causes the row to be preserved and re-run on the fresh isolate under the at-least-once alarm guarantee. `"Network connection lost."` is intentionally not included (it is a connection error that may succeed on in-process retry, not an isolate replacement).
+
+- [#1661](https://github.com/cloudflare/agents/pull/1661) [`41315b6`](https://github.com/cloudflare/agents/commit/41315b602c4d68dbd5cad99cc949fbf13e256c51) Thanks [@threepointone](https://github.com/threepointone)! - Enforce the `tool_use.input` invariant at the chat write boundary.
+
+  A streamed tool call that finishes with no `input_json_delta` events (the model called the tool with no args), or whose input surfaces as a stringified JSON blob, could persist a non-object `input` — `null`, `undefined`, `""`, an array, or a raw string. The Anthropic Messages API requires `tool_use.input` to be a JSON object and rejects every subsequent turn with `tool_use.input: Input should be an object` (verified against the live API: `{}` → 200, but `""`, `[]`, and `[{...}]` all → 400). Because the bad shape lives in durable storage, the session is wedged across reconnects, redeploys, and DO evictions.
+
+  `applyChunkToParts` (the shared accumulator used by `@cloudflare/ai-chat` and `@cloudflare/think`) now normalizes the finalized tool `input` on `tool-input-available` / `tool-input-error`: a plain object passes through untouched, a stringified-JSON object is parsed, and everything else (`null`/`undefined`/`""`/arrays/primitives/unparseable strings) collapses to `{}`. A new `normalizeToolInput` helper is exported from `agents/chat` so read-side transcript repair can enforce the same invariant.
+
+- [#1665](https://github.com/cloudflare/agents/pull/1665) [`13d6db0`](https://github.com/cloudflare/agents/commit/13d6db042315937ed8d393775f3d576d56984f44) Thanks [@threepointone](https://github.com/threepointone)! - Await Chat SDK state-agent cleanup scheduling during startup so tests and short-lived worker isolates do not leave dangling cleanup work.
+
+- [#1666](https://github.com/cloudflare/agents/pull/1666) [`01a0b35`](https://github.com/cloudflare/agents/commit/01a0b357a3fc5c7027e44e6687c898b1baeda66b) Thanks [@dcartertwo](https://github.com/dcartertwo)! - Fix MCP OAuth PKCE verifier lookup for overlapping authorization attempts.
+
+  `DurableObjectOAuthClientProvider` now binds pending PKCE verifiers to the OAuth callback state instead of storing a single verifier per client/server. Callback handling runs token exchange and verifier cleanup in the returned state's context, so older auth windows and retry churn no longer exchange an authorization code with another attempt's verifier.
+
 ## 0.14.0
 
 ### Minor Changes
