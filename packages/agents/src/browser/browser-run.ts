@@ -170,7 +170,12 @@ export async function connectBrowser(
     ws,
     normalizedOptions.timeoutMs,
     () => {
-      void deleteBrowserSession(browser, sessionId);
+      deleteBrowserSession(browser, sessionId).catch((error: unknown) => {
+        console.warn(
+          `[agents/browser] Failed to delete one-shot Browser Run session ${sessionId}`,
+          error
+        );
+      });
     },
     sessionId
   );

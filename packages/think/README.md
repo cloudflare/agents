@@ -151,8 +151,10 @@ drill-in, and cleanup patterns.
 
 Think can expose Browser Rendering through a code-mode tool. Browser sessions
 can be one-shot or reused across tool calls. Use dynamic sessions for one-shot
-by default, but allowing the agent to persist the session by calling
-`cdp.startSession()`.
+by default, while allowing the agent to persist the session by calling
+`cdp.startSession()` when it needs tabs, cookies, local storage, or navigation
+history across multiple calls. Use reuse mode only when every browser command
+should share state from the start.
 
 ```ts
 import { Think } from "@cloudflare/think";
@@ -182,7 +184,8 @@ export class Assistant extends Think<Env> {
 For login, MFA, CAPTCHA, or other human handoff flows, call
 `cdp.sessionInfo()` and share the page target's `devtoolsFrontendUrl` with the
 user. When browsing is done, call `cdp.closeSession()` so Browser Run does not
-stay alive until its inactivity timeout.
+stay alive until its inactivity timeout. Also close persistent sessions when a
+chat is deleted, cleared, or the user signs out.
 
 ## Built-in workspace
 

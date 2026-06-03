@@ -145,27 +145,36 @@ proxy that forwards every call to `AssistantDirectory.workspace` over
 a DO RPC hop:
 
 ```ts
+import { createBrowserProvider } from "@cloudflare/think/tools/browser";
 import {
-  createBrowserProvider,
+  createBrowserSessionManager,
   DurableBrowserSessionStore
-} from "@cloudflare/think/tools/browser";
+} from "agents/browser";
 
 class MyAssistant extends Think<Env> {
   override workspace: WorkspaceFsLike = new SharedWorkspace(this);
+
+  private browserProviderOptions() {
+    return {
+      browser: this.env.BROWSER,
+      session: {
+        mode: "dynamic" as const,
+        key: "default",
+        store: new DurableBrowserSessionStore(this.ctx.storage),
+        keepAliveMs: 600_000
+      }
+    };
+  }
+
+  async closeBrowserSession() {
+    await createBrowserSessionManager(this.browserProviderOptions()).close();
+  }
 
   getTools() {
     return {
       execute: createExecuteTool({
         tools: createWorkspaceTools(this.workspace),
-        providers: [
-          createBrowserProvider({
-            browser: this.env.BROWSER,
-            session: {
-              mode: "dynamic",
-              store: new DurableBrowserSessionStore(this.ctx.storage)
-            }
-          })
-        ],
+        providers: [createBrowserProvider(this.browserProviderOptions())],
         // state.* in the sandbox also hits the shared workspace,
         // because SharedWorkspace satisfies WorkspaceFsLike.
         state: createWorkspaceStateBackend(this.workspace),
@@ -187,6 +196,10 @@ class SharedWorkspace implements WorkspaceFsLike {
   //    lstat / mkdir / readDir / rm / cp / mv / symlink / readlink / glob
 }
 ```
+
+The app calls `closeBrowserSession()` when clearing a chat, deleting a chat,
+or signing out, so persistent Browser Run sessions do not stay open until
+their inactivity timeout.
 
 The proxy satisfies `@cloudflare/shell`'s `WorkspaceFsLike` interface,
 which is a strict superset of `@cloudflare/think`'s `WorkspaceLike`.

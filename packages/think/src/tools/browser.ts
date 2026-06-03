@@ -2,9 +2,11 @@ import type { ToolSet } from "ai";
 import {
   createBrowserExecutor,
   createBrowserProvider,
+  createBrowserSessionManager,
   DurableBrowserSessionStore,
   type BrowserProvider,
   type BrowserProviderOptions,
+  type BrowserSessionManager,
   type BrowserSessionInfo,
   type BrowserSessionOptions,
   type BrowserSessionStore,
@@ -18,9 +20,11 @@ export type CreateBrowserToolsOptions = BrowserToolsOptions;
 
 export {
   createBrowserProvider,
+  createBrowserSessionManager,
   DurableBrowserSessionStore,
   type BrowserProvider,
   type BrowserProviderOptions,
+  type BrowserSessionManager,
   type BrowserSessionInfo,
   type BrowserSessionOptions,
   type BrowserSessionStore,

@@ -314,7 +314,13 @@ This adds a browser code-mode tool to your agent:
 
 The tool uses the code-mode pattern — the model writes JavaScript async arrow functions that run in a sandboxed Worker isolate. The sandbox has access to `cdp.spec()` for protocol discovery, plus `cdp.send()`, `cdp.attachToTarget()`, and debug log helpers for live browser commands.
 
-By default, each `browser_execute` call opens a fresh browser session and closes it when the code finishes. `createBrowserTools` also accepts the same session options as `agents/browser`, including `{ mode: "reuse", store }` and `{ mode: "dynamic", store }`. Reusable and dynamic sessions expose `cdp.startSession()`, `cdp.sessionInfo()`, `cdp.closeSession()`, and `cdp.resetSession()` inside the sandbox. Dynamic mode remains one-shot until the code calls `cdp.startSession()`.
+By default, each `browser_execute` call opens a fresh browser session and closes it when the code finishes. `createBrowserTools` also accepts the same session options as `agents/browser`, including `{ mode: "dynamic", store }` and `{ mode: "reuse", store }`. Dynamic mode is the recommended default for agents: browser calls stay one-shot until the model calls `cdp.startSession()`, then later calls reuse that Browser Run session until `cdp.closeSession()`. Use reuse mode only when every browser command should share state from the start.
+
+Reusable and dynamic sessions expose `cdp.startSession()`, `cdp.sessionInfo()`, `cdp.closeSession()`, and `cdp.resetSession()` inside the sandbox. `cdp.sessionInfo()` returns target metadata, including Browser Run Live View URLs when available. Surface those URLs as user-facing buttons for login, MFA, CAPTCHA, or other manual browser steps, then let the agent inspect the page again after the user finishes.
+
+Close persistent browser sessions when the user deletes or clears a chat, signs out, resets the agent, or finishes the browsing task. Browser Run closes idle sessions after 60 seconds by default; `keepAliveMs` can request up to 10 minutes of inactivity. Persistent Browser Sessions count toward Browser Run browser-hours and concurrent-browser usage until they are closed or idle-expire.
+
+For UI controls outside the model loop, import `createBrowserSessionManager` and `DurableBrowserSessionStore` from `agents/browser`. The manager exposes `start()`, `info()`, `reset()`, and `close()` so server-side app code can render browser status, show an "Open Live View" action, or close sessions during chat lifecycle events.
 
 For page-scoped CDP commands (`Page.*`, `Runtime.*`, `DOM.*`), the model must create a target, attach to it, and pass the `sessionId`.
 

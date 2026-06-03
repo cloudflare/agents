@@ -1,7 +1,10 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest, callable } from "agents";
 import { createBrowserTools } from "agents/browser/ai";
-import { DurableBrowserSessionStore } from "agents/browser";
+import {
+  createBrowserSessionManager,
+  DurableBrowserSessionStore
+} from "agents/browser";
 import {
   AIChatAgent,
   type OnChatMessageOptions,
@@ -34,6 +37,19 @@ export class ChatAgent extends AIChatAgent {
 
   private _proactiveScheduled = false;
 
+  private _browserToolsOptions() {
+    return {
+      browser: this.env.BROWSER,
+      loader: this.env.LOADER,
+      session: {
+        mode: "dynamic" as const,
+        key: "default",
+        store: new DurableBrowserSessionStore(this.ctx.storage),
+        keepAliveMs: 600_000
+      }
+    };
+  }
+
   // Wait for MCP connections to restore after hibernation before processing messages
   waitForMcpConnections = true;
 
@@ -65,18 +81,14 @@ export class ChatAgent extends AIChatAgent {
     await this.removeMcpServer(serverId);
   }
 
+  @callable()
+  async closeBrowserSession() {
+    await createBrowserSessionManager(this._browserToolsOptions()).close();
+  }
+
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     const mcpTools = this.mcp.getAITools();
-    const browserTools = createBrowserTools({
-      browser: this.env.BROWSER,
-      loader: this.env.LOADER,
-      session: {
-        mode: "dynamic",
-        key: "default",
-        store: new DurableBrowserSessionStore(this.ctx.storage),
-        keepAliveMs: 600_000
-      }
-    });
+    const browserTools = createBrowserTools(this._browserToolsOptions());
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({

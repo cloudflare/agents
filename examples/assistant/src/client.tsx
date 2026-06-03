@@ -63,6 +63,7 @@ import {
   SunIcon,
   InfoIcon,
   ArrowsClockwiseIcon,
+  BrowserIcon,
   CaretLeftIcon,
   CaretRightIcon,
   FolderOpenIcon,
@@ -99,6 +100,19 @@ type ViewedWorkspaceFile =
       mimeType?: string;
     };
 
+type BrowserTargetInfo = {
+  id: string;
+  type?: string;
+  url?: string;
+  title?: string;
+  devtoolsFrontendUrl?: string;
+};
+
+type BrowserSessionInfo = {
+  sessionId: string;
+  targets?: BrowserTargetInfo[];
+};
+
 const imageExtensions = new Set([
   "avif",
   "gif",
@@ -123,6 +137,14 @@ function parentWorkspacePath(path: string): string {
   if (path === "/") return "/";
   const parent = path.split("/").slice(0, -1).join("/");
   return parent || "/";
+}
+
+function isBrowserSessionChangeMessage(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { type?: unknown }).type === "browser-session-change"
+  );
 }
 import { useChats } from "./use-chats";
 import type { ChatSummary } from "./server";
@@ -249,6 +271,13 @@ function Chat({
     null
   );
 
+  const [showBrowserPanel, setShowBrowserPanel] = useState(false);
+  const browserPanelRef = useRef<HTMLDivElement>(null);
+  const [browserSession, setBrowserSession] =
+    useState<BrowserSessionInfo | null>(null);
+  const [isLoadingBrowserSession, setIsLoadingBrowserSession] = useState(false);
+  const [browserRevision, setBrowserRevision] = useState(0);
+
   const [showExtensionsPanel, setShowExtensionsPanel] = useState(false);
   const extensionsPanelRef = useRef<HTMLDivElement>(null);
   const [extensions, setExtensions] = useState<
@@ -277,6 +306,18 @@ function Chat({
     sub: [{ agent: "MyAssistant", name: chatId }],
     onOpen: useCallback(() => setConnectionStatus("connected"), []),
     onClose: useCallback(() => setConnectionStatus("disconnected"), []),
+    onMessage: useCallback((message: MessageEvent) => {
+      if (typeof message.data !== "string") return;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(message.data);
+      } catch {
+        return;
+      }
+      if (isBrowserSessionChangeMessage(parsed)) {
+        setBrowserRevision((n) => n + 1);
+      }
+    }, []),
     onError: useCallback(
       (error: Event) => console.error("WebSocket error:", error),
       []
@@ -310,6 +351,20 @@ function Chat({
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [showFilesPanel]);
+
+  useEffect(() => {
+    if (!showBrowserPanel) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (
+        browserPanelRef.current &&
+        !browserPanelRef.current.contains(e.target as Node)
+      ) {
+        setShowBrowserPanel(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showBrowserPanel]);
 
   useEffect(() => {
     if (!showExtensionsPanel) return;
@@ -350,6 +405,29 @@ function Chat({
     },
     [agent, workspacePath]
   );
+
+  const refreshBrowserSession = useCallback(async () => {
+    setIsLoadingBrowserSession(true);
+    try {
+      const info = await agent.call("browserSessionInfo", []);
+      setBrowserSession(info as BrowserSessionInfo | null);
+    } catch (err) {
+      console.error("Failed to load browser session:", err);
+      setBrowserSession(null);
+    } finally {
+      setIsLoadingBrowserSession(false);
+    }
+  }, [agent]);
+
+  useEffect(() => {
+    if (connectionStatus !== "connected") return;
+    void refreshBrowserSession();
+  }, [connectionStatus, refreshBrowserSession]);
+
+  useEffect(() => {
+    if (browserRevision === 0) return;
+    void refreshBrowserSession();
+  }, [browserRevision, refreshBrowserSession]);
 
   // Live-refresh the file browser when the shared workspace changes in
   // another chat (or this one). `workspaceRevision` is incremented by
@@ -485,11 +563,16 @@ function Chat({
   }, [lastMessageId, isStreaming, fetchBranches, messages]);
 
   // Clear branch state on history clear
-  const handleClearHistory = useCallback(() => {
+  const handleClearHistory = useCallback(async () => {
     clearError();
+    try {
+      await agent.call("closeBrowserSession", []);
+    } catch (err) {
+      console.error("Failed to close browser session:", err);
+    }
     clearHistory();
     setBranches(new Map());
-  }, [clearError, clearHistory]);
+  }, [agent, clearError, clearHistory]);
 
   const handleRegenerate = useCallback(() => {
     if (isStreaming) return;
@@ -519,6 +602,33 @@ function Chat({
     clearError();
     sendMessage({ role: "user", parts: [{ type: "text", text }] });
   }, [input, isStreaming, sendMessage, clearError]);
+
+  const handleCloseBrowserSession = useCallback(async () => {
+    try {
+      await agent.call("closeBrowserSession", []);
+      setBrowserSession(null);
+    } catch (err) {
+      console.error("Failed to close browser session:", err);
+    }
+  }, [agent]);
+
+  const handleCloseBrowserTarget = useCallback(
+    async (targetId: string) => {
+      try {
+        await agent.call("closeBrowserTarget", [targetId]);
+        await refreshBrowserSession();
+      } catch (err) {
+        console.error("Failed to close browser target:", err);
+      }
+    },
+    [agent, refreshBrowserSession]
+  );
+
+  const browserTargets = browserSession?.targets ?? [];
+  const browserPageTargets = browserTargets.filter(
+    (target) => target.type === "page" || target.devtoolsFrontendUrl
+  );
+  const activeBrowserSessionCount = browserSession ? 1 : 0;
 
   return (
     <div className="flex flex-col h-full bg-kumo-elevated min-w-0">
@@ -889,6 +999,166 @@ function Chat({
                             </button>
                           ))}
                         </div>
+                      </div>
+                    )}
+                  </Surface>
+                </div>
+              )}
+            </div>
+            <div className="relative" ref={browserPanelRef}>
+              <Button
+                variant="secondary"
+                shape="square"
+                aria-label="Browser sessions"
+                icon={<BrowserIcon size={16} />}
+                onClick={() => {
+                  const next = !showBrowserPanel;
+                  setShowBrowserPanel(next);
+                  if (next) void refreshBrowserSession();
+                }}
+              />
+              {activeBrowserSessionCount > 0 && (
+                <span className="pointer-events-none absolute -right-1.5 -top-1.5 z-10 min-w-4 rounded-full bg-orange-500 px-1 text-center text-[10px] font-semibold leading-4 text-white shadow-sm ring-2 ring-kumo-base">
+                  {activeBrowserSessionCount}
+                </span>
+              )}
+              {showBrowserPanel && (
+                <div className="absolute right-0 top-full mt-2 w-80 sm:w-96 z-50">
+                  <Surface className="rounded-xl ring ring-kumo-line shadow-lg p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <BrowserIcon size={16} className="text-kumo-accent" />
+                        <Text size="sm" bold>
+                          Browser
+                        </Text>
+                        {browserSession && (
+                          <Badge variant="secondary">
+                            {browserPageTargets.length}
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          shape="square"
+                          aria-label="Refresh browser sessions"
+                          icon={<ArrowsClockwiseIcon size={14} />}
+                          onClick={() => void refreshBrowserSession()}
+                          disabled={isLoadingBrowserSession}
+                        />
+                        {browserSession && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            shape="square"
+                            aria-label="Close browser session"
+                            icon={
+                              <TrashIcon
+                                size={14}
+                                className="text-kumo-danger"
+                              />
+                            }
+                            onClick={() => void handleCloseBrowserSession()}
+                          />
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          shape="square"
+                          aria-label="Close browser panel"
+                          icon={<XIcon size={14} />}
+                          onClick={() => setShowBrowserPanel(false)}
+                        />
+                      </div>
+                    </div>
+
+                    {isLoadingBrowserSession ? (
+                      <span className="text-xs text-kumo-subtle block">
+                        Checking Browser Run session...
+                      </span>
+                    ) : !browserSession ? (
+                      <span className="text-xs text-kumo-subtle block">
+                        No active browser session. Ask the assistant to keep a
+                        browser open, or start a browsing task that needs login
+                        or page state.
+                      </span>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="rounded-lg bg-kumo-elevated px-3 py-2">
+                          <span className="text-[10px] uppercase tracking-wider text-kumo-inactive block mb-0.5">
+                            Session
+                          </span>
+                          <span className="text-xs font-mono text-kumo-subtle break-all">
+                            {browserSession.sessionId}
+                          </span>
+                        </div>
+
+                        {browserPageTargets.length === 0 ? (
+                          <span className="text-xs text-kumo-subtle block">
+                            This session has no page targets yet. Refresh after
+                            the assistant opens a page.
+                          </span>
+                        ) : (
+                          <div className="space-y-2 max-h-60 overflow-y-auto">
+                            {browserPageTargets.map((target) => (
+                              <div
+                                key={target.id}
+                                className="rounded-lg border border-kumo-line p-2.5 space-y-2"
+                              >
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2">
+                                    <Badge variant="secondary">
+                                      {target.type ?? "target"}
+                                    </Badge>
+                                    <span className="text-sm text-kumo-default truncate">
+                                      {target.title || "Untitled page"}
+                                    </span>
+                                  </div>
+                                  {target.url && (
+                                    <span className="text-xs font-mono text-kumo-subtle truncate block mt-1">
+                                      {target.url}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <Button
+                                    variant="primary"
+                                    size="sm"
+                                    icon={<BrowserIcon size={12} />}
+                                    disabled={!target.devtoolsFrontendUrl}
+                                    onClick={() => {
+                                      if (target.devtoolsFrontendUrl) {
+                                        window.open(
+                                          target.devtoolsFrontendUrl,
+                                          "browser-live-view",
+                                          "noopener,noreferrer"
+                                        );
+                                      }
+                                    }}
+                                  >
+                                    Open Live View
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    shape="square"
+                                    aria-label="Close browser tab"
+                                    icon={
+                                      <XIcon
+                                        size={14}
+                                        className="text-kumo-danger"
+                                      />
+                                    }
+                                    onClick={() =>
+                                      void handleCloseBrowserTarget(target.id)
+                                    }
+                                  />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )}
                   </Surface>
@@ -1807,11 +2077,16 @@ function MultiChatApp({
 
   const handleSignOut = useCallback(async () => {
     try {
+      await directory.call("closeBrowserSessions", []);
+    } catch (err) {
+      console.error("Failed to close browser sessions:", err);
+    }
+    try {
       await signOut();
     } finally {
       onSignOut();
     }
-  }, [onSignOut]);
+  }, [directory, onSignOut]);
 
   return (
     <div className="flex h-screen bg-kumo-elevated">

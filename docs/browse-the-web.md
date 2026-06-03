@@ -56,7 +56,7 @@ const browserTools = createBrowserTools({
 
 If you need to connect to a custom CDP endpoint instead of the Browser Rendering binding, pass `cdpUrl`.
 
-For agent-controlled persistent sessions, pass `session: { mode: "dynamic", store }`. Until the model calls `cdp.startSession()` inside `browser_execute`, browser calls stay one-shot.
+For agent-controlled persistent sessions, pass `session: { mode: "dynamic", store }`. Until the model calls `cdp.startSession()` inside `browser_execute`, browser calls stay one-shot. This is the recommended mode for most agents because the model only keeps a browser open when the task needs tabs, cookies, local storage, or navigation history to persist across calls.
 
 ### 3. Use with streamText
 
@@ -164,8 +164,8 @@ const stream = chat({
 
 - `cdp.spec()` fetches the live CDP protocol from the browser's `/json/protocol` endpoint and caches it briefly.
 - `browser_execute` opens a fresh browser session for the call, exposes a small `cdp` helper API to sandboxed code, and closes the session when execution finishes.
-- With `session.mode: "reuse"`, every `browser_execute` call uses a reusable Browser Run session until `cdp.closeSession()` is called.
-- With `session.mode: "dynamic"`, `browser_execute` is one-shot until the model calls `cdp.startSession()`; subsequent calls reuse that Browser Run session until `cdp.closeSession()` is called.
+- With `session.mode: "dynamic"`, `browser_execute` is one-shot until the model calls `cdp.startSession()`; subsequent calls reuse that Browser Run session until `cdp.closeSession()` is called. Use this for agent chats and assistants.
+- With `session.mode: "reuse"`, every `browser_execute` call uses a reusable Browser Run session until `cdp.closeSession()` is called. Use this when the app always wants browser state to persist from the first browser command.
 - LLM-generated code runs in a Worker sandbox. CDP traffic stays in the host worker.
 
 ## CDP helper API
@@ -210,6 +210,25 @@ When `session.mode` is `"reuse"` or `"dynamic"`, `browser_execute` also exposes 
 
 Use `cdp.closeSession()` when persistent browsing is complete to release Browser Run resources.
 
+### Live View UI pattern
+
+For human-in-the-loop browser tasks, return a Live View URL as a user-facing action rather than relying on the model to describe it in text:
+
+```javascript
+async () => {
+  await cdp.startSession();
+  const info = await cdp.sessionInfo();
+  const page = info.targets?.find((target) => target.type === "page");
+  return {
+    button: page?.devtoolsFrontendUrl
+      ? { url: page.devtoolsFrontendUrl, text: "Open Live View" }
+      : undefined
+  };
+};
+```
+
+After the user completes login, MFA, CAPTCHA, or sensitive input in Live View, the agent can call `browser_execute` again to inspect the page and continue. If the Live View URL is no longer usable, call `cdp.sessionInfo()` again to fetch fresh target metadata from Browser Run.
+
 ## Configuration
 
 ### `createBrowserTools(options)`
@@ -230,6 +249,46 @@ Either `browser` or `cdpUrl` must be provided.
 `session` defaults to `{ mode: "one-shot" }`, which opens a fresh browser for each execution. Persistent Browser Run sessions use `{ mode: "reuse", store }` or `{ mode: "dynamic", store }`, where `store` is a `BrowserSessionStore`. Use `new DurableBrowserSessionStore(this.ctx.storage)` inside an Agent or Durable Object to persist the Browser Run session id. You can also pass `key` to isolate users or workflows and `keepAliveMs` to request a Browser Run inactivity timeout.
 
 Reusable and dynamic sessions require the Browser Rendering `browser` binding. They are not supported with `cdpUrl`, because custom CDP endpoints are externally managed.
+
+### Manual session management
+
+Apps that need browser controls outside the chat can manage the same session directly from server code:
+
+```ts
+import {
+  createBrowserSessionManager,
+  DurableBrowserSessionStore
+} from "agents/browser";
+
+const browserSessions = createBrowserSessionManager({
+  browser: env.BROWSER,
+  session: {
+    mode: "dynamic",
+    key: chatId,
+    store: new DurableBrowserSessionStore(ctx.storage),
+    keepAliveMs: 600_000
+  }
+});
+
+const info = await browserSessions.info();
+await browserSessions.close();
+```
+
+Use `info()` to render a browser status panel or an "Open Live View" button, `start()` to proactively open a browser, `reset()` to clear browser state, and `close()` when the task, chat, or user session ends.
+
+### Cleanup and limits
+
+Reusable sessions keep the Browser Run browser alive after a `browser_execute` call finishes. Browser Run closes idle sessions after 60 seconds by default. `keepAliveMs` requests a longer inactivity timeout, up to the Browser Run maximum of 10 minutes.
+
+Close persistent sessions explicitly when:
+
+- the user is done browsing
+- the user deletes or clears a chat
+- the user signs out
+- the app resets agent state
+- the task no longer needs cookies, local storage, open tabs, or navigation history
+
+Browser Sessions count toward Browser Run browser-hours and concurrent-browser usage. Leaving sessions open can increase usage until Browser Run closes them for inactivity. One-shot mode closes sessions automatically after each tool call, so it is the safest default when persistence is not required.
 
 ### Raw access
 

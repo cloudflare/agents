@@ -96,10 +96,11 @@ import {
   handleLogout
 } from "./auth";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
+import { createBrowserProvider } from "@cloudflare/think/tools/browser";
 import {
-  createBrowserProvider,
+  createBrowserSessionManager,
   DurableBrowserSessionStore
-} from "@cloudflare/think/tools/browser";
+} from "agents/browser";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { createExtensionTools } from "@cloudflare/think/tools/extensions";
 import { createCompactFunction } from "agents/experimental/memory/utils";
@@ -335,6 +336,11 @@ export class AssistantDirectory extends Agent<Env, DirectoryState> {
 
   @callable()
   async deleteChat(id: string): Promise<void> {
+    if (this.hasSubAgent(MyAssistant, id)) {
+      const chat = await this.subAgent(MyAssistant, id);
+      await chat.closeBrowserSession();
+    }
+
     // Wipe the facet (idempotent — safe if already gone), then drop
     // its metadata. Order doesn't matter for correctness since the
     // registry is authoritative, but we do the facet first so a crash
@@ -342,6 +348,16 @@ export class AssistantDirectory extends Agent<Env, DirectoryState> {
     await this.deleteSubAgent(MyAssistant, id);
     this.sql`DELETE FROM chat_meta WHERE id = ${id}`;
     this._refreshState();
+  }
+
+  @callable()
+  async closeBrowserSessions(): Promise<void> {
+    await Promise.all(
+      this.listSubAgents(MyAssistant).map(async ({ name }) => {
+        const chat = await this.subAgent(MyAssistant, name);
+        await chat.closeBrowserSession();
+      })
+    );
   }
 
   /**
@@ -803,6 +819,22 @@ export class MyAssistant extends Think<Env> {
   chatRecovery = true;
   extensionLoader = this.env.LOADER;
 
+  private _browserProviderOptions() {
+    return {
+      browser: this.env.BROWSER,
+      session: {
+        mode: "dynamic" as const,
+        key: "default",
+        store: new DurableBrowserSessionStore(this.ctx.storage),
+        keepAliveMs: 600_000
+      }
+    };
+  }
+
+  private _broadcastBrowserSessionChange(): void {
+    this.broadcast(JSON.stringify({ type: "browser-session-change" }));
+  }
+
   /**
    * Override Think's default per-chat workspace with a proxy into the
    * shared `AssistantDirectory.workspace`. This class field runs in the
@@ -903,17 +935,7 @@ When you learn something about the user or their project, save it to memory.`
     return {
       execute: createExecuteTool({
         tools: createWorkspaceTools(this.workspace),
-        providers: [
-          createBrowserProvider({
-            browser: this.env.BROWSER,
-            session: {
-              mode: "dynamic",
-              key: "default",
-              store: new DurableBrowserSessionStore(this.ctx.storage),
-              keepAliveMs: 600_000
-            }
-          })
-        ],
+        providers: [createBrowserProvider(this._browserProviderOptions())],
         // `state.*` inside the sandbox is backed by the SHARED workspace
         // too — `createWorkspaceStateBackend` accepts our `SharedWorkspace`
         // proxy because it satisfies the `WorkspaceFsLike` interface from
@@ -1011,6 +1033,10 @@ When you learn something about the user or their project, save it to memory.`
         ctx.error
       );
     }
+
+    if (ctx.toolName === "execute") {
+      this._broadcastBrowserSessionChange();
+    }
   }
 
   onStepFinish(ctx: StepContext): void {
@@ -1090,6 +1116,40 @@ When you learn something about the user or their project, save it to memory.`
   @callable()
   currentConfig() {
     return this.getConfig<AgentConfig>();
+  }
+
+  @callable()
+  async closeBrowserSession() {
+    await createBrowserSessionManager(this._browserProviderOptions()).close();
+    this._broadcastBrowserSessionChange();
+  }
+
+  @callable()
+  async browserSessionInfo() {
+    return (
+      (await createBrowserSessionManager(
+        this._browserProviderOptions()
+      ).info()) ?? null
+    );
+  }
+
+  @callable()
+  async closeBrowserTarget(targetId: string) {
+    const manager = createBrowserSessionManager(this._browserProviderOptions());
+    const info = await manager.info();
+    if (!info?.targets?.some((target) => target.id === targetId)) {
+      return { status: "not-found" };
+    }
+
+    const lease = await manager.acquire();
+    try {
+      await lease.session.send("Target.closeTarget", { targetId });
+    } finally {
+      await lease.release();
+    }
+
+    this._broadcastBrowserSessionChange();
+    return { status: "closed" };
   }
 
   @callable()

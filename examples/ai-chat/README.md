@@ -8,6 +8,7 @@ A complete chat application built with `@cloudflare/ai-chat` showcasing the reco
 
 - `toUIMessageStreamResponse()` -- the simplest streaming pattern
 - Browser Rendering tools via `agents/browser/ai`, including dynamic Browser Run sessions
+- Browser session cleanup when chat history is cleared
 - Server-side tools with `execute` (weather lookup)
 - Client-side tools without `execute` (browser timezone)
 - Tool approval with `needsApproval` (calculation with amount threshold)
@@ -48,3 +49,5 @@ Recent Wrangler releases run the Browser Rendering binding locally, so no separa
 - Have a long conversation -- old tool calls are pruned from LLM context automatically
 
 Rich browser results expect `browser_execute` code to return `{ image?: string, button?: { url: string, text: string } }`. Use `image` for screenshot data URLs and `button` for links such as Browser Run Live View handoff URLs.
+
+The Clear button calls `closeBrowserSession()` before clearing history so persistent Browser Run sessions do not stay open until their inactivity timeout.

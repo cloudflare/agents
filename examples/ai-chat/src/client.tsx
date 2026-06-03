@@ -263,6 +263,15 @@ function Chat() {
     sendMessage({ role: "user", parts: [{ type: "text", text }] });
   }, [input, isStreaming, sendMessage]);
 
+  const handleClear = useCallback(async () => {
+    try {
+      await agent.call("closeBrowserSession", []);
+    } catch (e) {
+      console.error("Failed to close browser session:", e);
+    }
+    clearHistory();
+  }, [agent, clearHistory]);
+
   return (
     <div className="flex flex-col h-screen bg-kumo-elevated">
       {/* Header */}
@@ -448,7 +457,7 @@ function Chat() {
             <Button
               variant="secondary"
               icon={<TrashIcon size={16} />}
-              onClick={clearHistory}
+              onClick={handleClear}
             >
               Clear
             </Button>

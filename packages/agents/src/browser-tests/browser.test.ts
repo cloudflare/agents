@@ -397,6 +397,125 @@ describe("browser tools e2e", () => {
       expect(JSON.parse(closeResult.text)).toEqual({ status: "closed" });
     });
 
+    it("should preserve page state across reusable browser_execute calls", async () => {
+      const marker = `persistent-${crypto.randomUUID()}`;
+      const createResult = (await callAgent("testExecuteReuse", [
+        `async () => {
+          await cdp.startSession();
+          const { targetId } = await cdp.send("Target.createTarget", {
+            url: ${JSON.stringify(`data:text/html,<title>${marker}</title><h1>${marker}</h1>`)}
+          });
+          const sessionId = await cdp.attachToTarget(targetId);
+          await cdp.send("Runtime.enable", {}, { sessionId });
+          await cdp.send("Runtime.evaluate", {
+            expression: "window.__persistentMarker = document.title"
+          }, { sessionId });
+          return { targetId };
+        }`
+      ])) as { text: string; isError?: boolean };
+
+      expect(createResult.isError).toBeFalsy();
+      const { targetId } = JSON.parse(createResult.text) as {
+        targetId: string;
+      };
+
+      const observeResult = (await callAgent("testExecuteReuse", [
+        `async () => {
+          const sessionId = await cdp.attachToTarget(${JSON.stringify(targetId)});
+          const { result } = await cdp.send("Runtime.evaluate", {
+            expression: "window.__persistentMarker",
+            returnByValue: true
+          }, { sessionId });
+          return { marker: result.value };
+        }`
+      ])) as { text: string; isError?: boolean };
+
+      expect(observeResult.isError).toBeFalsy();
+      expect(JSON.parse(observeResult.text)).toEqual({ marker });
+
+      await callAgent("testExecuteReuse", [
+        "async () => await cdp.closeSession()"
+      ]);
+    });
+
+    it("should clear reusable browser state when closing the session", async () => {
+      const createResult = (await callAgent("testExecuteReuse", [
+        `async () => {
+          await cdp.startSession();
+          const { targetId } = await cdp.send("Target.createTarget", {
+            url: "data:text/html,<title>closed-session-state</title>"
+          });
+          return { targetId };
+        }`
+      ])) as { text: string; isError?: boolean };
+
+      expect(createResult.isError).toBeFalsy();
+      const { targetId } = JSON.parse(createResult.text) as {
+        targetId: string;
+      };
+
+      const closeResult = (await callAgent("testExecuteReuse", [
+        "async () => await cdp.closeSession()"
+      ])) as { text: string; isError?: boolean };
+
+      expect(closeResult.isError).toBeFalsy();
+      expect(JSON.parse(closeResult.text)).toEqual({ status: "closed" });
+
+      const infoResult = (await callAgent("testExecuteReuse", [
+        "async () => await cdp.sessionInfo()"
+      ])) as { text: string; isError?: boolean };
+
+      expect(infoResult.isError).toBeFalsy();
+      expect(JSON.parse(infoResult.text)).toEqual({ status: "none" });
+
+      const attachOldTargetResult = (await callAgent("testExecuteReuse", [
+        `async () => await cdp.attachToTarget(${JSON.stringify(targetId)})`
+      ])) as { text: string; isError?: boolean };
+
+      expect(attachOldTargetResult.isError).toBe(true);
+
+      await callAgent("testExecuteReuse", [
+        "async () => await cdp.closeSession()"
+      ]);
+    });
+
+    it("should create a fresh reusable browser when resetting the session", async () => {
+      const createResult = (await callAgent("testExecuteReuse", [
+        `async () => {
+          const start = await cdp.startSession();
+          const { targetId } = await cdp.send("Target.createTarget", {
+            url: "data:text/html,<title>reset-session-state</title>"
+          });
+          return { sessionId: start.sessionId, targetId };
+        }`
+      ])) as { text: string; isError?: boolean };
+
+      expect(createResult.isError).toBeFalsy();
+      const created = JSON.parse(createResult.text) as {
+        sessionId: string;
+        targetId: string;
+      };
+
+      const resetResult = (await callAgent("testExecuteReuse", [
+        "async () => await cdp.resetSession()"
+      ])) as { text: string; isError?: boolean };
+
+      expect(resetResult.isError).toBeFalsy();
+      const reset = JSON.parse(resetResult.text) as { sessionId: string };
+      expect(reset.sessionId).toBeTruthy();
+      expect(reset.sessionId).not.toBe(created.sessionId);
+
+      const attachOldTargetResult = (await callAgent("testExecuteReuse", [
+        `async () => await cdp.attachToTarget(${JSON.stringify(created.targetId)})`
+      ])) as { text: string; isError?: boolean };
+
+      expect(attachOldTargetResult.isError).toBe(true);
+
+      await callAgent("testExecuteReuse", [
+        "async () => await cdp.closeSession()"
+      ]);
+    });
+
     it("should let dynamic sessions start from the cdp provider", async () => {
       const noSessionResult = (await callAgent("testExecuteDynamic", [
         "async () => await cdp.sessionInfo()"
