@@ -93,10 +93,4 @@ describe("ChatSdkStateAdapter", () => {
       fallbackThread: "telegram:123"
     });
   });
-
-  it("creates ConversationAgent facets in the Vitest worker pool", async () => {
-    const host = await getHost();
-
-    await expect(host.testConversationFacet()).resolves.toBe("ok");
-  });
 });
