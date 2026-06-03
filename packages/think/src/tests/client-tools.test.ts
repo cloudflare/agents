@@ -1210,6 +1210,19 @@ describe("Think — auto-continuation", () => {
     expect(inputStreaming.afterStreamCleared).toBe(false);
   });
 
+  it("keeps the barrier closed for multiple unmaterialized slow siblings (#1649)", async () => {
+    // Mirrors the customer report: one fast tool settles while several slow RPC
+    // client tools are still represented by raw live accumulator parts.
+    const agent = await freshAgent();
+    const result =
+      await agent.detectsMidBatchInStreamingAccumulatorWithPendingSiblings(
+        "stateless",
+        3
+      );
+    expect(result.whileStreaming).toBe(true);
+    expect(result.afterStreamCleared).toBe(false);
+  });
+
   it("does not error a slow client tool when a fast sibling auto-continues mid-stream (#1649)", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

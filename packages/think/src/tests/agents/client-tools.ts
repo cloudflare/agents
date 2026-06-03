@@ -674,6 +674,23 @@ export class ThinkClientToolsAgent extends Think {
     whileStreaming: boolean;
     afterStreamCleared: boolean;
   }> {
+    return this.detectsMidBatchInStreamingAccumulatorWithPendingSiblings(
+      pendingState,
+      1
+    );
+  }
+
+  async detectsMidBatchInStreamingAccumulatorWithPendingSiblings(
+    pendingState:
+      | "input-available"
+      | "approval-requested"
+      | "input-streaming"
+      | "stateless",
+    pendingCount: number
+  ): Promise<{
+    whileStreaming: boolean;
+    afterStreamCleared: boolean;
+  }> {
     const internal = this as unknown as {
       _streamingAssistant: StreamAccumulator | null;
       _hasIncompleteToolBatch(): boolean;
@@ -689,13 +706,13 @@ export class ThinkClientToolsAgent extends Think {
           input: { action: "fast" },
           output: "fast output"
         },
-        {
+        ...Array.from({ length: pendingCount }, (_, i) => ({
           type: "tool-client_action",
-          toolCallId: "tc-slow",
+          toolCallId: `tc-slow-${i}`,
           toolName: "client_action",
           ...(pendingState === "stateless" ? {} : { state: pendingState }),
-          input: { action: "slow" }
-        }
+          input: { action: "slow", index: i }
+        }))
       ] as unknown as UIMessage["parts"]
     });
 
