@@ -1,4 +1,8 @@
-import type { WorkflowEvent, WorkflowSleepDuration } from "cloudflare:workers";
+import type {
+  WorkflowEvent,
+  WorkflowSleepDuration,
+  WorkflowStepEvent
+} from "cloudflare:workers";
 import {
   AgentWorkflow,
   type AgentWorkflowStep,
@@ -126,7 +130,7 @@ export class ThinkWorkflow<
     );
 
     const submission = (await step.do(`${stepName}:submit`, async () => {
-      return this.agent.submitMessages(
+      const submissionResult = (await this.agent.submitMessages(
         [
           {
             id: crypto.randomUUID(),
@@ -151,42 +155,70 @@ export class ThinkWorkflow<
             }
           }
         }
-      );
-    })) as SubmitMessagesResult;
+      )) as SubmitMessagesResult;
 
-    let eventPayload: ThinkPromptEventPayload;
+      try {
+        return { submissionId: submissionResult.submissionId };
+      } finally {
+        disposeIfPresent(submissionResult);
+      }
+    })) as Pick<SubmitMessagesResult, "submissionId">;
+
+    const event = await this._waitForPromptEvent(
+      step,
+      `${stepName}:wait`,
+      eventType,
+      options.timeout,
+      options.cancelOnTimeout,
+      submission.submissionId
+    );
+
     try {
-      const event = await step.waitForEvent(`${stepName}:wait`, {
+      const payload = event.payload;
+
+      if (payload.status !== "completed") {
+        throw this._terminalPromptError(payload);
+      }
+
+      const parsed = options.output.safeParse(payload.output);
+      if (!parsed.success) {
+        throw new ThinkPromptValidationError(
+          payload.submissionId,
+          parsed.error
+        );
+      }
+      return parsed.data;
+    } finally {
+      disposeIfPresent(event);
+    }
+  }
+
+  private async _waitForPromptEvent(
+    step: AgentWorkflowStep,
+    stepName: string,
+    eventType: string,
+    timeout: WorkflowSleepDuration | undefined,
+    cancelOnTimeout: boolean | undefined,
+    submissionId: string
+  ): Promise<WorkflowStepEvent<ThinkPromptEventPayload>> {
+    try {
+      return (await step.waitForEvent(stepName, {
         type: eventType,
-        timeout: options.timeout
-      });
-      eventPayload = event.payload as ThinkPromptEventPayload;
+        timeout
+      })) as WorkflowStepEvent<ThinkPromptEventPayload>;
     } catch (error) {
-      if (options.cancelOnTimeout !== false) {
+      if (cancelOnTimeout !== false) {
         try {
           await this.agent.cancelSubmission(
-            submission.submissionId,
+            submissionId,
             "Workflow prompt wait timed out"
           );
         } catch {
           // Cancellation is best-effort cleanup; preserve the timeout error.
         }
       }
-      throw new ThinkPromptTimeoutError(submission.submissionId, error);
+      throw new ThinkPromptTimeoutError(submissionId, error);
     }
-
-    if (eventPayload.status !== "completed") {
-      throw this._terminalPromptError(eventPayload);
-    }
-
-    const parsed = options.output.safeParse(eventPayload.output);
-    if (!parsed.success) {
-      throw new ThinkPromptValidationError(
-        eventPayload.submissionId,
-        parsed.error
-      );
-    }
-    return parsed.data;
   }
 
   private _terminalPromptError(
@@ -227,6 +259,25 @@ export class ThinkWorkflow<
     const bytes = new TextEncoder().encode(value);
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     return base64Url(digest).slice(0, 22);
+  }
+}
+
+type DisposableResource = {
+  [Symbol.dispose](): void;
+};
+
+function isDisposableResource(value: unknown): value is DisposableResource {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    Symbol.dispose in value &&
+    typeof value[Symbol.dispose] === "function"
+  );
+}
+
+function disposeIfPresent(value: unknown): void {
+  if (isDisposableResource(value)) {
+    value[Symbol.dispose]();
   }
 }
 
