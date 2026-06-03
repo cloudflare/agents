@@ -1271,6 +1271,11 @@ export interface ContextOverflowConfig {
    * compact in place and feed the recompacted history into the upcoming step —
    * heading off the provider rejection before it happens. Keys off usage (every
    * provider reports it), not provider error strings. Unset disables it.
+   *
+   * If a provider omits `inputTokens`, the guard falls back to `usage.totalTokens`
+   * (input + output) — a safe over-approximation that compacts slightly early
+   * rather than missing the threshold. If neither is reported, the guard does
+   * nothing that step (the reactive backstop still catches a genuine overflow).
    */
   proactive?: { maxInputTokens: number; headroom?: number };
 }
