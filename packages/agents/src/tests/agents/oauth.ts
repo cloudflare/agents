@@ -386,11 +386,58 @@ export class TestOAuthAgent extends Agent {
     };
   }
 
+  // Positive control for the binding guard: a matching serverId MUST promote the
+  // verifier from the challenge key to the state-nonce key (and delete the
+  // challenge key). Pairs with the negative guard tests so those cannot pass
+  // simply because promotion is broken everywhere.
+  async testRedirectPromotesMatchingServerId(): Promise<{
+    challengeBefore: boolean;
+    stateBefore: boolean;
+    challengeAfter: boolean;
+    stateAfter: boolean;
+    storedVerifierMatches: boolean;
+  }> {
+    const provider = this.newPkceProvider();
+    const verifier = `verifier-${crypto.randomUUID()}`;
+    const challenge = await createCodeChallenge(verifier);
+    const state = await provider.state();
+    const [nonce] = state.split(".");
+    if (!nonce) {
+      throw new Error("Test setup failed to derive nonce from state");
+    }
+    await provider.saveCodeVerifier(verifier);
+
+    const challengeKey = provider.challengeCodeVerifierKey(
+      provider.clientId,
+      challenge
+    );
+    const stateKey = provider.stateCodeVerifierKey(provider.clientId, nonce);
+    const challengeBefore = await this.storageHas(provider, challengeKey);
+    const stateBefore = await this.storageHas(provider, stateKey);
+
+    await provider.redirectToAuthorization(
+      await createAuthorizationUrl(state, verifier)
+    );
+
+    const stored = await provider.storage.get<{ verifier: string }>(stateKey);
+    return {
+      challengeBefore,
+      stateBefore,
+      challengeAfter: await this.storageHas(provider, challengeKey),
+      stateAfter: await this.storageHas(provider, stateKey),
+      storedVerifierMatches: stored?.verifier === verifier
+    };
+  }
+
   // redirectToAuthorization is a no-op when the authorization URL lacks state or
-  // code_challenge; the verifier stays under the challenge key (fail-soft orphan).
+  // code_challenge; the verifier stays orphaned under the challenge key and no
+  // state-nonce key is created (distinguishes a correct early-return from a
+  // silently broken promotion).
   async testRedirectWithoutStateOrChallengeKeepsOrphan(): Promise<{
-    afterNoState: boolean;
-    afterNoChallenge: boolean;
+    challengeAfterNoState: boolean;
+    stateAfterNoState: boolean;
+    challengeAfterNoChallenge: boolean;
+    stateAfterNoChallenge: boolean;
   }> {
     const provider = this.newPkceProvider();
     const verifier = `verifier-${crypto.randomUUID()}`;
@@ -401,20 +448,40 @@ export class TestOAuthAgent extends Agent {
       challenge
     );
 
+    const noStateNonce = `nonce-${crypto.randomUUID()}`;
     const noState = new URL("https://auth.example.com/authorize");
     noState.searchParams.set("code_challenge", challenge);
+    // Even though this URL has no state param, assert nothing was promoted under
+    // a nonce we control for comparison.
     await provider.redirectToAuthorization(noState);
-    const afterNoState = await this.storageHas(provider, challengeKey);
+    const challengeAfterNoState = await this.storageHas(provider, challengeKey);
+    const stateAfterNoState = await this.storageHas(
+      provider,
+      provider.stateCodeVerifierKey(provider.clientId, noStateNonce)
+    );
 
+    const noChallengeNonce = `nonce-${crypto.randomUUID()}`;
     const noChallenge = new URL("https://auth.example.com/authorize");
     noChallenge.searchParams.set(
       "state",
-      `nonce-${crypto.randomUUID()}.${provider.serverId}`
+      `${noChallengeNonce}.${provider.serverId}`
     );
     await provider.redirectToAuthorization(noChallenge);
-    const afterNoChallenge = await this.storageHas(provider, challengeKey);
+    const challengeAfterNoChallenge = await this.storageHas(
+      provider,
+      challengeKey
+    );
+    const stateAfterNoChallenge = await this.storageHas(
+      provider,
+      provider.stateCodeVerifierKey(provider.clientId, noChallengeNonce)
+    );
 
-    return { afterNoState, afterNoChallenge };
+    return {
+      challengeAfterNoState,
+      stateAfterNoState,
+      challengeAfterNoChallenge,
+      stateAfterNoChallenge
+    };
   }
 
   // codeVerifier() with no ALS context and multiple pending verifiers must fail
@@ -552,8 +619,12 @@ export class TestOAuthAgent extends Agent {
 
   // invalidateCredentials("verifier") sweeps every pending verifier (both bound
   // state verifiers and orphaned challenge verifiers), not just one slot.
+  // Also pins that codeVerifierKeys excludes orphaned challenge keys by default
+  // (so a no-context deleteCodeVerifier cannot nuke another flow's pending
+  // challenge verifier) but includes them under includeChallengeKeys.
   async testInvalidateVerifierDeletesAllPending(): Promise<{
-    before: number;
+    defaultBefore: number;
+    withChallengeBefore: number;
     after: number;
   }> {
     const provider = this.newPkceProvider();
@@ -572,10 +643,23 @@ export class TestOAuthAgent extends Agent {
     // An orphaned challenge verifier (saved but never redirected).
     await provider.saveCodeVerifier(`verifier-three-${crypto.randomUUID()}`);
 
-    const before = (await provider.codeVerifierKeys(provider.clientId)).length;
+    // Default excludes the orphaned challenge key: only the 2 promoted state
+    // verifiers are counted.
+    const defaultBefore = (await provider.codeVerifierKeys(provider.clientId))
+      .length;
+    // With challenge keys included, the orphan is counted too -> 3.
+    const withChallengeBefore = (
+      await provider.codeVerifierKeys(provider.clientId, {
+        includeChallengeKeys: true
+      })
+    ).length;
     await provider.invalidateCredentials("verifier");
-    const after = (await provider.codeVerifierKeys(provider.clientId)).length;
-    return { before, after };
+    const after = (
+      await provider.codeVerifierKeys(provider.clientId, {
+        includeChallengeKeys: true
+      })
+    ).length;
+    return { defaultBefore, withChallengeBefore, after };
   }
 }
 
