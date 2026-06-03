@@ -3868,8 +3868,9 @@ export class Think<
 
   /**
    * Eagerly terminalize this child facet's OWN agent-tool run row(s) once a
-   * recovered turn has settled. A recovered turn re-runs via
-   * `_chatRecoveryContinue` → `continueLastTurn`, which does NOT flow through
+   * recovered turn has settled. A recovered turn re-runs via either
+   * `_chatRecoveryContinue` → `continueLastTurn` or, for a pre-stream eviction,
+   * `_chatRecoveryRetry` (a fresh user turn) — neither flows through
    * `startAgentToolRun`'s finalizer, so without this the run row strands
    * `running` and its tailers stay open until a parent inspect lazily
    * reconciles it — forcing a re-attached parent to wait out a full no-progress
@@ -8833,6 +8834,13 @@ export class Think<
           recoveredSubmission.submission_id
         );
       }
+      // If this facet is an agent-tool child, its recovered turn just settled
+      // outside `startAgentToolRun`'s finalizer — eagerly close the run so a
+      // re-attached parent collects the terminal immediately rather than
+      // waiting out a no-progress window. The pre-stream retry path settles a
+      // fresh user turn that (like `continueLastTurn`) never hits the
+      // finalizer, so it needs the same reconcile as `_chatRecoveryContinue`.
+      await this._reconcileOwnStaleAgentToolChildRuns();
     }
   }
 

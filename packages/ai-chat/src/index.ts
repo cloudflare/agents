@@ -1982,8 +1982,8 @@ export class AIChatAgent<
    * concurrency state — use {@link resetTurnState} for the full
    * teardown that runs on `chat-clear`.
    */
-  protected abortAllRequests(): void {
-    this._abortRegistry.destroyAll();
+  protected abortAllRequests(reason?: unknown): void {
+    this._abortRegistry.destroyAll(reason);
   }
 
   private async _awaitWithDeadline<T>(
@@ -2704,7 +2704,17 @@ export class AIChatAgent<
   }
 
   async cancelAgentToolRun(runId: string, reason?: unknown): Promise<void> {
+    // Stop the original in-isolate run if it's still live...
     this._agentToolAbortControllers.get(runId)?.abort(reason);
+    // ...and any in-flight chat-recovery turn driving this child facet after an
+    // eviction. A recovered turn re-runs via `_chatRecoveryContinue` /
+    // `_chatRecoveryRetry` outside `startAgentToolRun`, so it has no entry in
+    // `_agentToolAbortControllers`; a child facet is dedicated to a single
+    // agent-tool run, so cancelling whatever turn is running tears the recovery
+    // down instead of letting it keep grinding (and holding a keep-alive) after
+    // the parent gave up and sealed `interrupted` (#1630 follow-up). Mirrors
+    // Think's `_submissionAbortControllers` sweep.
+    this.abortAllRequests(reason);
     this.sql`
       update cf_ai_chat_agent_tool_runs
       set status = 'aborted', completed_at = coalesce(completed_at, ${Date.now()})
@@ -2814,8 +2824,9 @@ export class AIChatAgent<
 
   /**
    * Eagerly terminalize this child facet's OWN agent-tool run row(s) once a
-   * recovered turn has settled. A recovered turn re-runs via
-   * `_chatRecoveryContinue` → `continueLastTurn`, which does NOT flow through
+   * recovered turn has settled. A recovered turn re-runs via either
+   * `_chatRecoveryContinue` → `continueLastTurn` or, for a pre-stream eviction,
+   * `_chatRecoveryRetry` → `_retryLastUserTurn` — neither flows through
    * `startAgentToolRun`'s finalizer, so without this the row strands `running`
    * and its tailers stay open until a parent inspect lazily reconciles it —
    * forcing a re-attached parent to wait out a full no-progress window before
@@ -4303,6 +4314,13 @@ export class AIChatAgent<
       );
     } finally {
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
+      // If this facet is an agent-tool child, its recovered turn just settled
+      // outside `startAgentToolRun`'s finalizer — eagerly close the run so a
+      // re-attached parent collects the terminal immediately rather than
+      // waiting out a no-progress window. The pre-stream retry path settles via
+      // `_retryLastUserTurn`, which (like `continueLastTurn`) never hits the
+      // finalizer, so it needs the same reconcile as `_chatRecoveryContinue`.
+      await this._reconcileOwnStaleAgentToolChildRuns();
     }
   }
 
