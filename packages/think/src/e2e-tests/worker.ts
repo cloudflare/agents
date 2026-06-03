@@ -14,6 +14,7 @@ import { Think, Workspace } from "../think";
 import type {
   ChatRecoveryContext,
   ChatRecoveryOptions,
+  ChatResponseResult,
   StreamCallback,
   TurnConfig,
   TurnContext
@@ -29,6 +30,7 @@ type Env = {
   ThinkStallRecoveryE2EAgent: DurableObjectNamespace<ThinkStallRecoveryE2EAgent>;
   ThinkTaskParentE2EAgent: DurableObjectNamespace<ThinkTaskParentE2EAgent>;
   ThinkAgentToolNaturalParentE2EAgent: DurableObjectNamespace<ThinkAgentToolNaturalParentE2EAgent>;
+  ThinkParallelClientToolE2EAgent: DurableObjectNamespace<ThinkParallelClientToolE2EAgent>;
   AI: Ai;
   R2: R2Bucket;
 };
@@ -1005,6 +1007,161 @@ export class ThinkRecoveryHelperParent extends Agent<Env> {
   }> {
     const helper = await this.subAgent(ThinkRecoveryHelperAgent, helperName);
     return helper.getRecoveryStatus();
+  }
+}
+
+/**
+ * #1649 slow-sibling barrier bypass: emits TWO parallel client tool calls
+ * (`tc-fast` + `tc-slow`) in one step, then holds the stream open with trailing
+ * text. The client answers `tc-fast` mid-stream (fast) and `tc-slow` only after
+ * the stream ends (slow RPC). The continuation barrier must hold for `tc-slow`
+ * rather than firing on the fast result and erroring the slow sibling.
+ */
+function createParallelClientToolE2EMockModel(
+  delayMs: number,
+  trailingGaps: number
+): LanguageModel {
+  let callCount = 0;
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-parallel-client-tool-e2e",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream(options: Record<string, unknown>) {
+      callCount++;
+      const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+      const hasToolResult = messages.some(
+        (m: unknown) =>
+          typeof m === "object" &&
+          m !== null &&
+          (m as Record<string, unknown>).role === "tool"
+      );
+
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+
+          if (!hasToolResult && callCount === 1) {
+            for (const toolCallId of ["tc-fast", "tc-slow"]) {
+              controller.enqueue({
+                type: "tool-input-start",
+                id: toolCallId,
+                toolName: "client_action"
+              });
+              controller.enqueue({
+                type: "tool-input-delta",
+                id: toolCallId,
+                delta: JSON.stringify({ action: toolCallId })
+              });
+              controller.enqueue({ type: "tool-input-end", id: toolCallId });
+              controller.enqueue({
+                type: "tool-call",
+                toolCallId,
+                toolName: "client_action",
+                input: JSON.stringify({ action: toolCallId })
+              });
+            }
+            controller.enqueue({ type: "text-start", id: "t-trail" });
+            for (let i = 0; i < trailingGaps; i++) {
+              await new Promise((r) => setTimeout(r, delayMs));
+              controller.enqueue({
+                type: "text-delta",
+                id: "t-trail",
+                delta: "."
+              });
+            }
+            controller.enqueue({ type: "text-end", id: "t-trail" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("tool-calls"),
+              usage: v3Usage(10, 5)
+            });
+          } else {
+            controller.enqueue({ type: "text-start", id: "t-cont" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-cont",
+              delta: "Continuation after parallel tools"
+            });
+            controller.enqueue({ type: "text-end", id: "t-cont" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("stop"),
+              usage: v3Usage(20, 10)
+            });
+          }
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+export class ThinkParallelClientToolE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+
+  override getModel(): LanguageModel {
+    // ~1s open window: long enough for the fast result + 50ms barrier timer to
+    // land while the message is still only in the streaming accumulator.
+    return createParallelClientToolE2EMockModel(25, 40);
+  }
+
+  override getSystemPrompt(): string {
+    return "Parallel client-tool e2e agent.";
+  }
+
+  override onChatResponse(result: ChatResponseResult): void {
+    if (!result.continuation) return;
+    this.ctx.storage
+      .get<number>("e2e:continuation-count")
+      .then((n = 0) => this.ctx.storage.put("e2e:continuation-count", n + 1))
+      .catch(console.error);
+  }
+
+  /** State of a tool part in the in-flight streaming accumulator (or undefined
+   * once the stream has ended / the call isn't present yet). */
+  @callable()
+  async streamingToolState(toolCallId: string): Promise<string | undefined> {
+    const acc = (
+      this as unknown as {
+        _streamingAssistant: {
+          parts: Array<Record<string, unknown>>;
+        } | null;
+      }
+    )._streamingAssistant;
+    if (!acc) return undefined;
+    return acc.parts.find((p) => p.toolCallId === toolCallId)?.state as
+      | string
+      | undefined;
+  }
+
+  /** Persisted tool-part states keyed by toolCallId, for post-turn assertions. */
+  @callable()
+  async toolStates(): Promise<
+    Record<string, { state?: string; output?: string }>
+  > {
+    const messages = await this.getMessages();
+    const out: Record<string, { state?: string; output?: string }> = {};
+    for (const message of messages) {
+      for (const part of message.parts as Array<Record<string, unknown>>) {
+        if (typeof part.toolCallId === "string") {
+          out[part.toolCallId] = {
+            state: part.state as string | undefined,
+            output: part.output as string | undefined
+          };
+        }
+      }
+    }
+    return out;
+  }
+
+  @callable()
+  async continuationCount(): Promise<number> {
+    return (await this.ctx.storage.get<number>("e2e:continuation-count")) ?? 0;
   }
 }
 

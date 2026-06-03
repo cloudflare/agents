@@ -46,6 +46,10 @@
       {
         "name": "ThinkAgentToolNaturalParentE2EAgent",
         "class_name": "ThinkAgentToolNaturalParentE2EAgent"
+      },
+      {
+        "name": "ThinkParallelClientToolE2EAgent",
+        "class_name": "ThinkParallelClientToolE2EAgent"
       }
     ]
   },
@@ -77,6 +81,10 @@
     {
       "tag": "v6",
       "new_sqlite_classes": ["ThinkStallRecoveryE2EAgent"]
+    },
+    {
+      "tag": "v7",
+      "new_sqlite_classes": ["ThinkParallelClientToolE2EAgent"]
     }
   ],
   "r2_buckets": [

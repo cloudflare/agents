@@ -664,7 +664,9 @@ export class ThinkClientToolsAgent extends Think {
    * is cleared (no streaming, empty history → must be false, proving the true
    * result came from the accumulator, not a stale cache).
    */
-  async detectsMidBatchInStreamingAccumulator(): Promise<{
+  async detectsMidBatchInStreamingAccumulator(
+    pendingState: "input-available" | "approval-requested" = "input-available"
+  ): Promise<{
     whileStreaming: boolean;
     afterStreamCleared: boolean;
   }> {
@@ -687,7 +689,7 @@ export class ThinkClientToolsAgent extends Think {
           type: "tool-client_action",
           toolCallId: "tc-slow",
           toolName: "client_action",
-          state: "input-available",
+          state: pendingState,
           input: { action: "slow" }
         }
       ] as unknown as UIMessage["parts"]

@@ -1183,6 +1183,17 @@ describe("Think — auto-continuation", () => {
     expect(afterStreamCleared).toBe(false);
   });
 
+  it("keeps the barrier closed for an approval-requested sibling pending only in the streaming accumulator (#1649)", async () => {
+    // Same bypass, approval path: the slow sibling is awaiting an approval
+    // response (not a tool result). `_partsAreMidBatch` treats
+    // `approval-requested` as pending, so the barrier must hold for it too.
+    const agent = await freshAgent();
+    const { whileStreaming, afterStreamCleared } =
+      await agent.detectsMidBatchInStreamingAccumulator("approval-requested");
+    expect(whileStreaming).toBe(true);
+    expect(afterStreamCleared).toBe(false);
+  });
+
   it("does not error a slow client tool when a fast sibling auto-continues mid-stream (#1649)", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
