@@ -617,6 +617,27 @@ describe("Think — error handling", () => {
     expect(errResult.interruptedCalls).toBe(0);
   });
 
+  it("does not re-arm a held auto-continuation when an RPC stall routes into bounded recovery", async () => {
+    const agent = await freshAgent(`stall-rearm-${crypto.randomUUID()}`);
+    // A pending auto-continuation is already armed when the stream stalls and
+    // routes into bounded recovery. The recovery continuation re-runs the turn
+    // and re-triggers the held barrier itself, so the RPC finally must do a
+    // plain clear (NOT re-arm the 50ms coalesce timer) — otherwise it would
+    // fire a second continuation alongside the scheduled recovery one. This
+    // mirrors the WebSocket `_streamResult` recovery paths.
+    const result = await agent.testStallRecoveryDoesNotRearmPendingContinuation(
+      3,
+      50
+    );
+
+    expect(result.firstError).toBeUndefined();
+    expect(result.scheduledContinues).toBeGreaterThanOrEqual(1);
+    // The fix: streaming accumulator cleared, but the coalesce timer was NOT
+    // re-armed by the recovery early-return.
+    expect(result.streamingAssistantCleared).toBe(true);
+    expect(result.coalesceTimerArmedAfterStall).toBe(false);
+  });
+
   it("honors a per-turn TurnConfig.chatStreamStallTimeoutMs override even when the instance watchdog is off (#1626)", async () => {
     const agent = await freshAgent(`stall-perturn-${crypto.randomUUID()}`);
     // Instance watchdog is OFF; only the per-turn override (from beforeTurn)

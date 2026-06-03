@@ -1668,6 +1668,116 @@ describe("Think — auto-continuation", () => {
     await closeWS(ws);
   });
 
+  it("documents the known gap: eviction + an errored autoContinue:false completing result drops the held continuation (#1650)", async () => {
+    // Non-evicted, this combination DOES continue once: the errored
+    // (autoContinue:false) result re-arms the EXISTING pending the fast sibling
+    // created (see the mixed-batch test above). But the only signal that
+    // continuation was requested — the fast sibling's autoContinue:true — lives
+    // in the in-memory pending, not the persisted transcript. So if the isolate
+    // is evicted between siblings, the errored completing result finds no
+    // pending and `_rearmPendingAutoContinuationForBatch` no-ops (it never
+    // CREATES a pending): the continuation is silently dropped.
+    //
+    // This is NOT a regression (the old in-memory timer was equally fragile to
+    // eviction) and a later user message / chat recovery repairs the transcript.
+    // This test pins the current behavior and the limitation; fixing it would
+    // require persisting the continuation-requested intent across eviction.
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.persistToolCallMessage([
+      makeUserMessage("use two tools"),
+      {
+        id: "assistant-evict-err",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-fast",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "fast" }
+          },
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-slow",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "slow" }
+          }
+        ]
+      } as unknown as UIMessage
+    ]);
+    await agent.clearResponseLog();
+
+    const repairedToolCallIds: Array<string[] | undefined> = [];
+    const unsubscribe = subscribe("transcript", (event) => {
+      if (event.type === "chat:transcript:repaired" && event.name === room) {
+        repairedToolCallIds.push(event.payload.toolCallIds);
+      }
+    });
+
+    try {
+      // Fast result opts into continuation and parks the barrier (slow sibling
+      // still pending).
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_RESULT,
+          toolCallId: "tc-fast",
+          toolName: "client_action",
+          output: "fast output",
+          autoContinue: true
+        })
+      );
+      await delay(300);
+      expect(
+        ((await agent.getResponseLog()) as ChatResponseResult[]).filter(
+          (entry) => entry.continuation
+        ).length
+      ).toBe(0);
+
+      // Eviction drops the in-memory pending (the autoContinue:true intent is
+      // lost); the fast result stays persisted in the transcript.
+      await agent.evictInMemoryContinuationState();
+
+      // The completing sibling errors with autoContinue:false. With no pending
+      // to re-arm, NO continuation fires — the held continuation is dropped.
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_RESULT,
+          toolCallId: "tc-slow",
+          toolName: "client_action",
+          state: "output-error",
+          errorText: "tool failed",
+          autoContinue: false
+        })
+      );
+      await delay(400);
+
+      const log = (await agent.getResponseLog()) as ChatResponseResult[];
+      expect(log.filter((entry) => entry.continuation).length).toBe(0);
+      // The drop is silent — no premature transcript repair either.
+      expect(repairedToolCallIds.flat()).toEqual([]);
+
+      // Both results are still applied to the transcript; only the continuation
+      // is lost (repaired later by a user message / chat recovery).
+      const messages = (await agent.getMessages()) as UIMessage[];
+      const assistant = messages.find((m) => m.id === "assistant-evict-err")!;
+      const partFor = (toolCallId: string) =>
+        assistant.parts.find(
+          (p) => (p as Record<string, unknown>).toolCallId === toolCallId
+        ) as Record<string, unknown>;
+      expect(partFor("tc-fast").state).toBe("output-available");
+      expect(partFor("tc-slow").state).toBe("output-error");
+    } finally {
+      unsubscribe();
+    }
+
+    await closeWS(ws);
+  });
+
   it("waits for a sibling tool emitted LATER in the same stream before continuing (#1649 headline / #1650)", async () => {
     // The exact race from #1649: the model emits parallel tool calls
     // sequentially within one step. A fast client tool resolves mid-stream —

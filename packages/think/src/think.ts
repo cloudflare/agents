@@ -6437,6 +6437,13 @@ export class Think<
     let doneSent = false;
     let streamError: string | undefined;
     let pendingRpcError: string | undefined;
+    // When a stall-recovery early-return schedules a continuation, the
+    // continuation re-runs the turn and its own stream finalize re-triggers the
+    // held barrier. Re-arming here too would let the 50ms coalesce timer fire a
+    // SECOND continuation alongside the scheduled recovery one — a spurious
+    // double model invocation. Mirror the WebSocket `_streamResult` recovery
+    // paths and clear `_streamingAssistant` WITHOUT re-arming in that case.
+    let skipFinalizeRearm = false;
 
     const stallTimeoutMs =
       this._activeStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
@@ -6594,6 +6601,7 @@ export class Think<
           // callback) owns the real terminal outcome. Signal the interruption so
           // the caller doesn't read this clean resolve as success and finalize a
           // truncated partial (#1644); NOT onDone/onError — see `onInterrupted`.
+          skipFinalizeRearm = true;
           await callback.onInterrupted?.();
           return;
         }
@@ -6612,6 +6620,7 @@ export class Think<
           // by `_exhaustChatRecovery` (banner/`onExhausted`), NOT through this
           // callback's `onError`. Signal the interruption so a `chat()` consumer
           // doesn't mis-read the clean resolve as a successful completion (#1644).
+          skipFinalizeRearm = true;
           await callback.onInterrupted?.();
           return;
         }
@@ -6670,8 +6679,15 @@ export class Think<
       // The message is now durably persisted (success, error, or recovery
       // path), so subsequent tool results resolve against storage; stop
       // exposing the sealed accumulator (#1649) and re-check any continuation
-      // the stream-active barrier held (#1650).
-      this._onStreamingTurnFinalized();
+      // the stream-active barrier held (#1650). A stall-recovery early-return
+      // does a plain clear instead (no re-arm): its scheduled continuation
+      // re-runs the turn and that finalize re-triggers the held barrier, so
+      // re-arming here would double-fire alongside the recovery continuation.
+      if (skipFinalizeRearm) {
+        this._streamingAssistant = null;
+      } else {
+        this._onStreamingTurnFinalized();
+      }
     }
 
     if (pendingRpcError) {

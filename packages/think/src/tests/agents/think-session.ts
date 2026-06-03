@@ -1090,6 +1090,88 @@ export class ThinkTestAgent extends Think {
   }
 
   /**
+   * Regression for the RPC stall-recovery re-arm asymmetry: with a pending
+   * auto-continuation already armed (as if a prior parallel tool-batch sibling
+   * had opted in with `autoContinue: true` but the batch isn't whole yet), a
+   * stream stall that routes into bounded recovery must NOT re-arm the 50ms
+   * coalesce timer in the RPC `_streamResultToRpcCallback` `finally`. The
+   * scheduled recovery continuation re-runs the turn and its own stream finalize
+   * re-triggers the held barrier; re-arming here too would fire a SECOND
+   * continuation alongside the recovery one (a spurious double model
+   * invocation). This mirrors the deliberate plain-clear in the WebSocket
+   * `_streamResult` recovery paths.
+   *
+   * Returns whether the coalesce timer was left armed after the stalled turn
+   * resolved (must be `false` with the fix) and whether `_streamingAssistant`
+   * was cleared (must be `true`). Read synchronously on resolve — before the
+   * (erroneously) armed macrotask timer could fire.
+   */
+  async testStallRecoveryDoesNotRearmPendingContinuation(
+    afterChunks: number,
+    timeoutMs: number
+  ): Promise<{
+    firstError: string | undefined;
+    scheduledContinues: number;
+    coalesceTimerArmedAfterStall: boolean;
+    streamingAssistantCleared: boolean;
+  }> {
+    const internal = this as unknown as {
+      _continuation: {
+        pending: Record<string, unknown> | null;
+        awaitingConnections: Map<string, unknown>;
+      };
+      _continuationTimer: ReturnType<typeof setTimeout> | null;
+      _streamingAssistant: unknown;
+    };
+    // Seed a pending auto-continuation with `pastCoalesce: false` so the buggy
+    // re-arm path (`_rearmPendingAutoContinuationForBatch`) would reset the
+    // coalesce timer in the recovery `finally`.
+    internal._continuation.pending = {
+      connection: undefined,
+      connectionId: "test-conn",
+      requestId: crypto.randomUUID(),
+      clientTools: undefined,
+      body: undefined,
+      errorPrefix: "[Think] Auto-continuation failed:",
+      prerequisite: null,
+      pastCoalesce: false
+    };
+    this._stallAfterChunks = afterChunks;
+    this._stallAttemptsRemaining = 1;
+    this.chatStreamStallTimeoutMs = timeoutMs;
+    try {
+      const first = await this.testChat("seeded pending, then stall");
+      // Read synchronously: no `await` has yielded since the recovery `finally`
+      // ran, so an erroneously armed 50ms timer cannot have fired yet.
+      const coalesceTimerArmedAfterStall = internal._continuationTimer !== null;
+      const streamingAssistantCleared = internal._streamingAssistant === null;
+      const scheduledContinues =
+        this.sql<{ count: number }>`
+          SELECT COUNT(*) as count FROM cf_agents_schedules
+          WHERE callback = '_chatRecoveryContinue'
+        `[0]?.count ?? 0;
+      return {
+        firstError: first.error,
+        scheduledContinues,
+        coalesceTimerArmedAfterStall,
+        streamingAssistantCleared
+      };
+    } finally {
+      // Tear down the seeded pending + any armed timer so nothing leaks into a
+      // later turn (and the seeded undefined connection never gets used).
+      if (internal._continuationTimer) {
+        clearTimeout(internal._continuationTimer);
+        internal._continuationTimer = null;
+      }
+      internal._continuation.pending = null;
+      internal._continuation.awaitingConnections.clear();
+      this._stallAfterChunks = null;
+      this._stallAttemptsRemaining = null;
+      this.chatStreamStallTimeoutMs = 0;
+    }
+  }
+
+  /**
    * Stream each chunk after `delayMs` with the watchdog armed at `timeoutMs`
    * (> delay). Proves the watchdog resets per chunk and does NOT false-fire on
    * a slow-but-steady stream.
