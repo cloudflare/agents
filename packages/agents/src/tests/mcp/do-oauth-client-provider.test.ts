@@ -45,6 +45,12 @@ describe("DurableObjectOAuthClientProvider PKCE binding", () => {
       expect(result.challengeAfterNoChallenge).toBe(true);
       expect(result.stateAfterNoChallenge).toBe(false);
     });
+
+    it("does not throw when ids are unset", async () => {
+      const result = await agent().testRedirectWithoutIdsDoesNotThrow();
+
+      expect(result.authUrl).toContain("https://auth.example.com/authorize");
+    });
   });
 
   describe("codeVerifier resolution without ALS context", () => {
@@ -73,6 +79,15 @@ describe("DurableObjectOAuthClientProvider PKCE binding", () => {
   });
 
   describe("expiry cleanup", () => {
+    it("deletes expired orphaned challenge verifiers before saving a new verifier", async () => {
+      const result =
+        await agent().testSaveCodeVerifierDeletesExpiredChallengeOrphans();
+
+      expect(result.expiredBefore).toBe(true);
+      expect(result.expiredAfter).toBe(false);
+      expect(result.freshAfter).toBe(true);
+    });
+
     it("deletes the bound state verifier when checkState finds the state expired", async () => {
       const result = await agent().testCheckStateExpiredDeletesVerifier();
 

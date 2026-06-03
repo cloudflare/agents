@@ -641,6 +641,13 @@ export class MCPClientManager {
     state: string
   ): Promise<void> {
     try {
+      const stateValidation = await authProvider.checkState(state);
+      if (!stateValidation.valid) {
+        console.warn(
+          `[MCPClientManager] Ignoring stale OAuth callback with invalid state for server "${serverId}": ${stateValidation.error ?? "Invalid state"}`
+        );
+        return;
+      }
       await authProvider.consumeState(state);
     } catch (cleanupError) {
       console.warn(

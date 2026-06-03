@@ -1368,6 +1368,49 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(stateStorage.storage.has(state2Nonce)).toBe(false);
     });
 
+    it("should not consume an invalid stale OAuth error callback state", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const baseAuthProvider = createMockAuthProvider(stateStorage);
+      const mockAuthProvider = {
+        ...baseAuthProvider,
+        consumeState: vi.fn(baseAuthProvider.consumeState)
+      };
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "connecting";
+      manager.mcpConnections[serverId] = connection;
+
+      const result = await manager.handleCallbackRequest(
+        new Request(
+          `${callbackUrl}?error=access_denied&state=forged-nonce.${serverId}`
+        )
+      );
+
+      expect(result.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+      expect(connection.connectionError).toBe(null);
+      expect(mockAuthProvider.consumeState).not.toHaveBeenCalled();
+    });
+
     it("should ignore stale OAuth error callback after auth is accepted but before state cleanup finishes", async () => {
       const serverId = "test-server";
       const callbackUrl = "http://localhost:3000/callback";

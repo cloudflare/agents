@@ -484,6 +484,24 @@ export class TestOAuthAgent extends Agent {
     };
   }
 
+  async testRedirectWithoutIdsDoesNotThrow(): Promise<{ authUrl: string }> {
+    const provider = new DurableObjectOAuthClientProvider(
+      this.ctx.storage,
+      `pkce-branch-${crypto.randomUUID()}`,
+      "https://client.example.com/callback"
+    );
+    const authUrl = new URL("https://auth.example.com/authorize");
+    authUrl.searchParams.set("state", `nonce-${crypto.randomUUID()}.server`);
+    authUrl.searchParams.set(
+      "code_challenge",
+      `challenge-${crypto.randomUUID()}`
+    );
+
+    await provider.redirectToAuthorization(authUrl);
+
+    return { authUrl: provider.authUrl ?? "" };
+  }
+
   // codeVerifier() with no ALS context and multiple pending verifiers must fail
   // loudly rather than guess (this replaces the old silent wrong-verifier bug).
   async testCodeVerifierMultiplePendingThrows(): Promise<{
@@ -660,6 +678,38 @@ export class TestOAuthAgent extends Agent {
       })
     ).length;
     return { defaultBefore, withChallengeBefore, after };
+  }
+
+  async testSaveCodeVerifierDeletesExpiredChallengeOrphans(): Promise<{
+    expiredBefore: boolean;
+    expiredAfter: boolean;
+    freshAfter: boolean;
+  }> {
+    const provider = this.newPkceProvider();
+    const expiredKey = provider.challengeCodeVerifierKey(
+      provider.clientId,
+      `expired-challenge-${crypto.randomUUID()}`
+    );
+    await provider.storage.put(expiredKey, {
+      verifier: "expired-verifier",
+      createdAt: Date.now() - 11 * 60 * 1000
+    });
+
+    const freshVerifier = `fresh-verifier-${crypto.randomUUID()}`;
+    const freshChallenge = await createCodeChallenge(freshVerifier);
+    const freshKey = provider.challengeCodeVerifierKey(
+      provider.clientId,
+      freshChallenge
+    );
+
+    const expiredBefore = await this.storageHas(provider, expiredKey);
+    await provider.saveCodeVerifier(freshVerifier);
+
+    return {
+      expiredBefore,
+      expiredAfter: await this.storageHas(provider, expiredKey),
+      freshAfter: await this.storageHas(provider, freshKey)
+    };
   }
 }
 

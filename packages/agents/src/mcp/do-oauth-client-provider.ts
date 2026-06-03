@@ -259,6 +259,12 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
   async redirectToAuthorization(authUrl: URL): Promise<void> {
     this._authUrl_ = authUrl.toString();
 
+    const clientId = this._clientId_;
+    const serverId = this._serverId_;
+    if (!clientId || !serverId) {
+      return;
+    }
+
     const state = authUrl.searchParams.get("state");
     const codeChallenge = authUrl.searchParams.get("code_challenge");
     if (!state || !codeChallenge) {
@@ -266,14 +272,11 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
     }
 
     const parsed = parseOAuthState(state);
-    if (!parsed || parsed.serverId !== this.serverId) {
+    if (!parsed || parsed.serverId !== serverId) {
       return;
     }
 
-    const challengeKey = this.challengeCodeVerifierKey(
-      this.clientId,
-      codeChallenge
-    );
+    const challengeKey = this.challengeCodeVerifierKey(clientId, codeChallenge);
     const pendingVerifier =
       await this.storage.get<StoredCodeVerifier>(challengeKey);
     if (!pendingVerifier) {
@@ -286,7 +289,7 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
     }
 
     await this.storage.put(
-      this.stateCodeVerifierKey(this.clientId, parsed.nonce),
+      this.stateCodeVerifierKey(clientId, parsed.nonce),
       pendingVerifier
     );
     await this.storage.delete(challengeKey);
@@ -365,6 +368,8 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
   }
 
   async saveCodeVerifier(verifier: string): Promise<void> {
+    await this.deleteExpiredChallengeCodeVerifiers(this.clientId);
+
     const codeChallenge = await createCodeChallenge(verifier);
     const storedVerifier: StoredCodeVerifier = {
       verifier,
@@ -375,6 +380,20 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
       this.challengeCodeVerifierKey(this.clientId, codeChallenge),
       storedVerifier
     );
+  }
+
+  private async deleteExpiredChallengeCodeVerifiers(
+    clientId: string
+  ): Promise<void> {
+    const challengeVerifiers = await this.storage.list<StoredCodeVerifier>({
+      prefix: this.challengeCodeVerifierPrefix(clientId)
+    });
+    const expiredKeys = [...challengeVerifiers.entries()]
+      .filter(([, storedVerifier]) => isExpired(storedVerifier.createdAt))
+      .map(([key]) => key);
+    if (expiredKeys.length > 0) {
+      await this.storage.delete(expiredKeys);
+    }
   }
 
   async codeVerifier(): Promise<string> {
