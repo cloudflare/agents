@@ -273,6 +273,7 @@ with retries per step, long waits, external events, or approvals.
 | `waitForMcpConnections`    | `false`                          | Wait for MCP servers before inference                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `chatRecovery`             | `true`                           | Wrap turns in `runFiber` for durable execution, including sub-agent turns. Set to `{ maxAttempts, stableTimeoutMs, terminalMessage, onExhausted }` to tune bounded recovery.                                                                                                                                                                                                                                                                                                                                                                                     |
 | `chatStreamStallTimeoutMs` | `0` (off)                        | Opt-in inactivity watchdog: abort a turn whose model stream produces no chunk for this long (measures the gap between chunks, including tool execution — set above your slowest model TTFT + tool, e.g. `120_000`). Emits a `chat:stream:stalled` event; with `chatRecovery` on (the default) the stall routes into bounded recovery (see below) instead of an infinite spinner, and only terminalizes once the budget is exhausted. Override per-turn via `TurnConfig.chatStreamStallTimeoutMs` (returned from `beforeTurn`) for a turn with a known-slow tool. |
+| `contextOverflow`          | `undefined`                      | Opt-in mid-turn context-overflow handling: `{ reactive?, maxRetries?, proactive? }`. Requires `classifyChatError` + a session compaction function. See [Context-window overflow recovery](#context-window-overflow-recovery).                                                                                                                                                                                                                                                                                                                                    |
 
 ## Agent Skills
 
@@ -444,6 +445,46 @@ export class MyAgent extends Think<Env> {
 ```
 
 This runs during transcript repair — before the repaired transcript is persisted and sent to the model — so the conversion shapes the current turn, not just the next one. The `input` is already normalized to a valid object. A returned tool part must carry a settled result (`output-available`, `output-error`, or `output-denied`); returning a non-tool part such as text is also fine.
+
+### Context-window overflow recovery
+
+[Compaction](../sessions.md#compaction) is checked **between turns** — `compactAfter()` runs after each `appendMessage()`. But a single long, tool-heavy turn grows the prompt step by step inside one `streamText` loop and can exceed the model's context window **mid-turn**, before the next pre-turn check. The provider then rejects the request (`"prompt is too long"`, `context_length_exceeded`), and the turn would otherwise die terminally.
+
+Think recovers from this with two opt-in, provider-agnostic layers, both configured through the `contextOverflow` property. Both are off by default, so existing behavior is unchanged. Both reuse your session's compaction function, so they require a `configureSession()` with `onCompaction()` configured. Both require [`classifyChatError`](./lifecycle-hooks.md#classifychaterror) to tell Think which errors are overflows — Think ships no provider-specific matching in core.
+
+**1. Reactive backstop — `contextOverflow.reactive`.** When a turn fails with an error you classify as `"context_overflow"`, Think persists the partial assistant message, runs `session.compact()`, and re-runs the turn from the compacted history. It is bounded by `contextOverflow.maxRetries` (default `1`); if compaction cannot shorten history or the budget is spent, the overflow surfaces terminally through `onChatError` with `classification: "context_overflow"` — it never loops or ends silently.
+
+```typescript
+import { Think, defaultContextOverflowClassifier } from "@cloudflare/think";
+
+export class MyAgent extends Think<Env> {
+  override contextOverflow = { reactive: true };
+
+  // The bundled classifier covers the common providers (Anthropic, OpenAI,
+  // Google, Bedrock, …). Assign it directly, or write your own.
+  override classifyChatError = defaultContextOverflowClassifier;
+}
+```
+
+**2. Proactive guard — `contextOverflow.proactive`.** Heads off the provider error before it happens. Before each step, Think reads the previous step's model-reported `usage.inputTokens` (provider-agnostic — every provider reports it) and, if it crosses `maxInputTokens * (headroom ?? 0.9)`, compacts in place and feeds the recompacted history into the upcoming step.
+
+```typescript
+import { Think, defaultContextOverflowClassifier } from "@cloudflare/think";
+
+export class MyAgent extends Think<Env> {
+  override contextOverflow = {
+    reactive: true,
+    // Compact mid-turn once a step approaches 90% of a 200K window.
+    proactive: { maxInputTokens: 200_000 }
+  };
+
+  override classifyChatError = defaultContextOverflowClassifier;
+}
+```
+
+Use either layer alone, or both together: the proactive guard avoids most overflows, and the reactive backstop catches any that still slip through (for example, a turn that starts already over budget, or a single tool result so large that compaction cannot help — in which case it terminalizes cleanly). Both apply to every turn entry path (WebSocket, sub-agent `chat()`, and programmatic `saveMessages()` / `submitMessages()`), and both emit a `chat:context:compacted` [observability event](../observability.md#chat-context-events).
+
+> A no-op compaction cannot rescue an over-budget turn, so recovery is only as effective as your compaction configuration. For tool-heavy histories, configure a `tokenCounter` on `compactAfter()` (see [Sessions](../sessions.md#auto-compaction)).
 
 ## Dynamic Configuration
 

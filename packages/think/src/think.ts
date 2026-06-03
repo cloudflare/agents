@@ -1212,10 +1212,137 @@ export interface TurnConfig {
   output?: Parameters<typeof streamText>[0]["output"];
 }
 
+/**
+ * Provider-agnostic semantic classification of a chat-turn error.
+ *
+ * Think ships **no** provider-specific string/code matching — the app owns
+ * that knowledge (it knows which provider/model it talks to), exactly like the
+ * `tokenCounter` it already passes to `compactAfter()`. An app teaches Think
+ * what an error *means* by overriding `classifyChatError()`; Think then reacts
+ * generically (e.g. compact-and-retry on `context_overflow`).
+ *
+ * - `context_overflow` — the prompt exceeded the model's context window
+ *   (Anthropic `"prompt is too long"`, OpenAI `context_length_exceeded`, …).
+ *   The only category Think currently acts on (auto-compact + retry).
+ * - `rate_limit` / `transient` — reserved for future backoff/retry policies.
+ * - `fatal` — unrecoverable; surface terminally.
+ * - `unknown` — default; Think applies its existing terminal behavior.
+ */
+export type ChatErrorClassification =
+  | "context_overflow"
+  | "rate_limit"
+  | "transient"
+  | "fatal"
+  | "unknown";
+
+/**
+ * Opt-in handling for a turn that overflows the model's context window
+ * mid-flight. Compaction (`compactAfter()`) is only checked between turns, so a
+ * long, tool-heavy turn can grow past the window before the next check; the
+ * provider then rejects the request (`"prompt is too long"` /
+ * `context_length_exceeded`). Both layers reuse the session's compaction
+ * function and are provider-agnostic — the app maps the error via
+ * {@link Think.classifyChatError}; Think never matches provider strings itself.
+ *
+ * Set `Think.contextOverflow` to enable. Leaving it unset disables both layers
+ * (existing terminal behavior).
+ */
+export interface ContextOverflowConfig {
+  /**
+   * Reactive backstop. When a turn fails with an error classified as
+   * `"context_overflow"`, persist the partial assistant message, run
+   * `session.compact()`, and re-run the turn from the compacted history. If
+   * compaction cannot shorten history or the retry budget is spent, the
+   * overflow surfaces terminally through `onChatError` (classified) — it never
+   * loops or ends silently. Default `false`.
+   */
+  reactive?: boolean;
+
+  /**
+   * Maximum compact-and-retry attempts for a single overflowing turn. Also
+   * floors (at `1`) the number of times the proactive guard may compact within
+   * a single step loop. Default `1`.
+   */
+  maxRetries?: number;
+
+  /**
+   * Proactive guard. Before each step, read the previous step's model-reported
+   * `usage.inputTokens` and, if it crosses `maxInputTokens * (headroom ?? 0.9)`,
+   * compact in place and feed the recompacted history into the upcoming step —
+   * heading off the provider rejection before it happens. Keys off usage (every
+   * provider reports it), not provider error strings. Unset disables it.
+   */
+  proactive?: { maxInputTokens: number; headroom?: number };
+}
+
+/**
+ * Matches the context-window-overflow error messages of the common providers.
+ * Anthropic (`prompt is too long`), OpenAI (`context_length_exceeded`,
+ * `maximum context length`), Google Gemini (`exceeds the maximum number of
+ * tokens`, `input token count`), Bedrock / Mistral / others (`input is too
+ * long`, `too many tokens`, `context window`).
+ */
+const CONTEXT_OVERFLOW_PATTERN =
+  /prompt is too long|context[_ ]length[_ ]exceeded|maximum context length|exceeds the maximum number of tokens|input token count|reduce the length|input is too long|too many (?:input )?tokens|context window/i;
+
+/**
+ * Opt-in default classifier for {@link Think.classifyChatError}. Matches the
+ * context-window-overflow error messages of the common providers (Anthropic,
+ * OpenAI, Google, Bedrock, Mistral, …) and returns `"context_overflow"`.
+ *
+ * Think ships this as an explicitly-imported helper rather than wiring it into
+ * core, so the framework default stays free of provider strings. Assign it (or
+ * delegate to it) when you do not need custom classification:
+ *
+ * @example
+ * ```typescript
+ * import { Think, defaultContextOverflowClassifier } from "@cloudflare/think";
+ *
+ * export class MyAgent extends Think<Env> {
+ *   override contextOverflow = { reactive: true };
+ *   override classifyChatError = defaultContextOverflowClassifier;
+ * }
+ * ```
+ *
+ * Or combine with your own checks:
+ *
+ * @example
+ * ```typescript
+ * override classifyChatError(error: unknown): ChatErrorClassification | void {
+ *   if (isMyRateLimit(error)) return "rate_limit";
+ *   return defaultContextOverflowClassifier(error);
+ * }
+ * ```
+ */
+export function defaultContextOverflowClassifier(
+  error: unknown
+): ChatErrorClassification | undefined {
+  let text: string;
+  if (error instanceof Error) {
+    text = error.message;
+  } else if (typeof error === "string") {
+    text = error;
+  } else {
+    try {
+      text = JSON.stringify(error);
+    } catch {
+      text = String(error);
+    }
+  }
+  return CONTEXT_OVERFLOW_PATTERN.test(text) ? "context_overflow" : undefined;
+}
+
 export interface ChatErrorContext {
   requestId?: string;
   stage: "parse" | "persist" | "turn" | "stream" | "recovery" | "transcript";
   messagesPersisted?: boolean;
+  /**
+   * App-provided semantic classification (from `classifyChatError`), when
+   * known. Lets `onChatError` overrides and observers distinguish e.g. a
+   * context-overflow from a generic provider failure without re-matching
+   * provider strings.
+   */
+  classification?: ChatErrorClassification;
 }
 
 /**
@@ -2369,6 +2496,78 @@ export class Think<
    */
   private _activeStallTimeoutMs: number | undefined;
 
+  // ── Context-overflow handling (opt-in) ────────────────────────────
+  //
+  // Compaction normally only fires between turns (Session.compactAfter checks
+  // the threshold on appendMessage). But a single long, tool-heavy turn grows
+  // the prompt step-by-step inside one streamText loop and can exceed the
+  // model's context window *mid-turn*, before the next pre-turn check — the
+  // provider then 400s ("prompt is too long" / context_length_exceeded). The
+  // `contextOverflow` config lets Think recover without baking provider
+  // knowledge into core: the app classifies the error (`classifyChatError`),
+  // Think reacts.
+
+  /**
+   * Opt-in handling for a turn that overflows the context window mid-flight.
+   * See {@link ContextOverflowConfig}. Unset (the default) leaves the existing
+   * terminal behavior unchanged.
+   *
+   * @example
+   * ```typescript
+   * override contextOverflow = {
+   *   reactive: true,
+   *   proactive: { maxInputTokens: 200_000 }
+   * };
+   * ```
+   */
+  contextOverflow?: ContextOverflowConfig;
+
+  /** Whether the reactive compact-and-retry backstop is enabled. */
+  private get _overflowReactiveEnabled(): boolean {
+    return this.contextOverflow?.reactive === true;
+  }
+
+  /** Compact-and-retry budget (reactive) / per-run proactive cap floor. */
+  private get _overflowMaxRetries(): number {
+    return this.contextOverflow?.maxRetries ?? 1;
+  }
+
+  /** Proactive guard config, when enabled. */
+  private get _overflowGuard():
+    | { maxInputTokens: number; headroom?: number }
+    | undefined {
+    return this.contextOverflow?.proactive;
+  }
+
+  /**
+   * Count of model messages assembled from history at the start of the current
+   * turn (captured in `_runInferenceLoop`). The proactive guard uses it to
+   * splice this turn's in-flight steps onto a freshly recompacted head. Turns
+   * are serialized, so a single value is safe.
+   */
+  private _turnModelMessageBaseline = 0;
+
+  /**
+   * The assembled tool set for the current turn, captured in
+   * `_runInferenceLoop`. The proactive guard reuses it to convert the
+   * recompacted history through the same `convertToModelMessages` tool schemas.
+   * Turns are serialized, so a single value is safe.
+   */
+  private _activeTurnTools: ToolSet = {};
+
+  /**
+   * Number of times the proactive guard has compacted within the current
+   * `_runInferenceLoop` (reset at the top of each run). Capped at
+   * `contextOverflow.maxRetries` so a guard that keeps reading over-budget
+   * usage can't compact on every step — once the head is summarized, further
+   * compaction no-ops anyway, and a genuine remaining overflow falls through to
+   * the reactive backstop.
+   */
+  private _proactiveCompactionsThisRun = 0;
+
+  /** One-time guard for the "recovery enabled but no classifier" DX warning. */
+  private _warnedMissingClassifier = false;
+
   /**
    * Configure the session. Called once during `onStart`.
    * Override to add context blocks, compaction, search, skills.
@@ -2658,6 +2857,132 @@ export class Think<
     return error;
   }
 
+  /**
+   * Classify a raw chat-turn error into a provider-agnostic category.
+   *
+   * Think deliberately ships **no** provider-specific matching: it cannot know
+   * that Anthropic's `"prompt is too long"` or OpenAI's
+   * `context_length_exceeded` means "context overflow" without baking provider
+   * knowledge into core. The app does know its provider/model, so it owns the
+   * mapping — the same split Think already uses for `tokenCounter`.
+   *
+   * Return `"context_overflow"` to enable Think's compact-and-retry backstop
+   * (gated by `contextOverflow.reactive`). Other categories are
+   * forwarded to `onChatError`/observers via {@link ChatErrorContext.classification}
+   * but are not yet acted on by core. Return `void`/`"unknown"` to keep the
+   * existing terminal behavior.
+   *
+   * The argument may be an `Error`, an AI SDK `APICallError` (with
+   * `statusCode`/`responseBody`), or — for in-stream provider errors that
+   * surface as a stream error part rather than a throw — the error message
+   * string. Narrow accordingly.
+   *
+   * @example Anthropic + OpenAI context-overflow
+   * ```typescript
+   * classifyChatError(error: unknown): ChatErrorClassification | void {
+   *   const text = error instanceof Error ? error.message : String(error);
+   *   if (/prompt is too long|context length|context_length_exceeded|maximum context/i.test(text)) {
+   *     return "context_overflow";
+   *   }
+   * }
+   * ```
+   */
+  classifyChatError(
+    _error: unknown,
+    _ctx?: ChatErrorContext
+  ): ChatErrorClassification | void {}
+
+  /**
+   * Whether an error (thrown or surfaced as an in-stream error string) should
+   * trigger the opt-in compact-and-retry backstop. Consults the app's
+   * `classifyChatError` and the `contextOverflow.reactive` flag. Centralized
+   * so both stream consumers (WebSocket + RPC) classify identically.
+   */
+  private _isRecoverableContextOverflow(error: unknown): boolean {
+    if (!this._overflowReactiveEnabled) return false;
+    // DX guard: enabling recovery without teaching Think which errors are
+    // overflows silently does nothing. Warn once instead of failing quietly.
+    if (this.classifyChatError === Think.prototype.classifyChatError) {
+      if (!this._warnedMissingClassifier) {
+        this._warnedMissingClassifier = true;
+        console.warn(
+          '[Think] contextOverflow.reactive is enabled but classifyChatError() is not overridden, so no error will ever be treated as a context overflow and recovery will never run. Override classifyChatError() (or assign the exported defaultContextOverflowClassifier) to return "context_overflow" for your provider\'s context-window error (e.g. Anthropic "prompt is too long", OpenAI context_length_exceeded).'
+        );
+      }
+      return false;
+    }
+    let classification: ChatErrorClassification | void;
+    try {
+      classification = this.classifyChatError(error, { stage: "stream" });
+    } catch (err) {
+      console.warn(
+        `[Think] classifyChatError threw; treating as non-overflow: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return false;
+    }
+    return classification === "context_overflow";
+  }
+
+  /**
+   * Compact the session in response to a context overflow (reactive backstop or
+   * proactive guard). Returns whether history was actually shortened — a no-op
+   * compaction (returns `null`) means a retry would just overflow again, so the
+   * caller should fall through to the terminal error rather than loop.
+   *
+   * This is the single emit point for `chat:context:compacted`, so callers must
+   * NOT emit it again.
+   */
+  private async _compactForContextOverflow(
+    reason: "reactive" | "proactive",
+    extra?: { requestId?: string; attempt?: number }
+  ): Promise<boolean> {
+    try {
+      const result = await this.session.compact();
+      const shortened = Boolean(result);
+      this._emit("chat:context:compacted", {
+        reason,
+        shortened,
+        ...extra
+      });
+      return shortened;
+    } catch (err) {
+      console.warn(
+        `[Think] context-overflow compaction failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Finalize a context overflow that recovery could not fix (compaction was a
+   * no-op, or the retry budget is spent). Routes the error through
+   * `onChatError` with `classification: "context_overflow"` and emits
+   * `chat:request:failed`, so every overflow terminal — whichever path it took
+   * — is reported identically. Returns the (possibly app-reshaped) message for
+   * the caller to deliver via its own transport (RPC callback / WS broadcast).
+   */
+  private _finalizeContextOverflowError(
+    requestId: string,
+    rawError: string | undefined
+  ): string {
+    const raw = rawError ?? "Context window exceeded.";
+    const wrapped = this.onChatError(raw, {
+      requestId,
+      stage: "stream",
+      messagesPersisted: true,
+      classification: "context_overflow"
+    });
+    const message =
+      wrapped instanceof Error ? wrapped.message : String(wrapped);
+    this._emit("chat:request:failed", {
+      requestId,
+      stage: "stream",
+      messagesPersisted: true,
+      error: message
+    });
+    return message;
+  }
+
   // ── Extension initialization ───────────────────────────────────
 
   private async _initializeExtensions(): Promise<void> {
@@ -2735,6 +3060,100 @@ export class Think<
   // ── Inference loop (Think owns this) ──────────────────────────
 
   /**
+   * Assemble provider-ready model messages from the current session history:
+   * repair the transcript, truncate older messages, drop any still-incomplete
+   * tool calls, and convert to `ModelMessage[]`. Shared by the turn entry point
+   * and the proactive context guard so a mid-turn recompaction rebuilds the
+   * head through the exact same pipeline.
+   */
+  private async _assembleModelMessages(
+    tools: ToolSet
+  ): Promise<Awaited<ReturnType<typeof convertToModelMessages>>> {
+    const history = await this._repairTranscriptForProvider(this.messages);
+    const truncated = truncateOlderMessages(history) as UIMessage[];
+    // `_repairTranscriptForProvider` above already heals orphan tool calls
+    // (flipping them to errored results, preserving the record). This is the
+    // last-line backstop: if any incomplete tool call still slips through
+    // (compaction edge, addToolOutput race, an unrecognized part shape), drop it
+    // here rather than letting the provider 400 with AI_MissingToolResultsError.
+    //
+    // The backstop drops silently. Repair should have left nothing incomplete,
+    // so a non-empty set here means repair missed a shape — surface it (rather
+    // than masking a repair bug) without breaking the turn.
+    const incompleteAfterRepair = this._incompleteToolCallIds(truncated);
+    if (incompleteAfterRepair.length > 0) {
+      console.warn(
+        `[Think] ${incompleteAfterRepair.length} incomplete tool call(s) survived transcript repair and will be dropped by ignoreIncompleteToolCalls: ${incompleteAfterRepair.join(", ")}. This indicates a gap in _repairToolTranscriptParts.`
+      );
+      this._emit("chat:transcript:repaired", {
+        removedToolCalls: incompleteAfterRepair.length,
+        normalizedInputs: 0,
+        toolCallIds: incompleteAfterRepair
+      });
+    }
+    return convertToModelMessages(truncated, {
+      tools,
+      ignoreIncompleteToolCalls: true
+    });
+  }
+
+  /**
+   * Proactive context guard (Layer 1). Runs before each step from the
+   * `prepareStep` wrapper. If `contextOverflow.proactive` is set and the *previous*
+   * step's model-reported input tokens cross the budget, compact the session in
+   * place and return recompacted messages for the upcoming step — heading off a
+   * provider context-overflow 400 before it happens.
+   *
+   * Keys off `usage.inputTokens` (provider-agnostic; every provider reports it)
+   * rather than any provider error string, and reuses `_assembleModelMessages`
+   * so the recompacted head goes through the same repair/convert pipeline. The
+   * current turn's in-flight steps (everything after `_turnModelMessageBaseline`)
+   * are spliced back on so no completed work is lost.
+   *
+   * Best-effort: any failure (no-op compaction, reconciliation that would leave
+   * an incomplete tool pair) returns `undefined` so the step proceeds unchanged
+   * and the reactive backstop (`contextOverflow.reactive`) can still
+   * catch a genuine overflow.
+   */
+  private async _maybeProactiveContextCompact(
+    event: PrepareStepContext
+  ): Promise<Awaited<ReturnType<typeof convertToModelMessages>> | undefined> {
+    const guard = this._overflowGuard;
+    if (!guard || guard.maxInputTokens <= 0) return undefined;
+    // Proactive cap is independent of the reactive budget (which may be 0 to
+    // disable the reactive backstop while still using the proactive guard).
+    const proactiveCap = Math.max(1, this._overflowMaxRetries);
+    if (this._proactiveCompactionsThisRun >= proactiveCap) return undefined;
+
+    const prev = event.steps?.at(-1);
+    const used = prev?.usage?.inputTokens ?? prev?.usage?.totalTokens;
+    if (used == null || !Number.isFinite(used)) return undefined;
+
+    const headroom = guard.headroom ?? 0.9;
+    if (used < guard.maxInputTokens * headroom) return undefined;
+
+    try {
+      this._proactiveCompactionsThisRun++;
+      const shortened = await this._compactForContextOverflow("proactive");
+      if (!shortened) return undefined;
+
+      // Rebuild the compacted head, then splice this turn's in-flight steps
+      // (which are not yet persisted to the session) back onto the tail.
+      const head = await this._assembleModelMessages(this._activeTurnTools);
+      const tail = event.messages.slice(this._turnModelMessageBaseline);
+      const merged = [...head, ...tail];
+      // Re-baseline so a second guard fire this turn keeps the new tail.
+      this._turnModelMessageBaseline = head.length;
+      return merged;
+    } catch (err) {
+      console.warn(
+        `[Think] proactive context compaction failed; proceeding without it: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return undefined;
+    }
+  }
+
+  /**
    * The single convergence point for all chat turn entry paths.
    * Merges tools, assembles context, fires lifecycle hooks, wraps tools
    * for interception, and calls streamText.
@@ -2743,6 +3162,8 @@ export class Think<
     // Reset the per-turn watchdog override; `beforeTurn` may set it below. A
     // turn that doesn't override falls back to the instance-level value.
     this._activeStallTimeoutMs = undefined;
+    // Reset the proactive-compaction cap for this streamText run.
+    this._proactiveCompactionsThisRun = 0;
     if (this.waitForMcpConnections) {
       const timeout =
         typeof this.waitForMcpConnections === "object"
@@ -2774,32 +3195,14 @@ export class Think<
     const baseSystem = frozenPrompt || this.getSystemPrompt();
     const system = this._systemPromptForTurn(baseSystem, tools);
 
-    const history = await this._repairTranscriptForProvider(this.messages);
-    const truncated = truncateOlderMessages(history) as UIMessage[];
-    // `_repairTranscriptForProvider` above already heals orphan tool calls
-    // (flipping them to errored results, preserving the record). This is the
-    // last-line backstop: if any incomplete tool call still slips through
-    // (compaction edge, addToolOutput race, an unrecognized part shape), drop it
-    // here rather than letting the provider 400 with AI_MissingToolResultsError.
-    //
-    // The backstop drops silently. Repair should have left nothing incomplete,
-    // so a non-empty set here means repair missed a shape — surface it (rather
-    // than masking a repair bug) without breaking the turn.
-    const incompleteAfterRepair = this._incompleteToolCallIds(truncated);
-    if (incompleteAfterRepair.length > 0) {
-      console.warn(
-        `[Think] ${incompleteAfterRepair.length} incomplete tool call(s) survived transcript repair and will be dropped by ignoreIncompleteToolCalls: ${incompleteAfterRepair.join(", ")}. This indicates a gap in _repairToolTranscriptParts.`
-      );
-      this._emit("chat:transcript:repaired", {
-        removedToolCalls: incompleteAfterRepair.length,
-        normalizedInputs: 0,
-        toolCallIds: incompleteAfterRepair
-      });
-    }
-    const messages = await convertToModelMessages(truncated, {
-      tools,
-      ignoreIncompleteToolCalls: true
-    });
+    const messages = await this._assembleModelMessages(tools);
+    // Baseline for the proactive context guard: everything appended to the
+    // model-message list after this point belongs to the current turn's steps,
+    // so a mid-turn recompaction can keep that tail and only re-summarize the
+    // (now-compacted) head. Captured even when the guard is off — cheap, and
+    // keeps the value correct if `beforeTurn` later overrides messages.
+    this._turnModelMessageBaseline = messages.length;
+    this._activeTurnTools = tools;
 
     if (messages.length === 0) {
       throw new Error(
@@ -2907,8 +3310,18 @@ export class Think<
       // `{}` so the AI SDK falls back to top-level settings (it accepts
       // `undefined` per docs but the typed return is non-null).
       prepareStep: (async (event) => {
+        // Proactive context guard (Layer 1) runs first so `beforeStep` sees the
+        // recompacted messages and can still override them if it wants to.
+        const guarded = await this._maybeProactiveContextCompact(event);
         const result = await this.beforeStep(event);
-        return result == null ? {} : result;
+        const base = result == null ? {} : result;
+        // Only apply the guard's recompacted messages when the subclass didn't
+        // set its own `messages` override for this step.
+        const baseMessages = (base as { messages?: unknown }).messages;
+        if (guarded && baseMessages === undefined) {
+          return { ...base, messages: guarded };
+        }
+        return base;
       }) satisfies PrepareStepFunction<ToolSet>,
       onChunk: async (event) => {
         // Pass the AI SDK's chunk event through unchanged — gives users
@@ -3465,43 +3878,75 @@ export class Think<
           this._broadcastMessages();
 
           const chatBody = async () => {
-            let result: StreamableResult;
-            try {
-              result = await agentContext.run(
-                {
-                  agent: this,
-                  connection: undefined,
-                  request: undefined,
-                  email: undefined
-                },
-                () =>
-                  this._runInferenceLoop({
-                    signal: abortSignal,
-                    continuation: false
-                  })
+            // Bounded compact-and-retry loop (opt-in via
+            // `contextOverflow.reactive`). A turn that overflows the context
+            // window mid-flight is compacted and re-run from the persisted
+            // partial instead of dying terminally. `attempt === 0` is the
+            // original turn; later attempts are continuations of it.
+            for (let attempt = 0; ; attempt++) {
+              let result: StreamableResult;
+              try {
+                result = await agentContext.run(
+                  {
+                    agent: this,
+                    connection: undefined,
+                    request: undefined,
+                    email: undefined
+                  },
+                  () =>
+                    this._runInferenceLoop({
+                      signal: abortSignal,
+                      continuation: attempt > 0
+                    })
+                );
+              } catch (error) {
+                const wrapped = this.onChatError(error, {
+                  stage: "turn",
+                  messagesPersisted: true
+                });
+                const errorMessage =
+                  wrapped instanceof Error ? wrapped.message : String(wrapped);
+                this._emit("chat:request:failed", {
+                  stage: "turn",
+                  messagesPersisted: true,
+                  error: errorMessage
+                });
+                await callback.onError(errorMessage);
+                return;
+              }
+
+              // The consumer suppresses a classified overflow whenever recovery
+              // is enabled; the driver (here) owns the retry-vs-terminal call so
+              // every overflow terminal is reported identically.
+              const { status, error } = await this._streamResultToRpcCallback(
+                requestId,
+                result,
+                callback,
+                abortSignal,
+                { overflowRecovery: this._overflowReactiveEnabled }
               );
-            } catch (error) {
-              const wrapped = this.onChatError(error, {
-                stage: "turn",
-                messagesPersisted: true
-              });
-              const errorMessage =
-                wrapped instanceof Error ? wrapped.message : String(wrapped);
-              this._emit("chat:request:failed", {
-                stage: "turn",
-                messagesPersisted: true,
-                error: errorMessage
-              });
-              await callback.onError(errorMessage);
+
+              if (status === "overflow_retry") {
+                if (attempt < this._overflowMaxRetries) {
+                  const shortened = await this._compactForContextOverflow(
+                    "reactive",
+                    { requestId, attempt: attempt + 1 }
+                  );
+                  // Compaction shortened history → retry. A no-op compaction
+                  // can't fix the overflow, so fall through to terminal.
+                  if (shortened) continue;
+                }
+                // Budget spent or compaction no-op: deliver terminally (through
+                // onChatError, classified) so the turn never loops or ends
+                // silently with no answer.
+                const message = this._finalizeContextOverflowError(
+                  requestId,
+                  error
+                );
+                await callback.onError(message);
+              }
               return;
             }
-
-            await this._streamResultToRpcCallback(
-              requestId,
-              result,
-              callback,
-              abortSignal
-            );
           };
 
           if (this.chatRecovery) {
@@ -5656,24 +6101,41 @@ export class Think<
         );
         try {
           const programmaticBody = async () => {
-            const result = await agentContext.run(
-              {
-                agent: this,
-                connection: undefined,
-                request: undefined,
-                email: undefined
-              },
-              () =>
-                this._runInferenceLoop({
-                  signal: abortSignal,
-                  clientTools,
-                  body,
-                  workflowPrompt: options?.workflowPrompt,
-                  continuation: false
-                })
-            );
+            // Bounded compact-and-retry loop (opt-in via
+            // `contextOverflow.reactive`), mirroring the WebSocket and chat()
+            // paths so programmatic turns (saveMessages / submitMessages /
+            // scheduled prompts) recover from a mid-turn overflow too.
+            for (let attempt = 0; ; attempt++) {
+              const result = await agentContext.run(
+                {
+                  agent: this,
+                  connection: undefined,
+                  request: undefined,
+                  email: undefined
+                },
+                () =>
+                  this._runInferenceLoop({
+                    signal: abortSignal,
+                    clientTools,
+                    body,
+                    workflowPrompt: options?.workflowPrompt,
+                    continuation: attempt > 0
+                  })
+              );
 
-            if (result) {
+              if (!result) return;
+
+              let overflowError: string | undefined;
+              let overflowRequested = false;
+              const overflowRecovery = this._overflowReactiveEnabled
+                ? {
+                    onRetry: (err?: string) => {
+                      overflowRequested = true;
+                      overflowError = err;
+                    }
+                  }
+                : undefined;
+
               const streamResult = await this._streamResult(
                 requestId,
                 result,
@@ -5681,12 +6143,33 @@ export class Think<
                 {
                   captureProgrammaticStreamError:
                     options?.captureProgrammaticStreamError,
-                  captureOutput: options?.captureOutput
+                  captureOutput: options?.captureOutput,
+                  overflowRecovery
                 }
               );
+
+              if (overflowRequested) {
+                if (attempt < this._overflowMaxRetries) {
+                  const shortened = await this._compactForContextOverflow(
+                    "reactive",
+                    { requestId, attempt: attempt + 1 }
+                  );
+                  if (shortened) continue;
+                }
+                // Budget spent or compaction no-op: surface terminally through
+                // onChatError (classified). The caller reads status/error.
+                error = this._finalizeContextOverflowError(
+                  requestId,
+                  overflowError
+                );
+                status = "error";
+                return;
+              }
+
               status = streamResult.status;
               error = streamResult.error;
               output = streamResult.output;
+              return;
             }
           };
 
@@ -6295,33 +6778,83 @@ export class Think<
             }
 
             const chatTurnBody = async () => {
-              const result = await agentContext.run(
-                {
-                  agent: this,
-                  connection,
-                  request: undefined,
-                  email: undefined
-                },
-                () =>
-                  this._runInferenceLoop({
-                    signal: abortSignal,
-                    clientTools: clientToolsForTurn,
-                    body: bodyForTurn,
-                    continuation: false
-                  })
-              );
+              // Bounded compact-and-retry loop (opt-in via
+              // `contextOverflow.reactive`). A turn that overflows the
+              // context window mid-flight is compacted and re-run from the
+              // persisted partial instead of dying terminally.
+              for (let attempt = 0; ; attempt++) {
+                const result = await agentContext.run(
+                  {
+                    agent: this,
+                    connection,
+                    request: undefined,
+                    email: undefined
+                  },
+                  () =>
+                    this._runInferenceLoop({
+                      signal: abortSignal,
+                      clientTools: clientToolsForTurn,
+                      body: bodyForTurn,
+                      continuation: attempt > 0
+                    })
+                );
 
-              if (result) {
+                if (!result) {
+                  this._broadcastChat({
+                    type: MSG_CHAT_RESPONSE,
+                    id: requestId,
+                    body: "No response was generated.",
+                    done: true
+                  });
+                  return;
+                }
+
+                // The consumer suppresses a classified overflow whenever
+                // recovery is enabled; the driver (here) owns the
+                // retry-vs-terminal call so every overflow terminal is reported
+                // identically.
+                let overflowError: string | undefined;
+                let overflowRequested = false;
+                const overflowRecovery = this._overflowReactiveEnabled
+                  ? {
+                      onRetry: (error?: string) => {
+                        overflowRequested = true;
+                        overflowError = error;
+                      }
+                    }
+                  : undefined;
+
                 await this._streamResult(requestId, result, abortSignal, {
-                  parentId: branchParentId
+                  parentId: branchParentId,
+                  overflowRecovery
                 });
-              } else {
-                this._broadcastChat({
-                  type: MSG_CHAT_RESPONSE,
-                  id: requestId,
-                  body: "No response was generated.",
-                  done: true
-                });
+
+                if (overflowRequested) {
+                  if (attempt < this._overflowMaxRetries) {
+                    const shortened = await this._compactForContextOverflow(
+                      "reactive",
+                      { requestId, attempt: attempt + 1 }
+                    );
+                    // Compaction shortened history → retry. A no-op compaction
+                    // can't fix the overflow, so fall through to terminal.
+                    if (shortened) continue;
+                  }
+                  // Budget spent or compaction no-op: deliver terminally
+                  // (through onChatError, classified) so the turn never loops or
+                  // ends silently with no answer.
+                  const message = this._finalizeContextOverflowError(
+                    requestId,
+                    overflowError
+                  );
+                  this._broadcastChat({
+                    type: MSG_CHAT_RESPONSE,
+                    id: requestId,
+                    body: message,
+                    done: true,
+                    error: true
+                  });
+                }
+                return;
               }
             };
 
@@ -6487,8 +7020,21 @@ export class Think<
     requestId: string,
     result: StreamableResult,
     callback: StreamCallback,
-    abortSignal?: AbortSignal
-  ): Promise<void> {
+    abortSignal?: AbortSignal,
+    options?: {
+      /**
+       * When set, an in-stream error the app classifies as `context_overflow`
+       * is treated as recoverable: the partial is persisted, the stream is
+       * finalized cleanly (no terminal error to the caller), and
+       * `{ status: "overflow_retry" }` is returned so the driver can compact
+       * and re-run. Pass only while the retry budget allows.
+       */
+      overflowRecovery?: boolean;
+    }
+  ): Promise<{
+    status: "completed" | "error" | "aborted" | "overflow_retry";
+    error?: string;
+  }> {
     const streamId = this._resumableStream.start(requestId);
     const accumulator = new StreamAccumulator({
       messageId: crypto.randomUUID()
@@ -6511,6 +7057,9 @@ export class Think<
     // double model invocation. Mirror the WebSocket `_streamResult` recovery
     // paths and clear `_streamingAssistant` WITHOUT re-arming in that case.
     let skipFinalizeRearm = false;
+    // Set when an in-stream overflow error is recoverable (opt-in): suppresses
+    // terminal delivery so the driver can compact and re-run the turn.
+    let overflowRetry = false;
 
     const stallTimeoutMs =
       this._activeStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
@@ -6546,6 +7095,17 @@ export class Think<
 
           if (action?.type === "error") {
             streamError = action.error;
+            // Recoverable context overflow (opt-in): don't terminalize. Persist
+            // the partial after the loop, then signal the driver to compact and
+            // re-run. No `message:error`/`chat:request:failed`/error frame here
+            // — the turn isn't over.
+            if (
+              options?.overflowRecovery &&
+              this._isRecoverableContextOverflow(streamError)
+            ) {
+              overflowRetry = true;
+              break;
+            }
             this._emit("message:error", { error: streamError });
             // An AI-SDK error surfaces as a stream error part (not a thrown
             // exception), so it lands here rather than in the `catch` below.
@@ -6586,6 +7146,22 @@ export class Think<
         }
       } finally {
         this._insideInferenceLoop = false;
+      }
+
+      // Recoverable context overflow: persist the partial (so the recompacted
+      // retry continues instead of re-running completed steps), close the
+      // stream cleanly without a terminal error, and hand control back to the
+      // driver. No `onDone`/`onError` and no response hook — the turn is not
+      // finished; the retry owns the terminal outcome.
+      if (overflowRetry) {
+        this._resumableStream.complete(streamId);
+        streamFinalized = true;
+        assistantMsg = accumulator.toMessage();
+        if (accumulator.parts.length > 0) {
+          await this._persistAssistantMessage(assistantMsg);
+          this._broadcastMessages();
+        }
+        return { status: "overflow_retry", error: streamError };
       }
 
       if (streamError) {
@@ -6670,7 +7246,7 @@ export class Think<
           // truncated partial (#1644); NOT onDone/onError — see `onInterrupted`.
           skipFinalizeRearm = true;
           await callback.onInterrupted?.();
-          return;
+          return { status: "aborted" };
         }
         if (outcome === "exhausted") {
           // `_routeStallToBoundedRecovery` already delivered the terminal UX
@@ -6689,7 +7265,7 @@ export class Think<
           // doesn't mis-read the clean resolve as a successful completion (#1644).
           skipFinalizeRearm = true;
           await callback.onInterrupted?.();
-          return;
+          return { status: "aborted" };
         }
         // outcome === "disabled" (chat recovery off): fall through to the
         // generic terminal path below (unchanged watchdog behavior).
@@ -6760,6 +7336,15 @@ export class Think<
     if (pendingRpcError) {
       await callback.onError(pendingRpcError);
     }
+
+    return {
+      status:
+        streamError || pendingRpcError
+          ? "error"
+          : aborted
+            ? "aborted"
+            : "completed"
+    };
   }
 
   /**
@@ -6908,6 +7493,14 @@ export class Think<
       parentId?: string;
       captureProgrammaticStreamError?: boolean;
       captureOutput?: boolean;
+      /**
+       * When set, an in-stream error the app classifies as `context_overflow`
+       * is treated as recoverable: the partial is persisted, the stream is
+       * finalized cleanly (no terminal error frame), `onRetry(error)` is invoked
+       * so the driver can compact and re-run, and `{ status: "aborted" }` is
+       * returned. Pass only while the retry budget allows.
+       */
+      overflowRecovery?: { onRetry: (error?: string) => void };
     }
   ): Promise<StreamResultStatus> {
     const clearGen = this._turnQueue.generation;
@@ -6934,6 +7527,9 @@ export class Think<
     let streamAborted = false;
     let streamError: string | undefined;
     let output: unknown;
+    // Set when an in-stream overflow error is recoverable (opt-in): suppresses
+    // terminal delivery so the driver can compact and re-run the turn.
+    let overflowRetry = false;
     const flushState = { chunksSinceFlush: 0, hasFlushedContent: false };
 
     const stallTimeoutMs =
@@ -6989,6 +7585,16 @@ export class Think<
 
           if (action?.type === "error") {
             streamError = action.error;
+            // Recoverable context overflow (opt-in): don't terminalize. Persist
+            // the partial after the loop, then signal the driver to compact and
+            // re-run. No `message:error`/`chat:request:failed`/error frame here.
+            if (
+              options?.overflowRecovery &&
+              this._isRecoverableContextOverflow(streamError)
+            ) {
+              overflowRetry = true;
+              break;
+            }
             if (options?.captureProgrammaticStreamError) {
               this._programmaticStreamErrors.set(requestId, streamError);
             }
@@ -7033,6 +7639,30 @@ export class Think<
         }
       } finally {
         this._insideInferenceLoop = false;
+      }
+
+      // Recoverable context overflow: persist the partial (so the recompacted
+      // retry continues instead of re-running completed steps), close this
+      // stream segment WITHOUT a terminal frame, and hand control back to the
+      // driver via `onRetry`. The inline retry runs in this same invocation and
+      // owns the terminal outcome, so we must NOT emit a `done` frame here —
+      // and `doneSent = true` keeps the outer `finally` from emitting one (it
+      // would otherwise prematurely terminate the client's stream mid-recovery
+      // and mark the segment errored).
+      if (overflowRetry && options?.overflowRecovery) {
+        this._resumableStream.complete(streamId);
+        this._pendingResumeConnections.clear();
+        doneSent = true;
+        if (this._turnQueue.generation === clearGen) {
+          const partial = accumulator.toMessage();
+          if (accumulator.parts.length > 0) {
+            await this._persistAssistantMessage(partial, parentId);
+            this._broadcastMessages();
+          }
+        }
+        options.overflowRecovery.onRetry(streamError);
+        this._streamingAssistant = null;
+        return { status: "aborted" };
       }
 
       if (streamError) {

@@ -3,7 +3,8 @@ export { TestAssistantAgentAgent } from "./assistant-agent";
 export {
   BareAssistantAgent,
   LoopTestAgent,
-  LoopToolTestAgent
+  LoopToolTestAgent,
+  OverflowRecoveryTestAgent
 } from "./assistant-agent-loop";
 export {
   ThinkTestAgent,

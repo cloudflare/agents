@@ -81,7 +81,12 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { Agent, callable, getAgentByName } from "agents";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
-import { Think, Session, Workspace } from "@cloudflare/think";
+import {
+  Think,
+  Session,
+  Workspace,
+  defaultContextOverflowClassifier
+} from "@cloudflare/think";
 import {
   createWorkspaceStateBackend,
   type FileInfo,
@@ -849,6 +854,18 @@ export class MyAssistant extends Think<Env> {
       { sessionAffinity: this.sessionAffinity }
     );
   }
+
+  // Recover from a turn that overflows the context window mid-flight: compaction
+  // (configured in configureSession below) is only checked between turns, so a
+  // long, tool-heavy turn can grow past the window before the next check. With
+  // `reactive` on, such a turn is compacted and re-run instead of dying.
+  override contextOverflow = { reactive: true };
+
+  // Think ships no provider-specific error matching — teach it which errors are
+  // context-window overflows. The bundled defaultContextOverflowClassifier
+  // covers the common providers; assign it directly, or wrap it to add your own
+  // categories.
+  override classifyChatError = defaultContextOverflowClassifier;
 
   configureSession(session: Session) {
     const persona =

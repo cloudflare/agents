@@ -32,6 +32,7 @@ the sub-agent routing primitive from `agents`.
 - **Self-authored extensions** — `extensionLoader` + `createExtensionTools` let the agent create new tools at runtime
 - **Persistent memory** — context blocks (`soul`, `memory`) the model can read and write across sessions
 - **Non-destructive compaction** — older messages summarized when context overflows, originals preserved
+- **Mid-turn overflow recovery** — `contextOverflow` + `classifyChatError` compact and re-run a turn that exceeds the context window mid-flight, instead of failing
 - **Searchable knowledge base** — FTS5-backed `AgentSearchProvider` with `search_context` and `set_context` tools
 - **Dynamic configuration** — typed `AgentConfig` with model tier and persona, persisted in SQLite
 - **Server-side tools** — `getWeather`, `calculate` execute on the server

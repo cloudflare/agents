@@ -22,20 +22,20 @@ Every event has these fields:
 
 Events are routed to named channels based on their type:
 
-| Channel             | Event types                                                                                                                                                              | Description                                        |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------- |
-| `agents:state`      | `state:update`                                                                                                                                                           | State sync events                                  |
-| `agents:rpc`        | `rpc`, `rpc:error`                                                                                                                                                       | RPC method calls and failures                      |
-| `agents:message`    | `message:request`, `message:response`, `message:clear`, `message:cancel`, `message:error`, `tool:result`, `tool:approval`                                                | Chat message and tool lifecycle                    |
-| `agents:chat`       | `chat:request:failed`, `chat:recovery:*`, `chat:stream:stalled`                                                                                                          | Chat request, recovery, and stream-stall lifecycle |
-| `agents:transcript` | `chat:transcript:repaired`                                                                                                                                               | Transcript repair events                           |
-| `agents:fiber`      | `fiber:run:*`, `fiber:recovery:*`                                                                                                                                        | Durable fiber lifecycle                            |
-| `agents:agent_tool` | `agent_tool:recovery:*`                                                                                                                                                  | Parent/child agent-tool recovery                   |
-| `agents:schedule`   | `schedule:create`, `schedule:execute`, `schedule:cancel`, `schedule:retry`, `schedule:error`, `schedule:duplicate_warning`, `queue:create`, `queue:retry`, `queue:error` | Scheduled and queued task lifecycle                |
-| `agents:lifecycle`  | `connect`, `disconnect`, `destroy`                                                                                                                                       | Agent connection and teardown                      |
-| `agents:workflow`   | `workflow:start`, `workflow:event`, `workflow:approved`, `workflow:rejected`, `workflow:terminated`, `workflow:paused`, `workflow:resumed`, `workflow:restarted`         | Workflow state transitions                         |
-| `agents:mcp`        | `mcp:client:preconnect`, `mcp:client:connect`, `mcp:client:authorize`, `mcp:client:discover`, `mcp:client:close`                                                         | MCP client operations                              |
-| `agents:email`      | `email:receive`, `email:reply`                                                                                                                                           | Email processing                                   |
+| Channel             | Event types                                                                                                                                                              | Description                                                            |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| `agents:state`      | `state:update`                                                                                                                                                           | State sync events                                                      |
+| `agents:rpc`        | `rpc`, `rpc:error`                                                                                                                                                       | RPC method calls and failures                                          |
+| `agents:message`    | `message:request`, `message:response`, `message:clear`, `message:cancel`, `message:error`, `tool:result`, `tool:approval`                                                | Chat message and tool lifecycle                                        |
+| `agents:chat`       | `chat:request:failed`, `chat:recovery:*`, `chat:stream:stalled`, `chat:context:compacted`                                                                                | Chat request, recovery, stream-stall, and context-compaction lifecycle |
+| `agents:transcript` | `chat:transcript:repaired`                                                                                                                                               | Transcript repair events                                               |
+| `agents:fiber`      | `fiber:run:*`, `fiber:recovery:*`                                                                                                                                        | Durable fiber lifecycle                                                |
+| `agents:agent_tool` | `agent_tool:recovery:*`                                                                                                                                                  | Parent/child agent-tool recovery                                       |
+| `agents:schedule`   | `schedule:create`, `schedule:execute`, `schedule:cancel`, `schedule:retry`, `schedule:error`, `schedule:duplicate_warning`, `queue:create`, `queue:retry`, `queue:error` | Scheduled and queued task lifecycle                                    |
+| `agents:lifecycle`  | `connect`, `disconnect`, `destroy`                                                                                                                                       | Agent connection and teardown                                          |
+| `agents:workflow`   | `workflow:start`, `workflow:event`, `workflow:approved`, `workflow:rejected`, `workflow:terminated`, `workflow:paused`, `workflow:resumed`, `workflow:restarted`         | Workflow state transitions                                             |
+| `agents:mcp`        | `mcp:client:preconnect`, `mcp:client:connect`, `mcp:client:authorize`, `mcp:client:discover`, `mcp:client:close`                                                         | MCP client operations                                                  |
+| `agents:email`      | `email:receive`, `email:reply`                                                                                                                                           | Email processing                                                       |
 
 ## Subscribing to events
 
@@ -171,6 +171,12 @@ These events are emitted by `AIChatAgent` from `@cloudflare/ai-chat`. They track
 | `chat:stream:stalled`     | `{ requestId, timeoutMs }`                                               | The inactivity watchdog fired — no stream chunk arrived within `chatStreamStallTimeoutMs`. With `chatRecovery` on (the default) the turn then routes into bounded recovery (look for `chat:recovery:*`); with recovery off it terminalizes. See [Think configuration](./think/index.md) |
 
 `recoveryKind` is `"retry"` when recovery replays an unanswered user turn and `"continue"` when it continues a partial assistant turn.
+
+### Chat context events
+
+| Type                     | Payload                                       | When                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------ | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `chat:context:compacted` | `{ reason, shortened, requestId?, attempt? }` | Think compacted the session to handle a context-window overflow. `reason` is `"proactive"` (the `contextOverflow.proactive` guard fired before a step) or `"reactive"` (`contextOverflow.reactive` fired after an overflow). `shortened` is whether compaction actually reduced history — `false` means a retry would overflow again. See [Context-window overflow recovery](./think/index.md#context-window-overflow-recovery). |
 
 ### Transcript events
 

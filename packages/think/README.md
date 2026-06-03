@@ -307,24 +307,25 @@ Script execution requires a Worker Loader binding:
 
 ### Configuration
 
-| Method / Property          | Default                            | Description                                                                                                                                            |
-| -------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `getModel()`               | throws                             | Return the `LanguageModel` to use                                                                                                                      |
-| `getSystemPrompt()`        | careful assistant operating prompt | System prompt (fallback when no context blocks)                                                                                                        |
-| `getTools()`               | `{}`                               | AI SDK `ToolSet` for the agentic loop                                                                                                                  |
-| `getMessengers()`          | `{}`                               | Messenger ingress and delivery declarations                                                                                                            |
-| `getScheduledTasks()`      | `{}`                               | Code-declared recurring prompts                                                                                                                        |
-| `getDefaultTimezone()`     | `undefined`                        | Default timezone for wall-clock schedules                                                                                                              |
-| `maxSteps`                 | `10`                               | Max tool-call rounds per turn (property)                                                                                                               |
-| `sendReasoning`            | `true`                             | Send reasoning chunks to chat clients                                                                                                                  |
-| `configureSession()`       | identity                           | Add context blocks, compaction, search, skills                                                                                                         |
-| `getSkills()`              | `[]`                               | First-class Agent Skills sources                                                                                                                       |
-| `getSkillScriptRunner()`   | `null`                             | Optional runner for `run_skill_script`                                                                                                                 |
-| `getExtensions()`          | `[]`                               | Sandboxed extension declarations (load order)                                                                                                          |
-| `extensionLoader`          | `undefined`                        | `WorkerLoader` binding — enables extensions                                                                                                            |
-| `workspaceBash`            | `true`                             | Include the default workspace `bash` tool                                                                                                              |
-| `chatRecovery`             | `true`                             | Wrap turns in `runFiber` for durable execution. Set `{ maxAttempts, terminalMessage, onExhausted }` to tune bounded recovery                           |
-| `chatStreamStallTimeoutMs` | `0` (off)                          | Inactivity watchdog: abort a turn whose model stream produces no chunk for this long, surfacing a terminal stream error instead of an infinite spinner |
+| Method / Property          | Default                            | Description                                                                                                                                                                                                                  |
+| -------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `getModel()`               | throws                             | Return the `LanguageModel` to use                                                                                                                                                                                            |
+| `getSystemPrompt()`        | careful assistant operating prompt | System prompt (fallback when no context blocks)                                                                                                                                                                              |
+| `getTools()`               | `{}`                               | AI SDK `ToolSet` for the agentic loop                                                                                                                                                                                        |
+| `getMessengers()`          | `{}`                               | Messenger ingress and delivery declarations                                                                                                                                                                                  |
+| `getScheduledTasks()`      | `{}`                               | Code-declared recurring prompts                                                                                                                                                                                              |
+| `getDefaultTimezone()`     | `undefined`                        | Default timezone for wall-clock schedules                                                                                                                                                                                    |
+| `maxSteps`                 | `10`                               | Max tool-call rounds per turn (property)                                                                                                                                                                                     |
+| `sendReasoning`            | `true`                             | Send reasoning chunks to chat clients                                                                                                                                                                                        |
+| `configureSession()`       | identity                           | Add context blocks, compaction, search, skills                                                                                                                                                                               |
+| `getSkills()`              | `[]`                               | First-class Agent Skills sources                                                                                                                                                                                             |
+| `getSkillScriptRunner()`   | `null`                             | Optional runner for `run_skill_script`                                                                                                                                                                                       |
+| `getExtensions()`          | `[]`                               | Sandboxed extension declarations (load order)                                                                                                                                                                                |
+| `extensionLoader`          | `undefined`                        | `WorkerLoader` binding — enables extensions                                                                                                                                                                                  |
+| `workspaceBash`            | `true`                             | Include the default workspace `bash` tool                                                                                                                                                                                    |
+| `chatRecovery`             | `true`                             | Wrap turns in `runFiber` for durable execution. Set `{ maxAttempts, terminalMessage, onExhausted }` to tune bounded recovery                                                                                                 |
+| `chatStreamStallTimeoutMs` | `0` (off)                          | Inactivity watchdog: abort a turn whose model stream produces no chunk for this long, surfacing a terminal stream error instead of an infinite spinner                                                                       |
+| `contextOverflow`          | `undefined`                        | Opt-in mid-turn context-overflow handling: `{ reactive?, maxRetries?, proactive? }`. Requires `classifyChatError` + a session compaction function. See [Context-window overflow recovery](#context-window-overflow-recovery) |
 
 On each turn, Think appends a small capability block to the assembled system prompt. The block is based on the tools available for that turn, so models learn about workspace tools, context-loading tools, extension tools, sandboxed execution, MCP/client tools, and delegated-agent tools only when they are actually exposed.
 
@@ -383,6 +384,40 @@ instead of looking frozen — surface it on the client with `useAgentChat`'s
 cleared on every terminal outcome, so the indicator never spins forever. To
 record recovery counts or reasons in your own analytics, subscribe to the
 `chat:recovery:*` observability events and route them to your sink.
+
+### Context-window overflow recovery
+
+Compaction (`compactAfter()`) is checked _between_ turns. A single long,
+tool-heavy turn can grow the prompt past the model's context window _mid-turn_,
+before the next check — the provider then rejects the request
+(`"prompt is too long"` / `context_length_exceeded`). Two opt-in,
+provider-agnostic layers recover from this (both off by default; both reuse your
+session's compaction function):
+
+```ts
+import { Think, defaultContextOverflowClassifier } from "@cloudflare/think";
+
+export class MyAgent extends Think<Env> {
+  override contextOverflow = {
+    // Reactive: compact + re-run a turn that overflows (bounded by maxRetries;
+    // terminalizes via onChatError if it cannot help).
+    reactive: true,
+    // Proactive: compact mid-turn before a step crosses 90% of the window.
+    proactive: { maxInputTokens: 200_000 }
+  };
+
+  // Teach Think which errors are overflows. The bundled classifier covers the
+  // common providers; assign it directly or wrap it to add your own categories.
+  override classifyChatError = defaultContextOverflowClassifier;
+}
+```
+
+Use either layer alone or both together. The proactive guard keys off
+model-reported `usage.inputTokens` (no provider strings); the reactive backstop
+catches anything that still overflows. Both emit a `chat:context:compacted`
+observability event. Recovery is only as effective as your compaction
+configuration — a no-op compaction cannot rescue an over-budget turn. See the
+[Think docs](../../docs/think/index.md#context-window-overflow-recovery) for details.
 
 ### Scheduled tasks
 
@@ -468,20 +503,30 @@ exhausts its retries, so failed occurrences do not block future runs.
 
 Think owns the `streamText` call. Hooks fire on every turn regardless of entry path (WebSocket, `chat()`, `saveMessages()`, durable `submitMessages()` execution, `continueLastTurn()`, auto-continuation).
 
-| Hook                      | When it fires                               | Return                         |
-| ------------------------- | ------------------------------------------- | ------------------------------ |
-| `beforeTurn(ctx)`         | Before `streamText` — see assembled context | `TurnConfig` overrides or void |
-| `beforeStep(ctx)`         | Before each model step                      | `StepConfig` overrides or void |
-| `beforeToolCall(ctx)`     | Before tool's `execute` runs                | `ToolCallDecision` or void     |
-| `afterToolCall(ctx)`      | After tool execution (success or failure)   | void                           |
-| `onStepFinish(ctx)`       | After each step completes                   | void                           |
-| `onChunk(ctx)`            | Per streaming chunk (high-frequency)        | void                           |
-| `onChatResponse(result)`  | After turn completes + message persisted    | void                           |
-| `onChatError(error, ctx)` | On error during a turn                      | error to propagate             |
+| Hook                            | When it fires                               | Return                            |
+| ------------------------------- | ------------------------------------------- | --------------------------------- |
+| `beforeTurn(ctx)`               | Before `streamText` — see assembled context | `TurnConfig` overrides or void    |
+| `beforeStep(ctx)`               | Before each model step                      | `StepConfig` overrides or void    |
+| `beforeToolCall(ctx)`           | Before tool's `execute` runs                | `ToolCallDecision` or void        |
+| `afterToolCall(ctx)`            | After tool execution (success or failure)   | void                              |
+| `onStepFinish(ctx)`             | After each step completes                   | void                              |
+| `onChunk(ctx)`                  | Per streaming chunk (high-frequency)        | void                              |
+| `onChatResponse(result)`        | After turn completes + message persisted    | void                              |
+| `onChatError(error, ctx)`       | On error during a turn                      | error to propagate                |
+| `classifyChatError(error, ctx)` | On error, before `onChatError`              | `ChatErrorClassification` or void |
 
-`onChatError` receives `ctx.stage`, `ctx.requestId`, and `ctx.messagesPersisted`
-so apps can distinguish pre-persist request failures from stream failures. The
-same failures emit `chat:request:failed` observability events.
+`onChatError` receives `ctx.stage`, `ctx.requestId`, `ctx.messagesPersisted`,
+and `ctx.classification` so apps can distinguish pre-persist request failures
+from stream failures and react to semantic categories. The same failures emit
+`chat:request:failed` observability events.
+
+`classifyChatError` maps a raw provider error to a provider-agnostic category
+(`"context_overflow" | "rate_limit" | "transient" | "fatal" | "unknown"`).
+Think ships no provider-specific matching in core — the app owns it, the same
+split as the `tokenCounter` passed to `compactAfter()`. For the common case,
+assign the exported `defaultContextOverflowClassifier` (it matches the
+context-overflow errors of Anthropic, OpenAI, Google, Bedrock, and others).
+Returning `"context_overflow"` enables the recovery described below.
 
 The AI SDK-derived contexts spread the SDK's own types at the top level — no information is dropped:
 

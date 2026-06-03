@@ -8,6 +8,7 @@ export {
   BareAssistantAgent,
   LoopTestAgent,
   LoopToolTestAgent,
+  OverflowRecoveryTestAgent,
   ThinkTestAgent,
   ThinkToolsTestAgent,
   ThinkFiberTestAgent,
@@ -34,6 +35,7 @@ import type {
   BareAssistantAgent,
   LoopTestAgent,
   LoopToolTestAgent,
+  OverflowRecoveryTestAgent,
   ThinkTestAgent,
   ThinkToolsTestAgent,
   ThinkFiberTestAgent,
@@ -60,6 +62,7 @@ export type Env = {
   BareAssistantAgent: DurableObjectNamespace<BareAssistantAgent>;
   LoopTestAgent: DurableObjectNamespace<LoopTestAgent>;
   LoopToolTestAgent: DurableObjectNamespace<LoopToolTestAgent>;
+  OverflowRecoveryTestAgent: DurableObjectNamespace<OverflowRecoveryTestAgent>;
   ThinkTestAgent: DurableObjectNamespace<ThinkTestAgent>;
   ThinkToolsTestAgent: DurableObjectNamespace<ThinkToolsTestAgent>;
   ThinkFiberTestAgent: DurableObjectNamespace<ThinkFiberTestAgent>;

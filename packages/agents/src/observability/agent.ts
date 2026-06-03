@@ -239,6 +239,22 @@ export type AgentObservabilityEvent =
       }
     >
   | BaseEvent<
+      "chat:context:compacted",
+      {
+        /**
+         * `"proactive"` — the pre-step token guard compacted before the next
+         * step; `"reactive"` — a context-overflow error triggered compaction
+         * before a retry.
+         */
+        reason: "proactive" | "reactive";
+        /** Whether compaction actually shortened history (false = no-op). */
+        shortened: boolean;
+        requestId?: string;
+        /** Recovery attempt index (reactive backstop only). */
+        attempt?: number;
+      }
+    >
+  | BaseEvent<
       "agent_tool:recovery:begin",
       { runCount: number; totalTimeoutMs?: number }
     >

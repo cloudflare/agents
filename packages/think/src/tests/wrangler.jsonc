@@ -32,6 +32,10 @@
         "name": "LoopToolTestAgent"
       },
       {
+        "class_name": "OverflowRecoveryTestAgent",
+        "name": "OverflowRecoveryTestAgent"
+      },
+      {
         "class_name": "ThinkTestAgent",
         "name": "ThinkTestAgent"
       },
@@ -115,6 +119,7 @@
         "BareAssistantAgent",
         "LoopTestAgent",
         "LoopToolTestAgent",
+        "OverflowRecoveryTestAgent",
         "ThinkTestAgent",
         "ThinkToolsTestAgent",
         "ThinkFiberTestAgent",
