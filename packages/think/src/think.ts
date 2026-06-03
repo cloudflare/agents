@@ -2866,11 +2866,15 @@ export class Think<
    * knowledge into core. The app does know its provider/model, so it owns the
    * mapping — the same split Think already uses for `tokenCounter`.
    *
-   * Return `"context_overflow"` to enable Think's compact-and-retry backstop
-   * (gated by `contextOverflow.reactive`). Other categories are
-   * forwarded to `onChatError`/observers via {@link ChatErrorContext.classification}
-   * but are not yet acted on by core. Return `void`/`"unknown"` to keep the
-   * existing terminal behavior.
+   * Currently this hook drives **only** context-overflow recovery: it is
+   * consulted when a turn errors **and** `contextOverflow.reactive` is enabled
+   * (if reactive is off, it is not called). Return `"context_overflow"` to run
+   * the compact-and-retry backstop; if recovery cannot save the turn, that
+   * classification is surfaced on the terminal `onChatError` call via
+   * {@link ChatErrorContext.classification}. The other categories are reserved
+   * for future use — returning one today is a no-op (the turn terminalizes as
+   * usual) and it is **not** forwarded to `onChatError`. Returning
+   * `void`/`"unknown"` keeps the existing terminal behavior.
    *
    * The argument may be an `Error`, an AI SDK `APICallError` (with
    * `statusCode`/`responseBody`), or — for in-stream provider errors that
@@ -3196,13 +3200,6 @@ export class Think<
     const system = this._systemPromptForTurn(baseSystem, tools);
 
     const messages = await this._assembleModelMessages(tools);
-    // Baseline for the proactive context guard: everything appended to the
-    // model-message list after this point belongs to the current turn's steps,
-    // so a mid-turn recompaction can keep that tail and only re-summarize the
-    // (now-compacted) head. Captured even when the guard is off — cheap, and
-    // keeps the value correct if `beforeTurn` later overrides messages.
-    this._turnModelMessageBaseline = messages.length;
-    this._activeTurnTools = tools;
 
     if (messages.length === 0) {
       throw new Error(
@@ -3249,6 +3246,16 @@ export class Think<
     // `substitute` returns `output` directly, `allow` runs the original
     // (optionally with modified `input`).
     const finalTools: ToolSet = this._wrapToolsWithDecision(mergedTools);
+
+    // Baseline for the proactive context guard: everything the AI SDK appends
+    // to the model-message list after the assembled turn messages belongs to
+    // this turn's steps, so a mid-turn recompaction can keep that tail and only
+    // re-summarize the (now-compacted) head. Captured from the FINAL messages
+    // and tools — after `beforeTurn` may have overridden them — so the tail
+    // splice stays correct even when the override changes the message count.
+    this._turnModelMessageBaseline = finalMessages.length;
+    this._activeTurnTools = mergedTools;
+
     const finalMaxSteps = config.maxSteps ?? this.maxSteps;
     const finalSendReasoning = config.sendReasoning ?? this.sendReasoning;
     // Resolve the per-turn stall-watchdog override (explicit `0` = off for this
@@ -3881,8 +3888,10 @@ export class Think<
             // Bounded compact-and-retry loop (opt-in via
             // `contextOverflow.reactive`). A turn that overflows the context
             // window mid-flight is compacted and re-run from the persisted
-            // partial instead of dying terminally. `attempt === 0` is the
-            // original turn; later attempts are continuations of it.
+            // partial instead of dying terminally. Every attempt re-runs the
+            // SAME user turn from the now-compacted history, so it stays
+            // `continuation: false` — an overflow retry is not an
+            // auto-continuation, and `beforeTurn` should not treat it as one.
             for (let attempt = 0; ; attempt++) {
               let result: StreamableResult;
               try {
@@ -3896,7 +3905,7 @@ export class Think<
                   () =>
                     this._runInferenceLoop({
                       signal: abortSignal,
-                      continuation: attempt > 0
+                      continuation: false
                     })
                 );
               } catch (error) {
@@ -6104,7 +6113,8 @@ export class Think<
             // Bounded compact-and-retry loop (opt-in via
             // `contextOverflow.reactive`), mirroring the WebSocket and chat()
             // paths so programmatic turns (saveMessages / submitMessages /
-            // scheduled prompts) recover from a mid-turn overflow too.
+            // scheduled prompts) recover from a mid-turn overflow too. Each
+            // attempt re-runs the same turn (`continuation: false`).
             for (let attempt = 0; ; attempt++) {
               const result = await agentContext.run(
                 {
@@ -6119,7 +6129,7 @@ export class Think<
                     clientTools,
                     body,
                     workflowPrompt: options?.workflowPrompt,
-                    continuation: attempt > 0
+                    continuation: false
                   })
               );
 
@@ -6781,7 +6791,9 @@ export class Think<
               // Bounded compact-and-retry loop (opt-in via
               // `contextOverflow.reactive`). A turn that overflows the
               // context window mid-flight is compacted and re-run from the
-              // persisted partial instead of dying terminally.
+              // persisted partial instead of dying terminally. Each attempt
+              // re-runs the same turn (`continuation: false`) — not an
+              // auto-continuation.
               for (let attempt = 0; ; attempt++) {
                 const result = await agentContext.run(
                   {
@@ -6795,7 +6807,7 @@ export class Think<
                       signal: abortSignal,
                       clientTools: clientToolsForTurn,
                       body: bodyForTurn,
-                      continuation: attempt > 0
+                      continuation: false
                     })
                 );
 

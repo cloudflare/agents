@@ -4,18 +4,18 @@ Think owns the `streamText` call and provides hooks at each stage of the chat tu
 
 ## Hook Summary
 
-| Hook                             | When it fires                                 | Return                            | Async |
-| -------------------------------- | --------------------------------------------- | --------------------------------- | ----- |
-| `configureSession(session)`      | Once during `onStart`                         | `Session`                         | yes   |
-| `beforeTurn(ctx)`                | Before `streamText`                           | `TurnConfig` or void              | yes   |
-| `beforeStep(ctx)`                | Before each model step                        | `StepConfig` or void              | yes   |
-| `beforeToolCall(ctx)`            | When model calls a tool                       | `ToolCallDecision` or void        | yes   |
-| `afterToolCall(ctx)`             | After tool execution                          | void                              | yes   |
-| `onStepFinish(ctx)`              | After each step completes                     | void                              | yes   |
-| `onChunk(ctx)`                   | Per streaming chunk                           | void                              | yes   |
-| `onChatResponse(result)`         | After turn completes and message is persisted | void                              | yes   |
-| `onChatError(error, ctx?)`       | On error during a turn                        | error to propagate                | no    |
-| `classifyChatError(error, ctx?)` | On error during a turn (before `onChatError`) | `ChatErrorClassification` or void | no    |
+| Hook                             | When it fires                                               | Return                            | Async |
+| -------------------------------- | ----------------------------------------------------------- | --------------------------------- | ----- |
+| `configureSession(session)`      | Once during `onStart`                                       | `Session`                         | yes   |
+| `beforeTurn(ctx)`                | Before `streamText`                                         | `TurnConfig` or void              | yes   |
+| `beforeStep(ctx)`                | Before each model step                                      | `StepConfig` or void              | yes   |
+| `beforeToolCall(ctx)`            | When model calls a tool                                     | `ToolCallDecision` or void        | yes   |
+| `afterToolCall(ctx)`             | After tool execution                                        | void                              | yes   |
+| `onStepFinish(ctx)`              | After each step completes                                   | void                              | yes   |
+| `onChunk(ctx)`                   | Per streaming chunk                                         | void                              | yes   |
+| `onChatResponse(result)`         | After turn completes and message is persisted               | void                              | yes   |
+| `onChatError(error, ctx?)`       | On error during a turn                                      | error to propagate                | no    |
+| `classifyChatError(error, ctx?)` | On a turn error, when `contextOverflow.reactive` is enabled | `ChatErrorClassification` or void | no    |
 
 ## Execution Order
 
@@ -718,12 +718,12 @@ The partial assistant message (if any) is persisted before this hook fires.
 
 `ChatErrorContext` includes:
 
-| Field               | Type                                                                       | Description                                                                        |
-| ------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `requestId`         | `string \| undefined`                                                      | Chat request ID, when available                                                    |
-| `stage`             | `"parse" \| "persist" \| "turn" \| "stream" \| "recovery" \| "transcript"` | Failure stage                                                                      |
-| `messagesPersisted` | `boolean`                                                                  | Whether incoming user messages were already stored                                 |
-| `classification`    | `ChatErrorClassification \| undefined`                                     | Semantic category from `classifyChatError`, when known (e.g. `"context_overflow"`) |
+| Field               | Type                                                                       | Description                                                                                                                                                                     |
+| ------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `requestId`         | `string \| undefined`                                                      | Chat request ID, when available                                                                                                                                                 |
+| `stage`             | `"parse" \| "persist" \| "turn" \| "stream" \| "recovery" \| "transcript"` | Failure stage                                                                                                                                                                   |
+| `messagesPersisted` | `boolean`                                                                  | Whether incoming user messages were already stored                                                                                                                              |
+| `classification`    | `ChatErrorClassification \| undefined`                                     | Set to `"context_overflow"` on the terminal `onChatError` when a context overflow could not be recovered (see [`classifyChatError`](#classifychaterror)); `undefined` otherwise |
 
 Think also emits `chat:request:failed` on the `agents:chat` observability channel with the same stage and persistence information.
 
@@ -751,7 +751,7 @@ Called when an error occurs during a turn, **before** `onChatError`. Maps a raw 
 classifyChatError(error: unknown, ctx?: ChatErrorContext): ChatErrorClassification | void
 ```
 
-`ChatErrorClassification` is `"context_overflow" | "rate_limit" | "transient" | "fatal" | "unknown"`. Returning `"context_overflow"` enables Think's compact-and-retry backstop (see [Context-window overflow recovery](./index.md#context-window-overflow-recovery)); the classification is also forwarded to `onChatError` and observers via `ChatErrorContext.classification`. The other categories are surfaced for your own handling but are not yet acted on by core. Returning `void` (the default) keeps the existing terminal behavior.
+`ChatErrorClassification` is `"context_overflow" | "rate_limit" | "transient" | "fatal" | "unknown"`. Today this hook drives **only** context-overflow recovery: Think calls it when a turn errors **and** `contextOverflow.reactive` is enabled (if reactive is off, it is not called). Returning `"context_overflow"` runs the compact-and-retry backstop (see [Context-window overflow recovery](./index.md#context-window-overflow-recovery)); if recovery cannot save the turn, that classification is surfaced on the terminal `onChatError` call via `ChatErrorContext.classification`. The other categories are reserved for future use — returning one today is a no-op (the turn terminalizes as usual) and is not forwarded to `onChatError`. Returning `void` (the default) keeps the existing terminal behavior.
 
 The argument may be an `Error`, an AI SDK `APICallError` (with `statusCode`/`responseBody`), or — for in-stream provider errors that surface as a stream error part rather than a throw — the error message string. Narrow accordingly. (Think confirms provider context-overflow errors always surface as in-stream error parts, never thrown exceptions out of `streamText`, so this hook sees them whether you read the `Error` or the string form.)
 

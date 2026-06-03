@@ -503,30 +503,33 @@ exhausts its retries, so failed occurrences do not block future runs.
 
 Think owns the `streamText` call. Hooks fire on every turn regardless of entry path (WebSocket, `chat()`, `saveMessages()`, durable `submitMessages()` execution, `continueLastTurn()`, auto-continuation).
 
-| Hook                            | When it fires                               | Return                            |
-| ------------------------------- | ------------------------------------------- | --------------------------------- |
-| `beforeTurn(ctx)`               | Before `streamText` — see assembled context | `TurnConfig` overrides or void    |
-| `beforeStep(ctx)`               | Before each model step                      | `StepConfig` overrides or void    |
-| `beforeToolCall(ctx)`           | Before tool's `execute` runs                | `ToolCallDecision` or void        |
-| `afterToolCall(ctx)`            | After tool execution (success or failure)   | void                              |
-| `onStepFinish(ctx)`             | After each step completes                   | void                              |
-| `onChunk(ctx)`                  | Per streaming chunk (high-frequency)        | void                              |
-| `onChatResponse(result)`        | After turn completes + message persisted    | void                              |
-| `onChatError(error, ctx)`       | On error during a turn                      | error to propagate                |
-| `classifyChatError(error, ctx)` | On error, before `onChatError`              | `ChatErrorClassification` or void |
+| Hook                            | When it fires                                          | Return                            |
+| ------------------------------- | ------------------------------------------------------ | --------------------------------- |
+| `beforeTurn(ctx)`               | Before `streamText` — see assembled context            | `TurnConfig` overrides or void    |
+| `beforeStep(ctx)`               | Before each model step                                 | `StepConfig` overrides or void    |
+| `beforeToolCall(ctx)`           | Before tool's `execute` runs                           | `ToolCallDecision` or void        |
+| `afterToolCall(ctx)`            | After tool execution (success or failure)              | void                              |
+| `onStepFinish(ctx)`             | After each step completes                              | void                              |
+| `onChunk(ctx)`                  | Per streaming chunk (high-frequency)                   | void                              |
+| `onChatResponse(result)`        | After turn completes + message persisted               | void                              |
+| `onChatError(error, ctx)`       | On error during a turn                                 | error to propagate                |
+| `classifyChatError(error, ctx)` | On a turn error, when `contextOverflow.reactive` is on | `ChatErrorClassification` or void |
 
-`onChatError` receives `ctx.stage`, `ctx.requestId`, `ctx.messagesPersisted`,
-and `ctx.classification` so apps can distinguish pre-persist request failures
-from stream failures and react to semantic categories. The same failures emit
-`chat:request:failed` observability events.
+`onChatError` receives `ctx.stage`, `ctx.requestId`, and `ctx.messagesPersisted`
+so apps can distinguish pre-persist request failures from stream failures. The
+same failures emit `chat:request:failed` observability events. `ctx.classification`
+is set to `"context_overflow"` on the terminal `onChatError` when a context
+overflow could not be recovered, and `undefined` otherwise.
 
 `classifyChatError` maps a raw provider error to a provider-agnostic category
 (`"context_overflow" | "rate_limit" | "transient" | "fatal" | "unknown"`).
 Think ships no provider-specific matching in core — the app owns it, the same
-split as the `tokenCounter` passed to `compactAfter()`. For the common case,
-assign the exported `defaultContextOverflowClassifier` (it matches the
-context-overflow errors of Anthropic, OpenAI, Google, Bedrock, and others).
-Returning `"context_overflow"` enables the recovery described below.
+split as the `tokenCounter` passed to `compactAfter()`. Today it drives only
+context-overflow recovery: it is consulted when a turn errors and
+`contextOverflow.reactive` is enabled, and only `"context_overflow"` is acted on
+(other categories are reserved for future use). For the common case, assign the
+exported `defaultContextOverflowClassifier` (it matches the context-overflow
+errors of Anthropic, OpenAI, Google, Bedrock, and others).
 
 The AI SDK-derived contexts spread the SDK's own types at the top level — no information is dropped:
 

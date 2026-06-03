@@ -18,7 +18,8 @@ import type {
   ToolCallContext,
   ToolCallDecision,
   ToolCallResultContext,
-  StepContext
+  StepContext,
+  TurnContext
 } from "../../think";
 
 type TestChatResult = {
@@ -391,6 +392,8 @@ type OverflowChatResult = {
   compactionEvents: number;
   /** `ctx.classification` seen by `onChatError`, if it was invoked. */
   errorClassification?: string;
+  /** `ctx.continuation` seen by `beforeTurn` on each attempt of the turn. */
+  beforeTurnContinuations: boolean[];
 };
 
 /**
@@ -406,9 +409,14 @@ export class OverflowRecoveryTestAgent extends Think {
   alwaysOverflow = false;
   compactionEvents = 0;
   errorClassification?: string;
+  beforeTurnContinuations: boolean[] = [];
   private _model?: LanguageModel;
 
   override maxSteps = 3;
+
+  override beforeTurn(ctx: TurnContext): void {
+    this.beforeTurnContinuations.push(ctx.continuation);
+  }
 
   override _emit(
     type: ObservabilityEvent["type"],
@@ -496,6 +504,7 @@ export class OverflowRecoveryTestAgent extends Think {
     this.modelCalls = 0;
     this.compactionEvents = 0;
     this.errorClassification = undefined;
+    this.beforeTurnContinuations = [];
 
     // Seed a prior turn so the compaction range leaves a usable tail.
     await this.session.appendMessage({
@@ -517,7 +526,8 @@ export class OverflowRecoveryTestAgent extends Think {
       compactionCount: this.compactionCount,
       modelCalls: this.modelCalls,
       compactionEvents: this.compactionEvents,
-      errorClassification: this.errorClassification
+      errorClassification: this.errorClassification,
+      beforeTurnContinuations: this.beforeTurnContinuations
     };
   }
 
@@ -534,6 +544,7 @@ export class OverflowRecoveryTestAgent extends Think {
     this.modelCalls = 0;
     this.compactionEvents = 0;
     this.errorClassification = undefined;
+    this.beforeTurnContinuations = [];
 
     await this.session.appendMessage({
       id: crypto.randomUUID(),
@@ -572,6 +583,7 @@ export class OverflowRecoveryTestAgent extends Think {
     this.modelCalls = 0;
     this.compactionEvents = 0;
     this.errorClassification = undefined;
+    this.beforeTurnContinuations = [];
     // The mock tool model reports usage.inputTokens = 10 on the first step;
     // a budget of 10 with the default 0.9 headroom (threshold 9) trips before
     // the second step. Reactive off isolates the proactive path.
@@ -596,7 +608,8 @@ export class OverflowRecoveryTestAgent extends Think {
       compactionCount: this.compactionCount,
       modelCalls: this.modelCalls,
       compactionEvents: this.compactionEvents,
-      errorClassification: this.errorClassification
+      errorClassification: this.errorClassification,
+      beforeTurnContinuations: this.beforeTurnContinuations
     };
   }
 
@@ -614,6 +627,7 @@ export class OverflowRecoveryTestAgent extends Think {
     this.modelCalls = 0;
     this.compactionEvents = 0;
     this.errorClassification = undefined;
+    this.beforeTurnContinuations = [];
 
     await this.session.appendMessage({
       id: crypto.randomUUID(),
@@ -640,7 +654,8 @@ export class OverflowRecoveryTestAgent extends Think {
       compactionCount: this.compactionCount,
       modelCalls: this.modelCalls,
       compactionEvents: this.compactionEvents,
-      errorClassification: this.errorClassification
+      errorClassification: this.errorClassification,
+      beforeTurnContinuations: this.beforeTurnContinuations
     };
   }
 }

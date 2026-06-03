@@ -247,6 +247,7 @@ describe("Think — agentic loop", () => {
       modelCalls: number;
       compactionEvents: number;
       errorClassification?: string;
+      beforeTurnContinuations: boolean[];
     };
 
     type OverflowAgent = {
@@ -282,6 +283,9 @@ describe("Think — agentic loop", () => {
       expect(result.modelCalls).toBe(2);
       // Exactly one observability event per compaction (no double-emit).
       expect(result.compactionEvents).toBe(1);
+      // Both attempts re-run the SAME user turn — the retry is not an
+      // auto-continuation, so beforeTurn sees `continuation: false` each time.
+      expect(result.beforeTurnContinuations).toEqual([false, false]);
     });
 
     it("stays terminal when disabled (no compaction, surfaces the error)", async () => {
