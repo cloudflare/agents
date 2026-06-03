@@ -1,0 +1,19 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "dynamic-playwright",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "browser": {
+    "binding": "BROWSER",
+    "remote": true
+  },
+  "rules": [
+    {
+      "type": "Text",
+      "globs": ["**/*.raw.js"],
+      "fallthrough": true
+    }
+  ],
+  "worker_loaders": [{ "binding": "LOADER" }]
+}
