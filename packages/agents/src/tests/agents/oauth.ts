@@ -333,6 +333,250 @@ export class TestOAuthAgent extends Agent {
       challengeVerifierAfterFallbackCleanup
     };
   }
+
+  // --- Provider-level PKCE branch coverage helpers ---
+
+  private newPkceProvider(): DurableObjectOAuthClientProvider {
+    const provider = new DurableObjectOAuthClientProvider(
+      this.ctx.storage,
+      `pkce-branch-${crypto.randomUUID()}`,
+      "https://client.example.com/callback"
+    );
+    provider.serverId = `server-${crypto.randomUUID()}`;
+    provider.clientId = `client-${crypto.randomUUID()}`;
+    return provider;
+  }
+
+  private async storageHas(
+    provider: DurableObjectOAuthClientProvider,
+    key: string
+  ): Promise<boolean> {
+    return (await provider.storage.get(key)) !== undefined;
+  }
+
+  // redirectToAuthorization must NOT bind the verifier when the state's serverId
+  // belongs to a different server (cross-server binding guard).
+  async testRedirectIgnoresServerIdMismatch(): Promise<{
+    challengeBefore: boolean;
+    challengeStillPresent: boolean;
+    stateVerifierCreated: boolean;
+  }> {
+    const provider = this.newPkceProvider();
+    const verifier = `verifier-${crypto.randomUUID()}`;
+    const challenge = await createCodeChallenge(verifier);
+    await provider.saveCodeVerifier(verifier);
+    const challengeKey = provider.challengeCodeVerifierKey(
+      provider.clientId,
+      challenge
+    );
+    const challengeBefore = await this.storageHas(provider, challengeKey);
+
+    const nonce = `nonce-${crypto.randomUUID()}`;
+    const foreignState = `${nonce}.other-server-${crypto.randomUUID()}`;
+    const authUrl = new URL("https://auth.example.com/authorize");
+    authUrl.searchParams.set("state", foreignState);
+    authUrl.searchParams.set("code_challenge", challenge);
+    await provider.redirectToAuthorization(authUrl);
+
+    const stateKey = provider.stateCodeVerifierKey(provider.clientId, nonce);
+    return {
+      challengeBefore,
+      challengeStillPresent: await this.storageHas(provider, challengeKey),
+      stateVerifierCreated: await this.storageHas(provider, stateKey)
+    };
+  }
+
+  // redirectToAuthorization is a no-op when the authorization URL lacks state or
+  // code_challenge; the verifier stays under the challenge key (fail-soft orphan).
+  async testRedirectWithoutStateOrChallengeKeepsOrphan(): Promise<{
+    afterNoState: boolean;
+    afterNoChallenge: boolean;
+  }> {
+    const provider = this.newPkceProvider();
+    const verifier = `verifier-${crypto.randomUUID()}`;
+    const challenge = await createCodeChallenge(verifier);
+    await provider.saveCodeVerifier(verifier);
+    const challengeKey = provider.challengeCodeVerifierKey(
+      provider.clientId,
+      challenge
+    );
+
+    const noState = new URL("https://auth.example.com/authorize");
+    noState.searchParams.set("code_challenge", challenge);
+    await provider.redirectToAuthorization(noState);
+    const afterNoState = await this.storageHas(provider, challengeKey);
+
+    const noChallenge = new URL("https://auth.example.com/authorize");
+    noChallenge.searchParams.set(
+      "state",
+      `nonce-${crypto.randomUUID()}.${provider.serverId}`
+    );
+    await provider.redirectToAuthorization(noChallenge);
+    const afterNoChallenge = await this.storageHas(provider, challengeKey);
+
+    return { afterNoState, afterNoChallenge };
+  }
+
+  // codeVerifier() with no ALS context and multiple pending verifiers must fail
+  // loudly rather than guess (this replaces the old silent wrong-verifier bug).
+  async testCodeVerifierMultiplePendingThrows(): Promise<{
+    threw: boolean;
+    message: string;
+  }> {
+    const provider = this.newPkceProvider();
+    const v1 = `verifier-one-${crypto.randomUUID()}`;
+    const v2 = `verifier-two-${crypto.randomUUID()}`;
+    const s1 = await provider.state();
+    await provider.saveCodeVerifier(v1);
+    await provider.redirectToAuthorization(
+      await createAuthorizationUrl(s1, v1)
+    );
+    const s2 = await provider.state();
+    await provider.saveCodeVerifier(v2);
+    await provider.redirectToAuthorization(
+      await createAuthorizationUrl(s2, v2)
+    );
+
+    try {
+      await provider.codeVerifier();
+      return { threw: false, message: "" };
+    } catch (err) {
+      return {
+        threw: true,
+        message: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+
+  // codeVerifier() with no ALS context and exactly one pending verifier resolves
+  // it (the deprecated reconnect path's happy case).
+  async testCodeVerifierSinglePendingFallback(): Promise<{
+    resolved: string;
+    expected: string;
+  }> {
+    const provider = this.newPkceProvider();
+    const v1 = `verifier-only-${crypto.randomUUID()}`;
+    const s1 = await provider.state();
+    await provider.saveCodeVerifier(v1);
+    await provider.redirectToAuthorization(
+      await createAuthorizationUrl(s1, v1)
+    );
+    const resolved = await provider.codeVerifier();
+    return { resolved, expected: v1 };
+  }
+
+  // codeVerifier() inside a state context with no stored verifier throws a
+  // state-specific error rather than falling back.
+  async testCodeVerifierStateContextNoVerifierThrows(): Promise<{
+    threw: boolean;
+    message: string;
+  }> {
+    const provider = this.newPkceProvider();
+    const state = await provider.state();
+    try {
+      await provider.runWithCodeVerifierState(state, () =>
+        provider.codeVerifier()
+      );
+      return { threw: false, message: "" };
+    } catch (err) {
+      return {
+        threw: true,
+        message: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+
+  // checkState() on an expired state also deletes the bound state verifier
+  // (the closest thing to a client-side verifier TTL).
+  async testCheckStateExpiredDeletesVerifier(): Promise<{
+    valid: boolean;
+    error: string;
+    stateKeyExists: boolean;
+    verifierKeyExists: boolean;
+  }> {
+    const provider = this.newPkceProvider();
+    const nonce = `nonce-${crypto.randomUUID()}`;
+    const old = Date.now() - 11 * 60 * 1000;
+    await provider.storage.put(provider.stateKey(nonce), {
+      nonce,
+      serverId: provider.serverId,
+      createdAt: old
+    });
+    const verifierKey = provider.stateCodeVerifierKey(provider.clientId, nonce);
+    await provider.storage.put(verifierKey, {
+      verifier: "stale-verifier",
+      createdAt: old
+    });
+
+    const result = await provider.checkState(`${nonce}.${provider.serverId}`);
+    return {
+      valid: result.valid,
+      error: result.error ?? "",
+      stateKeyExists: await this.storageHas(provider, provider.stateKey(nonce)),
+      verifierKeyExists: await this.storageHas(provider, verifierKey)
+    };
+  }
+
+  // codeVerifier() resolving an expired state verifier deletes it and throws.
+  async testCodeVerifierStateExpiredThrows(): Promise<{
+    threw: boolean;
+    message: string;
+    verifierKeyExists: boolean;
+  }> {
+    const provider = this.newPkceProvider();
+    const nonce = `nonce-${crypto.randomUUID()}`;
+    const old = Date.now() - 11 * 60 * 1000;
+    const verifierKey = provider.stateCodeVerifierKey(provider.clientId, nonce);
+    await provider.storage.put(verifierKey, {
+      verifier: "stale-verifier",
+      createdAt: old
+    });
+
+    let threw = false;
+    let message = "";
+    try {
+      await provider.runWithCodeVerifierState(
+        `${nonce}.${provider.serverId}`,
+        () => provider.codeVerifier()
+      );
+    } catch (err) {
+      threw = true;
+      message = err instanceof Error ? err.message : String(err);
+    }
+    return {
+      threw,
+      message,
+      verifierKeyExists: await this.storageHas(provider, verifierKey)
+    };
+  }
+
+  // invalidateCredentials("verifier") sweeps every pending verifier (both bound
+  // state verifiers and orphaned challenge verifiers), not just one slot.
+  async testInvalidateVerifierDeletesAllPending(): Promise<{
+    before: number;
+    after: number;
+  }> {
+    const provider = this.newPkceProvider();
+    const v1 = `verifier-one-${crypto.randomUUID()}`;
+    const v2 = `verifier-two-${crypto.randomUUID()}`;
+    const s1 = await provider.state();
+    await provider.saveCodeVerifier(v1);
+    await provider.redirectToAuthorization(
+      await createAuthorizationUrl(s1, v1)
+    );
+    const s2 = await provider.state();
+    await provider.saveCodeVerifier(v2);
+    await provider.redirectToAuthorization(
+      await createAuthorizationUrl(s2, v2)
+    );
+    // An orphaned challenge verifier (saved but never redirected).
+    await provider.saveCodeVerifier(`verifier-three-${crypto.randomUUID()}`);
+
+    const before = (await provider.codeVerifierKeys(provider.clientId)).length;
+    await provider.invalidateCredentials("verifier");
+    const after = (await provider.codeVerifierKeys(provider.clientId)).length;
+    return { before, after };
+  }
 }
 
 // Test Agent that overrides createMcpOAuthProvider with a custom implementation
