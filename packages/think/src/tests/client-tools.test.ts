@@ -1330,6 +1330,343 @@ describe("Think — auto-continuation", () => {
 
     await closeWS(ws);
   });
+
+  it("does not fire through a human-in-the-loop tool parked beside a fast tool (#1650)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // A parallel batch mixing a fast data tool with a client-resolved tool that
+    // has no `execute` (an `ask_user`-style prompt). The human tool legitimately
+    // parks at `input-available` for as long as the user takes to answer. The
+    // event-driven barrier must NOT fire through and error it — there is no
+    // timeout, so the continuation simply waits for the human's answer event.
+    await agent.persistToolCallMessage([
+      makeUserMessage("look something up and ask me"),
+      {
+        id: "assistant-human",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-fast",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "fast" }
+          },
+          {
+            type: "tool-ask_user",
+            toolCallId: "tc-human",
+            toolName: "ask_user",
+            state: "input-available",
+            input: { prompt: "What is your name?" }
+          }
+        ]
+      } as unknown as UIMessage
+    ]);
+    await agent.clearResponseLog();
+
+    const repairedToolCallIds: Array<string[] | undefined> = [];
+    const unsubscribe = subscribe("transcript", (event) => {
+      if (event.type === "chat:transcript:repaired" && event.name === room) {
+        repairedToolCallIds.push(event.payload.toolCallIds);
+      }
+    });
+
+    try {
+      // The fast tool resolves immediately with autoContinue; the human tool is
+      // still being answered.
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_RESULT,
+          toolCallId: "tc-fast",
+          toolName: "client_action",
+          output: "fast output",
+          autoContinue: true
+        })
+      );
+
+      // Wait far longer than the coalesce window. The old bounded-wait barrier
+      // would eventually fire through; the event-driven barrier holds with no
+      // hold on the isolate and no spurious repair.
+      await delay(1500);
+
+      let log = (await agent.getResponseLog()) as ChatResponseResult[];
+      expect(log.filter((entry) => entry.continuation).length).toBe(0);
+      // The human tool was NOT errored / repaired while the user was answering.
+      expect(repairedToolCallIds.flat()).not.toContain("tc-human");
+      let messages = (await agent.getMessages()) as UIMessage[];
+      let human = (messages
+        .find((m) => m.id === "assistant-human")!
+        .parts.find(
+          (p) => (p as Record<string, unknown>).toolCallId === "tc-human"
+        ) ?? {}) as Record<string, unknown>;
+      expect(human.state).toBe("input-available");
+
+      // The human finally answers: this completes the batch and fires exactly
+      // one continuation.
+      const continuationDone = waitForDone(ws, 15000);
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_RESULT,
+          toolCallId: "tc-human",
+          toolName: "ask_user",
+          output: "Ada",
+          autoContinue: true
+        })
+      );
+      await continuationDone;
+      await delay(200);
+
+      log = (await agent.getResponseLog()) as ChatResponseResult[];
+      expect(log.filter((entry) => entry.continuation).length).toBe(1);
+      expect(repairedToolCallIds.flat()).not.toContain("tc-human");
+
+      messages = (await agent.getMessages()) as UIMessage[];
+      const partFor = (toolCallId: string) =>
+        messages
+          .find((m) => m.id === "assistant-human")!
+          .parts.find(
+            (p) => (p as Record<string, unknown>).toolCallId === toolCallId
+          ) as Record<string, unknown>;
+      expect(partFor("tc-fast").state).toBe("output-available");
+      human = partFor("tc-human");
+      expect(human.state).toBe("output-available");
+      expect(human.output).toBe("Ada");
+    } finally {
+      unsubscribe();
+    }
+
+    await closeWS(ws);
+  }, 20000);
+
+  it("continues when an errored sibling (autoContinue:false) completes the batch (#1650)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // Parallel batch: one tool succeeds, the other errors. The client sends
+    // `autoContinue: false` for an errored result (it declines to continue a
+    // standalone error) — but the successful sibling already opted in, so once
+    // the errored result completes the batch the continuation must still fire.
+    await agent.persistToolCallMessage([
+      makeUserMessage("use two tools"),
+      {
+        id: "assistant-mixed",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-ok",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "ok" }
+          },
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-err",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "err" }
+          }
+        ]
+      } as unknown as UIMessage
+    ]);
+    await agent.clearResponseLog();
+
+    const repairedToolCallIds: Array<string[] | undefined> = [];
+    const unsubscribe = subscribe("transcript", (event) => {
+      if (event.type === "chat:transcript:repaired" && event.name === room) {
+        repairedToolCallIds.push(event.payload.toolCallIds);
+      }
+    });
+
+    try {
+      // Successful sibling opts into continuation.
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_RESULT,
+          toolCallId: "tc-ok",
+          toolName: "client_action",
+          output: "ok output",
+          autoContinue: true
+        })
+      );
+      await delay(300);
+      expect(
+        ((await agent.getResponseLog()) as ChatResponseResult[]).filter(
+          (entry) => entry.continuation
+        ).length
+      ).toBe(0);
+
+      // The completing result is an ERROR with autoContinue:false. It must still
+      // re-arm the barrier so the batch continues exactly once.
+      const continuationDone = waitForDone(ws, 15000);
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_RESULT,
+          toolCallId: "tc-err",
+          toolName: "client_action",
+          state: "output-error",
+          errorText: "tool failed",
+          autoContinue: false
+        })
+      );
+      await continuationDone;
+      await delay(200);
+
+      const log = (await agent.getResponseLog()) as ChatResponseResult[];
+      expect(log.filter((entry) => entry.continuation).length).toBe(1);
+      // No premature repair flipped a still-pending sibling.
+      expect(repairedToolCallIds.flat()).toEqual([]);
+
+      const messages = (await agent.getMessages()) as UIMessage[];
+      const assistant = messages.find((m) => m.id === "assistant-mixed")!;
+      const partFor = (toolCallId: string) =>
+        assistant.parts.find(
+          (p) => (p as Record<string, unknown>).toolCallId === toolCallId
+        ) as Record<string, unknown>;
+      expect(partFor("tc-ok").state).toBe("output-available");
+      expect(partFor("tc-err").state).toBe("output-error");
+    } finally {
+      unsubscribe();
+    }
+
+    await closeWS(ws);
+  });
+
+  it("does not continue a standalone errored tool (autoContinue:false, no opted-in sibling) (#1650)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.persistToolCallMessage([
+      makeUserMessage("use one tool"),
+      makeToolMessage("tc-solo-err", "client_action", "input-available")
+    ]);
+    await agent.clearResponseLog();
+
+    // A single errored tool with autoContinue:false must NOT auto-continue —
+    // the re-arm path only re-checks an EXISTING pending continuation, it never
+    // creates one. (Documented single-tool error behavior is preserved.)
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-solo-err",
+        toolName: "client_action",
+        state: "output-error",
+        errorText: "tool failed",
+        autoContinue: false
+      })
+    );
+    await delay(400);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.filter((entry) => entry.continuation).length).toBe(0);
+
+    await closeWS(ws);
+  });
+
+  it("self-heals when the pending continuation is evicted mid-batch (#1650)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.persistToolCallMessage([
+      makeUserMessage("use two tools"),
+      {
+        id: "assistant-evict",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-fast",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "fast" }
+          },
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-slow",
+            toolName: "client_action",
+            state: "input-available",
+            input: { action: "slow" }
+          }
+        ]
+      } as unknown as UIMessage
+    ]);
+    await agent.clearResponseLog();
+
+    const repairedToolCallIds: Array<string[] | undefined> = [];
+    const unsubscribe = subscribe("transcript", (event) => {
+      if (event.type === "chat:transcript:repaired" && event.name === room) {
+        repairedToolCallIds.push(event.payload.toolCallIds);
+      }
+    });
+
+    try {
+      // Fast result arrives and parks the continuation on the barrier (the slow
+      // sibling is still pending).
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_RESULT,
+          toolCallId: "tc-fast",
+          toolName: "client_action",
+          output: "fast output",
+          autoContinue: true
+        })
+      );
+      await delay(300);
+      expect(
+        ((await agent.getResponseLog()) as ChatResponseResult[]).filter(
+          (entry) => entry.continuation
+        ).length
+      ).toBe(0);
+
+      // The isolate is evicted: the in-memory pending continuation is dropped,
+      // but the fast result is already persisted in the transcript.
+      await agent.evictInMemoryContinuationState();
+
+      // The slow result arrives post-eviction. With no in-memory pending, the
+      // event re-creates it from the persisted transcript, sees a now-complete
+      // batch, and fires exactly one continuation.
+      const continuationDone = waitForDone(ws, 15000);
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_RESULT,
+          toolCallId: "tc-slow",
+          toolName: "client_action",
+          output: "slow output",
+          autoContinue: true
+        })
+      );
+      await continuationDone;
+      await delay(200);
+
+      const log = (await agent.getResponseLog()) as ChatResponseResult[];
+      expect(log.filter((entry) => entry.continuation).length).toBe(1);
+      expect(repairedToolCallIds.flat()).toEqual([]);
+
+      const messages = (await agent.getMessages()) as UIMessage[];
+      const assistant = messages.find((m) => m.id === "assistant-evict")!;
+      const partFor = (toolCallId: string) =>
+        assistant.parts.find(
+          (p) => (p as Record<string, unknown>).toolCallId === toolCallId
+        ) as Record<string, unknown>;
+      expect(partFor("tc-fast").state).toBe("output-available");
+      expect(partFor("tc-fast").output).toBe("fast output");
+      expect(partFor("tc-slow").state).toBe("output-available");
+      expect(partFor("tc-slow").output).toBe("slow output");
+    } finally {
+      unsubscribe();
+    }
+
+    await closeWS(ws);
+  });
 });
 
 // ── Client tool schemas ──────────────────────────────────────────

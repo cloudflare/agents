@@ -1,0 +1,13 @@
+---
+"@cloudflare/think": patch
+---
+
+fix(think): make the parallel-tool auto-continuation barrier event-driven (#1650, follow-up to #1649)
+
+#1649 added a barrier so auto-continuation waits for all of a step's parallel client-tool results before firing, but bounded the wait with a fixed 60s timeout that fired through on expiry. That timeout was the wrong primary mechanism: a human-in-the-loop tool with no `execute` (an `ask_user`/`display_ui`-style prompt) emitted in parallel with a fast tool legitimately parks at `input-available` for minutes, so the barrier would fire through and repair the still-open tool to errored while the user was answering. Orphans (a client disconnecting mid-batch) also pinned the isolate alive via `keepAlive` for the full 60s.
+
+Auto-continuation is only ever triggered by a tool-result/approval event, so the barrier is now purely event-driven. When the coalesce timer fires on an incomplete batch, Think drains the in-flight applies, re-checks, and — if a sibling is still unanswered — returns without firing and without holding the isolate, leaving the pending continuation in place. The next sibling's result re-arms the timer (or, after eviction, re-creates the pending state from the persisted transcript) and re-runs the check; the continuation fires exactly once when the final sibling lands. A legitimately slow human answer never fires through to a spurious error, a true orphan never auto-continues and never pins the isolate, and the case is self-healing across hibernation. This removes `AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS` (and its `console.warn`) from the Think path entirely.
+
+Because the barrier now keys off events rather than polling message state, it also handles the case where the result that completes a parallel batch is an errored one: the client sends `autoContinue: false` for an errored tool result, so that event no longer schedules a continuation. When a sibling has already opted in (a pending continuation exists), such a result now re-arms the barrier check so the batch still continues exactly once — without ever creating a continuation for a standalone errored tool.
+
+`@cloudflare/ai-chat` keeps the bounded-wait barrier for now (its barrier runs inside the queued continuation turn and can't return-and-wait without occupying the chat-turn queue); making it event-driven requires moving the batch gate before queueing, tracked alongside the think↔ai-chat unification (#1642).

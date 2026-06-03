@@ -631,4 +631,31 @@ export class ThinkClientToolsAgent extends Think {
   async clearResponseLog(): Promise<void> {
     this._responseLog.length = 0;
   }
+
+  /**
+   * Simulate the in-memory auto-continuation state being lost to eviction
+   * WITHOUT touching the persisted transcript (#1650). A real eviction drops
+   * `_continuation.pending` and the coalesce timer but leaves messages in
+   * storage; the next tool-result event must re-create the pending state from
+   * the persisted transcript and still fire exactly once when the batch is
+   * complete (self-healing). This nulls the in-memory barrier state to model
+   * that, so a test can assert the continuation survives an eviction mid-batch.
+   */
+  async evictInMemoryContinuationState(): Promise<void> {
+    const internal = this as unknown as {
+      _continuation: { pending: unknown };
+      _continuationTimer: ReturnType<typeof setTimeout> | null;
+      _continuationBarrierActive: boolean;
+      _pendingInteractionPromise: Promise<boolean> | null;
+      _interactionApplyTail: Promise<void>;
+    };
+    if (internal._continuationTimer) {
+      clearTimeout(internal._continuationTimer);
+      internal._continuationTimer = null;
+    }
+    internal._continuation.pending = null;
+    internal._continuationBarrierActive = false;
+    internal._pendingInteractionPromise = null;
+    internal._interactionApplyTail = Promise.resolve();
+  }
 }
