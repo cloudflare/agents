@@ -50,9 +50,19 @@ function currentAgentToolRunner(): AgentToolRunner {
 function failure(
   status: AgentToolFailure["status"],
   error: string,
-  retryable: boolean
+  retryable: boolean,
+  extra?: Pick<AgentToolFailure, "reason" | "childStillRunning">
 ): AgentToolFailure {
-  return { ok: false, status, error, retryable };
+  return {
+    ok: false,
+    status,
+    error,
+    retryable,
+    ...(extra?.reason !== undefined ? { reason: extra.reason } : {}),
+    ...(extra?.childStillRunning !== undefined
+      ? { childStillRunning: extra.childStillRunning }
+      : {})
+  };
 }
 
 /**
@@ -132,12 +142,16 @@ export function agentTool<Input = unknown, Output = unknown>(
         // The child was reset/superseded by a deploy or parent recovery before
         // it reached a logical outcome. Re-dispatching the run can succeed, so
         // surface it as retryable rather than a terminal failure the parent
-        // would report to the user as final.
+        // would report to the user as final. `retryable` is intentionally COARSE
+        // (always true for `interrupted`); callers that want to distinguish a
+        // self-healing child from an exhausted one branch on `reason` /
+        // `childStillRunning` instead.
         return failure(
           "interrupted",
           result.error ??
             "agent tool run was interrupted before it finished; it can be retried",
-          true
+          true,
+          { reason: result.reason, childStillRunning: result.childStillRunning }
         );
       }
       return failure("error", result.error ?? "agent tool run failed", false);
@@ -153,6 +167,7 @@ export type {
   AgentToolEventMessage,
   AgentToolEventState,
   AgentToolFailure,
+  AgentToolInterruptedReason,
   AgentToolLifecycleResult,
   AgentToolRunInfo,
   AgentToolRunInspection,

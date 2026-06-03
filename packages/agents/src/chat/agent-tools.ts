@@ -106,7 +106,13 @@ function applyToRun(
       return { ...seeded, status: "aborted", error: event.reason };
     case "interrupted":
       if (!seeded) return undefined;
-      return { ...seeded, status: "interrupted", error: event.error };
+      return {
+        ...seeded,
+        status: "interrupted",
+        error: event.error,
+        reason: event.reason,
+        childStillRunning: event.childStillRunning
+      };
   }
 }
 

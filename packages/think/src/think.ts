@@ -3727,7 +3727,18 @@ export class Think<
   async cancelAgentToolRun(runId: string, reason?: unknown): Promise<void> {
     const row = this._readAgentToolChildRun(runId);
     if (!row || row.completed_at !== null) return;
+    // Stop the original in-isolate run if it's still live...
     this._agentToolAbortControllers.get(runId)?.abort(reason);
+    // ...and any in-flight chat-recovery turn driving this child facet after an
+    // eviction. A recovered turn re-runs via `_chatRecoveryContinue` outside
+    // `startAgentToolRun`, so it has no entry in `_agentToolAbortControllers`; a
+    // child facet is dedicated to a single agent-tool run, so aborting its
+    // active submissions tears the recovery down instead of letting it keep
+    // grinding (and holding a fiber / keep-alive) after the parent gave up on
+    // it and sealed `interrupted` (#1630 follow-up).
+    for (const controller of this._submissionAbortControllers.values()) {
+      controller.abort(reason);
+    }
     this.sql`
       UPDATE cf_agent_tool_child_runs
       SET status = 'aborted',
@@ -3736,6 +3747,8 @@ export class Think<
       WHERE run_id = ${runId}
         AND status NOT IN ('completed', 'error', 'aborted')
     `;
+    // Release any parent live-tail so it stops waiting on this run immediately.
+    this._finalizeAgentToolChildRunTailers(runId);
   }
 
   /**
@@ -3851,6 +3864,42 @@ export class Think<
     this._agentToolLiveSequences.delete(runId);
     this._agentToolLastErrors.delete(runId);
     this._agentToolPreTurnAssistantIds.delete(runId);
+  }
+
+  /**
+   * Eagerly terminalize this child facet's OWN agent-tool run row(s) once a
+   * recovered turn has settled. A recovered turn re-runs via
+   * `_chatRecoveryContinue` → `continueLastTurn`, which does NOT flow through
+   * `startAgentToolRun`'s finalizer, so without this the run row strands
+   * `running` and its tailers stay open until a parent inspect lazily
+   * reconciles it — forcing a re-attached parent to wait out a full no-progress
+   * window before collecting an already-finished result (#1630 follow-up).
+   * Reconciling here closes the tail promptly so the parent collects the
+   * terminal immediately. No-op on non-child facets (their
+   * `cf_agent_tool_child_runs` table is empty) and on rows whose in-memory run
+   * is still live (those are finalized by `startAgentToolRun`); the underlying
+   * reconcile leaves a row `running` while its recovery is still in progress.
+   */
+  private async _reconcileOwnStaleAgentToolChildRuns(): Promise<void> {
+    let rows: Array<{ run_id: string }>;
+    try {
+      rows = this.sql<{ run_id: string }>`
+        SELECT run_id FROM cf_agent_tool_child_runs
+        WHERE completed_at IS NULL
+      `;
+    } catch {
+      // No child-run table on this facet (it never ran as a child) — nothing
+      // to reconcile.
+      return;
+    }
+    for (const { run_id } of rows) {
+      if (this._agentToolAbortControllers.has(run_id)) continue;
+      try {
+        await this._reconcileStaleAgentToolChildRun(run_id);
+      } catch {
+        // Best-effort: a parent inspect still reconciles lazily.
+      }
+    }
   }
 
   async getAgentToolChunks(
@@ -9003,6 +9052,11 @@ export class Think<
           recoveredSubmission.submission_id
         );
       }
+      // If this facet is an agent-tool child, its recovered turn just settled
+      // outside `startAgentToolRun`'s finalizer — eagerly close the run so a
+      // re-attached parent collects the terminal immediately rather than
+      // waiting out a no-progress window.
+      await this._reconcileOwnStaleAgentToolChildRuns();
     }
   }
 

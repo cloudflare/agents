@@ -60,6 +60,23 @@ type ThinkAgentToolParentStub = DurableObjectStub & {
     elapsedMs: number;
     status: string | null;
   }>;
+  reattachMaxWindowExhaustedThinkChildForTest(runId?: string): Promise<{
+    finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
+    elapsedMs: number;
+    status: string | null;
+    childStatus: string | null;
+  }>;
+  getResolvedReattachBudgetsForTest(): Promise<{
+    noProgressTimeoutMs: number;
+    maxWindowMs: number;
+  }>;
+  reattachNotTailableAdapterForTest(): Promise<{
+    reason?: string;
+    result: boolean;
+  }>;
+  reattachScriptedAdapterForTest(
+    scenario: "rearm-then-complete" | "idle-after-progress"
+  ): Promise<{ status?: string; reason?: string; tailAttempts: number }>;
   reconcileParallelThinkChildrenForTest(): Promise<{
     stuckStatus: string | null;
     fastStatus: string | null;
@@ -362,11 +379,102 @@ describe("Think agent tools", () => {
         }),
         result: expect.objectContaining({
           status: "interrupted",
+          // Typed cause (#1630 follow-up) so callers don't parse the prose: the
+          // child made no forward progress within the no-progress budget. This
+          // seal is SOFT — the child is NOT torn down (`childStillRunning: true`)
+          // so a re-issue can still re-attach and repair it if it self-heals.
+          // Only the `window-exceeded` hard ceiling tears the child down.
+          reason: "no-progress",
+          childStillRunning: true,
           error:
-            "Agent tool run was still running and did not reach a terminal result within the re-attach budget."
+            "Agent tool run was still running but made no forward progress within the re-attach no-progress budget; the parent gave up."
         })
       }
     ]);
+  });
+
+  it("tears down a child given up at the window-exceeded ceiling (#1630)", async () => {
+    const parent = await freshParent();
+    const runId = crypto.randomUUID();
+
+    const { finishes, elapsedMs, status, childStatus } =
+      await parent.reattachMaxWindowExhaustedThinkChildForTest(runId);
+
+    // Ceiling (200ms) ends the wait well before the 5s no-progress budget.
+    expect(elapsedMs).toBeLessThan(5000);
+    expect(status).toBe("interrupted");
+    expect(finishes).toEqual([
+      {
+        run: expect.objectContaining({
+          runId,
+          agentType: "ThinkTestAgent",
+          status: "interrupted"
+        }),
+        result: expect.objectContaining({
+          status: "interrupted",
+          // The hard ceiling is the one give-up that TEARS THE CHILD DOWN — the
+          // child had its full window and is truly exhausted.
+          reason: "window-exceeded",
+          childStillRunning: false
+        })
+      }
+    ]);
+    // Teardown actually cancelled the child run (not just sealed the parent).
+    expect(childStatus).toBe("aborted");
+  });
+
+  it("re-arms across a clean mid-flight stream-close and follows an advancing child to completed (#1630)", async () => {
+    const parent = await freshParent();
+
+    const { status, reason, tailAttempts } =
+      await parent.reattachScriptedAdapterForTest("rearm-then-complete");
+
+    // The child's stream closed once (re-eviction) while still advancing, so
+    // re-attach re-armed (a second tail) and collected the real terminal result
+    // rather than sealing interrupted.
+    expect(status).toBe("completed");
+    expect(reason).toBeUndefined();
+    expect(tailAttempts).toBe(2);
+  });
+
+  it("does not re-arm after a full no-progress window even if the child progressed earlier (#1630)", async () => {
+    const parent = await freshParent();
+
+    const { status, reason, tailAttempts } =
+      await parent.reattachScriptedAdapterForTest("idle-after-progress");
+
+    // Progress then a full idle window is an honest stall: seal `no-progress`
+    // after a SINGLE tail (no bonus window, no per-cycle abandoned reader).
+    expect(status).toBeUndefined();
+    expect(reason).toBe("no-progress");
+    expect(tailAttempts).toBe(1);
+  });
+
+  it("re-attach returns not-tailable for an adapter without a live-tail (#1630)", async () => {
+    const parent = await freshParent();
+
+    // An adapter missing `tailAgentToolRun` cannot be re-attached: the re-attach
+    // returns no terminal result and the typed `not-tailable` cause. (Real RPC
+    // children always pass the `typeof` guard, so this defensive branch is
+    // exercised via a plain in-process adapter — see the seam doc.)
+    const reattach = await parent.reattachNotTailableAdapterForTest();
+
+    expect(reattach.reason).toBe("not-tailable");
+    expect(reattach.result).toBe(false);
+  });
+
+  it("honors the public AgentStaticOptions re-attach budgets (#1630)", async () => {
+    const parent = await freshParent();
+
+    // `ThinkAgentToolParent` sets distinctive static options; this proves they
+    // are resolved (and therefore used as the recovery defaults), not just
+    // type-checked.
+    const budgets = await parent.getResolvedReattachBudgetsForTest();
+
+    expect(budgets).toEqual({
+      noProgressTimeoutMs: 4242,
+      maxWindowMs: 54_321
+    });
   });
 
   it("re-attaches still-running children in parallel so a hung child can't starve a sibling (#1630)", async () => {

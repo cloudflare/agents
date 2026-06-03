@@ -2812,6 +2812,43 @@ export class AIChatAgent<
     }
   }
 
+  /**
+   * Eagerly terminalize this child facet's OWN agent-tool run row(s) once a
+   * recovered turn has settled. A recovered turn re-runs via
+   * `_chatRecoveryContinue` → `continueLastTurn`, which does NOT flow through
+   * `startAgentToolRun`'s finalizer, so without this the row strands `running`
+   * and its tailers stay open until a parent inspect lazily reconciles it —
+   * forcing a re-attached parent to wait out a full no-progress window before
+   * collecting an already-finished result (#1630 follow-up). Reconciling here
+   * closes the tail promptly so the parent collects the terminal immediately.
+   * No-op on non-child facets (their `cf_ai_chat_agent_tool_runs` table is
+   * empty) and on rows whose in-memory run is still live; the underlying
+   * reconcile leaves a row `running` while its recovery is still in progress.
+   * Mirrors `@cloudflare/think`.
+   */
+  private async _reconcileOwnStaleAgentToolChildRuns(): Promise<void> {
+    let rows: Array<{ run_id: string }>;
+    try {
+      rows = this.sql<{ run_id: string }>`
+        select run_id from cf_ai_chat_agent_tool_runs
+        where status = 'running'
+      `;
+    } catch {
+      // No child-run table on this facet (it never ran as a child).
+      return;
+    }
+    for (const { run_id } of rows) {
+      if (this._agentToolAbortControllers.has(run_id)) continue;
+      const row = this._getAgentToolRunRow(run_id);
+      if (!row || row.status !== "running") continue;
+      try {
+        await this._reconcileStaleAgentToolChildRun(run_id, row);
+      } catch {
+        // Best-effort: a parent inspect still reconciles lazily.
+      }
+    }
+  }
+
   async inspectAgentToolRun(
     runId: string
   ): Promise<AgentToolRunInspection | null> {
@@ -3992,6 +4029,11 @@ export class AIChatAgent<
       );
     } finally {
       this._activeChatRecoveryRootRequestId = previousRootRequestId;
+      // If this facet is an agent-tool child, its recovered turn just settled
+      // outside `startAgentToolRun`'s finalizer — eagerly close the run so a
+      // re-attached parent collects the terminal immediately rather than
+      // waiting out a no-progress window.
+      await this._reconcileOwnStaleAgentToolChildRuns();
     }
   }
 

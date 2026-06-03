@@ -15,6 +15,30 @@ export type AgentToolTerminalStatus = Extract<
 >;
 
 /**
+ * Machine-readable cause of an `interrupted` seal (#1630 follow-up). Lets a
+ * caller branch on WHY a run was abandoned without parsing the human-readable
+ * `error` prose, which is not a stable contract.
+ *
+ * - `no-progress` — the child went silent for a full no-progress window while
+ *   the parent was tailing it (genuinely stalled / hung).
+ * - `window-exceeded` — the hard re-attach ceiling elapsed while the child was
+ *   still non-terminal (it may have been advancing too slowly to ever finish).
+ * - `not-tailable` — the child runtime cannot live-tail, so the parent could
+ *   not re-attach to its stream to follow it to terminal.
+ * - `inspect-timeout` — inspecting the child timed out during parent recovery.
+ * - `inspect-failed` — inspecting the child failed during parent recovery.
+ * - `recovery-deadline` — the overall parent-recovery deadline elapsed before
+ *   this run could be reconciled.
+ */
+export type AgentToolInterruptedReason =
+  | "no-progress"
+  | "window-exceeded"
+  | "not-tailable"
+  | "inspect-timeout"
+  | "inspect-failed"
+  | "recovery-deadline";
+
+/**
  * Structured failure envelope an `agentTool()` returns when a sub-agent run
  * does not complete. Instead of an opaque error string the parent model would
  * parrot back to the user, the caller (or an orchestration harness) gets a
@@ -33,6 +57,15 @@ export type AgentToolFailure = {
   status: Exclude<AgentToolTerminalStatus, "completed">;
   error: string;
   retryable: boolean;
+  /** Present only when `status` is `interrupted` — machine-readable cause. */
+  reason?: AgentToolInterruptedReason;
+  /**
+   * Present only when `status` is `interrupted`. `true` when the child facet was
+   * still non-terminal (running / advancing) at the moment the parent stopped
+   * waiting; `false` once the parent has torn the child down so it is no longer
+   * doing work. Lets a caller decide between re-dispatching vs. reconnecting.
+   */
+  childStillRunning?: boolean;
 };
 
 export type AgentToolDisplayMetadata = {
@@ -56,6 +89,13 @@ export type AgentToolLifecycleResult = {
   status: AgentToolTerminalStatus;
   summary?: string;
   error?: string;
+  /** Present only when `status` is `interrupted` — machine-readable cause. */
+  reason?: AgentToolInterruptedReason;
+  /**
+   * Present only when `status` is `interrupted`. Whether the child facet was
+   * still non-terminal when the parent stopped waiting (before any teardown).
+   */
+  childStillRunning?: boolean;
 };
 
 export type RunAgentToolOptions<Input = unknown> = {
@@ -75,6 +115,18 @@ export type RunAgentToolResult<Output = unknown> = {
   output?: Output;
   summary?: string;
   error?: string;
+  /**
+   * Present only when `status` is `interrupted` — a machine-readable cause so
+   * callers don't pattern-match the `error` prose (#1630 follow-up).
+   */
+  reason?: AgentToolInterruptedReason;
+  /**
+   * Present only when `status` is `interrupted`. `true` when the child facet was
+   * still non-terminal (running / advancing) at the moment the parent stopped
+   * waiting and before any teardown; `false` once the parent has torn the child
+   * down so it is no longer doing work.
+   */
+  childStillRunning?: boolean;
 };
 
 export type ChatCapableAgentClass<T extends Agent = Agent> = SubAgentClass<T>;
@@ -148,6 +200,14 @@ export type AgentToolEvent =
       kind: "interrupted";
       runId: string;
       error: string;
+      /** Machine-readable cause of the interrupt (#1630 follow-up). */
+      reason?: AgentToolInterruptedReason;
+      /**
+       * Whether the child facet was still non-terminal when the parent stopped
+       * waiting (before any teardown). Lets a UI distinguish a still-running
+       * child from one the parent has torn down.
+       */
+      childStillRunning?: boolean;
     };
 
 export type AgentToolEventMessage = {
@@ -169,6 +229,13 @@ export type AgentToolRunState = {
   parts: UIMessage["parts"];
   summary?: string;
   error?: string;
+  /**
+   * Present only when `status` is `interrupted` — machine-readable cause and
+   * whether the child is still running, mirrored from the wire event so a UI
+   * can render the reason without parsing `error` (#1630 follow-up).
+   */
+  reason?: AgentToolInterruptedReason;
+  childStillRunning?: boolean;
   subAgent: { agent: string; name: string };
 };
 

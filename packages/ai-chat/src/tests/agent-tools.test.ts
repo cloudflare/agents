@@ -324,8 +324,15 @@ describe("AIChatAgent as an agent-tool child", () => {
         }),
         result: expect.objectContaining({
           status: "interrupted",
+          // Typed cause (#1630 follow-up) so callers don't parse the prose: the
+          // child made no forward progress within the no-progress budget. This
+          // seal is SOFT — the child is NOT torn down (`childStillRunning: true`)
+          // so a re-issue can still re-attach and repair it if it self-heals.
+          // Only the `window-exceeded` hard ceiling tears the child down.
+          reason: "no-progress",
+          childStillRunning: true,
           error:
-            "Agent tool run was still running and did not reach a terminal result within the re-attach budget."
+            "Agent tool run was still running but made no forward progress within the re-attach no-progress budget; the parent gave up."
         })
       }
     ]);

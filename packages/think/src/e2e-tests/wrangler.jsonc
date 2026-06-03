@@ -46,6 +46,16 @@
       {
         "name": "ThinkAgentToolNaturalParentE2EAgent",
         "class_name": "ThinkAgentToolNaturalParentE2EAgent"
+      },
+      // Test-harness-only binding: production only needs to export the child
+      // facet class, but vitest-pool-workers needs it here for ctx.exports.
+      {
+        "name": "ThinkSlowChildE2EAgent",
+        "class_name": "ThinkSlowChildE2EAgent"
+      },
+      {
+        "name": "ThinkSlowChildParentE2EAgent",
+        "class_name": "ThinkSlowChildParentE2EAgent"
       }
     ]
   },
@@ -77,6 +87,13 @@
     {
       "tag": "v6",
       "new_sqlite_classes": ["ThinkStallRecoveryE2EAgent"]
+    },
+    {
+      "tag": "v7",
+      "new_sqlite_classes": [
+        "ThinkSlowChildParentE2EAgent",
+        "ThinkSlowChildE2EAgent"
+      ]
     }
   ],
   "r2_buckets": [

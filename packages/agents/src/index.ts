@@ -80,6 +80,7 @@ import type {
   AgentToolDisplayMetadata,
   AgentToolEvent,
   AgentToolEventMessage,
+  AgentToolInterruptedReason,
   AgentToolLifecycleResult,
   AgentToolRunInfo,
   AgentToolRunInspection,
@@ -97,6 +98,7 @@ export type {
   AgentToolEventMessage,
   AgentToolEventState,
   AgentToolFailure,
+  AgentToolInterruptedReason,
   AgentToolLifecycleResult,
   AgentToolRunInfo,
   AgentToolRunInspection,
@@ -902,15 +904,22 @@ export type AddRpcMcpServerOptions = {
 const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
 const DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS = 2_000;
 const DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 5_000;
-// Generous wall-clock budget for re-attaching to a still-running child
-// agent-tool run (parent recovery / duplicate-runId re-issue) and tailing it
-// to its real terminal result instead of abandoning it as `interrupted` and
-// re-running already-completed child work (#1630). Keyed to time-to-terminal,
-// consistent with the wall-clock-dominant chat-recovery budget (#1638): a
-// child that keeps streaming toward terminal within the window is collected; a
-// genuinely hung child seals `interrupted` after the budget so it can never
-// block recovery forever. Internal constant only — no new public config.
-const DEFAULT_AGENT_TOOL_REATTACH_TIMEOUT_MS = 120_000;
+// Re-attaching to a still-running child agent-tool run (parent recovery /
+// duplicate-runId re-issue) tails it to its REAL terminal result instead of
+// abandoning it as `interrupted` and re-running already-completed child work
+// (#1630). The budget is PROGRESS-KEYED, not a flat wall clock: it bounds how
+// long the parent waits with NO forward progress from the child, and resets
+// every time the child forwards a chunk. A child that keeps streaming toward
+// terminal is therefore never abandoned mid-flight (the previous flat 120s
+// budget abandoned healthy, still-advancing children); only a genuinely
+// silent/hung child seals `interrupted` after a full no-progress window.
+const DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS = 120_000;
+// Hard ceiling on a single re-attach, mirroring the child's own chat-recovery
+// window (@cloudflare/think `CHAT_RECOVERY_MAX_WINDOW_MS`). Past this the child
+// can no longer be legitimately advancing, so the parent stops waiting — this
+// guarantees a hung child can never block recovery forever even while the
+// progress-keyed budget keeps re-arming.
+const DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS = 15 * 60 * 1000;
 const SUB_AGENT_IDENTITY_VERSION_LEGACY = "legacy";
 const SUB_AGENT_IDENTITY_VERSION_PATH_V2 = "path-v2";
 const SUB_AGENT_IDENTITY_PATH_V2_PREFIX = "cf-agents:v2:";
@@ -1139,7 +1148,24 @@ export const DEFAULT_AGENT_STATIC_OPTIONS = {
    * up. Bounds repeated retries of a `onFiberRecovered()` hook that keeps
    * throwing so a poison row cannot re-trigger forever across boots.
    */
-  fiberRecoveryMaxAgeMs: 24 * 60 * 60 * 1000
+  fiberRecoveryMaxAgeMs: 24 * 60 * 60 * 1000,
+  /**
+   * No-progress budget (ms) for re-attaching to a still-running agent-tool
+   * child after a deploy / parent recovery (#1630). Bounds how long the parent
+   * waits with NO forward progress from the child; it resets on every forwarded
+   * chunk, so a child that keeps streaming is never abandoned mid-flight. Only a
+   * genuinely silent/hung child seals `interrupted` after a full window. Raise
+   * for children with long quiet stretches between outputs.
+   */
+  agentToolReattachNoProgressTimeoutMs:
+    DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS,
+  /**
+   * Hard ceiling (ms) on a single agent-tool re-attach (#1630). Caps the total
+   * wait even as the no-progress budget re-arms across stream-closes, so a hung
+   * child can never block recovery forever. Defaults to the child's own
+   * chat-recovery window.
+   */
+  agentToolReattachMaxWindowMs: DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS
 };
 
 /**
@@ -1154,6 +1180,8 @@ interface ResolvedAgentOptions {
   fiberRecoveryHookTimeoutMs: number;
   fiberRecoveryScanDeadlineMs: number;
   fiberRecoveryMaxAgeMs: number;
+  agentToolReattachNoProgressTimeoutMs: number;
+  agentToolReattachMaxWindowMs: number;
 }
 
 /**
@@ -1187,6 +1215,22 @@ export interface AgentStaticOptions {
    * and discards the row. Set to `0` to retain rows indefinitely.
    */
   fiberRecoveryMaxAgeMs?: number;
+  /**
+   * No-progress budget in milliseconds for re-attaching to a still-running
+   * agent-tool child after a deploy / parent recovery (#1630). Resets on every
+   * forwarded chunk, so a steadily-streaming child is never abandoned; only a
+   * genuinely silent child seals `interrupted` after a full window.
+   * Default: 120000 (2 minutes). Set to `0` to skip waiting (collect only an
+   * already-terminal child).
+   */
+  agentToolReattachNoProgressTimeoutMs?: number;
+  /**
+   * Hard ceiling in milliseconds on a single agent-tool re-attach (#1630). Caps
+   * the total wait even as the no-progress budget re-arms across stream-closes.
+   * Default: 900000 (15 minutes). Set to `0` to disable the ceiling (bounded
+   * only by the no-progress budget).
+   */
+  agentToolReattachMaxWindowMs?: number;
 }
 
 /**
@@ -1572,7 +1616,13 @@ export class Agent<
         DEFAULT_AGENT_STATIC_OPTIONS.fiberRecoveryScanDeadlineMs,
       fiberRecoveryMaxAgeMs:
         ctor.options?.fiberRecoveryMaxAgeMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.fiberRecoveryMaxAgeMs
+        DEFAULT_AGENT_STATIC_OPTIONS.fiberRecoveryMaxAgeMs,
+      agentToolReattachNoProgressTimeoutMs:
+        ctor.options?.agentToolReattachNoProgressTimeoutMs ??
+        DEFAULT_AGENT_STATIC_OPTIONS.agentToolReattachNoProgressTimeoutMs,
+      agentToolReattachMaxWindowMs:
+        ctor.options?.agentToolReattachMaxWindowMs ??
+        DEFAULT_AGENT_STATIC_OPTIONS.agentToolReattachMaxWindowMs
     };
     return this._cachedOptions;
   }
@@ -7180,13 +7230,17 @@ export class Agent<
       // letting the model re-run already-completed child work (#1630). Falls
       // back to replay+interrupt when there is no tail adapter or the bounded
       // budget is exhausted.
+      let reattachReason: AgentToolInterruptedReason | undefined;
+      let childTornDown = false;
       try {
         const child = await this.subAgent(cls as SubAgentClass<Agent>, runId);
         const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
         const reattach = await this._reattachAgentToolRunToTerminal<Output>(
           adapter,
           existing,
-          1
+          1,
+          this._resolvedOptions.agentToolReattachNoProgressTimeoutMs,
+          this._resolvedOptions.agentToolReattachMaxWindowMs
         );
         if (reattach.result) {
           await this._finishAgentToolRun(
@@ -7196,12 +7250,21 @@ export class Agent<
           );
           return reattach.result;
         }
+        reattachReason = reattach.reason;
+        // The parent has genuinely given up re-attaching to this live child —
+        // tear it down so it stops consuming a fiber / keep-alive (#1630).
+        childTornDown = await this._teardownGivenUpAgentToolChild(
+          adapter,
+          runId,
+          reattach.reason
+        );
       } catch {
         // Fall through to the honest interrupted state below.
       }
       return await this._replayAndInterruptAgentToolRun<Output>(
         existing,
-        "Agent tool run was still running and could not be re-attached to a terminal result within the recovery budget."
+        this._interruptedMessageForReason(reattachReason),
+        { reason: reattachReason, childStillRunning: !childTornDown }
       );
     }
 
@@ -7312,13 +7375,15 @@ export class Agent<
         const stream = await adapter.tailAgentToolRun(runId, {
           afterSequence: -1
         });
-        sequence = await this._forwardAgentToolStream(
-          stream,
-          options.parentToolCallId,
-          runId,
-          sequence,
-          options.signal
-        );
+        sequence = (
+          await this._forwardAgentToolStream(
+            stream,
+            options.parentToolCallId,
+            runId,
+            sequence,
+            options.signal
+          )
+        ).next;
       } else {
         const chunks = await adapter.getAgentToolChunks(runId);
         sequence = this._broadcastAgentToolChunks(
@@ -7743,10 +7808,16 @@ export class Agent<
     parentToolCallId: string | undefined,
     runId: string,
     sequence: number,
-    signal?: AbortSignal
-  ): Promise<number> {
+    signal?: AbortSignal,
+    idleTimeoutMs?: number
+  ): Promise<{ next: number; ended: "done" | "idle" | "aborted" }> {
     let next = sequence;
-    if (signal?.aborted) return next;
+    if (signal?.aborted) return { next, ended: "aborted" };
+    // How the forward loop ended, so the re-attach caller can re-arm ONLY on a
+    // clean stream-close (`done`) and never abandon a fresh reader per idle
+    // cycle: `idle` = a full no-progress window elapsed (stalled), `aborted` =
+    // the caller's ceiling signal fired.
+    let ended: "done" | "idle" | "aborted" = "done";
     const reader = (
       stream as ReadableStream<AgentToolStoredChunk | Uint8Array>
     ).getReader();
@@ -7762,6 +7833,22 @@ export class Agent<
       abortListener = () => resolveAbort?.();
       signal.addEventListener("abort", abortListener, { once: true });
     }
+    // Optional no-progress (idle) budget: a re-attach passes this so a child
+    // that keeps forwarding chunks is never cut off mid-flight. The timer is
+    // (re-)armed on every forwarded chunk and only fires after a full window of
+    // silence. When `idleTimeoutMs` is undefined (the live run path) the idle
+    // promise never resolves, so behaviour is unchanged.
+    const idleEnabled = typeof idleTimeoutMs === "number" && idleTimeoutMs > 0;
+    let resolveIdle: (() => void) | undefined;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const idlePromise = new Promise<void>((resolve) => {
+      resolveIdle = resolve;
+    });
+    const armIdle = () => {
+      if (!idleEnabled) return;
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => resolveIdle?.(), idleTimeoutMs);
+    };
     // N9: track whether any chunk was forwarded since the last progress hook so
     // a parent that is merely orchestrating a child still records forward
     // progress for its OWN recovery budget — but ONLY when the child actually
@@ -7776,6 +7863,8 @@ export class Agent<
           body: chunk.body
         });
         forwardedSinceProgress = true;
+        // Forward progress resets the no-progress budget.
+        armIdle();
       };
       const forwardLine = (line: string) => {
         try {
@@ -7803,6 +7892,9 @@ export class Agent<
           bufferedBytes = "";
         }
       };
+      // Arm the idle budget up front so a child that never emits anything still
+      // ends the wait after one no-progress window.
+      armIdle();
       while (true) {
         // Pre-attach a catch so that if the abort wins the race below, a later
         // rejection of this read (e.g. the child closing / DO RPC surfacing
@@ -7811,10 +7903,15 @@ export class Agent<
         readPromise.catch(() => {});
         const raced = await Promise.race([
           readPromise.then((result) => ({ kind: "read" as const, result })),
-          abortPromise.then(() => ({ kind: "abort" as const }))
+          abortPromise.then(() => ({ kind: "abort" as const })),
+          idlePromise.then(() => ({ kind: "idle" as const }))
         ]);
-        if (raced.kind === "abort") {
+        if (raced.kind === "abort" || raced.kind === "idle") {
+          // Both leave the pending read in place — we never cancel a live child
+          // facet stream (see the note below). The caller distinguishes a
+          // no-progress stall from terminal via a follow-up inspect.
           aborted = true;
+          ended = raced.kind === "idle" ? "idle" : "aborted";
           break;
         }
         const { done, value } = raced.result;
@@ -7845,6 +7942,7 @@ export class Agent<
         }
       }
     } finally {
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
       if (abortListener && signal) {
         signal.removeEventListener("abort", abortListener);
       }
@@ -7863,8 +7961,10 @@ export class Agent<
       // and the adapter's tail fires its registered closer, releasing the reader
       // + stream. That makes the hold BOUNDED by the child's own recovery
       // (its turn is sealed within the chat-recovery ceiling), never unbounded.
+      // The re-attach loop re-arms only on `ended === "done"`, so at most ONE
+      // such read is ever left pending per re-attach (no per-cycle leak).
     }
-    return next;
+    return { next, ended };
   }
 
   /**
@@ -7923,7 +8023,11 @@ export class Agent<
         {
           kind: "interrupted",
           runId: result.runId,
-          error: result.error ?? "Agent tool run was interrupted"
+          error: result.error ?? "Agent tool run was interrupted",
+          ...(result.reason !== undefined ? { reason: result.reason } : {}),
+          ...(result.childStillRunning !== undefined
+            ? { childStillRunning: result.childStillRunning }
+            : {})
         },
         replay,
         connection
@@ -7971,7 +8075,8 @@ export class Agent<
 
   private async _replayAndInterruptAgentToolRun<Output>(
     row: AgentToolRunStorageRow,
-    message: string
+    message: string,
+    extra?: { reason?: AgentToolInterruptedReason; childStillRunning?: boolean }
   ): Promise<RunAgentToolResult<Output>> {
     let sequence = 1;
     try {
@@ -7983,12 +8088,74 @@ export class Agent<
       runId: row.run_id,
       agentType: row.agent_type,
       status: "interrupted",
-      error: message
+      error: message,
+      ...(extra?.reason !== undefined ? { reason: extra.reason } : {}),
+      ...(extra?.childStillRunning !== undefined
+        ? { childStillRunning: extra.childStillRunning }
+        : {})
     };
     await this._finishAgentToolRun(this._agentToolRunInfoFromRow(row), result, {
       sequence
     });
     return result;
+  }
+
+  /**
+   * Human-readable prose for an `interrupted` seal. Kept in sync with
+   * {@link AgentToolInterruptedReason}; callers branch on the typed `reason`
+   * field, not this string.
+   */
+  private _interruptedMessageForReason(
+    reason: AgentToolInterruptedReason | undefined
+  ): string {
+    switch (reason) {
+      case "no-progress":
+        return "Agent tool run was still running but made no forward progress within the re-attach no-progress budget; the parent gave up.";
+      case "window-exceeded":
+        return "Agent tool run did not reach a terminal result within the maximum re-attach window; the parent gave up.";
+      case "not-tailable":
+        return "Agent tool run was still running, but live-tail reattachment is not supported in this runtime.";
+      case "inspect-timeout":
+        return "Agent tool run inspection timed out during parent recovery.";
+      case "inspect-failed":
+        return "Agent tool run could not be inspected during parent recovery.";
+      case "recovery-deadline":
+        return "Agent tool run recovery deadline exceeded.";
+      default:
+        return "Agent tool run was still running and did not reach a terminal result.";
+    }
+  }
+
+  /**
+   * Tear down a child agent-tool run the parent has genuinely given up on
+   * (#1630 follow-up). Teardown is scoped to `window-exceeded` ONLY — the hard
+   * ceiling, where the child has had its full recovery window and is therefore
+   * truly exhausted, so cancelling it reclaims its fiber / keep-alive. Every
+   * other give-up is deliberately left repairable: `no-progress` seals stay
+   * SOFT (`interrupted`, `childStillRunning: true`) so a re-issue can still
+   * re-attach and collect the child if it self-heals — tearing those down would
+   * defeat the repair-on-re-issue path and convert a retryable interrupt into a
+   * non-retryable `aborted`. Reasons where the child's state is unknown
+   * (`inspect-*`, `recovery-deadline`, `not-tailable`) are also left alone.
+   * Returns whether the child was torn down (so the caller reports
+   * `childStillRunning: false`).
+   */
+  private async _teardownGivenUpAgentToolChild(
+    adapter: AgentToolChildAdapter,
+    runId: string,
+    reason: AgentToolInterruptedReason | undefined
+  ): Promise<boolean> {
+    if (reason !== "window-exceeded") return false;
+    try {
+      await adapter.cancelAgentToolRun(
+        runId,
+        `agent tool run given up by parent recovery: ${reason}`
+      );
+      return true;
+    } catch {
+      // Best-effort: a failed teardown just means the child may still be alive.
+      return false;
+    }
   }
 
   /**
@@ -7999,15 +8166,23 @@ export class Agent<
    * its live stream (forwarding chunks to the parent's connections) until it
    * reaches terminal, then inspect for the collected result.
    *
-   * Bounded by {@link DEFAULT_AGENT_TOOL_REATTACH_TIMEOUT_MS}: a child that keeps
-   * advancing toward terminal within the window is collected; a genuinely hung
-   * child returns `{ result: undefined }` once the budget elapses so the caller
-   * falls back to `interrupted` and recovery can never block forever.
+   * The wait is PROGRESS-KEYED, not a flat wall clock (which previously abandoned
+   * healthy, still-advancing children whose recovery simply outran a fixed
+   * budget). `noProgressTimeoutMs` bounds how long the parent waits with NO
+   * forward progress; it is reset on every forwarded chunk. As long as the child
+   * keeps streaming it is followed through to terminal. The loop also RE-ARMS
+   * across stream-closes (a child re-evicted mid-recovery, or a tail that ends
+   * before terminal) as long as the prior attempt made progress, so a child that
+   * dies and recovers again during deploy churn is still collected. The total
+   * wait is hard-bounded by `maxWindowMs` (the child's own recovery ceiling) so a
+   * genuinely hung child can never block recovery forever.
    *
    * Returns the terminal `result` (and `completedAt`) when the child reaches a
-   * terminal status within the budget, plus the advanced broadcast `sequence`.
-   * Returns `{ result: undefined }` when there is no `tailAgentToolRun` adapter,
-   * the budget is exhausted, or the child is still non-terminal.
+   * terminal status, plus the advanced broadcast `sequence`. Returns
+   * `{ result: undefined }` when there is no `tailAgentToolRun` adapter, the
+   * child makes no progress within a full no-progress window, or the ceiling is
+   * reached while the child is still non-terminal — the caller then seals
+   * `interrupted`.
    */
   private async _reattachAgentToolRunToTerminal<Output>(
     adapter: AgentToolChildAdapter<unknown, Output>,
@@ -8016,41 +8191,96 @@ export class Agent<
       "run_id" | "agent_type" | "parent_tool_call_id"
     >,
     sequence: number,
-    budgetMs: number = DEFAULT_AGENT_TOOL_REATTACH_TIMEOUT_MS
+    noProgressTimeoutMs: number = DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS,
+    maxWindowMs: number = DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS
   ): Promise<{
     sequence: number;
     result?: RunAgentToolResult<Output>;
     completedAt?: number;
+    reason?: AgentToolInterruptedReason;
   }> {
     if (typeof adapter.tailAgentToolRun !== "function") {
-      return { sequence };
-    }
-
-    const controller = new AbortController();
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    if (budgetMs > 0 && Number.isFinite(budgetMs)) {
-      timeoutId = setTimeout(() => controller.abort(), budgetMs);
-    } else if (budgetMs <= 0) {
-      // A non-positive budget means "do not wait" — only collect an
-      // already-terminal child without tailing.
-      controller.abort();
+      // Defensive: a real (RPC) child stub reports every method as a `function`,
+      // so this only fires for an in-process adapter that genuinely omits the
+      // method. A real child that can't tail surfaces as a tail-call failure
+      // below (caught → `no-progress`), not here.
+      return { sequence, reason: "not-tailable" };
     }
 
     this._emit("agent_tool:recovery:reattach", {
       runId: row.run_id,
       agentType: row.agent_type,
-      budgetMs
+      budgetMs: noProgressTimeoutMs
     });
 
-    let nextSequence = sequence;
-    if (!controller.signal.aborted) {
+    const collectTerminal = async (
+      seq: number
+    ): Promise<{
+      sequence: number;
+      result: RunAgentToolResult<Output>;
+      completedAt?: number;
+    } | null> => {
+      let inspection: AgentToolRunInspection<Output> | null = null;
       try {
-        // Tail from the child's CURRENT last chunk, not from -1: a re-attach is
-        // re-syncing a client that already has the stored chunks (delivered via
-        // `_replayAgentToolRuns` on reconnect), so replaying them here would just
-        // duplicate the run's parts on a connected client (the client reducer
-        // appends by arrival order and ignores sequence). Forwarding only chunks
-        // produced *after* re-attach keeps the live stream correct without dupes.
+        inspection = await adapter.inspectAgentToolRun(row.run_id);
+      } catch {
+        // Treat an un-inspectable child as still non-terminal.
+        return null;
+      }
+      if (
+        inspection &&
+        inspection.status !== "running" &&
+        inspection.status !== "starting"
+      ) {
+        return {
+          sequence: seq,
+          result: this._terminalResultFromInspection<Output>(
+            row.agent_type,
+            inspection
+          ),
+          completedAt: inspection.completedAt
+        };
+      }
+      return null;
+    };
+
+    let nextSequence = sequence;
+
+    // A non-positive no-progress budget means "do not wait" — only collect an
+    // already-terminal child without tailing.
+    if (!(noProgressTimeoutMs > 0) || !Number.isFinite(noProgressTimeoutMs)) {
+      return (
+        (await collectTerminal(nextSequence)) ?? {
+          sequence: nextSequence,
+          reason: "no-progress"
+        }
+      );
+    }
+
+    // Hard ceiling so a hung child can never block recovery forever, even as the
+    // progress-keyed budget re-arms across stream-closes / re-evictions.
+    const ceilingController = new AbortController();
+    let ceilingTimer: ReturnType<typeof setTimeout> | undefined;
+    if (maxWindowMs > 0 && Number.isFinite(maxWindowMs)) {
+      ceilingTimer = setTimeout(() => ceilingController.abort(), maxWindowMs);
+    }
+
+    // Defaults to the no-progress cause; promoted to `window-exceeded` if the
+    // hard ceiling is what ends the wait.
+    let reason: AgentToolInterruptedReason = "no-progress";
+    try {
+      // Re-arm loop: keep tailing as long as the child makes forward progress.
+      // Each attempt forwards live chunks until the child reaches terminal (its
+      // stream closes), goes silent for a full no-progress window, or the ceiling
+      // fires. Only a full no-progress window with no terminal seals
+      // `interrupted`; a still-streaming or re-evicted-but-advancing child is
+      // followed through.
+      while (!ceilingController.signal.aborted) {
+        // Tail from the child's CURRENT last chunk, not from -1: stored chunks
+        // are already delivered to connected clients via `_replayAgentToolRuns`
+        // on reconnect, so replaying them here would duplicate parts (the client
+        // reducer appends by arrival order). Forwarding only chunks produced
+        // after this point keeps the live stream correct without dupes.
         let afterSequence = -1;
         try {
           const existing = await adapter.getAgentToolChunks(row.run_id);
@@ -8059,53 +8289,62 @@ export class Agent<
         } catch {
           // Fall back to a full tail if the chunk probe fails.
         }
-        // NOTE: the signal is NOT forwarded to `tailAgentToolRun` — the child is
-        // a separate facet reached over DO RPC and an AbortSignal can't be
-        // serialized across it. We bound the wait parent-side instead: the
-        // budget aborts our local controller, which makes `_forwardAgentToolStream`
-        // stop tailing and release its reader. That only releases the read view;
-        // it never cancels the child (the child must keep advancing toward its
-        // own terminal so a later re-attach / inspect can still collect it).
-        const stream = await adapter.tailAgentToolRun(row.run_id, {
-          afterSequence
-        });
-        // Resolves when the child reaches terminal (the adapter closes the tail)
-        // or when the budget aborts our controller (the reader is cancelled).
-        nextSequence = await this._forwardAgentToolStream(
-          stream,
-          row.parent_tool_call_id ?? undefined,
-          row.run_id,
-          nextSequence,
-          controller.signal
-        );
-      } catch {
-        // Tail failures fall through to an inspect; the child remains
-        // authoritative for terminal status and durable chunk replay.
-      }
-    }
-    if (timeoutId !== undefined) clearTimeout(timeoutId);
 
-    let inspection: AgentToolRunInspection<Output> | null = null;
-    try {
-      inspection = await adapter.inspectAgentToolRun(row.run_id);
-    } catch {
-      // Treat an un-inspectable child as still non-terminal → caller interrupts.
+        const beforeSequence = nextSequence;
+        // Defaults to a non-`done` end so a tail that throws below does NOT
+        // re-arm (we only re-arm on a verified clean stream-close).
+        let streamEnded: "done" | "idle" | "aborted" = "idle";
+        try {
+          // NOTE: the ceiling signal is NOT forwarded to `tailAgentToolRun` — an
+          // AbortSignal can't be serialized across the child-facet DO RPC. We
+          // bound the wait parent-side: the ceiling/no-progress budget ends our
+          // local forward loop and releases the read view, but never cancels the
+          // child (it must keep advancing toward its own terminal so this — or a
+          // later — inspect can still collect it).
+          const stream = await adapter.tailAgentToolRun(row.run_id, {
+            afterSequence
+          });
+          // Resolves when the child reaches terminal (the adapter closes the
+          // tail), goes silent for a full no-progress window, or the ceiling
+          // aborts our controller.
+          const forwarded = await this._forwardAgentToolStream(
+            stream,
+            row.parent_tool_call_id ?? undefined,
+            row.run_id,
+            nextSequence,
+            ceilingController.signal,
+            noProgressTimeoutMs
+          );
+          nextSequence = forwarded.next;
+          streamEnded = forwarded.ended;
+        } catch {
+          // Tail failures fall through to an inspect; the child remains
+          // authoritative for terminal status and durable chunk replay.
+        }
+
+        const terminal = await collectTerminal(nextSequence);
+        if (terminal) return terminal;
+
+        if (ceilingController.signal.aborted) {
+          reason = "window-exceeded";
+          break;
+        }
+
+        // Re-arm ONLY when the child's stream closed cleanly (`done`) AND it
+        // made forward progress this attempt — i.e. a re-evicted-but-advancing
+        // child that closed before terminal. An `idle` end means a full
+        // no-progress window elapsed (genuinely stalled) ⇒ seal `no-progress`
+        // now; re-arming there would both mis-read a stall as recoverable and
+        // abandon a fresh pending reader every cycle. No progress likewise
+        // seals.
+        if (streamEnded !== "done") break;
+        if (nextSequence <= beforeSequence) break;
+      }
+    } finally {
+      if (ceilingTimer !== undefined) clearTimeout(ceilingTimer);
     }
-    if (
-      inspection &&
-      inspection.status !== "running" &&
-      inspection.status !== "starting"
-    ) {
-      return {
-        sequence: nextSequence,
-        result: this._terminalResultFromInspection<Output>(
-          row.agent_type,
-          inspection
-        ),
-        completedAt: inspection.completedAt
-      };
-    }
-    return { sequence: nextSequence };
+
+    return { sequence: nextSequence, reason };
   }
 
   private async _replayAgentToolRuns(connection: Connection): Promise<void> {
@@ -8182,10 +8421,15 @@ export class Agent<
     childInspectionTimeoutMs?: number;
     totalRecoveryTimeoutMs?: number;
     reattachTimeoutMs?: number;
+    reattachMaxWindowMs?: number;
     runIds?: readonly string[];
   }): Promise<DeferredAgentToolFinish[]> {
     const reattachTimeoutMs =
-      options?.reattachTimeoutMs ?? DEFAULT_AGENT_TOOL_REATTACH_TIMEOUT_MS;
+      options?.reattachTimeoutMs ??
+      this._resolvedOptions.agentToolReattachNoProgressTimeoutMs;
+    const reattachMaxWindowMs =
+      options?.reattachMaxWindowMs ??
+      this._resolvedOptions.agentToolReattachMaxWindowMs;
     const startedAt = Date.now();
     const totalTimeoutMs =
       options?.totalRecoveryTimeoutMs ??
@@ -8264,7 +8508,8 @@ export class Agent<
             runId: row.run_id,
             agentType: row.agent_type,
             status: "interrupted",
-            error: "Agent tool run recovery deadline exceeded."
+            reason: "recovery-deadline",
+            error: this._interruptedMessageForReason("recovery-deadline")
           },
           sequence,
           undefined
@@ -8284,15 +8529,19 @@ export class Agent<
       if (recovery.status !== "inspected") {
         await finalizeRow(
           row,
-          {
-            runId: row.run_id,
-            agentType: row.agent_type,
-            status: "interrupted",
-            error:
+          (() => {
+            const reason: AgentToolInterruptedReason =
               recovery.status === "timed-out"
-                ? "Agent tool run inspection timed out during parent recovery."
-                : "Agent tool run could not be inspected during parent recovery."
-          },
+                ? "inspect-timeout"
+                : "inspect-failed";
+            return {
+              runId: row.run_id,
+              agentType: row.agent_type,
+              status: "interrupted" as const,
+              reason,
+              error: this._interruptedMessageForReason(reason)
+            };
+          })(),
           sequence,
           undefined
         );
@@ -8335,8 +8584,11 @@ export class Agent<
             runId: row.run_id,
             agentType: row.agent_type,
             status: "interrupted",
-            error:
-              "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
+            reason: "not-tailable",
+            // The child has no live-tail adapter, so it was never torn down and
+            // may still self-complete and be collected by a later inspect.
+            childStillRunning: true,
+            error: this._interruptedMessageForReason("not-tailable")
           },
           sequenceAfterReplay,
           undefined
@@ -8360,16 +8612,34 @@ export class Agent<
           adapter,
           row,
           1,
-          reattachTimeoutMs
+          reattachTimeoutMs,
+          reattachMaxWindowMs
+        );
+        if (reattach.result) {
+          await finalizeRow(
+            row,
+            reattach.result,
+            reattach.sequence,
+            reattach.completedAt
+          );
+          return;
+        }
+        // The parent has genuinely given up on this still-running child — tear
+        // it down so it stops consuming a fiber / keep-alive (#1630).
+        const tornDown = await this._teardownGivenUpAgentToolChild(
+          adapter,
+          row.run_id,
+          reattach.reason
         );
         await finalizeRow(
           row,
-          reattach.result ?? {
+          {
             runId: row.run_id,
             agentType: row.agent_type,
             status: "interrupted",
-            error:
-              "Agent tool run was still running and did not reach a terminal result within the re-attach budget."
+            reason: reattach.reason,
+            childStillRunning: !tornDown,
+            error: this._interruptedMessageForReason(reattach.reason)
           },
           reattach.sequence,
           reattach.completedAt
@@ -8413,6 +8683,7 @@ export class Agent<
     childInspectionTimeoutMs?: number;
     totalRecoveryTimeoutMs?: number;
     reattachTimeoutMs?: number;
+    reattachMaxWindowMs?: number;
     runIds?: readonly string[];
   }): Promise<void> {
     if (this._agentToolRunRecoveryPromise) {
@@ -8430,6 +8701,7 @@ export class Agent<
         childInspectionTimeoutMs: options?.childInspectionTimeoutMs,
         totalRecoveryTimeoutMs: options?.totalRecoveryTimeoutMs,
         reattachTimeoutMs: options?.reattachTimeoutMs,
+        reattachMaxWindowMs: options?.reattachMaxWindowMs,
         runIds: options?.runIds
       });
       await this._runDeferredAgentToolFinishHooks(recoveredAgentToolFinishes);

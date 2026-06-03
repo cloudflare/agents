@@ -29,6 +29,8 @@ type Env = {
   ThinkStallRecoveryE2EAgent: DurableObjectNamespace<ThinkStallRecoveryE2EAgent>;
   ThinkTaskParentE2EAgent: DurableObjectNamespace<ThinkTaskParentE2EAgent>;
   ThinkAgentToolNaturalParentE2EAgent: DurableObjectNamespace<ThinkAgentToolNaturalParentE2EAgent>;
+  ThinkSlowChildE2EAgent: DurableObjectNamespace<ThinkSlowChildE2EAgent>;
+  ThinkSlowChildParentE2EAgent: DurableObjectNamespace<ThinkSlowChildParentE2EAgent>;
   AI: Ai;
   R2: R2Bucket;
 };
@@ -887,6 +889,192 @@ export class ThinkAgentToolNaturalParentE2EAgent extends Think<Env> {
         (await this.ctx.storage.get<number>("parent:recovery-count")) ?? 0,
       parentHasFiberRows: (fiberRows[0]?.c ?? 0) > 0,
       parentChildStatus: parentChildRunRows[0]?.status ?? null,
+      child
+    };
+  }
+}
+
+// ── Re-attach budget bug: a deploy-interrupted child that is HEALTHY but needs
+// longer than the parent's re-attach budget to finish is sealed `interrupted`.
+//
+// The re-attach budget (`DEFAULT_AGENT_TOOL_REATTACH_TIMEOUT_MS`, 120s) is a
+// flat wall-clock timer that is NOT reset by child forward-progress, and the
+// child facet cannot self-drive its own recovery (facets share the root isolate
+// and cannot arm a physical alarm). So a parent that re-attaches after a deploy
+// abandons a child that is still healthily advancing once the 120s elapse.
+//
+// Unlike the other task agents, these deliberately use the PRODUCTION-DEFAULT
+// keepAlive (30s) — the `keepAliveIntervalMs: 2_000` override the rollback/task
+// agents use drives facet recovery ~15x faster and masks this bug.
+const SLOW_CHILD_TOTAL_STEPS = 60;
+// ~2.7s/step × 60 ≈ 162s of continuous child work — comfortably beyond the
+// parent's 120s re-attach budget, so the budget always expires before the
+// (healthy) child reaches its terminal result.
+const SLOW_CHILD_EXEC_DELAY_MS = 2_700;
+
+/**
+ * A long child tool-loop (same shape as {@link ThinkToolRollbackE2EAgent}) whose
+ * recovered turn legitimately takes longer than the parent's 120s re-attach
+ * budget. Production-default keepAlive (no 2s override).
+ */
+export class ThinkSlowChildE2EAgent extends Think<Env> {
+  override chatRecovery = true;
+  override maxSteps = 200;
+  private _ledgerReady = false;
+
+  override getModel(): LanguageModel {
+    return createToolLoopMockModel(SLOW_CHILD_TOTAL_STEPS);
+  }
+
+  override getSystemPrompt(): string {
+    return "Record each step in order using the recordStep tool.";
+  }
+
+  override getTools(): ToolSet {
+    return {
+      recordStep: tool({
+        description: "Record a step by its index.",
+        inputSchema: z.object({ index: z.number() }),
+        execute: async ({ index }) => {
+          this._ensureLedger();
+          this
+            .sql`INSERT INTO tool_ledger (idx, at) VALUES (${index}, ${Date.now()})`;
+          await new Promise((r) => setTimeout(r, SLOW_CHILD_EXEC_DELAY_MS));
+          return { recorded: index };
+        }
+      })
+    };
+  }
+
+  override async onChatRecovery(): Promise<ChatRecoveryOptions> {
+    const n = (await this.ctx.storage.get<number>("tool:recovery-count")) ?? 0;
+    await this.ctx.storage.put("tool:recovery-count", n + 1);
+    return { continue: true };
+  }
+
+  private _ensureLedger(): void {
+    if (this._ledgerReady) return;
+    this
+      .sql`CREATE TABLE IF NOT EXISTS tool_ledger (seq INTEGER PRIMARY KEY AUTOINCREMENT, idx INTEGER, at INTEGER)`;
+    this._ledgerReady = true;
+  }
+
+  @callable()
+  async getLedgerStatus(): Promise<{
+    totalExecutions: number;
+    uniqueIndices: number;
+    maxIndex: number;
+    duplicates: Array<{ index: number; count: number }>;
+    recoveryCount: number;
+    hasFiberRows: boolean;
+  }> {
+    this._ensureLedger();
+    const rows = this.sql<{ idx: number; count: number }>`
+      SELECT idx, COUNT(*) as count FROM tool_ledger GROUP BY idx ORDER BY idx
+    `;
+    const fiberRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    return {
+      totalExecutions: rows.reduce((n, r) => n + r.count, 0),
+      uniqueIndices: rows.length,
+      maxIndex: rows.reduce((m, r) => Math.max(m, r.idx), 0),
+      duplicates: rows
+        .filter((r) => r.count > 1)
+        .map((r) => ({ index: r.idx, count: r.count })),
+      recoveryCount:
+        (await this.ctx.storage.get<number>("tool:recovery-count")) ?? 0,
+      hasFiberRows: (fiberRows[0]?.c ?? 0) > 0
+    };
+  }
+}
+
+/**
+ * Parent that drives {@link ThinkSlowChildE2EAgent} via the natural `agentTool()`
+ * path (stable runId `agent-tool:task-1`). Production-default keepAlive. A single
+ * deploy mid-child is enough to expose the budget bug: the parent re-attaches,
+ * the budget elapses while the child is still advancing, and the run is sealed
+ * `interrupted` instead of `completed`.
+ */
+export class ThinkSlowChildParentE2EAgent extends Think<Env> {
+  override chatRecovery = true;
+  override maxSteps = 50;
+
+  override getModel(): LanguageModel {
+    return createSingleTaskMockModel();
+  }
+
+  override getSystemPrompt(): string {
+    return "Run the seeding task exactly once using runTask.";
+  }
+
+  override getTools(): ToolSet {
+    return {
+      runTask: agentTool(ThinkSlowChildE2EAgent, {
+        description: "Run the seeding task as a child agent.",
+        inputSchema: z.object({ taskId: z.number() })
+      })
+    };
+  }
+
+  override async onChatRecovery(): Promise<ChatRecoveryOptions> {
+    const n =
+      (await this.ctx.storage.get<number>("parent:recovery-count")) ?? 0;
+    await this.ctx.storage.put("parent:recovery-count", n + 1);
+    return { continue: true };
+  }
+
+  @callable()
+  async getTaskStatus(): Promise<{
+    parentRecoveries: number;
+    parentHasFiberRows: boolean;
+    parentChildStatus: string | null;
+    parentChildError: string | null;
+    child: {
+      maxIndex: number;
+      uniqueIndices: number;
+      recoveryCount: number;
+      hasFiberRows: boolean;
+    } | null;
+  }> {
+    const parentChildRunRows = this.sql<{
+      status: string;
+      error_message: string | null;
+    }>`
+      SELECT status, error_message FROM cf_agent_tool_runs
+      WHERE run_id = ${NATURAL_CHILD_TASK_RUN_ID}
+      LIMIT 1
+    `;
+    const fiberRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    let child: {
+      maxIndex: number;
+      uniqueIndices: number;
+      recoveryCount: number;
+      hasFiberRows: boolean;
+    } | null = null;
+    try {
+      const childStub = await this.subAgent(
+        ThinkSlowChildE2EAgent,
+        NATURAL_CHILD_TASK_RUN_ID
+      );
+      const ledger = await childStub.getLedgerStatus();
+      child = {
+        maxIndex: ledger.maxIndex,
+        uniqueIndices: ledger.uniqueIndices,
+        recoveryCount: ledger.recoveryCount,
+        hasFiberRows: ledger.hasFiberRows
+      };
+    } catch {
+      child = null;
+    }
+    return {
+      parentRecoveries:
+        (await this.ctx.storage.get<number>("parent:recovery-count")) ?? 0,
+      parentHasFiberRows: (fiberRows[0]?.c ?? 0) > 0,
+      parentChildStatus: parentChildRunRows[0]?.status ?? null,
+      parentChildError: parentChildRunRows[0]?.error_message ?? null,
       child
     };
   }
