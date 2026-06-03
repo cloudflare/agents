@@ -191,6 +191,258 @@ import { resolveProvider } from "@cloudflare/codemode";
 await executor.execute(code, [resolveProvider(dbProvider)]);
 ```
 
+## Connectors
+
+Connectors are class-based integrations that bridge external services into the codemode sandbox. Each connector extends `WorkerEntrypoint`, making it serializable, RPC-callable, and available as `ctx.exports.ConnectorName`.
+
+The model gets one tool (`codemode`) that executes code. Inside the sandbox, each connector is available as a global named after the connector, and a platform SDK (`codemode`) provides discovery:
+
+```ts
+// discover
+const matches = await codemode.search("pull request");
+const docs = await codemode.describe("github.list_pull_requests");
+
+// call
+const prs = await github.list_pull_requests({
+  owner: "cloudflare",
+  repo: "agents"
+});
+```
+
+### `McpConnector`
+
+Wraps an MCP server. Each MCP tool becomes a method on the connector namespace.
+
+Under the hood: fetches tools from the MCP connection via `listTools()`, creates a descriptor per tool for search/describe, and dispatches calls through `connection.client.callTool()`. Tool names are sanitized into valid JS identifiers.
+
+```ts
+// github.codemode.ts
+import { McpConnector, type McpConnectionLike } from "@cloudflare/codemode";
+
+export class GithubConnector extends McpConnector<Env> {
+  #conn?: McpConnectionLike;
+  setConnection(conn: McpConnectionLike) {
+    this.#conn = conn;
+  }
+
+  name() {
+    return "github";
+  }
+  protected instructions() {
+    return "Use for GitHub operations.";
+  }
+  protected createConnection() {
+    return this.#conn!;
+  }
+
+  // Override to customize tool naming
+  // protected toolName(tool: McpTool) { return sanitizeToolName(tool.name); }
+
+  protected annotations() {
+    return {
+      list_pull_requests: { observation: true },
+      create_issue: {
+        requiresApproval: true,
+        approvalDescription: "Create issue"
+      }
+    };
+  }
+}
+```
+
+Sandbox sees:
+
+```ts
+github.list_pull_requests({ owner, repo, state });
+github.search_issues({ query });
+// ... one method per MCP tool
+```
+
+### `OpenApiConnector`
+
+Wraps an OpenAPI spec. Exposes **two methods** in the sandbox — `search` and `request` — rather than one method per endpoint. This keeps the tool surface small for large APIs.
+
+Under the hood: `search` does substring matching across paths, methods, operationIds, and summaries in the spec. `request` delegates to the subclass's `request()` method with `{ operationId, params, body }`.
+
+```ts
+// stripe.codemode.ts
+import {
+  OpenApiConnector,
+  type OpenApiRequestOptions
+} from "@cloudflare/codemode";
+
+export class StripeConnector extends OpenApiConnector<Env> {
+  name() {
+    return "stripe";
+  }
+  protected instructions() {
+    return "Use for Stripe payment operations.";
+  }
+  protected spec() {
+    return stripeOpenApiSpec;
+  }
+
+  protected async request(input: OpenApiRequestOptions) {
+    return fetch(`https://api.stripe.com/v1/...`, {
+      headers: { Authorization: `Bearer ${this.env.STRIPE_KEY}` }
+      // map input.operationId, input.params, input.body to the right endpoint
+    }).then((r) => r.json());
+  }
+}
+```
+
+Sandbox sees:
+
+```ts
+// Find endpoints
+const ops = await stripe.search("payment intent");
+// [{ path: "/v1/payment_intents", method: "post", operationId: "CreatePaymentIntent", summary: "..." }]
+
+// Call an endpoint
+const intent = await stripe.request({
+  operationId: "CreatePaymentIntent",
+  params: { amount: 2000, currency: "usd" }
+});
+```
+
+### `ToolsetConnector`
+
+Wraps an existing AI SDK `ToolSet` or codemode `ToolDescriptors`. Each tool in the set becomes a method on the connector namespace.
+
+Under the hood: dispatches calls to the tool's `execute` function by name. No schema descriptors are generated automatically — the tools carry their own schemas.
+
+```ts
+// linear.codemode.ts
+import { ToolsetConnector } from "@cloudflare/codemode";
+import { linearTools } from "./linear-tools";
+
+export class LinearConnector extends ToolsetConnector<Env> {
+  name() {
+    return "linear";
+  }
+  protected instructions() {
+    return "Use for Linear issue tracking.";
+  }
+  protected tools() {
+    return linearTools;
+  }
+}
+```
+
+Sandbox sees:
+
+```ts
+linear.createIssue({ title, description });
+linear.listIssues({ projectId });
+// ... one method per tool in the set
+```
+
+### `CodemodeConnector` (base class)
+
+All connectors extend `CodemodeConnector`, which extends `WorkerEntrypoint`. The base class provides:
+
+- **RPC surface**: `describe()`, `callTool(method, args)`, `getTypeScriptTypes()` — compatible with the Gatekeeper interface
+- **Template methods**: `name()`, `instructions()`, `annotations()`, `loadDescriptors()`, `executeTool()`
+- **Caching**: descriptors are loaded once via `loadDescriptors()` and cached
+
+To build a custom connector from scratch:
+
+```ts
+import { CodemodeConnector } from "@cloudflare/codemode";
+
+export class MyConnector extends CodemodeConnector<Env> {
+  name() {
+    return "myService";
+  }
+
+  protected async loadDescriptors() {
+    return {
+      doThing: {
+        description: "Do a thing.",
+        inputSchema: {
+          type: "object",
+          properties: { id: { type: "string" } },
+          required: ["id"]
+        }
+      }
+    };
+  }
+
+  async executeTool(method: string, args: unknown) {
+    if (method === "doThing") return this.env.MY_SERVICE.doThing(args);
+    throw new Error(`Unknown method: ${method}`);
+  }
+}
+```
+
+### Annotations
+
+Connectors can classify methods for future permission/approval enforcement:
+
+```ts
+protected annotations() {
+  return {
+    listItems: { observation: true },                          // read-only
+    createItem: { requiresApproval: true, approvalDescription: "Create item" },  // needs approval
+  };
+}
+```
+
+### Snippets
+
+Snippets are durable, addressable saved scripts. The model writes a script, confirms it works, then promotes it for reuse — they accumulate on the runtime over time. No authoring step, no skill-source interface.
+
+```ts
+// inside sandbox code
+const prs = await github.list_pull_requests({ owner, repo, state: "open" });
+
+// save the current script for reuse
+await codemode.save("list-open-prs", {
+  description: "List open PRs for a repo."
+});
+
+// run it later by name
+const prs = await codemode.run("list-open-prs");
+```
+
+Snippets appear in `codemode.search` results (with `kind: "snippet"`), are documented via `codemode.describe(name)`, and listed with `codemode.snippets()`. They live on the runtime facet, whose identity is derived from the connector set — so a snippet is always run against exactly the connectors it was written with. See [docs/codemode/snippets.md](../../docs/codemode/snippets.md).
+
+### Vite plugin
+
+The `@cloudflare/codemode/vite` plugin discovers `*.codemode.ts` files and auto-exports connector classes from the worker entry module, making them available as `ctx.exports.ConnectorName`:
+
+```ts
+// vite.config.ts
+import codemode from "@cloudflare/codemode/vite";
+export default { plugins: [codemode()] };
+```
+
+Import connectors with the `type: "connectors"` attribute:
+
+```ts
+import { GithubConnector } from "./github.codemode" with { type: "connectors" };
+import { StripeConnector } from "./stripe.codemode" with { type: "connectors" };
+```
+
+### How connector calls work
+
+```
+┌─────────────────────┐        ┌─────────────────────────────────────────────┐
+│                     │        │  Dynamic Worker (isolated sandbox)           │
+│  Host Worker        │  RPC   │                                              │
+│                     │◄──────►│  github.list_pull_requests(args)             │
+│  Connectors are     │        │    → env.__connectors.github.callTool(...)   │
+│  env bindings       │        │    → Workers RPC                             │
+│  (WorkerEntrypoint) │        │                                              │
+│                     │        │  codemode.search("query")                    │
+│  Platform SDK uses  │        │    → __dispatchers.codemode.call(...)        │
+│  ToolDispatcher     │        │    → host-side search                        │
+│                     │        │                                              │
+└─────────────────────┘        └─────────────────────────────────────────────┘
+```
+
+Connector calls go via **Workers RPC** directly to the connector's `callTool()` method — no JSON serialization through ToolDispatcher. The platform SDK (`codemode.search`, `codemode.describe`, etc.) uses the traditional ToolDispatcher path since it's host-created.
+
 ## Architecture
 
 ### How it works

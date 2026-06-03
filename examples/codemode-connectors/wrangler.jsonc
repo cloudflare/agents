@@ -1,0 +1,32 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "codemode-connectors-demo",
+  "main": "src/server.ts",
+  "ai": { "binding": "AI", "remote": true },
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*", "/mcp*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "GitHubLikeMCP", "name": "GitHubLikeMCP" },
+      { "class_name": "Chat", "name": "Chat" }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["GitHubLikeMCP", "Chat"],
+      "tag": "v1"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "worker_loaders": [
+    {
+      "binding": "LOADER"
+    }
+  ]
+}

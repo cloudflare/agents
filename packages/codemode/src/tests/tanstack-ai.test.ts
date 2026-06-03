@@ -10,7 +10,7 @@ import type { Tool as TanStackTool, ServerTool } from "@tanstack/ai";
 import { z } from "zod";
 import { createCodeTool, tanstackTools, resolveProvider } from "../tanstack-ai";
 import type {
-  Executor,
+  Runtime,
   ExecuteResult,
   ResolvedProvider,
   ToolProvider
@@ -23,7 +23,7 @@ function createMockExecutor(result: ExecuteResult = { result: "ok" }) {
     fnNames: string[];
     providers: ResolvedProvider[];
   }[] = [];
-  const executor: Executor = {
+  const executor: Runtime = {
     execute: vi.fn(
       async (
         code: string,
