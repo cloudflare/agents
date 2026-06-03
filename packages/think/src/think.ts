@@ -6669,8 +6669,9 @@ export class Think<
     } finally {
       // The message is now durably persisted (success, error, or recovery
       // path), so subsequent tool results resolve against storage; stop
-      // exposing the sealed accumulator (#1649).
-      this._streamingAssistant = null;
+      // exposing the sealed accumulator (#1649) and re-check any continuation
+      // the stream-active barrier held (#1650).
+      this._onStreamingTurnFinalized();
     }
 
     if (pendingRpcError) {
@@ -7008,6 +7009,8 @@ export class Think<
           // the scheduled continuation owns the real terminal outcome. No
           // response hook fires here (the continuation fires it), mirroring how
           // a deploy-interrupted attempt is superseded by its continuation.
+          // Plain clear (no auto-continuation re-check): recovery re-runs the
+          // turn and its own stream finalize re-triggers the held barrier.
           this._streamingAssistant = null;
           return { status: "aborted" };
         }
@@ -7101,8 +7104,9 @@ export class Think<
     }
 
     // The message is now persisted (or the turn was cleared), so subsequent
-    // tool results resolve against storage; stop exposing the accumulator.
-    this._streamingAssistant = null;
+    // tool results resolve against storage; stop exposing the accumulator and
+    // re-check any continuation the stream-active barrier held (#1650).
+    this._onStreamingTurnFinalized();
 
     return streamError
       ? { status: "error", error: streamError }
@@ -9041,6 +9045,21 @@ export class Think<
     this._resetAutoContinuationTimer();
   }
 
+  /**
+   * Called when a streaming assistant turn finalizes (its message, with ALL
+   * tool parts, is now persisted). Clears the in-flight accumulator and re-runs
+   * the auto-continuation barrier for a continuation the stream-active gate held
+   * (#1650). This is essential for an all-fast parallel batch whose every result
+   * landed mid-stream: once the stream ends there is no further tool-result
+   * event to re-arm the barrier, so without this re-check the held continuation
+   * would never fire. A slow batch is also re-checked here and simply continues
+   * to hold (event-driven) until its remaining siblings answer.
+   */
+  private _onStreamingTurnFinalized(): void {
+    this._streamingAssistant = null;
+    this._rearmPendingAutoContinuationForBatch();
+  }
+
   private _resetAutoContinuationTimer(): void {
     if (this._continuationTimer) {
       clearTimeout(this._continuationTimer);
@@ -9074,15 +9093,13 @@ export class Think<
    * A true orphan (a sibling that never arrives) simply never auto-continues,
    * which is correct: there is nothing valid to continue, and a later user turn
    * / chat recovery repairs the transcript.
+   *
+   * The barrier also holds while the assistant turn is still streaming (the
+   * stream-active gate below): mid-stream the batch can still grow with tool
+   * calls the model hasn't emitted yet, so no completeness check is meaningful.
+   * `_onStreamingTurnFinalized` re-runs the check once the stream ends.
    */
   private _fireAutoContinuationWhenStable(connection: Connection): void {
-    // NOTE: when a result arrives mid-stream, the in-flight assistant message
-    // lives only in `_streamingAssistant` and is NOT yet in `this.messages`, so
-    // `_hasIncompleteToolBatch()` here inspects a stale (prior) leaf. That does
-    // not break correctness: the continuation is enqueued behind the active
-    // streaming turn on the turn queue, and that turn persists the (now
-    // settled) result before the continuation's transcript repair runs. The
-    // ordering guarantee is the turn queue, not this barrier's cache view.
     if (!this._continuation.pending) return;
     // The continuation is already running (a sibling result re-armed the timer
     // after it started). New results coalesce/defer into it — don't double-fire.
@@ -9090,6 +9107,19 @@ export class Think<
     // A drain is already in progress; the sibling that re-armed the timer is
     // absorbed by it. Only one drain must run, and it re-checks on completion.
     if (this._continuationBarrierActive) return;
+    // Stream-active gate (#1650, #1649). While the model is still streaming the
+    // assistant turn we CANNOT know the parallel tool batch is complete: the
+    // model emits tool calls sequentially, so a fast client tool can resolve
+    // before its slower siblings have even been streamed. At that point the
+    // siblings exist nowhere — not in `this.messages`, not in the in-flight
+    // `_streamingAssistant` accumulator — so no batch check can see them, and
+    // firing now would enqueue a continuation that repairs the (later
+    // materialized, still-pending) siblings to errored. The only signal that
+    // "more tool calls may still arrive" is that the stream is open, so we hold
+    // without firing. `_onStreamingTurnFinalized` re-runs this check once the
+    // stream ends and the batch is fully materialized, and any later sibling
+    // result re-arms it via `_scheduleAutoContinuation`.
+    if (this._streamingAssistant) return;
     // Fast path: no apply in flight and the leaf step is not mid-batch.
     if (!this._pendingInteractionPromise && !this._hasIncompleteToolBatch()) {
       this._fireAutoContinuation(connection);
@@ -9111,6 +9141,9 @@ export class Think<
         this._continuationBarrierActive = false;
         const pending = this._continuation.pending;
         if (!pending || pending.pastCoalesce) return;
+        // A stream (re)started during the drain — hold; the finalize re-trigger
+        // will re-check once the batch is fully materialized.
+        if (this._streamingAssistant) return;
         // Still waiting on an unanswered sibling — return without firing. The
         // result that completes the batch re-triggers this check via its own
         // `_scheduleAutoContinuation`; we do not pin the isolate in the interim.

@@ -178,6 +178,128 @@ function createSlowClientToolMockModel(
   } as LanguageModel;
 }
 
+// Reproduces #1649's headline race (abhagsain's debug-log analysis): the model
+// emits parallel client tool calls SEQUENTIALLY within one step. It streams a
+// FAST tool's `tool-input-available` first, then holds the stream open (trailing
+// text gaps) before emitting a SLOW tool's call and finishing. The fast tool's
+// result can therefore arrive at the server BEFORE the slow tool has even been
+// streamed — so no batch check can see the slow sibling yet. On the continuation
+// invocation (tool results present) it emits plain text.
+function createMidStreamParallelToolModel(
+  gapMs: number,
+  gapsBeforeSlow: number,
+  gapsAfterSlow: number
+): LanguageModel {
+  let callCount = 0;
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-midstream-parallel-tool",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream(options: Record<string, unknown>) {
+      callCount++;
+      const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+      const hasToolResult = messages.some(
+        (m: unknown) =>
+          typeof m === "object" &&
+          m !== null &&
+          (m as Record<string, unknown>).role === "tool"
+      );
+
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+
+          if (!hasToolResult && callCount === 1) {
+            // Fast tool — emitted and finalized FIRST.
+            controller.enqueue({
+              type: "tool-input-start",
+              id: "tc-fast",
+              toolName: "fast_tool"
+            });
+            controller.enqueue({
+              type: "tool-input-delta",
+              id: "tc-fast",
+              delta: JSON.stringify({ action: "fast" })
+            });
+            controller.enqueue({ type: "tool-input-end", id: "tc-fast" });
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "tc-fast",
+              toolName: "fast_tool",
+              input: JSON.stringify({ action: "fast" })
+            });
+            // Hold the stream open with trailing text — the window during which
+            // the client resolves `tc-fast` while `tc-slow` is NOT yet emitted.
+            controller.enqueue({ type: "text-start", id: "t-mid" });
+            for (let i = 0; i < gapsBeforeSlow; i++) {
+              await new Promise((r) => setTimeout(r, gapMs));
+              controller.enqueue({
+                type: "text-delta",
+                id: "t-mid",
+                delta: "."
+              });
+            }
+            // Slow tool — emitted only AFTER the gap.
+            controller.enqueue({
+              type: "tool-input-start",
+              id: "tc-slow",
+              toolName: "slow_tool"
+            });
+            controller.enqueue({
+              type: "tool-input-delta",
+              id: "tc-slow",
+              delta: JSON.stringify({ action: "slow" })
+            });
+            controller.enqueue({ type: "tool-input-end", id: "tc-slow" });
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "tc-slow",
+              toolName: "slow_tool",
+              input: JSON.stringify({ action: "slow" })
+            });
+            // Keep the stream open after the slow tool too, so a client result
+            // for it can also land mid-stream (the all-fast batch scenario).
+            for (let i = 0; i < gapsAfterSlow; i++) {
+              await new Promise((r) => setTimeout(r, gapMs));
+              controller.enqueue({
+                type: "text-delta",
+                id: "t-mid",
+                delta: "."
+              });
+            }
+            controller.enqueue({ type: "text-end", id: "t-mid" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "tool-calls",
+              usage: { inputTokens: 10, outputTokens: 5 }
+            });
+          } else {
+            controller.enqueue({ type: "text-start", id: "t-cont" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-cont",
+              delta: "Continuation after parallel tools"
+            });
+            controller.enqueue({ type: "text-end", id: "t-cont" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "stop",
+              usage: { inputTokens: 20, outputTokens: 10 }
+            });
+          }
+
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
 function createServerApprovalToolMockModel(): LanguageModel {
   return {
     specificationVersion: "v3",
@@ -343,6 +465,10 @@ export class ThinkClientToolsAgent extends Think {
   private _useSlowClientToolStream = false;
   private _slowClientToolDelayMs = 30;
   private _slowClientToolGaps = 12;
+  private _useMidStreamParallelToolStream = false;
+  private _midStreamParallelGapMs = 40;
+  private _midStreamParallelGapsBeforeSlow = 20;
+  private _midStreamParallelGapsAfterSlow = 10;
   private _useServerApprovalTool = false;
   private _serverApprovalToolExecutions = 0;
   private _serverApprovalToolFails = false;
@@ -365,6 +491,12 @@ export class ThinkClientToolsAgent extends Think {
       return createSlowClientToolMockModel(
         this._slowClientToolDelayMs,
         this._slowClientToolGaps
+      );
+    if (this._useMidStreamParallelToolStream)
+      return createMidStreamParallelToolModel(
+        this._midStreamParallelGapMs,
+        this._midStreamParallelGapsBeforeSlow,
+        this._midStreamParallelGapsAfterSlow
       );
     if (this._useTextOnly) return createTextOnlyMockModel();
     if (this._useServerApprovalTool) return createServerApprovalToolMockModel();
@@ -427,6 +559,20 @@ export class ThinkClientToolsAgent extends Think {
     this._useSlowClientToolStream = enabled;
     if (delayMs !== undefined) this._slowClientToolDelayMs = delayMs;
     if (trailingGaps !== undefined) this._slowClientToolGaps = trailingGaps;
+  }
+
+  async setMidStreamParallelToolMode(
+    enabled: boolean,
+    gapMs?: number,
+    gapsBeforeSlow?: number,
+    gapsAfterSlow?: number
+  ): Promise<void> {
+    this._useMidStreamParallelToolStream = enabled;
+    if (gapMs !== undefined) this._midStreamParallelGapMs = gapMs;
+    if (gapsBeforeSlow !== undefined)
+      this._midStreamParallelGapsBeforeSlow = gapsBeforeSlow;
+    if (gapsAfterSlow !== undefined)
+      this._midStreamParallelGapsAfterSlow = gapsAfterSlow;
   }
 
   /**
