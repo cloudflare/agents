@@ -248,6 +248,7 @@ describe("Think — agentic loop", () => {
       compactionEvents: number;
       errorClassification?: string;
       beforeTurnContinuations: boolean[];
+      promptIncludedSeedMarker: boolean[];
     };
 
     type OverflowAgent = {
@@ -263,6 +264,7 @@ describe("Think — agentic loop", () => {
         compactionCount: number;
         modelCalls: number;
         compactionEvents: number;
+        promptIncludedSeedMarker: boolean[];
       }>;
     };
 
@@ -286,6 +288,11 @@ describe("Think — agentic loop", () => {
       // Both attempts re-run the SAME user turn — the retry is not an
       // auto-continuation, so beforeTurn sees `continuation: false` each time.
       expect(result.beforeTurnContinuations).toEqual([false, false]);
+      // Effectiveness: the first attempt's prompt still contained the seeded
+      // (later compacted-away) messages; the retry's prompt did NOT — proving
+      // compaction actually shortened what was sent and that the refreshed
+      // message cache reached the retry (not just that the loop ran).
+      expect(result.promptIncludedSeedMarker).toEqual([true, false]);
     });
 
     it("stays terminal when disabled (no compaction, surfaces the error)", async () => {
@@ -350,6 +357,11 @@ describe("Think — agentic loop", () => {
       expect(result.modelCalls).toBe(2);
       expect(result.compactionCount).toBe(1);
       expect(result.compactionEvents).toBe(1);
+      // Compaction did remove the seeded content on the retry (marker gone),
+      // but `alwaysOverflow` forces the retry to overflow anyway — modelling a
+      // turn whose remaining message alone exceeds the window. Bounded, then
+      // terminal.
+      expect(result.promptIncludedSeedMarker).toEqual([true, false]);
     });
 
     it("recovers a context overflow on the programmatic (saveMessages) path", async () => {
@@ -366,6 +378,7 @@ describe("Think — agentic loop", () => {
       expect(result.compactionCount).toBe(1);
       expect(result.modelCalls).toBe(2);
       expect(result.compactionEvents).toBe(1);
+      expect(result.promptIncludedSeedMarker).toEqual([true, false]);
     });
 
     it("recovers a context overflow on the WebSocket turn path", async () => {
@@ -411,6 +424,8 @@ describe("Think — agentic loop", () => {
       expect(stats.modelCalls).toBe(2);
       expect(stats.compactionCount).toBe(1);
       expect(stats.compactionEvents).toBe(1);
+      // Compaction removed the seeded messages before the retry was sent.
+      expect(stats.promptIncludedSeedMarker).toEqual([true, false]);
 
       await closeWS(ws);
     });

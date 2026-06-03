@@ -325,17 +325,33 @@ export class LoopToolTestAgent extends Think {
 // ── Test agent: mid-turn context-overflow recovery ──────────────────
 
 /**
- * A model whose first stream surfaces an in-stream provider error
- * ("prompt is too long" — the context-overflow class) and whose subsequent
- * streams return normal text. Models the failure where a long turn overflows
- * the context window before compaction can fire, then succeeds once history is
- * compacted and the turn is re-run.
+ * Marker text seeded into the conversation before an overflow turn. The mock
+ * model overflows **while this marker is still present in the prompt**, so a
+ * turn only stops overflowing once compaction has actually removed the seeded
+ * messages from what is sent. This makes the test verify compaction
+ * *effectiveness* (the retry sends a genuinely shorter, summarized prompt) — not
+ * just the retry plumbing — and guards against a regression where the in-memory
+ * message cache is not refreshed after `session.compact()` (the retry would
+ * then resend the marker and overflow forever).
+ */
+const SEED_OVERFLOW_MARKER = "earlier question";
+
+function promptIncludesMarker(options: unknown): boolean {
+  const prompt = (options as { prompt?: unknown[] })?.prompt ?? [];
+  return JSON.stringify(prompt).includes(SEED_OVERFLOW_MARKER);
+}
+
+/**
+ * A model that overflows (surfacing the AI SDK in-stream "prompt is too long"
+ * error part, not a throw) **while the seeded marker is still in the prompt**,
+ * and returns normal text once compaction has removed it. `alwaysOverflow`
+ * forces an overflow on every call regardless — modelling a turn whose single
+ * remaining message still exceeds the window, so compaction cannot save it.
  */
 function createOverflowThenOkModel(
-  onCall?: () => void,
+  onCall?: (options: unknown) => void,
   alwaysOverflow = false
 ): LanguageModel {
-  let call = 0;
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -344,14 +360,13 @@ function createOverflowThenOkModel(
     doGenerate() {
       throw new Error("doGenerate not implemented in mock");
     },
-    doStream() {
-      onCall?.();
-      call++;
-      const isFirst = call === 1 || alwaysOverflow;
+    doStream(options: Record<string, unknown>) {
+      onCall?.(options);
+      const overflow = alwaysOverflow || promptIncludesMarker(options);
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
-          if (isFirst) {
+          if (overflow) {
             // Provider rejects the over-long prompt mid-turn. The AI SDK
             // surfaces this as an in-stream error part, not a throw.
             controller.enqueue({
@@ -394,6 +409,8 @@ type OverflowChatResult = {
   errorClassification?: string;
   /** `ctx.continuation` seen by `beforeTurn` on each attempt of the turn. */
   beforeTurnContinuations: boolean[];
+  /** Whether each model call's prompt still contained the seeded marker. */
+  promptIncludedSeedMarker: boolean[];
 };
 
 /**
@@ -410,6 +427,7 @@ export class OverflowRecoveryTestAgent extends Think {
   compactionEvents = 0;
   errorClassification?: string;
   beforeTurnContinuations: boolean[] = [];
+  promptIncludedSeedMarker: boolean[] = [];
   private _model?: LanguageModel;
 
   override maxSteps = 3;
@@ -450,9 +468,14 @@ export class OverflowRecoveryTestAgent extends Think {
 
   getModel(): LanguageModel {
     if (!this._model) {
-      // Count model invocations so the test can assert a retry happened.
-      const onCall = () => {
+      // Record each model invocation: count (to assert a retry happened) and,
+      // for the overflow model, whether the seeded marker was still in the
+      // prompt (to assert compaction actually removed it on the retry).
+      const onCall = (options?: unknown) => {
         this.modelCalls++;
+        if (!this.proactiveMode) {
+          this.promptIncludedSeedMarker.push(promptIncludesMarker(options));
+        }
       };
       this._model = this.proactiveMode
         ? createMockToolModel(onCall)
@@ -505,6 +528,7 @@ export class OverflowRecoveryTestAgent extends Think {
     this.compactionEvents = 0;
     this.errorClassification = undefined;
     this.beforeTurnContinuations = [];
+    this.promptIncludedSeedMarker = [];
 
     // Seed a prior turn so the compaction range leaves a usable tail.
     await this.session.appendMessage({
@@ -527,7 +551,8 @@ export class OverflowRecoveryTestAgent extends Think {
       modelCalls: this.modelCalls,
       compactionEvents: this.compactionEvents,
       errorClassification: this.errorClassification,
-      beforeTurnContinuations: this.beforeTurnContinuations
+      beforeTurnContinuations: this.beforeTurnContinuations,
+      promptIncludedSeedMarker: this.promptIncludedSeedMarker
     };
   }
 
@@ -545,6 +570,7 @@ export class OverflowRecoveryTestAgent extends Think {
     this.compactionEvents = 0;
     this.errorClassification = undefined;
     this.beforeTurnContinuations = [];
+    this.promptIncludedSeedMarker = [];
 
     await this.session.appendMessage({
       id: crypto.randomUUID(),
@@ -562,11 +588,13 @@ export class OverflowRecoveryTestAgent extends Think {
     compactionCount: number;
     modelCalls: number;
     compactionEvents: number;
+    promptIncludedSeedMarker: boolean[];
   }> {
     return {
       compactionCount: this.compactionCount,
       modelCalls: this.modelCalls,
-      compactionEvents: this.compactionEvents
+      compactionEvents: this.compactionEvents,
+      promptIncludedSeedMarker: this.promptIncludedSeedMarker
     };
   }
 
@@ -584,6 +612,7 @@ export class OverflowRecoveryTestAgent extends Think {
     this.compactionEvents = 0;
     this.errorClassification = undefined;
     this.beforeTurnContinuations = [];
+    this.promptIncludedSeedMarker = [];
     // The mock tool model reports usage.inputTokens = 10 on the first step;
     // a budget of 10 with the default 0.9 headroom (threshold 9) trips before
     // the second step. Reactive off isolates the proactive path.
@@ -609,7 +638,8 @@ export class OverflowRecoveryTestAgent extends Think {
       modelCalls: this.modelCalls,
       compactionEvents: this.compactionEvents,
       errorClassification: this.errorClassification,
-      beforeTurnContinuations: this.beforeTurnContinuations
+      beforeTurnContinuations: this.beforeTurnContinuations,
+      promptIncludedSeedMarker: this.promptIncludedSeedMarker
     };
   }
 
@@ -628,6 +658,7 @@ export class OverflowRecoveryTestAgent extends Think {
     this.compactionEvents = 0;
     this.errorClassification = undefined;
     this.beforeTurnContinuations = [];
+    this.promptIncludedSeedMarker = [];
 
     await this.session.appendMessage({
       id: crypto.randomUUID(),
@@ -655,7 +686,8 @@ export class OverflowRecoveryTestAgent extends Think {
       modelCalls: this.modelCalls,
       compactionEvents: this.compactionEvents,
       errorClassification: this.errorClassification,
-      beforeTurnContinuations: this.beforeTurnContinuations
+      beforeTurnContinuations: this.beforeTurnContinuations,
+      promptIncludedSeedMarker: this.promptIncludedSeedMarker
     };
   }
 }
