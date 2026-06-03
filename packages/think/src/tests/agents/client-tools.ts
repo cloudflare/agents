@@ -178,6 +178,99 @@ function createSlowClientToolMockModel(
   } as LanguageModel;
 }
 
+// Emits TWO parallel client tool calls (`tc-fast` + `tc-slow`) in one step,
+// then holds the stream open with trailing text. Models the slow-sibling case
+// of #1649: the client answers `tc-fast` quickly (mid-stream) while `tc-slow`
+// (an RPC-backed tool) is still `input-available`. On the continuation
+// invocation it emits plain text.
+function createParallelClientToolMockModel(
+  delayMs: number,
+  trailingGaps: number
+): LanguageModel {
+  let callCount = 0;
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-parallel-client-tool",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream(options: Record<string, unknown>) {
+      callCount++;
+      const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+      const hasToolResult = messages.some(
+        (m: unknown) =>
+          typeof m === "object" &&
+          m !== null &&
+          (m as Record<string, unknown>).role === "tool"
+      );
+
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+
+          if (!hasToolResult && callCount === 1) {
+            for (const toolCallId of ["tc-fast", "tc-slow"]) {
+              controller.enqueue({
+                type: "tool-input-start",
+                id: toolCallId,
+                toolName: "client_action"
+              });
+              controller.enqueue({
+                type: "tool-input-delta",
+                id: toolCallId,
+                delta: JSON.stringify({ action: toolCallId })
+              });
+              controller.enqueue({ type: "tool-input-end", id: toolCallId });
+              controller.enqueue({
+                type: "tool-call",
+                toolCallId,
+                toolName: "client_action",
+                input: JSON.stringify({ action: toolCallId })
+              });
+            }
+            // Hold the stream open so the fast result lands (and the 50ms
+            // auto-continuation timer fires) while the message is still only in
+            // the accumulator — the slow-sibling barrier-bypass window (#1649).
+            controller.enqueue({ type: "text-start", id: "t-trail" });
+            for (let i = 0; i < trailingGaps; i++) {
+              await new Promise((r) => setTimeout(r, delayMs));
+              controller.enqueue({
+                type: "text-delta",
+                id: "t-trail",
+                delta: "."
+              });
+            }
+            controller.enqueue({ type: "text-end", id: "t-trail" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "tool-calls",
+              usage: { inputTokens: 10, outputTokens: 5 }
+            });
+          } else {
+            controller.enqueue({ type: "text-start", id: "t-cont" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-cont",
+              delta: "Continuation after parallel tools"
+            });
+            controller.enqueue({ type: "text-end", id: "t-cont" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "stop",
+              usage: { inputTokens: 20, outputTokens: 10 }
+            });
+          }
+
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
 function createServerApprovalToolMockModel(): LanguageModel {
   return {
     specificationVersion: "v3",
@@ -343,6 +436,9 @@ export class ThinkClientToolsAgent extends Think {
   private _useSlowClientToolStream = false;
   private _slowClientToolDelayMs = 30;
   private _slowClientToolGaps = 12;
+  private _useParallelClientToolStream = false;
+  private _parallelClientToolDelayMs = 25;
+  private _parallelClientToolGaps = 20;
   private _useServerApprovalTool = false;
   private _serverApprovalToolExecutions = 0;
   private _serverApprovalToolFails = false;
@@ -365,6 +461,11 @@ export class ThinkClientToolsAgent extends Think {
       return createSlowClientToolMockModel(
         this._slowClientToolDelayMs,
         this._slowClientToolGaps
+      );
+    if (this._useParallelClientToolStream)
+      return createParallelClientToolMockModel(
+        this._parallelClientToolDelayMs,
+        this._parallelClientToolGaps
       );
     if (this._useTextOnly) return createTextOnlyMockModel();
     if (this._useServerApprovalTool) return createServerApprovalToolMockModel();
@@ -427,6 +528,16 @@ export class ThinkClientToolsAgent extends Think {
     this._useSlowClientToolStream = enabled;
     if (delayMs !== undefined) this._slowClientToolDelayMs = delayMs;
     if (trailingGaps !== undefined) this._slowClientToolGaps = trailingGaps;
+  }
+
+  async setParallelClientToolStreamMode(
+    enabled: boolean,
+    delayMs?: number,
+    trailingGaps?: number
+  ): Promise<void> {
+    this._useParallelClientToolStream = enabled;
+    if (delayMs !== undefined) this._parallelClientToolDelayMs = delayMs;
+    if (trailingGaps !== undefined) this._parallelClientToolGaps = trailingGaps;
   }
 
   /**
@@ -539,6 +650,54 @@ export class ThinkClientToolsAgent extends Think {
       .flatMap((m) => m.parts as Array<Record<string, unknown>>)
       .find((p) => p.toolCallId === opts.toolCallId);
     return { state: (part?.state as string) ?? "missing" };
+  }
+
+  /**
+   * Deterministic regression guard for the slow-sibling barrier bypass (#1649):
+   * when a parallel tool batch lives ONLY in the in-flight accumulator (a
+   * settled `tc-fast` beside a still-pending `tc-slow`), `_hasIncompleteToolBatch`
+   * must report mid-batch so the auto-continuation barrier holds. Before the fix
+   * it inspected only `this.messages` — which is empty mid-stream — and returned
+   * false, letting the continuation fire and error the slow sibling.
+   *
+   * Returns the check result while the accumulator is exposed and again after it
+   * is cleared (no streaming, empty history → must be false, proving the true
+   * result came from the accumulator, not a stale cache).
+   */
+  async detectsMidBatchInStreamingAccumulator(): Promise<{
+    whileStreaming: boolean;
+    afterStreamCleared: boolean;
+  }> {
+    const internal = this as unknown as {
+      _streamingAssistant: StreamAccumulator | null;
+      _hasIncompleteToolBatch(): boolean;
+    };
+    const accumulator = new StreamAccumulator({
+      messageId: crypto.randomUUID(),
+      existingParts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-fast",
+          toolName: "client_action",
+          state: "output-available",
+          input: { action: "fast" },
+          output: "fast output"
+        },
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-slow",
+          toolName: "client_action",
+          state: "input-available",
+          input: { action: "slow" }
+        }
+      ] as unknown as UIMessage["parts"]
+    });
+
+    internal._streamingAssistant = accumulator;
+    const whileStreaming = internal._hasIncompleteToolBatch();
+    internal._streamingAssistant = null;
+    const afterStreamCleared = internal._hasIncompleteToolBatch();
+    return { whileStreaming, afterStreamCleared };
   }
 
   async getCapturedClientTools(): Promise<ClientToolSchema[] | undefined> {

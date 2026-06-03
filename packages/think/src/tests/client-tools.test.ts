@@ -1170,6 +1170,109 @@ describe("Think — auto-continuation", () => {
     await closeWS(ws);
   }, 25000);
 
+  it("keeps the continuation barrier closed for a slow sibling pending only in the streaming accumulator (#1649)", async () => {
+    // Deterministic guard for the slow-sibling barrier bypass: mid-stream the
+    // assistant message lives only in `_streamingAssistant`, so the batch check
+    // must inspect the accumulator. On `main` it only scanned `this.messages`
+    // (empty mid-stream) and returned false, bypassing the barrier and letting
+    // the continuation error the slow sibling.
+    const agent = await freshAgent();
+    const { whileStreaming, afterStreamCleared } =
+      await agent.detectsMidBatchInStreamingAccumulator();
+    expect(whileStreaming).toBe(true);
+    expect(afterStreamCleared).toBe(false);
+  });
+
+  it("does not error a slow client tool when a fast sibling auto-continues mid-stream (#1649)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    // Two parallel client tool calls in one streaming step; the stream stays
+    // open long enough for the fast result + 50ms barrier timer to land while
+    // the message is still only in the accumulator.
+    await agent.setParallelClientToolStreamMode(true, 25, 24);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    const repairedToolCallIds: Array<string[] | undefined> = [];
+    const unsubscribe = subscribe("transcript", (event) => {
+      if (event.type === "chat:transcript:repaired" && event.name === room) {
+        repairedToolCallIds.push(event.payload.toolCallIds);
+      }
+    });
+
+    try {
+      sendChatRequest(
+        ws,
+        [makeUserMessage("delete the 4th slide and rewrite the 1st")],
+        {
+          clientTools: [{ name: "client_action", description: "A client tool" }]
+        }
+      );
+
+      // Wait until both parallel calls are exposed in the accumulator.
+      await waitUntil(async () => {
+        const fast = await agent.streamingToolCallState("tc-fast");
+        const slow = await agent.streamingToolCallState("tc-slow");
+        return fast === "input-available" && slow === "input-available";
+      }, 8000);
+
+      // Answer the FAST tool mid-stream with autoContinue. This schedules the
+      // continuation; its 50ms barrier timer fires while the message is still
+      // only in the accumulator — the slow-sibling bypass window.
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_RESULT,
+          toolCallId: "tc-fast",
+          toolName: "client_action",
+          output: "fast output",
+          autoContinue: true
+        })
+      );
+
+      // Let the stream finish and persist (tc-slow still `input-available`)
+      // WITHOUT answering the slow tool yet — `_streamingAssistant` cleared.
+      await waitUntil(async () => {
+        const slow = await agent.streamingToolCallState("tc-slow");
+        return slow === undefined;
+      }, 8000);
+      // On `main` the bypassed continuation runs here and errors tc-slow; the
+      // barrier must instead still be holding.
+      await delay(300);
+
+      // The slow RPC finally resolves, well after the stream ended.
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_RESULT,
+          toolCallId: "tc-slow",
+          toolName: "client_action",
+          output: "slow output",
+          autoContinue: true
+        })
+      );
+
+      await waitUntil(async () => {
+        const log = (await agent.getResponseLog()) as ChatResponseResult[];
+        return log.some((entry) => entry.continuation);
+      }, 8000);
+      await delay(100);
+
+      const messages = (await agent.getMessages()) as UIMessage[];
+      const partFor = (toolCallId: string) =>
+        messages
+          .flatMap((m) => m.parts as Array<Record<string, unknown>>)
+          .find((p) => p.toolCallId === toolCallId);
+      expect(partFor("tc-fast")?.state).toBe("output-available");
+      expect(partFor("tc-slow")?.state).toBe("output-available");
+      expect(partFor("tc-slow")?.output).toBe("slow output");
+      // tc-slow was never errored by a premature repair.
+      expect(repairedToolCallIds.flat()).not.toContain("tc-slow");
+    } finally {
+      unsubscribe();
+    }
+
+    await closeWS(ws);
+  }, 25000);
+
   it("does not clobber siblings when parallel results arrive concurrently (#1649)", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

@@ -9032,13 +9032,11 @@ export class Think<
    * repair backstop rather than pinning the continuation open forever.
    */
   private _fireAutoContinuationWhenStable(connection: Connection): void {
-    // NOTE: when a result arrives mid-stream, the in-flight assistant message
-    // lives only in `_streamingAssistant` and is NOT yet in `this.messages`, so
-    // `_hasIncompleteToolBatch()` here inspects a stale (prior) leaf. That does
-    // not break correctness: the continuation is enqueued behind the active
-    // streaming turn on the turn queue, and that turn persists the (now
-    // settled) result before the continuation's transcript repair runs. The
-    // ordering guarantee is the turn queue, not this barrier's cache view.
+    // When a result arrives mid-stream the in-flight assistant message lives
+    // only in `_streamingAssistant`; `_hasIncompleteToolBatch()` inspects that
+    // accumulator directly (not just `this.messages`) so a slow sibling still
+    // awaiting its result keeps the barrier closed rather than slipping through
+    // the fast path below (#1649).
     if (!this._continuation.pending) return;
     // The continuation is already running (a sibling result re-armed the timer
     // after it started). New results coalesce/defer into it — don't double-fire.
@@ -9115,21 +9113,41 @@ export class Think<
    * message doesn't block a legitimate follow-up continuation.
    */
   private _hasIncompleteToolBatch(): boolean {
+    // During an active stream the leaf assistant message lives only in the
+    // accumulator and is NOT yet in `this.messages`. Inspect it directly so a
+    // slow sibling (e.g. an RPC-backed client tool still `input-available`)
+    // keeps the barrier closed instead of letting the bypass fire the
+    // continuation before its result lands (#1649).
+    const streaming = this._streamingAssistant;
+    if (streaming) {
+      return Think._partsAreMidBatch(
+        streaming.parts as ReadonlyArray<Record<string, unknown>>
+      );
+    }
     // Zero-allocation backward scan for the latest assistant message — this
     // runs on every barrier poll tick, and `this.messages` can be large.
     const messages = this.messages;
-    let leaf: (typeof messages)[number] | undefined;
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role === "assistant") {
-        leaf = messages[i];
-        break;
+        return Think._partsAreMidBatch(
+          messages[i].parts as ReadonlyArray<Record<string, unknown>>
+        );
       }
     }
-    if (!leaf) return false;
+    return false;
+  }
+
+  /**
+   * `true` when `parts` carry at least one settled tool result AND at least one
+   * tool call/approval still awaiting a client result — the #1649 mid-batch
+   * signature. Shared by the streaming-accumulator and persisted-leaf scans.
+   */
+  private static _partsAreMidBatch(
+    parts: ReadonlyArray<Record<string, unknown>>
+  ): boolean {
     let hasPending = false;
     let hasSettled = false;
-    for (const part of leaf.parts) {
-      const record = part as Record<string, unknown>;
+    for (const record of parts) {
       const state = record.state;
       if (state === "input-available" || state === "approval-requested") {
         hasPending = true;

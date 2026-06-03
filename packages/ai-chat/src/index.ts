@@ -2180,21 +2180,42 @@ export class AIChatAgent<
    * message doesn't block a legitimate follow-up continuation.
    */
   private _hasIncompleteToolBatch(): boolean {
+    // During an active stream the leaf assistant message lives only in
+    // `_streamingMessage` and is not yet in `this.messages`. Inspect it first
+    // (mirroring `hasPendingInteraction`) so a slow sibling still
+    // `input-available` keeps the barrier closed. ai-chat's barrier normally
+    // runs in the post-stream continuation turn (where `_streamingMessage` is
+    // already null), so this is defensive symmetry with Think (#1649).
+    const streamingParts = this._streamingMessage?.parts;
+    if (streamingParts) {
+      return AIChatAgent._partsAreMidBatch(
+        streamingParts as ReadonlyArray<Record<string, unknown>>
+      );
+    }
     // Zero-allocation backward scan for the latest assistant message — this
     // runs on every barrier poll tick, and `this.messages` can be large.
     const messages = this.messages;
-    let leaf: (typeof messages)[number] | undefined;
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role === "assistant") {
-        leaf = messages[i];
-        break;
+        return AIChatAgent._partsAreMidBatch(
+          messages[i].parts as ReadonlyArray<Record<string, unknown>>
+        );
       }
     }
-    if (!leaf) return false;
+    return false;
+  }
+
+  /**
+   * `true` when `parts` carry at least one settled tool result AND at least one
+   * tool call/approval still awaiting a client result — the #1649 mid-batch
+   * signature. Shared by the streaming-message and persisted-leaf scans.
+   */
+  private static _partsAreMidBatch(
+    parts: ReadonlyArray<Record<string, unknown>>
+  ): boolean {
     let hasPending = false;
     let hasSettled = false;
-    for (const part of leaf.parts) {
-      const record = part as Record<string, unknown>;
+    for (const record of parts) {
       const state = record.state;
       if (state === "input-available" || state === "approval-requested") {
         hasPending = true;
