@@ -1076,6 +1076,7 @@ export type {
   ChatRecoveryConfig,
   ChatRecoveryContext,
   ChatRecoveryExhaustedContext,
+  ChatRecoveryProgressContext,
   ChatRecoveryOptions,
   MessageConcurrency,
   ResolvedChatRecoveryConfig,
