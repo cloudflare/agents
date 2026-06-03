@@ -161,9 +161,14 @@ export type ChatRecoveryExhaustedContext = Pick<
    * Why recovery stopped. One of:
    * - `max_attempts_exceeded` — the per-incident attempt budget was spent.
    * - `no_progress_timeout` — no forward progress within the no-progress window.
-   * - `max_recovery_window_exceeded` — the absolute incident-age ceiling was hit.
+   * - `work_budget_exceeded` — the turn kept producing content but exceeded the
+   *   configured `maxRecoveryWork` runaway-loop budget.
+   * - `recovery_aborted` — the caller's `shouldContinue` hook returned `false`.
    * - `stable_timeout` — a recovery attempt kept timing out waiting for the
    *   isolate to reach stable state until the budget drained (extreme churn).
+   * - `max_recovery_window_exceeded` — DEPRECATED. The old absolute incident-age
+   *   ceiling. No longer emitted (a progressing turn is no longer bounded by
+   *   wall-clock); retained only for back-compat with persisted incidents.
    *
    * Treat this as an open string: new reasons may be added.
    */
@@ -173,8 +178,32 @@ export type ChatRecoveryExhaustedContext = Pick<
 };
 
 /**
+ * Context passed to the `shouldContinue` recovery predicate on each attempt.
+ * Lets an integrator impose a runaway-loop guard expressed as bounded work
+ * (steps / tool-calls / tokens / cost) rather than wall-clock duration.
+ */
+export type ChatRecoveryProgressContext = {
+  incidentId: string;
+  requestId: string;
+  recoveryRootRequestId: string;
+  attempt: number;
+  maxAttempts: number;
+  recoveryKind: "retry" | "continue";
+  /**
+   * Recovery work units produced since this incident began — a durable,
+   * monotonic, reconnect-immune count of produced content/tool segments (not
+   * tokens). The signal that distinguishes a healthy long turn from a runaway
+   * loop.
+   */
+  work: number;
+  /** Wall-clock ms since the incident's first interruption. */
+  ageMs: number;
+};
+
+/**
  * Configuration for durable chat recovery. `true` uses these defaults:
- * `maxAttempts: 6`, `stableTimeoutMs: 10_000`, and a generic terminal message.
+ * `maxAttempts: 10`, `stableTimeoutMs: 10_000`, `maxRecoveryWork: Infinity`,
+ * and a generic terminal message.
  */
 export type ChatRecoveryConfig =
   | boolean
@@ -182,6 +211,32 @@ export type ChatRecoveryConfig =
       maxAttempts?: number;
       stableTimeoutMs?: number;
       terminalMessage?: string;
+      /**
+       * Runaway-loop guard. Maximum recovery WORK — produced content/tool units
+       * since the incident began — before a still-progressing turn is sealed
+       * with `reason="work_budget_exceeded"`. Defaults to `Infinity` (no cap):
+       * the SDK never terminates a progressing turn on its own. Set a finite
+       * value (or use `shouldContinue`) to bound a loop that keeps emitting
+       * content but never converges.
+       */
+      maxRecoveryWork?: number;
+      /**
+       * Caller policy consulted on each recovery attempt from the second
+       * onward — it is NOT called on the first detection (the attempt that
+       * opens the incident), and not at all once a hard bound (no-progress
+       * window, attempt cap, or `maxRecoveryWork`) has already sealed the
+       * incident. Return `false` to stop recovery with
+       * `reason="recovery_aborted"`. A throwing hook is logged and treated as
+       * "continue" so a buggy predicate cannot wedge a turn.
+       *
+       * This is the hook point for a token/cost/step budget, but note
+       * `ctx.work` is a coarse count of produced content/tool segments, not
+       * tokens — track real token/cost yourself (keyed by
+       * `ctx.recoveryRootRequestId`) and consult it here.
+       */
+      shouldContinue?(
+        ctx: ChatRecoveryProgressContext
+      ): boolean | Promise<boolean>;
       onExhausted?(ctx: ChatRecoveryExhaustedContext): void | Promise<void>;
     };
 
@@ -190,6 +245,10 @@ export type ResolvedChatRecoveryConfig = {
   maxAttempts: number;
   stableTimeoutMs: number;
   terminalMessage: string;
+  maxRecoveryWork: number;
+  shouldContinue?: (
+    ctx: ChatRecoveryProgressContext
+  ) => boolean | Promise<boolean>;
   onExhausted?: (ctx: ChatRecoveryExhaustedContext) => void | Promise<void>;
 };
 

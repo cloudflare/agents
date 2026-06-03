@@ -657,18 +657,49 @@ Settled work is never dropped: `persist: false` only suppresses persistence of a
 
 When recovery happens before any stream chunks were written, there is no partial assistant message to continue. If the latest persisted message is still the unanswered user message from the interrupted turn, the framework retries that turn automatically unless `continue` is `false`.
 
-`chatRecovery` can also be configured with an attempt cap and terminal behavior:
+`chatRecovery` can also be configured with budgets and terminal behavior:
 
 ```typescript
 override chatRecovery = {
-  maxAttempts: 6,
+  maxAttempts: 10,
   stableTimeoutMs: 10_000,
   terminalMessage: "The assistant was interrupted and could not recover.",
+  // Runaway-loop guard. Defaults to Infinity (no cap). Set a finite value to
+  // seal a turn that keeps emitting content but never converges.
+  maxRecoveryWork: 200,
+  // Caller policy consulted from the second recovery attempt onward. Return
+  // false to stop recovery. This is where you enforce a token/cost budget.
+  // Note: this is called as `config.shouldContinue(ctx)`, so it is not bound to
+  // the agent instance — track spend in your own store keyed by the incident.
+  async shouldContinue(ctx) {
+    return (await getSpendForTurn(ctx.recoveryRootRequestId)) < MAX_SPEND;
+  },
   async onExhausted(ctx) {
-    console.warn("Chat recovery exhausted", ctx.incidentId);
+    console.warn("Chat recovery exhausted", ctx.incidentId, ctx.reason);
   }
 };
 ```
+
+**`chatRecovery` configuration:**
+
+| Field             | Default         | Description                                                                                                                                                                                                                                                                                                |
+| ----------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `maxAttempts`     | `10`            | Attempt cap before terminal exhaustion. Resets on forward progress, so it catches a tight no-progress alarm loop, not a healthy long turn.                                                                                                                                                                 |
+| `stableTimeoutMs` | `10_000`        | How long a recovery attempt waits for the isolate to reach stable state before rescheduling.                                                                                                                                                                                                               |
+| `terminalMessage` | generic message | The message shown to the user when recovery is given up on.                                                                                                                                                                                                                                                |
+| `maxRecoveryWork` | `Infinity`      | Runaway-loop guard. Maximum produced content/tool units since the incident began before a still-progressing turn is sealed. Defaults to no cap.                                                                                                                                                            |
+| `shouldContinue`  | —               | Caller policy consulted from the second recovery attempt onward (never on the first detection, never once a hard bound has sealed the incident). Return `false` to stop recovery. The hook point for a token/cost budget — `ctx.work` is a coarse segment count, not tokens, so track real spend yourself. |
+| `onExhausted`     | —               | Called once when recovery is given up on, before the terminal message is delivered. Inspect `ctx.reason` for why.                                                                                                                                                                                          |
+
+A progressing turn is never terminated by the framework on its own — it survives unbounded interruption (for example a dense deploy window) as long as it keeps making forward progress. Recovery is sealed only by one of these `ctx.reason` values:
+
+- `no_progress_timeout` — no forward progress within the no-progress window (a stuck turn).
+- `max_attempts_exceeded` — the attempt cap was spent on a tight no-progress alarm loop.
+- `work_budget_exceeded` — the turn kept producing content but exceeded `maxRecoveryWork` (a runaway loop).
+- `recovery_aborted` — your `shouldContinue` hook returned `false`.
+- `stable_timeout` — recovery attempts kept timing out waiting for stable state until the budget drained (extreme churn).
+
+> Setting a finite `maxRecoveryWork` reintroduces a false-positive risk for a legitimately long turn — pick a cap well above what a healthy turn produces, or prefer `shouldContinue` with real token/cost accounting for a precise budget.
 
 Monitor recovery through observability:
 

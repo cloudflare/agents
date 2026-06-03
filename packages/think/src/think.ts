@@ -640,6 +640,15 @@ type ChatRecoveryIncident = {
    * (#1628).
    */
   progress?: number;
+  /**
+   * Value of the durable progress counter when this incident first opened. The
+   * runaway-loop work budget is `progress - workBaseline` (work produced since
+   * the incident began); compared against `maxRecoveryWork`. Optional for
+   * backward-compat with incidents persisted before this field existed — a
+   * missing baseline is treated as the current marker (zero work so far), so an
+   * in-flight incident from an older build is never falsely sealed.
+   */
+  workBaseline?: number;
 };
 
 const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
@@ -654,6 +663,11 @@ const CHAT_RECOVERY_PROGRESS_KEY = "cf:chat-recovery:progress";
 // pathological tight alarm-loop). Kept high so the no-progress window seals
 // first under normal deploy cadence (#1637).
 const DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS = 10;
+// Runaway-loop guard default. `Infinity` = no SDK-imposed work cap: a turn that
+// keeps making forward progress is never terminated by the framework on its own
+// (rfc-chat-recovery-work-budget). Integrators bound a content-emitting runaway
+// by setting `maxRecoveryWork` or a `shouldContinue` predicate.
+const DEFAULT_CHAT_RECOVERY_MAX_WORK = Number.POSITIVE_INFINITY;
 const DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS = 10_000;
 // Auto-continuation barrier (#1649 / #1650): when the model emits parallel tool
 // calls, the client answers each one independently and sends a `tool-result`
@@ -692,10 +706,13 @@ const CHAT_RECOVERY_NO_PROGRESS_WINDOW_MS = 5 * 60 * 1000;
 // single attempt. A deploy rollout drops/reconnects the socket several times
 // over ~11–22s; without this, one logical deploy would burn several attempts.
 const CHAT_RECOVERY_ALARM_DEBOUNCE_MS = 30 * 1000;
-// ABSOLUTE ceiling for a single recovery incident, keyed to `firstSeenAt` and
-// NEVER reset by progress — the final hard stop so even a degenerate
-// slowly-progressing loop cannot run forever.
-const CHAT_RECOVERY_MAX_WINDOW_MS = 15 * 60 * 1000;
+// Staleness bound for the live "recovering…" flag (#1620). A flag older than
+// this is treated as abandoned (the owning incident died without a terminal,
+// e.g. the DO went idle) so it can neither pin the indicator on forever nor
+// suppress a genuinely-new recovering signal. This is NOT a recovery budget —
+// a progressing turn is bounded by work, not wall-clock
+// (rfc-chat-recovery-work-budget).
+const CHAT_RECOVERING_FLAG_TTL_MS = 15 * 60 * 1000;
 // N9: while a parent re-attaches to and forwards a sub-agent's stream, credit
 // the parent's recovery progress at most this often. The marker only needs to
 // advance ≥once between recovery attempts (the no-progress window is minutes),
@@ -7506,6 +7523,14 @@ export class Think<
       ),
       terminalMessage:
         custom?.terminalMessage ?? DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,
+      maxRecoveryWork:
+        typeof custom?.maxRecoveryWork === "number" &&
+        custom.maxRecoveryWork >= 0
+          ? custom.maxRecoveryWork
+          : DEFAULT_CHAT_RECOVERY_MAX_WORK,
+      ...(custom?.shouldContinue
+        ? { shouldContinue: custom.shouldContinue }
+        : {}),
       ...(custom?.onExhausted ? { onExhausted: custom.onExhausted } : {})
     };
   }
@@ -7630,26 +7655,37 @@ export class Think<
     const currentProgress = await this._chatRecoveryProgressMarker();
     const madeProgress = existing != null && currentProgress > prevProgress;
 
-    // Wall-clock-keyed-to-progress budget (#1637). The raw attempt count is the
-    // wrong primary bound under deploy churn: one rollout drops/reconnects the
-    // socket several times (~11–22s), each firing an alarm, so a count inflates
-    // far faster than the real interruption rate and seals a healthy turn.
-    //  • PRIMARY — no-progress window: `lastProgressAt` resets on every
+    // Recovery budget (#1637, rfc-chat-recovery-work-budget). A turn making
+    // genuine forward progress survives unbounded deploy churn — duration is
+    // never a bound. The instruments are decoupled by what they catch:
+    //  • STUCK — no-progress window: `lastProgressAt` resets on every
     //    progress-bearing attempt, so a turn that keeps producing content
     //    survives churn indefinitely; a stuck turn is sealed after 5 min.
     //  • DEBOUNCE — alarms bunched within `ALARM_DEBOUNCE_MS` collapse into one
     //    attempt, so a single rollout's reconnect storm isn't N attempts.
-    //  • SECONDARY — the attempt cap is a high backstop (resets on progress).
-    //  • ABSOLUTE — the 15-min incident-age ceiling never resets (final stop).
+    //  • ALARM-LOOP — the attempt cap (resets on progress) catches a tight
+    //    no-progress alarm loop.
+    //  • RUNAWAY — the work budget seals a loop that keeps emitting content but
+    //    never converges. Keyed to WORK done (produced content/tool units since
+    //    the incident opened), not wall-clock, because a healthy long turn and a
+    //    runaway differ by bounded work, not duration. Defaults to no cap.
+    //  • CALLER — `shouldContinue` lets the integrator express a token/cost/step
+    //    budget the SDK should not hardcode.
     const lastProgressAt = madeProgress
       ? now
       : (existing?.lastProgressAt ?? existing?.firstSeenAt ?? now);
     const noProgressExceeded =
       existing != null &&
       now - lastProgressAt > CHAT_RECOVERY_NO_PROGRESS_WINDOW_MS;
-    const incidentAgeExceeded =
+    // Reuse the durable progress counter as a work meter. Baseline is captured
+    // when the incident opens; `work` is what the turn produced since.
+    const workBaseline = existing?.workBaseline ?? currentProgress;
+    const progress = Math.max(prevProgress, currentProgress);
+    const work = progress - workBaseline;
+    const workBudgetExceeded =
       existing != null &&
-      now - existing.firstSeenAt > CHAT_RECOVERY_MAX_WINDOW_MS;
+      Number.isFinite(config.maxRecoveryWork) &&
+      work > config.maxRecoveryWork;
     const debounced =
       existing != null &&
       !madeProgress &&
@@ -7660,8 +7696,40 @@ export class Think<
       : debounced
         ? (existing?.attempt ?? 1)
         : (existing?.attempt ?? 0) + 1;
+
+    // Consult the caller predicate only when no hard bound has already sealed
+    // the incident — a buggy/expensive hook must not run after we've decided,
+    // and a throwing hook must not wedge the turn (log and treat as "continue").
+    let abortedByCaller = false;
+    if (
+      existing != null &&
+      config.shouldContinue &&
+      !noProgressExceeded &&
+      !workBudgetExceeded &&
+      attempt <= config.maxAttempts
+    ) {
+      try {
+        const decision = await config.shouldContinue({
+          incidentId,
+          requestId: input.requestId,
+          recoveryRootRequestId: input.recoveryRootRequestId ?? input.requestId,
+          attempt,
+          maxAttempts: config.maxAttempts,
+          recoveryKind: input.recoveryKind,
+          work,
+          ageMs: now - (existing.firstSeenAt ?? now)
+        });
+        abortedByCaller = decision === false;
+      } catch (error) {
+        console.error("[Think] chatRecovery shouldContinue hook threw", error);
+      }
+    }
+
     const exhausted =
-      noProgressExceeded || incidentAgeExceeded || attempt > config.maxAttempts;
+      noProgressExceeded ||
+      workBudgetExceeded ||
+      abortedByCaller ||
+      attempt > config.maxAttempts;
     const incident: ChatRecoveryIncident = {
       incidentId,
       requestId: input.requestId,
@@ -7673,14 +7741,17 @@ export class Think<
       firstSeenAt: existing?.firstSeenAt ?? now,
       lastAttemptAt: now,
       lastProgressAt,
-      progress: Math.max(prevProgress, currentProgress),
+      progress,
+      workBaseline,
       ...(exhausted
         ? {
-            reason: incidentAgeExceeded
-              ? "max_recovery_window_exceeded"
+            reason: workBudgetExceeded
+              ? "work_budget_exceeded"
               : noProgressExceeded
                 ? "no_progress_timeout"
-                : "max_attempts_exceeded"
+                : abortedByCaller
+                  ? "recovery_aborted"
+                  : "max_attempts_exceeded"
           }
         : {})
     };
@@ -9382,13 +9453,13 @@ export class Think<
       requestId?: string;
       at?: number;
     }>(CHAT_RECOVERING_KEY);
-    // A record older than the max recovery window is stale: the owning incident
-    // was abandoned without ever reaching a terminal (e.g. the DO went idle
-    // before recovery could exhaust), so its terminal-clear never ran. Treat it
-    // as not-recovering so a stuck record can neither pin the indicator "on"
+    // A flag older than the TTL is stale: the owning incident was abandoned
+    // without ever reaching a terminal (e.g. the DO went idle before recovery
+    // could resolve), so its terminal-clear never ran. Treat it as
+    // not-recovering so a stuck record can neither pin the indicator "on"
     // forever nor suppress a genuinely-new recovering signal.
     const activeExisting =
-      existing && Date.now() - (existing.at ?? 0) < CHAT_RECOVERY_MAX_WINDOW_MS;
+      existing && Date.now() - (existing.at ?? 0) < CHAT_RECOVERING_FLAG_TTL_MS;
     if (active) {
       if (activeExisting) return; // already recovering — idempotent, no re-broadcast
       await this.ctx.storage.put(CHAT_RECOVERING_KEY, {
@@ -9432,16 +9503,16 @@ export class Think<
     // Replay an in-progress "recovering…" status so a client that connects
     // mid-recovery reads the turn as working rather than frozen (#1620). It's
     // mutually exclusive with `pending` (a terminal outcome clears recovering).
-    // Skip a stale record (older than the max recovery window) so a turn whose
-    // recovery was abandoned without a terminal can't show "recovering…"
-    // forever on reconnect.
+    // Skip a stale record (older than the flag TTL) so a turn whose recovery
+    // was abandoned without a terminal can't show "recovering…" forever on
+    // reconnect.
     const recovering = await this.ctx.storage.get<{
       requestId?: string;
       at?: number;
     }>(CHAT_RECOVERING_KEY);
     if (
       recovering &&
-      Date.now() - (recovering.at ?? 0) < CHAT_RECOVERY_MAX_WINDOW_MS
+      Date.now() - (recovering.at ?? 0) < CHAT_RECOVERING_FLAG_TTL_MS
     ) {
       messages.push({
         type: MSG_CHAT_RECOVERING,

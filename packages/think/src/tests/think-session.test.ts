@@ -2503,11 +2503,12 @@ describe("Think — onChatRecovery", () => {
     expect(afterProgress.exhausted).toBe(false);
   });
 
-  it("exhausts via the wall-clock window even while making progress", async () => {
-    const agent = await freshRecoveryAgent("recovery-window");
+  it("a progressing turn survives past the old wall-clock ceiling (rfc-chat-recovery-work-budget)", async () => {
+    const agent = await freshRecoveryAgent("recovery-window-survives");
+    // Default config: maxRecoveryWork is Infinity, so duration is never a bound.
     await agent.setChatRecoveryConfigForTest({ maxAttempts: 6 });
 
-    // An incident that opened more than the 15-minute window ago.
+    // An incident that opened well past the old 15-minute ceiling.
     await agent.seedIncidentForTest({
       incidentId: "req-old:u1",
       requestId: "req-old",
@@ -2515,15 +2516,61 @@ describe("Think — onChatRecovery", () => {
       attempt: 1,
       maxAttempts: 6,
       status: "scheduled",
-      firstSeenAt: Date.now() - 16 * 60 * 1000,
+      firstSeenAt: Date.now() - 30 * 60 * 1000,
       lastAttemptAt: Date.now() - 1000
     });
 
-    // Even with fresh progress, the wall-clock ceiling terminalizes it.
+    // Fresh forward progress: the turn is healthy. It must NOT be sealed —
+    // wall-clock age no longer terminalizes a progressing turn.
     await agent.bumpRecoveryProgressForTest();
     const next = await agent.beginIncidentForTest({
       requestId: "req-old-2",
       recoveryRootRequestId: "req-old",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue"
+    });
+    expect(next.exhausted).toBe(false);
+    expect(next.attempt).toBe(1);
+
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      status: string;
+      reason?: string;
+    }>;
+    expect(incidents[0]).toMatchObject({ status: "attempting" });
+    expect(incidents[0]?.reason).toBeUndefined();
+  });
+
+  it("seals a content-emitting runaway via the work budget", async () => {
+    const agent = await freshRecoveryAgent("recovery-work-budget");
+    // Tiny work budget so a turn that keeps producing content is sealed by
+    // bounded work, not wall-clock.
+    await agent.setChatRecoveryConfigForTest({
+      maxAttempts: 100,
+      maxRecoveryWork: 2
+    });
+
+    // Incident opened with a work baseline of 0 (no work produced yet).
+    await agent.seedIncidentForTest({
+      incidentId: "req-runaway:u1",
+      requestId: "req-runaway",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 100,
+      status: "scheduled",
+      firstSeenAt: Date.now() - 1000,
+      lastAttemptAt: Date.now() - 60_000,
+      progress: 0,
+      workBaseline: 0
+    });
+
+    // Three units of new content → work = 3 > budget(2), even though every unit
+    // is genuine forward progress.
+    await agent.bumpRecoveryProgressForTest();
+    await agent.bumpRecoveryProgressForTest();
+    await agent.bumpRecoveryProgressForTest();
+    const next = await agent.beginIncidentForTest({
+      requestId: "req-runaway-2",
+      recoveryRootRequestId: "req-runaway",
       latestUserMessageId: "u1",
       recoveryKind: "continue"
     });
@@ -2535,7 +2582,43 @@ describe("Think — onChatRecovery", () => {
     }>;
     expect(incidents[0]).toMatchObject({
       status: "exhausted",
-      reason: "max_recovery_window_exceeded"
+      reason: "work_budget_exceeded"
+    });
+  });
+
+  it("seals when the shouldContinue predicate returns false (recovery_aborted)", async () => {
+    const agent = await freshRecoveryAgent("recovery-should-continue");
+    await agent.setRecoveryShouldContinueForTest(false);
+
+    // An open incident below every hard bound — only the caller predicate fires.
+    await agent.seedIncidentForTest({
+      incidentId: "req-abort:u1",
+      requestId: "req-abort",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 10,
+      status: "scheduled",
+      firstSeenAt: 1_000_000,
+      lastAttemptAt: 1_000_000
+    });
+
+    const next = await agent.beginIncidentForTest({
+      requestId: "req-abort-2",
+      recoveryRootRequestId: "req-abort",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue",
+      // Well within the no-progress window, past the alarm debounce.
+      nowMs: 1_060_000
+    });
+    expect(next.exhausted).toBe(true);
+
+    const incidents = (await agent.getChatRecoveryIncidentsForTest()) as Array<{
+      status: string;
+      reason?: string;
+    }>;
+    expect(incidents[0]).toMatchObject({
+      status: "exhausted",
+      reason: "recovery_aborted"
     });
   });
 
