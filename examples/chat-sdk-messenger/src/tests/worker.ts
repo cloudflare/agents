@@ -202,6 +202,14 @@ export class TestHostAgent extends Agent {
     };
   }
 
+  async testConversationFacet(): Promise<string> {
+    await this.subAgent(
+      ConversationAgent,
+      `conversation:${crypto.randomUUID()}`
+    );
+    return "ok";
+  }
+
   private async createState(): Promise<ChatSdkStateAdapter> {
     const state = new ChatSdkStateAdapter({
       parent: this,

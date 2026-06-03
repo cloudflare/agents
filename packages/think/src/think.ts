@@ -1563,8 +1563,12 @@ export class Think<
       // after subclass initialization has completed.
       await this._recoverSubmissionsOnStart();
       this._recoverWorkflowNotifications();
-      this._startSubmissionDrain();
-      this._startWorkflowNotificationDrain();
+      if (this._hasPendingSubmissions()) {
+        this._startSubmissionDrain();
+      }
+      if (this._hasPendingWorkflowNotifications()) {
+        this._startWorkflowNotificationDrain();
+      }
     };
   }
 
@@ -4792,6 +4796,17 @@ export class Think<
     );
   }
 
+  private _hasPendingWorkflowNotifications(): boolean {
+    this._ensureWorkflowNotificationTable();
+    const pending = this.sql<{ notification_id: string }>`
+      SELECT notification_id
+      FROM cf_think_workflow_notifications
+      WHERE delivered_at IS NULL
+      LIMIT 1
+    `;
+    return pending.length > 0;
+  }
+
   private async _drainWorkflowNotifications(): Promise<void> {
     if (this._drainingWorkflowNotifications) return;
     this._ensureWorkflowNotificationTable();
@@ -5108,6 +5123,17 @@ export class Think<
     void this.keepAliveWhile(() => this._drainSubmissions()).catch((error) => {
       console.error("[Think] Failed to drain submissions", error);
     });
+  }
+
+  private _hasPendingSubmissions(): boolean {
+    this._ensureSubmissionTable();
+    const pending = this.sql<{ submission_id: string }>`
+      SELECT submission_id
+      FROM cf_think_submissions
+      WHERE status = 'pending'
+      LIMIT 1
+    `;
+    return pending.length > 0;
   }
 
   async _drainThinkSubmissions(): Promise<void> {
