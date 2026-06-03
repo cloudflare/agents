@@ -306,7 +306,11 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
       deleteKeys.push(this.tokenKey(this.clientId));
     }
     if (scope === "all" || scope === "verifier") {
-      deleteKeys.push(...(await this.codeVerifierKeys(this.clientId)));
+      deleteKeys.push(
+        ...(await this.codeVerifierKeys(this.clientId, {
+          includeChallengeKeys: true
+        }))
+      );
     }
 
     if (deleteKeys.length > 0) {
@@ -334,11 +338,30 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
     return `${this.challengeCodeVerifierPrefix(clientId)}${codeChallenge}`;
   }
 
-  async codeVerifierKeys(clientId: string): Promise<string[]> {
-    const keys = await this.storage.list({
-      prefix: this.codeVerifierKey(clientId)
+  async codeVerifierKeys(
+    clientId: string,
+    options: { includeChallengeKeys?: boolean } = {}
+  ): Promise<string[]> {
+    const legacyKey = this.codeVerifierKey(clientId);
+    const keys: string[] = [];
+
+    if (await this.storage.get(legacyKey)) {
+      keys.push(legacyKey);
+    }
+
+    const stateKeys = await this.storage.list({
+      prefix: this.stateCodeVerifierPrefix(clientId)
     });
-    return [...keys.keys()];
+    keys.push(...stateKeys.keys());
+
+    if (options.includeChallengeKeys) {
+      const challengeKeys = await this.storage.list({
+        prefix: this.challengeCodeVerifierPrefix(clientId)
+      });
+      keys.push(...challengeKeys.keys());
+    }
+
+    return keys;
   }
 
   async saveCodeVerifier(verifier: string): Promise<void> {

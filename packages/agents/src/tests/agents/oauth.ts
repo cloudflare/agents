@@ -258,6 +258,7 @@ export class TestOAuthAgent extends Agent {
     state1Verifier: string;
     state2Verifier: string;
     staleStateIgnoredVerifier: string;
+    challengeVerifierAfterFallbackCleanup: string;
   }> {
     const provider = new DurableObjectOAuthClientProvider(
       this.ctx.storage,
@@ -313,7 +314,24 @@ export class TestOAuthAgent extends Agent {
         provider.codeVerifier()
       );
 
-    return { state1Verifier, state2Verifier, staleStateIgnoredVerifier };
+    const verifier4 = `verifier-four-${crypto.randomUUID()}`;
+    const state4 = await provider.state();
+    await provider.saveCodeVerifier(verifier4);
+    await provider.deleteCodeVerifier();
+    await provider.redirectToAuthorization(
+      await createAuthorizationUrl(state4, verifier4)
+    );
+    const challengeVerifierAfterFallbackCleanup =
+      await statefulProvider.runWithCodeVerifierState(state4, () =>
+        provider.codeVerifier()
+      );
+
+    return {
+      state1Verifier,
+      state2Verifier,
+      staleStateIgnoredVerifier,
+      challengeVerifierAfterFallbackCleanup
+    };
   }
 }
 
