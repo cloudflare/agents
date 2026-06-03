@@ -1194,6 +1194,22 @@ describe("Think — auto-continuation", () => {
     expect(afterStreamCleared).toBe(false);
   });
 
+  it("keeps the barrier closed for unmaterialized streaming tool parts (#1649)", async () => {
+    // Real UI streams can expose live accumulator tool parts before their final
+    // `input-available` state is visible on the raw part. The streaming scan
+    // must still treat them as pending siblings.
+    const agent = await freshAgent();
+    const stateless =
+      await agent.detectsMidBatchInStreamingAccumulator("stateless");
+    expect(stateless.whileStreaming).toBe(true);
+    expect(stateless.afterStreamCleared).toBe(false);
+
+    const inputStreaming =
+      await agent.detectsMidBatchInStreamingAccumulator("input-streaming");
+    expect(inputStreaming.whileStreaming).toBe(true);
+    expect(inputStreaming.afterStreamCleared).toBe(false);
+  });
+
   it("does not error a slow client tool when a fast sibling auto-continues mid-stream (#1649)", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

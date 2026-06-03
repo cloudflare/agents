@@ -9121,7 +9121,8 @@ export class Think<
     const streaming = this._streamingAssistant;
     if (streaming) {
       return Think._partsAreMidBatch(
-        streaming.parts as ReadonlyArray<Record<string, unknown>>
+        streaming.parts as ReadonlyArray<Record<string, unknown>>,
+        { streaming: true }
       );
     }
     // Zero-allocation backward scan for the latest assistant message — this
@@ -9143,17 +9144,26 @@ export class Think<
    * signature. Shared by the streaming-accumulator and persisted-leaf scans.
    */
   private static _partsAreMidBatch(
-    parts: ReadonlyArray<Record<string, unknown>>
+    parts: ReadonlyArray<Record<string, unknown>>,
+    options?: { streaming?: boolean }
   ): boolean {
     let hasPending = false;
     let hasSettled = false;
     for (const record of parts) {
       const state = record.state;
-      if (state === "input-available" || state === "approval-requested") {
+      const isToolPart =
+        typeof record.type === "string" &&
+        (record.type.startsWith("tool-") || record.type === "dynamic-tool");
+      if (
+        state === "input-available" ||
+        state === "approval-requested" ||
+        (options?.streaming === true &&
+          isToolPart &&
+          (state === "input-streaming" || !("state" in record)))
+      ) {
         hasPending = true;
       } else if (
-        typeof record.type === "string" &&
-        (record.type.startsWith("tool-") || record.type === "dynamic-tool") &&
+        isToolPart &&
         (state === "output-available" ||
           state === "output-error" ||
           state === "output-denied" ||

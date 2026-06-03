@@ -2189,7 +2189,8 @@ export class AIChatAgent<
     const streamingParts = this._streamingMessage?.parts;
     if (streamingParts) {
       return AIChatAgent._partsAreMidBatch(
-        streamingParts as ReadonlyArray<Record<string, unknown>>
+        streamingParts as ReadonlyArray<Record<string, unknown>>,
+        { streaming: true }
       );
     }
     // Zero-allocation backward scan for the latest assistant message — this
@@ -2211,17 +2212,26 @@ export class AIChatAgent<
    * signature. Shared by the streaming-message and persisted-leaf scans.
    */
   private static _partsAreMidBatch(
-    parts: ReadonlyArray<Record<string, unknown>>
+    parts: ReadonlyArray<Record<string, unknown>>,
+    options?: { streaming?: boolean }
   ): boolean {
     let hasPending = false;
     let hasSettled = false;
     for (const record of parts) {
       const state = record.state;
-      if (state === "input-available" || state === "approval-requested") {
+      const isToolPart =
+        typeof record.type === "string" &&
+        (record.type.startsWith("tool-") || record.type === "dynamic-tool");
+      if (
+        state === "input-available" ||
+        state === "approval-requested" ||
+        (options?.streaming === true &&
+          isToolPart &&
+          (state === "input-streaming" || !("state" in record)))
+      ) {
         hasPending = true;
       } else if (
-        typeof record.type === "string" &&
-        (record.type.startsWith("tool-") || record.type === "dynamic-tool") &&
+        isToolPart &&
         (state === "output-available" ||
           state === "output-error" ||
           state === "output-denied" ||

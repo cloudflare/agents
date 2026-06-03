@@ -665,7 +665,11 @@ export class ThinkClientToolsAgent extends Think {
    * result came from the accumulator, not a stale cache).
    */
   async detectsMidBatchInStreamingAccumulator(
-    pendingState: "input-available" | "approval-requested" = "input-available"
+    pendingState:
+      | "input-available"
+      | "approval-requested"
+      | "input-streaming"
+      | "stateless" = "input-available"
   ): Promise<{
     whileStreaming: boolean;
     afterStreamCleared: boolean;
@@ -689,7 +693,7 @@ export class ThinkClientToolsAgent extends Think {
           type: "tool-client_action",
           toolCallId: "tc-slow",
           toolName: "client_action",
-          state: pendingState,
+          ...(pendingState === "stateless" ? {} : { state: pendingState }),
           input: { action: "slow" }
         }
       ] as unknown as UIMessage["parts"]
