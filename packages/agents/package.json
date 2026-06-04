@@ -26,9 +26,11 @@
   "dependencies": {
     "@babel/plugin-proposal-decorators": "^7.29.7",
     "@cfworker/json-schema": "^4.1.1",
+    "@cloudflare/codemode": "*",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@rolldown/plugin-babel": "^0.2.3",
     "cron-schedule": "^6.0.0",
+    "just-bash": "^3.0.1",
     "mimetext": "^3.0.28",
     "nanoid": "^5.1.11",
     "partyserver": "^0.5.6",
@@ -38,7 +40,6 @@
   },
   "devDependencies": {
     "@ai-sdk/react": "^3.0.196",
-    "@cloudflare/codemode": "*",
     "@cloudflare/worker-bundler": "*",
     "@tanstack/ai": "^0.26.1",
     "@types/react": "^19.2.16",
@@ -48,30 +49,24 @@
     "@x402/evm": "^2.14.0",
     "ai": "^6.0.194",
     "chat": "^4.30.0",
-    "just-bash": "^3.0.1",
     "react": "^19.2.7",
     "vitest-browser-react": "^2.2.0",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
     "@cloudflare/ai-chat": ">=0.8.0 <1.0.0",
-    "@cloudflare/codemode": ">=0.3.8 <1.0.0",
     "@cloudflare/worker-bundler": ">=0.2.0 <1.0.0",
     "@tanstack/ai": ">=0.10.2 <1.0.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",
     "ai": "^6.0.0",
     "chat": "^4.29.0",
-    "just-bash": "^3.0.0",
     "react": "^19.0.0",
     "vite": ">=6.0.0 <9.0.0",
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
     "@cloudflare/ai-chat": {
-      "optional": true
-    },
-    "@cloudflare/codemode": {
       "optional": true
     },
     "@cloudflare/worker-bundler": {
@@ -87,9 +82,6 @@
       "optional": true
     },
     "chat": {
-      "optional": true
-    },
-    "just-bash": {
       "optional": true
     },
     "vite": {
@@ -251,8 +243,7 @@
   ],
   "nx": {
     "implicitDependencies": [
-      "!@cloudflare/ai-chat",
-      "!@cloudflare/codemode"
+      "!@cloudflare/ai-chat"
     ]
   },
   "scripts": {

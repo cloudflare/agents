@@ -16,9 +16,14 @@ interface PluginContext {
   addWatchFile: (id: string) => void;
 }
 
+function pluginByName(name: string, options?: Parameters<typeof agents>[0]) {
+  const plugin = agents(options).find((p) => p.name === name);
+  if (!plugin) throw new Error(`plugin "${name}" not found`);
+  return plugin;
+}
+
 function skillsPlugin(): Plugin {
-  // The skills import plugin is the first plugin returned by agents().
-  return agents()[0];
+  return pluginByName("agents-skills-import");
 }
 
 function resolveId(plugin: Plugin, ctx: PluginContext): ResolveIdFn {
@@ -150,5 +155,30 @@ describe("agents:skills vite plugin", () => {
     const joined = warnings.join("\n");
     expect(joined).toContain("assets/big.bin");
     expect(joined).toContain("skills.r2()");
+  });
+});
+
+describe("turndown stub vite plugin", () => {
+  const ctx: PluginContext = { warn: () => {}, addWatchFile: () => {} };
+
+  it("is enabled by default and resolves turndown to a virtual stub", async () => {
+    const plugin = pluginByName("agents-turndown-stub");
+    const resolved = await resolveId(plugin, ctx)("turndown");
+    expect(resolved).toBe("\0agents:turndown-stub");
+
+    const code = await load(plugin, ctx)("\0agents:turndown-stub");
+    expect(code).toContain("class TurndownService");
+    expect(code).toContain("export default TurndownService");
+  });
+
+  it("ignores unrelated specifiers", async () => {
+    const plugin = pluginByName("agents-turndown-stub");
+    expect(await resolveId(plugin, ctx)("turndown-plugin-gfm")).toBeNull();
+    expect(await load(plugin, ctx)("turndown")).toBeNull();
+  });
+
+  it("can be disabled via stubTurndown: false", () => {
+    const names = agents({ stubTurndown: false }).map((p) => p.name);
+    expect(names).not.toContain("agents-turndown-stub");
   });
 });

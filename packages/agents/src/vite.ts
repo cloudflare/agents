@@ -338,6 +338,39 @@ async function buildSkillsModule(
   return `const manifest = ${JSON.stringify(manifest)};\nexport default {\n  id: manifest.id,\n  fingerprint: manifest.fingerprint,\n  async list() {\n    return manifest.skills.map(({ body, rawContent, resources, ...skill }) => skill);\n  },\n  async load(name) {\n    const skill = manifest.skills.find((entry) => entry.name === name);\n    if (!skill) return null;\n    return {\n      ...skill,\n      resources: skill.resources.map(({ content, ...resource }) => resource)\n    };\n  },\n  async readResource(name, path) {\n    const skill = manifest.skills.find((entry) => entry.name === name);\n    const resource = skill?.resources.find((entry) => entry.path === path);\n    return resource ? { ...resource } : null;\n  }\n};\n`;
 }
 
+const TURNDOWN_STUB_ID = "\0agents:turndown-stub";
+
+// `just-bash` (pulled in by the workspace bash tool / skill runner) statically
+// depends on `turndown`, whose ESM build runs a top-level `require()` on its
+// Node DOM fallback. Workers is ESM with no global `require`, so the module
+// throws at startup — even when the bash tool is never used. turndown is only
+// needed by just-bash's niche `html-to-markdown` command, so we replace it with
+// an inert stub by default to keep Workers deploys clean. Opt out with
+// `agents({ stubTurndown: false })` if you rely on turndown elsewhere.
+function turndownStubPlugin(): Plugin {
+  return {
+    name: "agents-turndown-stub",
+    enforce: "pre",
+    resolveId(source) {
+      if (source === "turndown") return TURNDOWN_STUB_ID;
+      return null;
+    },
+    load(id) {
+      if (id !== TURNDOWN_STUB_ID) return null;
+      return `class TurndownService {
+  constructor() {}
+  use() { return this; }
+  addRule() { return this; }
+  keep() { return this; }
+  remove() { return this; }
+  turndown() { return ""; }
+}
+export default TurndownService;
+`;
+    }
+  };
+}
+
 function skillsImportPlugin(): Plugin {
   return {
     name: "agents-skills-import",
@@ -369,15 +402,29 @@ function skillsImportPlugin(): Plugin {
   };
 }
 
+export interface AgentsPluginOptions {
+  /**
+   * Replace `turndown` with an inert stub so `just-bash` (workspace bash tool /
+   * skill runner) doesn't drag turndown's `require()`-using DOM fallback into
+   * the Worker's module-init path and break deploys. Enabled by default. Set to
+   * `false` if your app uses turndown directly and needs the real
+   * implementation.
+   */
+  stubTurndown?: boolean;
+}
+
 /**
  * Vite plugin for Agents SDK projects.
  *
- * Currently handles TC39 decorator transforms (Oxc doesn't support them yet,
- * oxc#9170) so `@callable()` works at runtime. Will grow to cover other
+ * Handles TC39 decorator transforms (Oxc doesn't support them yet, oxc#9170) so
+ * `@callable()` works at runtime, the `agents:skills` import transform, and
+ * stubbing `turndown` to keep Workers deploys clean. Will grow to cover other
  * Agents-specific build concerns as needed.
  */
-export default function agents(): Plugin[] {
+export default function agents(options: AgentsPluginOptions = {}): Plugin[] {
+  const { stubTurndown = true } = options;
   return [
+    ...(stubTurndown ? [turndownStubPlugin()] : []),
     skillsImportPlugin(),
     babel({
       presets: [

@@ -164,6 +164,7 @@ import { Session } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
 import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "./tools/workspace";
+import { ExtensionManager, sanitizeName } from "./extensions/manager";
 import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
 import type {
   MessengerContext,
@@ -2641,9 +2642,6 @@ export class Think<
   // ── Extension initialization ───────────────────────────────────
 
   private async _initializeExtensions(): Promise<void> {
-    const { ExtensionManager } = await import("./extensions/manager");
-    const { sanitizeName } = await import("./extensions/manager");
-
     // 3. Create ExtensionManager with host binding if HostBridgeLoopback
     // is re-exported from the worker entry point.
     const agentClassName = this.constructor.name;

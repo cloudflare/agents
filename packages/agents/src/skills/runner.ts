@@ -1,5 +1,7 @@
 import { RpcTarget } from "cloudflare:workers";
+import { DynamicWorkerExecutor, resolveProvider } from "@cloudflare/codemode";
 import type { ToolProvider } from "@cloudflare/codemode";
+import { Bash, defineCommand } from "just-bash";
 import type { ToolSet } from "ai";
 import type {
   SkillScriptRequest,
@@ -858,7 +860,6 @@ async function runBashScript(
   options: WorkerSkillScriptRunnerOptions,
   bridge: SkillScriptHostBridge
 ): Promise<unknown> {
-  const { Bash, defineCommand } = await import("just-bash");
   const customCommands = [];
 
   if (bridge.workspaceAccess !== "none") {
@@ -1007,9 +1008,6 @@ async function runJavaScriptScript(
       "JS/TS skill scripts must `export default` an async run(input, ctx) function."
     );
   }
-
-  const { DynamicWorkerExecutor, resolveProvider } =
-    await import("@cloudflare/codemode");
 
   const source = await prepareJavaScriptSource(request, runtime);
   const executor = new DynamicWorkerExecutor({
