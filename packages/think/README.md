@@ -414,9 +414,12 @@ export class MyAgent extends Think<Env> {
 
 Use either layer alone or both together. The proactive guard keys off
 model-reported `usage.inputTokens` (no provider strings); the reactive backstop
-catches anything that still overflows. Both emit a `chat:context:compacted`
-observability event. Recovery is only as effective as your compaction
-configuration — a no-op compaction cannot rescue an over-budget turn. See the
+catches anything that still overflows. The two caps are independent: `maxRetries`
+(default `1`) bounds reactive compact-and-retries, while `proactive.maxCompactions`
+(default `1`) bounds in-place compactions per turn. Both emit a
+`chat:context:compacted` observability event. Recovery is only as effective as
+your compaction configuration — a no-op compaction cannot rescue an over-budget
+turn. See the
 [Think docs](../../docs/think/index.md#context-window-overflow-recovery) for details.
 
 ### Scheduled tasks

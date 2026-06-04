@@ -755,6 +755,8 @@ classifyChatError(error: unknown, ctx?: ChatErrorContext): ChatErrorClassificati
 
 The argument may be an `Error`, an AI SDK `APICallError` (with `statusCode`/`responseBody`), or — for in-stream provider errors that surface as a stream error part rather than a throw — the error message string. Narrow accordingly. (Think confirms provider context-overflow errors always surface as in-stream error parts, never thrown exceptions out of `streamText`, so this hook sees them whether you read the `Error` or the string form.)
 
+The second argument is a [`ChatErrorContext`](#onchaterror): when consulted for overflow recovery it is `{ stage: "stream", requestId }`, so a classifier can correlate the error with the in-flight turn — for example to call [`cancelChat(requestId)`](./index.md) and bail out of recovery.
+
 ### Example
 
 For the common case, assign the bundled `defaultContextOverflowClassifier`, which matches the context-overflow errors of Anthropic, OpenAI, Google, Bedrock, and others:

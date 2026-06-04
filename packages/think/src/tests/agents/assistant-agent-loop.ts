@@ -194,6 +194,80 @@ function createMockToolModel(onCall?: () => void): LanguageModel {
   } as LanguageModel;
 }
 
+/**
+ * A model that issues two sequential tool calls (steps 1 and 2) before
+ * answering with text (step 3). Each tool-call step reports
+ * `usage.inputTokens = 10`, so with a low `maxInputTokens` the proactive guard
+ * trips before BOTH step 2 and step 3 — exercising the multi-fire splice /
+ * re-baseline path (`_turnModelMessageBaseline`) that a single-fire run never
+ * reaches. Keys its behavior off the model-call count (not prompt inspection)
+ * so a mid-turn recompaction does not change which step it is on.
+ */
+function createTwoToolThenTextModel(
+  onCall?: (options: unknown) => void
+): LanguageModel {
+  let callCount = 0;
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-two-tool-model",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream(options: Record<string, unknown>) {
+      onCall?.(options);
+      callCount++;
+      const step = callCount;
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (step <= 2) {
+            const id = `tc${step}`;
+            controller.enqueue({
+              type: "tool-input-start",
+              id,
+              toolName: "echo"
+            });
+            controller.enqueue({
+              type: "tool-input-delta",
+              id,
+              delta: JSON.stringify({ message: `ping-${step}` })
+            });
+            controller.enqueue({ type: "tool-input-end", id });
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: id,
+              toolName: "echo",
+              input: JSON.stringify({ message: `ping-${step}` })
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("tool-calls"),
+              usage: v3Usage(10, 5)
+            });
+          } else {
+            controller.enqueue({ type: "text-start", id: "t-final" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-final",
+              delta: "done after two tools"
+            });
+            controller.enqueue({ type: "text-end", id: "t-final" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("stop"),
+              usage: v3Usage(20, 10)
+            });
+          }
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
 // ── Test agent: bare (no getModel override) ─────────────────────────
 
 export class BareAssistantAgent extends Think {}
@@ -342,6 +416,45 @@ function promptIncludesMarker(options: unknown): boolean {
 }
 
 /**
+ * Inspect a provider prompt (the model-message array the AI SDK is about to
+ * send) and extract the tool-call/tool-result IDs and whether the recompacted
+ * head summary is present. Lets a test assert that a mid-turn compaction splice
+ * preserved tool pairing (every `tool-call` has a matching `tool-result`) and
+ * actually substituted the recompacted head — not just that the turn finished.
+ */
+function extractToolPairing(options: unknown): {
+  toolCalls: string[];
+  toolResults: string[];
+  hasSummary: boolean;
+  headHasHistory: boolean;
+} {
+  const prompt =
+    (options as { prompt?: Array<{ content?: unknown }> })?.prompt ?? [];
+  const toolCalls: string[] = [];
+  const toolResults: string[] = [];
+  for (const msg of prompt) {
+    const content = (msg as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      const p = part as { type?: string; toolCallId?: string };
+      if (p.type === "tool-call" && p.toolCallId) toolCalls.push(p.toolCallId);
+      if (p.type === "tool-result" && p.toolCallId) {
+        toolResults.push(p.toolCallId);
+      }
+    }
+  }
+  const json = JSON.stringify(prompt);
+  return {
+    toolCalls,
+    toolResults,
+    hasSummary: json.includes("compacted-summary"),
+    // The recompacted head was prepended (not dropped): the seeded conversation
+    // tail survives in every step's prompt.
+    headHasHistory: json.includes("earlier answer")
+  };
+}
+
+/**
  * A model that overflows (surfacing the AI SDK in-stream "prompt is too long"
  * error part, not a throw) **while the seeded marker is still in the prompt**,
  * and returns normal text once compaction has removed it. `alwaysOverflow`
@@ -350,7 +463,8 @@ function promptIncludesMarker(options: unknown): boolean {
  */
 function createOverflowThenOkModel(
   onCall?: (options: unknown) => void,
-  alwaysOverflow = false
+  alwaysOverflow = false,
+  emitPartialBeforeOverflow = false
 ): LanguageModel {
   return {
     specificationVersion: "v3",
@@ -367,8 +481,20 @@ function createOverflowThenOkModel(
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
           if (overflow) {
-            // Provider rejects the over-long prompt mid-turn. The AI SDK
-            // surfaces this as an in-stream error part, not a throw.
+            // Model a realistic overflow: the model streams some assistant
+            // text first, THEN the provider rejects the now-too-long prompt
+            // mid-turn. The AI SDK surfaces the rejection as an in-stream error
+            // part, not a throw. The streamed text accumulates into a partial
+            // assistant message before the error lands.
+            if (emitPartialBeforeOverflow) {
+              controller.enqueue({ type: "text-start", id: "t-partial" });
+              controller.enqueue({
+                type: "text-delta",
+                id: "t-partial",
+                delta: "partial answer before overflow"
+              });
+              controller.enqueue({ type: "text-end", id: "t-partial" });
+            }
             controller.enqueue({
               type: "error",
               error: new Error(
@@ -378,6 +504,146 @@ function createOverflowThenOkModel(
             controller.close();
             return;
           }
+          controller.enqueue({ type: "text-start", id: "t-ok" });
+          controller.enqueue({
+            type: "text-delta",
+            id: "t-ok",
+            delta: "recovered after compaction"
+          });
+          controller.enqueue({ type: "text-end", id: "t-ok" });
+          controller.enqueue({
+            type: "finish",
+            finishReason: v3FinishReason("stop"),
+            usage: v3Usage(20, 10)
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+/**
+ * Exercises BOTH overflow layers in a single turn (the recommended config):
+ * - Call 1: a tool call reporting `usage.inputTokens = 10`, which trips the
+ *   proactive guard before step 2 (proactive compaction #1).
+ * - Call 2 (step 2): an in-stream overflow error the proactive compaction could
+ *   not prevent — the reactive backstop catches it (compaction #2) and retries.
+ * - Call 3 (retry, step 1): succeeds with text.
+ *
+ * Proves the proactive guard and the reactive backstop cooperate: proactive
+ * fires, the turn still overflows, reactive recovers it. Keyed off call count.
+ */
+function createProactiveThenReactiveModel(
+  onCall?: (options: unknown) => void
+): LanguageModel {
+  let callCount = 0;
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-proactive-then-reactive-model",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream(options: Record<string, unknown>) {
+      onCall?.(options);
+      callCount++;
+      const step = callCount;
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (step === 1) {
+            const id = "tc1";
+            controller.enqueue({
+              type: "tool-input-start",
+              id,
+              toolName: "echo"
+            });
+            controller.enqueue({
+              type: "tool-input-delta",
+              id,
+              delta: JSON.stringify({ message: "ping" })
+            });
+            controller.enqueue({ type: "tool-input-end", id });
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: id,
+              toolName: "echo",
+              input: JSON.stringify({ message: "ping" })
+            });
+            // Report high input usage so the proactive guard trips before step 2.
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("tool-calls"),
+              usage: v3Usage(10, 5)
+            });
+          } else if (step === 2) {
+            // Proactive compaction did not save the turn — overflow anyway.
+            controller.enqueue({
+              type: "error",
+              error: new Error(
+                "AI_APICallError: prompt is too long: 213450 tokens > 200000 maximum"
+              )
+            });
+          } else {
+            controller.enqueue({ type: "text-start", id: "t-ok" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-ok",
+              delta: "recovered after compaction"
+            });
+            controller.enqueue({ type: "text-end", id: "t-ok" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("stop"),
+              usage: v3Usage(20, 10)
+            });
+          }
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+/**
+ * A model whose `doStream` THROWS (rejects) on overflow rather than emitting an
+ * in-stream `{ type: "error" }` part — the "top-level provider rejection" shape.
+ * Returns normal text once the seeded marker is gone (after compaction).
+ *
+ * The recovery seam only fires on in-stream error parts, so this test asserts
+ * the changeset's central AI-SDK assumption: `streamText` re-enqueues even a
+ * thrown/rejected `doStream` as a `{ type: "error" }` fullStream part, so the
+ * seam catches it and recovery still runs. If the SDK ever stopped doing this,
+ * this test would fail — surfacing a real gap rather than a silent regression.
+ */
+function createThrowingThenOkModel(
+  onCall?: (options: unknown) => void
+): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-throwing-overflow-model",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream(options: Record<string, unknown>) {
+      onCall?.(options);
+      if (promptIncludesMarker(options)) {
+        // Top-level rejection (not an in-stream error part).
+        return Promise.reject(
+          new Error(
+            "AI_APICallError: prompt is too long: 213450 tokens > 200000 maximum"
+          )
+        );
+      }
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
           controller.enqueue({ type: "text-start", id: "t-ok" });
           controller.enqueue({
             type: "text-delta",
@@ -422,12 +688,26 @@ export class OverflowRecoveryTestAgent extends Think {
   compactionCount = 0;
   modelCalls = 0;
   proactiveMode = false;
+  proactiveMultiFire = false;
   compactionNoOp = false;
   alwaysOverflow = false;
+  emitPartialBeforeOverflow = false;
+  abortDuringRecovery = false;
+  combinedProactiveReactive = false;
+  throwOnOverflow = false;
   compactionEvents = 0;
   errorClassification?: string;
   beforeTurnContinuations: boolean[] = [];
   promptIncludedSeedMarker: boolean[] = [];
+  /** Full payload of each `chat:context:compacted` event (observability contract). */
+  compactionEventPayloads: Array<Record<string, unknown>> = [];
+  /** Tool-call/result pairing + recompacted-head presence per model step (multi-fire). */
+  proactiveStepPrompts: Array<{
+    toolCalls: string[];
+    toolResults: string[];
+    hasSummary: boolean;
+    headHasHistory: boolean;
+  }> = [];
   private _model?: LanguageModel;
 
   override maxSteps = 3;
@@ -440,7 +720,10 @@ export class OverflowRecoveryTestAgent extends Think {
     type: ObservabilityEvent["type"],
     payload: Record<string, unknown> = {}
   ): void {
-    if (type === "chat:context:compacted") this.compactionEvents++;
+    if (type === "chat:context:compacted") {
+      this.compactionEvents++;
+      this.compactionEventPayloads.push(payload);
+    }
     super._emit(type, payload);
   }
 
@@ -454,9 +737,9 @@ export class OverflowRecoveryTestAgent extends Think {
   }
 
   getTools(): ToolSet {
-    // Only used in proactive mode to drive a multi-step turn so `beforeStep`
-    // sees a prior step's model-reported usage and the guard can fire.
-    if (!this.proactiveMode) return {};
+    // Only used in proactive / combined mode to drive a multi-step turn so
+    // `beforeStep` sees a prior step's model-reported usage and the guard fires.
+    if (!this.proactiveMode && !this.combinedProactiveReactive) return {};
     return {
       echo: tool({
         description: "Echo a message back",
@@ -473,22 +756,48 @@ export class OverflowRecoveryTestAgent extends Think {
       // prompt (to assert compaction actually removed it on the retry).
       const onCall = (options?: unknown) => {
         this.modelCalls++;
-        if (!this.proactiveMode) {
+        if (this.proactiveMultiFire) {
+          // Capture the spliced prompt's tool pairing + recompacted-head
+          // presence per step, so the multi-fire test can assert structural
+          // integrity (not just a clean completion).
+          this.proactiveStepPrompts.push(extractToolPairing(options));
+        } else if (!this.proactiveMode) {
           this.promptIncludedSeedMarker.push(promptIncludesMarker(options));
         }
       };
-      this._model = this.proactiveMode
-        ? createMockToolModel(onCall)
-        : createOverflowThenOkModel(onCall, this.alwaysOverflow);
+      this._model = this.throwOnOverflow
+        ? createThrowingThenOkModel(onCall)
+        : this.combinedProactiveReactive
+          ? createProactiveThenReactiveModel(onCall)
+          : this.proactiveMultiFire
+            ? createTwoToolThenTextModel(onCall)
+            : this.proactiveMode
+              ? createMockToolModel(onCall)
+              : createOverflowThenOkModel(
+                  onCall,
+                  this.alwaysOverflow,
+                  this.emitPartialBeforeOverflow
+                );
     }
     return this._model;
   }
 
-  override classifyChatError(error: unknown): ChatErrorClassification | void {
+  override classifyChatError(
+    error: unknown,
+    ctx?: ChatErrorContext
+  ): ChatErrorClassification | void {
     const text = error instanceof Error ? error.message : String(error);
     if (
       /prompt is too long|context length|context_length_exceeded/i.test(text)
     ) {
+      // Abort-during-recovery seam: classifyChatError is consulted at the
+      // overflow stream seam (synchronously, before the driver decides to
+      // compact and retry). Cancelling the in-flight turn here via the threaded
+      // ctx.requestId lets the test deterministically simulate a user abort
+      // landing between the overflow and the retry.
+      if (this.abortDuringRecovery && ctx?.requestId) {
+        this.cancelChat(ctx.requestId);
+      }
       return "context_overflow";
     }
   }
@@ -515,22 +824,93 @@ export class OverflowRecoveryTestAgent extends Think {
     return this.messages;
   }
 
+  /**
+   * Returns the final persisted transcript as compact `role:text` tuples so a
+   * test can assert the shape after a recovery (e.g. that a reactive retry does
+   * not leave an orphan truncated assistant message behind).
+   */
+  async getTranscriptSummary(): Promise<Array<{ role: string; text: string }>> {
+    return this.messages.map((m) => ({
+      role: m.role,
+      text: m.parts
+        .filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("")
+    }));
+  }
+
   async testChat(
     message: string,
     enabled: boolean,
-    opts?: { noOpCompaction?: boolean; alwaysOverflow?: boolean }
+    opts?: {
+      noOpCompaction?: boolean;
+      alwaysOverflow?: boolean;
+      emitPartialBeforeOverflow?: boolean;
+    }
   ): Promise<OverflowChatResult> {
     this.contextOverflow = { reactive: enabled };
     this.compactionNoOp = opts?.noOpCompaction ?? false;
     this.alwaysOverflow = opts?.alwaysOverflow ?? false;
+    this.emitPartialBeforeOverflow = opts?.emitPartialBeforeOverflow ?? false;
     this.compactionCount = 0;
     this.modelCalls = 0;
     this.compactionEvents = 0;
     this.errorClassification = undefined;
     this.beforeTurnContinuations = [];
     this.promptIncludedSeedMarker = [];
+    this.compactionEventPayloads = [];
+    this.proactiveStepPrompts = [];
 
     // Seed a prior turn so the compaction range leaves a usable tail.
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text: "earlier question" }]
+    });
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [{ type: "text", text: "earlier answer" }]
+    });
+
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      compactionCount: this.compactionCount,
+      modelCalls: this.modelCalls,
+      compactionEvents: this.compactionEvents,
+      errorClassification: this.errorClassification,
+      beforeTurnContinuations: this.beforeTurnContinuations,
+      promptIncludedSeedMarker: this.promptIncludedSeedMarker
+    };
+  }
+
+  /**
+   * Reactive recovery is enabled, but the turn is aborted at the overflow seam
+   * (classifyChatError cancels the in-flight request). The driver must NOT
+   * compact or retry an aborted turn — it falls through to the terminal
+   * delivery instead. Asserts the abort responsiveness fix: no compaction, no
+   * second model call.
+   */
+  async testChatAbortDuringRecovery(
+    message: string
+  ): Promise<OverflowChatResult> {
+    this.contextOverflow = { reactive: true };
+    this.compactionNoOp = false;
+    this.alwaysOverflow = false;
+    this.emitPartialBeforeOverflow = false;
+    this.abortDuringRecovery = true;
+    this.compactionCount = 0;
+    this.modelCalls = 0;
+    this.compactionEvents = 0;
+    this.errorClassification = undefined;
+    this.beforeTurnContinuations = [];
+    this.promptIncludedSeedMarker = [];
+    this.compactionEventPayloads = [];
+    this.proactiveStepPrompts = [];
+
     await this.session.appendMessage({
       id: crypto.randomUUID(),
       role: "user",
@@ -561,16 +941,21 @@ export class OverflowRecoveryTestAgent extends Think {
    * turn path (`_handleChatRequest` → `_streamResult`) from a test that sends a
    * raw chat-request frame rather than calling `chat()`.
    */
-  async enableOverflowRecoveryForWsTest(): Promise<void> {
+  async enableOverflowRecoveryForWsTest(opts?: {
+    abortDuringRecovery?: boolean;
+  }): Promise<void> {
     this.contextOverflow = { reactive: true };
     this.compactionNoOp = false;
     this.proactiveMode = false;
+    this.abortDuringRecovery = opts?.abortDuringRecovery ?? false;
     this.compactionCount = 0;
     this.modelCalls = 0;
     this.compactionEvents = 0;
     this.errorClassification = undefined;
     this.beforeTurnContinuations = [];
     this.promptIncludedSeedMarker = [];
+    this.compactionEventPayloads = [];
+    this.proactiveStepPrompts = [];
 
     await this.session.appendMessage({
       id: crypto.randomUUID(),
@@ -589,13 +974,27 @@ export class OverflowRecoveryTestAgent extends Think {
     modelCalls: number;
     compactionEvents: number;
     promptIncludedSeedMarker: boolean[];
+    compactionEventPayloads: Array<Record<string, unknown>>;
   }> {
     return {
       compactionCount: this.compactionCount,
       modelCalls: this.modelCalls,
       compactionEvents: this.compactionEvents,
-      promptIncludedSeedMarker: this.promptIncludedSeedMarker
+      promptIncludedSeedMarker: this.promptIncludedSeedMarker,
+      compactionEventPayloads: this.compactionEventPayloads
     };
+  }
+
+  /** Per-step tool pairing + recompacted-head presence (multi-fire proactive). */
+  async getProactiveStepPrompts(): Promise<
+    Array<{
+      toolCalls: string[];
+      toolResults: string[];
+      hasSummary: boolean;
+      headHasHistory: boolean;
+    }>
+  > {
+    return this.proactiveStepPrompts;
   }
 
   /**
@@ -613,9 +1012,114 @@ export class OverflowRecoveryTestAgent extends Think {
     this.errorClassification = undefined;
     this.beforeTurnContinuations = [];
     this.promptIncludedSeedMarker = [];
+    this.compactionEventPayloads = [];
+    this.proactiveStepPrompts = [];
     // The mock tool model reports usage.inputTokens = 10 on the first step;
     // a budget of 10 with the default 0.9 headroom (threshold 9) trips before
     // the second step. Reactive off isolates the proactive path.
+    this.contextOverflow = { proactive: { maxInputTokens: 10 } };
+
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text: "earlier question" }]
+    });
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [{ type: "text", text: "earlier answer" }]
+    });
+
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      compactionCount: this.compactionCount,
+      modelCalls: this.modelCalls,
+      compactionEvents: this.compactionEvents,
+      errorClassification: this.errorClassification,
+      beforeTurnContinuations: this.beforeTurnContinuations,
+      promptIncludedSeedMarker: this.promptIncludedSeedMarker
+    };
+  }
+
+  /**
+   * Drives a 3-step tool turn (two tool calls, then text) with the proactive
+   * guard budget low enough that the prior step's usage trips it before BOTH
+   * step 2 and step 3. With `maxRetries: 2` the guard may compact twice in one
+   * run, exercising the multi-fire splice / re-baseline path
+   * (`_turnModelMessageBaseline`) that a single-fire run never reaches. A clean
+   * completion proves the second splice did not corrupt the prompt (e.g. drop a
+   * tool result or duplicate the recompacted head).
+   */
+  async testProactiveMultiFire(message: string): Promise<OverflowChatResult> {
+    this.proactiveMode = true;
+    this.proactiveMultiFire = true;
+    this.compactionNoOp = false;
+    this.compactionCount = 0;
+    this.modelCalls = 0;
+    this.compactionEvents = 0;
+    this.errorClassification = undefined;
+    this.beforeTurnContinuations = [];
+    this.promptIncludedSeedMarker = [];
+    this.compactionEventPayloads = [];
+    this.proactiveStepPrompts = [];
+    // Budget 10 with the default 0.9 headroom (threshold 9): each tool-call
+    // step reports usage.inputTokens = 10, so the guard trips before step 2 AND
+    // step 3. proactive.maxCompactions: 2 lets it compact on both (independent
+    // of the reactive maxRetries budget).
+    this.contextOverflow = {
+      proactive: { maxInputTokens: 10, maxCompactions: 2 }
+    };
+
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text: "earlier question" }]
+    });
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [{ type: "text", text: "earlier answer" }]
+    });
+
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      compactionCount: this.compactionCount,
+      modelCalls: this.modelCalls,
+      compactionEvents: this.compactionEvents,
+      errorClassification: this.errorClassification,
+      beforeTurnContinuations: this.beforeTurnContinuations,
+      promptIncludedSeedMarker: this.promptIncludedSeedMarker
+    };
+  }
+
+  /**
+   * Drives the 3-step tool turn with the proactive guard but a no-op compaction
+   * and the DEFAULT budget (`maxRetries` unset → proactive cap 1). The guard
+   * trips before step 2, attempts compaction (a no-op), consumes its single
+   * slot, and emits exactly one `chat:context:compacted` event. Before step 3
+   * the cap is already spent, so it must NOT attempt again — locking the bound
+   * that a persistent no-op cannot emit/compact on every step. The turn still
+   * completes (proactive failure is best-effort; the step proceeds uncompacted).
+   */
+  async testProactiveNoOp(message: string): Promise<OverflowChatResult> {
+    this.proactiveMode = true;
+    this.proactiveMultiFire = true;
+    this.compactionNoOp = true;
+    this.compactionCount = 0;
+    this.modelCalls = 0;
+    this.compactionEvents = 0;
+    this.errorClassification = undefined;
+    this.beforeTurnContinuations = [];
+    this.promptIncludedSeedMarker = [];
+    this.compactionEventPayloads = [];
+    this.proactiveStepPrompts = [];
+    // Default budget: maxRetries unset → proactive cap = max(1, 1) = 1.
     this.contextOverflow = { proactive: { maxInputTokens: 10 } };
 
     await this.session.appendMessage({
@@ -659,6 +1163,8 @@ export class OverflowRecoveryTestAgent extends Think {
     this.errorClassification = undefined;
     this.beforeTurnContinuations = [];
     this.promptIncludedSeedMarker = [];
+    this.compactionEventPayloads = [];
+    this.proactiveStepPrompts = [];
 
     await this.session.appendMessage({
       id: crypto.randomUUID(),
@@ -682,6 +1188,155 @@ export class OverflowRecoveryTestAgent extends Think {
     return {
       done: result.status === "completed",
       error: result.status === "error" ? (result.error ?? "error") : undefined,
+      compactionCount: this.compactionCount,
+      modelCalls: this.modelCalls,
+      compactionEvents: this.compactionEvents,
+      errorClassification: this.errorClassification,
+      beforeTurnContinuations: this.beforeTurnContinuations,
+      promptIncludedSeedMarker: this.promptIncludedSeedMarker
+    };
+  }
+
+  /**
+   * Programmatic (`saveMessages`) twin of the abort-during-recovery test: the
+   * turn is cancelled at the overflow seam, so the driver must skip compaction
+   * and the retry and surface the overflow terminally.
+   */
+  async testProgrammaticAbortDuringRecovery(
+    message: string
+  ): Promise<OverflowChatResult> {
+    this.contextOverflow = { reactive: true };
+    this.compactionNoOp = false;
+    this.proactiveMode = false;
+    this.alwaysOverflow = false;
+    this.abortDuringRecovery = true;
+    this.compactionCount = 0;
+    this.modelCalls = 0;
+    this.compactionEvents = 0;
+    this.errorClassification = undefined;
+    this.beforeTurnContinuations = [];
+    this.promptIncludedSeedMarker = [];
+    this.compactionEventPayloads = [];
+    this.proactiveStepPrompts = [];
+
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text: "earlier question" }]
+    });
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [{ type: "text", text: "earlier answer" }]
+    });
+
+    const result = await this.saveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: message }]
+      }
+    ]);
+
+    return {
+      done: result.status === "completed",
+      error: result.status === "error" ? (result.error ?? "error") : undefined,
+      compactionCount: this.compactionCount,
+      modelCalls: this.modelCalls,
+      compactionEvents: this.compactionEvents,
+      errorClassification: this.errorClassification,
+      beforeTurnContinuations: this.beforeTurnContinuations,
+      promptIncludedSeedMarker: this.promptIncludedSeedMarker
+    };
+  }
+
+  /**
+   * Drives a single turn with BOTH layers enabled: the proactive guard fires
+   * before step 2, the turn still overflows, and the reactive backstop recovers
+   * it. Verifies the two layers cooperate (the recommended config).
+   */
+  async testCombinedProactiveReactive(
+    message: string
+  ): Promise<OverflowChatResult> {
+    this.combinedProactiveReactive = true;
+    this.proactiveMode = true;
+    this.compactionNoOp = false;
+    this.compactionCount = 0;
+    this.modelCalls = 0;
+    this.compactionEvents = 0;
+    this.errorClassification = undefined;
+    this.beforeTurnContinuations = [];
+    this.promptIncludedSeedMarker = [];
+    this.compactionEventPayloads = [];
+    this.proactiveStepPrompts = [];
+    // Proactive guard trips on the step-1 usage (inputTokens 10 ≥ threshold 9);
+    // reactive (default maxRetries 1) catches the residual step-2 overflow.
+    this.contextOverflow = {
+      reactive: true,
+      proactive: { maxInputTokens: 10 }
+    };
+
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text: "earlier question" }]
+    });
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [{ type: "text", text: "earlier answer" }]
+    });
+
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      compactionCount: this.compactionCount,
+      modelCalls: this.modelCalls,
+      compactionEvents: this.compactionEvents,
+      errorClassification: this.errorClassification,
+      beforeTurnContinuations: this.beforeTurnContinuations,
+      promptIncludedSeedMarker: this.promptIncludedSeedMarker
+    };
+  }
+
+  /**
+   * Reactive recovery driven by a provider that REJECTS `doStream` (a top-level
+   * throw) rather than emitting an in-stream error part. Asserts the AI SDK
+   * re-enqueues the rejection as a `{ type: "error" }` fullStream part so the
+   * recovery seam still catches it and the turn recovers.
+   */
+  async testChatThrowingOverflow(message: string): Promise<OverflowChatResult> {
+    this.contextOverflow = { reactive: true };
+    this.throwOnOverflow = true;
+    this.compactionNoOp = false;
+    this.proactiveMode = false;
+    this.compactionCount = 0;
+    this.modelCalls = 0;
+    this.compactionEvents = 0;
+    this.errorClassification = undefined;
+    this.beforeTurnContinuations = [];
+    this.promptIncludedSeedMarker = [];
+    this.compactionEventPayloads = [];
+    this.proactiveStepPrompts = [];
+
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text: "earlier question" }]
+    });
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [{ type: "text", text: "earlier answer" }]
+    });
+
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      done: cb.doneCalled,
+      error: cb.errorMessage,
       compactionCount: this.compactionCount,
       modelCalls: this.modelCalls,
       compactionEvents: this.compactionEvents,
