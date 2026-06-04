@@ -17,10 +17,6 @@
       {
         "class_name": "AssistantDirectory",
         "name": "AssistantDirectory"
-      },
-      {
-        "class_name": "MyAssistant",
-        "name": "MyAssistant"
       }
     ]
   },
