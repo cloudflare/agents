@@ -1435,13 +1435,6 @@ export class Agent<
   /** True when this agent runs as a facet (sub-agent) inside a parent. */
   private _isFacet = false;
 
-  /**
-   * True only while the internal facet bootstrap RPC runs startup.
-   * Startup may happen while the parent is handling a WebSocket
-   * message, so protocol broadcasts must not touch any ambient
-   * parent-owned WebSocket handles during this window.
-   */
-  private _suppressProtocolBroadcasts = false;
   private _protocolBroadcastExcludeIds = new Set<string>();
   private _cf_currentSubAgentBridge?: SubAgentConnectionBridgeLike;
   private _cf_virtualSubAgentConnections = new Map<
@@ -2482,8 +2475,6 @@ export class Agent<
    * @param excludeIds Additional connection IDs to exclude (e.g. the source)
    */
   private _broadcastProtocol(msg: string, excludeIds: string[] = []) {
-    if (this._suppressProtocolBroadcasts) return;
-
     const exclude = [...excludeIds, ...this._protocolBroadcastExcludeIds];
     for (const conn of this.getConnections()) {
       if (!this.isConnectionProtocolEnabled(conn)) {
@@ -6949,16 +6940,12 @@ export class Agent<
       this.ctx.storage.put("cf_agents_facet_name", name),
       this.ctx.storage.put("cf_agents_parent_path", parentPath)
     ]);
-    // Fire onStart() now since this RPC bypasses Server.fetch(),
-    // which is the entry point that normally triggers it. Suppress
-    // protocol broadcasts only during startup so bootstrap cannot touch
-    // parent-owned WebSocket handles if the parent is inside onMessage().
-    this._suppressProtocolBroadcasts = true;
-    try {
-      await this.__unsafe_ensureInitialized();
-    } finally {
-      this._suppressProtocolBroadcasts = false;
-    }
+    // Fire onStart() now since this RPC bypasses Server.fetch(), which is the
+    // entry point that normally triggers it. Protocol broadcasts during this
+    // bootstrap window are safe: on a facet `getConnections()` returns only
+    // virtual sub-agent connections and `broadcast()` routes to the parent
+    // bridge, so neither touches the parent's own WebSocket handles (#1679).
+    await this.__unsafe_ensureInitialized();
   }
 
   override get name(): string {
