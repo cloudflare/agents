@@ -1,16 +1,17 @@
-# Dynamic Playwright
+# Dynamic Puppeteer
 
-Scratch worker for testing `@cloudflare/playwright` inside dynamically loaded Workers.
+Run Puppeteer scripts in dynamically loaded Workers while watching the Browser Run session through Live View.
 
-The worker accepts a JavaScript async function as the raw request body on any path:
+The app accepts a JavaScript module that default-exports an async function:
 
 ```js
-async ({ browser }) => {
-  // ...
+export default async ({ page }) => {
+  await page.goto("https://example.com");
+  return await page.title();
 };
 ```
 
-The host bundles a dynamic Worker with `@cloudflare/worker-bundler`, loads it with `env.LOADER`, launches a browser from the Browser Rendering binding, and invokes the submitted function with `{ browser }`. `console.log`, `console.warn`, and `console.error` are captured automatically.
+The host Worker uses a project-scoped `Project` Agent to sync session and Live View state to the browser, plus one `BrowserSession` Durable Object per Browser Run session. Pasted modules are bundled as `src/user.js`; the session Durable Object runs them through a dynamic Worker connected to that session and passes a single persistent Puppeteer `page` into user code.
 
 ## Run
 
@@ -19,18 +20,25 @@ npm install
 npm start
 ```
 
-In another terminal:
+Open the local Vite URL, create or select a session, paste a script, and click **Run**. New sessions use Browser Run's 10 minute keep-alive window. The iframe shows the session page through Browser Run Live View.
 
-```bash
-./scripts/run.sh scripts/cases/01-launch-and-title.js
+This example uses a remote Browser Run binding. You must be logged in with Wrangler or provide Cloudflare credentials in your environment.
+
+## Key Pattern
+
+```ts
+const acquireResponse = await env.BROWSER.fetch(
+  "http://fake.host/v1/acquire?keep_alive=600000"
+);
+const { sessionId } = await acquireResponse.json();
+const targetsResponse = await env.BROWSER.fetch(
+  `http://fake.host/v1/devtools/browser/${sessionId}/json/list`
+);
+const targets = await targetsResponse.json();
 ```
 
-This example uses a remote Browser Rendering binding. You must be logged in with Wrangler or provide Cloudflare credentials in your environment.
+Each page target includes a `devtoolsFrontendUrl` that can be embedded as the Live View iframe URL. The app uses the first non-blank page target and avoids exposing `browser` to user scripts so runs stay focused on a single page.
 
-## Cases
+## Session Lifecycle
 
-```bash
-./scripts/run-all.sh
-```
-
-The cases are small scripts intended for quick iteration. They launch a real browser session, so they may take a few seconds and consume Browser Rendering quota.
+New sessions request Browser Run's 10 minute keep-alive timeout. Use **Stop session** to close the session immediately and remove it from the project session list.

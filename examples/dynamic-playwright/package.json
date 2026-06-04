@@ -1,21 +1,33 @@
 {
   "name": "@cloudflare/agents-dynamic-playwright-example",
-  "description": "Scratch worker for running Playwright scripts inside dynamically loaded Workers",
+  "description": "Run Puppeteer scripts in dynamic Workers while viewing the browser live",
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "wrangler dev --port 8799",
-    "deploy": "wrangler deploy",
+    "start": "vite dev --port 8799",
+    "deploy": "vite build && wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/playwright": "1.3.0",
-    "@cloudflare/worker-bundler": "*"
+    "@cloudflare/kumo": "^2.4.1",
+    "@cloudflare/puppeteer": "^1.1.0",
+    "@cloudflare/worker-bundler": "*",
+    "@phosphor-icons/react": "^2.1.10",
+    "agents": "*",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.39.1",
     "@cloudflare/workers-types": "^4.20260602.1",
+    "@tailwindcss/vite": "^4",
     "@types/node": "^25.9.1",
+    "@types/react": "^19.2.16",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",
+    "vite": "^8.0.16",
     "wrangler": "^4.96.0"
   }
 }

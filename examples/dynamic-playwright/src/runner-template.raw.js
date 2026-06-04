@@ -1,19 +1,21 @@
-import { launch as rawLaunch } from "@cloudflare/playwright";
+import puppeteer from "@cloudflare/puppeteer";
+import userFn from "./user.js";
 
 const TIMEOUT_MS = 60_000;
 
 const logs = [];
-const console = createCapturedConsole(logs);
-void console;
-const userFn = /* __USER_CODE__ */ undefined;
+globalThis.console = createCapturedConsole(logs);
 
 export default {
   async fetch(_request, env) {
-    const browser = await rawLaunch(env.BROWSER);
+    const browserResult = await createBrowserOrReturnError(env);
+    if (browserResult instanceof Response) return browserResult;
+    const { browser, sessionId } = browserResult;
+    const page = await getOrCreatePage(browser);
 
     if (typeof userFn !== "function") {
       return Response.json({
-        error: "User code must evaluate to a function",
+        error: "User module must default-export a function",
         logs
       });
     }
@@ -25,24 +27,87 @@ export default {
     let result;
     let runError;
     try {
-      result = await Promise.race([userFn({ browser }), timeout]);
+      result = await Promise.race([userFn({ page }), timeout]);
     } catch (error) {
       runError = error instanceof Error ? error.message : String(error);
-    }
-
-    try {
-      await browser.close();
-    } catch (error) {
-      runError ??= error instanceof Error ? error.message : String(error);
+    } finally {
+      browser.disconnect();
     }
 
     return Response.json(
       runError
-        ? { error: runError, logs }
-        : { result: encodeValue(result), logs }
+        ? { error: runError, logs, sessionId }
+        : { result: encodeValue(result), logs, sessionId }
     );
   }
 };
+
+async function createBrowserOrReturnError(env) {
+  const sessionId = env.SESSION_ID;
+  try {
+    console.log("Connecting to Browser Run session", sessionId);
+    const browser = await puppeteer.connect(env.BROWSER, sessionId);
+    return { browser, sessionId };
+  } catch (error) {
+    const diagnostics = sessionId ? await inspectSession(env, sessionId) : null;
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("Failed to create Browser Run client", {
+      sessionId,
+      message,
+      diagnostics
+    });
+
+    return Response.json(
+      {
+        error: env.SESSION_ID
+          ? `Failed to connect to Browser Run session ${sessionId}: ${message}`
+          : `Failed to launch Browser Run session: ${message}`,
+        logs,
+        sessionId,
+        diagnostics: {
+          phase: env.SESSION_ID ? "connect" : "launch",
+          sessionId,
+          error: serializeError(error),
+          browserRun: diagnostics
+        }
+      },
+      { status: 500 }
+    );
+  }
+}
+
+async function getOrCreatePage(browser) {
+  const pages = await browser.pages();
+  return pages[0] ?? (await browser.newPage());
+}
+
+async function inspectSession(env, sessionId) {
+  try {
+    const response = await env.BROWSER.fetch(
+      `http://fake.host/v1/devtools/browser/${sessionId}/json/list`
+    );
+    return {
+      targetListStatus: response.status,
+      targetListOk: response.ok,
+      targets: response.ok ? await response.json() : await response.text()
+    };
+  } catch (error) {
+    return {
+      targetListError: serializeError(error)
+    };
+  }
+}
+
+function serializeError(error) {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack
+    };
+  }
+  return { message: String(error) };
+}
 
 function encodeValue(value) {
   if (value instanceof Uint8Array) {
@@ -51,7 +116,7 @@ function encodeValue(value) {
       binary += String.fromCharCode(value[i]);
     }
     return {
-      __dynamic_playwright_binary_v1__: "Uint8Array",
+      __dynamic_puppeteer_binary_v1__: "Uint8Array",
       data: btoa(binary)
     };
   }

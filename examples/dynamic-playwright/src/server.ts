@@ -1,84 +1,91 @@
-import { createWorker } from "@cloudflare/worker-bundler";
-import runnerTemplate from "./runner-template.raw.js";
+import { routeAgentRequest } from "agents";
+import { browserSession, BrowserSession } from "./server/browser-session";
+import { errorResponse, notFoundResponse } from "./server/http";
+import { project, Project } from "./server/project";
+import type { Env, JsonValue } from "./server/types";
 
-type Env = {
-  BROWSER: Fetcher;
-  LOADER: WorkerLoader;
-};
+export { BrowserSession, Project };
 
-type RunResponse = {
-  result?: unknown;
-  error?: string;
-  logs?: string[];
-  warnings?: string[];
-  bundleMs?: number;
-  runMs?: number;
-  workerId?: string;
-};
-
-const PLAYWRIGHT_VERSION = "1.3.0";
-const USER_CODE_PLACEHOLDER = "/* __USER_CODE__ */ undefined";
-
-function json(data: RunResponse, status = 200): Response {
-  return Response.json(data, { status });
-}
-
-function createRunnerSource(code: string): string {
-  return runnerTemplate.replace(USER_CODE_PLACEHOLDER, `(${code})`);
-}
-
-async function buildRunner(code: string) {
-  return await createWorker({
-    files: {
-      "package.json": JSON.stringify({
-        dependencies: {
-          "@cloudflare/playwright": PLAYWRIGHT_VERSION
-        }
-      }),
-      "wrangler.jsonc": JSON.stringify({
-        main: "src/runner.js",
-        compatibility_date: "2026-01-28",
-        compatibility_flags: ["nodejs_compat"]
-      }),
-      "src/runner.js": createRunnerSource(code)
-    },
-    entryPoint: "src/runner.js",
-    conditions: ["workerd", "worker", "browser", "import", "default"],
-    target: "es2022"
-  });
-}
-
-let workerCount = 0;
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const runStart = Date.now();
+    const url = new URL(request.url);
+
     try {
-      const bundle = await buildRunner(await request.text());
+      const agentResponse = await routeAgentRequest(request, env);
+      if (agentResponse) return agentResponse;
 
-      const worker = env.LOADER.get(
-        `dynamic-playwright-${workerCount++}`,
-        () => ({
-          mainModule: bundle.mainModule,
-          modules: bundle.modules,
-          compatibilityDate: "2026-01-28",
-          compatibilityFlags: ["nodejs_compat"],
-          env: {
-            BROWSER: env.BROWSER
-          }
-        })
+      if (request.method === "GET" && url.pathname === "/api/sessions") {
+        return Response.json({
+          sessions: await (await project(env)).listSessions()
+        });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/sessions") {
+        const session = await (await project(env)).createSession();
+        return Response.json({ session });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/debug/sessions") {
+        return Response.json({
+          sessions: await (await project(env)).listSessions()
+        });
+      }
+
+      const debugSessionMatch = url.pathname.match(
+        /^\/api\/debug\/sessions\/([^/]+)$/
       );
+      if (request.method === "GET" && debugSessionMatch) {
+        return Response.json(
+          await browserSession(env, debugSessionMatch[1]).debug()
+        );
+      }
 
-      return await worker
-        .getEntrypoint()
-        .fetch(new Request("https://dynamic-playwright.local/run"));
+      const forceUnlockMatch = url.pathname.match(
+        /^\/api\/debug\/sessions\/([^/]+)\/unlock$/
+      );
+      if (request.method === "POST" && forceUnlockMatch) {
+        await browserSession(env, forceUnlockMatch[1]).forceUnlock();
+        return Response.json(
+          await browserSession(env, forceUnlockMatch[1]).debug()
+        );
+      }
+
+      const runMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/run$/);
+      if (request.method === "POST" && runMatch) {
+        const scriptCode = await request.text();
+        const projectAgent = (await project(env)) as unknown as ProjectRunStub;
+        return Response.json(
+          await projectAgent.runScript(runMatch[1], scriptCode)
+        );
+      }
+
+      const targetMatch = url.pathname.match(
+        /^\/api\/sessions\/([^/]+)\/targets$/
+      );
+      if (request.method === "GET" && targetMatch) {
+        return Response.json({
+          targets: await (await project(env)).refreshTargets(targetMatch[1])
+        });
+      }
+
+      const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
+      if (request.method === "DELETE" && sessionMatch) {
+        return Response.json({
+          sessions: await (await project(env)).closeSession(sessionMatch[1])
+        });
+      }
+
+      return notFoundResponse(runStart);
     } catch (error) {
-      return json(
-        {
-          error: error instanceof Error ? error.message : String(error),
-          runMs: Date.now() - runStart
-        },
-        500
-      );
+      return errorResponse(error, runStart);
     }
   }
 } satisfies ExportedHandler<Env>;
+
+type ProjectRunStub = {
+  runScript(
+    sessionId: string,
+    scriptCode: string
+  ): Promise<{ run: JsonValue; sessionId: string | null }>;
+};
