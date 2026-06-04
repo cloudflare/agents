@@ -6138,6 +6138,10 @@ export class Agent<
           stored.meta
         ) as Connection<TState>;
       }
+      // Do NOT fall through to `super.getConnection()` on a facet — it resolves
+      // to the host/root DO's hibernatable sockets and reading them from the
+      // facet's I/O context throws a cross-DO Native I/O error. See issue #1677.
+      return undefined;
     }
 
     const connection = super.getConnection<TState>(id);
@@ -6151,6 +6155,13 @@ export class Agent<
     tag?: string
   ): Iterable<Connection<TState>> {
     if (this._isFacet) {
+      // A facet's client connections are all virtual — they are real
+      // WebSockets owned by the ROOT DO and bridged in. We must NOT fall
+      // through to `super.getConnections()` here: on a facet that resolves to
+      // the host/root DO's hibernatable sockets, and reading their attachments
+      // from the facet's I/O context throws
+      // "Cannot perform I/O on behalf of a different Durable Object (Native)".
+      // See issue #1677.
       for (const stored of this._cf_virtualSubAgentConnections.values()) {
         if (!tag || stored.meta.tags.includes(tag)) {
           yield this._cf_createSubAgentBridgeConnection(
@@ -6159,6 +6170,7 @@ export class Agent<
           ) as Connection<TState>;
         }
       }
+      return;
     }
 
     for (const connection of super.getConnections<TState>(tag)) {
