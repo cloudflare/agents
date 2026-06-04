@@ -39,7 +39,24 @@ export type BrowserEnv = {
 };
 
 export type RunnerEnv = BrowserEnv & {
+  AI: Ai;
   LOADER: WorkerLoader;
+};
+
+export type ExplorationTraceEntry = {
+  toolName: string;
+  input: JsonValue;
+  output: JsonValue;
+};
+
+export type ExplorationResult = {
+  description: string;
+  explorationSessionId: string;
+  testSessionId: string | null;
+  summary: string;
+  script: string;
+  trace: ExplorationTraceEntry[];
+  run: JsonValue;
 };
 
 export type Env = RunnerEnv & {

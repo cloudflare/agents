@@ -30,6 +30,22 @@ export type RunScriptResponse = {
   sessionId: string | null;
 };
 
+export type ExplorationTraceEntry = {
+  toolName: string;
+  input: unknown;
+  output: unknown;
+};
+
+export type ExplorationResult = {
+  description: string;
+  explorationSessionId: string;
+  testSessionId: string | null;
+  summary: string;
+  script: string;
+  trace: ExplorationTraceEntry[];
+  run: RunResponse;
+};
+
 export type BrowserSessionState = {
   sessions: Session[];
   selectedSession: Session | null;
@@ -37,11 +53,14 @@ export type BrowserSessionState = {
   selectedTarget: LiveViewTarget | null;
   runResponse: RunResponse | null;
   error: string | null;
+  explorationResponse: ExplorationResult | null;
   running: boolean;
+  exploring: boolean;
   creatingSession: boolean;
   refreshingTargets: boolean;
   stopping: boolean;
   run: (script: string) => Promise<void>;
+  explore: (description: string) => Promise<ExplorationResult | null>;
   createSession: () => Promise<void>;
   stop: (sessionId?: string) => Promise<void>;
   refreshTargets: () => Promise<void>;

@@ -8,10 +8,15 @@ interface Deps {
   browser: Fetcher;
 }
 
+export type RunScriptOptions = {
+  captureScreenshot?: boolean;
+};
+
 export async function runScript(
   code: string,
   sessionId: string,
-  { browser, loader }: Deps
+  { browser, loader }: Deps,
+  options: RunScriptOptions = {}
 ): Promise<Response> {
   const bundle = await buildRunner(code);
 
@@ -22,6 +27,7 @@ export async function runScript(
     compatibilityFlags: ["nodejs_compat"],
     env: {
       BROWSER: browser,
+      CAPTURE_SCREENSHOT: options.captureScreenshot ? "true" : "false",
       SESSION_ID: sessionId
     }
   });

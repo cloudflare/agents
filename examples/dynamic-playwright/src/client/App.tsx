@@ -2,6 +2,7 @@ import { useState } from "react";
 import { PoweredByCloudflare } from "@cloudflare/kumo";
 import { DEFAULT_SCRIPT } from "./sampleScripts";
 import { useBrowserSession } from "./hooks/useBrowserSession";
+import { ExplorationPanel } from "./components/ExplorationPanel";
 import { Explainer } from "./components/Explainer";
 import { Header } from "./components/Header";
 import { LiveViewPanel } from "./components/LiveViewPanel";
@@ -19,6 +20,10 @@ export function App() {
 
       <main className="mx-auto flex max-w-7xl flex-col gap-5 px-5 py-6">
         <Explainer />
+        <ExplorationPanel
+          browserSession={browserSession}
+          onScriptChange={setScript}
+        />
 
         {browserSession.selectedSession ? (
           <div className="grid gap-5 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">

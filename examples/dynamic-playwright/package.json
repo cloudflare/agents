@@ -14,8 +14,11 @@
     "@cloudflare/worker-bundler": "*",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
+    "ai": "^6.0.194",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react-dom": "^19.2.7",
+    "workers-ai-provider": "^3.1.14",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.39.1",

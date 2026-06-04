@@ -1,7 +1,15 @@
-import { Agent, getAgentByName } from "agents";
+import { Agent, callable, getAgentByName } from "agents";
 import { browserSession, isExpiredSessionRun } from "./browser-session";
 import { createBrowserSession } from "./browser-sessions";
-import type { Env, JsonValue, LiveViewTarget, SessionMetadata } from "./types";
+import { exploreApplication } from "./exploration";
+import type { RunScriptOptions } from "./dynamic-runner";
+import type {
+  Env,
+  ExplorationResult,
+  JsonValue,
+  LiveViewTarget,
+  SessionMetadata
+} from "./types";
 
 export const DEFAULT_PROJECT_ID = "default";
 
@@ -90,14 +98,15 @@ export class Project extends Agent<Env, ProjectState> {
 
   async runScript(
     sessionId: string,
-    scriptCode: string
+    scriptCode: string,
+    options: RunScriptOptions = {}
   ): Promise<{ run: JsonValue; sessionId: string | null }> {
     try {
       const runner = browserSession(
         this.env,
         sessionId
       ) as unknown as BrowserSessionRunStub;
-      const result = await runner.run(scriptCode);
+      const result = await runner.run(scriptCode, options);
       this.updateTargets(sessionId, result.targets);
 
       if (isExpiredSessionRun(result.run)) {
@@ -120,11 +129,23 @@ export class Project extends Agent<Env, ProjectState> {
   listSessions(): SessionMetadata[] {
     return this.state.sessions;
   }
+
+  @callable()
+  async explore(description: string): Promise<ExplorationResult> {
+    return await exploreApplication(description, {
+      env: this.env,
+      createSession: () => this.createSession(),
+      closeSession: (sessionId) => this.closeSession(sessionId),
+      runScript: (sessionId, scriptCode, options) =>
+        this.runScript(sessionId, scriptCode, options)
+    });
+  }
 }
 
 type BrowserSessionRunStub = {
   run(
-    scriptCode: string
+    scriptCode: string,
+    options?: RunScriptOptions
   ): Promise<{ run: JsonValue; sessionId: string; targets: LiveViewTarget[] }>;
 };
 

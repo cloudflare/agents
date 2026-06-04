@@ -8,6 +8,7 @@ import {
 } from "../api";
 import type {
   BrowserSessionState,
+  ExplorationResult,
   ProjectState,
   RunResponse,
   Session
@@ -29,8 +30,11 @@ export function useBrowserSession(): BrowserSessionState {
     null
   );
   const [runResponse, setRunResponse] = useState<RunResponse | null>(null);
+  const [explorationResponse, setExplorationResponse] =
+    useState<ExplorationResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
+  const [exploring, setExploring] = useState(false);
   const [creatingSession, setCreatingSession] = useState(false);
   const [refreshingTargets, setRefreshingTargets] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -78,6 +82,30 @@ export function useBrowserSession(): BrowserSessionState {
     }
   }
 
+  async function explore(
+    description: string
+  ): Promise<ExplorationResult | null> {
+    setExploring(true);
+    setError(null);
+    setRunResponse(null);
+    setExplorationResponse(null);
+
+    try {
+      const result = (await project.call("explore", [
+        description
+      ])) as ExplorationResult;
+      setExplorationResponse(result);
+      setRunResponse(result.run);
+      setSelectedSessionId(result.testSessionId);
+      return result;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      return null;
+    } finally {
+      setExploring(false);
+    }
+  }
+
   async function createSession() {
     setCreatingSession(true);
     setError(null);
@@ -115,12 +143,15 @@ export function useBrowserSession(): BrowserSessionState {
     targets,
     selectedTarget,
     runResponse,
+    explorationResponse,
     error,
     running,
+    exploring,
     creatingSession,
     refreshingTargets,
     stopping,
     run,
+    explore,
     createSession,
     stop,
     refreshTargets,

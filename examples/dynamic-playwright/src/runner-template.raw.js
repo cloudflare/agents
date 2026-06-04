@@ -26,19 +26,27 @@ export default {
 
     let result;
     let runError;
+    let screenshot;
     try {
-      result = await Promise.race([userFn({ page }), timeout]);
-    } catch (error) {
-      runError = error instanceof Error ? error.message : String(error);
+      try {
+        result = await Promise.race([userFn({ page }), timeout]);
+      } catch (error) {
+        runError = error instanceof Error ? error.message : String(error);
+      }
+
+      if (env.CAPTURE_SCREENSHOT === "true") {
+        screenshot = await captureScreenshot(page);
+      }
     } finally {
       browser.disconnect();
     }
 
-    return Response.json(
-      runError
-        ? { error: runError, logs, sessionId }
-        : { result: encodeValue(result), logs, sessionId }
-    );
+    const payload = runError
+      ? { error: runError, logs, sessionId }
+      : { result: encodeValue(result), logs, sessionId };
+    if (screenshot) payload.screenshot = screenshot;
+
+    return Response.json(payload);
   }
 };
 
@@ -79,6 +87,18 @@ async function createBrowserOrReturnError(env) {
 async function getOrCreatePage(browser) {
   const pages = await browser.pages();
   return pages[0] ?? (await browser.newPage());
+}
+
+async function captureScreenshot(page) {
+  try {
+    const data = await page.screenshot({ type: "jpeg", quality: 60 });
+    return {
+      mimeType: "image/jpeg",
+      data: bytesToBase64(data)
+    };
+  } catch (error) {
+    return { error: serializeError(error) };
+  }
 }
 
 async function inspectSession(env, sessionId) {
@@ -134,6 +154,15 @@ function encodeValue(value) {
     return out;
   }
   return value;
+}
+
+function bytesToBase64(value) {
+  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+  let binary = "";
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
 }
 
 function createCapturedConsole(logs) {

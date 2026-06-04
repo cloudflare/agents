@@ -1,13 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
 import { closeBrowserSession, listLiveViewTargets } from "./browser-sessions";
 import { runScript } from "./dynamic-runner";
+import type { RunScriptOptions } from "./dynamic-runner";
 import type { Env, JsonValue, LiveViewTarget } from "./types";
 
 export class BrowserSession extends DurableObject<Env> {
   private isRunning = false;
 
   async run(
-    scriptCode: string
+    scriptCode: string,
+    options: RunScriptOptions = {}
   ): Promise<{ run: JsonValue; sessionId: string; targets: LiveViewTarget[] }> {
     if (this.isRunning) {
       throw new Error("Session is already running a script");
@@ -17,10 +19,15 @@ export class BrowserSession extends DurableObject<Env> {
     this.isRunning = true;
 
     try {
-      const response = await runScript(scriptCode, sessionId, {
-        loader: this.env.LOADER,
-        browser: this.env.BROWSER
-      });
+      const response = await runScript(
+        scriptCode,
+        sessionId,
+        {
+          loader: this.env.LOADER,
+          browser: this.env.BROWSER
+        },
+        options
+      );
       const run = (await response.json()) as JsonValue;
       const targets = await listLiveViewTargets(this.env, sessionId);
       return { run, sessionId, targets };
