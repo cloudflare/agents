@@ -837,6 +837,113 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  private _readChildRunStatusForTest(runId: string): string | null {
+    const rows = this.sql<{ status: string }>`
+      SELECT status FROM cf_agent_tool_child_runs WHERE run_id = ${runId}
+    `;
+    return rows[0]?.status ?? null;
+  }
+
+  /**
+   * P1 (#1630): a child facet that was evicted mid agent-tool run strands its
+   * `cf_agent_tool_child_runs` row `running`. Its own durable chat-recovery
+   * settles the turn OUTSIDE `startAgentToolRun`'s finalizer, so the `finally`
+   * of BOTH recovery entrypoints must reconcile that stranded row — otherwise a
+   * re-attached parent waits out a full no-progress window for an already-
+   * settled child. This drives each entrypoint into a benign no-op path (no real
+   * inference) that still runs its `finally`, and asserts the row finalized:
+   * `completed` when a recovered assistant turn exists, else `error`.
+   */
+  async reconcileStaleChildRunViaRecoveryForTest(
+    path: "continue" | "retry",
+    withAssistantTurn: boolean
+  ): Promise<{ before: string | null; after: string | null }> {
+    if (withAssistantTurn) {
+      // A completed assistant turn the reconcile recognises as recovered.
+      await this.testChat("seed a completed assistant turn");
+    }
+    const runId = crypto.randomUUID();
+    // `inspectAgentToolRun` ensures the child-run table exists; the run does not
+    // exist yet, so it returns null.
+    await this.inspectAgentToolRun(runId);
+    // Strand a `running` row with no live abort controller — exactly the post-
+    // eviction shape the reconcile repairs.
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs (run_id, status, started_at)
+      VALUES (${runId}, 'running', ${Date.now()})
+    `;
+    const before = this._readChildRunStatusForTest(runId);
+    if (path === "continue") {
+      // A non-leaf `targetAssistantId` → benign "conversation_changed" skip
+      // that still reaches the `finally`.
+      await this._chatRecoveryContinue({ targetAssistantId: "no-such-leaf" });
+    } else {
+      // No `recoveredRequestId` (avoids the pre-`try` early return) + a non-user
+      // leaf (or empty transcript) → benign skip that still reaches `finally`.
+      await this._chatRecoveryRetry({});
+    }
+    return { before, after: this._readChildRunStatusForTest(runId) };
+  }
+
+  /**
+   * P2 (#1630/#1672): `ThinkTestAgent` sets NO re-attach overrides, so its
+   * resolved budgets are the SDK defaults. The hard ceiling now defaults to
+   * uncapped (`Infinity`) to mirror chat-recovery's `maxRecoveryWork` — a
+   * regression that reintroduces a finite default would re-break healthy
+   * long-running children, so lock the default here.
+   */
+  getDefaultReattachBudgetsForTest(): {
+    noProgressTimeoutMs: number;
+    maxWindowIsFinite: boolean;
+  } {
+    const resolved = (
+      this as unknown as {
+        _resolvedOptions: {
+          agentToolReattachNoProgressTimeoutMs: number;
+          agentToolReattachMaxWindowMs: number;
+        };
+      }
+    )._resolvedOptions;
+    return {
+      noProgressTimeoutMs: resolved.agentToolReattachNoProgressTimeoutMs,
+      maxWindowIsFinite: Number.isFinite(resolved.agentToolReattachMaxWindowMs)
+    };
+  }
+
+  /**
+   * P4 (#1630): `cancelAgentToolRun` must abort not just the original in-isolate
+   * run but any in-flight chat-recovery turn driving this child facet (which
+   * runs outside `startAgentToolRun` and registers a submission abort
+   * controller), so a torn-down child stops grinding instead of finishing an
+   * orphaned recovered turn. Registers a controller exactly as the recovery
+   * entrypoints do, then asserts cancel sweeps it and seals the row `aborted`.
+   */
+  async cancelAgentToolRunAbortsRecoveryForTest(): Promise<{
+    abortedBefore: boolean;
+    abortedAfter: boolean;
+    childStatus: string | null;
+  }> {
+    const runId = crypto.randomUUID();
+    await this.inspectAgentToolRun(runId);
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs (run_id, status, started_at)
+      VALUES (${runId}, 'running', ${Date.now()})
+    `;
+    const controller = new AbortController();
+    (
+      this as unknown as {
+        _submissionAbortControllers: Map<string, AbortController>;
+      }
+    )._submissionAbortControllers.set("recovered-submission", controller);
+    const abortedBefore = controller.signal.aborted;
+    await this.cancelAgentToolRun(runId, "parent gave up re-attaching");
+    return {
+      abortedBefore,
+      abortedAfter: controller.signal.aborted,
+      childStatus: this._readChildRunStatusForTest(runId)
+    };
+  }
+
   async testChatWithRethrowingErrorCallback(message: string): Promise<string> {
     const cb: StreamCallback = {
       onStart() {},

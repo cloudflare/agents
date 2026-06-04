@@ -33,6 +33,19 @@ type ThinkAgentToolTestStub = {
     lastErrors: number;
     preTurnAssistantIds: number;
   }>;
+  reconcileStaleChildRunViaRecoveryForTest(
+    path: "continue" | "retry",
+    withAssistantTurn: boolean
+  ): Promise<{ before: string | null; after: string | null }>;
+  getDefaultReattachBudgetsForTest(): Promise<{
+    noProgressTimeoutMs: number;
+    maxWindowIsFinite: boolean;
+  }>;
+  cancelAgentToolRunAbortsRecoveryForTest(): Promise<{
+    abortedBefore: boolean;
+    abortedAfter: boolean;
+    childStatus: string | null;
+  }>;
 };
 
 type ThinkAgentToolParentStub = DurableObjectStub & {
@@ -625,5 +638,61 @@ describe("Think agent tools", () => {
     expect(
       events.filter((event) => event.event.kind === "interrupted")
     ).toHaveLength(1);
+  });
+
+  it("finalizes a stranded child run row when its own recovery CONTINUES (#1630)", async () => {
+    // A recovered assistant turn → the reconcile in `_chatRecoveryContinue`'s
+    // finally seals the stranded row `completed` so a re-attached parent
+    // collects immediately instead of waiting out a no-progress window.
+    const completed = await (
+      await freshAgent()
+    ).reconcileStaleChildRunViaRecoveryForTest("continue", true);
+    expect(completed.before).toBe("running");
+    expect(completed.after).toBe("completed");
+
+    // No recovered assistant turn → the same finally seals it `error`.
+    const errored = await (
+      await freshAgent()
+    ).reconcileStaleChildRunViaRecoveryForTest("continue", false);
+    expect(errored.before).toBe("running");
+    expect(errored.after).toBe("error");
+  });
+
+  it("finalizes a stranded child run row when its own recovery RETRIES a pre-stream turn (#1630)", async () => {
+    // The pre-stream-eviction path settles via `_chatRecoveryRetry`, which
+    // (like continue) never hits `startAgentToolRun`'s finalizer — so its
+    // finally must run the same reconcile. This is the path the earlier review
+    // flagged as missing.
+    const completed = await (
+      await freshAgent()
+    ).reconcileStaleChildRunViaRecoveryForTest("retry", true);
+    expect(completed.before).toBe("running");
+    expect(completed.after).toBe("completed");
+
+    const errored = await (
+      await freshAgent()
+    ).reconcileStaleChildRunViaRecoveryForTest("retry", false);
+    expect(errored.before).toBe("running");
+    expect(errored.after).toBe("error");
+  });
+
+  it("defaults the re-attach hard ceiling to uncapped (Infinity) when unset (#1630/#1672)", async () => {
+    // No re-attach override on `ThinkTestAgent` ⇒ SDK defaults. The ceiling must
+    // stay uncapped so a healthy long-running child is never cut off; a finite
+    // default would reintroduce the bug #1672 removed at the child layer.
+    const budgets = await (
+      await freshAgent()
+    ).getDefaultReattachBudgetsForTest();
+    expect(budgets.noProgressTimeoutMs).toBe(120_000);
+    expect(budgets.maxWindowIsFinite).toBe(false);
+  });
+
+  it("cancelAgentToolRun aborts an in-flight recovery turn and seals the child aborted (#1630)", async () => {
+    const result = await (
+      await freshAgent()
+    ).cancelAgentToolRunAbortsRecoveryForTest();
+    expect(result.abortedBefore).toBe(false);
+    expect(result.abortedAfter).toBe(true);
+    expect(result.childStatus).toBe("aborted");
   });
 });

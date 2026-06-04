@@ -2490,6 +2490,109 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   listMessagesForTest(): ChatMessage[] {
     return this.messages;
   }
+
+  private _readChildRunStatusForTest(runId: string): string | null {
+    const rows = this.sql<{ status: string }>`
+      SELECT status FROM cf_ai_chat_agent_tool_runs WHERE run_id = ${runId}
+    `;
+    return rows[0]?.status ?? null;
+  }
+
+  /**
+   * P1 (#1630): a child facet evicted mid agent-tool run strands its
+   * `cf_ai_chat_agent_tool_runs` row `running`. Its own durable chat-recovery
+   * settles the turn OUTSIDE `startAgentToolRun`'s finalizer, so the `finally`
+   * of BOTH recovery entrypoints must reconcile the stranded row — otherwise a
+   * re-attached parent waits out a full no-progress window for an already-
+   * settled child. Drives each entrypoint into a benign no-op path (no real
+   * inference) that still runs its `finally`, and asserts the row finalized:
+   * `completed` when a recovered assistant turn exists, else `error`.
+   */
+  async reconcileStaleChildRunViaRecoveryForTest(
+    path: "continue" | "retry",
+    withAssistantTurn: boolean
+  ): Promise<{ before: string | null; after: string | null }> {
+    if (withAssistantTurn) {
+      // Persist a settled assistant turn directly (no streaming) so the
+      // reconcile recognises a recovered turn. `persistMessages` writes the
+      // message store without opening a resumable stream — a real recovered
+      // turn's stream is already closed before its `finally` reconcile runs, so
+      // this matches that settled state (a streamed seed would leave the stream
+      // "active" with no client to ACK it in a headless test, and the reconcile
+      // correctly defers while a stream is active).
+      await this.persistMessages([
+        {
+          id: `seed-user-${crypto.randomUUID()}`,
+          role: "user",
+          parts: [{ type: "text", text: "seed prompt" }]
+        },
+        {
+          id: `seed-assistant-${crypto.randomUUID()}`,
+          role: "assistant",
+          parts: [{ type: "text", text: "recovered answer" }]
+        }
+      ]);
+    }
+    const runId = crypto.randomUUID();
+    // The child-run table (`cf_ai_chat_agent_tool_runs`) is created in the
+    // AIChatAgent constructor, so strand a `running` row with no live abort
+    // controller — exactly the post-eviction shape the reconcile repairs. A
+    // valid `input_json` is required because the completed branch re-derives
+    // output via `getAgentToolOutput(input, ...)`, which this child reads.
+    this.sql`
+      INSERT INTO cf_ai_chat_agent_tool_runs (run_id, status, input_json, started_at)
+      VALUES (${runId}, 'running', ${JSON.stringify({ prompt: "recovered" })}, ${Date.now()})
+    `;
+    const before = this._readChildRunStatusForTest(runId);
+    const recovery = this as unknown as {
+      _chatRecoveryContinue(d?: { targetAssistantId?: string }): Promise<void>;
+      _chatRecoveryRetry(d?: Record<string, never>): Promise<void>;
+    };
+    if (path === "continue") {
+      // A non-leaf `targetAssistantId` → benign "conversation_changed" skip
+      // that still reaches the `finally`.
+      await recovery._chatRecoveryContinue({
+        targetAssistantId: "no-such-leaf"
+      });
+    } else {
+      // A non-user leaf (or empty transcript) → benign "no_unanswered_user_
+      // message" skip that still reaches the `finally`.
+      await recovery._chatRecoveryRetry({});
+    }
+    return { before, after: this._readChildRunStatusForTest(runId) };
+  }
+
+  /**
+   * P4 (#1630): `cancelAgentToolRun` must abort not just the original in-isolate
+   * run but any in-flight chat-recovery turn driving this child facet — which
+   * runs outside `startAgentToolRun` and registers a request controller in the
+   * `AbortRegistry` — so a torn-down child stops grinding instead of finishing
+   * an orphaned recovered turn. Registers a request signal exactly as a live
+   * turn does, then asserts cancel aborts it and seals the row `aborted`.
+   */
+  async cancelAgentToolRunAbortsRecoveryForTest(): Promise<{
+    abortedBefore: boolean;
+    abortedAfter: boolean;
+    childStatus: string | null;
+  }> {
+    const runId = crypto.randomUUID();
+    this.sql`
+      INSERT INTO cf_ai_chat_agent_tool_runs (run_id, status, started_at)
+      VALUES (${runId}, 'running', ${Date.now()})
+    `;
+    const signal = (
+      this as unknown as {
+        _abortRegistry: { getSignal(id: string): AbortSignal | undefined };
+      }
+    )._abortRegistry.getSignal("recovered-request");
+    const abortedBefore = signal?.aborted ?? false;
+    await this.cancelAgentToolRun(runId, "parent gave up re-attaching");
+    return {
+      abortedBefore,
+      abortedAfter: signal?.aborted ?? false,
+      childStatus: this._readChildRunStatusForTest(runId)
+    };
+  }
 }
 
 export class StuckAgentToolChild extends Agent<Env> {
@@ -3060,6 +3163,35 @@ export class AIChatAgentToolParent extends Agent<Env> {
     await child.startAgentToolRun(input, { runId });
     await child.cancelAgentToolRun(runId, "test abort");
     return child.inspectAgentToolRun(runId);
+  }
+
+  // P1/P4 (#1630): the child-side seams must run on the child AS A FACET of this
+  // parent (its `cf_agent_tool_child_runs` table only has SQL when created via
+  // `subAgent`, not when addressed standalone), so route through the parent.
+  async childReconcileStaleRunViaRecoveryForTest(
+    path: "continue" | "retry",
+    withAssistantTurn: boolean
+  ): Promise<{ before: string | null; after: string | null }> {
+    const child = await this.subAgent(
+      AIChatAgentToolChild,
+      crypto.randomUUID()
+    );
+    return child.reconcileStaleChildRunViaRecoveryForTest(
+      path,
+      withAssistantTurn
+    );
+  }
+
+  async childCancelAgentToolRunAbortsRecoveryForTest(): Promise<{
+    abortedBefore: boolean;
+    abortedAfter: boolean;
+    childStatus: string | null;
+  }> {
+    const child = await this.subAgent(
+      AIChatAgentToolChild,
+      crypto.randomUUID()
+    );
+    return child.cancelAgentToolRunAbortsRecoveryForTest();
   }
 
   async runChildWithTrackedAbortListener(

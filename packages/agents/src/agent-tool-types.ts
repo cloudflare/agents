@@ -21,8 +21,9 @@ export type AgentToolTerminalStatus = Extract<
  *
  * - `no-progress` — the child went silent for a full no-progress window while
  *   the parent was tailing it (genuinely stalled / hung).
- * - `window-exceeded` — the hard re-attach ceiling elapsed while the child was
- *   still non-terminal (it may have been advancing too slowly to ever finish).
+ * - `window-exceeded` — a finite `agentToolReattachMaxWindowMs` ceiling elapsed
+ *   while the child was still non-terminal. Only fires when an integrator opts
+ *   into a hard wall-clock cap (the default ceiling is `Infinity`).
  * - `not-tailable` — the child runtime cannot live-tail, so the parent could
  *   not re-attach to its stream to follow it to terminal.
  * - `inspect-timeout` — inspecting the child timed out during parent recovery.

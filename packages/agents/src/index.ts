@@ -914,12 +914,18 @@ const DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 5_000;
 // budget abandoned healthy, still-advancing children); only a genuinely
 // silent/hung child seals `interrupted` after a full no-progress window.
 const DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS = 120_000;
-// Hard ceiling on a single re-attach, mirroring the child's own chat-recovery
-// window (@cloudflare/think `CHAT_RECOVERY_MAX_WINDOW_MS`). Past this the child
-// can no longer be legitimately advancing, so the parent stops waiting — this
-// guarantees a hung child can never block recovery forever even while the
-// progress-keyed budget keeps re-arming.
-const DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS = 15 * 60 * 1000;
+// Optional hard wall-clock ceiling on a single re-attach. Defaults to NO cap,
+// mirroring chat-recovery's `maxRecoveryWork: Infinity` (#1672): the SDK does
+// not impose an implicit wall-clock bound on a child that keeps making forward
+// progress — a re-attached parent follows a healthy, still-streaming child for
+// as long as it advances, exactly as it would on the live (never-evicted) path.
+// A hung/silent child is already bounded by the progress-keyed no-progress
+// budget above, and a content-runaway is bounded uniformly (live AND recovery)
+// by the child's own `maxRecoveryWork` / `shouldKeepRecovering` — not by a
+// parent-only timer that would fire only after an eviction. Integrators that
+// want a hard wall-clock cap (and the `window-exceeded` child teardown it
+// triggers) can still set `agentToolReattachMaxWindowMs` to a finite value.
+const DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS = Number.POSITIVE_INFINITY;
 const SUB_AGENT_IDENTITY_VERSION_LEGACY = "legacy";
 const SUB_AGENT_IDENTITY_VERSION_PATH_V2 = "path-v2";
 const SUB_AGENT_IDENTITY_PATH_V2_PREFIX = "cf-agents:v2:";
@@ -1160,10 +1166,14 @@ export const DEFAULT_AGENT_STATIC_OPTIONS = {
   agentToolReattachNoProgressTimeoutMs:
     DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS,
   /**
-   * Hard ceiling (ms) on a single agent-tool re-attach (#1630). Caps the total
-   * wait even as the no-progress budget re-arms across stream-closes, so a hung
-   * child can never block recovery forever. Defaults to the child's own
-   * chat-recovery window.
+   * Optional hard wall-clock ceiling (ms) on a single agent-tool re-attach
+   * (#1630). Caps the total wait even as the no-progress budget re-arms across
+   * stream-closes. Defaults to `Infinity` (no implicit cap), mirroring
+   * chat-recovery's `maxRecoveryWork` (#1672): a healthy, still-advancing child
+   * is followed for as long as it makes progress — a hung child is bounded by
+   * the no-progress budget, and a content-runaway by the child's own
+   * `maxRecoveryWork` / `shouldKeepRecovering`. Set a finite value to impose a
+   * wall-clock cap (which also tears the child down on `window-exceeded`).
    */
   agentToolReattachMaxWindowMs: DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS
 };
@@ -1225,10 +1235,14 @@ export interface AgentStaticOptions {
    */
   agentToolReattachNoProgressTimeoutMs?: number;
   /**
-   * Hard ceiling in milliseconds on a single agent-tool re-attach (#1630). Caps
-   * the total wait even as the no-progress budget re-arms across stream-closes.
-   * Default: 900000 (15 minutes). Set to `0` to disable the ceiling (bounded
-   * only by the no-progress budget).
+   * Optional hard wall-clock ceiling in milliseconds on a single agent-tool
+   * re-attach (#1630). Caps the total wait even as the no-progress budget
+   * re-arms across stream-closes. Default: `Infinity` (no implicit cap),
+   * mirroring chat-recovery's `maxRecoveryWork` (#1672) — a healthy,
+   * still-advancing child is followed for as long as it makes progress, exactly
+   * as on the live (never-evicted) path. Set a finite value to impose a
+   * wall-clock cap (which also tears the child down on `window-exceeded`); `0`
+   * also disables the ceiling.
    */
   agentToolReattachMaxWindowMs?: number;
 }
@@ -8173,9 +8187,12 @@ export class Agent<
    * keeps streaming it is followed through to terminal. The loop also RE-ARMS
    * across stream-closes (a child re-evicted mid-recovery, or a tail that ends
    * before terminal) as long as the prior attempt made progress, so a child that
-   * dies and recovers again during deploy churn is still collected. The total
-   * wait is hard-bounded by `maxWindowMs` (the child's own recovery ceiling) so a
-   * genuinely hung child can never block recovery forever.
+   * dies and recovers again during deploy churn is still collected. A genuinely
+   * silent/hung child can never block recovery forever: it seals `interrupted`
+   * after one `noProgressTimeoutMs` window. `maxWindowMs` is an OPTIONAL hard
+   * wall-clock ceiling (default `Infinity` — uncapped, mirroring #1672's
+   * `maxRecoveryWork`); set it finite to also bound a child that keeps
+   * progressing, which seals `window-exceeded` and tears the child down.
    *
    * Returns the terminal `result` (and `completedAt`) when the child reaches a
    * terminal status, plus the advanced broadcast `sequence`. Returns
@@ -8257,8 +8274,9 @@ export class Agent<
       );
     }
 
-    // Hard ceiling so a hung child can never block recovery forever, even as the
-    // progress-keyed budget re-arms across stream-closes / re-evictions.
+    // Optional hard wall-clock ceiling (default Infinity = off). A hung child is
+    // already bounded by the no-progress budget; this only additionally bounds a
+    // child that keeps progressing, when an integrator opts into a finite cap.
     const ceilingController = new AbortController();
     let ceilingTimer: ReturnType<typeof setTimeout> | undefined;
     if (maxWindowMs > 0 && Number.isFinite(maxWindowMs)) {

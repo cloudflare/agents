@@ -115,6 +115,13 @@ const options: AgentStaticOptions = {
 };
 void options;
 
+// The hard ceiling is optional and uncapped by default — `Infinity` (no
+// wall-clock cap, mirroring chat-recovery's `maxRecoveryWork`) is a valid value.
+const uncappedCeiling: AgentStaticOptions = {
+  agentToolReattachMaxWindowMs: Number.POSITIVE_INFINITY
+};
+void uncappedCeiling;
+
 const wrongOption: AgentStaticOptions = {
   // @ts-expect-error — the budget knobs are numbers (milliseconds).
   agentToolReattachNoProgressTimeoutMs: "120s"
