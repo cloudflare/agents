@@ -88,7 +88,10 @@ type ThinkAgentToolParentStub = DurableObjectStub & {
     result: boolean;
   }>;
   reattachScriptedAdapterForTest(
-    scenario: "rearm-then-complete" | "idle-after-progress"
+    scenario:
+      | "rearm-then-complete"
+      | "idle-after-progress"
+      | "infinite-no-progress-ceiling"
   ): Promise<{ status?: string; reason?: string; tailAttempts: number }>;
   reconcileParallelThinkChildrenForTest(): Promise<{
     stuckStatus: string | null;
@@ -460,6 +463,24 @@ describe("Think agent tools", () => {
     // after a SINGLE tail (no bonus window, no per-cycle abandoned reader).
     expect(status).toBeUndefined();
     expect(reason).toBe("no-progress");
+    expect(tailAttempts).toBe(1);
+  });
+
+  it("an Infinity no-progress budget never seals on silence — only the hard ceiling ends the wait (#1630/#1672)", async () => {
+    const parent = await freshParent();
+
+    const { status, reason, tailAttempts } =
+      await parent.reattachScriptedAdapterForTest(
+        "infinite-no-progress-ceiling"
+      );
+
+    // Pre-fix, `Infinity` short-circuited to an immediate `no-progress` seal
+    // with ZERO tail attempts. Now it tails the silent child and, because the
+    // no-progress idle timer is disabled, only the finite hard ceiling ends the
+    // wait — sealing `window-exceeded`, never `no-progress`.
+    expect(status).toBeUndefined();
+    expect(reason).toBe("window-exceeded");
+    expect(reason).not.toBe("no-progress");
     expect(tailAttempts).toBe(1);
   });
 

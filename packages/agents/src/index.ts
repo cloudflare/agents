@@ -1233,7 +1233,10 @@ export interface AgentStaticOptions {
    * forwarded chunk, so a steadily-streaming child is never abandoned; only a
    * genuinely silent child seals `interrupted` after a full window.
    * Default: 120000 (2 minutes). Set to `0` to skip waiting (collect only an
-   * already-terminal child).
+   * already-terminal child). Set to `Infinity` to never seal on no-progress —
+   * a silent-but-alive child is then followed until its stream closes (or the
+   * `agentToolReattachMaxWindowMs` ceiling fires), mirroring that knob's
+   * "Infinity = off" convention.
    */
   agentToolReattachNoProgressTimeoutMs?: number;
   /**
@@ -7901,9 +7904,14 @@ export class Agent<
     // Optional no-progress (idle) budget: a re-attach passes this so a child
     // that keeps forwarding chunks is never cut off mid-flight. The timer is
     // (re-)armed on every forwarded chunk and only fires after a full window of
-    // silence. When `idleTimeoutMs` is undefined (the live run path) the idle
-    // promise never resolves, so behaviour is unchanged.
-    const idleEnabled = typeof idleTimeoutMs === "number" && idleTimeoutMs > 0;
+    // silence. When `idleTimeoutMs` is undefined (the live run path) OR
+    // non-finite (`Infinity` = "never seal on no-progress") the idle promise
+    // never resolves, so the forward loop ends only on a clean stream-close or
+    // the caller's ceiling signal — never on silence.
+    const idleEnabled =
+      typeof idleTimeoutMs === "number" &&
+      idleTimeoutMs > 0 &&
+      Number.isFinite(idleTimeoutMs);
     let resolveIdle: (() => void) | undefined;
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     const idlePromise = new Promise<void>((resolve) => {
@@ -8315,8 +8323,12 @@ export class Agent<
     let nextSequence = sequence;
 
     // A non-positive no-progress budget means "do not wait" — only collect an
-    // already-terminal child without tailing.
-    if (!(noProgressTimeoutMs > 0) || !Number.isFinite(noProgressTimeoutMs)) {
+    // already-terminal child without tailing. A non-finite (`Infinity`) budget
+    // is the OPPOSITE — "never seal on no-progress": it falls through to the
+    // tail loop below, where a non-finite budget disables the idle timer so a
+    // silent-but-alive child is followed until its stream closes (or the hard
+    // ceiling fires), matching the `maxWindowMs` "Infinity = off" convention.
+    if (!(noProgressTimeoutMs > 0)) {
       return (
         (await collectTerminal(nextSequence)) ?? {
           sequence: nextSequence,

@@ -2231,9 +2231,17 @@ export class ThinkAgentToolParent extends Agent {
    *    despite the earlier progress (it seals `no-progress` after a single tail,
    *    proving both the honest-stall semantics and that no fresh reader is
    *    abandoned per cycle).
+   *  - `"infinite-no-progress-ceiling"`: an `Infinity` no-progress budget on a
+   *    totally silent, never-closing stream ⇒ the idle timer is disabled, so
+   *    silence alone NEVER seals `no-progress`; only the finite hard ceiling
+   *    ends the wait (`window-exceeded`). Pre-fix, `Infinity` short-circuited to
+   *    an immediate `no-progress` seal with zero tail attempts.
    */
   async reattachScriptedAdapterForTest(
-    scenario: "rearm-then-complete" | "idle-after-progress"
+    scenario:
+      | "rearm-then-complete"
+      | "idle-after-progress"
+      | "infinite-no-progress-ceiling"
   ): Promise<{ status?: string; reason?: string; tailAttempts: number }> {
     let tailAttempts = 0;
     let inspectCalls = 0;
@@ -2286,6 +2294,13 @@ export class ThinkAgentToolParent extends Agent {
             ? makeStream(["a", "b"], true)
             : makeStream([], true);
         }
+        // `infinite-no-progress-ceiling`: a totally silent, never-closing
+        // stream. With an `Infinity` no-progress budget the idle timer is
+        // disabled, so the ONLY thing that can end the wait is the finite hard
+        // ceiling — proving silence alone no longer seals `no-progress`.
+        if (scenario === "infinite-no-progress-ceiling") {
+          return makeStream([], false);
+        }
         return makeStream(["a", "b"], false);
       }
     };
@@ -2312,8 +2327,16 @@ export class ThinkAgentToolParent extends Agent {
         parent_tool_call_id: null
       },
       1,
-      scenario === "idle-after-progress" ? 50 : 5_000,
-      10_000
+      // no-progress budget: tight for the stall scenario, Infinity for the
+      // "never seal on silence" scenario, generous otherwise.
+      scenario === "idle-after-progress"
+        ? 50
+        : scenario === "infinite-no-progress-ceiling"
+          ? Number.POSITIVE_INFINITY
+          : 5_000,
+      // hard ceiling: a short finite cap for the infinite-budget scenario so the
+      // otherwise-unbounded silent wait still terminates the test.
+      scenario === "infinite-no-progress-ceiling" ? 150 : 10_000
     );
 
     return {
