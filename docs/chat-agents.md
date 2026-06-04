@@ -664,14 +664,18 @@ override chatRecovery = {
   maxAttempts: 10,
   stableTimeoutMs: 10_000,
   terminalMessage: "The assistant was interrupted and could not recover.",
+  // Primary stuck-turn bound. Resets on every progress-bearing attempt, so a
+  // turn that keeps producing content survives unbounded interruption.
+  noProgressTimeoutMs: 5 * 60 * 1000,
   // Runaway-loop guard. Defaults to Infinity (no cap). Set a finite value to
   // seal a turn that keeps emitting content but never converges.
   maxRecoveryWork: 200,
   // Caller policy consulted from the second recovery attempt onward. Return
   // false to stop recovery. This is where you enforce a token/cost budget.
-  // Note: this is called as `config.shouldContinue(ctx)`, so it is not bound to
-  // the agent instance — track spend in your own store keyed by the incident.
-  async shouldContinue(ctx) {
+  // Note: this is called as `config.shouldKeepRecovering(ctx)`, so it is not
+  // bound to the agent instance — track spend in your own store keyed by the
+  // incident.
+  async shouldKeepRecovering(ctx) {
     return (await getSpendForTurn(ctx.recoveryRootRequestId)) < MAX_SPEND;
   },
   async onExhausted(ctx) {
@@ -682,24 +686,38 @@ override chatRecovery = {
 
 **`chatRecovery` configuration:**
 
-| Field             | Default         | Description                                                                                                                                                                                                                                                                                                |
-| ----------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `maxAttempts`     | `10`            | Attempt cap before terminal exhaustion. Resets on forward progress, so it catches a tight no-progress alarm loop, not a healthy long turn.                                                                                                                                                                 |
-| `stableTimeoutMs` | `10_000`        | How long a recovery attempt waits for the isolate to reach stable state before rescheduling.                                                                                                                                                                                                               |
-| `terminalMessage` | generic message | The message shown to the user when recovery is given up on.                                                                                                                                                                                                                                                |
-| `maxRecoveryWork` | `Infinity`      | Runaway-loop guard. Maximum produced content/tool units since the incident began before a still-progressing turn is sealed. Defaults to no cap.                                                                                                                                                            |
-| `shouldContinue`  | —               | Caller policy consulted from the second recovery attempt onward (never on the first detection, never once a hard bound has sealed the incident). Return `false` to stop recovery. The hook point for a token/cost budget — `ctx.work` is a coarse segment count, not tokens, so track real spend yourself. |
-| `onExhausted`     | —               | Called once when recovery is given up on, before the terminal message is delivered. Inspect `ctx.reason` for why.                                                                                                                                                                                          |
+| Field                  | Default           | Description                                                                                                                                                                                                                                                                                                |
+| ---------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `maxAttempts`          | `10`              | Attempt cap before terminal exhaustion. Resets on forward progress, so it catches a tight no-progress alarm loop, not a healthy long turn.                                                                                                                                                                 |
+| `stableTimeoutMs`      | `10_000`          | How long a recovery attempt waits for the isolate to reach stable state before rescheduling.                                                                                                                                                                                                               |
+| `terminalMessage`      | generic message   | The message shown to the user when recovery is given up on.                                                                                                                                                                                                                                                |
+| `noProgressTimeoutMs`  | `300_000` (5 min) | Primary stuck-turn bound: how long an incident may go without forward progress before it is sealed (`no_progress_timeout`). **Resets on every progress-bearing attempt**, so a turn that keeps producing content survives unbounded interruption.                                                          |
+| `maxRecoveryWork`      | `Infinity`        | Runaway-loop guard. Maximum produced content/tool units since the incident began before a still-progressing turn is sealed. Defaults to no cap.                                                                                                                                                            |
+| `shouldKeepRecovering` | —                 | Caller policy consulted from the second recovery attempt onward (never on the first detection, never once a hard bound has sealed the incident). Return `false` to stop recovery. The hook point for a token/cost budget — `ctx.work` is a coarse segment count, not tokens, so track real spend yourself. |
+| `onExhausted`          | —                 | Called once when recovery is given up on, before the terminal message is delivered. Inspect `ctx.reason` for why.                                                                                                                                                                                          |
+
+**`ChatRecoveryProgressContext`** (the `ctx` passed to `shouldKeepRecovering`):
+
+| Field                   | Type                    | Description                                                                                       |
+| ----------------------- | ----------------------- | ------------------------------------------------------------------------------------------------- |
+| `incidentId`            | `string`                | Stable ID for this recovery incident.                                                             |
+| `requestId`             | `string`                | Request ID for the current continuation (changes per chained continuation).                       |
+| `recoveryRootRequestId` | `string`                | Stable ID for the whole continuation chain — the right key for per-incident budget tracking.      |
+| `attempt`               | `number`                | Attempt number for this incident (2 or greater when this hook runs).                              |
+| `maxAttempts`           | `number`                | Configured attempt cap.                                                                           |
+| `recoveryKind`          | `"retry" \| "continue"` | Whether recovery retries an unanswered user turn or continues a partial assistant turn.           |
+| `work`                  | `number`                | Coarse, monotonic count of content/tool segments produced since the incident opened (not tokens). |
+| `ageMs`                 | `number`                | Wall-clock ms since the incident's first interruption.                                            |
 
 A progressing turn is never terminated by the framework on its own — it survives unbounded interruption (for example a dense deploy window) as long as it keeps making forward progress. Recovery is sealed only by one of these `ctx.reason` values:
 
 - `no_progress_timeout` — no forward progress within the no-progress window (a stuck turn).
 - `max_attempts_exceeded` — the attempt cap was spent on a tight no-progress alarm loop.
 - `work_budget_exceeded` — the turn kept producing content but exceeded `maxRecoveryWork` (a runaway loop).
-- `recovery_aborted` — your `shouldContinue` hook returned `false`.
+- `recovery_aborted` — your `shouldKeepRecovering` hook returned `false`.
 - `stable_timeout` — recovery attempts kept timing out waiting for stable state until the budget drained (extreme churn).
 
-> Setting a finite `maxRecoveryWork` reintroduces a false-positive risk for a legitimately long turn — pick a cap well above what a healthy turn produces, or prefer `shouldContinue` with real token/cost accounting for a precise budget.
+> Setting a finite `maxRecoveryWork` reintroduces a false-positive risk for a legitimately long turn — pick a cap well above what a healthy turn produces, or prefer `shouldKeepRecovering` with real token/cost accounting for a precise budget.
 
 Monitor recovery through observability:
 

@@ -1594,11 +1594,11 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.recoveryShouldThrow = shouldThrow;
   }
 
-  /** Configure recovery with a built-in `shouldContinue` predicate. Functions
-   *  can't cross the RPC boundary, so this sets the predicate in-DO rather than
-   *  accepting one through `setChatRecoveryConfigForTest`. */
-  setRecoveryShouldContinueForTest(shouldContinue: boolean): void {
-    this.chatRecovery = { shouldContinue: () => shouldContinue };
+  /** Configure recovery with a built-in `shouldKeepRecovering` predicate.
+   *  Functions can't cross the RPC boundary, so this sets the predicate in-DO
+   *  rather than accepting one through `setChatRecoveryConfigForTest`. */
+  setShouldKeepRecoveringForTest(keepRecovering: boolean): void {
+    this.chatRecovery = { shouldKeepRecovering: () => keepRecovering };
   }
 
   enableThrowingOnExhaustedForTest(

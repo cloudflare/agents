@@ -47,8 +47,9 @@ interface ChatRecoveryTestStub {
     maxAttempts?: number;
     terminalMessage?: string;
     maxRecoveryWork?: number;
+    noProgressTimeoutMs?: number;
   }): Promise<void>;
-  setRecoveryShouldContinueForTest(shouldContinue: boolean): Promise<void>;
+  setShouldKeepRecoveringForTest(keepRecovering: boolean): Promise<void>;
   getChatRecoveryIncidentsForTest(): Promise<unknown[]>;
   addAssistantMessageForTest(id: string): Promise<void>;
   bumpRecoveryProgressForTest(): Promise<void>;
@@ -495,10 +496,10 @@ describe("onChatRecovery", () => {
     expect(next.reason).toBe("work_budget_exceeded");
   });
 
-  it("seals when the shouldContinue predicate returns false (recovery_aborted)", async () => {
+  it("seals when the shouldKeepRecovering predicate returns false (recovery_aborted)", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
-    await agentStub.setRecoveryShouldContinueForTest(false);
+    await agentStub.setShouldKeepRecoveringForTest(false);
 
     const base = {
       requestId: "req-abort",
@@ -543,6 +544,36 @@ describe("onChatRecovery", () => {
     const past = await agentStub.beginIncidentForTest({
       ...base,
       nowMs: t0 + 6 * 60 * 1000
+    });
+    expect(past.exhausted).toBe(true);
+    expect(past.reason).toBe("no_progress_timeout");
+  });
+
+  it("honors a custom noProgressTimeoutMs override", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    // A tight 1-min no-progress window instead of the 5-min default.
+    await agentStub.setChatRecoveryConfigForTest({
+      maxAttempts: 100,
+      noProgressTimeoutMs: 60_000
+    });
+
+    const base = {
+      requestId: "req-np-cfg",
+      recoveryRootRequestId: "req-np-cfg",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue" as const
+    };
+    const t0 = 8_000_000;
+    expect(
+      (await agentStub.beginIncidentForTest({ ...base, nowMs: t0 })).exhausted
+    ).toBe(false);
+
+    // 90s later with no progress — past the custom 1-min window (the 5-min
+    // default would NOT have sealed here), so it seals on no-progress.
+    const past = await agentStub.beginIncidentForTest({
+      ...base,
+      nowMs: t0 + 90_000
     });
     expect(past.exhausted).toBe(true);
     expect(past.reason).toBe("no_progress_timeout");

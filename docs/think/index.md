@@ -403,7 +403,7 @@ import type {
 
 export class MyAgent extends Think<Env> {
   override chatRecovery = {
-    maxAttempts: 6,
+    maxAttempts: 10,
     terminalMessage: "The assistant was interrupted. Please try again."
   };
 

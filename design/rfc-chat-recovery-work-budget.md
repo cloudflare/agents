@@ -47,19 +47,36 @@ Decouple the two jobs.
    when `work = progress - workBaseline` exceeds `maxRecoveryWork`
    (`reason="work_budget_exceeded"`).
 
-3. **Add a caller predicate hook** `shouldContinue(ctx)`, invoked per recovery
-   attempt (only when no hard bound has already sealed the incident). Returning
-   `false` seals with `reason="recovery_aborted"`. This is where integrators
-   express token / cost / semantic-step budgets the SDK should not hardcode. A
-   throwing predicate is logged and treated as "continue" so a buggy hook cannot
-   wedge a turn.
+3. **Add a caller predicate hook** `shouldKeepRecovering(ctx)`, invoked per
+   recovery attempt from the second onward (only when no hard bound has already
+   sealed the incident). Returning `false` seals with
+   `reason="recovery_aborted"`. This is where integrators express token / cost /
+   semantic-step budgets the SDK should not hardcode. A throwing predicate is
+   logged and treated as "keep recovering" so a buggy hook cannot wedge a turn.
 
-All three new knobs live on `ChatRecoveryConfig`:
+4. **Expose the no-progress timeout** as `noProgressTimeoutMs` (default 5 min,
+   resets on progress). With the wall-clock ceiling gone it is the primary
+   stuck-turn bound, and it was the only recovery limit still hardcoded;
+   exposing it keeps the config surface consistent (`maxAttempts`,
+   `stableTimeoutMs`, `maxRecoveryWork` are all configurable). Safe to expose
+   because it resets on progress, so it only bites genuinely idle turns.
+
+The new knobs live on `ChatRecoveryConfig`:
 
 ```ts
 maxRecoveryWork?: number; // default Infinity
-shouldContinue?(ctx: ChatRecoveryProgressContext): boolean | Promise<boolean>;
+noProgressTimeoutMs?: number; // default 300_000 (5 min)
+shouldKeepRecovering?(ctx: ChatRecoveryProgressContext): boolean | Promise<boolean>;
 ```
+
+### Naming
+
+The predicate is `shouldKeepRecovering`, not `shouldContinue`: `continue` is
+already overloaded in this API (`ChatRecoveryOptions.continue` and
+`continueLastTurn()`), so `shouldContinue` read as "should I call
+`continueLastTurn`?" rather than "should the recovery loop keep going?". The
+work cap stays `maxRecoveryWork`/`ctx.work` — "work" honestly conveys "units of
+progress" and the config/context pair is self-documenting.
 
 ### Default behavior
 
@@ -68,7 +85,7 @@ imposes **no** implicit work cap. By default the only remaining bounds are the
 no-progress window and the attempt cap (both reset on progress). This is a
 deliberate decision (see "Decision"): a progressing turn is never terminated by
 the framework on its own; integrators that need a runaway backstop set
-`maxRecoveryWork` or `shouldContinue`. Note `maxSteps` is **not** a substitute —
+`maxRecoveryWork` or `shouldKeepRecovering`. Note `maxSteps` is **not** a substitute —
 it bounds a single continuation and resets on each recovery, so it does not
 bound cumulative recovery work (the gap the work budget exists to fill).
 

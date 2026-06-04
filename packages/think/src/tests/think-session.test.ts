@@ -2586,9 +2586,9 @@ describe("Think — onChatRecovery", () => {
     });
   });
 
-  it("seals when the shouldContinue predicate returns false (recovery_aborted)", async () => {
-    const agent = await freshRecoveryAgent("recovery-should-continue");
-    await agent.setRecoveryShouldContinueForTest(false);
+  it("seals when the shouldKeepRecovering predicate returns false (recovery_aborted)", async () => {
+    const agent = await freshRecoveryAgent("recovery-should-keep-recovering");
+    await agent.setShouldKeepRecoveringForTest(false);
 
     // An open incident below every hard bound — only the caller predicate fires.
     await agent.seedIncidentForTest({
@@ -2644,6 +2644,35 @@ describe("Think — onChatRecovery", () => {
     const past = await agent.beginIncidentForTest({
       ...base,
       nowMs: t0 + 6 * 60 * 1000
+    });
+    expect(past.exhausted).toBe(true);
+    expect(past.reason).toBe("no_progress_timeout");
+  });
+
+  it("honors a custom noProgressTimeoutMs override", async () => {
+    const agent = await freshRecoveryAgent("recovery-no-progress-cfg");
+    // A tight 1-min no-progress window instead of the 5-min default.
+    await agent.setChatRecoveryConfigForTest({
+      maxAttempts: 100,
+      noProgressTimeoutMs: 60_000
+    });
+
+    const base = {
+      requestId: "req-np-cfg",
+      recoveryRootRequestId: "req-np-cfg",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue" as const
+    };
+    const t0 = 4_500_000;
+    expect(
+      (await agent.beginIncidentForTest({ ...base, nowMs: t0 })).exhausted
+    ).toBe(false);
+
+    // 90s later with no progress — past the custom 1-min window (the 5-min
+    // default would NOT have sealed here), so it seals on no-progress.
+    const past = await agent.beginIncidentForTest({
+      ...base,
+      nowMs: t0 + 90_000
     });
     expect(past.exhausted).toBe(true);
     expect(past.reason).toBe("no_progress_timeout");

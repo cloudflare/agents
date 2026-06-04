@@ -160,7 +160,7 @@ const DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS = 10;
 // Runaway-loop guard default. `Infinity` = no SDK-imposed work cap: a turn that
 // keeps making forward progress is never terminated by the framework on its own
 // (rfc-chat-recovery-work-budget). Integrators bound a content-emitting runaway
-// by setting `maxRecoveryWork` or a `shouldContinue` predicate.
+// by setting `maxRecoveryWork` or a `shouldKeepRecovering` predicate.
 const DEFAULT_CHAT_RECOVERY_MAX_WORK = Number.POSITIVE_INFINITY;
 const DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS = 10_000;
 // Auto-continuation barrier (#1649): when the model emits parallel tool calls,
@@ -192,7 +192,8 @@ const CHAT_RECOVERY_INCIDENT_TTL_MS = 60 * 60 * 1000;
 // progress for this long. Keyed to `lastProgressAt`, which resets on every
 // progress-bearing attempt — so a turn that keeps producing content survives
 // deploy churn indefinitely, while a genuinely stuck turn dies within 5 min.
-const CHAT_RECOVERY_NO_PROGRESS_WINDOW_MS = 5 * 60 * 1000;
+// Overridable per-agent via `chatRecovery.noProgressTimeoutMs`.
+const DEFAULT_CHAT_RECOVERY_NO_PROGRESS_TIMEOUT_MS = 5 * 60 * 1000;
 // Alarm debounce: recovery alarms bunched within this window collapse into a
 // single attempt. A deploy rollout drops/reconnects the socket several times
 // over ~11–22s; without this, one logical deploy would burn several attempts.
@@ -3281,13 +3282,20 @@ export class AIChatAgent<
       ),
       terminalMessage:
         custom?.terminalMessage ?? DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,
+      noProgressTimeoutMs: Math.max(
+        0,
+        Math.floor(
+          custom?.noProgressTimeoutMs ??
+            DEFAULT_CHAT_RECOVERY_NO_PROGRESS_TIMEOUT_MS
+        )
+      ),
       maxRecoveryWork:
         typeof custom?.maxRecoveryWork === "number" &&
         custom.maxRecoveryWork >= 0
           ? custom.maxRecoveryWork
           : DEFAULT_CHAT_RECOVERY_MAX_WORK,
-      ...(custom?.shouldContinue
-        ? { shouldContinue: custom.shouldContinue }
+      ...(custom?.shouldKeepRecovering
+        ? { shouldKeepRecovering: custom.shouldKeepRecovering }
         : {}),
       ...(custom?.onExhausted ? { onExhausted: custom.onExhausted } : {})
     };
@@ -3448,14 +3456,13 @@ export class AIChatAgent<
     //    never converges. Keyed to WORK done (produced content/tool units since
     //    the incident opened), not wall-clock, because a healthy long turn and a
     //    runaway differ by bounded work, not duration. Defaults to no cap.
-    //  • CALLER — `shouldContinue` lets the integrator express a token/cost/step
-    //    budget the SDK should not hardcode.
+    //  • CALLER — `shouldKeepRecovering` lets the integrator express a
+    //    token/cost/step budget the SDK should not hardcode.
     const lastProgressAt = madeProgress
       ? now
       : (existing?.lastProgressAt ?? existing?.firstSeenAt ?? now);
     const noProgressExceeded =
-      existing != null &&
-      now - lastProgressAt > CHAT_RECOVERY_NO_PROGRESS_WINDOW_MS;
+      existing != null && now - lastProgressAt > config.noProgressTimeoutMs;
     // Reuse the durable progress counter as a work meter. Baseline is captured
     // when the incident opens; `work` is what the turn produced since.
     const workBaseline = existing?.workBaseline ?? currentProgress;
@@ -3482,13 +3489,13 @@ export class AIChatAgent<
     let abortedByCaller = false;
     if (
       existing != null &&
-      config.shouldContinue &&
+      config.shouldKeepRecovering &&
       !noProgressExceeded &&
       !workBudgetExceeded &&
       attempt <= config.maxAttempts
     ) {
       try {
-        const decision = await config.shouldContinue({
+        const decision = await config.shouldKeepRecovering({
           incidentId,
           requestId: input.requestId,
           recoveryRootRequestId: input.recoveryRootRequestId ?? input.requestId,
@@ -3501,7 +3508,7 @@ export class AIChatAgent<
         abortedByCaller = decision === false;
       } catch (error) {
         console.error(
-          "[AIChatAgent] chatRecovery shouldContinue hook threw",
+          "[AIChatAgent] chatRecovery shouldKeepRecovering hook threw",
           error
         );
       }

@@ -3837,13 +3837,11 @@ export class ThinkRecoveryTestAgent extends Think {
     this.chatRecovery = config;
   }
 
-  /** Configure recovery with a built-in `shouldContinue` predicate. Functions
-   *  can't cross the RPC boundary, so this sets the predicate in-DO rather than
-   *  accepting one through `setChatRecoveryConfigForTest`. */
-  async setRecoveryShouldContinueForTest(
-    shouldContinue: boolean
-  ): Promise<void> {
-    this.chatRecovery = { shouldContinue: () => shouldContinue };
+  /** Configure recovery with a built-in `shouldKeepRecovering` predicate.
+   *  Functions can't cross the RPC boundary, so this sets the predicate in-DO
+   *  rather than accepting one through `setChatRecoveryConfigForTest`. */
+  async setShouldKeepRecoveringForTest(keepRecovering: boolean): Promise<void> {
+    this.chatRecovery = { shouldKeepRecovering: () => keepRecovering };
   }
 
   async getChatRecoveryIncidentsForTest(): Promise<unknown[]> {
