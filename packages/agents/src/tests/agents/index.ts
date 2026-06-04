@@ -29,6 +29,7 @@ export {
   TestScheduleAgent
 } from "./schedule";
 export { TestWorkflowAgent } from "./workflow";
+export { TestAgentToolReplayAgent } from "./agent-tool-replay";
 export { TestOAuthAgent, TestCustomOAuthAgent } from "./oauth";
 export { TestReadonlyAgent } from "./readonly";
 export { TestProtocolMessagesAgent } from "./protocol-messages";

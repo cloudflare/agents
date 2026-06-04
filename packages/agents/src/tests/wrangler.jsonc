@@ -78,6 +78,10 @@
         "name": "TestWorkflowAgent"
       },
       {
+        "class_name": "TestAgentToolReplayAgent",
+        "name": "TestAgentToolReplayAgent"
+      },
+      {
         "class_name": "TestAddMcpServerAgent",
         "name": "TestAddMcpServerAgent"
       },
@@ -308,6 +312,7 @@
         "TestOnStartScheduleNoWarnAgent",
         "TestOnStartScheduleExplicitFalseAgent",
         "TestWorkflowAgent",
+        "TestAgentToolReplayAgent",
         "TestAddMcpServerAgent",
         "TestRpcMcpClientAgent",
         "TestHttpMcpDedupAgent",

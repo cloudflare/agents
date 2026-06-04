@@ -29,6 +29,7 @@ export {
   TestOnStartScheduleExplicitFalseAgent,
   TestScheduleAgent,
   TestWorkflowAgent,
+  TestAgentToolReplayAgent,
   TestOAuthAgent,
   TestCustomOAuthAgent,
   TestReadonlyAgent,
@@ -104,6 +105,7 @@ import type {
   TestProtocolMessagesAgent,
   TestScheduleAgent,
   TestWorkflowAgent,
+  TestAgentToolReplayAgent,
   TestAddMcpServerAgent,
   TestHttpMcpDedupAgent,
   TestStateAgent,
@@ -153,6 +155,7 @@ export type Env = {
   TestProtocolMessagesAgent: DurableObjectNamespace<TestProtocolMessagesAgent>;
   TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
   TestWorkflowAgent: DurableObjectNamespace<TestWorkflowAgent>;
+  TestAgentToolReplayAgent: DurableObjectNamespace<TestAgentToolReplayAgent>;
   TestAddMcpServerAgent: DurableObjectNamespace<TestAddMcpServerAgent>;
   TestRpcMcpClientAgent: DurableObjectNamespace<TestRpcMcpClientAgent>;
   TestHttpMcpDedupAgent: DurableObjectNamespace<TestHttpMcpDedupAgent>;

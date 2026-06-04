@@ -574,6 +574,8 @@ type AgentToolRunStorageRow = {
   summary: string | null;
   output_json: string | null;
   error_message: string | null;
+  interrupted_reason: string | null;
+  child_still_running: number | null;
   display_metadata: string | null;
   display_order: number;
   started_at: number;
@@ -949,7 +951,7 @@ type AgentToolRecoveryInspection =
  * The constructor stores this as a row in cf_agents_state and checks it
  * on wake to skip DDL on established DOs.
  */
-const CURRENT_SCHEMA_VERSION = 8;
+const CURRENT_SCHEMA_VERSION = 9;
 
 const SCHEMA_VERSION_ROW_ID = "cf_schema_version";
 const STATE_ROW_ID = "cf_state_row_id";
@@ -1957,6 +1959,8 @@ export class Agent<
           summary TEXT,
           output_json TEXT,
           error_message TEXT,
+          interrupted_reason TEXT,
+          child_still_running INTEGER,
           display_metadata TEXT,
           display_order INTEGER NOT NULL DEFAULT 0,
           started_at INTEGER NOT NULL,
@@ -1971,6 +1975,15 @@ export class Agent<
 
       addColumnIfNotExists(
         "ALTER TABLE cf_agent_tool_runs ADD COLUMN output_json TEXT"
+      );
+      // #1630 follow-up: persist the typed interrupted cause so it survives a
+      // reconnect replay (otherwise live clients see `reason`/`childStillRunning`
+      // but reconnecting clients replay them as `undefined`).
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agent_tool_runs ADD COLUMN interrupted_reason TEXT"
+      );
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agent_tool_runs ADD COLUMN child_still_running INTEGER"
       );
 
       // Mark schema as up-to-date
@@ -7558,13 +7571,37 @@ export class Agent<
   private _readAgentToolRun(runId: string): AgentToolRunStorageRow | null {
     const rows = this.sql<AgentToolRunStorageRow>`
       SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
-             summary, output_json, error_message, display_metadata, display_order,
+             summary, output_json, error_message, interrupted_reason,
+             child_still_running, display_metadata, display_order,
              started_at, completed_at
       FROM cf_agent_tool_runs
       WHERE run_id = ${runId}
       LIMIT 1
     `;
     return rows[0] ?? null;
+  }
+
+  /**
+   * Reconstruct the typed interrupted cause (`reason` / `childStillRunning`,
+   * #1630 follow-up) from a stored row so a row→result/event rebuild — e.g. a
+   * reconnect replay — carries the same fields a live client saw. Only
+   * `interrupted` rows store a cause; everything else yields `{}` (the columns
+   * are cleared whenever a row settles to a hard terminal).
+   */
+  private _agentToolInterruptedExtrasFromRow(row: {
+    status: AgentToolRunStatus;
+    interrupted_reason: string | null;
+    child_still_running: number | null;
+  }): { reason?: AgentToolInterruptedReason; childStillRunning?: boolean } {
+    if (row.status !== "interrupted") return {};
+    return {
+      ...(row.interrupted_reason !== null
+        ? { reason: row.interrupted_reason as AgentToolInterruptedReason }
+        : {}),
+      ...(row.child_still_running !== null
+        ? { childStillRunning: row.child_still_running !== 0 }
+        : {})
+    };
   }
 
   private _resultFromAgentToolRow<Output>(
@@ -7579,7 +7616,8 @@ export class Agent<
       status: row.status as RunAgentToolResult<Output>["status"],
       ...(output !== undefined ? { output } : {}),
       ...(row.summary !== null ? { summary: row.summary } : {}),
-      ...(row.error_message !== null ? { error: row.error_message } : {})
+      ...(row.error_message !== null ? { error: row.error_message } : {}),
+      ...this._agentToolInterruptedExtrasFromRow(row)
     };
   }
 
@@ -7687,12 +7725,25 @@ export class Agent<
     // in the guard below: a later child completion (via a re-issue's re-attach,
     // #1630) can repair an `interrupted` row to `completed`/`error`. The three
     // HARD terminals are never overwritten.
+    // Persist the typed interrupted cause (#1630 follow-up) so a reconnect
+    // replay reconstructs the same `reason` / `childStillRunning` a live client
+    // saw. Written unconditionally so repairing an `interrupted` row to a hard
+    // terminal (e.g. a re-attach that finally collects `completed`) CLEARS the
+    // stale cause rather than leaving it dangling.
+    const childStillRunning =
+      result.childStillRunning === undefined
+        ? null
+        : result.childStillRunning
+          ? 1
+          : 0;
     this.sql`
       UPDATE cf_agent_tool_runs
       SET status = ${result.status},
           summary = ${result.summary ?? null},
           output_json = ${this._stringifyAgentToolOutput(result.output)},
           error_message = ${result.error ?? null},
+          interrupted_reason = ${result.reason ?? null},
+          child_still_running = ${childStillRunning},
           completed_at = ${completedAt}
       WHERE run_id = ${runId}
         AND status NOT IN ('completed', 'error', 'aborted')
@@ -8375,11 +8426,14 @@ export class Agent<
       summary: string | null;
       output_json: string | null;
       error_message: string | null;
+      interrupted_reason: string | null;
+      child_still_running: number | null;
       display_metadata: string | null;
       display_order: number;
     }>`
       SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
-             summary, output_json, error_message, display_metadata, display_order
+             summary, output_json, error_message, interrupted_reason,
+             child_still_running, display_metadata, display_order
       FROM cf_agent_tool_runs
       ORDER BY started_at ASC
     `;
@@ -8425,7 +8479,8 @@ export class Agent<
             status: row.status as RunAgentToolResult["status"],
             output: this._parseAgentToolJson(row.output_json),
             summary: row.summary ?? undefined,
-            error: row.error_message ?? undefined
+            error: row.error_message ?? undefined,
+            ...this._agentToolInterruptedExtrasFromRow(row)
           },
           true,
           connection
@@ -8459,7 +8514,8 @@ export class Agent<
     const deferredFinishes: DeferredAgentToolFinish[] = [];
     const rows = this.sql<AgentToolRunStorageRow>`
       SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
-             summary, output_json, error_message, display_metadata, display_order,
+             summary, output_json, error_message, interrupted_reason,
+             child_still_running, display_metadata, display_order,
              started_at, completed_at
       FROM cf_agent_tool_runs
       WHERE status IN ('starting', 'running')
