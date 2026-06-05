@@ -8,6 +8,7 @@
 import { describe, it, expect, afterAll, beforeAll } from "vitest";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { setDefaultAutoSelectFamily } from "node:net";
+import "./harden-net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";

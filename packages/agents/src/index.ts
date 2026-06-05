@@ -1464,6 +1464,9 @@ export class Agent<
   /** Tracks callbacks already warned about during this onStart() to avoid log spam. */
   private _warnedScheduleInOnStart = new Set<string>();
 
+  /** Warn-once guard: `chatRecovery` reassigned during onStart() (too late for wake recovery). */
+  private _warnedChatRecoveryInOnStart = false;
+
   /**
    * Number of active keepAlive() callers. When > 0, `_scheduleNextAlarm()`
    * caps the next alarm at `keepAliveIntervalMs` so the DO stays alive.
@@ -2399,6 +2402,16 @@ export class Agent<
             await this._checkRunFibers();
             const startupAgentToolRunIds = this._agentToolRunRecoveryRunIds();
 
+            // Chat recovery (above, in `_checkRunFibers`) evaluates its budgets
+            // — and may seal an interrupted turn, firing `onExhausted` — BEFORE
+            // the user's onStart runs. So a `chatRecovery` config produced
+            // inside onStart is applied too late for the recovery that matters.
+            // Snapshot the reference (subclasses like Think / AIChatAgent expose
+            // `chatRecovery`; plain Agents leave it undefined) so we can warn if
+            // onStart swaps in a custom config object below.
+            const chatRecoveryBefore = (this as { chatRecovery?: unknown })
+              .chatRecovery;
+
             this._insideOnStart = true;
             this._warnedScheduleInOnStart.clear();
             let result: Awaited<ReturnType<typeof _onStart>>;
@@ -2407,6 +2420,35 @@ export class Agent<
             } finally {
               this._insideOnStart = false;
             }
+
+            const chatRecoveryAfter = (this as { chatRecovery?: unknown })
+              .chatRecovery;
+            // Warn when onStart swaps in a recovery config that would have
+            // mattered: a custom config object OR `chatRecovery = true`
+            // (enabling recovery / its defaults too late). Setting `false`
+            // (disabling) is intentionally NOT warned — recovery already ran
+            // with the pre-onStart value, so disabling here is a benign no-op
+            // for the wake that just happened, not the silent-misconfig bug.
+            const chatRecoveryAfterMatters =
+              (typeof chatRecoveryAfter === "object" &&
+                chatRecoveryAfter !== null) ||
+              chatRecoveryAfter === true;
+            if (
+              !this._warnedChatRecoveryInOnStart &&
+              chatRecoveryBefore !== chatRecoveryAfter &&
+              chatRecoveryAfterMatters
+            ) {
+              this._warnedChatRecoveryInOnStart = true;
+              console.warn(
+                "[Agent] `chatRecovery` was assigned during onStart(). Chat " +
+                  "recovery evaluates its budgets (and may seal an interrupted " +
+                  "turn, firing onExhausted) on wake BEFORE onStart() runs, so a " +
+                  "config set here is applied too late and the built-in defaults " +
+                  "are used for the recovery that matters. Assign `chatRecovery` " +
+                  "as a class field or in the constructor instead."
+              );
+            }
+
             this._scheduleAgentToolRunRecovery({
               runIds: startupAgentToolRunIds
             });
@@ -3461,7 +3503,7 @@ export class Agent<
     }
 
     return (await getServerByName<Cloudflare.Env, Agent>(
-      binding as DurableObjectNamespace<Agent>,
+      binding as unknown as DurableObjectNamespace<Agent>,
       root.name
     )) as unknown as RootFacetRpcSurface;
   }

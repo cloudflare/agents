@@ -10,6 +10,7 @@
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { setDefaultAutoSelectFamily } from "node:net";
+import "./harden-net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
@@ -591,7 +592,7 @@ describe("Think chat recovery e2e", () => {
     expect(fiberRowsAfter).toBe(false);
   });
 
-  it("should interrupt a stale parent agent-tool run after parent restart", async () => {
+  it("should re-attach to a still-running child agent-tool run after parent restart and collect its terminal result (#1630)", async () => {
     wrangler = startWrangler();
     await waitForReady();
 
@@ -609,14 +610,30 @@ describe("Think chat recovery e2e", () => {
     console.log("[test] Killing wrangler with active agent-tool run...");
     wrangler = await restartWrangler(wrangler);
 
-    const recoveredRun = await waitForAgentToolRun(
-      runId,
-      (run) => run.status === "interrupted" || run.status === "error"
-    );
+    // #1630 progress-keyed re-attach: a deploy that interrupts an in-flight
+    // child no longer abandons it as `interrupted`. The parent re-attaches to
+    // the still-running child (the facet self-heals via `continue` recovery)
+    // and tails it to its REAL terminal — collecting `completed`. The child
+    // streams ~10s of chunks, so allow a generous window for it to settle.
+    const recoveredRun = await pollUntil(
+      "agent-tool re-attach terminal",
+      () =>
+        callHelperParent("getAgentToolRuns") as Promise<AgentToolRunStatus[]>,
+      (runs) =>
+        runs.some(
+          (run) =>
+            run.runId === runId &&
+            (run.status === "completed" ||
+              run.status === "interrupted" ||
+              run.status === "error")
+        ),
+      { attempts: 60, delayMs: 1000 }
+    ).then((runs) => runs.find((run) => run.runId === runId));
 
-    expect(recoveredRun.status).toBe("interrupted");
-    expect(recoveredRun.error ?? "").toMatch(
-      /still running|timed out|could not be inspected/
-    );
+    expect(recoveredRun).toBeDefined();
+    // The re-attached, self-healing child reaches its real terminal — it is NOT
+    // abandoned as `interrupted` the way the old flat-budget behavior did.
+    expect(recoveredRun?.status).toBe("completed");
+    expect(recoveredRun?.error ?? null).toBeNull();
   });
 });

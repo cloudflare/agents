@@ -17,6 +17,14 @@
  *   `maxRecoveryWork` / `shouldKeepRecovering`.
  * - `stuck`    — emits no content and parks until aborted, producing no forward
  *   progress. Used to exercise the no-progress timeout.
+ * - `hitl`     — emits a CLIENT tool call (`ask_user`, no server `execute`) and
+ *   finishes CLEANLY with `tool-calls`, so the turn PARKS at `input-available`
+ *   awaiting the human (a `submitMessages` turn leaves its submission `running`,
+ *   which the next isolate's boot-recovery sweep picks up). On the continuation
+ *   that runs AFTER the client replays a `tool-result` (the prompt then carries
+ *   a `role:"tool"` message) it emits a short final answer and finishes. Used to
+ *   exercise the pending-client-interaction recovery exemption (the turn must
+ *   NOT be sealed while parked, and must complete once the human replies).
  */
 import type {
   LanguageModelV3,
@@ -24,7 +32,37 @@ import type {
   LanguageModelV3StreamPart
 } from "@ai-sdk/provider";
 
-export type SyntheticMode = "progress" | "runaway" | "stuck";
+export type SyntheticMode =
+  | "progress"
+  | "runaway"
+  | "stuck"
+  | "hitl"
+  | "server-orphan"
+  | "approval";
+
+/** The client tool the `hitl` mode calls. The driver must register a schema of
+ *  this name in the request's `clientTools` so the framework treats the
+ *  interrupted `input-available` part as CLIENT-resolvable (recovery-exempt),
+ *  and replays its result under this `toolCallId`. */
+export const HITL_TOOL_NAME = "ask_user";
+export const HITL_TOOL_CALL_ID = "ask-user-call-1";
+
+/** Tool-call emission for the "park on a tool" modes. The MODEL behavior is
+ *  identical (emit one tool call, finish with `tool-calls`); the framework's
+ *  reaction differs by tool kind, which is the whole point:
+ *   - `hitl`          → `ask_user` is a CLIENT tool (registered via `clientTools`,
+ *                       no `execute`): parks at `input-available`, recovery-exempt.
+ *   - `server-orphan` → `slow_server` is a SERVER tool whose `execute` hangs;
+ *                       evicted mid-execute it is a NON-client-resolvable orphan
+ *                       (must recover via transcript repair, NOT park/seal).
+ *   - `approval`      → `approve_action` has `needsApproval`: parks at
+ *                       `approval-requested`, recovery-exempt regardless of
+ *                       `clientTools`. */
+const TOOL_PARK_MODES: Record<string, { name: string; callId: string }> = {
+  hitl: { name: HITL_TOOL_NAME, callId: HITL_TOOL_CALL_ID },
+  "server-orphan": { name: "slow_server", callId: "slow-server-call-1" },
+  approval: { name: "approve_action", callId: "approve-action-call-1" }
+};
 
 export type SyntheticConfig = {
   mode: SyntheticMode;
@@ -69,6 +107,12 @@ function highestTick(prompt: LanguageModelV3CallOptions["prompt"]): number {
     }
   }
   return max;
+}
+
+/** Whether the prompt already carries a tool result — i.e. the client replayed
+ *  `ask_user`'s answer, so the `hitl` continuation should finish the turn. */
+function hasToolResult(prompt: LanguageModelV3CallOptions["prompt"]): boolean {
+  return prompt.some((message) => message.role === "tool");
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -120,6 +164,61 @@ export function createSyntheticModel(
         async start(controller) {
           const id = `txt-${crypto.randomUUID()}`;
           controller.enqueue({ type: "stream-start", warnings: [] });
+
+          // Tool-park modes (hitl / server-orphan / approval): emit one tool
+          // call and finish CLEANLY with `tool-calls`. The framework's reaction
+          // depends on the tool kind (see `TOOL_PARK_MODES`). The continuation
+          // that runs after the interaction settles (prompt then carries a
+          // `role:"tool"` message) emits a short final answer and finishes.
+          const park = TOOL_PARK_MODES[cfg.mode];
+          if (park) {
+            if (hasToolResult(options.prompt)) {
+              controller.enqueue({ type: "text-start", id });
+              controller.enqueue({
+                type: "text-delta",
+                id,
+                delta: "Thanks — proceeding with your answer.\n"
+              });
+              controller.enqueue({ type: "text-end", id });
+              controller.enqueue({
+                type: "finish",
+                finishReason: { unified: "stop", raw: undefined },
+                usage: EMPTY_USAGE
+              });
+              onComplete?.();
+              controller.close();
+              return;
+            }
+            controller.enqueue({
+              type: "tool-input-start",
+              id: park.callId,
+              toolName: park.name
+            });
+            controller.enqueue({
+              type: "tool-input-delta",
+              id: park.callId,
+              delta: JSON.stringify({ question: "Proceed?" })
+            });
+            controller.enqueue({ type: "tool-input-end", id: park.callId });
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: park.callId,
+              toolName: park.name,
+              input: JSON.stringify({ question: "Proceed?" })
+            });
+            // Finish CLEANLY with `tool-calls` so the framework settles the tool
+            // call (parks a client/approval tool at `input-available` /
+            // `approval-requested`, or executes a server tool) rather than
+            // seeing a truncated stream.
+            controller.enqueue({
+              type: "finish",
+              finishReason: { unified: "tool-calls", raw: undefined },
+              usage: EMPTY_USAGE
+            });
+            controller.close();
+            return;
+          }
+
           controller.enqueue({ type: "text-start", id });
 
           // Stuck: produce nothing, park until aborted, end without finishing

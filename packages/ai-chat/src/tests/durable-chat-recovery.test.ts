@@ -100,6 +100,14 @@ interface ChatRecoveryTestStub {
     workBaseline?: number;
   }): Promise<void>;
   setForceStableTimeoutForTest(value: boolean): Promise<void>;
+  setRequestContextForTest(
+    body: Record<string, unknown> | undefined,
+    clientTools: Array<{ name: string }>
+  ): Promise<void>;
+  persistPendingToolCallForTest(
+    messageId: string,
+    toolName: string
+  ): Promise<void>;
   runChatRecoveryContinueDirectForTest(
     data: Record<string, unknown>
   ): Promise<void>;
@@ -109,6 +117,7 @@ interface ChatRecoveryTestStub {
   preScheduleRecoveryContinueForTest(
     data: Record<string, unknown>
   ): Promise<void>;
+  preScheduleRecoveryRetryForTest(data: Record<string, unknown>): Promise<void>;
   getIncidentForTest(incidentId: string): Promise<{
     attempt: number;
     status: string;
@@ -571,6 +580,84 @@ describe("onChatRecovery", () => {
 
     // 90s later with no progress — past the custom 1-min window (the 5-min
     // default would NOT have sealed here), so it seals on no-progress.
+    const past = await agentStub.beginIncidentForTest({
+      ...base,
+      nowMs: t0 + 90_000
+    });
+    expect(past.exhausted).toBe(true);
+    expect(past.reason).toBe("no_progress_timeout");
+  });
+
+  it("does NOT seal on no-progress while a CLIENT interaction is pending (HITL turn waiting on the human)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    // Tight 1-min no-progress window + low attempt cap: a stuck turn would seal.
+    await agentStub.setChatRecoveryConfigForTest({
+      maxAttempts: 2,
+      noProgressTimeoutMs: 60_000
+    });
+
+    // Register `chooseOption` as a CLIENT tool, then persist an assistant message
+    // parked on its `input-available` orphan — the SPA replays the tool-result
+    // after reconnect, so the turn is waiting on the human, not stuck.
+    await agentStub.setRequestContextForTest(undefined, [
+      { name: "chooseOption" }
+    ]);
+    await agentStub.persistPendingToolCallForTest(
+      "assistant-hitl",
+      "chooseOption"
+    );
+
+    const base = {
+      requestId: "req-hitl",
+      recoveryRootRequestId: "req-hitl",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue" as const
+    };
+    const t0 = 6_000_000;
+    expect(
+      (await agentStub.beginIncidentForTest({ ...base, nowMs: t0 })).exhausted
+    ).toBe(false);
+
+    // Far past both the no-progress window AND the attempt cap, but a client
+    // interaction is still pending — the turn is budget-free and must NOT seal.
+    const later = await agentStub.beginIncidentForTest({
+      ...base,
+      nowMs: t0 + 10 * 60 * 1000
+    });
+    expect(later.exhausted).toBe(false);
+    expect(later.reason).toBeUndefined();
+  });
+
+  it("STILL seals a dead SERVER-tool orphan on no-progress (the pending-interaction exemption is client-only)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setChatRecoveryConfigForTest({
+      maxAttempts: 100,
+      noProgressTimeoutMs: 60_000
+    });
+
+    // `previewTool` is NOT registered as a client tool — its `input-available`
+    // orphan is dead (its execute() died with the isolate), so it must NOT get
+    // the HITL exemption; it seals normally on no-progress.
+    await agentStub.setRequestContextForTest(undefined, [
+      { name: "chooseOption" }
+    ]);
+    await agentStub.persistPendingToolCallForTest(
+      "assistant-server",
+      "previewTool"
+    );
+
+    const base = {
+      requestId: "req-srv",
+      recoveryRootRequestId: "req-srv",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue" as const
+    };
+    const t0 = 7_000_000;
+    expect(
+      (await agentStub.beginIncidentForTest({ ...base, nowMs: t0 })).exhausted
+    ).toBe(false);
     const past = await agentStub.beginIncidentForTest({
       ...base,
       nowMs: t0 + 90_000
@@ -1201,6 +1288,101 @@ describe("onChatRecovery", () => {
     const incident = await agentStub.getIncidentForTest("inc-retry");
     expect(incident?.attempt).toBe(2);
     expect(incident?.status).toBe("scheduled");
+  });
+
+  it("PARKS a continuation (no reschedule, no budget spent) while a CLIENT interaction is pending", async () => {
+    const agentStub = await getTestAgent(`stable-park-${crypto.randomUUID()}`);
+    await agentStub.setForceStableTimeoutForTest(true);
+
+    // The turn is parked on a CLIENT-tool `input-available` orphan: the SPA will
+    // replay the tool-result after reconnect, so `waitUntilStable` timing out is
+    // expected (the human hasn't answered), NOT churn.
+    await agentStub.setRequestContextForTest(undefined, [
+      { name: "chooseOption" }
+    ]);
+    await agentStub.persistPendingToolCallForTest(
+      "assistant-park",
+      "chooseOption"
+    );
+
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-park",
+      requestId: "root-park",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    const continueData = {
+      incidentId: "inc-park",
+      originalRequestId: "root-park",
+      targetAssistantId: "assistant-park"
+    };
+    await agentStub.preScheduleRecoveryContinueForTest(continueData);
+    await agentStub.runChatRecoveryContinueDirectForTest(continueData);
+
+    // No NEW reschedule row (only the pre-scheduled executing row remains) and
+    // the attempt count did NOT advance — the stable-timeout budget was not
+    // spent. The incident is parked `skipped` for the client's eventual replay.
+    expect(
+      await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
+    ).toBe(1);
+    const parked = await agentStub.getIncidentForTest("inc-park");
+    expect(parked?.attempt).toBe(1);
+    expect(parked?.status).toBe("skipped");
+    expect(parked?.reason).toBe("awaiting_client_interaction");
+  });
+
+  it("PARKS a retry (no reschedule, no budget spent) while a CLIENT interaction is pending", async () => {
+    const agentStub = await getTestAgent(
+      `stable-retry-park-${crypto.randomUUID()}`
+    );
+    await agentStub.setForceStableTimeoutForTest(true);
+
+    // Same HITL park condition as the continue-path test, exercised through the
+    // RETRY loop: a CLIENT-tool `input-available` orphan the SPA will replay
+    // after reconnect, so `waitUntilStable` timing out is the human being slow,
+    // not churn. Guards the retry path's call to the shared park helper.
+    await agentStub.setRequestContextForTest(undefined, [
+      { name: "chooseOption" }
+    ]);
+    await agentStub.persistPendingToolCallForTest(
+      "assistant-retry-park",
+      "chooseOption"
+    );
+
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-retry-park",
+      requestId: "root-retry-park",
+      recoveryKind: "retry",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    const retryData = {
+      incidentId: "inc-retry-park",
+      originalRequestId: "root-retry-park",
+      targetUserId: "u-x"
+    };
+    await agentStub.preScheduleRecoveryRetryForTest(retryData);
+    await agentStub.runChatRecoveryRetryDirectForTest(retryData);
+
+    // No NEW reschedule row (only the pre-scheduled executing row remains) and
+    // the attempt count did NOT advance — the stable-timeout budget was not
+    // spent. The incident is parked `skipped` for the client's eventual replay.
+    expect(
+      await agentStub.getScheduleCountForCallback("_chatRecoveryRetry")
+    ).toBe(1);
+    const parked = await agentStub.getIncidentForTest("inc-retry-park");
+    expect(parked?.attempt).toBe(1);
+    expect(parked?.status).toBe("skipped");
+    expect(parked?.reason).toBe("awaiting_client_interaction");
   });
 
   it("exhausts via onExhausted once the stable-state continue budget is spent", async () => {

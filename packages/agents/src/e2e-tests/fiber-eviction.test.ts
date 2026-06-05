@@ -14,7 +14,7 @@
  */
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
-import { setDefaultAutoSelectFamily } from "node:net";
+import { setDefaultAutoSelectFamily, Socket } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
@@ -24,6 +24,28 @@ import fs from "node:fs";
 // can throw a connect-time `setTypeOfService` EINVAL that surfaces as an
 // unhandled error and fails an otherwise-green chaos run.
 setDefaultAutoSelectFamily(false);
+
+// Write-time variant: undici's `writeH1` calls `socket.setTypeOfService(...)` on
+// every request when the socket exposes it. Against a server being torn down the
+// `setsockopt(IP_TOS)` syscall returns EINVAL, thrown *synchronously* inside
+// undici — no `fetch`/WebSocket call site can catch it, so it surfaces as an
+// unhandled exception and fails an otherwise-green run. We never use IP
+// type-of-service, so make the optional setter best-effort.
+{
+  const proto = Socket.prototype as unknown as {
+    setTypeOfService?: (tos: number) => unknown;
+  };
+  const original = proto.setTypeOfService;
+  if (typeof original === "function") {
+    proto.setTypeOfService = function (this: unknown, tos: number) {
+      try {
+        return original.call(this, tos);
+      } catch {
+        return this;
+      }
+    };
+  }
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 18799;

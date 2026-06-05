@@ -1149,6 +1149,15 @@ export class ThinkRecoveryHelperParent extends Agent<Env> {
     runId: string,
     prompt: string
   ): Promise<string> {
+    // #1630: a parent that re-attaches to a still-running child after a deploy
+    // must follow it to its REAL terminal instead of abandoning it as
+    // `interrupted`. The child facet is named by `runId` (runAgentTool resolves
+    // it via subAgent(cls, runId)), so configure it to self-heal (continue) on
+    // recovery BEFORE starting the run — the re-attached parent then collects
+    // `completed`, not an abandoned interrupt.
+    const child = await this.subAgent(ThinkRecoveryHelperAgent, runId);
+    await child.setRecoveryBehavior("continue");
+
     void this.runAgentTool(ThinkRecoveryHelperAgent, {
       runId,
       input: prompt

@@ -206,6 +206,15 @@ export type ChatRecoveryProgressContext = {
  * Configuration for durable chat recovery. `true` uses these defaults:
  * `maxAttempts: 10`, `stableTimeoutMs: 10_000`, `noProgressTimeoutMs: 300_000`
  * (5 min), `maxRecoveryWork: Infinity`, and a generic terminal message.
+ *
+ * **Apply this as a class field or in the constructor — never assign it in
+ * `onStart()`.** On every wake the SDK evaluates recovery budgets (and may seal
+ * an interrupted turn, firing `onExhausted`) BEFORE your `onStart()` body runs.
+ * A config produced inside `onStart()` is therefore read as the built-in
+ * defaults at the moment recovery decides, so your budgets / `shouldKeepRecovering`
+ * / `onExhausted` silently never apply to the recovery that matters. The SDK
+ * logs a one-time warning if it detects `chatRecovery` being assigned during
+ * `onStart()`.
  */
 export type ChatRecoveryConfig =
   | boolean

@@ -602,6 +602,8 @@ When enabled, every `onChatMessage` call runs inside a fiber. If the agent is ev
 
 `AIChatAgent` defaults `chatRecovery` to `false` so existing chat agents only get client reconnect/resumable-stream behavior. `Think` defaults it to `true`.
 
+> **Assign `chatRecovery` as a class field or in the constructor — never in `onStart()`.** On every wake the SDK evaluates recovery budgets (and may seal an interrupted turn, firing `onExhausted`) _before_ your `onStart()` body runs. A config produced inside `onStart()` is therefore read as the built-in defaults at the moment recovery decides, so your `maxRecoveryWork` / `shouldKeepRecovering` / `onExhausted` silently never apply to the recovery that matters. The SDK logs a one-time warning if it detects `chatRecovery` being assigned during `onStart()`.
+
 #### `onChatRecovery`
 
 Override to implement provider-specific recovery. The default behavior persists the partial response and schedules a continuation via `continueLastTurn()`.
@@ -718,6 +720,12 @@ A progressing turn is never terminated by the framework on its own — it surviv
 - `stable_timeout` — recovery attempts kept timing out waiting for stable state until the budget drained (extreme churn).
 
 > Setting a finite `maxRecoveryWork` reintroduces a false-positive risk for a legitimately long turn — pick a cap well above what a healthy turn produces, or prefer `shouldKeepRecovering` with real token/cost accounting for a precise budget.
+
+#### Turns waiting on a human are not sealed
+
+A turn parked on a pending **client** interaction — a tool part in `input-available` state for a client-side tool (one with no server `execute`, whose result the client replays), or a part in `approval-requested` state — is _waiting on the human_, not stuck. While such an interaction is pending, the turn is exempt from every recovery budget: the no-progress window, attempt cap, `maxRecoveryWork`, and `shouldKeepRecovering` are all suspended, so a slow human (for example, a user who takes minutes to answer a confirmation prompt that was interrupted by a deploy) never trips a seal. Instead of rescheduling or exhausting, recovery **parks** the incident (status `skipped`, reason `awaiting_client_interaction`) and clears the live "recovering…" indicator; the client's eventual reconnect-and-replay resumes the turn through the normal continuation path. A client that never returns is reclaimed by the incident TTL sweep and Durable Object idle eviction.
+
+This exemption is intentionally **client-only**. A server tool whose `execute()` died with the evicted isolate is a genuine orphan — nothing will ever resolve it — so server-tool interruptions are not exempt and recover normally through the transcript-repair pass.
 
 Monitor recovery through observability:
 

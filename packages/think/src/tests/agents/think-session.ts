@@ -4940,6 +4940,34 @@ export class ThinkRecoveryTestAgent extends Think {
     internals._lastClientTools = clientTools;
   }
 
+  /**
+   * Simulate the durable state a HITL turn leaves before a Durable Object
+   * restart: the client tools are persisted to the `think_config` store (where
+   * onStart's `_restoreClientTools()` reads them), while the IN-MEMORY cache is
+   * cleared to mimic a fresh wake whose onStart has not run yet. Used to
+   * exercise the hibernation ordering guard in `_beginChatRecoveryIncident`.
+   */
+  async seedDurableClientToolsForTest(
+    clientTools: ClientToolSchema[]
+  ): Promise<void> {
+    const internals = this as unknown as {
+      _lastClientTools?: ClientToolSchema[];
+      _persistClientTools(): void;
+    };
+    internals._lastClientTools = clientTools;
+    internals._persistClientTools();
+    internals._lastClientTools = undefined;
+  }
+
+  /** Clear the in-memory client-tool cache (without touching the durable
+   *  `think_config` store) to simulate a fresh post-hibernation wake whose
+   *  onStart `_restoreClientTools()` has not run yet. */
+  async clearInMemoryClientToolsForTest(): Promise<void> {
+    (
+      this as unknown as { _lastClientTools?: ClientToolSchema[] }
+    )._lastClientTools = undefined;
+  }
+
   async insertInterruptedStream(
     streamId: string,
     requestId: string,
@@ -5038,6 +5066,14 @@ export class ThinkRecoveryTestAgent extends Think {
       SELECT status FROM cf_think_submissions WHERE submission_id = ${submissionId}
     `;
     return rows[0]?.status ?? null;
+  }
+
+  /** Drive the boot-time submission sweep to assert a parked (completed)
+   *  submission isn't resurrected as an error on the next restart. */
+  async recoverSubmissionsOnStartForTest(): Promise<void> {
+    await (
+      this as unknown as { _recoverSubmissionsOnStart(): Promise<void> }
+    )._recoverSubmissionsOnStart();
   }
 
   async runChatRecoveryContinueForTestWith(

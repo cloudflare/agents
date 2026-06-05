@@ -1811,6 +1811,15 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     });
   }
 
+  /** Retry-path twin of {@link preScheduleRecoveryContinueForTest}. */
+  async preScheduleRecoveryRetryForTest(
+    data: Record<string, unknown>
+  ): Promise<void> {
+    await this.schedule(60, "_chatRecoveryRetry", data, {
+      idempotent: false
+    });
+  }
+
   async getChatRecoveringForTest(): Promise<{ requestId?: string } | null> {
     return (
       (await this.ctx.storage.get<{ requestId?: string }>(
@@ -1851,6 +1860,30 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     };
     this.messages = [...this.messages, message];
     await this.persistMessages(this.messages);
+  }
+
+  /** Persist an assistant message parked on a tool's `input-available` orphan,
+   *  to exercise the pending-CLIENT-interaction recovery exemption. The tool is
+   *  treated as client-resolvable only if its name was registered via
+   *  `setRequestContextForTest`. */
+  async persistPendingToolCallForTest(
+    messageId: string,
+    toolName: string
+  ): Promise<void> {
+    await this.persistMessages([
+      {
+        id: messageId,
+        role: "assistant" as const,
+        parts: [
+          {
+            type: `tool-${toolName}`,
+            toolCallId: `call_${messageId}`,
+            state: "input-available",
+            input: {}
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
   }
 
   /** Simulate recovery forward progress: advance the durable progress counter

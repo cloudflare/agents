@@ -454,6 +454,12 @@ export class AIChatAgent<
    * When true, chat turns are wrapped in `runFiber` for durable execution.
    * Enables `onChatRecovery` hook and `this.stash()` during streaming.
    * Set to `true` in subclasses to enable durable streaming.
+   *
+   * Assign this as a class field or in the constructor — NOT in `onStart()`.
+   * On every wake the SDK evaluates recovery budgets (and may seal an
+   * interrupted turn, firing `onExhausted`) before `onStart()` runs, so a config
+   * set in `onStart()` is applied too late and the built-in defaults are used
+   * for the recovery that matters. See {@link ChatRecoveryConfig}.
    */
   chatRecovery: ChatRecoveryConfig = false;
 
@@ -2016,6 +2022,93 @@ export class AIChatAgent<
   }
 
   /**
+   * `true` when the turn is parked on a pending interaction that the CLIENT can
+   * still resolve after a restart — an `approval-requested` part, or an
+   * `input-available` part for a CLIENT tool (no server `execute`) whose
+   * `tool-result` the SPA replays over the WebSocket on reconnect.
+   *
+   * This is intentionally NARROWER than `hasPendingInteraction()` (which
+   * `waitUntilStable` uses): a SERVER tool's `input-available` orphan is
+   * excluded, because its `execute()` promise died with the evicted isolate and
+   * nothing will ever post its result — so it must NOT be treated as a healthy
+   * "waiting on the human" wait. Used to make a HITL turn budget-free during
+   * recovery so a slow human can't trip the no-progress / attempt / stable-
+   * timeout budgets; see `_beginChatRecoveryIncident` and
+   * `_parkRecoveryForPendingInteraction`. Mirrors `@cloudflare/think`'s
+   * `hasPendingInteraction`, which is already client-only by construction.
+   */
+  protected hasPendingClientInteraction(): boolean {
+    const clientResolvable = this._clientResolvableToolNames();
+    if (
+      this._streamingMessage &&
+      this._messageAwaitsClientInteraction(
+        this._streamingMessage,
+        clientResolvable
+      )
+    ) {
+      return true;
+    }
+    return this.messages.some(
+      (message) =>
+        message.role === "assistant" &&
+        this._messageAwaitsClientInteraction(message, clientResolvable)
+    );
+  }
+
+  private _messageAwaitsClientInteraction(
+    message: UIMessage,
+    clientResolvable: Set<string>
+  ): boolean {
+    return message.parts.some((part) =>
+      this._partAwaitsClientInteraction(part, clientResolvable)
+    );
+  }
+
+  /**
+   * Whether a part is still awaiting a CLIENT interaction that can genuinely
+   * arrive after a restart: an `approval-requested` part (a reconnecting client
+   * replays the approval) or an `input-available` part for a CLIENT tool (the
+   * SPA replays the `tool-result`). A SERVER tool's `input-available` is NOT
+   * pending — its `execute()` died with the isolate. Mirrors `@cloudflare/think`.
+   */
+  private _partAwaitsClientInteraction(
+    part: UIMessage["parts"][number],
+    clientResolvable: Set<string>
+  ): boolean {
+    if (!("state" in part)) return false;
+    const record = part as Record<string, unknown>;
+    const state = record.state;
+    if (state === "approval-requested") return true;
+    if (state !== "input-available") return false;
+    const toolName = this._toolPartName(record);
+    return toolName != null && clientResolvable.has(toolName);
+  }
+
+  /** Extract a tool part's name from its `tool-<name>` / `dynamic-tool` shape. */
+  private _toolPartName(record: Record<string, unknown>): string | undefined {
+    const type = typeof record.type === "string" ? record.type : "";
+    if (type === "dynamic-tool") {
+      return typeof record.toolName === "string" ? record.toolName : undefined;
+    }
+    if (type.startsWith("tool-")) {
+      return type.slice("tool-".length);
+    }
+    return undefined;
+  }
+
+  /**
+   * Names of the CLIENT-resolvable tools (the client-provided schemas from the
+   * last request, which have no server `execute`). Mirrors `@cloudflare/think`.
+   */
+  private _clientResolvableToolNames(): Set<string> {
+    const names = new Set<string>();
+    for (const tool of this._lastClientTools ?? []) {
+      if (tool?.name) names.add(tool.name);
+    }
+    return names;
+  }
+
+  /**
    * Run a chat turn exclusively so `_reply()` never overlaps with another
    * streaming turn.
    */
@@ -3490,6 +3583,24 @@ export class AIChatAgent<
     const currentProgress = await this._chatRecoveryProgressMarker();
     const madeProgress = existing != null && currentProgress > prevProgress;
 
+    // A turn parked on a pending CLIENT interaction (an `input-available`
+    // client-tool part or an `approval-requested` part — see
+    // `hasPendingClientInteraction`) is WAITING ON THE HUMAN, not stuck. It
+    // produces no forward progress by design until the client replays the
+    // tool-result / approval after reconnect, which drives a fresh continuation
+    // independently of recovery. Spending the recovery budget on that wait would
+    // seal a perfectly healthy turn whose human is simply slow (e.g. a mid-turn
+    // deploy during a confirmation prompt the user takes longer than
+    // `noProgressTimeoutMs` to answer). So while a client interaction is pending
+    // the turn is budget-free: the no-progress window, attempt cap, work budget,
+    // and caller predicate are all suppressed, and the no-progress clock is kept
+    // fresh so the turn has a full window once the human finally answers.
+    // SERVER-tool orphans are excluded (their `execute` died with the isolate),
+    // so they still recover normally. The recovery continuation additionally
+    // PARKS (skips, no reschedule) on a stable-state timeout while this holds;
+    // see `_chatRecoveryContinue`/`_chatRecoveryRetry`.
+    const awaitingClientInteraction = this.hasPendingClientInteraction();
+
     // Recovery budget (#1637, rfc-chat-recovery-work-budget). A turn making
     // genuine forward progress survives unbounded deploy churn — duration is
     // never a bound. The instruments are decoupled by what they catch:
@@ -3506,11 +3617,14 @@ export class AIChatAgent<
     //    runaway differ by bounded work, not duration. Defaults to no cap.
     //  • CALLER — `shouldKeepRecovering` lets the integrator express a
     //    token/cost/step budget the SDK should not hardcode.
-    const lastProgressAt = madeProgress
-      ? now
-      : (existing?.lastProgressAt ?? existing?.firstSeenAt ?? now);
+    const lastProgressAt =
+      madeProgress || awaitingClientInteraction
+        ? now
+        : (existing?.lastProgressAt ?? existing?.firstSeenAt ?? now);
     const noProgressExceeded =
-      existing != null && now - lastProgressAt > config.noProgressTimeoutMs;
+      existing != null &&
+      !awaitingClientInteraction &&
+      now - lastProgressAt > config.noProgressTimeoutMs;
     // Reuse the durable progress counter as a work meter. Baseline is captured
     // when the incident opens; `work` is what the turn produced since.
     const workBaseline = existing?.workBaseline ?? currentProgress;
@@ -3537,6 +3651,7 @@ export class AIChatAgent<
     let abortedByCaller = false;
     if (
       existing != null &&
+      !awaitingClientInteraction &&
       config.shouldKeepRecovering &&
       !noProgressExceeded &&
       !workBudgetExceeded &&
@@ -3563,10 +3678,11 @@ export class AIChatAgent<
     }
 
     const exhausted =
-      noProgressExceeded ||
-      workBudgetExceeded ||
-      abortedByCaller ||
-      attempt > config.maxAttempts;
+      !awaitingClientInteraction &&
+      (noProgressExceeded ||
+        workBudgetExceeded ||
+        abortedByCaller ||
+        attempt > config.maxAttempts);
     const incident: ChatRecoveryIncident = {
       incidentId,
       requestId: input.requestId,
@@ -3983,6 +4099,17 @@ export class AIChatAgent<
         timeout: recoveryConfig.stableTimeoutMs
       });
       if (!ready) {
+        // PARK, don't burn the budget: a stable-state timeout while a CLIENT
+        // interaction is pending is not churn — the turn is correctly waiting
+        // for the client to replay an interrupted tool-result / approval after
+        // reconnect, which drives a fresh continuation independently of this
+        // retry loop. Retrying here would just time out again (the human hasn't
+        // answered) and eventually seal a healthy turn on `stable_timeout`. So
+        // stop the loop, resolve the live "recovering…" indicator, and let the
+        // client's replay resume the turn.
+        if (await this._parkRecoveryForPendingInteraction(data)) {
+          return;
+        }
         console.warn(
           "[AIChatAgent] _chatRecoveryContinue timed out waiting for stable state"
         );
@@ -4098,6 +4225,44 @@ export class AIChatAgent<
       callback,
       data ?? {},
       { idempotent: false }
+    );
+    return true;
+  }
+
+  /**
+   * Park a recovery continuation that timed out waiting for stable state
+   * because the turn is holding a pending CLIENT interaction (an
+   * `input-available` client-tool part or an `approval-requested` part — see
+   * `hasPendingClientInteraction`). Such a turn is WAITING ON THE HUMAN, not
+   * stuck: the client replays the interrupted tool-result / approval after
+   * reconnect, which drives a fresh continuation independently of the recovery
+   * retry loop. Burning the attempt budget on that wait (each `waitUntilStable`
+   * times out because the human hasn't answered) would seal a perfectly healthy
+   * turn on `stable_timeout` — the symptom behind HITL "session recovery errors"
+   * under deploy churn.
+   *
+   * So instead of rescheduling or exhausting, we stop the loop and mark the
+   * incident `skipped` (reason `awaiting_client_interaction`). That retains the
+   * incident record (a later genuine interruption re-evaluates it) while
+   * resolving the live "recovering…" indicator via `_updateChatRecoveryIncident`
+   * so the client sees the parked tool-call UI rather than an eternal spinner.
+   * A client that never returns is reclaimed by the incident TTL sweep and DO
+   * idle-eviction. SERVER-tool orphans are excluded by `hasPendingClientInteraction`
+   * (their `execute` died with the isolate), so they still reschedule / exhaust
+   * via the normal path. Mirrors the same helper in `@cloudflare/think`.
+   *
+   * Returns `true` when the recovery was parked (caller must return), `false`
+   * when there is no pending client interaction (caller proceeds to the normal
+   * reschedule / exhaustion path).
+   */
+  private async _parkRecoveryForPendingInteraction(
+    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
+  ): Promise<boolean> {
+    if (!this.hasPendingClientInteraction()) return false;
+    await this._updateChatRecoveryIncident(
+      data?.incidentId,
+      "skipped",
+      "awaiting_client_interaction"
     );
     return true;
   }
@@ -4253,6 +4418,12 @@ export class AIChatAgent<
         timeout: recoveryConfig.stableTimeoutMs
       });
       if (!ready) {
+        // PARK while a CLIENT interaction is pending — the turn is waiting for
+        // the human, not churning; see `_chatRecoveryContinue` for the full
+        // rationale.
+        if (await this._parkRecoveryForPendingInteraction(data)) {
+          return;
+        }
         console.warn(
           "[AIChatAgent] _chatRecoveryRetry timed out waiting for stable state"
         );

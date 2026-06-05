@@ -1610,6 +1610,12 @@ export class Think<
   /**
    * When true, chat turns are wrapped in `runFiber` for durable execution.
    * Enables `onChatRecovery` hook and `this.stash()` during streaming.
+   *
+   * Assign this as a class field or in the constructor — NOT in `onStart()`.
+   * On every wake the SDK evaluates recovery budgets (and may seal an
+   * interrupted turn, firing `onExhausted`) before `onStart()` runs, so a config
+   * set in `onStart()` is applied too late and the built-in defaults are used
+   * for the recovery that matters. See {@link ChatRecoveryConfig}.
    */
   chatRecovery: ChatRecoveryConfig = true;
 
@@ -8415,6 +8421,21 @@ export class Think<
     await this._sweepStaleChatRecoveryIncidents(now);
     const existing = await this.ctx.storage.get<ChatRecoveryIncident>(key);
 
+    // Hibernation ordering guard. The budget decision below consults
+    // `hasPendingInteraction()` -> `_clientResolvableToolNames()` ->
+    // `_lastClientTools` to keep a HITL turn (parked on a client-tool
+    // `input-available` orphan) budget-free. On a fresh wake the base Agent runs
+    // the boot-recovery path (`_handleInternalFiberRecovery`) BEFORE onStart's
+    // `_restoreClientTools()`, so without this the in-memory cache is empty and
+    // such a turn is misread as "stuck" and wrongly sealed (the slow-human +
+    // deploy-churn case). Re-hydrate from the durable `think_config` store — its
+    // own table, no Session init required, so the read is safe this early; the
+    // guard keeps it idempotent with the later onStart restore and a no-op on
+    // the live-isolate stall path where the tools are already loaded.
+    if (this._lastClientTools === undefined) {
+      this._restoreClientTools();
+    }
+
     // Forward-progress detection. A mid-turn deploy resets the Durable Object
     // ("code was updated"); the interrupted continuation is re-detected on the
     // next wake. A turn that followed real progress (more durably-produced
@@ -8423,6 +8444,25 @@ export class Think<
     const prevProgress = existing?.progress ?? 0;
     const currentProgress = await this._chatRecoveryProgressMarker();
     const madeProgress = existing != null && currentProgress > prevProgress;
+
+    // A turn parked on a pending CLIENT interaction (an `input-available`
+    // client-tool part or an `approval-requested` part — see
+    // `hasPendingInteraction`) is WAITING ON THE HUMAN, not stuck. It produces
+    // no forward progress by design until the SPA replays the tool-result /
+    // approval after reconnect, which drives a fresh continuation via the
+    // auto-continuation barrier independently of recovery. Spending the recovery
+    // budget on that wait would seal a perfectly healthy turn whose human is
+    // simply slow (e.g. a mid-turn deploy during a confirmation prompt that the
+    // user takes more than `noProgressTimeoutMs` to answer). So while a client
+    // interaction is pending the turn is budget-free: the no-progress window,
+    // attempt cap, work budget, and caller predicate are all suppressed, and the
+    // no-progress clock is kept fresh so the turn has a full window once the
+    // human finally answers. SERVER-tool orphans are deliberately excluded by
+    // `hasPendingInteraction` (their `execute` died with the isolate, so nothing
+    // will resolve them) — they still recover normally. The recovery
+    // continuation additionally PARKS (skips, no reschedule) on a stable-state
+    // timeout while this holds; see `_chatRecoveryContinue`/`_chatRecoveryRetry`.
+    const awaitingClientInteraction = this.hasPendingInteraction();
 
     // Recovery budget (#1637, rfc-chat-recovery-work-budget). A turn making
     // genuine forward progress survives unbounded deploy churn — duration is
@@ -8440,11 +8480,14 @@ export class Think<
     //    runaway differ by bounded work, not duration. Defaults to no cap.
     //  • CALLER — `shouldKeepRecovering` lets the integrator express a
     //    token/cost/step budget the SDK should not hardcode.
-    const lastProgressAt = madeProgress
-      ? now
-      : (existing?.lastProgressAt ?? existing?.firstSeenAt ?? now);
+    const lastProgressAt =
+      madeProgress || awaitingClientInteraction
+        ? now
+        : (existing?.lastProgressAt ?? existing?.firstSeenAt ?? now);
     const noProgressExceeded =
-      existing != null && now - lastProgressAt > config.noProgressTimeoutMs;
+      existing != null &&
+      !awaitingClientInteraction &&
+      now - lastProgressAt > config.noProgressTimeoutMs;
     // Reuse the durable progress counter as a work meter. Baseline is captured
     // when the incident opens; `work` is what the turn produced since.
     const workBaseline = existing?.workBaseline ?? currentProgress;
@@ -8471,6 +8514,7 @@ export class Think<
     let abortedByCaller = false;
     if (
       existing != null &&
+      !awaitingClientInteraction &&
       config.shouldKeepRecovering &&
       !noProgressExceeded &&
       !workBudgetExceeded &&
@@ -8497,10 +8541,11 @@ export class Think<
     }
 
     const exhausted =
-      noProgressExceeded ||
-      workBudgetExceeded ||
-      abortedByCaller ||
-      attempt > config.maxAttempts;
+      !awaitingClientInteraction &&
+      (noProgressExceeded ||
+        workBudgetExceeded ||
+        abortedByCaller ||
+        attempt > config.maxAttempts);
     const incident: ChatRecoveryIncident = {
       incidentId,
       requestId: input.requestId,
@@ -9167,6 +9212,64 @@ export class Think<
   }
 
   /**
+   * Park a recovery continuation that timed out waiting for stable state
+   * because the turn is holding a pending CLIENT interaction (an
+   * `input-available` client-tool part or an `approval-requested` part — see
+   * `hasPendingInteraction`). Such a turn is WAITING ON THE HUMAN, not stuck:
+   * the SPA replays the interrupted tool-result / approval after reconnect,
+   * which drives a fresh continuation via the auto-continuation barrier
+   * independently of the recovery retry loop. Burning the attempt budget on
+   * that wait (each `waitUntilStable` times out because the human hasn't
+   * answered) would seal a perfectly healthy turn on `stable_timeout` — the
+   * exact symptom behind HITL "session recovery errors" under deploy churn.
+   *
+   * So instead of rescheduling or exhausting, we stop the loop and mark the
+   * incident `skipped` (reason `awaiting_client_interaction`). That retains the
+   * incident record (a later genuine interruption re-evaluates it) while
+   * resolving the live "recovering…" indicator via `_updateChatRecoveryIncident`
+   * so the client sees the parked tool-call UI rather than an eternal spinner.
+   * A client that never returns is reclaimed by the incident TTL sweep and DO
+   * idle-eviction. SERVER-tool orphans are excluded by `hasPendingInteraction`
+   * (their `execute` died with the isolate), so they still recover normally.
+   *
+   * For a SUBMISSION-backed turn (`recoveredRequestId` present) the recovery
+   * loop is the submission row's SOLE completion driver after a restart, and the
+   * client's replay resumes the conversation as an independent auto-continuation
+   * that never touches the submission. Parking would therefore leave the row
+   * `running` until `_recoverSubmissionsOnStart` swept it to `error` on the next
+   * restart. We instead complete it `completed` here: the park condition is a
+   * fully-materialized client tool call in the leaf, which is exactly the
+   * terminal state a non-interrupted submission reaches when its step emits a
+   * client tool call (the model does not block on client tools — see
+   * `_runProgrammaticMessagesTurn`, which marks such a step `completed`). The
+   * human round-trip then proceeds via the normal auto-continuation, identical
+   * to the non-crash flow.
+   *
+   * Returns `true` when the recovery was parked (caller must return), `false`
+   * when there is no pending client interaction (caller proceeds to the normal
+   * reschedule / exhaustion path).
+   */
+  private async _parkRecoveryForPendingInteraction(
+    data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
+  ): Promise<boolean> {
+    if (!this.hasPendingInteraction()) return false;
+    await this._updateChatRecoveryIncident(
+      data?.incidentId,
+      "skipped",
+      "awaiting_client_interaction"
+    );
+    if (data?.recoveredRequestId) {
+      await this._completeRecoveredSubmission(
+        data.recoveredRequestId,
+        "completed",
+        null,
+        null
+      );
+    }
+    return true;
+  }
+
+  /**
    * Resolve the stream id for a recovery turn so the give-up terminalization
    * can surface whatever partial the turn produced. Prefers the durable stream
    * row keyed by the recovery-root request id; falls back to the live active
@@ -9442,6 +9545,12 @@ export class Think<
         timeout: recoveryConfig.stableTimeoutMs
       });
       if (!ready) {
+        // PARK while a CLIENT interaction is pending — the turn is waiting for
+        // the human, not churning; see `_chatRecoveryContinue` for the full
+        // rationale.
+        if (await this._parkRecoveryForPendingInteraction(data)) {
+          return;
+        }
         // Transient under churn — reschedule within the attempt budget rather
         // than terminally failing the turn (see _chatRecoveryContinue).
         if (
@@ -9676,6 +9785,17 @@ export class Think<
         timeout: recoveryConfig.stableTimeoutMs
       });
       if (!ready) {
+        // PARK, don't burn the budget: a stable-state timeout while a CLIENT
+        // interaction is pending is not churn — the turn is correctly waiting
+        // for the SPA to replay an interrupted tool-result / approval after
+        // reconnect, which drives a fresh continuation via the auto-continuation
+        // barrier independently of this retry loop. Retrying here would just
+        // time out again (the human hasn't answered) and eventually seal a
+        // healthy turn on `stable_timeout`. So stop the loop, resolve the live
+        // "recovering…" indicator, and let the client's replay resume the turn.
+        if (await this._parkRecoveryForPendingInteraction(data)) {
+          return;
+        }
         console.warn(
           "[Think] _chatRecoveryContinue timed out waiting for stable state"
         );

@@ -2678,6 +2678,175 @@ describe("Think — onChatRecovery", () => {
     expect(past.reason).toBe("no_progress_timeout");
   });
 
+  it("does NOT seal on no-progress while a CLIENT interaction is pending (HITL turn waiting on the human)", async () => {
+    const agent = await freshRecoveryAgent("recovery-hitl-no-progress");
+    // Tight 1-min no-progress window: a plain stuck turn would seal at +90s.
+    await agent.setChatRecoveryConfigForTest({
+      maxAttempts: 2,
+      noProgressTimeoutMs: 60_000
+    });
+
+    // `client_action` is a client tool (no server execute); its persisted
+    // `input-available` part is resolved by the SPA replaying a tool-result
+    // after reconnect, so the turn is WAITING ON THE HUMAN, not stuck.
+    await agent.setRequestContextForTest(undefined, [
+      { name: "client_action" }
+    ]);
+    await agent.persistTestMessage({
+      id: "user-1",
+      role: "user",
+      parts: [{ type: "text", text: "Use a tool" }]
+    } as UIMessage);
+    await agent.persistTestMessage({
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-1",
+          toolName: "client_action",
+          state: "input-available",
+          input: { action: "test" }
+        }
+      ]
+    } as unknown as UIMessage);
+
+    const base = {
+      requestId: "req-hitl",
+      recoveryRootRequestId: "req-hitl",
+      latestUserMessageId: "user-1",
+      recoveryKind: "continue" as const
+    };
+    const t0 = 6_000_000;
+    expect(
+      (await agent.beginIncidentForTest({ ...base, nowMs: t0 })).exhausted
+    ).toBe(false);
+
+    // Far past both the no-progress window AND the attempt cap, but a client
+    // interaction is still pending — the turn is budget-free and must NOT seal.
+    const later = await agent.beginIncidentForTest({
+      ...base,
+      nowMs: t0 + 10 * 60 * 1000
+    });
+    expect(later.exhausted).toBe(false);
+    expect(later.reason).toBeUndefined();
+  });
+
+  it("does NOT seal a client-tool HITL turn re-detected on a fresh wake before onStart restores client tools (hibernation ordering)", async () => {
+    const agent = await freshRecoveryAgent("recovery-hitl-boot-restore");
+    // Tight 1-min no-progress window: a turn misread as "stuck" would seal at +90s.
+    await agent.setChatRecoveryConfigForTest({
+      maxAttempts: 100,
+      noProgressTimeoutMs: 60_000
+    });
+
+    // The HITL turn persisted its client tool to the durable `think_config`
+    // store before the restart, but the IN-MEMORY cache is empty: on a fresh
+    // wake the base Agent runs boot recovery (`_handleInternalFiberRecovery` ->
+    // `_beginChatRecoveryIncident`) BEFORE onStart's `_restoreClientTools()`.
+    // Without the hibernation guard that re-hydrates from the durable store,
+    // `hasPendingInteraction()` reads an empty tool set, the parked client-tool
+    // `input-available` orphan is misread as "stuck", and the turn is wrongly
+    // sealed on no-progress — the exact false "session recovery error" the
+    // exemption is meant to prevent.
+    await agent.seedDurableClientToolsForTest([{ name: "client_action" }]);
+    await agent.persistTestMessage({
+      id: "user-1",
+      role: "user",
+      parts: [{ type: "text", text: "Use a tool" }]
+    } as UIMessage);
+    await agent.persistTestMessage({
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-1",
+          toolName: "client_action",
+          state: "input-available",
+          input: { action: "test" }
+        }
+      ]
+    } as unknown as UIMessage);
+
+    const base = {
+      requestId: "req-boot",
+      recoveryRootRequestId: "req-boot",
+      latestUserMessageId: "user-1",
+      recoveryKind: "continue" as const
+    };
+    const t0 = 7_000_000;
+
+    // Wake 1 (fresh boot, in-memory cache empty): opens the incident.
+    await agent.clearInMemoryClientToolsForTest();
+    expect(
+      (await agent.beginIncidentForTest({ ...base, nowMs: t0 })).exhausted
+    ).toBe(false);
+
+    // Wake 2 (another fresh boot, far past the no-progress window, in-memory
+    // cache empty again): the incident is re-detected. The guard must re-hydrate
+    // the client tools from the durable store so the turn is still recognized as
+    // waiting-on-the-human and is NOT sealed.
+    await agent.clearInMemoryClientToolsForTest();
+    const later = await agent.beginIncidentForTest({
+      ...base,
+      nowMs: t0 + 10 * 60 * 1000
+    });
+    expect(later.exhausted).toBe(false);
+    expect(later.reason).toBeUndefined();
+  });
+
+  it("STILL seals a dead SERVER-tool orphan on no-progress (the pending-interaction exemption is client-only)", async () => {
+    const agent = await freshRecoveryAgent("recovery-server-orphan-seals");
+    await agent.setChatRecoveryConfigForTest({
+      maxAttempts: 100,
+      noProgressTimeoutMs: 60_000
+    });
+
+    // `preview_tool` is a SERVER tool — NOT in the client tool set — so its
+    // `input-available` orphan is dead (its execute() died with the isolate).
+    // It must not get the HITL exemption; it seals normally on no-progress.
+    await agent.setRequestContextForTest(undefined, [
+      { name: "client_action" }
+    ]);
+    await agent.persistTestMessage({
+      id: "user-1",
+      role: "user",
+      parts: [{ type: "text", text: "Render a preview" }]
+    } as UIMessage);
+    await agent.persistTestMessage({
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-preview_tool",
+          toolCallId: "tc-server-1",
+          toolName: "preview_tool",
+          state: "input-available",
+          input: { url: "https://example.com" }
+        }
+      ]
+    } as unknown as UIMessage);
+
+    const base = {
+      requestId: "req-srv",
+      recoveryRootRequestId: "req-srv",
+      latestUserMessageId: "user-1",
+      recoveryKind: "continue" as const
+    };
+    const t0 = 7_000_000;
+    expect(
+      (await agent.beginIncidentForTest({ ...base, nowMs: t0 })).exhausted
+    ).toBe(false);
+
+    const past = await agent.beginIncidentForTest({
+      ...base,
+      nowMs: t0 + 90_000
+    });
+    expect(past.exhausted).toBe(true);
+    expect(past.reason).toBe("no_progress_timeout");
+  });
+
   it("collapses a rollout's reconnect storm into one attempt via debounce (#1637)", async () => {
     const agent = await freshRecoveryAgent("recovery-debounce");
     await agent.setChatRecoveryConfigForTest({ maxAttempts: 2 });
@@ -3330,6 +3499,153 @@ describe("Think — onChatRecovery", () => {
     const incident = await agent.getIncidentAttemptForTest("inc-C");
     expect(incident?.attempt).toBe(2);
     expect(incident?.status).toBe("scheduled");
+  });
+
+  it("PARKS a continuation (no reschedule, no budget spent) while a CLIENT interaction is pending", async () => {
+    const agent = await freshRecoveryAgent(
+      `stable-park-${crypto.randomUUID()}`
+    );
+    await agent.setForceStableTimeoutForTest(true);
+    await agent.seedRunningSubmissionForTest("root-P");
+    await agent.seedIncidentForTest({
+      incidentId: "inc-P",
+      requestId: "root-P",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    // The turn is parked on a CLIENT-tool `input-available` orphan: the SPA will
+    // replay the tool-result after reconnect, so `waitUntilStable` timing out is
+    // expected (the human hasn't answered), NOT churn.
+    await agent.setRequestContextForTest(undefined, [
+      { name: "client_action" }
+    ]);
+    await agent.persistTestMessage({
+      id: "user-P",
+      role: "user",
+      parts: [{ type: "text", text: "Use a tool" }]
+    } as UIMessage);
+    await agent.persistTestMessage({
+      id: "assistant-P",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-P",
+          toolName: "client_action",
+          state: "input-available",
+          input: { action: "test" }
+        }
+      ]
+    } as unknown as UIMessage);
+
+    const continueData = {
+      recoveredRequestId: "root-P",
+      targetAssistantId: "assistant-P",
+      incidentId: "inc-P",
+      originalRequestId: "root-P"
+    };
+    await agent.preScheduleRecoveryContinueForTest(continueData);
+    await agent.runChatRecoveryContinueForTestWith(continueData);
+
+    // No NEW reschedule row (only the pre-scheduled executing row remains) and
+    // the attempt count did NOT advance — the stable-timeout budget was not
+    // spent. The incident is parked `skipped`.
+    expect(
+      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
+    ).toBe(1);
+    const parked = await agent.getIncidentAttemptForTest("inc-P");
+    expect(parked?.attempt).toBe(1);
+    expect(parked?.status).toBe("skipped");
+    expect(parked?.reason).toBe("awaiting_client_interaction");
+    // The submission row is COMPLETED at park (its sole completion driver, the
+    // recovery loop, is stopping). The leaf holds a fully-materialized client
+    // tool call — the same terminal state a non-interrupted submission reaches
+    // when its step emits a client tool. The human's replay then resumes the
+    // conversation as a normal auto-continuation.
+    expect(await agent.getSubmissionStatusForTest("root-P")).toBe("completed");
+
+    // Regression guard: a restart while still awaiting the human must NOT
+    // resurrect this as an error. Were the row left `running`, the next boot's
+    // `_recoverSubmissionsOnStart` (no scheduled continuation, no recoverable
+    // turn after park) would sweep it to `error` — the false "session recovery
+    // error" this fix prevents. Completing at park makes it terminal, so the
+    // sweep (which only touches `running` rows) leaves it untouched.
+    await agent.recoverSubmissionsOnStartForTest();
+    expect(await agent.getSubmissionStatusForTest("root-P")).toBe("completed");
+  });
+
+  it("PARKS a pre-stream retry (no reschedule, no budget spent) while a CLIENT interaction is pending", async () => {
+    const agent = await freshRecoveryAgent(
+      `stable-retry-park-${crypto.randomUUID()}`
+    );
+    await agent.setForceStableTimeoutForTest(true);
+    await agent.seedRunningSubmissionForTest("root-RP");
+    await agent.seedIncidentForTest({
+      incidentId: "inc-RP",
+      requestId: "root-RP",
+      recoveryKind: "retry",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    // Same HITL park condition as the continue-path test, exercised through the
+    // RETRY loop: a CLIENT-tool `input-available` orphan the SPA will replay
+    // after reconnect, so `waitUntilStable` timing out is the human being slow,
+    // not churn. Guards the retry path's call to the shared park helper.
+    await agent.setRequestContextForTest(undefined, [
+      { name: "client_action" }
+    ]);
+    await agent.persistTestMessage({
+      id: "user-RP",
+      role: "user",
+      parts: [{ type: "text", text: "Use a tool" }]
+    } as UIMessage);
+    await agent.persistTestMessage({
+      id: "assistant-RP",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-RP",
+          toolName: "client_action",
+          state: "input-available",
+          input: { action: "test" }
+        }
+      ]
+    } as unknown as UIMessage);
+
+    const retryData = {
+      recoveredRequestId: "root-RP",
+      targetUserId: "user-RP",
+      incidentId: "inc-RP",
+      originalRequestId: "root-RP"
+    };
+    await agent.preScheduleRecoveryRetryForTest(retryData);
+    await agent.runChatRecoveryRetryForTestWith(retryData);
+
+    // No NEW reschedule row (only the pre-scheduled executing row remains) and
+    // the attempt count did NOT advance — the stable-timeout budget was not
+    // spent. The incident is parked `skipped`.
+    expect(
+      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryRetry")
+    ).toBe(1);
+    const parked = await agent.getIncidentAttemptForTest("inc-RP");
+    expect(parked?.attempt).toBe(1);
+    expect(parked?.status).toBe("skipped");
+    expect(parked?.reason).toBe("awaiting_client_interaction");
+    // The submission row is COMPLETED at park, and a follow-up restart sweep
+    // must not resurrect it as `error`.
+    expect(await agent.getSubmissionStatusForTest("root-RP")).toBe("completed");
+    await agent.recoverSubmissionsOnStartForTest();
+    expect(await agent.getSubmissionStatusForTest("root-RP")).toBe("completed");
   });
 
   it("reschedules a pre-stream retry that times out waiting for stable state, within the attempt budget", async () => {

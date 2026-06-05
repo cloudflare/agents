@@ -16,13 +16,15 @@
  *   POST /probe/interrupt?session=S  -> ctx.abort() (simulated eviction)
  *   POST /probe/reset?session=S
  *
- * The recovery knobs are written into agent state by /probe/start and rebuilt
- * into `this.chatRecovery` on every isolate start, so they survive deploy churn.
+ * The recovery knobs are written into agent state by /probe/start and exposed
+ * via `this.chatRecovery` as live, state-backed getters (assigned in the
+ * constructor, NOT in onStart — see the constructor comment), so they survive
+ * deploy churn and are current the moment fiber recovery evaluates budgets.
  */
 import { getAgentByName, routeAgentRequest } from "agents";
 import { Think } from "@cloudflare/think";
+import { jsonSchema, tool, type ToolSet } from "ai";
 import type {
-  ChatRecoveryConfig,
   ChatRecoveryExhaustedContext,
   ChatRecoveryProgressContext
 } from "@cloudflare/think";
@@ -56,12 +58,60 @@ const INCIDENT_PREFIX = "cf:chat-recovery:incident:";
 const PROGRESS_KEY = "cf:chat-recovery:progress";
 
 export class ProbeAgent extends Think<Env, ProbeState> {
-  // Replaced at runtime from persisted state (see `_applyRecoveryConfig`).
-  chatRecovery: ChatRecoveryConfig = true;
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    // Bind the recovery config to PERSISTED STATE via live property getters,
+    // assigned synchronously in the constructor.
+    //
+    // Why not set this in `onStart`? Chat-fiber recovery
+    // (`_handleInternalFiberRecovery`) and its scheduled continuations resolve
+    // the recovery budgets through `_resolveChatRecoveryConfig()` (which reads
+    // the live values off `this.chatRecovery`) and can run BEFORE the subclass
+    // `onStart` body executes. A config assigned in `onStart` is therefore read
+    // as the BASE default (`maxAttempts: 10`, `maxRecoveryWork: Infinity`) at
+    // the moment that matters, so a configured budget/attempt seal silently
+    // never fires (observed: a primed `work_budget_exceeded` incident fell
+    // through to `conversation_changed` because `maxRecoveryWork` read as
+    // Infinity). Assigning here — and exposing each knob as a getter that reads
+    // `this.state` lazily — keeps the config both EARLY (set in the ctor) and
+    // CURRENT (re-read on every access, so per-scenario `setState` is picked up
+    // without another deploy).
+    const agent = this;
+    this.chatRecovery = {
+      get maxAttempts() {
+        return agent.state?.recovery?.maxAttempts ?? 50;
+      },
+      get noProgressTimeoutMs() {
+        return agent.state?.recovery?.noProgressTimeoutMs ?? 5 * 60 * 1000;
+      },
+      get maxRecoveryWork() {
+        return (
+          agent.state?.recovery?.maxRecoveryWork ?? Number.POSITIVE_INFINITY
+        );
+      },
+      get terminalMessage() {
+        return (
+          agent.state?.recovery?.terminalMessage ??
+          "Probe recovery exhausted (terminal)."
+        );
+      },
+      get shouldKeepRecovering() {
+        const abortAfterAttempt = agent.state?.recovery?.abortAfterAttempt;
+        if (abortAfterAttempt === undefined) return undefined;
+        return (ctx: ChatRecoveryProgressContext) => {
+          agent._recordPredicate(ctx);
+          return ctx.attempt < abortAfterAttempt;
+        };
+      },
+      get onExhausted() {
+        return (ctx: ChatRecoveryExhaustedContext) =>
+          agent._recordExhausted(ctx);
+      }
+    };
+  }
 
   async onStart() {
     this._ensureProbeTable();
-    this._applyRecoveryConfig();
   }
 
   getModel() {
@@ -69,30 +119,49 @@ export class ProbeAgent extends Think<Env, ProbeState> {
     return createSyntheticModel(synth, () => this._recordCompletion());
   }
 
-  getSystemPrompt() {
-    return "You are a deterministic synthetic ticker used for recovery testing.";
+  // SERVER tools used by the scoping scenarios. They are only ever invoked when
+  // the synthetic model is in the matching mode, so registering them here is
+  // inert for every other scenario.
+  //  - `slow_server`   (a7): `execute` runs until interrupted. Evicted
+  //    mid-execute it is a NON-client-resolvable orphan that must recover via
+  //    transcript repair (NOT park, NOT seal).
+  //  - `approve_action` (a8): `needsApproval` parks the turn at
+  //    `approval-requested`, which recovery exempts like a client tool.
+  getTools(): ToolSet {
+    const questionSchema = jsonSchema<{ question?: string }>({
+      type: "object",
+      properties: { question: { type: "string" } }
+    });
+    return {
+      slow_server: tool({
+        description: "A slow server tool that runs until interrupted.",
+        inputSchema: questionSchema,
+        execute: async (_input, { abortSignal }) => {
+          await new Promise<void>((resolve) => {
+            const t = setTimeout(resolve, 5 * 60 * 1000);
+            abortSignal?.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(t);
+                resolve();
+              },
+              { once: true }
+            );
+          });
+          return "slow server tool finished";
+        }
+      }),
+      approve_action: tool({
+        description: "An action that requires human approval before running.",
+        inputSchema: questionSchema,
+        needsApproval: true,
+        execute: async () => "approved action executed"
+      })
+    };
   }
 
-  // ── Recovery config ─────────────────────────────────────────────
-
-  private _applyRecoveryConfig() {
-    const knobs = this.state?.recovery ?? {};
-    this.chatRecovery = {
-      maxAttempts: knobs.maxAttempts ?? 50,
-      noProgressTimeoutMs: knobs.noProgressTimeoutMs ?? 5 * 60 * 1000,
-      maxRecoveryWork: knobs.maxRecoveryWork ?? Number.POSITIVE_INFINITY,
-      terminalMessage:
-        knobs.terminalMessage ?? "Probe recovery exhausted (terminal).",
-      shouldKeepRecovering:
-        knobs.abortAfterAttempt === undefined
-          ? undefined
-          : (ctx: ChatRecoveryProgressContext) => {
-              this._recordPredicate(ctx);
-              return ctx.attempt < (knobs.abortAfterAttempt as number);
-            },
-      onExhausted: (ctx: ChatRecoveryExhaustedContext) =>
-        this._recordExhausted(ctx)
-    };
+  getSystemPrompt() {
+    return "You are a deterministic synthetic ticker used for recovery testing.";
   }
 
   // ── Control methods (called from the Worker fetch via stub RPC) ──
@@ -107,7 +176,6 @@ export class ProbeAgent extends Think<Env, ProbeState> {
     const synth: SyntheticConfig = { ...DEFAULT_SYNTH, ...config.synth };
     const recovery: RecoveryKnobs = config.recovery ?? {};
     this.setState({ synth, recovery });
-    this._applyRecoveryConfig();
 
     const submissionId = config.submissionId ?? crypto.randomUUID();
     const result = await this.submitMessages(
@@ -156,7 +224,6 @@ export class ProbeAgent extends Think<Env, ProbeState> {
     const synth: SyntheticConfig = { ...DEFAULT_SYNTH, ...config.synth };
     const recovery: RecoveryKnobs = config.recovery ?? {};
     this.setState({ synth, recovery });
-    this._applyRecoveryConfig();
 
     const text =
       config.prompt ?? `Emit ${synth.targetSteps} ticks (${synth.mode} mode).`;
@@ -174,6 +241,68 @@ export class ProbeAgent extends Think<Env, ProbeState> {
       )
     );
     return { started: true, synth, recovery };
+  }
+
+  /**
+   * Set the synth mode + recovery knobs into state WITHOUT starting a turn.
+   * The `hitl` scenario needs the synthetic model configured before the driver
+   * opens a WebSocket and sends a real chat request with `clientTools` (the only
+   * path that registers a CLIENT-resolvable tool — `submitMessages`/`chat()`
+   * server-side do not). `getModel()` reads the persisted mode on every isolate
+   * start, so it survives the deploy/abort churn that follows.
+   */
+  async configureProbe(config: {
+    synth?: Partial<SyntheticConfig>;
+    recovery?: RecoveryKnobs;
+  }) {
+    const synth: SyntheticConfig = { ...DEFAULT_SYNTH, ...config.synth };
+    const recovery: RecoveryKnobs = config.recovery ?? {};
+    this.setState({ synth, recovery });
+    return { configured: true, synth, recovery };
+  }
+
+  /**
+   * Prime the (single) open recovery incident so the NEXT boot-time detection
+   * seals it deterministically via `work_budget_exceeded`, through the
+   * RACE-FREE boot path. `_handleInternalFiberRecovery` decides exhaustion the
+   * instant it re-detects the interrupted chat fiber — BEFORE scheduling any
+   * continuation — so the seal cannot be lost to the `conversation_changed`
+   * skip that makes the live content-emitting `runaway` budget race
+   * nondeterministic.
+   *
+   * Mechanics: `workBaseline = 0` makes `work = progress - 0` exceed the small
+   * configured `maxRecoveryWork`; `status` is reset to a non-terminal value so a
+   * prior benign skip does not stop re-evaluation. `lastAttemptAt` is set to NOW
+   * (not 0) — a backdated timestamp would trip the 1h stale-incident sweep at
+   * the top of `_beginChatRecoveryIncident`, deleting the primed record so the
+   * next boot opens a FRESH incident with `workBaseline = currentProgress` and
+   * never seals. The budget seal is independent of the alarm-debounce window, so
+   * a fresh timestamp is safe. The incident's id/key are left untouched so it
+   * still matches the live turn.
+   *
+   * After the seal fires once, `_exhaustChatRecovery` consumes the fiber, so
+   * subsequent deploys find NO interrupted fiber and cannot re-emit
+   * `onExhausted` — which is exactly the "seal exactly once" invariant the
+   * `rapid` scenario then hammers with real deploys.
+   */
+  async primeSeal() {
+    const now = Date.now();
+    const primed: { key: string; progress: number }[] = [];
+    const list = await this.ctx.storage.list<Record<string, unknown>>({
+      prefix: INCIDENT_PREFIX
+    });
+    for (const [key, incident] of list) {
+      const next: Record<string, unknown> = {
+        ...incident,
+        status: "attempting",
+        workBaseline: 0,
+        lastAttemptAt: now
+      };
+      delete next.reason;
+      await this.ctx.storage.put(key, next);
+      primed.push({ key, progress: Number(incident.progress ?? 0) });
+    }
+    return { primed: primed.length, incidents: primed };
   }
 
   async debugState() {
@@ -207,6 +336,29 @@ export class ProbeAgent extends Think<Env, ProbeState> {
     }>`select * from cf_probe_predicate order by at asc`;
     const submissions = await this.listSubmissions({ limit: 25 });
 
+    // Surface the restored client-tool schemas so the HITL scenario can confirm
+    // `ask_user` is recognized as CLIENT-resolvable after an eviction (the
+    // precondition for the pending-interaction recovery exemption).
+    let lastClientTools: unknown = null;
+    try {
+      const rows = this.sql<{ value: string }>`
+        SELECT value FROM think_config WHERE key = 'lastClientTools'`;
+      if (rows.length > 0) lastClientTools = JSON.parse(rows[0].value);
+    } catch {
+      lastClientTools = null;
+    }
+
+    // Compact transcript so the driver can confirm the HITL turn is parked (a
+    // leaf assistant part at `input-available`) before churning, and that it
+    // reached a settled answer after the client replays the tool result.
+    const transcript = this.messages.map((m) => ({
+      role: m.role,
+      parts: m.parts.map((p) => {
+        const r = p as Record<string, unknown>;
+        return { type: r.type, state: r.state };
+      })
+    }));
+
     return {
       progress,
       recovering,
@@ -215,6 +367,8 @@ export class ProbeAgent extends Think<Env, ProbeState> {
       exhausted,
       predicate,
       submissions,
+      transcript,
+      lastClientTools,
       state: this.state ?? null
     };
   }
@@ -315,11 +469,19 @@ export default {
             >[0];
             return json(await agent.startProbeChat(body));
           }
+          case "config": {
+            const body = (await request.json().catch(() => ({}))) as Parameters<
+              ProbeAgent["configureProbe"]
+            >[0];
+            return json(await agent.configureProbe(body));
+          }
           case "inspect": {
             const id = url.searchParams.get("id");
             if (!id) return json({ error: "missing id" }, { status: 400 });
             return json(await agent.inspectSubmission(id));
           }
+          case "prime-seal":
+            return json(await agent.primeSeal());
           case "debug":
             return json(await agent.debugState());
           case "interrupt": {
