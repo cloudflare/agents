@@ -4845,12 +4845,15 @@ export class ThinkRecoveryTestAgent extends Think {
     const stream = streams[0];
     if (!stream) return null;
 
-    const chunks = this.sql<{ body: string }>`
-      SELECT body
-      FROM cf_ai_chat_stream_chunks
-      WHERE stream_id = ${stream.id}
-      ORDER BY chunk_index ASC
-    `;
+    // Use ResumableStream.getStreamChunks so packed segment rows are unpacked
+    // into individual chunk bodies (matching production replay/reconstruction).
+    const chunks = (
+      this as unknown as {
+        _resumableStream: {
+          getStreamChunks(id: string): Array<{ body: string }>;
+        };
+      }
+    )._resumableStream.getStreamChunks(stream.id);
 
     const text = chunks
       .map((chunk) => {

@@ -45,6 +45,7 @@ import {
   type ChatFiberSnapshot
 } from "agents/chat";
 import { ResumableStream } from "agents/chat";
+import { MAX_BOUND_PARAMS, buildInClauseStrings } from "agents/chat";
 import {
   ContinuationState,
   AbortRegistry,
@@ -188,6 +189,9 @@ const CHAT_RECOVERING_KEY = "cf:chat:recovering";
 // Incidents that have not seen a new attempt within this window are assumed
 // abandoned and swept so durable storage does not grow without bound.
 const CHAT_RECOVERY_INCIDENT_TTL_MS = 60 * 60 * 1000;
+// Max keys per Durable Object KV `delete([...])` call.
+// See https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
+const KV_DELETE_MAX_KEYS = 128;
 // PRIMARY recovery bound (#1637): seal an incident that has made no forward
 // progress for this long. Keyed to `lastProgressAt`, which resets on every
 // progress-bearing attempt — so a turn that keeps producing content survives
@@ -313,10 +317,6 @@ type AIChatStreamMetadataRow = {
   id: string;
   status: string;
   request_id: string;
-};
-type AIChatStreamChunkRow = {
-  body: string;
-  chunk_index: number;
 };
 
 /**
@@ -3104,16 +3104,15 @@ export class AIChatAgent<
     const streamId = this._getAgentToolStreamId(requestId);
     if (!streamId) return [];
 
-    const rows = this.sql<AIChatStreamChunkRow>`
-      select body, chunk_index
-      from cf_ai_chat_stream_chunks
-      where stream_id = ${streamId} and chunk_index > ${afterSequence}
-      order by chunk_index asc
-    `;
-    return rows.map((row) => ({
-      sequence: row.chunk_index,
-      body: row.body
-    }));
+    // Read through ResumableStream so packed segment rows are unpacked into
+    // individual chunk bodies with a running per-chunk index. That per-chunk
+    // sequence matches the in-memory live counter (`_agentToolLiveSequences`),
+    // so a tailing parent can switch from stored replay to live forwarding
+    // without gaps or duplicates.
+    return this._resumableStream
+      .getStreamChunks(streamId)
+      .filter((chunk) => chunk.chunk_index > afterSequence)
+      .map((chunk) => ({ sequence: chunk.chunk_index, body: chunk.body }));
   }
 
   private _getAgentToolMessagesAfterStart(runId: string): UIMessage[] {
@@ -3549,8 +3548,10 @@ export class AIChatAgent<
         staleKeys.push(key);
       }
     }
-    for (const key of staleKeys) {
-      await this.ctx.storage.delete(key);
+    // Batch deletes — the DO storage KV delete accepts up to 128 keys per call,
+    // collapsing N awaited round-trips into ceil(N / 128).
+    for (let i = 0; i < staleKeys.length; i += KV_DELETE_MAX_KEYS) {
+      await this.ctx.storage.delete(staleKeys.slice(i, i + KV_DELETE_MAX_KEYS));
     }
   }
 
@@ -4575,14 +4576,10 @@ export class AIChatAgent<
           this.sql<{ id: string }>`
             select id from cf_ai_chat_agent_messages
           ` || [];
-        for (const row of allDbRows) {
-          if (!keepIds.has(row.id)) {
-            this.sql`
-              delete from cf_ai_chat_agent_messages where id = ${row.id}
-            `;
-            this._persistedMessageCache.delete(row.id);
-          }
-        }
+        const staleIds = allDbRows
+          .map((row) => row.id)
+          .filter((id) => !keepIds.has(id));
+        this._deleteMessagesByIds(staleIds);
       }
     }
 
@@ -4790,6 +4787,26 @@ export class AIChatAgent<
   }
 
   /**
+   * Delete the given message rows from SQLite in batched `IN (...)` queries
+   * and evict them from the persistence cache. Batches stay within the SQLite
+   * 100 bound-parameter limit. No-op for an empty list.
+   * @internal
+   */
+  private _deleteMessagesByIds(ids: string[]) {
+    for (let i = 0; i < ids.length; i += MAX_BOUND_PARAMS) {
+      const batch = ids.slice(i, i + MAX_BOUND_PARAMS);
+      const strings = buildInClauseStrings(
+        "delete from cf_ai_chat_agent_messages where id in ",
+        batch.length
+      );
+      this.sql(strings, ...batch);
+      for (const id of batch) {
+        this._persistedMessageCache.delete(id);
+      }
+    }
+  }
+
+  /**
    * Deletes oldest messages from SQLite when the count exceeds maxPersistedMessages.
    * Called after each persist to keep storage bounded.
    */
@@ -4814,10 +4831,7 @@ export class AIChatAgent<
     `;
 
     if (toDelete && toDelete.length > 0) {
-      for (const row of toDelete) {
-        this.sql`delete from cf_ai_chat_agent_messages where id = ${row.id}`;
-        this._persistedMessageCache.delete(row.id);
-      }
+      this._deleteMessagesByIds(toDelete.map((row) => row.id));
     }
   }
 

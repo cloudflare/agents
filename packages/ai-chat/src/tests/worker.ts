@@ -612,13 +612,40 @@ export class TestChatAgent extends AIChatAgent<Env> {
   getStreamChunks(
     streamId: string
   ): Array<{ body: string; chunk_index: number }> {
-    return (
-      this.sql<{ body: string; chunk_index: number }>`
-        select body, chunk_index from cf_ai_chat_stream_chunks 
-        where stream_id = ${streamId} 
-        order by chunk_index asc
-      ` || []
-    );
+    // Delegate to ResumableStream so tests see the same unpacked, per-chunk
+    // view that production consumers get (packed segment rows are expanded).
+    return this._resumableStream.getStreamChunks(streamId);
+  }
+
+  /** Raw count of stored rows for a stream (packed segments count as 1 each). */
+  getStreamChunkRowCount(streamId: string): number {
+    const result = this.sql<{ cnt: number }>`
+      select count(*) as cnt from cf_ai_chat_stream_chunks
+      where stream_id = ${streamId}
+    `;
+    return result?.[0]?.cnt ?? 0;
+  }
+
+  /**
+   * Seed legacy one-row-per-chunk records (the pre-packing storage format) so
+   * tests can verify backward-compatible unpacking of older data.
+   */
+  insertLegacyChunkRows(
+    streamId: string,
+    requestId: string,
+    bodies: string[]
+  ): void {
+    const now = Date.now();
+    this.sql`
+      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
+      values (${streamId}, ${requestId}, 'completed', ${now})
+    `;
+    bodies.forEach((body, index) => {
+      this.sql`
+        insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
+        values (${`${streamId}-${index}`}, ${streamId}, ${body}, ${index}, ${now})
+      `;
+    });
   }
 
   getStreamMetadata(

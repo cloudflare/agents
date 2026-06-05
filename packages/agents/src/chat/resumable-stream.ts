@@ -14,16 +14,44 @@ import { nanoid } from "nanoid";
 import type { Connection } from "agents";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
 
-/** Number of chunks to buffer before flushing to SQLite */
+/** Number of chunks to pack into a single SQLite row before flushing */
 const CHUNK_BUFFER_SIZE = 10;
 /** Maximum buffer size to prevent memory issues on rapid reconnections */
 const CHUNK_BUFFER_MAX_SIZE = 100;
+/**
+ * Max accumulated raw chunk bytes packed into one row before forcing a flush.
+ * The SQLite row limit is 2 MB; packing serializes bodies into a JSON array,
+ * which re-escapes their contents (quotes/backslashes), so we keep the raw
+ * total well under the limit to leave generous headroom for escaping overhead.
+ * A chunk larger than this is flushed as its own (unwrapped) row.
+ */
+const SEGMENT_MAX_BYTES = 512_000;
 /** Default cleanup interval for old streams (ms) - every 10 minutes */
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 /** Default age threshold for cleaning up completed streams (ms) - 24 hours */
 const CLEANUP_AGE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 /** Shared encoder for UTF-8 byte length measurement */
 const textEncoder = new TextEncoder();
+
+/**
+ * A stored row body is either a single chunk body (a JSON object string —
+ * legacy per-chunk rows and single-chunk segments) or a packed segment (a JSON
+ * array of chunk body strings). Unpack to the individual chunk bodies in order.
+ *
+ * Stored chunk bodies are always serialized JSON *objects*, never arrays, so
+ * `Array.isArray` reliably distinguishes a packed segment from a single body.
+ */
+function unpackSegmentBody(rowBody: string): string[] {
+  try {
+    const parsed = JSON.parse(rowBody);
+    if (Array.isArray(parsed)) {
+      return parsed as string[];
+    }
+  } catch {
+    // Not valid JSON — treat as a single opaque body.
+  }
+  return [rowBody];
+}
 
 function sendIfOpen(connection: Connection, message: string): boolean {
   try {
@@ -79,7 +107,8 @@ export type SqlTaggedTemplate = {
 export class ResumableStream {
   private _activeStreamId: string | null = null;
   private _activeRequestId: string | null = null;
-  private _streamChunkIndex = 0;
+  /** Monotonic row-ordering index; one increment per flushed segment row. */
+  private _segmentIndex = 0;
 
   /**
    * Whether the active stream was started in this instance (true) or
@@ -89,12 +118,8 @@ export class ResumableStream {
    */
   private _isLive = false;
 
-  private _chunkBuffer: Array<{
-    id: string;
-    streamId: string;
-    body: string;
-    index: number;
-  }> = [];
+  private _chunkBuffer: Array<{ streamId: string; body: string }> = [];
+  private _chunkBufferBytes = 0;
   private _isFlushingChunks = false;
   private _lastCleanupTime = 0;
 
@@ -160,7 +185,7 @@ export class ResumableStream {
     const streamId = nanoid();
     this._activeStreamId = streamId;
     this._activeRequestId = requestId;
-    this._streamChunkIndex = 0;
+    this._segmentIndex = 0;
     this._isLive = true;
 
     this.sql`
@@ -185,7 +210,7 @@ export class ResumableStream {
     `;
     this._activeStreamId = null;
     this._activeRequestId = null;
-    this._streamChunkIndex = 0;
+    this._segmentIndex = 0;
     this._isLive = false;
 
     // Periodically clean up old streams
@@ -206,7 +231,7 @@ export class ResumableStream {
     `;
     this._activeStreamId = null;
     this._activeRequestId = null;
-    this._streamChunkIndex = 0;
+    this._segmentIndex = 0;
     this._isLive = false;
   }
 
@@ -240,23 +265,35 @@ export class ResumableStream {
       this.flushBuffer();
     }
 
-    this._chunkBuffer.push({
-      id: nanoid(),
-      streamId,
-      body,
-      index: this._streamChunkIndex
-    });
-    this._streamChunkIndex++;
+    // Byte guard: keep a packed segment safely under the SQLite row limit. If
+    // the buffer already holds chunks and adding this body would push the
+    // segment past the threshold, flush first so this chunk starts a fresh
+    // segment. A single large chunk therefore ends up alone and is written
+    // unwrapped by flushBuffer (no array-escaping inflation).
+    if (
+      this._chunkBuffer.length > 0 &&
+      this._chunkBufferBytes + bodyBytes > SEGMENT_MAX_BYTES
+    ) {
+      this.flushBuffer();
+    }
 
-    // Flush when buffer reaches threshold
+    this._chunkBuffer.push({ streamId, body });
+    this._chunkBufferBytes += bodyBytes;
+
+    // Flush when buffer reaches the per-segment chunk threshold
     if (this._chunkBuffer.length >= CHUNK_BUFFER_SIZE) {
       this.flushBuffer();
     }
   }
 
   /**
-   * Flush buffered chunks to SQLite in a single batch.
+   * Flush the buffered chunks to SQLite as a single packed row.
    * Uses a lock to prevent concurrent flush operations.
+   *
+   * The whole buffer becomes one row: a single-chunk segment is stored
+   * unwrapped (legacy object format) so a large chunk avoids array-escaping
+   * inflation, while a multi-chunk segment stores a JSON array of bodies. This
+   * collapses N chunk rows into one, cutting rows written / stored / scanned.
    */
   flushBuffer() {
     if (this._isFlushingChunks || this._chunkBuffer.length === 0) {
@@ -267,14 +304,21 @@ export class ResumableStream {
     try {
       const chunks = this._chunkBuffer;
       this._chunkBuffer = [];
+      this._chunkBufferBytes = 0;
 
-      const now = Date.now();
-      for (const chunk of chunks) {
-        this.sql`
-          insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
-          values (${chunk.id}, ${chunk.streamId}, ${chunk.body}, ${chunk.index}, ${now})
-        `;
-      }
+      // All chunks in a buffer belong to the same stream: start() flushes
+      // before switching streams, so the buffer is never cross-stream.
+      const streamId = chunks[0].streamId;
+      const segmentBody =
+        chunks.length === 1
+          ? chunks[0].body
+          : JSON.stringify(chunks.map((chunk) => chunk.body));
+
+      this.sql`
+        insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
+        values (${nanoid()}, ${streamId}, ${segmentBody}, ${this._segmentIndex}, ${Date.now()})
+      `;
+      this._segmentIndex++;
     } finally {
       this._isFlushingChunks = false;
     }
@@ -316,21 +360,23 @@ export class ResumableStream {
     `;
 
     for (const chunk of chunks || []) {
-      if (
-        !sendIfOpen(
-          connection,
-          JSON.stringify({
-            body: chunk.body,
-            done: false,
-            id: requestId,
-            type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
-            replay: true
-          })
-        )
-      ) {
-        // Connection closed mid-replay — leave the stream active so the
-        // next reconnect can retry from the start.
-        return null;
+      for (const body of unpackSegmentBody(chunk.body)) {
+        if (
+          !sendIfOpen(
+            connection,
+            JSON.stringify({
+              body,
+              done: false,
+              id: requestId,
+              type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+              replay: true
+            })
+          )
+        ) {
+          // Connection closed mid-replay — leave the stream active so the
+          // next reconnect can retry from the start.
+          return null;
+        }
       }
     }
 
@@ -413,19 +459,21 @@ export class ResumableStream {
     `;
 
     for (const chunk of chunks || []) {
-      if (
-        !sendIfOpen(
-          connection,
-          JSON.stringify({
-            body: chunk.body,
-            done: false,
-            id: requestId,
-            type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
-            replay: true
-          })
-        )
-      ) {
-        return false;
+      for (const body of unpackSegmentBody(chunk.body)) {
+        if (
+          !sendIfOpen(
+            connection,
+            JSON.stringify({
+              body,
+              done: false,
+              id: requestId,
+              type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+              replay: true
+            })
+          )
+        ) {
+          return false;
+        }
       }
     }
 
@@ -461,13 +509,13 @@ export class ResumableStream {
       this._activeStreamId = stream.id;
       this._activeRequestId = stream.request_id;
 
-      // Get the last chunk index
+      // Resume the segment row-ordering index past the highest stored value.
       const lastChunk = this.sql<{ max_index: number }>`
         select max(chunk_index) as max_index 
         from cf_ai_chat_stream_chunks 
         where stream_id = ${this._activeStreamId}
       `;
-      this._streamChunkIndex =
+      this._segmentIndex =
         lastChunk && lastChunk[0]?.max_index != null
           ? lastChunk[0].max_index + 1
           : 0;
@@ -479,11 +527,12 @@ export class ResumableStream {
    */
   clearAll() {
     this._chunkBuffer = [];
+    this._chunkBufferBytes = 0;
     this.sql`delete from cf_ai_chat_stream_chunks`;
     this.sql`delete from cf_ai_chat_stream_metadata`;
     this._activeStreamId = null;
     this._activeRequestId = null;
-    this._streamChunkIndex = 0;
+    this._segmentIndex = 0;
   }
 
   /**
@@ -538,17 +587,30 @@ export class ResumableStream {
 
   // ── Test helpers (matching old AIChatAgent test API) ────────────────
 
-  /** @internal For testing only */
+  /**
+   * Return the stored chunks for a stream as individual chunk bodies in order,
+   * unpacking packed segment rows. The returned `chunk_index` is a running
+   * per-chunk sequence (0, 1, 2, …) — stable across calls because rows are
+   * append-only — so callers can use it as a monotonic chunk sequence.
+   */
   getStreamChunks(
     streamId: string
   ): Array<{ body: string; chunk_index: number }> {
-    return (
-      this.sql<{ body: string; chunk_index: number }>`
-        select body, chunk_index from cf_ai_chat_stream_chunks 
+    const rows =
+      this.sql<{ body: string }>`
+        select body from cf_ai_chat_stream_chunks 
         where stream_id = ${streamId} 
         order by chunk_index asc
-      ` || []
-    );
+      ` || [];
+    const out: Array<{ body: string; chunk_index: number }> = [];
+    let index = 0;
+    for (const row of rows) {
+      for (const body of unpackSegmentBody(row.body)) {
+        out.push({ body, chunk_index: index });
+        index++;
+      }
+    }
+    return out;
   }
 
   /** @internal For testing only */

@@ -535,6 +535,170 @@ describe("Resumable Streaming", () => {
 
       ws.close(1000);
     });
+
+    it("persists many chunks in order, packed into far fewer rows", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      const streamId = await agentStub.testStartStream("req-batch");
+
+      // 45 small chunks: auto-flushed every CHUNK_BUFFER_SIZE (10) → 4 packed
+      // rows of 10, plus a manual flush of the remaining 5 → 5 rows total,
+      // while all 45 chunks are still individually recoverable.
+      const total = 45;
+      for (let i = 0; i < total; i++) {
+        await agentStub.testStoreStreamChunk(
+          streamId,
+          `{"type":"text","text":"c${i}"}`
+        );
+      }
+
+      // Flush any remainder still in the buffer.
+      await agentStub.testFlushChunkBuffer();
+
+      const chunks = await agentStub.getStreamChunks(streamId);
+      expect(chunks.length).toBe(total);
+      for (let i = 0; i < total; i++) {
+        expect(chunks[i].chunk_index).toBe(i);
+        expect(chunks[i].body).toBe(`{"type":"text","text":"c${i}"}`);
+      }
+
+      // The 45 chunks are packed into 5 rows (4×10 + 1×5), not 45.
+      const rowCount = await agentStub.getStreamChunkRowCount(streamId);
+      expect(rowCount).toBe(5);
+
+      ws.close(1000);
+    });
+
+    it("packs a single flush of multiple chunks into one row", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      const streamId = await agentStub.testStartStream("req-pack-one");
+
+      // 3 small chunks, then a manual flush → exactly one packed row.
+      for (let i = 0; i < 3; i++) {
+        await agentStub.testStoreStreamChunk(
+          streamId,
+          `{"type":"text","text":"p${i}"}`
+        );
+      }
+      await agentStub.testFlushChunkBuffer();
+
+      expect(await agentStub.getStreamChunkRowCount(streamId)).toBe(1);
+
+      const chunks = await agentStub.getStreamChunks(streamId);
+      expect(chunks.map((c) => c.body)).toEqual([
+        '{"type":"text","text":"p0"}',
+        '{"type":"text","text":"p1"}',
+        '{"type":"text","text":"p2"}'
+      ]);
+
+      ws.close(1000);
+    });
+
+    it("stores a single buffered chunk as one unwrapped row", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      const streamId = await agentStub.testStartStream("req-single");
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text","text":"solo"}'
+      );
+      await agentStub.testFlushChunkBuffer();
+
+      expect(await agentStub.getStreamChunkRowCount(streamId)).toBe(1);
+      const chunks = await agentStub.getStreamChunks(streamId);
+      expect(chunks.length).toBe(1);
+      expect(chunks[0].body).toBe('{"type":"text","text":"solo"}');
+
+      ws.close(1000);
+    });
+
+    it("splits a large chunk into its own row to respect the byte cap", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      const streamId = await agentStub.testStartStream("req-bytecap");
+
+      // A small chunk, then a chunk larger than SEGMENT_MAX_BYTES (512 KB),
+      // then another small chunk. The large chunk forces a flush boundary on
+      // each side, so it lands in its own (unwrapped) row.
+      const big = "x".repeat(600_000);
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text","text":"before"}'
+      );
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        `{"type":"text","text":"${big}"}`
+      );
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text","text":"after"}'
+      );
+      await agentStub.testFlushChunkBuffer();
+
+      // 3 rows: [before], [big], [after] — the byte cap prevents packing the
+      // large chunk with its neighbors.
+      expect(await agentStub.getStreamChunkRowCount(streamId)).toBe(3);
+
+      const chunks = await agentStub.getStreamChunks(streamId);
+      expect(chunks.length).toBe(3);
+      expect(chunks[0].body).toBe('{"type":"text","text":"before"}');
+      expect(chunks[1].body).toBe(`{"type":"text","text":"${big}"}`);
+      expect(chunks[2].body).toBe('{"type":"text","text":"after"}');
+
+      ws.close(1000);
+    });
+
+    it("reads back legacy per-chunk rows (backward compatibility)", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      // Seed the table with legacy one-row-per-chunk records (unwrapped object
+      // bodies), as written by older builds, then verify they unpack 1:1.
+      const streamId = "legacy-stream";
+      await agentStub.insertLegacyChunkRows(streamId, "req-legacy", [
+        '{"type":"text","text":"L0"}',
+        '{"type":"text","text":"L1"}',
+        '{"type":"text","text":"L2"}'
+      ]);
+
+      // 3 legacy rows on disk…
+      expect(await agentStub.getStreamChunkRowCount(streamId)).toBe(3);
+
+      // …read back as 3 individual chunks in order.
+      const chunks = await agentStub.getStreamChunks(streamId);
+      expect(chunks.map((c) => c.body)).toEqual([
+        '{"type":"text","text":"L0"}',
+        '{"type":"text","text":"L1"}',
+        '{"type":"text","text":"L2"}'
+      ]);
+
+      ws.close(1000);
+    });
   });
 
   describe("Completed stream handling", () => {

@@ -151,7 +151,9 @@ import {
   resolveToolMergeId,
   createChatFiberSnapshot,
   unwrapChatFiberSnapshot,
-  wrapChatFiberSnapshot
+  wrapChatFiberSnapshot,
+  MAX_BOUND_PARAMS,
+  buildInClauseStrings
 } from "agents/chat";
 import type {
   StreamChunkData,
@@ -697,6 +699,9 @@ const DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE =
 // Incidents that have not seen a new attempt within this window are assumed
 // abandoned and swept so durable storage does not grow without bound.
 const CHAT_RECOVERY_INCIDENT_TTL_MS = 60 * 60 * 1000;
+// Max keys per Durable Object KV `delete([...])` call.
+// See https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
+const KV_DELETE_MAX_KEYS = 128;
 // PRIMARY recovery bound (#1637): seal an incident that has made no forward
 // progress for this long. Keyed to `lastProgressAt`, which resets on every
 // progress-bearing attempt — so a turn that keeps producing content survives
@@ -5528,15 +5533,21 @@ export class Think<
       )
       .slice(0, limit);
 
+    const idsToDelete = rows
+      .filter((row) => this._isTerminalSubmissionStatus(row.status))
+      .map((row) => row.submission_id);
+
+    // Batch deletes into `IN (...)` queries within the SQLite 100
+    // bound-parameter limit to minimize round-trips during cleanup.
     let deleted = 0;
-    for (const row of rows) {
-      if (!this._isTerminalSubmissionStatus(row.status)) continue;
-      this.sql`
-        DELETE FROM cf_think_submissions
-        WHERE submission_id = ${row.submission_id}
-          AND status IN ('completed', 'aborted', 'skipped', 'error')
-      `;
-      deleted++;
+    for (let i = 0; i < idsToDelete.length; i += MAX_BOUND_PARAMS) {
+      const batch = idsToDelete.slice(i, i + MAX_BOUND_PARAMS);
+      const strings = buildInClauseStrings(
+        "DELETE FROM cf_think_submissions WHERE status IN ('completed', 'aborted', 'skipped', 'error') AND submission_id IN ",
+        batch.length
+      );
+      this.sql(strings, ...batch);
+      deleted += batch.length;
     }
     return deleted;
   }
@@ -8396,8 +8407,10 @@ export class Think<
         staleKeys.push(key);
       }
     }
-    for (const key of staleKeys) {
-      await this.ctx.storage.delete(key);
+    // Batch deletes — the DO storage KV delete accepts up to 128 keys per call,
+    // collapsing N awaited round-trips into ceil(N / 128).
+    for (let i = 0; i < staleKeys.length; i += KV_DELETE_MAX_KEYS) {
+      await this.ctx.storage.delete(staleKeys.slice(i, i + KV_DELETE_MAX_KEYS));
     }
   }
 
