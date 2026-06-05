@@ -6,7 +6,7 @@
   "description": "A real-time GitHub repository activity monitor built with Cloudflare Agents",
   "scripts": {
     "start": "vite dev",
-    "deploy": "npm run build && wrangler deploy",
+    "deploy": "pnpm run build && wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {

@@ -17,14 +17,13 @@
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint .",
-    "typecheck": "npx tsx scripts/typecheck.ts",
-    "check:exports": "npx tsx scripts/check-exports.ts",
-    "check": "sherif && npm run check:exports && oxfmt --check . && oxlint . && npm run typecheck",
+    "typecheck": "tsx scripts/typecheck.ts",
+    "check:exports": "tsx scripts/check-exports.ts",
+    "check": "sherif && pnpm run check:exports && oxfmt --check . && oxlint . && pnpm run typecheck",
     "test": "nx run-many -t test",
-    "ci": "oxfmt --write . && nx run-many -t build test && npm run check",
+    "ci": "oxfmt --write . && nx run-many -t build test && pnpm run check",
     "test:e2e": "nx run-many -t test:e2e --parallel=1",
-    "test:react": "npm run test:react -w agents",
-    "postinstall": "patch-package",
+    "test:react": "pnpm --filter agents run test:react",
     "prepare:playwright": "playwright install --with-deps chromium",
     "prepare": "husky"
   },
@@ -53,6 +52,7 @@
     "@vitest/browser": "^4.1.8",
     "@vitest/browser-playwright": "^4.1.8",
     "@vitest/runner": "^4.1.8",
+    "agents": "workspace:*",
     "ai": "^6.0.196",
     "autoevals": "^0.0.132",
     "concurrently": "^10.0.3",
@@ -65,7 +65,6 @@
     "oxlint": "^1.68.0",
     "partyserver": "^0.5.6",
     "partysocket": "1.1.19",
-    "patch-package": "^8.0.1",
     "pkg-pr-new": "^0.0.75",
     "playwright": "^1.60.0",
     "react": "^19.2.7",
@@ -81,15 +80,6 @@
     "wrangler": "^4.97.0",
     "zod": "^4.4.3"
   },
-  "workspaces": [
-    "examples/*",
-    "packages/*",
-    "voice-providers/*",
-    "guides/*",
-    "experimental/*",
-    "openai-sdk/*",
-    "site/*"
-  ],
   "overrides": {
     "esbuild": "^0.25.1"
   },
@@ -98,5 +88,5 @@
       "oxfmt --write"
     ]
   },
-  "packageManager": "npm@11.16.0"
+  "packageManager": "pnpm@11.5.1"
 }

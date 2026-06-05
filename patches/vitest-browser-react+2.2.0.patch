@@ -1,7 +1,7 @@
-diff --git a/node_modules/vitest-browser-react/dist/pure-C_qo4W4L.js b/node_modules/vitest-browser-react/dist/pure-C_qo4W4L.js
+diff --git a/dist/pure-C_qo4W4L.js b/dist/pure-C_qo4W4L.js
 index 1822276..e2b25bd 100644
---- a/node_modules/vitest-browser-react/dist/pure-C_qo4W4L.js
-+++ b/node_modules/vitest-browser-react/dist/pure-C_qo4W4L.js
+--- a/dist/pure-C_qo4W4L.js
++++ b/dist/pure-C_qo4W4L.js
 @@ -12,7 +12,7 @@ function ensureTestIdAttribute(element) {
  }
  let activeActs = 0;

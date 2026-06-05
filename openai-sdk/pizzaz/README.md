@@ -11,7 +11,7 @@ You'll need a ChatGPT developer account to be able to use ChatGPT apps (connecto
 We'll be deploying a PizzaMCP that allows us to render a few different pizza-related components.
 All ChatGPT App MCPs are ready-to-ship with `agents`.
 
-Run `npm run deploy` and make a note of the URL your worker is hosted at. It should be something like `https://pizzaz-mcp.<your-account>.workers.dev`.
+Run `pnpm run deploy` and make a note of the URL your worker is hosted at. It should be something like `https://pizzaz-mcp.<your-account>.workers.dev`.
 
 Now, you can go to the ChatGPT interface and add the app as a connector. Simply:
 

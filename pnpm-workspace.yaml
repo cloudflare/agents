@@ -1,0 +1,25 @@
+packages:
+  - "examples/*"
+  - "packages/*"
+  - "voice-providers/*"
+  - "guides/*"
+  - "experimental/*"
+  - "openai-sdk/*"
+  - "site/*"
+linkWorkspacePackages: true
+preferWorkspacePackages: true
+patchedDependencies:
+  "@chonkiejs/chunk@0.9.3": patches/@chonkiejs+chunk+0.9.3.patch
+  vitest-browser-react@2.2.0: patches/vitest-browser-react+2.2.0.patch
+allowBuilds:
+  "@mongodb-js/zstd": true
+  better-sqlite3: true
+  core-js-pure: true
+  esbuild: true
+  node-liblzma: true
+  nx: true
+  sharp: true
+  workerd: true
+minimumReleaseAgeExclude:
+  - "@cloudflare/*"
+  - "@typescript/*"

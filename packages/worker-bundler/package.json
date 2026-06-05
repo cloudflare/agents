@@ -43,7 +43,10 @@
     "typescript": "^6.0.3"
   },
   "devDependencies": {
-    "@types/semver": "^7.7.1"
+    "@cloudflare/workers-types": "^4.20260604.1",
+    "@types/semver": "^7.7.1",
+    "esbuild": "^0.25.1",
+    "tsdown": "^0.22.1"
   },
   "engines": {
     "node": ">=22"
