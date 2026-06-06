@@ -1882,6 +1882,27 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return result.status;
   }
 
+  /** Drive an ABORTED turn purely server-side (no client request), via a
+   *  pre-aborted external signal — the stream loop breaks immediately and the
+   *  pushed `ChatResponseResult.status` is `"aborted"`. Used to verify that an
+   *  aborted programmatic turn also supersedes a stale terminal record (#1645),
+   *  not just a completed one. */
+  async driveAbortedTurnForTest(): Promise<SaveMessagesResult["status"]> {
+    const controller = new AbortController();
+    controller.abort(new Error("pre-aborted"));
+    const result = await this.saveMessages(
+      [
+        {
+          id: `u-${crypto.randomUUID()}`,
+          role: "user",
+          parts: [{ type: "text", text: "hello" }]
+        }
+      ],
+      { signal: controller.signal }
+    );
+    return result.status;
+  }
+
   async getIncidentForTest(incidentId: string): Promise<{
     attempt: number;
     status: string;

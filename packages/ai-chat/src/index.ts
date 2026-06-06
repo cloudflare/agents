@@ -2164,13 +2164,20 @@ export class AIChatAgent<
           await this.keepAliveWhile(async () => {
             while (this._pendingChatResponseResults.length > 0) {
               const chatResult = this._pendingChatResponseResults.shift()!;
-              // A later turn that completes successfully supersedes any pending
-              // terminal record (#1645). The client-request handler already
-              // clears on a new submit; this covers turns driven purely
-              // server-side (`saveMessages`, auto-continuation) with no client
-              // request in between, so a stale exhaustion can't replay on a
-              // later reconnect once a fresh turn has succeeded.
-              if (chatResult.status === "completed") {
+              // A later turn that ends in a non-error outcome supersedes any
+              // pending terminal record (#1645) — both a successful turn and an
+              // aborted one (the conversation has moved on either way; only a
+              // fresh error should leave a terminal to replay). The
+              // client-request handler already clears on a new submit; this
+              // covers turns driven purely server-side (`saveMessages`,
+              // auto-continuation) with no client request in between, so a
+              // stale exhaustion can't replay on a later reconnect. Mirrors
+              // Think's `_recordTerminalChatStatus`, which clears on any
+              // non-error/non-interrupted status.
+              if (
+                chatResult.status === "completed" ||
+                chatResult.status === "aborted"
+              ) {
                 await this._clearChatTerminal();
               }
               try {

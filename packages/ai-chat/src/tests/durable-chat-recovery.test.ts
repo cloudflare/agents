@@ -145,6 +145,9 @@ interface ChatRecoveryTestStub {
   driveSuccessfulTurnForTest(): Promise<
     "completed" | "error" | "aborted" | "skipped"
   >;
+  driveAbortedTurnForTest(): Promise<
+    "completed" | "error" | "aborted" | "skipped"
+  >;
 }
 
 async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
@@ -1725,6 +1728,53 @@ describe("onChatRecovery", () => {
     expect(
       received.some((m) => m.type === MessageType.CF_AGENT_STREAM_RESUME_NONE)
     ).toBe(true);
+  });
+
+  // #1645 (clear-on-abort): an ABORTED server-side turn must also supersede the
+  // terminal record, not just a completed one. The conversation has moved on
+  // either way; only a fresh error should leave a terminal to replay. The
+  // client-submit path clears eagerly, so this gap is reachable only for turns
+  // driven purely server-side (`saveMessages` / `continueLastTurn` with an
+  // external abort signal).
+  it("clears the terminal record when a later server-side turn is aborted (#1645)", async () => {
+    const room = `terminal-aborted-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    const TERMINAL = "Recovery exhausted — the assistant could not finish.";
+
+    // Drive a turn to exhaustion while no client is connected → record written.
+    await agentStub.enableExhaustedCaptureForTest(6, TERMINAL);
+    await agentStub.setForceStableTimeoutForTest(true);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-aborted",
+      requestId: "root-aborted",
+      recoveryKind: "continue",
+      attempt: 6,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+    await agentStub.runChatRecoveryContinueDirectForTest({
+      incidentId: "inc-aborted",
+      originalRequestId: "root-aborted",
+      targetAssistantId: "a-aborted"
+    });
+
+    // Precondition: the terminal record is durably present.
+    expect(await agentStub.getPendingChatTerminalForTest()).toMatchObject({
+      body: TERMINAL
+    });
+
+    // A later turn is ABORTED — driven purely server-side (`saveMessages` with
+    // a pre-aborted signal), NOT via a client request. Only the response-hook
+    // drain loop can supersede the record here, and it must do so on the
+    // aborted outcome (not just on "completed").
+    await agentStub.setForceStableTimeoutForTest(false);
+    expect(await agentStub.driveAbortedTurnForTest()).toBe("aborted");
+
+    // The stale exhaustion is gone, so a reconnecting client won't replay it.
+    expect(await agentStub.getPendingChatTerminalForTest()).toBeNull();
   });
 
   // #1645 (clear-on-chat-clear): clearing the conversation must also drop the
