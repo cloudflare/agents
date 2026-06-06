@@ -1538,6 +1538,15 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       }
     }
 
+    if (this._emitStreamError) {
+      // Surface a terminal stream error (the way a provider 500 arrives as an
+      // SSE `error` part). The turn resolves with status "error".
+      return makeSSEChunkResponse([
+        { type: "start" },
+        { type: "error", errorText: this._emitStreamError }
+      ]);
+    }
+
     const chunks: Array<Record<string, unknown>> = [];
     if (this.includeReasoningInResponse) {
       chunks.push(
@@ -1554,6 +1563,8 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     );
     return makeSSEChunkResponse(chunks);
   }
+
+  private _emitStreamError: string | null = null;
 
   setStashData(data: unknown): void {
     this._stashData = data;
@@ -1901,6 +1912,28 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       { signal: controller.signal }
     );
     return result.status;
+  }
+
+  /** Drive a turn that ends in a terminal (non-recovered) stream error — the
+   *  way a provider 500 arrives as an SSE `error` part. Used to verify the
+   *  error is durably recorded so it replays to a reconnecting client (#1645),
+   *  matching Think. Returns the resulting status (`"error"`). */
+  async driveErroredTurnForTest(
+    message: string
+  ): Promise<SaveMessagesResult["status"]> {
+    this._emitStreamError = message;
+    try {
+      const result = await this.saveMessages([
+        {
+          id: `u-${crypto.randomUUID()}`,
+          role: "user",
+          parts: [{ type: "text", text: "hello" }]
+        }
+      ]);
+      return result.status;
+    } finally {
+      this._emitStreamError = null;
+    }
   }
 
   async getIncidentForTest(incidentId: string): Promise<{

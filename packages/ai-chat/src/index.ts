@@ -2179,6 +2179,21 @@ export class AIChatAgent<
                 chatResult.status === "aborted"
               ) {
                 await this._clearChatTerminal();
+              } else if (chatResult.status === "error") {
+                // A terminal (non-recovered) error — e.g. a provider 500 surfaced
+                // as a stream `error` part — has no durable trace otherwise, so a
+                // client disconnected at this moment never learns the turn failed
+                // and stays frozen on reconnect (#1645). Record it so it replays
+                // over the resume handshake (`_replayTerminalOnResume`). Mirrors
+                // Think's `_fireResponseHook`, which records on `error` too.
+                // Recoverable failures (deploy/eviction/stall) don't arrive here
+                // as `error` — they reach the drain loop as `aborted`, or not at
+                // all (the isolate is gone), and exhaustion records its own
+                // terminal — so this can't pre-empt recovery.
+                await this._recordChatTerminal(
+                  chatResult.requestId,
+                  chatResult.error ?? "The assistant encountered an error."
+                );
               }
               try {
                 await this.onChatResponse(chatResult);

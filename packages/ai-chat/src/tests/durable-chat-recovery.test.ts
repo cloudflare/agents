@@ -148,6 +148,9 @@ interface ChatRecoveryTestStub {
   driveAbortedTurnForTest(): Promise<
     "completed" | "error" | "aborted" | "skipped"
   >;
+  driveErroredTurnForTest(
+    message: string
+  ): Promise<"completed" | "error" | "aborted" | "skipped">;
 }
 
 async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
@@ -1775,6 +1778,73 @@ describe("onChatRecovery", () => {
 
     // The stale exhaustion is gone, so a reconnecting client won't replay it.
     expect(await agentStub.getPendingChatTerminalForTest()).toBeNull();
+  });
+
+  // #1645 (record-on-error): a terminal NON-exhaustion error (e.g. a provider
+  // 500 surfaced as a stream `error` part) must also be durably recorded, not
+  // just broadcast transiently — otherwise a client disconnected at that moment
+  // never learns the turn failed and stays frozen on reconnect. Brings ai-chat
+  // to parity with Think's `_fireResponseHook`, which records on `error`.
+  it("records a durable terminal for a non-exhaustion error and replays it on reconnect (#1645)", async () => {
+    const room = `terminal-error-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    const STREAM_ERROR = "Provider returned HTTP 500.";
+
+    // Drive a turn that ends in a terminal stream error, purely server-side
+    // (no client connected at the moment of failure).
+    expect(await agentStub.driveErroredTurnForTest(STREAM_ERROR)).toBe("error");
+
+    // The error is durably recorded (not just broadcast transiently).
+    expect(await agentStub.getPendingChatTerminalForTest()).toMatchObject({
+      body: STREAM_ERROR
+    });
+
+    // End-to-end: a client connecting now and running the standard resume probe
+    // learns the turn failed — it receives the terminal error frame rather than
+    // a bare RESUME_NONE that would leave it frozen.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const received: Array<Record<string, unknown>> = [];
+    ws.addEventListener("message", (e) => {
+      let frame: Record<string, unknown>;
+      try {
+        frame = JSON.parse(e.data as string) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      received.push(frame);
+      if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+        ws.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+            id: frame.id
+          })
+        );
+      }
+    });
+
+    ws.send(
+      JSON.stringify({ type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST })
+    );
+
+    await new Promise((r) => setTimeout(r, 400));
+    ws.close(1000);
+
+    const terminal = received.find(
+      (m) =>
+        m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+        m.error === true &&
+        m.done === true
+    );
+    expect(
+      terminal,
+      `expected a terminal error frame on reconnect; received frame types: ${JSON.stringify(
+        received.map((m) => m.type)
+      )}`
+    ).toBeDefined();
+    expect(terminal?.body).toBe(STREAM_ERROR);
   });
 
   // #1645 (clear-on-chat-clear): clearing the conversation must also drop the
