@@ -1855,6 +1855,33 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     );
   }
 
+  /** Read the durable terminal record (#1645) so tests can assert it is
+   *  recorded on exhaustion and cleared once a later turn succeeds. */
+  async getPendingChatTerminalForTest(): Promise<{
+    requestId: string;
+    body: string;
+  } | null> {
+    return (
+      (await this.ctx.storage.get<{ requestId: string; body: string }>(
+        "cf:chat:last-terminal"
+      )) ?? null
+    );
+  }
+
+  /** Drive a successful turn purely server-side (no client request), the way
+   *  an app's own code would via `saveMessages`. Used to verify that a
+   *  succeeding programmatic turn supersedes a stale terminal record (#1645). */
+  async driveSuccessfulTurnForTest(): Promise<SaveMessagesResult["status"]> {
+    const result = await this.saveMessages([
+      {
+        id: `u-${crypto.randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text: "hello" }]
+      }
+    ]);
+    return result.status;
+  }
+
   async getIncidentForTest(incidentId: string): Promise<{
     attempt: number;
     status: string;

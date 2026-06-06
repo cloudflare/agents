@@ -180,12 +180,20 @@ const DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE =
   "The assistant was interrupted and could not recover. Please try again.";
 // Durable record of an in-progress recovery so a "recovering…" status (#1620)
 // can be broadcast live and survives the set/clear happening in different
-// isolates (a continuation runs in a later alarm invocation). NOTE: unlike
-// `@cloudflare/think`, AIChatAgent has no connect-time replay yet (it lacks the
-// idle-connect hydration path) — a client that connects mid-recovery won't be
-// re-told until #1645 adds hydration. The live broadcast + reliable clear work
-// regardless.
+// isolates (a continuation runs in a later alarm invocation). NOTE: this live
+// "recovering…" status is NOT replayed on connect — only the terminal outcome
+// is (#1645, via the resume handshake; see `CHAT_LAST_TERMINAL_KEY`). A client
+// that connects mid-recovery isn't re-told it's recovering, but the live
+// broadcast + reliable clear work regardless, and any terminal outcome is
+// surfaced on reconnect.
 const CHAT_RECOVERING_KEY = "cf:chat:recovering";
+// Durable record of the last turn that ended in a terminal error / abandoned
+// recovery (#1645). The terminal `CF_AGENT_USE_CHAT_RESPONSE` broadcast is
+// transient, so a client disconnected at the moment recovery exhausts would
+// otherwise never learn the turn failed and stay frozen. Replayed on the next
+// reconnect via the resume handshake (`_replayTerminalOnResume`); cleared when
+// a later turn supersedes it.
+const CHAT_LAST_TERMINAL_KEY = "cf:chat:last-terminal";
 // Incidents that have not seen a new attempt within this window are assumed
 // abandoned and swept so durable storage does not grow without bound.
 const CHAT_RECOVERY_INCIDENT_TTL_MS = 60 * 60 * 1000;
@@ -818,6 +826,11 @@ export class AIChatAgent<
             return;
           }
 
+          // A genuinely-new turn supersedes any pending terminal record (#1645)
+          // so a stale exhaustion can't replay on a later reconnect once the
+          // user has moved on.
+          await this._clearChatTerminal();
+
           // Track that this request is past the concurrency decision but
           // not yet enqueued in _turnQueue. Decremented synchronously
           // before _runExclusiveChatTurn (which increments queuedCount).
@@ -995,6 +1008,10 @@ export class AIChatAgent<
         if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
           this.resetTurnState();
           this.sql`delete from cf_ai_chat_agent_messages`;
+          // Drop any pending terminal record (#1645) so a stale exhaustion
+          // can't replay onto a freshly-cleared (empty) conversation when a
+          // client reconnects and runs the resume probe.
+          await this._clearChatTerminal();
           this._resumableStream.clearAll();
           this._pendingResumeConnections.clear();
           this._lastClientTools = undefined;
@@ -1054,6 +1071,11 @@ export class AIChatAgent<
               connection.id,
               connection
             );
+          } else if (await this._replayTerminalOnResume(connection)) {
+            // A turn terminalized while no client was connected (#1645): drive
+            // the resume handshake so the terminal error frame can be delivered
+            // on the resumed stream (the only path that surfaces as an error on
+            // the client) once this connection ACKs — see `_replayTerminalOnAck`.
           } else {
             sendIfOpen(
               connection,
@@ -1087,6 +1109,9 @@ export class AIChatAgent<
             }
           } else if (this._resumableStream.hasActiveStream()) {
             // Ignore ACKs for a different active stream request id.
+          } else if (await this._replayTerminalOnAck(connection, data.id)) {
+            // Delivered the pending terminal error frame on the resumed stream
+            // the client just ACKed (#1645).
           } else if (
             !this._resumableStream.replayCompletedChunksByRequestId(
               connection,
@@ -2139,6 +2164,15 @@ export class AIChatAgent<
           await this.keepAliveWhile(async () => {
             while (this._pendingChatResponseResults.length > 0) {
               const chatResult = this._pendingChatResponseResults.shift()!;
+              // A later turn that completes successfully supersedes any pending
+              // terminal record (#1645). The client-request handler already
+              // clears on a new submit; this covers turns driven purely
+              // server-side (`saveMessages`, auto-continuation) with no client
+              // request in between, so a stale exhaustion can't replay on a
+              // later reconnect once a fresh turn has succeeded.
+              if (chatResult.status === "completed") {
+                await this._clearChatTerminal();
+              }
               try {
                 await this.onChatResponse(chatResult);
               } catch (hookError) {
@@ -3819,6 +3853,12 @@ export class AIChatAgent<
     } catch (error) {
       console.error("[AIChatAgent] chatRecovery onExhausted hook threw", error);
     }
+    // Persist the terminal outcome BEFORE broadcasting it (#1645): the
+    // broadcast is transient, so a client disconnected at this moment (a
+    // deploy/reconnect storm exhausting recovery) would otherwise never learn
+    // the turn failed. The record is replayed on the next reconnect via the
+    // resume handshake (`_replayTerminalOnResume`).
+    await this._recordChatTerminal(incident.requestId, config.terminalMessage);
     this._broadcastChatMessage({
       body: config.terminalMessage,
       done: true,
@@ -3833,11 +3873,89 @@ export class AIChatAgent<
   }
 
   /**
+   * Persist a durable record of the last terminal turn so a client that
+   * (re)connects after the turn ended still learns its outcome (#1645). Kept
+   * until a later turn supersedes it (`_clearChatTerminal`); a single record is
+   * sufficient because only the most recent terminal is relevant.
+   */
+  private async _recordChatTerminal(
+    requestId: string,
+    body: string
+  ): Promise<void> {
+    await this.ctx.storage.put(CHAT_LAST_TERMINAL_KEY, { requestId, body });
+  }
+
+  /** Clear the durable terminal record once a later turn supersedes it (#1645). */
+  private async _clearChatTerminal(): Promise<void> {
+    await this.ctx.storage.delete(CHAT_LAST_TERMINAL_KEY);
+  }
+
+  private async _pendingChatTerminal(): Promise<{
+    requestId: string;
+    body: string;
+  } | null> {
+    return (
+      (await this.ctx.storage.get<{ requestId: string; body: string }>(
+        CHAT_LAST_TERMINAL_KEY
+      )) ?? null
+    );
+  }
+
+  /**
+   * Replay a pending terminal outcome (#1645) over the resume handshake so a
+   * reconnecting client surfaces it exactly like a live exhaustion. The bare
+   * terminal frame is dropped by the client unless it arrives on a resumed
+   * stream — the only path that reaches the transport's stream reader and
+   * becomes `useChat.error` — so we drive `STREAM_RESUMING` here and deliver
+   * the error frame once the client ACKs (see `_replayTerminalOnAck`).
+   * Returns true if a terminal was pending (and `STREAM_RESUMING` was sent).
+   */
+  private async _replayTerminalOnResume(
+    connection: Connection
+  ): Promise<boolean> {
+    const pending = await this._pendingChatTerminal();
+    if (!pending) return false;
+    sendIfOpen(
+      connection,
+      JSON.stringify({
+        type: MessageType.CF_AGENT_STREAM_RESUMING,
+        id: pending.requestId
+      })
+    );
+    return true;
+  }
+
+  /**
+   * Deliver the pending terminal error frame on the resumed stream the client
+   * ACKed (#1645). The record is retained (not cleared) so concurrent
+   * reconnects (e.g. multiple tabs) each learn the outcome; it is cleared when
+   * a later turn supersedes it.
+   */
+  private async _replayTerminalOnAck(
+    connection: Connection,
+    requestId: string
+  ): Promise<boolean> {
+    const pending = await this._pendingChatTerminal();
+    if (!pending || pending.requestId !== requestId) return false;
+    sendIfOpen(
+      connection,
+      JSON.stringify({
+        body: pending.body,
+        done: true,
+        error: true,
+        id: pending.requestId,
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+      })
+    );
+    return true;
+  }
+
+  /**
    * Set or clear the live "recovering…" status (#1620). Persists a durable
    * record (so set/clear stay consistent across the isolates a recovery spans)
    * and broadcasts a `CF_AGENT_CHAT_RECOVERING` frame on a genuine transition.
-   * NOTE: AIChatAgent does not yet replay this on connect (no idle-connect
-   * hydration; tracked in #1645) — this is the live signal only.
+   * NOTE: the live "recovering…" signal is still not replayed on connect — only
+   * the terminal outcome is (#1645, via the resume handshake).
    */
   private async _setChatRecovering(
     active: boolean,

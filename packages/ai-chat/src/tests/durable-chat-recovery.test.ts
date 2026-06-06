@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import { subscribe } from "agents/observability";
 import type { UIMessage as ChatMessage } from "ai";
+import { connectChatWS } from "./test-utils";
+import { MessageType } from "../types";
 
 interface ChatRecoveryTestStub {
   setRecoveryOverride(options: {
@@ -135,6 +137,13 @@ interface ChatRecoveryTestStub {
       reason: string;
       terminalMessage: string;
     }>
+  >;
+  getPendingChatTerminalForTest(): Promise<{
+    requestId: string;
+    body: string;
+  } | null>;
+  driveSuccessfulTurnForTest(): Promise<
+    "completed" | "error" | "aborted" | "skipped"
   >;
 }
 
@@ -1538,5 +1547,224 @@ describe("onChatRecovery", () => {
     // A terminal outcome clears it so the indicator can't spin forever.
     await agentStub.updateIncidentForTest(begun.incidentId, "failed", "boom");
     expect(await agentStub.getChatRecoveringForTest()).toBeNull();
+  });
+
+  // #1645: a recovery that exhausts while NO client is connected currently
+  // only broadcasts the terminal frame transiently — there is no durable
+  // record, so a client that (re)connects afterward and runs the standard
+  // resume probe is told RESUME_NONE and the failed turn stays frozen.
+  // This drives the real WebSocket reconnect protocol against a real DO.
+  it("replays the terminal exhaustion to a client that reconnects after it ended (#1645)", async () => {
+    const room = `terminal-reconnect-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    const TERMINAL = "Recovery exhausted — the assistant could not finish.";
+
+    // Drive a turn to exhaustion while no client is connected (deploy-churn /
+    // reconnect-storm shape): the terminal broadcast lands on nobody.
+    await agentStub.enableExhaustedCaptureForTest(6, TERMINAL);
+    await agentStub.setForceStableTimeoutForTest(true);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-reconnect",
+      requestId: "root-reconnect",
+      recoveryKind: "continue",
+      attempt: 6,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+    await agentStub.runChatRecoveryContinueDirectForTest({
+      incidentId: "inc-reconnect",
+      originalRequestId: "root-reconnect",
+      targetAssistantId: "a-reconnect"
+    });
+
+    // Sanity: the turn really did terminalize.
+    expect(await agentStub.getExhaustedContextsForTest()).toHaveLength(1);
+
+    // A client now connects — it was NOT present during exhaustion — and runs
+    // the standard reconnect probe the transport sends on every mount. We mirror
+    // the real WebSocketChatTransport handshake exactly: send RESUME_REQUEST,
+    // and on STREAM_RESUMING reply with STREAM_RESUME_ACK so the (resumed)
+    // stream can deliver its terminal error frame — the only path that becomes
+    // useChat.error on a reconnected client.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const received: Array<Record<string, unknown>> = [];
+    ws.addEventListener("message", (e) => {
+      let frame: Record<string, unknown>;
+      try {
+        frame = JSON.parse(e.data as string) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      received.push(frame);
+      if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+        ws.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+            id: frame.id
+          })
+        );
+      }
+    });
+
+    ws.send(
+      JSON.stringify({ type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST })
+    );
+
+    await new Promise((r) => setTimeout(r, 400));
+    ws.close(1000);
+
+    // EXPECTATION (#1645): the reconnecting client learns the turn failed —
+    // it receives the configured terminal error frame, not a bare RESUME_NONE.
+    const terminal = received.find(
+      (m) =>
+        m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+        m.error === true &&
+        m.done === true
+    );
+    expect(
+      terminal,
+      `expected a terminal error frame on reconnect; received frame types: ${JSON.stringify(
+        received.map((m) => m.type)
+      )}`
+    ).toBeTruthy();
+    expect(terminal?.body).toBe(TERMINAL);
+  });
+
+  // #1645 (clear-on-success): the durable terminal record must be superseded
+  // when a LATER turn succeeds — including a turn driven purely server-side via
+  // `saveMessages` (no client request in between, which is the only path that
+  // would otherwise clear it). Otherwise the stale exhaustion replays to the
+  // next client to connect, even though the conversation has since recovered.
+  it("clears the terminal record when a later server-side turn succeeds (#1645)", async () => {
+    const room = `terminal-cleared-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    const TERMINAL = "Recovery exhausted — the assistant could not finish.";
+
+    // Drive a turn to exhaustion while no client is connected → record written.
+    await agentStub.enableExhaustedCaptureForTest(6, TERMINAL);
+    await agentStub.setForceStableTimeoutForTest(true);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-cleared",
+      requestId: "root-cleared",
+      recoveryKind: "continue",
+      attempt: 6,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+    await agentStub.runChatRecoveryContinueDirectForTest({
+      incidentId: "inc-cleared",
+      originalRequestId: "root-cleared",
+      targetAssistantId: "a-cleared"
+    });
+
+    // Precondition: the terminal record is durably present.
+    expect(await agentStub.getPendingChatTerminalForTest()).toMatchObject({
+      body: TERMINAL
+    });
+
+    // A later turn succeeds — but driven purely server-side (`saveMessages`),
+    // NOT via a client `CF_AGENT_USE_CHAT_REQUEST`. The request handler's clear
+    // never runs; only the response-hook drain loop can supersede the record.
+    await agentStub.setForceStableTimeoutForTest(false);
+    expect(await agentStub.driveSuccessfulTurnForTest()).toBe("completed");
+
+    // The stale exhaustion is gone, so a reconnecting client won't see it.
+    expect(await agentStub.getPendingChatTerminalForTest()).toBeNull();
+
+    // End-to-end: a client connecting now and running the standard resume probe
+    // is told RESUME_NONE — no terminal error frame replays.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const received: Array<Record<string, unknown>> = [];
+    ws.addEventListener("message", (e) => {
+      let frame: Record<string, unknown>;
+      try {
+        frame = JSON.parse(e.data as string) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      received.push(frame);
+      if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+        ws.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+            id: frame.id
+          })
+        );
+      }
+    });
+
+    ws.send(
+      JSON.stringify({ type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST })
+    );
+
+    await new Promise((r) => setTimeout(r, 400));
+    ws.close(1000);
+
+    const terminal = received.find(
+      (m) =>
+        m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+        m.error === true &&
+        m.done === true
+    );
+    expect(
+      terminal,
+      `expected NO terminal error frame after a successful turn; received frame types: ${JSON.stringify(
+        received.map((m) => m.type)
+      )}`
+    ).toBeUndefined();
+    expect(
+      received.some((m) => m.type === MessageType.CF_AGENT_STREAM_RESUME_NONE)
+    ).toBe(true);
+  });
+
+  // #1645 (clear-on-chat-clear): clearing the conversation must also drop the
+  // terminal record. Otherwise a stale exhaustion replays onto the now-empty
+  // chat the next time a client connects and runs the resume probe.
+  it("drops the terminal record when the conversation is cleared (#1645)", async () => {
+    const room = `terminal-chatclear-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    const TERMINAL = "Recovery exhausted — the assistant could not finish.";
+
+    await agentStub.enableExhaustedCaptureForTest(6, TERMINAL);
+    await agentStub.setForceStableTimeoutForTest(true);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-chatclear",
+      requestId: "root-chatclear",
+      recoveryKind: "continue",
+      attempt: 6,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+    await agentStub.runChatRecoveryContinueDirectForTest({
+      incidentId: "inc-chatclear",
+      originalRequestId: "root-chatclear",
+      targetAssistantId: "a-chatclear"
+    });
+    expect(await agentStub.getPendingChatTerminalForTest()).toMatchObject({
+      body: TERMINAL
+    });
+
+    // Clear the conversation over the real WS protocol.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
+    await new Promise((r) => setTimeout(r, 200));
+    ws.close(1000);
+
+    expect(await agentStub.getPendingChatTerminalForTest()).toBeNull();
   });
 });

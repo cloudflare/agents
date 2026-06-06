@@ -816,6 +816,36 @@ export class ThinkTestAgent extends Think {
     this._resumableStream.complete(streamId);
   }
 
+  /**
+   * Persist a durable terminal record exactly as recovery exhaustion does
+   * (#1645), so a test can drive the reconnect path without a full
+   * deploy-churn exhaustion.
+   */
+  async recordTerminalForTest(requestId: string, body: string): Promise<void> {
+    await (
+      this as unknown as {
+        _recordTerminalChatStatus: (
+          status: "interrupted",
+          requestId: string,
+          body: string
+        ) => Promise<void>;
+      }
+    )._recordTerminalChatStatus("interrupted", requestId, body);
+  }
+
+  /** Read the durable terminal record (#1645) so a test can assert it is
+   *  cleared when the conversation is cleared. */
+  async getPendingChatTerminalForTest(): Promise<{
+    requestId: string;
+    body: string;
+  } | null> {
+    return (
+      (await this.ctx.storage.get<{ requestId: string; body: string }>(
+        "cf:chat:last-terminal"
+      )) ?? null
+    );
+  }
+
   async getLatestStreamStatusForTest(): Promise<string | null> {
     const streams = this.sql<{ status: string }>`
       SELECT status
@@ -4573,6 +4603,20 @@ export class ThinkRecoveryTestAgent extends Think {
       _buildIdleConnectMessages(): Promise<Array<Record<string, unknown>>>;
     };
     return self._buildIdleConnectMessages();
+  }
+
+  /** The durable terminal record (#1645) the resume handshake replays. A
+   *  failed turn persists this so a client that reconnects after the turn ended
+   *  is surfaced the outcome (delivery itself is over the resume handshake). */
+  async getPendingChatTerminalForTest(): Promise<{
+    requestId: string;
+    body: string;
+  } | null> {
+    return (
+      (await this.ctx.storage.get<{ requestId: string; body: string }>(
+        "cf:chat:last-terminal"
+      )) ?? null
+    );
   }
 
   async setRecoveryShouldThrowForTest(shouldThrow: boolean): Promise<void> {
