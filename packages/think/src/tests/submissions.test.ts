@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { getServerByName } from "partyserver";
 import { describe, expect, it } from "vitest";
+import type { UIMessage } from "ai";
 import type { ThinkProgrammaticTestAgent } from "./agents/think-session";
 import type {
   SubmitMessagesResult,
@@ -25,6 +26,8 @@ type ThinkSubmissionTestStub = {
   runNonSubmissionStreamFailureForTest(requestId: string): Promise<void>;
   setSubmissionStatusDelayForTest(delayMs: number): Promise<void>;
   setProgrammaticResponseForTest(response: string): Promise<void>;
+  setFinalAnswerResponseForTest(args: unknown): Promise<void>;
+  persistAssistantMessageForTest(msg: UIMessage): Promise<void>;
   setLastBodyForTest(body: Record<string, unknown>): Promise<void>;
   setSubmissionRecoveryStaleMsForTest(ms: number): Promise<void>;
   setWorkflowEventFailuresForTest(count: number): Promise<void>;
@@ -510,12 +513,12 @@ describe("Think durable submissions", () => {
 
   it("captures workflow structured output in terminal notifications", async () => {
     const agent = await freshAgent();
-    await agent.setProgrammaticResponseForTest(
-      JSON.stringify({
-        title: "Workflow output",
-        labels: ["ops", "review"]
-      })
-    );
+    // The structured workflow turn now terminates by calling the synthetic
+    // `think_final_answer` tool; the mock model emits that call (issue #1685).
+    await agent.setFinalAnswerResponseForTest({
+      title: "Workflow output",
+      labels: ["ops", "review"]
+    });
 
     const accepted = await agent.testSubmitMessages("produce workflow output", {
       submissionId: "sub-workflow-output",
@@ -571,6 +574,100 @@ describe("Think durable submissions", () => {
         }
       }
     });
+  });
+
+  it("does not persist the internal final-answer tool into the conversation", async () => {
+    const agent = await freshAgent();
+    await agent.setFinalAnswerResponseForTest({ title: "Hidden", labels: [] });
+
+    const accepted = await agent.testSubmitMessages("structured, no noise", {
+      submissionId: "sub-workflow-no-noise",
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-no-noise",
+            stepName: "draft",
+            eventType: "think-prompt-no-noise"
+          },
+          output: {
+            schema: {
+              type: "object",
+              properties: {
+                title: { type: "string" },
+                labels: { type: "array", items: { type: "string" } }
+              },
+              required: ["title", "labels"],
+              additionalProperties: false
+            }
+          },
+          fingerprint: "fingerprint"
+        }
+      }
+    });
+
+    await waitForSubmission(
+      agent,
+      accepted.submissionId,
+      (submission) => submission.status === "completed"
+    );
+    // The output is still delivered via the workflow event...
+    const event = await waitForWorkflowEvent(
+      agent,
+      (entry) => entry.event.type === "think-prompt-no-noise"
+    );
+    expect((event.event.payload as { output?: unknown }).output).toEqual({
+      title: "Hidden",
+      labels: []
+    });
+
+    // ...but the synthetic `think_final_answer` tool call must not leak into the
+    // stored conversation. The turn called only the internal tool, so no
+    // assistant message should be persisted at all — just the user message.
+    const stored = await agent.getStoredMessages();
+    const toolParts = stored.flatMap((m) =>
+      (m.parts ?? []).filter((p) => {
+        const part = p as { type?: string; toolName?: string };
+        return (
+          part.type === "tool-think_final_answer" ||
+          (part.type === "dynamic-tool" &&
+            part.toolName === "think_final_answer")
+        );
+      })
+    );
+    expect(toolParts).toHaveLength(0);
+    expect(stored.every((m) => m.role !== "assistant")).toBe(true);
+  });
+
+  it("strips the internal final-answer tool from a recovered assistant message", async () => {
+    // The recovery re-persist path runs outside an active turn, so stripping
+    // must be stateless (matched by the reserved tool name). Real content must
+    // survive; the internal tool call/result must not.
+    const agent = await freshAgent();
+    await agent.persistAssistantMessageForTest({
+      id: "asst-recovered",
+      role: "assistant",
+      parts: [
+        { type: "step-start" },
+        { type: "text", text: "Here is the answer." },
+        {
+          type: "tool-think_final_answer",
+          toolCallId: "call-1",
+          state: "output-available",
+          input: { word: "banana" },
+          output: "Final answer recorded."
+        }
+      ]
+    } as unknown as UIMessage);
+
+    const stored = await agent.getStoredMessages();
+    const recovered = stored.find((m) => m.id === "asst-recovered");
+    expect(recovered).toBeTruthy();
+    const partTypes = (recovered?.parts ?? []).map(
+      (p) => (p as { type?: string }).type
+    );
+    expect(partTypes).toContain("text");
+    expect(partTypes).not.toContain("tool-think_final_answer");
   });
 
   it("drains workflow notifications and clears delivered payloads", async () => {

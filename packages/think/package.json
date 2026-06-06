@@ -27,6 +27,8 @@
     "just-bash": "^3.0.1"
   },
   "devDependencies": {
+    "@ai-sdk/anthropic": "^3.0.81",
+    "@ai-sdk/openai": "^3.0.67",
     "@chat-adapter/telegram": "^4.30.0",
     "ai": "^6.0.196",
     "zod": "^4.4.3"

@@ -2819,6 +2819,59 @@ function createToolCallingMockModel(): LanguageModel {
   } as LanguageModel;
 }
 
+// Emits a single tool call for whichever tool the turn forces via `toolChoice`
+// (or the first `think_final_answer*` tool advertised), with the configured
+// arguments. Mirrors how a real model terminates a structured workflow turn by
+// calling the synthetic final-answer tool — exercises the #1685 capture path
+// without a network round-trip.
+function createFinalAnswerMockModel(args: unknown): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-final-answer",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream(options: Record<string, unknown>) {
+      const opts = options as {
+        toolChoice?: { type?: string; toolName?: string };
+        tools?: Array<{ name?: string }>;
+      };
+      const toolName =
+        opts.toolChoice?.type === "tool" && opts.toolChoice.toolName
+          ? opts.toolChoice.toolName
+          : ((opts.tools ?? [])
+              .map((t) => t.name)
+              .find((n) => n?.startsWith("think_final_answer")) ??
+            "think_final_answer");
+      const input = JSON.stringify(args);
+      const id = "final-answer-call";
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "tool-input-start", id, toolName });
+          controller.enqueue({ type: "tool-input-delta", id, delta: input });
+          controller.enqueue({ type: "tool-input-end", id });
+          controller.enqueue({
+            type: "tool-call",
+            toolCallId: id,
+            toolName,
+            input
+          });
+          controller.enqueue({
+            type: "finish",
+            finishReason: v3FinishReason("tool-calls"),
+            usage: v3Usage(10, 5)
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
 export class ThinkToolsTestAgent extends Think {
   override maxSteps = 3;
 
@@ -3031,6 +3084,7 @@ export class ThinkProgrammaticTestAgent extends Think {
   private _throwBeforeTurnError: string | null = null;
   private _submissionStatusDelayMs = 0;
   private _programmaticResponse = "Programmatic response";
+  private _finalAnswerResponse: unknown = undefined;
   private _inBandErrorResponse: {
     errorText: string;
     textChunks: string[];
@@ -3042,6 +3096,9 @@ export class ThinkProgrammaticTestAgent extends Think {
         this._inBandErrorResponse.errorText,
         this._inBandErrorResponse.textChunks
       );
+    }
+    if (this._finalAnswerResponse !== undefined) {
+      return createFinalAnswerMockModel(this._finalAnswerResponse);
     }
     if (this._delayedChunks) {
       return createDelayedMultiChunkMockModel(
@@ -3165,6 +3222,23 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async setProgrammaticResponseForTest(response: string): Promise<void> {
     this._programmaticResponse = response;
+  }
+
+  // Make the next turn(s) terminate by calling the structured-output
+  // `think_final_answer` tool with `args` as its arguments (issue #1685).
+  async setFinalAnswerResponseForTest(args: unknown): Promise<void> {
+    this._finalAnswerResponse = args;
+  }
+
+  // Drive the assistant-message persistence chokepoint directly. Used to
+  // simulate the recovery re-persist path (which runs outside an active turn)
+  // and assert the internal `think_final_answer` tool is stripped statelessly.
+  async persistAssistantMessageForTest(msg: UIMessage): Promise<void> {
+    await (
+      this as unknown as {
+        _persistAssistantMessage: (m: UIMessage) => Promise<void>;
+      }
+    )._persistAssistantMessage(msg);
   }
 
   async setLastBodyForTest(body: Record<string, unknown>): Promise<void> {

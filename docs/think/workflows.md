@@ -84,15 +84,37 @@ await this.sendWorkflowEvent("TRIAGE_WORKFLOW", workflowId, {
 ```
 
 `step.prompt()` accepts a prompt string and a Zod object schema. The schema is
-converted to JSON Schema before the Workflow calls the Agent, then Think
-reconstructs the AI SDK structured output configuration for the turn. When the
+converted to JSON Schema before the Workflow calls the Agent. Think then runs a
+full agentic turn: the Agent may use its tools across multiple steps and returns
+the structured result by calling an internal `final_answer` tool whose arguments
+match the schema. This uses ordinary tool calling rather than a streaming
+`response_format`, so it works across every provider Think supports — including
+Workers AI, which rejects JSON Schema responses on streaming requests. When the
 Workflow resumes, the payload is validated again with the original Zod schema
 before the typed value is returned.
 
 Unsupported Zod features that cannot be represented as JSON Schema fail while
 creating the prompt step. Think does not silently repair invalid model output.
-If the model or provider cannot produce valid output, the submission reaches a
-terminal error state and `step.prompt()` throws.
+If the model does not produce a valid `final_answer` call, the submission reaches
+a terminal error state and `step.prompt()` throws.
+
+### Behavior notes
+
+- **The Agent may use its tools first.** A `step.prompt()` turn is a full agentic
+  turn: the Agent can call its own tools across multiple steps and then call the
+  final-answer tool. Allow at least `maxSteps: 2` if you expect the Agent to use
+  a tool before answering — with `maxSteps: 1` it is forced to answer on the
+  first step and cannot call any other tool.
+- **Tool use is forced during a structured turn.** To guarantee the Agent
+  terminates with a structured answer (rather than replying in plain text), Think
+  sets `toolChoice` for the turn. Do not override `toolChoice` from `beforeTurn`
+  on a `step.prompt()` turn — doing so can prevent the Agent from calling the
+  final-answer tool, which makes the prompt fail.
+- **`think_final_answer` is reserved.** Think injects an internal
+  `think_final_answer` tool to carry the structured result. This name (and any
+  `think_final_answer_*` variant) is reserved; its call and result are stripped
+  from the persisted conversation, so the transcript and later turns do not see
+  Think's internal plumbing.
 
 ## How It Runs
 
