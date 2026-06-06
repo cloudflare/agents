@@ -1,5 +1,5 @@
 {
-  "name": "issue-1691-live",
+  "name": "@cloudflare/agents-issue-1691-live",
   "version": "0.0.0",
   "private": true,
   "type": "module",

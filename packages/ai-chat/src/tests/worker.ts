@@ -2222,7 +2222,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       })) ?? {};
 
     if (options.persist !== false) {
-      this._persistOrphanedStream(streamId);
+      await this._persistOrphanedStream(streamId);
     }
 
     this._resumableStream.complete(streamId);

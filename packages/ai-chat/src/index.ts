@@ -4099,9 +4099,30 @@ export class AIChatAgent<
       streamId ?? "",
       partial
     );
-    const recoveryKind: ChatRecoveryKind = shouldRetryPreStream
-      ? "retry"
-      : "continue";
+    // A new turn whose stream produced no assistant partial at all (interrupted
+    // before the first chunk materialized) will be re-run fresh rather than
+    // continued (#1691) — and that is knowable *before* `onChatRecovery`,
+    // because an empty partial persists nothing and leaves the conversation
+    // leaf at the user message regardless of what the hook returns. Report it
+    // as "retry" so the hook and the incident match the action that follows.
+    // The sibling `persist: false` case (a NON-empty partial the hook chooses
+    // to discard) only becomes a retry based on the hook's own return value, so
+    // it cannot be pre-detected here — the hook still sees "continue" there and
+    // only the `chat:recovery:scheduled` event reflects the final "retry".
+    const preStreamLeaf =
+      this.messages.length > 0
+        ? this.messages[this.messages.length - 1]
+        : undefined;
+    const emptyPartialNewTurn =
+      !!streamId &&
+      recoverySnapshot?.continuation === false &&
+      !!recoverySnapshot.latestUserMessageId &&
+      partial.text === "" &&
+      partial.parts.length === 0 &&
+      preStreamLeaf?.role === "user" &&
+      preStreamLeaf.id === recoverySnapshot.latestUserMessageId;
+    const recoveryKind: ChatRecoveryKind =
+      shouldRetryPreStream || emptyPartialNewTurn ? "retry" : "continue";
     const recoveryRootRequestId =
       recoverySnapshot?.recoveryRootRequestId ?? requestId;
     const { incident, config, exhausted } =
