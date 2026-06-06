@@ -26,7 +26,6 @@ type ThinkAppContext = {
   };
 };
 
-
 function createJsonResponse(body: unknown, init?: ResponseInit) {
   const headers = new Headers(init?.headers);
   headers.set("Cache-Control", "no-store");

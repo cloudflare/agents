@@ -14,20 +14,20 @@
   "dependencies": {
     "@cloudflare/think": "*",
     "agents": "*",
-    "react": "^19.2.6",
-    "react-dom": "^19.2.6",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
     "react-router": "^7.15.1"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.37.2",
-    "@cloudflare/workers-types": "^4.20260519.1",
+    "@cloudflare/vite-plugin": "^1.39.2",
+    "@cloudflare/workers-types": "^4.20260604.1",
     "@react-router/dev": "^7.15.1",
-    "@types/node": "^25.9.0",
-    "@types/react": "^19.2.14",
+    "@types/node": "^25.9.1",
+    "@types/react": "^19.2.16",
     "@types/react-dom": "^19.2.3",
     "typescript": "^6.0.3",
-    "vite": "^8.0.13",
-    "vitest": "4.1.6",
-    "wrangler": "^4.93.0"
+    "vite": "^8.0.16",
+    "vitest": "4.1.8",
+    "wrangler": "^4.97.0"
   }
 }
