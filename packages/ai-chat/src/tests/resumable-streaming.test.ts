@@ -66,6 +66,80 @@ describe("Resumable Streaming", () => {
       ws.close(1000);
     });
 
+    it("records the allocated assistant message id in stream metadata for a real turn (#1691 wiring)", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Drive a real turn whose response carries NO provider `start.messageId`
+      // (the common case — and the #1691 scenario). We assert that `_reply`
+      // recorded the id it actually persists under (the id allocated at stream
+      // start) in stream metadata, so orphan recovery can re-associate
+      // reconstructed chunks with the right message. Without this wiring the
+      // column would be null and recovery would fall back to the (buggy)
+      // last-assistant heuristic.
+      const done = new Promise<void>((resolve) => {
+        ws.addEventListener("message", (e: MessageEvent) => {
+          const data = JSON.parse(e.data as string);
+          if (
+            data.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+            data.done
+          ) {
+            resolve();
+          }
+        });
+      });
+
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+          id: "req-wiring",
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: "u-wiring",
+                  role: "user",
+                  parts: [{ type: "text", text: "hi" }]
+                }
+              ]
+            })
+          }
+        })
+      );
+
+      await done;
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      // Persistence runs after the `done` broadcast, so wait for the assistant
+      // message to land before asserting.
+      await waitFor(async () =>
+        (
+          (await agentStub.getPersistedMessages()) as Array<{ role: string }>
+        ).some((m) => m.role === "assistant")
+      );
+
+      const persisted = (await agentStub.getPersistedMessages()) as Array<{
+        id: string;
+        role: string;
+      }>;
+      const assistant = persisted.find((m) => m.role === "assistant");
+      expect(assistant).toBeDefined();
+
+      const metadata = await agentStub.getAllStreamMetadata();
+      const row = metadata.find((m) => m.request_id === "req-wiring");
+      expect(row).toBeDefined();
+      // The wiring: the metadata records the SAME id the assistant message was
+      // persisted under (the allocated id, since no provider id was emitted).
+      expect(row?.message_id).toBeTruthy();
+      expect(row?.message_id).toBe(assistant?.id);
+
+      ws.close(1000);
+    });
+
     it("stores stream chunks in batches", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

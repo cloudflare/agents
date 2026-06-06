@@ -6,6 +6,7 @@ packages:
   - "experimental/*"
   - "openai-sdk/*"
   - "site/*"
+  - "wip/*"
 linkWorkspacePackages: true
 preferWorkspacePackages: true
 patchedDependencies:

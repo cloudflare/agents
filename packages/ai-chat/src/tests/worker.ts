@@ -663,6 +663,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
     status: string;
     request_id: string;
     created_at: number;
+    message_id: string | null;
   }> {
     return (
       this.sql<{
@@ -670,7 +671,8 @@ export class TestChatAgent extends AIChatAgent<Env> {
         status: string;
         request_id: string;
         created_at: number;
-      }>`select id, status, request_id, created_at from cf_ai_chat_stream_metadata` ||
+        message_id: string | null;
+      }>`select id, status, request_id, created_at, message_id from cf_ai_chat_stream_metadata` ||
       []
     );
   }
@@ -2260,12 +2262,16 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     streamId: string,
     requestId: string,
     chunks: Array<{ body: string; index: number }>,
-    ageMs = 0
+    ageMs = 0,
+    metadata?: { messageId?: string }
   ): void {
     const createdAt = Date.now() - ageMs;
+    // Omitting `metadata.messageId` inserts NULL message_id, simulating a legacy
+    // stream row written before the #1691 metadata column existed.
+    const messageId = metadata?.messageId ?? null;
     this.sql`
-      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      values (${streamId}, ${requestId}, 'streaming', ${createdAt})
+      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, message_id)
+      values (${streamId}, ${requestId}, 'streaming', ${createdAt}, ${messageId})
     `;
     for (const chunk of chunks) {
       const id = `chunk-${streamId}-${chunk.index}`;

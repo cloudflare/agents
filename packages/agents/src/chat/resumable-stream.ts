@@ -90,6 +90,14 @@ type StreamMetadata = {
   status: "streaming" | "completed" | "error";
   created_at: number;
   completed_at: number | null;
+  /**
+   * The assistant message id this stream is producing, captured when the
+   * stream starts. This is the SAME id the live path persists under, so orphan
+   * recovery (#1691) can re-associate reconstructed chunks with the correct
+   * message even when the provider stream carries no `start.messageId`. Null on
+   * legacy rows written before this column existed.
+   */
+  message_id: string | null;
 };
 
 /**
@@ -141,11 +149,35 @@ export class ResumableStream {
       completed_at integer
     )`;
 
+    // Backward-compatible migration (#1691): add the column that durably links a
+    // stream to its assistant message. Tables created before this release lack
+    // it, so `alter table add column` is idempotent — the duplicate-column
+    // error (and ONLY that error) is swallowed on an already-migrated table.
+    this._migrateMetadataColumns();
+
     this.sql`create index if not exists idx_stream_chunks_stream_id 
       on cf_ai_chat_stream_chunks(stream_id, chunk_index)`;
 
     // Restore any active stream from a previous session
     this.restore();
+  }
+
+  /**
+   * Add the #1691 recovery column to the metadata table for rows created before
+   * it existed. Inspects the current schema and only runs `alter table` when the
+   * column is absent — idempotent across Durable Object restarts, with no
+   * error-driven control flow.
+   */
+  private _migrateMetadataColumns() {
+    const columns =
+      this.sql<{ name: string }>`
+        select name from pragma_table_info('cf_ai_chat_stream_metadata')
+      ` ?? [];
+    const hasMessageId = columns.some((column) => column.name === "message_id");
+    if (!hasMessageId) {
+      this
+        .sql`alter table cf_ai_chat_stream_metadata add column message_id text`;
+    }
   }
 
   // ── State accessors ────────────────────────────────────────────────
@@ -178,7 +210,7 @@ export class ResumableStream {
    * @param requestId - The unique ID of the chat request
    * @returns The generated stream ID
    */
-  start(requestId: string): string {
+  start(requestId: string, options: { messageId?: string } = {}): string {
     // Flush any pending chunks from previous streams to prevent mixing
     this.flushBuffer();
 
@@ -188,12 +220,29 @@ export class ResumableStream {
     this._segmentIndex = 0;
     this._isLive = true;
 
+    const messageId = options.messageId ?? null;
+
     this.sql`
-      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      values (${streamId}, ${requestId}, 'streaming', ${Date.now()})
+      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, message_id)
+      values (${streamId}, ${requestId}, 'streaming', ${Date.now()}, ${messageId})
     `;
 
     return streamId;
+  }
+
+  /**
+   * The assistant message id an orphaned stream was producing — the same id the
+   * live path persists under, so recovery re-associates reconstructed chunks
+   * with the correct message (#1691). Returns null when the row is missing or
+   * is a legacy row written before the `message_id` column existed.
+   */
+  getStreamMessageId(streamId: string): string | null {
+    const rows = this.sql<{ message_id: string | null }>`
+      select message_id from cf_ai_chat_stream_metadata
+      where id = ${streamId}
+    `;
+    if (!rows || rows.length === 0) return null;
+    return rows[0].message_id ?? null;
   }
 
   /**

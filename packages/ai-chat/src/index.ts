@@ -1357,8 +1357,11 @@ export class AIChatAgent<
   }
 
   /** @internal Delegate to _resumableStream */
-  protected _startStream(requestId: string): string {
-    const streamId = this._resumableStream.start(requestId);
+  protected _startStream(
+    requestId: string,
+    options: { messageId?: string } = {}
+  ): string {
+    const streamId = this._resumableStream.start(requestId, options);
     if (this._continuation.pending?.requestId === requestId) {
       this._continuation.activatePending();
       this._flushAwaitingStreamStartConnections();
@@ -1458,7 +1461,10 @@ export class AIChatAgent<
       try {
         const data = JSON.parse(chunk.body);
 
-        // Capture message ID from the "start" event if present
+        // Capture a provider `start.messageId` if present. The live path adopts
+        // it for new turns (see `_streamSSEReply`'s "start" handling), so
+        // recovery must reuse it to land under the same id a completed live
+        // turn would. Continuations have it stripped before storage (#1229).
         if (data.type === "start" && data.messageId != null) {
           message.id = data.messageId;
         }
@@ -1480,14 +1486,30 @@ export class AIChatAgent<
     }
 
     if (message.parts.length > 0) {
-      // Continuation streams have their messageId stripped (#1229) so the
-      // start chunk won't contain one. Fall back to the last assistant
-      // message — continuations always append to it.
+      // Resolve the id to persist under when the chunks carried no provider
+      // `start.messageId` (the common case — most providers don't emit one, and
+      // continuations have it stripped, #1229). When a provider id WAS present
+      // it was applied above and is kept, since the live path adopts it too.
       if (message.id === fallbackId) {
-        for (let i = this.messages.length - 1; i >= 0; i--) {
-          if (this.messages[i].role === "assistant") {
-            message.id = this.messages[i].id;
-            break;
+        // Preferred: the id allocated when the stream started, recorded in
+        // stream metadata (#1691) — the SAME id the live path persists under
+        // (it only adopts a provider id, never invents one). A new turn stored
+        // its own fresh id, so it becomes its own message; a continuation
+        // stored the cloned last-assistant id, so it merges (via the
+        // existing-index check below). This is what stops a new turn after a
+        // later user message from being folded into the previous assistant
+        // message (the #1691 corruption).
+        const storedId = this._resumableStream.getStreamMessageId(streamId);
+        if (storedId != null) {
+          message.id = storedId;
+        } else {
+          // Legacy row written before the metadata column existed: fall back to
+          // the last assistant message, matching pre-#1691 behavior.
+          for (let i = this.messages.length - 1; i >= 0; i--) {
+            if (this.messages[i].role === "assistant") {
+              message.id = this.messages[i].id;
+              break;
+            }
           }
         }
       }
@@ -1497,9 +1519,25 @@ export class AIChatAgent<
       // the last assistant message). Update in place if so.
       const existingIdx = this.messages.findIndex((m) => m.id === message.id);
       if (existingIdx >= 0) {
-        // Merge: keep existing parts and append new ones from the stream
+        // Merge: keep existing parts and append new ones from the stream.
+        // A tool part is identified by its toolCallId, so a reconstructed part
+        // whose toolCallId already exists is NOT re-appended — otherwise an
+        // early persist (at tool approval) followed by recovery, which replays
+        // the SAME chunks, would leave two parts for one tool call. The kept
+        // (persisted) part is also the one that may have received a tool result
+        // applied in place, so preserving it avoids regressing settled state.
         const existing = this.messages[existingIdx];
-        message.parts = [...existing.parts, ...message.parts];
+        const existingToolCallIds = new Set(
+          existing.parts
+            .filter(
+              (p): p is typeof p & { toolCallId: string } => "toolCallId" in p
+            )
+            .map((p) => p.toolCallId)
+        );
+        const newParts = message.parts.filter(
+          (p) => !("toolCallId" in p && existingToolCallIds.has(p.toolCallId))
+        );
+        message.parts = [...existing.parts, ...newParts];
         if (existing.metadata) {
           message.metadata = message.metadata
             ? { ...existing.metadata, ...message.metadata }
@@ -4134,9 +4172,30 @@ export class AIChatAgent<
         this._resumableStream.complete(streamId);
       }
 
-      const targetId = shouldRetryPreStream
-        ? undefined
-        : this._findLastAssistantMessage()?.id;
+      // A NEW turn (not a continuation) that produced no persisted assistant
+      // partial — interrupted before any part materialized, or `persist: false`
+      // discarded it — leaves the conversation leaf at the user message.
+      // Continuing here would clone the PREVIOUS assistant turn (the most recent
+      // assistant message, found by walking back past the trailing user
+      // message) and merge this turn into it (#1691). Re-run the user turn fresh
+      // instead, so it becomes its own message. Checked AFTER the persist step,
+      // so a partial that WAS persisted (now the assistant leaf) still continues.
+      const leaf =
+        this.messages.length > 0
+          ? this.messages[this.messages.length - 1]
+          : undefined;
+      const lostPartialUserId =
+        recoverySnapshot?.continuation === false &&
+        recoverySnapshot.latestUserMessageId &&
+        leaf?.role === "user" &&
+        leaf.id === recoverySnapshot.latestUserMessageId
+          ? recoverySnapshot.latestUserMessageId
+          : undefined;
+
+      const targetId =
+        shouldRetryPreStream || lostPartialUserId !== undefined
+          ? undefined
+          : this._findLastAssistantMessage()?.id;
 
       if (shouldRetryPreStream && options.continue !== false) {
         await this._updateChatRecoveryIncident(
@@ -4159,6 +4218,35 @@ export class AIChatAgent<
             incidentId: incident.incidentId,
             lastBody: recoverySnapshot.lastBody ?? null,
             lastClientTools: recoverySnapshot.lastClientTools ?? null
+          },
+          { idempotent: true }
+        );
+      } else if (
+        lostPartialUserId !== undefined &&
+        options.continue !== false
+      ) {
+        // Re-run the orphaned new turn fresh instead of continuing (and
+        // merging into) the previous assistant message.
+        await this._updateChatRecoveryIncident(
+          incident.incidentId,
+          "scheduled"
+        );
+        this._emit("chat:recovery:scheduled", {
+          incidentId: incident.incidentId,
+          requestId,
+          attempt: incident.attempt,
+          maxAttempts: incident.maxAttempts,
+          recoveryKind: "retry"
+        });
+        await this.schedule(
+          0,
+          "_chatRecoveryRetry",
+          {
+            targetUserId: lostPartialUserId,
+            originalRequestId: recoveryRootRequestId,
+            incidentId: incident.incidentId,
+            lastBody: recoverySnapshot?.lastBody ?? null,
+            lastClientTools: recoverySnapshot?.lastClientTools ?? null
           },
           { idempotent: true }
         );
@@ -6009,14 +6097,21 @@ export class AIChatAgent<
           return { status: "completed" };
         }
 
-        // Start tracking this stream for resumability
-        const streamId = this._startStream(id);
-
-        const reader = response.body.getReader();
-
         // Parsing state adapted from:
         // https://github.com/vercel/ai/blob/main/packages/ai/src/ui-message-stream/ui-message-chunks.ts#L295
         const message = this._createStreamingAssistantMessage(continuation);
+
+        // Start tracking this stream for resumability. The allocated message id
+        // is persisted in stream metadata so orphan recovery (#1691) can
+        // re-associate reconstructed chunks with the right assistant message —
+        // even when the provider stream carries no `start.messageId`. For a
+        // continuation this is the cloned last-assistant id, so recovery merges
+        // into it; for a new turn it is a fresh id, so recovery keeps it
+        // distinct.
+        const streamId = this._startStream(id, { messageId: message.id });
+
+        const reader = response.body.getReader();
+
         // Track the streaming message so tool results can be applied before persistence
         this._streamingMessage = message;
 

@@ -21,7 +21,8 @@ interface ChatRecoveryTestStub {
     streamId: string,
     requestId: string,
     chunks: Array<{ body: string; index: number }>,
-    ageMs?: number
+    ageMs?: number,
+    metadata?: { messageId?: string }
   ): Promise<void>;
   insertInterruptedFiber(name: string, snapshot?: unknown): Promise<void>;
   triggerFiberRecovery(): Promise<void>;
@@ -946,6 +947,454 @@ describe("onChatRecovery", () => {
 
     expect(assistantMessages).toHaveLength(1);
     expect(assistantMessages[0].id).toBe("assistant-persist");
+  });
+
+  it("#1691: a new turn's orphan is its own message, NOT merged into the previous assistant", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    // History: user-one, assistant-one (already answered), user-two (new turn).
+    await agentStub.persistMessages([
+      {
+        id: "user-one",
+        role: "user",
+        parts: [{ type: "text", text: "first question" }]
+      },
+      {
+        id: "assistant-one",
+        role: "assistant",
+        parts: [{ type: "text", text: "first response" }]
+      },
+      {
+        id: "user-two",
+        role: "user",
+        parts: [{ type: "text", text: "second question" }]
+      }
+    ] as ChatMessage[]);
+
+    // New (non-continuation) response stream for user-two whose chunks carry
+    // NO provider start.messageId. The allocated assistant id is stored in
+    // stream metadata so recovery can re-create it as its own message.
+    await agentStub.insertInterruptedStream(
+      "stream-1691",
+      "req-1691",
+      makeChunks(["second response"]),
+      undefined,
+      { messageId: "assistant-two" }
+    );
+    await agentStub.triggerInterruptedStreamCheck();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const textOf = (m: ChatMessage) =>
+      m.parts
+        .filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("");
+
+    // assistant-one must remain untouched.
+    expect(textOf(messages.find((m) => m.id === "assistant-one")!)).toBe(
+      "first response"
+    );
+    // The recovered turn is its own NEW assistant message.
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+    expect(assistantMessages).toHaveLength(2);
+    expect(textOf(messages.find((m) => m.id === "assistant-two")!)).toBe(
+      "second response"
+    );
+  });
+
+  it("#1691: a continuation orphan WITHOUT a provider messageId still merges into the last assistant", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    await agentStub.persistMessages([
+      {
+        id: "user-one",
+        role: "user",
+        parts: [{ type: "text", text: "question" }]
+      },
+      {
+        id: "assistant-one",
+        role: "assistant",
+        parts: [{ type: "text", text: "partial " }]
+      }
+    ] as ChatMessage[]);
+
+    // Continuation stream: metadata records the cloned last-assistant id, so
+    // recovery reuses it and appends onto assistant-one.
+    await agentStub.insertInterruptedStream(
+      "stream-cont",
+      "req-cont",
+      makeChunks(["continued"]),
+      undefined,
+      { messageId: "assistant-one" }
+    );
+    await agentStub.triggerInterruptedStreamCheck();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+    expect(assistantMessages).toHaveLength(1);
+    expect(
+      assistantMessages[0].parts
+        .filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("")
+    ).toBe("partial continued");
+  });
+
+  it("#1691: legacy rows without metadata keep the pre-fix continuation fallback", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    await agentStub.persistMessages([
+      {
+        id: "user-one",
+        role: "user",
+        parts: [{ type: "text", text: "question" }]
+      },
+      {
+        id: "assistant-one",
+        role: "assistant",
+        parts: [{ type: "text", text: "partial " }]
+      }
+    ] as ChatMessage[]);
+
+    // No metadata (messageId omitted) → simulates a row written before #1691.
+    // Backward-compatible fallback appends to last assistant.
+    await agentStub.insertInterruptedStream(
+      "stream-legacy",
+      "req-legacy",
+      makeChunks(["continued"])
+    );
+    await agentStub.triggerInterruptedStreamCheck();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+    expect(assistantMessages).toHaveLength(1);
+    expect(
+      assistantMessages[0].parts
+        .filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("")
+    ).toBe("partial continued");
+  });
+
+  it("#1691: a provider start.messageId is preserved over the stored id (matches the live path)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    await agentStub.persistMessages([
+      {
+        id: "user-one",
+        role: "user",
+        parts: [{ type: "text", text: "question" }]
+      }
+    ] as ChatMessage[]);
+
+    // The chunks carry a provider `start.messageId` ("provider-msg"). For a new
+    // turn the live path ADOPTS that id (see `_streamSSEReply`), so the message
+    // is persisted under it. Recovery must do the same, even though metadata
+    // also recorded the id allocated before the provider id was seen — otherwise
+    // a recovered turn would diverge from a completed live turn. The stored id
+    // is only a fallback for when no provider id is present.
+    await agentStub.insertInterruptedStream(
+      "stream-prefer",
+      "req-prefer",
+      makeChunks(["answer"], "provider-msg"),
+      undefined,
+      { messageId: "allocated-msg" }
+    );
+    await agentStub.triggerInterruptedStreamCheck();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+    expect(assistantMessages).toHaveLength(1);
+    expect(assistantMessages[0].id).toBe("provider-msg");
+  });
+
+  it("#1691: recovering after an early (tool-approval) persist does not duplicate the tool part", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    // Simulate the state after an early persist at tool approval: the assistant
+    // message already exists with the tool part, and the stream's stored chunks
+    // (which recovery replays in full) reconstruct that SAME tool part. The
+    // merge must not leave two parts with the same toolCallId.
+    await agentStub.persistMessages([
+      {
+        id: "user-one",
+        role: "user",
+        parts: [{ type: "text", text: "q" }]
+      },
+      {
+        id: "assistant-early",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-myTool",
+            toolCallId: "tc-dup",
+            toolName: "myTool",
+            state: "input-available",
+            input: { x: 1 }
+          }
+        ] as unknown as ChatMessage["parts"]
+      }
+    ] as ChatMessage[]);
+
+    await agentStub.insertInterruptedStream(
+      "stream-dup",
+      "req-dup",
+      [
+        { body: JSON.stringify({ type: "start" }), index: 0 },
+        {
+          body: JSON.stringify({
+            type: "tool-input-start",
+            toolCallId: "tc-dup",
+            toolName: "myTool"
+          }),
+          index: 1
+        },
+        {
+          body: JSON.stringify({
+            type: "tool-input-available",
+            toolCallId: "tc-dup",
+            toolName: "myTool",
+            input: { x: 1 }
+          }),
+          index: 2
+        },
+        { body: JSON.stringify({ type: "text-start", id: "t" }), index: 3 },
+        {
+          body: JSON.stringify({
+            type: "text-delta",
+            id: "t",
+            delta: "answer"
+          }),
+          index: 4
+        }
+      ],
+      undefined,
+      { messageId: "assistant-early" }
+    );
+    await agentStub.triggerInterruptedStreamCheck();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistant = messages.find((m) => m.id === "assistant-early");
+    expect(assistant).toBeDefined();
+    const toolParts = assistant!.parts.filter(
+      (p) =>
+        "toolCallId" in p &&
+        (p as { toolCallId?: string }).toolCallId === "tc-dup"
+    );
+    expect(toolParts).toHaveLength(1);
+  });
+
+  it("#1691: two sequentially recovered new turns stay distinct (not merged into each other)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    // ai-chat serializes to one active stream, so orphans are recovered one at
+    // a time. Two interrupted NEW turns recovered in sequence must each become
+    // their own assistant message, never merging into one another.
+    await agentStub.persistMessages([
+      { id: "user-1", role: "user", parts: [{ type: "text", text: "q1" }] },
+      { id: "user-2", role: "user", parts: [{ type: "text", text: "q2" }] }
+    ] as ChatMessage[]);
+
+    await agentStub.insertInterruptedStream(
+      "seq-1",
+      "req-seq-1",
+      makeChunks(["answer one"]),
+      undefined,
+      { messageId: "asst-seq-1" }
+    );
+    await agentStub.triggerInterruptedStreamCheck();
+
+    await agentStub.insertInterruptedStream(
+      "seq-2",
+      "req-seq-2",
+      makeChunks(["answer two"]),
+      undefined,
+      { messageId: "asst-seq-2" }
+    );
+    await agentStub.triggerInterruptedStreamCheck();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+    expect(assistantMessages.map((m) => m.id).sort()).toEqual([
+      "asst-seq-1",
+      "asst-seq-2"
+    ]);
+    const textOf = (id: string) =>
+      messages
+        .find((m) => m.id === id)!
+        .parts.filter(
+          (p): p is { type: "text"; text: string } => p.type === "text"
+        )
+        .map((p) => p.text)
+        .join("");
+    expect(textOf("asst-seq-1")).toBe("answer one");
+    expect(textOf("asst-seq-2")).toBe("answer two");
+  });
+
+  // ── Continue-path (fiber recovery) tests ────────────────────────────────
+  // The default chatRecovery flow does NOT go through the reconnect-ACK
+  // `_persistOrphanedStream` path the tests above drive — it schedules a fiber
+  // continuation (`_chatRecoveryContinue` -> `continueLastTurn`). These tests
+  // exercise that real path via `triggerFiberRecovery` + the scheduled continue.
+  const chatTurnSnapshot = (requestId: string, userId: string) => ({
+    __cfAIChatFiberSnapshot: {
+      kind: "ai-chat-turn",
+      version: 1,
+      requestId,
+      continuation: false,
+      latestMessageId: userId,
+      latestMessageRole: "user",
+      latestUserMessageId: userId,
+      startedAt: Date.now()
+    },
+    user: null
+  });
+  const assistantText = (messages: ChatMessage[], id: string) =>
+    (messages.find((m) => m.id === id)?.parts ?? [])
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("");
+
+  it("#1691 (continue path): a recovered NEW turn continues as its own message, not the previous one", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setRecoveryOverride({});
+
+    await agentStub.persistMessages([
+      { id: "u1", role: "user", parts: [{ type: "text", text: "q1" }] },
+      {
+        id: "assistant-one",
+        role: "assistant",
+        parts: [{ type: "text", text: "first answer" }]
+      },
+      { id: "u2", role: "user", parts: [{ type: "text", text: "q2" }] }
+    ] as ChatMessage[]);
+
+    // Interrupted NEW turn for u2: partial chunks carry NO provider
+    // start.messageId, but the allocated id is recorded in stream metadata.
+    await agentStub.insertInterruptedStream(
+      "stream-fc1",
+      "req-fc1",
+      makeChunks(["partial two "]),
+      undefined,
+      { messageId: "assistant-two" }
+    );
+    await agentStub.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-fc1",
+      chatTurnSnapshot("req-fc1", "u2")
+    );
+
+    await agentStub.triggerFiberRecovery();
+    await agentStub.runScheduledRecoveryContinueForTest();
+    await agentStub.waitForIdleForTest();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(assistantText(messages, "assistant-one")).toBe("first answer");
+    const assistants = messages.filter((m) => m.role === "assistant");
+    expect(assistants).toHaveLength(2);
+    expect(assistantText(messages, "assistant-two")).toContain("partial two");
+    expect(assistantText(messages, "assistant-two")).toContain(
+      "Continued response."
+    );
+  });
+
+  it("#1691 (continue path): an empty partial (no parts persisted) does not merge the new turn into the previous one", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setRecoveryOverride({});
+
+    await agentStub.persistMessages([
+      { id: "u1", role: "user", parts: [{ type: "text", text: "q1" }] },
+      {
+        id: "assistant-one",
+        role: "assistant",
+        parts: [{ type: "text", text: "first answer" }]
+      },
+      { id: "u2", role: "user", parts: [{ type: "text", text: "q2" }] }
+    ] as ChatMessage[]);
+
+    // Interrupted in the window AFTER `start` but BEFORE any text/tool part, so
+    // the orphan reconstructs to zero parts and nothing is persisted for u2.
+    await agentStub.insertInterruptedStream(
+      "stream-fc2",
+      "req-fc2",
+      [{ body: JSON.stringify({ type: "start" }), index: 0 }],
+      undefined,
+      { messageId: "assistant-two" }
+    );
+    await agentStub.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-fc2",
+      chatTurnSnapshot("req-fc2", "u2")
+    );
+
+    await agentStub.triggerFiberRecovery();
+    await agentStub.runScheduledRecoveryContinueForTest();
+    await agentStub.runScheduledRecoveryRetryForTest();
+    await agentStub.waitForIdleForTest();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    // The previous turn must be untouched.
+    expect(assistantText(messages, "assistant-one")).toBe("first answer");
+    // u2 must get its own assistant message, not be folded into assistant-one.
+    const assistants = messages.filter((m) => m.role === "assistant");
+    expect(assistants).toHaveLength(2);
+  });
+
+  it("#1691 (continue path): persist:false on a new turn does not merge it into the previous one", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setRecoveryOverride({ persist: false });
+
+    await agentStub.persistMessages([
+      { id: "u1", role: "user", parts: [{ type: "text", text: "q1" }] },
+      {
+        id: "assistant-one",
+        role: "assistant",
+        parts: [{ type: "text", text: "first answer" }]
+      },
+      { id: "u2", role: "user", parts: [{ type: "text", text: "q2" }] }
+    ] as ChatMessage[]);
+
+    // A real partial exists, but the app opts out of persisting it.
+    await agentStub.insertInterruptedStream(
+      "stream-fc3",
+      "req-fc3",
+      makeChunks(["discarded partial "]),
+      undefined,
+      { messageId: "assistant-two" }
+    );
+    await agentStub.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-fc3",
+      chatTurnSnapshot("req-fc3", "u2")
+    );
+
+    await agentStub.triggerFiberRecovery();
+    await agentStub.runScheduledRecoveryContinueForTest();
+    await agentStub.runScheduledRecoveryRetryForTest();
+    await agentStub.waitForIdleForTest();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(assistantText(messages, "assistant-one")).toBe("first answer");
+    const assistants = messages.filter((m) => m.role === "assistant");
+    expect(assistants).toHaveLength(2);
   });
 
   it("should skip persistence when persist: false", async () => {

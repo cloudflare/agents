@@ -1,0 +1,6 @@
+.dev.vars
+.wrangler
+.wrangler-state-*
+env.d.ts
+node_modules
+dist

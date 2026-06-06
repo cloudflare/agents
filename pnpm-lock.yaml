@@ -3552,6 +3552,58 @@ importers:
         specifier: '*'
         version: link:../../packages/voice
 
+  wip/issue-1677-minimal:
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^4.20260604.1
+        version: 4.20260604.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      wrangler:
+        specifier: ^4.97.0
+        version: 4.97.0(@cloudflare/workers-types@4.20260604.1)
+
+  wip/issue-1691-live:
+    dependencies:
+      '@ai-sdk/anthropic':
+        specifier: ^3.0.81
+        version: 3.0.81(zod@4.4.3)
+      '@ai-sdk/openai':
+        specifier: ^3.0.67
+        version: 3.0.67(zod@4.4.3)
+      '@cloudflare/ai-chat':
+        specifier: '*'
+        version: link:../../packages/ai-chat
+      '@cloudflare/think':
+        specifier: '*'
+        version: link:../../packages/think
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
+      ai:
+        specifier: ^6.0.196
+        version: 6.0.196(zod@4.4.3)
+      workers-ai-provider:
+        specifier: ^3.1.14
+        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.196(zod@4.4.3))
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^4.20260604.1
+        version: 4.20260604.1
+      '@types/node':
+        specifier: ^25.9.1
+        version: 25.9.1
+      tsx:
+        specifier: ^4.22.4
+        version: 4.22.4
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      wrangler:
+        specifier: ^4.97.0
+        version: 4.97.0(@cloudflare/workers-types@4.20260604.1)
+
 packages:
 
   '@a2a-js/sdk@0.3.13':
