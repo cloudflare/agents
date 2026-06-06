@@ -330,4 +330,59 @@ describe("Think — terminal replay on reconnect (#1645)", () => {
     await agent.clearMessages();
     expect(await agent.getPendingChatTerminalForTest()).toBeNull();
   });
+
+  it("eagerly drops the terminal record when a new turn is submitted, before it streams (#1645)", async () => {
+    const room = crypto.randomUUID();
+    const agent = (await freshAgent(room)) as unknown as {
+      recordTerminalForTest: (id: string, body: string) => Promise<void>;
+      getPendingChatTerminalForTest: () => Promise<{
+        requestId: string;
+        body: string;
+      } | null>;
+      setBeforeStepAsyncDelay: (ms: number) => Promise<void>;
+    };
+
+    // A previous turn failed terminally.
+    await agent.recordTerminalForTest("root-old", TERMINAL);
+    // Park the NEW turn indefinitely at its first step so it never reaches
+    // completion during this test. This isolates the eager submit-time clear
+    // from the turn-completion clear: any observed clear must come from the
+    // submit path, not from the new turn finishing.
+    await agent.setBeforeStepAsyncDelay(60_000);
+
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 100); // drain the on-connect frames
+
+    // Submit a genuinely-new turn. The user hasn't waited for it to stream.
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_use_chat_request",
+        id: "root-new",
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [
+              {
+                id: "u-new",
+                role: "user",
+                parts: [{ type: "text", text: "hi" }]
+              }
+            ]
+          })
+        }
+      })
+    );
+
+    // The eager clear lands at submit time, while the new turn is still parked
+    // in `beforeStep`. Without it, a reconnecting tab in this window would
+    // replay `root-old`'s stale exhaustion over the resume handshake.
+    let pending = await agent.getPendingChatTerminalForTest();
+    for (let i = 0; i < 50 && pending !== null; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      pending = await agent.getPendingChatTerminalForTest();
+    }
+    expect(pending).toBeNull();
+
+    await closeWS(ws);
+  });
 });

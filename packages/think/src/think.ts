@@ -6911,6 +6911,15 @@ export class Think<
       return;
     }
 
+    // A genuinely-new turn supersedes any pending terminal record (#1645) so a
+    // stale exhaustion can't replay over the resume handshake to a client that
+    // reconnects in the window between accepting this submit and the new turn
+    // streaming. Mirrors `@cloudflare/ai-chat`; without it a reconnect in that
+    // gap would surface the previous failed turn's error even though the user
+    // has already moved on. Completion clears it too, but only once the turn
+    // resolves — which leaves the gap open.
+    await this._clearChatTerminal();
+
     const releasePendingEnqueue = this._submitConcurrency.beginEnqueue();
     let pendingEnqueue = true;
     const epoch = this._turnQueue.generation;
