@@ -8913,8 +8913,13 @@ export class Think<
     // window recovery exhausts in), and if it threw before this broadcast the
     // user would be left staring at a half-finished message with no terminal
     // resolution. The broadcast itself touches no storage, so ordering it first
-    // makes the banner resilient to a failing `_markRecoveredSubmissionInterrupted`
-    // / `_recordTerminalChatStatus`.
+    // makes the banner resilient to a failing `_recordTerminalChatStatus` /
+    // `_markRecoveredSubmissionInterrupted`.
+    //
+    // (`@cloudflare/ai-chat` persists before broadcasting instead. Ordering
+    // can't rescue a terminal-record write that itself fails, so that choice
+    // gains no reconnect reliability under storage failure while losing this
+    // banner resilience — hence Think keeps broadcast-first.)
     this._broadcastChat({
       type: MSG_CHAT_RESPONSE,
       id: incident.requestId,
@@ -8922,15 +8927,18 @@ export class Think<
       done: true,
       error: true
     });
+    // Write the durable terminal record (#1645) FIRST among the storage writes:
+    // it's the record a disconnected client replays on reconnect, so it must
+    // not be skipped if the (independent) submission-row write below throws.
+    await this._recordTerminalChatStatus(
+      "interrupted",
+      incident.requestId,
+      config.terminalMessage
+    );
     // The submission is keyed by the recovery ROOT request id; `incident.requestId`
     // is the latest per-continuation id and won't match a chained submission.
     await this._markRecoveredSubmissionInterrupted(
       incident.recoveryRootRequestId ?? incident.requestId,
-      config.terminalMessage
-    );
-    await this._recordTerminalChatStatus(
-      "interrupted",
-      incident.requestId,
       config.terminalMessage
     );
     // The exhausted record is retained for inspection and reclaimed later by
