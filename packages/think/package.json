@@ -107,6 +107,10 @@
     "./vite": {
       "types": "./dist/vite.d.ts",
       "import": "./dist/vite.js"
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js"
     }
   },
   "files": [

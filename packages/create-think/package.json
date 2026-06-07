@@ -1,0 +1,45 @@
+{
+  "name": "create-think",
+  "description": "Scaffold a new Cloudflare Think agent — npm create think",
+  "version": "0.0.1",
+  "type": "module",
+  "license": "MIT",
+  "author": "Cloudflare Inc.",
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "think",
+    "ai",
+    "create",
+    "starter"
+  ],
+  "repository": {
+    "directory": "packages/create-think",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "bin": {
+    "create-think": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@cloudflare/think": "workspace:*",
+    "tiged": "^2.12.7",
+    "yargs": "^18.0.0"
+  },
+  "devDependencies": {
+    "@types/yargs": "^17.0.35"
+  },
+  "scripts": {
+    "build": "tsx ./scripts/build.ts"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "name": "think-customer-support-starter",
+  "description": "Think customer support agent with custom tools and an escalation skill",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "vite dev",
+    "dev": "vite dev",
+    "build": "vite build",
+    "deploy": "vite build && wrangler deploy",
+    "types": "think types --all"
+  },
+  "dependencies": {
+    "@cloudflare/ai-chat": "workspace:*",
+    "@cloudflare/think": "workspace:*",
+    "agents": "workspace:*",
+    "ai": "^6.0.196",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "workers-ai-provider": "^3.1.14",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.39.2",
+    "@cloudflare/workers-types": "^4.20260604.1",
+    "@types/react": "^19.2.16",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16",
+    "wrangler": "^4.97.0"
+  }
+}

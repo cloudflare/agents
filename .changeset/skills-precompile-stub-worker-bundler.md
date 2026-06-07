@@ -1,5 +1,5 @@
 ---
-"agents": minor
+"agents": patch
 ---
 
 Compile skill scripts ahead of time and remove the in-Worker bundler (drops ~14MB of `esbuild-wasm` from Worker bundles).

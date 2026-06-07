@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "think-personal-assistant-starter",
+  "main": "virtual:think/entry",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI" },
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*", "/messengers/*", "/__think/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "ThinkAgent_Assistant", "name": "ThinkAgent_Assistant" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ThinkAgent_Assistant"] }
+  ]
+}

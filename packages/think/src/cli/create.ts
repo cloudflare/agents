@@ -28,6 +28,14 @@ export function createCli(argv = process.argv) {
             type: "string",
             describe: "Package and Worker name for the generated app"
           })
+          .option("template", {
+            type: "string",
+            describe: "Starter template to scaffold (default: basic)"
+          })
+          .option("ref", {
+            type: "string",
+            describe: "Git ref to fetch remote templates from"
+          })
           .option("route-prefix", {
             type: "string",
             describe: "Think route prefix for generated config"
@@ -53,6 +61,8 @@ export function createCli(argv = process.argv) {
           root: args.root,
           directory: args.directory,
           name: args.name,
+          template: args.template,
+          ref: args.ref,
           routePrefix: args.routePrefix,
           yes: args.yes,
           install: args.install,

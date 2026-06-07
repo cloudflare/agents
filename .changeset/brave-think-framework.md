@@ -1,5 +1,5 @@
 ---
-"@cloudflare/think": minor
+"@cloudflare/think": patch
 "agents": patch
 "@cloudflare/worker-bundler": patch
 ---
