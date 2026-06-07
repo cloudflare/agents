@@ -21,12 +21,20 @@
       {
         "class_name": "ThinkSubAgent_Sales_Researcher",
         "name": "ThinkSubAgent_Sales_Researcher"
+      },
+      {
+        "class_name": "ThinkSubAgent_Sales_Analyst",
+        "name": "ThinkSubAgent_Sales_Analyst"
       }
     ]
   },
   "migrations": [
     {
-      "new_sqlite_classes": ["ThinkAgent_Sales", "ThinkAgent_Support"],
+      "new_sqlite_classes": [
+        "ThinkAgent_Sales",
+        "ThinkAgent_Support",
+        "ThinkSubAgent_Sales_Analyst"
+      ],
       "tag": "v1"
     }
   ],
