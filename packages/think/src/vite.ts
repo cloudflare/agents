@@ -45,9 +45,14 @@ const virtualModules = {
   serverEntry: createVirtualModule("virtual:think/server-entry")
 };
 
+export const THINK_EXPERIMENTAL_NOTICE =
+  "The @cloudflare/think framework layer (Vite plugin and `think` CLI) is " +
+  "experimental and may change or be removed in any release.";
+
 export function think(options: ThinkVitePluginOptions = {}): PluginOption[] {
   let config: ResolvedConfig | null = null;
   let manifest: ThinkFrameworkManifest | null = options.manifest ?? null;
+  let warnedExperimental = false;
 
   const frameworkPlugin: Plugin = {
     name: "@cloudflare/think",
@@ -56,6 +61,10 @@ export function think(options: ThinkVitePluginOptions = {}): PluginOption[] {
       config = resolved;
     },
     async buildStart() {
+      if (!warnedExperimental) {
+        warnedExperimental = true;
+        this.warn(THINK_EXPERIMENTAL_NOTICE);
+      }
       const root = config?.root ?? process.cwd();
       manifest = await resolveThinkManifest(options, root, (file) =>
         this.addWatchFile(file)

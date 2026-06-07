@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import think, {
   createThinkViteManifest,
   createThinkViteWorkerConfig,
-  createThinkViteWorkerConfigResult
+  createThinkViteWorkerConfigResult,
+  THINK_EXPERIMENTAL_NOTICE
 } from "../vite";
 import type { Plugin } from "vite";
 
@@ -162,6 +163,7 @@ describe("Think Vite plugin", () => {
     );
 
     expect(warnings).toEqual([
+      THINK_EXPERIMENTAL_NOTICE,
       'No Think agents discovered. Add an agent file such as "agents/support.ts" exporting a Think subclass or "export default agent(...)".'
     ]);
   });

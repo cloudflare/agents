@@ -19,6 +19,10 @@ unsupported nested sub-agent conventions. Think currently supports top-level
 agents and one sub-agent layer; deeper nesting is rejected with guidance so that
 the routing and lifecycle model can be designed deliberately.
 
+This framework layer is experimental: both the Vite plugin (once, on build
+start) and the `think` CLI (on startup) emit a notice that the API may change
+or be removed in any release. The core Think agent runtime is unchanged.
+
 The Think CLI now includes `think init`, `think inspect`, and `think types`.
 `think init` scaffolds a minimal Workers/Vite Think app, safely handles prompted
 or named target directories, refuses unsafe migrations, and installs npm
