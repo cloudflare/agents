@@ -1,5 +1,21 @@
 # @cloudflare/think
 
+## 0.8.5
+
+### Patch Changes
+
+- [#1690](https://github.com/cloudflare/agents/pull/1690) [`f6a8bc4`](https://github.com/cloudflare/agents/commit/f6a8bc4a3f1836e214cc9ac984d3bfc2ba0537b2) Thanks [@threepointone](https://github.com/threepointone)! - Surface a terminal chat-recovery outcome to clients that reconnect after it ended ([#1645](https://github.com/cloudflare/agents/issues/1645)).
+
+  When a durable chat turn exhausted recovery (e.g. during a deploy/reconnect storm) while no client was connected, the terminal error was only broadcast transiently, so a client that connected afterward never learned the turn failed and the conversation appeared frozen. The outcome is now persisted durably and replayed over the resume handshake on the next reconnect — `STREAM_RESUMING` → `STREAM_RESUME_ACK` → terminal error frame on the resumed stream — which is the only path that surfaces as `useAgentChat`'s `error` on the real client. (A bare replayed frame is dropped by the client because it never reaches a transport stream reader.) The record is cleared once a later turn supersedes it — on a new client request, and also when any later turn ends in a non-error outcome (completed or aborted, including turns driven server-side via `saveMessages`), so a stale exhaustion can never replay after the conversation has recovered. Terminal non-exhaustion errors (e.g. a provider 500) are now durably recorded too, not just transiently broadcast, so they also replay to a reconnecting client.
+
+  `@cloudflare/think` previously recorded the outcome durably but only replayed it as a bare on-connect frame (dropped by the client); it now uses the same resume-handshake delivery.
+
+- [#1688](https://github.com/cloudflare/agents/pull/1688) [`4d050c7`](https://github.com/cloudflare/agents/commit/4d050c7600d5d763414fc8766a05c23acf3070a4) Thanks [@threepointone](https://github.com/threepointone)! - Fix `ThinkWorkflow` `step.prompt({ output })` failing on Workers AI with `AiError 5023: JSON Schema mode is not supported with stream mode`.
+
+  Structured workflow prompts previously requested output via the AI SDK `Output.object` path, which streams a JSON Schema `response_format` — rejected by some providers (notably Workers AI). `step.prompt()` now runs a full agentic turn that returns its structured result by calling an internal `think_final_answer` tool whose arguments match the schema. This uses ordinary tool calling, so it works across every provider Think supports (verified on Workers AI, OpenAI, and Anthropic), keeps Think's streaming engine (persistence, recovery, resumable streams), and lets the agent use its own tools across multiple steps before producing the final structured answer.
+
+  The `think_final_answer` tool name is reserved; its call and result are stripped from the persisted conversation so the transcript and later turns do not see Think's internal plumbing.
+
 ## 0.8.4
 
 ### Patch Changes
