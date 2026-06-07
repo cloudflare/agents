@@ -1,7 +1,7 @@
 {
   "name": "create-think",
   "description": "Scaffold a new Cloudflare Think agent — npm create think",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "type": "module",
   "license": "MIT",
   "author": "Cloudflare Inc.",
