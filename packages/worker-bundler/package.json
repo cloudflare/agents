@@ -45,7 +45,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260604.1",
     "@types/semver": "^7.7.1",
-    "esbuild": "^0.25.1",
+    "esbuild": "^0.28.0",
     "tsdown": "^0.22.1"
   },
   "engines": {

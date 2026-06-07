@@ -29,6 +29,7 @@
     "aywson": "^0.0.16",
     "chat": "^4.30.0",
     "just-bash": "^3.0.1",
+    "smol-toml": "^1.6.1",
     "yargs": "^18.0.0"
   },
   "devDependencies": {

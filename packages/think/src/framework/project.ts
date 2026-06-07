@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { parse as parseJsonc } from "aywson";
+import { parse as parseToml } from "smol-toml";
 import {
   createThinkWorkerConfig,
   createThinkWorkerDefaults,
@@ -96,24 +97,25 @@ export async function readWranglerConfig(
   root: string
 ): Promise<ThinkWranglerConfigResult> {
   for (const file of WRANGLER_CONFIG_FILES) {
+    let source: string;
     try {
-      const source = await readFile(path.join(root, file), "utf8");
-      return {
-        config: parseWranglerConfig(file, source),
-        path: file
-      };
+      source = await readFile(path.join(root, file), "utf8");
     } catch (error) {
       if (isMissingFileError(error)) continue;
-      if (error instanceof SyntaxError) {
-        return {
-          config: null,
-          path: file,
-          error:
-            `Could not parse ${file} for Think diagnostics: ${error.message}. ` +
-            `Fix the config syntax to enable binding and route diagnostics.`
-        };
-      }
       throw error;
+    }
+    try {
+      return { config: parseWranglerConfig(file, source), path: file };
+    } catch (error) {
+      return {
+        config: null,
+        path: file,
+        error:
+          `Could not parse ${file} for Think diagnostics: ${
+            error instanceof Error ? error.message : String(error)
+          }. ` +
+          `Fix the config syntax to enable binding and route diagnostics.`
+      };
     }
   }
 
@@ -124,156 +126,10 @@ function parseWranglerConfig(
   file: string,
   source: string
 ): Record<string, unknown> {
-  if (file.endsWith(".toml")) return parseWranglerToml(source);
+  if (file.endsWith(".toml")) {
+    return parseToml(source) as Record<string, unknown>;
+  }
   return parseJsonc(source) as Record<string, unknown>;
-}
-
-function parseWranglerToml(source: string): Record<string, unknown> {
-  const root: Record<string, unknown> = {};
-  let current: Record<string, unknown> = root;
-  for (const rawLine of source.split(/\r?\n/)) {
-    const line = stripTomlComment(rawLine).trim();
-    if (!line) continue;
-
-    const arrayTable = line.match(/^\[\[\s*([^\]]+)\s*\]\]$/);
-    if (arrayTable?.[1]) {
-      current = appendTomlArrayTable(root, arrayTable[1]);
-      continue;
-    }
-
-    const table = line.match(/^\[\s*([^\]]+)\s*\]$/);
-    if (table?.[1]) {
-      current = ensureTomlTable(root, table[1]);
-      continue;
-    }
-
-    const assignment = line.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/);
-    if (!assignment?.[1] || !assignment[2]) {
-      throw new SyntaxError(`Unsupported TOML line: ${rawLine.trim()}`);
-    }
-    current[assignment[1]] = parseTomlValue(assignment[2].trim());
-  }
-  return root;
-}
-
-function ensureTomlTable(
-  root: Record<string, unknown>,
-  path: string
-): Record<string, unknown> {
-  let current = root;
-  for (const segment of path.split(".").map((part) => part.trim())) {
-    const existing = current[segment];
-    if (existing === undefined) {
-      const next: Record<string, unknown> = {};
-      current[segment] = next;
-      current = next;
-      continue;
-    }
-    if (!isPlainRecord(existing)) {
-      throw new SyntaxError(`TOML table "${path}" conflicts with a value.`);
-    }
-    current = existing;
-  }
-  return current;
-}
-
-function appendTomlArrayTable(
-  root: Record<string, unknown>,
-  path: string
-): Record<string, unknown> {
-  const parts = path.split(".").map((part) => part.trim());
-  const tableName = parts.pop();
-  if (!tableName) {
-    throw new SyntaxError(`Invalid TOML array table "${path}".`);
-  }
-  const parent =
-    parts.length > 0 ? ensureTomlTable(root, parts.join(".")) : root;
-  const existing = parent[tableName];
-  if (existing !== undefined && !Array.isArray(existing)) {
-    throw new SyntaxError(`TOML array table "${path}" conflicts with a value.`);
-  }
-  const table: Record<string, unknown> = {};
-  parent[tableName] = [...(Array.isArray(existing) ? existing : []), table];
-  return table;
-}
-
-function parseTomlValue(value: string): unknown {
-  if (value === "true") return true;
-  if (value === "false") return false;
-  if (/^-?\d+(?:\.\d+)?$/.test(value)) return Number(value);
-  if (value.startsWith("[") && value.endsWith("]")) {
-    const inner = value.slice(1, -1).trim();
-    if (!inner) return [];
-    return splitTomlArray(inner).map((item) => parseTomlValue(item.trim()));
-  }
-  const quoted = value.match(/^"((?:\\.|[^"\\])*)"$/);
-  if (quoted) return JSON.parse(value) as string;
-  const singleQuoted = value.match(/^'([^']*)'$/);
-  if (singleQuoted) return singleQuoted[1];
-  return value;
-}
-
-function splitTomlArray(value: string): string[] {
-  const parts: string[] = [];
-  let current = "";
-  let quote: '"' | "'" | null = null;
-  let escaped = false;
-  for (const char of value) {
-    if (escaped) {
-      current += char;
-      escaped = false;
-      continue;
-    }
-    if (char === "\\" && quote === '"') {
-      current += char;
-      escaped = true;
-      continue;
-    }
-    if ((char === '"' || char === "'") && !quote) {
-      quote = char;
-      current += char;
-      continue;
-    }
-    if (char === quote) {
-      quote = null;
-      current += char;
-      continue;
-    }
-    if (char === "," && !quote) {
-      parts.push(current);
-      current = "";
-      continue;
-    }
-    current += char;
-  }
-  if (current.trim()) parts.push(current);
-  return parts;
-}
-
-function stripTomlComment(line: string): string {
-  let quote: '"' | "'" | null = null;
-  let escaped = false;
-  for (let index = 0; index < line.length; index++) {
-    const char = line[index];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (char === "\\" && quote === '"') {
-      escaped = true;
-      continue;
-    }
-    if ((char === '"' || char === "'") && !quote) {
-      quote = char;
-      continue;
-    }
-    if (char === quote) {
-      quote = null;
-      continue;
-    }
-    if (char === "#" && !quote) return line.slice(0, index);
-  }
-  return line;
 }
 
 export async function createThinkProjectWorkerConfigResult(
@@ -421,10 +277,6 @@ function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null
     ? (value as Record<string, unknown>)
     : {};
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isMissingDirectoryError(error: unknown): boolean {

@@ -11,6 +11,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCli } from "../cli/create";
 import { initCommand } from "../cli/init";
+import { readWranglerConfig } from "../framework/project";
 
 describe("think CLI", () => {
   let originalConsoleLog: typeof console.log;
@@ -560,6 +561,57 @@ describe("think CLI", () => {
     expect(output).toContain("init");
     expect(output).toContain("inspect");
     expect(output).toContain("types");
+  });
+});
+
+describe("readWranglerConfig (TOML)", () => {
+  it("parses inline tables inside arrays and array-of-tables", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-toml-"));
+    await writeFile(
+      path.join(root, "wrangler.toml"),
+      [
+        'main = "virtual:think/entry"',
+        // Inline table inside an array — the kind of value a naive
+        // comma-splitting parser mishandles.
+        'kv_namespaces = [{ binding = "CACHE", id = "cache-id" }]',
+        "",
+        "[[durable_objects.bindings]]",
+        'name = "Host"',
+        'class_name = "ThinkAgent_Host"',
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    const result = await readWranglerConfig(root);
+
+    expect(result.error).toBeUndefined();
+    expect(result.path).toBe("wrangler.toml");
+    const config = result.config as {
+      kv_namespaces: Array<{ binding: string; id: string }>;
+      durable_objects: { bindings: Array<{ class_name: string }> };
+    };
+    expect(config.kv_namespaces).toEqual([
+      { binding: "CACHE", id: "cache-id" }
+    ]);
+    expect(config.durable_objects.bindings[0]?.class_name).toBe(
+      "ThinkAgent_Host"
+    );
+  });
+
+  it("reports a recoverable error for invalid TOML instead of throwing", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-toml-bad-"));
+    await writeFile(
+      path.join(root, "wrangler.toml"),
+      'main = "virtual:think/entry"\n[unclosed\n',
+      "utf8"
+    );
+
+    const result = await readWranglerConfig(root);
+
+    expect(result.config).toBeNull();
+    expect(result.path).toBe("wrangler.toml");
+    expect(result.error).toContain("Could not parse wrangler.toml");
   });
 });
 

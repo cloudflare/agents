@@ -80,9 +80,6 @@
     "wrangler": "^4.97.0",
     "zod": "^4.4.3"
   },
-  "overrides": {
-    "esbuild": "^0.25.1"
-  },
   "lint-staged": {
     "*.{js,mjs,cjs,jsx,ts,mts,cts,tsx,vue,astro,svelte,css}": [
       "oxfmt --write"

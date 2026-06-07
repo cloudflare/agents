@@ -397,7 +397,10 @@ async function runNpmInstall(root: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const child = spawn("npm", ["install"], {
       cwd: root,
-      stdio: "inherit"
+      stdio: "inherit",
+      // On Windows `npm` resolves to `npm.cmd`, which Node's spawn won't find
+      // without a shell.
+      shell: process.platform === "win32"
     });
     child.on("error", reject);
     child.on("exit", (code) => {

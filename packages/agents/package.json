@@ -30,6 +30,7 @@
     "@modelcontextprotocol/sdk": "1.29.0",
     "@rolldown/plugin-babel": "^0.2.3",
     "cron-schedule": "^6.0.0",
+    "esbuild": "^0.28.0",
     "just-bash": "^3.0.1",
     "mimetext": "^3.0.28",
     "nanoid": "^5.1.11",
@@ -40,7 +41,6 @@
   },
   "devDependencies": {
     "@ai-sdk/react": "^3.0.198",
-    "@cloudflare/worker-bundler": "*",
     "@tanstack/ai": "^0.27.0",
     "@types/react": "^19.2.16",
     "@types/yargs": "^17.0.35",
@@ -56,7 +56,6 @@
   },
   "peerDependencies": {
     "@cloudflare/ai-chat": ">=0.8.0 <1.0.0",
-    "@cloudflare/worker-bundler": ">=0.2.0 <1.0.0",
     "@tanstack/ai": ">=0.10.2 <1.0.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",
@@ -68,9 +67,6 @@
   },
   "peerDependenciesMeta": {
     "@cloudflare/ai-chat": {
-      "optional": true
-    },
-    "@cloudflare/worker-bundler": {
       "optional": true
     },
     "@tanstack/ai": {
@@ -231,6 +227,11 @@
       "types": "./dist/skills/index.d.ts",
       "import": "./dist/skills/index.js",
       "require": "./dist/skills/index.js"
+    },
+    "./skills/compile": {
+      "types": "./dist/skills/compile.d.ts",
+      "import": "./dist/skills/compile.js",
+      "require": "./dist/skills/compile.js"
     }
   },
   "publishConfig": {

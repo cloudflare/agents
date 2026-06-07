@@ -290,72 +290,83 @@ function scriptModule(source: string, request: SkillScriptRequest): string {
   ].join("\n");
 }
 
-function moduleSource(
-  module: string | { js?: string; cjs?: string } | undefined
-): string | null {
-  if (typeof module === "string") return module;
-  return module?.js ?? module?.cjs ?? null;
+/**
+ * Whether a script declares a default export, in either the raw author form
+ * (`export default ...`) or the bundled form esbuild emits
+ * (`export { run as default }`).
+ */
+function hasDefaultExport(source: string): boolean {
+  return (
+    /^\s*export\s+default\s+/m.test(source) ||
+    /export\s*\{[^}]*\bas\s+default\b[^}]*\}/m.test(source)
+  );
 }
 
 /**
- * Remove `export { ... }` blocks (illegal inside the function wrapper) and
- * rewrite a `export { X as default }` binding to the local `__skillRun`.
+ * Remove `export { ... }` blocks, which are illegal inside the function wrapper
+ * the runner builds around skill scripts.
  */
 function stripStrayExports(source: string): string {
   return source.replace(/\n?export\s*\{[\s\S]*?\};?/g, "");
 }
 
 function rewriteBundledSource(source: string): string {
-  const defaultExport = source.match(
-    /export\s*\{\s*([A-Za-z_$][\w$]*)\s+as\s+default\s*\};?/m
+  // esbuild emits the default export as a binding inside an `export { ... }`
+  // block, e.g. `export { run as default }` or, when the module also has named
+  // exports, `export { helper, run as default }`. Extract the binding aliased
+  // to `default` from anywhere in those blocks, then strip the (illegal-inside-
+  // a-function) export statements and bind the captured name to `__skillRun`.
+  const defaultBinding = source.match(
+    /\bexport\s*\{[^}]*\b([A-Za-z_$][\w$]*)\s+as\s+default\b[^}]*\}/m
   );
-  let out = source;
-  if (defaultExport) {
-    out = out.replace(
-      defaultExport[0],
-      `const __skillRun = ${defaultExport[1]};`
-    );
+  const stripped = stripStrayExports(source);
+  if (defaultBinding) {
+    return `${stripped}\nconst __skillRun = ${defaultBinding[1]};`;
   }
-  return stripStrayExports(out);
+  return stripped;
 }
 
 async function prepareJavaScriptSource(
   request: SkillScriptRequest,
   runtime: "javascript" | "typescript"
 ): Promise<string> {
-  const files: Record<string, string> = {};
+  // Skill scripts run directly in the sandbox; the runtime ships no in-Worker
+  // bundler. Build-time compiled scripts (Agents Vite plugin / `compileSkillScript`
+  // from "agents/skills/compile") arrive as self-contained ESM. Normalize
+  // esbuild's `export { run as default }` (or a raw `export default`) into the
+  // `__skillRun` binding the wrapper expects.
+  const entryPrecompiled = (request.resources ?? []).some(
+    (resource) =>
+      resource.path === request.path && resource.precompiled === true
+  );
+  if (entryPrecompiled) return rewriteBundledSource(request.source);
+
+  // Count sibling script files to detect skills that span multiple modules.
+  let scriptFileCount = 1;
   for (const resource of request.resources ?? []) {
+    if (resource.path === request.path) continue;
     const extension = extensionOf(resource.path);
     if (
       resource.kind === "script" &&
       (resource.encoding ?? "text") === "text" &&
       [".js", ".mjs", ".ts", ".tsx"].includes(extension)
     ) {
-      files[resource.path] = resource.content;
+      scriptFileCount++;
     }
   }
-  files[request.path] = request.source;
 
-  // Only compile when TypeScript or when sibling script files need bundling.
-  const needsBundler =
-    runtime === "typescript" || Object.keys(files).length > 1;
-  if (!needsBundler) return request.source;
-
-  const { createWorker } = await import("@cloudflare/worker-bundler");
-  const result = await createWorker({
-    files,
-    entryPoint: request.path,
-    bundle: true
-  });
-  const compiled =
-    moduleSource(result.modules[result.mainModule]) ??
-    moduleSource(Object.values(result.modules)[0]);
-
-  if (!compiled) {
-    throw new Error(`Failed to compile skill script: ${request.path}`);
+  // Plain single-file JavaScript runs as-is. Anything that needs compiling
+  // (TypeScript, or a skill split across multiple modules) must be bundled
+  // ahead of time — there is no runtime bundler to fall back to.
+  if (runtime === "javascript" && scriptFileCount === 1) {
+    return request.source;
   }
 
-  return rewriteBundledSource(compiled);
+  throw new Error(
+    `Skill script "${request.path}" must be compiled to a self-contained JavaScript module before it can run. ` +
+      "Bundled skills are compiled automatically by the Agents Vite plugin. Skills served from R2 or other dynamic " +
+      'sources must be bundled ahead of time (e.g. with `compileSkillScript` from "agents/skills/compile") before upload.'
+  );
 }
 
 // ── Host bridge: single capability + permission surface ───────────────
@@ -1003,7 +1014,7 @@ async function runJavaScriptScript(
   bridge: SkillScriptHostBridge,
   runtime: "javascript" | "typescript"
 ): Promise<unknown> {
-  if (!/^\s*export\s+default\s+/m.test(request.source)) {
+  if (!hasDefaultExport(request.source)) {
     throw new Error(
       "JS/TS skill scripts must `export default` an async run(input, ctx) function."
     );
