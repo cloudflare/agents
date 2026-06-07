@@ -117,11 +117,29 @@ export async function copyLocalTemplate(
 }
 
 /**
- * After a template is fetched, set the package name and rewrite any
- * `workspace:*` dependencies (used so templates build inside the monorepo) to
- * published version ranges so the project installs standalone.
+ * Wrangler config filenames, in the order `wrangler` itself resolves them.
  */
-export async function finalizeTemplatePackageJson(
+const WRANGLER_CONFIG_FILES = [
+  "wrangler.jsonc",
+  "wrangler.json",
+  "wrangler.toml"
+];
+
+/**
+ * After a template is fetched, set the project name (in both `package.json` and
+ * the Wrangler config's `name`) and rewrite any `workspace:*` dependencies
+ * (used so templates build inside the monorepo) to published version ranges so
+ * the project installs standalone.
+ */
+export async function finalizeTemplate(
+  dest: string,
+  projectName: string
+): Promise<void> {
+  await finalizePackageJson(dest, projectName);
+  await finalizeWranglerName(dest, projectName);
+}
+
+async function finalizePackageJson(
   dest: string,
   projectName: string
 ): Promise<void> {
@@ -137,6 +155,30 @@ export async function finalizeTemplatePackageJson(
     }
   }
   await writeFile(packageJsonPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
+}
+
+/**
+ * Update the Worker `name` in the template's Wrangler config so each scaffolded
+ * app deploys under its own name instead of the shared template name. Done with
+ * a targeted replacement of the first `name` field so JSONC comments and
+ * formatting are preserved.
+ */
+async function finalizeWranglerName(
+  dest: string,
+  projectName: string
+): Promise<void> {
+  for (const file of WRANGLER_CONFIG_FILES) {
+    const configPath = path.join(dest, file);
+    const source = await readFile(configPath, "utf8").catch(() => null);
+    if (source === null) continue;
+    const updated = file.endsWith(".toml")
+      ? source.replace(/^(\s*name\s*=\s*")[^"]*(")/m, `$1${projectName}$2`)
+      : source.replace(/("name"\s*:\s*")[^"]*(")/, `$1${projectName}$2`);
+    if (updated !== source) {
+      await writeFile(configPath, updated, "utf8");
+    }
+    return;
+  }
 }
 
 function rewriteWorkspaceVersions(deps: Record<string, string>): void {

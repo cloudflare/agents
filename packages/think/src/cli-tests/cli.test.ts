@@ -282,9 +282,15 @@ describe("think CLI", () => {
       for (const version of Object.values(pkg.dependencies)) {
         expect(version.startsWith("workspace:")).toBe(false);
       }
-      expect(
-        await readFile(path.join(appRoot, "wrangler.jsonc"), "utf8")
-      ).toContain("virtual:think/entry");
+      const wrangler = await readFile(
+        path.join(appRoot, "wrangler.jsonc"),
+        "utf8"
+      );
+      expect(wrangler).toContain("virtual:think/entry");
+      // The Worker name is updated so each scaffolded app deploys under its own
+      // name rather than the shared template name.
+      expect(wrangler).toContain(`"name": "app"`);
+      expect(wrangler).not.toContain(`${name}-starter`);
     }
   });
 

@@ -5,7 +5,7 @@ import { access, mkdir, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   copyLocalTemplate,
-  finalizeTemplatePackageJson,
+  finalizeTemplate,
   findLocalTemplatesRoot,
   formatTemplateList,
   localTemplateExists,
@@ -21,7 +21,6 @@ export interface InitCommandOptions {
   template?: string;
   /** Git ref passed to the remote template fetcher. Defaults to `main`. */
   ref?: string;
-  routePrefix?: string;
   yes?: boolean;
   install?: boolean;
   dryRun?: boolean;
@@ -105,7 +104,7 @@ export async function initCommand(options: InitCommandOptions): Promise<void> {
 
   await mkdir(targetRoot, { recursive: true });
   await fetchTemplate(template, targetRoot, options);
-  await finalizeTemplatePackageJson(targetRoot, projectName);
+  await finalizeTemplate(targetRoot, projectName);
 
   if (options.install ?? true) {
     await (options.installRunner ?? runNpmInstall)(targetRoot);
