@@ -1,5 +1,5 @@
 {
-  "name": "think-coding-agent-starter",
+  "name": "@cloudflare/think-coding-agent-starter",
   "description": "Think coding agent with workspace file tools and a coding skill",
   "private": true,
   "type": "module",

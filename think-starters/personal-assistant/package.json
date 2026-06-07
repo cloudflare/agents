@@ -1,5 +1,5 @@
 {
-  "name": "think-personal-assistant-starter",
+  "name": "@cloudflare/think-personal-assistant-starter",
   "description": "Think personal assistant with persistent memory and scheduled tasks",
   "private": true,
   "type": "module",

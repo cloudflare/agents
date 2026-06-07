@@ -1,5 +1,5 @@
 {
-  "name": "think-basic-starter",
+  "name": "@cloudflare/think-basic-starter",
   "description": "Minimal Think chat agent on Cloudflare Workers",
   "private": true,
   "type": "module",

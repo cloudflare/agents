@@ -1,5 +1,5 @@
 {
-  "name": "think-customer-support-starter",
+  "name": "@cloudflare/think-customer-support-starter",
   "description": "Think customer support agent with custom tools and an escalation skill",
   "private": true,
   "type": "module",
