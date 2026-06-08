@@ -135,18 +135,16 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
     const { corsOptions, storage, onsessioninitialized, ...sdkOptions } =
       options;
 
-    // Stateful-vs-stateless behaviour is still controlled solely by the
-    // SDK's `sessionIdGenerator` option. Supplying `storage` persists whatever
-    // state exists, but it must not make later requests require the
-    // `mcp-session-id` header by itself.
-    const sessionIdGenerator = sdkOptions.sessionIdGenerator;
-
+    // `storage` is intentionally orthogonal to statefulness: stateful-vs-
+    // stateless behaviour is driven solely by the SDK's `sessionIdGenerator`.
+    // `storage` only persists whatever session state exists across DO
+    // hibernation, so it's used alongside a `sessionIdGenerator`.
+    //
     // We wrap onsessioninitialized so we can persist state to storage as soon
     // as the SDK transport assigns a session ID. The bridge gets installed
     // lazily on the first request so `this` is fully constructed when it fires.
     super({
       ...sdkOptions,
-      sessionIdGenerator,
       onsessioninitialized: undefined
     });
 
