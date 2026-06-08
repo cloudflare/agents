@@ -6,7 +6,11 @@
 // framework. It has no side effects on import (unlike `./index.ts`, which is
 // the executable bin).
 
-export { initCommand, type InitCommandOptions } from "./init";
+export {
+  initCommand,
+  looksLikeThinkApp,
+  type InitCommandOptions
+} from "./init";
 export {
   DEFAULT_TEMPLATE,
   DEFAULT_TEMPLATE_REF,

@@ -11,7 +11,7 @@ export function createCli(argv = process.argv) {
     .usage("$0 <command> [options]")
     .command(
       "init [directory]",
-      "Create a new Think app from a starter template",
+      "Scaffold a new Think app from a starter template, or add Think to the current project",
       (cmd) =>
         cmd
           .positional("directory", {

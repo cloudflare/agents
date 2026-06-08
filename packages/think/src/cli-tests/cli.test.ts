@@ -592,6 +592,47 @@ describe("think CLI", () => {
     ).rejects.toThrow();
   });
 
+  it("keeps an existing tsconfig.json when augmenting instead of aborting", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "existing-app" }),
+      "utf8"
+    );
+    const userTsconfig = JSON.stringify({ compilerOptions: { strict: true } });
+    await writeFile(path.join(root, "tsconfig.json"), userTsconfig, "utf8");
+
+    await initCommand({ root, install: false });
+
+    // The user's tsconfig is left untouched, and Think files are still written.
+    expect(await readFile(path.join(root, "tsconfig.json"), "utf8")).toBe(
+      userTsconfig
+    );
+    expect(await readFile(path.join(root, "vite.config.ts"), "utf8")).toContain(
+      "think()"
+    );
+    expect(consoleOutput.join("\n")).toContain(
+      "Kept your existing files (not overwritten):"
+    );
+    expect(consoleOutput.join("\n")).toContain("- tsconfig.json");
+  });
+
+  it("forces type:module when augmenting a CommonJS project", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "think-init-"));
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "existing-app", type: "commonjs" }),
+      "utf8"
+    );
+
+    await initCommand({ root, install: false });
+
+    const pkg = JSON.parse(
+      await readFile(path.join(root, "package.json"), "utf8")
+    ) as { type: string };
+    expect(pkg.type).toBe("module");
+  });
+
   it("shows help", async () => {
     const cli = createCli(["node", "think", "--help"]);
 

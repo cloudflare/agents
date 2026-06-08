@@ -80,11 +80,7 @@ const tigedFetchTemplate: TemplateFetcher = async ({ template, ref, dest }) => {
 export async function initCommand(options: InitCommandOptions): Promise<void> {
   const baseRoot = path.resolve(options.root ?? process.cwd());
   const template = resolveTemplateName(options.template);
-  const defaultDirectory = await uniqueDefaultDirectory(baseRoot);
-  const selectedDirectory = await selectTargetDirectory(
-    options,
-    defaultDirectory
-  );
+  const selectedDirectory = await selectTargetDirectory(options, baseRoot);
   const targetRoot = resolveTargetRoot(baseRoot, selectedDirectory);
   const projectName = packageName(options.name ?? path.basename(targetRoot));
 
@@ -150,14 +146,27 @@ async function fetchTemplate(
 
 async function selectTargetDirectory(
   options: InitCommandOptions,
-  defaultDirectory: string
+  root: string
 ): Promise<string> {
   if (options.directory) return normalizeTargetDirectory(options.directory);
-  if (options.yes) return defaultDirectory;
+  const randomDirectory = await uniqueDefaultDirectory(root);
+  // `--yes` always scaffolds into a fresh subfolder so non-interactive runs
+  // (e.g. `npm create think -y`) never write into an unexpected directory.
+  if (options.yes) return randomDirectory;
+  // Interactively, an empty starting folder is almost always meant to *be* the
+  // app, so offer `.` as the default; otherwise suggest a new subfolder.
+  const defaultDirectory = (await isSafeEmptyDirectory(root))
+    ? "."
+    : randomDirectory;
   const target = await (options.promptTargetDirectory ?? promptTargetDirectory)(
     defaultDirectory
   );
   return normalizeTargetDirectory(target || defaultDirectory);
+}
+
+async function isSafeEmptyDirectory(root: string): Promise<boolean> {
+  const entries = await readDirectoryEntries(root);
+  return entries.every((entry) => SAFE_EMPTY_DIRECTORY_ENTRIES.has(entry));
 }
 
 async function promptTargetDirectory(
@@ -225,7 +234,7 @@ async function assertSafeTargetDirectory(
   );
 }
 
-async function looksLikeThinkApp(root: string): Promise<boolean> {
+export async function looksLikeThinkApp(root: string): Promise<boolean> {
   let hasThinkDependency = false;
   const packageSource = await readTextIfExists(path.join(root, "package.json"));
   if (packageSource) {

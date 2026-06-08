@@ -3,6 +3,7 @@ import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   initCommand as scaffoldFromTemplate,
+  looksLikeThinkApp,
   type InitCommandOptions as TemplateInitOptions
 } from "create-think";
 import { createThinkWorkerConfig } from "../framework/config";
@@ -92,20 +93,23 @@ async function augmentExistingProject(
     routePrefix: options.routePrefix
   });
 
-  await assertNoUserFileConflicts(plan);
+  // Anything the user already owns (e.g. an existing tsconfig.json) is kept as-is
+  // rather than aborting the whole command. Vite/Wrangler config is handled by
+  // the migration guard above, so the rest is safe to skip and report.
+  const skipped = await existingPlanFiles(plan);
 
   if (options.dryRun) {
-    printDryRun(plan, options.install ?? true);
+    printDryRun(plan, skipped, options.install ?? true);
     return;
   }
 
-  await writePlannedFiles(plan);
+  await writePlannedFiles(plan, skipped);
 
   if (options.install ?? true) {
     await (options.installRunner ?? runNpmInstall)(root);
   }
 
-  printSuccess(plan, options.install ?? true);
+  printSuccess(plan, skipped, options.install ?? true);
 }
 
 async function createInitPlan(options: {
@@ -168,27 +172,25 @@ async function createInitPlan(options: {
   };
 }
 
-async function assertNoUserFileConflicts(plan: InitPlan): Promise<void> {
-  const conflicts: string[] = [];
+async function existingPlanFiles(plan: InitPlan): Promise<Set<string>> {
+  const existing = new Set<string>();
   for (const file of plan.files) {
-    const absolute = path.join(plan.root, file.path);
-    if (!(await fileExists(absolute))) continue;
+    // package.json is always merged, never overwritten, so it is never skipped.
     if (file.merge === "package-json") continue;
-    conflicts.push(file.path);
+    if (await fileExists(path.join(plan.root, file.path))) {
+      existing.add(file.path);
+    }
   }
-  if (conflicts.length > 0) {
-    throw new Error(
-      [
-        "Refusing to overwrite existing user-owned files:",
-        ...conflicts.map((file) => `- ${file}`)
-      ].join("\n")
-    );
-  }
+  return existing;
 }
 
-async function writePlannedFiles(plan: InitPlan): Promise<void> {
+async function writePlannedFiles(
+  plan: InitPlan,
+  skip: Set<string>
+): Promise<void> {
   await mkdir(plan.root, { recursive: true });
   for (const file of plan.files) {
+    if (skip.has(file.path)) continue;
     const absolute = path.join(plan.root, file.path);
     await mkdir(path.dirname(absolute), { recursive: true });
     const content =
@@ -217,6 +219,9 @@ function mergePackageJsonData(
   return {
     ...generated,
     ...existing,
+    // Think + Vite require ES modules, so the framework's `type` wins even if the
+    // existing project was CommonJS (or omitted `type`).
+    type: generated.type ?? existing.type,
     scripts: {
       ...generated.scripts,
       ...existing.scripts
@@ -246,56 +251,56 @@ async function unsafeMigrationReason(root: string): Promise<string | null> {
   return null;
 }
 
-async function looksLikeThinkApp(root: string): Promise<boolean> {
-  let hasThinkDependency = false;
-  const packageSource = await readTextIfExists(path.join(root, "package.json"));
-  if (packageSource) {
-    try {
-      const packageJson = JSON.parse(packageSource) as PackageJson;
-      hasThinkDependency = Boolean(
-        packageJson.dependencies?.["@cloudflare/think"] ||
-        packageJson.devDependencies?.["@cloudflare/think"]
-      );
-    } catch {
-      hasThinkDependency = false;
-    }
-  }
-  const viteConfig = await readFirstExistingText(
-    VITE_CONFIG_FILES.map((file) => path.join(root, file))
-  );
-  if (viteConfig?.includes("@cloudflare/think/vite")) return true;
-  const wranglerConfig = await readFirstExistingText(
-    ["wrangler.jsonc", "wrangler.json", "wrangler.toml"].map((file) =>
-      path.join(root, file)
-    )
-  );
-  if (wranglerConfig?.includes("virtual:think/entry")) return true;
-  return hasThinkDependency && (await fileExists(path.join(root, "agents")));
-}
-
-function printDryRun(plan: InitPlan, install: boolean): void {
-  console.log(
-    [
-      "Think init would add to the current project:",
-      ...plan.files.map((file) => `- ${file.path}`),
-      install ? "Would run: npm install" : "Would skip dependency install."
-    ].join("\n")
-  );
-}
-
-function printSuccess(plan: InitPlan, install: boolean): void {
-  console.log(
-    [
-      `Added Think to ${plan.root}.`,
-      install ? "Installed npm dependencies." : "Skipped npm install.",
+function printDryRun(
+  plan: InitPlan,
+  skipped: Set<string>,
+  install: boolean
+): void {
+  const lines = [
+    "Think init would add to the current project:",
+    ...plan.files
+      .filter((file) => !skipped.has(file.path))
+      .map((file) => `- ${file.path}`)
+  ];
+  if (skipped.size > 0) {
+    lines.push(
       "",
-      "Next steps:",
-      "- Edit agents/assistant/agent.ts to customize the model, prompt, skills, and schedules",
-      "- npm run dev",
-      "- npm run types",
-      "- npm run deploy"
-    ].join("\n")
+      "Would keep your existing files (left unchanged):",
+      ...[...skipped].map((file) => `- ${file}`)
+    );
+  }
+  lines.push(
+    install ? "Would run: npm install" : "Would skip dependency install."
   );
+  console.log(lines.join("\n"));
+}
+
+function printSuccess(
+  plan: InitPlan,
+  skipped: Set<string>,
+  install: boolean
+): void {
+  const lines = [
+    `Added Think to ${plan.root}.`,
+    install ? "Installed npm dependencies." : "Skipped npm install."
+  ];
+  if (skipped.size > 0) {
+    lines.push(
+      "",
+      "Kept your existing files (not overwritten):",
+      ...[...skipped].map((file) => `- ${file}`),
+      "Reconcile them with Think's expected setup if the app does not build."
+    );
+  }
+  lines.push(
+    "",
+    "Next steps:",
+    "- Edit agents/assistant/agent.ts to customize the model, prompt, skills, and schedules",
+    "- npm run dev",
+    "- npm run types",
+    "- npm run deploy"
+  );
+  console.log(lines.join("\n"));
 }
 
 async function runNpmInstall(root: string): Promise<void> {
@@ -462,14 +467,6 @@ async function readTextIfExists(file: string): Promise<string | null> {
     if (isMissingFileError(error)) return null;
     throw error;
   }
-}
-
-async function readFirstExistingText(files: string[]): Promise<string | null> {
-  for (const file of files) {
-    const source = await readTextIfExists(file);
-    if (source !== null) return source;
-  }
-  return null;
 }
 
 async function fileExists(file: string): Promise<boolean> {
