@@ -948,6 +948,56 @@ describe("WorkerTransport", () => {
         transport.handleRequest(createInitRequest())
       ).rejects.toThrow("Stateless transport cannot be reused across requests");
     });
+
+    it("retries restoreState after a transient storage read failure", async () => {
+      const server = createTestServer();
+      let getCalls = 0;
+
+      const mockStorage = {
+        get: async () => {
+          getCalls++;
+          if (getCalls === 1) {
+            throw new Error("transient storage error");
+          }
+          return {
+            sessionId: "restored-session",
+            initialized: true
+          };
+        },
+        set: async () => {}
+      };
+
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "restored-session",
+        storage: mockStorage
+      });
+
+      const createRequest = () =>
+        new Request("http://example.com/", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+            "mcp-session-id": "restored-session"
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            method: "notifications/initialized"
+          })
+        });
+
+      // First request: storage.get() throws, the error propagates and the
+      // restore guard is cleared so a later request can try again.
+      await expect(transport.handleRequest(createRequest())).rejects.toThrow(
+        "transient storage error"
+      );
+
+      // Second request: restore is retried and succeeds.
+      const response = await transport.handleRequest(createRequest());
+      expect(response.status).toBe(202);
+      expect(transport.sessionId).toBe("restored-session");
+      expect(getCalls).toBe(2);
+    });
   });
 
   describe("Client Capabilities Persistence (Serverless Restart)", () => {

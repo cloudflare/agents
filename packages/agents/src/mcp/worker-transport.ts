@@ -458,9 +458,20 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
 
   private async restoreState(): Promise<void> {
     if (!this._storage || this._stateRestored) return;
+    // Set the guard up-front so a re-entrant call (a second request reaching
+    // this `await` before the first resolves) doesn't restore twice. If the
+    // storage read throws we reset it so a transient failure can be retried
+    // on the next request rather than leaving the session permanently
+    // un-restored for this DO instance's lifetime.
     this._stateRestored = true;
 
-    const state = await Promise.resolve(this._storage.get());
+    let state: TransportState | undefined;
+    try {
+      state = await Promise.resolve(this._storage.get());
+    } catch (error) {
+      this._stateRestored = false;
+      throw error;
+    }
     if (!state) return;
 
     // Restore SDK private state. We intentionally reach in here — the SDK
