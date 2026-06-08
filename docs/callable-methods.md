@@ -127,6 +127,30 @@ export class CounterAgent extends Agent<Env, State> {
 }
 ```
 
+You can also wrap a function-valued class field with `callable()` if you do not
+want to use decorators:
+
+```typescript
+import { Agent, callable, type StreamingResponse } from "agents";
+
+export class CounterAgent extends Agent<Env, State> {
+  increment = callable((): number => {
+    this.setState({ ...this.state, count: this.state.count + 1 });
+    return this.state.count;
+  });
+
+  streamNumbers = callable(
+    async (stream: StreamingResponse, count: number): Promise<void> => {
+      for (let i = 0; i < count; i++) {
+        stream.send(i);
+      }
+      stream.end();
+    },
+    { streaming: true, description: "Stream numbers" }
+  );
+}
+```
+
 ### Calling from the Client
 
 There are two ways to call methods from the client:

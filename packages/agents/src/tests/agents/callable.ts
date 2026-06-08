@@ -1,4 +1,4 @@
-import { Agent, callable } from "../../index.ts";
+import { Agent, callable, getCurrentAgent } from "../../index.ts";
 import type { StreamingResponse } from "../../index.ts";
 
 // Test Agent for @callable decorator tests
@@ -7,6 +7,46 @@ export class TestCallableAgent extends Agent<
   { value: number }
 > {
   initialState = { value: 0 };
+
+  functionAdd = callable(
+    (a: number, b: number): number => {
+      return a + b;
+    },
+    { description: "Function property add" }
+  );
+
+  functionAsync = callable(async (value: string): Promise<string> => {
+    await new Promise((r) => setTimeout(r, 10));
+    return `async:${value}`;
+  });
+
+  functionUsesThis = callable(function (
+    this: TestCallableAgent,
+    value: number
+  ): number {
+    this.setState({ value });
+    return this.state.value;
+  });
+
+  functionContext = callable(
+    (): {
+      hasAgent: boolean;
+      hasConnection: boolean;
+    } => {
+      const { agent, connection } = getCurrentAgent<TestCallableAgent>();
+      return { hasAgent: agent === this, hasConnection: !!connection };
+    }
+  );
+
+  functionStream = callable(
+    (stream: StreamingResponse, count: number) => {
+      for (let i = 0; i < count; i++) {
+        stream.send(`function-${i}`);
+      }
+      stream.end("function-complete");
+    },
+    { streaming: true, description: "Function property stream" }
+  );
 
   // Basic sync method
   @callable()

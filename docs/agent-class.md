@@ -242,7 +242,7 @@ class MyAgent extends Agent {
 
 ### RPC and Callable Methods
 
-`agents` take Durable Objects RPC one step forward by implementing RPC through WebSockets, so clients can also call methods on the Agent directly. To make a method callable through WS, developers can use the `@callable` decorator. Methods can return a serializable value or a stream (when using `@callable({ stream: true })`).
+`agents` take Durable Objects RPC one step forward by implementing RPC through WebSockets, so clients can also call methods on the Agent directly. To make a method callable through WS, developers can use the `@callable` decorator. Methods can return a serializable value or a stream (when using `@callable({ streaming: true })`).
 
 ```ts
 class MyAgent extends Agent {

@@ -106,6 +106,19 @@ class MyAgent extends Agent<typeof env, { count: number; name: string }> {
     return `Hello, ${name ?? "World"}!`;
   }
 
+  functionHello = callable((name?: string): string => {
+    return `Hello, ${name ?? "World"}!`;
+  });
+
+  functionWithThis = callable(function (this: MyAgent, amount: number): number {
+    return this.state.count + amount;
+  });
+
+  functionStream = callable(
+    async (_stream: StreamingResponse, _prompt: string): Promise<void> => {},
+    { streaming: true }
+  );
+
   @callable()
   async perform(_task: string, _p1?: number): Promise<void> {}
 
@@ -124,6 +137,15 @@ const typedClient = new AgentClient<MyAgent>({
 typedClient.stub.sayHello() satisfies Promise<string>;
 // @ts-expect-error first argument is not a string
 await typedClient.stub.sayHello(1);
+typedClient.stub.functionHello("Ada") satisfies Promise<string>;
+// @ts-expect-error first argument is not a string
+await typedClient.stub.functionHello(1);
+typedClient.stub.functionWithThis(5) satisfies Promise<number>;
+// @ts-expect-error requires parameters
+await typedClient.stub.functionWithThis();
+typedClient.stub.functionStream("prompt") satisfies Promise<void>;
+// @ts-expect-error StreamingResponse is injected server-side
+await typedClient.stub.functionStream(undefined, "prompt");
 await typedClient.stub.perform("some task", 1);
 await typedClient.stub.perform("another task");
 // @ts-expect-error requires parameters
