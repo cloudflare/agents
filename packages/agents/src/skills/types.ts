@@ -21,6 +21,14 @@ export interface SkillResourceDescriptor {
   size?: number;
   encoding?: "text" | "base64";
   mimeType?: string;
+  /**
+   * Set when a script resource was compiled to a self-contained JavaScript
+   * module ahead of time — by the Agents Vite plugin for bundled skills, or via
+   * `compileSkillScript` from `agents/skills/compile` for R2/dynamic skills. The
+   * runtime runs precompiled scripts directly; the runtime ships no in-Worker
+   * bundler, so non-precompiled TypeScript or multi-file scripts cannot run.
+   */
+  precompiled?: boolean;
 }
 
 export interface SkillResource extends SkillResourceDescriptor {

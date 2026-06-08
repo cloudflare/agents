@@ -816,6 +816,36 @@ export class ThinkTestAgent extends Think {
     this._resumableStream.complete(streamId);
   }
 
+  /**
+   * Persist a durable terminal record exactly as recovery exhaustion does
+   * (#1645), so a test can drive the reconnect path without a full
+   * deploy-churn exhaustion.
+   */
+  async recordTerminalForTest(requestId: string, body: string): Promise<void> {
+    await (
+      this as unknown as {
+        _recordTerminalChatStatus: (
+          status: "interrupted",
+          requestId: string,
+          body: string
+        ) => Promise<void>;
+      }
+    )._recordTerminalChatStatus("interrupted", requestId, body);
+  }
+
+  /** Read the durable terminal record (#1645) so a test can assert it is
+   *  cleared when the conversation is cleared. */
+  async getPendingChatTerminalForTest(): Promise<{
+    requestId: string;
+    body: string;
+  } | null> {
+    return (
+      (await this.ctx.storage.get<{ requestId: string; body: string }>(
+        "cf:chat:last-terminal"
+      )) ?? null
+    );
+  }
+
   async getLatestStreamStatusForTest(): Promise<string | null> {
     const streams = this.sql<{ status: string }>`
       SELECT status
@@ -2819,6 +2849,59 @@ function createToolCallingMockModel(): LanguageModel {
   } as LanguageModel;
 }
 
+// Emits a single tool call for whichever tool the turn forces via `toolChoice`
+// (or the first `think_final_answer*` tool advertised), with the configured
+// arguments. Mirrors how a real model terminates a structured workflow turn by
+// calling the synthetic final-answer tool — exercises the #1685 capture path
+// without a network round-trip.
+function createFinalAnswerMockModel(args: unknown): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-final-answer",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream(options: Record<string, unknown>) {
+      const opts = options as {
+        toolChoice?: { type?: string; toolName?: string };
+        tools?: Array<{ name?: string }>;
+      };
+      const toolName =
+        opts.toolChoice?.type === "tool" && opts.toolChoice.toolName
+          ? opts.toolChoice.toolName
+          : ((opts.tools ?? [])
+              .map((t) => t.name)
+              .find((n) => n?.startsWith("think_final_answer")) ??
+            "think_final_answer");
+      const input = JSON.stringify(args);
+      const id = "final-answer-call";
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "tool-input-start", id, toolName });
+          controller.enqueue({ type: "tool-input-delta", id, delta: input });
+          controller.enqueue({ type: "tool-input-end", id });
+          controller.enqueue({
+            type: "tool-call",
+            toolCallId: id,
+            toolName,
+            input
+          });
+          controller.enqueue({
+            type: "finish",
+            finishReason: v3FinishReason("tool-calls"),
+            usage: v3Usage(10, 5)
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
 export class ThinkToolsTestAgent extends Think {
   override maxSteps = 3;
 
@@ -3031,6 +3114,7 @@ export class ThinkProgrammaticTestAgent extends Think {
   private _throwBeforeTurnError: string | null = null;
   private _submissionStatusDelayMs = 0;
   private _programmaticResponse = "Programmatic response";
+  private _finalAnswerResponse: unknown = undefined;
   private _inBandErrorResponse: {
     errorText: string;
     textChunks: string[];
@@ -3042,6 +3126,9 @@ export class ThinkProgrammaticTestAgent extends Think {
         this._inBandErrorResponse.errorText,
         this._inBandErrorResponse.textChunks
       );
+    }
+    if (this._finalAnswerResponse !== undefined) {
+      return createFinalAnswerMockModel(this._finalAnswerResponse);
     }
     if (this._delayedChunks) {
       return createDelayedMultiChunkMockModel(
@@ -3165,6 +3252,23 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async setProgrammaticResponseForTest(response: string): Promise<void> {
     this._programmaticResponse = response;
+  }
+
+  // Make the next turn(s) terminate by calling the structured-output
+  // `think_final_answer` tool with `args` as its arguments (issue #1685).
+  async setFinalAnswerResponseForTest(args: unknown): Promise<void> {
+    this._finalAnswerResponse = args;
+  }
+
+  // Drive the assistant-message persistence chokepoint directly. Used to
+  // simulate the recovery re-persist path (which runs outside an active turn)
+  // and assert the internal `think_final_answer` tool is stripped statelessly.
+  async persistAssistantMessageForTest(msg: UIMessage): Promise<void> {
+    await (
+      this as unknown as {
+        _persistAssistantMessage: (m: UIMessage) => Promise<void>;
+      }
+    )._persistAssistantMessage(msg);
   }
 
   async setLastBodyForTest(body: Record<string, unknown>): Promise<void> {
@@ -4501,6 +4605,20 @@ export class ThinkRecoveryTestAgent extends Think {
     return self._buildIdleConnectMessages();
   }
 
+  /** The durable terminal record (#1645) the resume handshake replays. A
+   *  failed turn persists this so a client that reconnects after the turn ended
+   *  is surfaced the outcome (delivery itself is over the resume handshake). */
+  async getPendingChatTerminalForTest(): Promise<{
+    requestId: string;
+    body: string;
+  } | null> {
+    return (
+      (await this.ctx.storage.get<{ requestId: string; body: string }>(
+        "cf:chat:last-terminal"
+      )) ?? null
+    );
+  }
+
   async setRecoveryShouldThrowForTest(shouldThrow: boolean): Promise<void> {
     this._recoveryShouldThrow = shouldThrow;
   }
@@ -4845,12 +4963,15 @@ export class ThinkRecoveryTestAgent extends Think {
     const stream = streams[0];
     if (!stream) return null;
 
-    const chunks = this.sql<{ body: string }>`
-      SELECT body
-      FROM cf_ai_chat_stream_chunks
-      WHERE stream_id = ${stream.id}
-      ORDER BY chunk_index ASC
-    `;
+    // Use ResumableStream.getStreamChunks so packed segment rows are unpacked
+    // into individual chunk bodies (matching production replay/reconstruction).
+    const chunks = (
+      this as unknown as {
+        _resumableStream: {
+          getStreamChunks(id: string): Array<{ body: string }>;
+        };
+      }
+    )._resumableStream.getStreamChunks(stream.id);
 
     const text = chunks
       .map((chunk) => {

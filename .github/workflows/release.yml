@@ -32,12 +32,12 @@ jobs:
         with:
           registry-url: "https://registry.npmjs.org"
 
-      - run: npm run build
-      - run: npm run check
+      - run: pnpm run build
+      - run: pnpm run check
 
       - name: Get Playwright version
         id: playwright-version
-        run: echo "version=$(jq -r '.packages["node_modules/playwright"].version' package-lock.json)" >> $GITHUB_OUTPUT
+        run: echo "version=$(node -p 'require(\"playwright/package.json\").version')" >> $GITHUB_OUTPUT
 
       - name: Cache Playwright browsers
         uses: actions/cache@v5
@@ -48,15 +48,15 @@ jobs:
 
       - name: Install Playwright browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium
+        run: pnpm exec playwright install --with-deps chromium
 
-      - run: CI=true npx nx run-many -t test
+      - run: CI=true pnpm exec nx run-many -t test
 
       - id: changesets
         uses: changesets/action@v1.7.0
         with:
-          version: npx tsx .github/changeset-version.ts
-          publish: npx tsx .github/changeset-publish.ts
+          version: pnpm exec tsx .github/changeset-version.ts
+          publish: pnpm exec tsx .github/changeset-publish.ts
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_CONFIG_PROVENANCE: true

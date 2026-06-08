@@ -1,0 +1,34 @@
+{
+  "name": "@cloudflare/agents-think-tanstack-start-example",
+  "description": "TanStack Start app embedded with the Think framework",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "vite dev",
+    "build": "vite build",
+    "deploy": "vite build && wrangler deploy",
+    "test:e2e": "vitest --run -c e2e/vitest.config.ts",
+    "types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cloudflare/think": "*",
+    "@tanstack/react-router": "^1.170.8",
+    "@tanstack/react-start": "^1.168.13",
+    "agents": "*",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.39.2",
+    "@cloudflare/workers-types": "^4.20260604.1",
+    "@types/node": "^25.9.1",
+    "@types/react": "^19.2.16",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16",
+    "vitest": "4.1.8",
+    "wrangler": "^4.97.0"
+  }
+}

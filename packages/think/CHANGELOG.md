@@ -1,5 +1,84 @@
 # @cloudflare/think
 
+## 0.8.7
+
+### Patch Changes
+
+- [#1699](https://github.com/cloudflare/agents/pull/1699) [`b1b8268`](https://github.com/cloudflare/agents/commit/b1b8268e541a29201f2edfaad8e105cda8bc131f) Thanks [@threepointone](https://github.com/threepointone)! - Decouple `create-think` from `@cloudflare/think` for fast project starts.
+
+  `create-think` is now fully standalone — it owns the starter-template scaffolding logic and depends only on `tiged` + `yargs`, so `npm create think` no longer installs the entire framework just to copy a template.
+
+  `think init` now has two modes:
+  - **New project** — when `--template` is given, or when run outside an existing npm project, it delegates to `create-think` to fetch a complete starter template.
+  - **Augment in place** — when run inside an existing npm project with no `--template`, it adds Think framework files (agent, Vite/Wrangler config, generated types) and merges dependencies into the current project.
+
+  The internal `@cloudflare/think/cli` export has been removed (its scaffolding logic now lives in `create-think`).
+
+- Updated dependencies [[`b1b8268`](https://github.com/cloudflare/agents/commit/b1b8268e541a29201f2edfaad8e105cda8bc131f)]:
+  - create-think@0.0.3
+
+## 0.8.6
+
+### Patch Changes
+
+- [#1613](https://github.com/cloudflare/agents/pull/1613) [`124a47a`](https://github.com/cloudflare/agents/commit/124a47a91c8a9db0bcf08ab931a5dd99a2fac663) Thanks [@threepointone](https://github.com/threepointone)! - Introduce the first Think framework layer for convention-driven agent apps.
+
+  This release adds a manifest-driven Vite plugin that discovers agents from the
+  `agents/` directory, generates a Worker entrypoint and virtual framework
+  modules, derives stable Durable Object class names, and merges framework-owned
+  Worker config defaults with user Wrangler config. It also keeps the Think Vite
+  plugin usable directly in normal Vite plugin arrays.
+
+  The framework now supports optional app server entries, manifest-scoped friendly
+  agent and sub-agent routing, deterministic route surfaces, colocated skill
+  detection, Worker Loader requirement diagnostics, and explicit diagnostics for
+  unsupported nested sub-agent conventions. Think currently supports top-level
+  agents and one sub-agent layer; deeper nesting is rejected with guidance so that
+  the routing and lifecycle model can be designed deliberately.
+
+  This framework layer is experimental: both the Vite plugin (once, on build
+  start) and the `think` CLI (on startup) emit a notice that the API may change
+  or be removed in any release. The core Think agent runtime is unchanged.
+
+  The Think CLI now includes `think init`, `think inspect`, and `think types`.
+  `think init` scaffolds a minimal Workers/Vite Think app, safely handles prompted
+  or named target directories, refuses unsafe migrations, and installs npm
+  dependencies by default. `think inspect` exposes manifest/config diagnostics in
+  text or JSON, while `think types` generates Think-owned declarations and can
+  optionally compose with Wrangler type generation.
+
+  This release also adds host-framework coverage for React Router and TanStack
+  Start, updates examples to use the convention-first framework shape, and hardens
+  Agents/worker-bundler virtual modules for bundled skill compatibility.
+
+- [#1695](https://github.com/cloudflare/agents/pull/1695) [`b545e86`](https://github.com/cloudflare/agents/commit/b545e867d8ee559de9aff7b795dfdf7ef90d2185) Thanks [@threepointone](https://github.com/threepointone)! - Add a `--template` flag to `think init` and a programmatic `@cloudflare/think/cli` entry point. `think init` now scaffolds from the repo's starter templates (locally, or via an injected fetcher) instead of generating a single inline app. This is what powers the new `create-think` package.
+
+## 0.8.5
+
+### Patch Changes
+
+- [#1690](https://github.com/cloudflare/agents/pull/1690) [`f6a8bc4`](https://github.com/cloudflare/agents/commit/f6a8bc4a3f1836e214cc9ac984d3bfc2ba0537b2) Thanks [@threepointone](https://github.com/threepointone)! - Surface a terminal chat-recovery outcome to clients that reconnect after it ended ([#1645](https://github.com/cloudflare/agents/issues/1645)).
+
+  When a durable chat turn exhausted recovery (e.g. during a deploy/reconnect storm) while no client was connected, the terminal error was only broadcast transiently, so a client that connected afterward never learned the turn failed and the conversation appeared frozen. The outcome is now persisted durably and replayed over the resume handshake on the next reconnect — `STREAM_RESUMING` → `STREAM_RESUME_ACK` → terminal error frame on the resumed stream — which is the only path that surfaces as `useAgentChat`'s `error` on the real client. (A bare replayed frame is dropped by the client because it never reaches a transport stream reader.) The record is cleared once a later turn supersedes it — on a new client request, and also when any later turn ends in a non-error outcome (completed or aborted, including turns driven server-side via `saveMessages`), so a stale exhaustion can never replay after the conversation has recovered. Terminal non-exhaustion errors (e.g. a provider 500) are now durably recorded too, not just transiently broadcast, so they also replay to a reconnecting client.
+
+  `@cloudflare/think` previously recorded the outcome durably but only replayed it as a bare on-connect frame (dropped by the client); it now uses the same resume-handshake delivery.
+
+- [#1688](https://github.com/cloudflare/agents/pull/1688) [`4d050c7`](https://github.com/cloudflare/agents/commit/4d050c7600d5d763414fc8766a05c23acf3070a4) Thanks [@threepointone](https://github.com/threepointone)! - Fix `ThinkWorkflow` `step.prompt({ output })` failing on Workers AI with `AiError 5023: JSON Schema mode is not supported with stream mode`.
+
+  Structured workflow prompts previously requested output via the AI SDK `Output.object` path, which streams a JSON Schema `response_format` — rejected by some providers (notably Workers AI). `step.prompt()` now runs a full agentic turn that returns its structured result by calling an internal `think_final_answer` tool whose arguments match the schema. This uses ordinary tool calling, so it works across every provider Think supports (verified on Workers AI, OpenAI, and Anthropic), keeps Think's streaming engine (persistence, recovery, resumable streams), and lets the agent use its own tools across multiple steps before producing the final structured answer.
+
+  The `think_final_answer` tool name is reserved; its call and result are stripped from the persisted conversation so the transcript and later turns do not see Think's internal plumbing.
+
+## 0.8.4
+
+### Patch Changes
+
+- [#1686](https://github.com/cloudflare/agents/pull/1686) [`1e49880`](https://github.com/cloudflare/agents/commit/1e498803fe26970aa264678d5ae3a2c96dd28258) Thanks [@threepointone](https://github.com/threepointone)! - Batch and pack chat-persistence SQLite writes to reduce rows written and round-trips.
+  - `agents`: `ResumableStream` now **packs** each buffered group of stream chunks into a single SQLite row (a JSON array of chunk bodies) instead of writing one row per chunk. Single-chunk and large-chunk segments are stored unwrapped, and a per-segment byte cap keeps rows within the 2 MB SQLite row limit. This cuts chunk rows written / stored / scanned-on-replay by up to ~10×. Reads (replay, orphan reconstruction, `getStreamChunks`) transparently unpack both packed segments and legacy per-chunk rows, so existing stored data keeps working. Adds shared `buildInClauseStrings` and `MAX_BOUND_PARAMS` helpers exported from `agents/chat`.
+  - `@cloudflare/ai-chat`: message cleanup (stale-row pruning and `maxPersistedMessages` enforcement) previously issued one `DELETE` per row in a loop; it now deletes rows in batched `DELETE ... WHERE id IN (...)` queries (capped at 100 bound parameters per query).
+  - `@cloudflare/think`: `deleteSubmissions()` cleanup previously issued one `DELETE` per terminal submission (up to 500 per call); it now deletes rows in batched `DELETE ... WHERE submission_id IN (...)` queries.
+  - `@cloudflare/ai-chat` & `@cloudflare/think`: chat-recovery incident TTL sweep previously deleted each stale incident with a separate awaited `storage.delete(key)` (which also defeats Durable Object write-coalescing); it now deletes incidents in batched `storage.delete(keys)` calls (up to 128 keys per call).
+
 ## 0.8.3
 
 ### Patch Changes

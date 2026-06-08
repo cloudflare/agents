@@ -1,5 +1,5 @@
 name: Install
-description: Set up Node and install dependencies with npm's package cache.
+description: Set up Node and install dependencies with pnpm's package cache.
 
 inputs:
   registry-url:
@@ -10,12 +10,16 @@ inputs:
 runs:
   using: composite
   steps:
+    - uses: pnpm/action-setup@v4
+      with:
+        run_install: false
+
     - uses: actions/setup-node@v6
       with:
         node-version: 24
         registry-url: ${{ inputs.registry-url }}
-        cache: npm
+        cache: pnpm
 
     - name: Install dependencies
       shell: bash
-      run: npm ci
+      run: pnpm install --frozen-lockfile

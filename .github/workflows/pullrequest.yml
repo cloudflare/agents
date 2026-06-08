@@ -33,17 +33,17 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .nx/cache
-          key: ${{ runner.os }}-nx-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          key: ${{ runner.os }}-nx-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-nx-${{ hashFiles('package-lock.json') }}-
+            ${{ runner.os }}-nx-${{ hashFiles('pnpm-lock.yaml') }}-
             ${{ runner.os }}-nx-
 
-      - run: npm run build
-      - run: npm run check
+      - run: pnpm run build
+      - run: pnpm run check
 
       - name: Get Playwright version
         id: playwright-version
-        run: echo "version=$(jq -r '.packages["node_modules/playwright"].version' package-lock.json)" >> $GITHUB_OUTPUT
+        run: echo "version=$(node -p 'require(\"playwright/package.json\").version')" >> $GITHUB_OUTPUT
 
       - name: Cache Playwright browsers
         uses: actions/cache@v5
@@ -54,8 +54,8 @@ jobs:
 
       - name: Install Playwright browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium
+        run: pnpm exec playwright install --with-deps chromium
 
-      - run: CI=true npx nx affected -t test
+      - run: CI=true pnpm exec nx affected -t test
 
-      - run: npx pkg-pr-new publish --peerDeps ./packages/*
+      - run: pnpm exec pkg-pr-new publish --peerDeps ./packages/*

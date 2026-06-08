@@ -1,5 +1,6 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "think-assistant",
   "ai": { "binding": "AI", "remote": true },
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
@@ -15,20 +16,19 @@
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "AssistantDirectory",
+        "class_name": "ThinkAgent_Assistant",
         "name": "AssistantDirectory"
       }
     ]
   },
   "worker_loaders": [{ "binding": "LOADER" }],
-  "main": "src/server.ts",
+  "main": "virtual:think/entry",
   "migrations": [
     {
-      "new_sqlite_classes": ["AssistantDirectory"],
+      "new_sqlite_classes": ["ThinkAgent_Assistant"],
       "tag": "v1"
     }
   ],
-  "name": "think-assistant",
   "secrets": {
     "required": ["GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"]
   }

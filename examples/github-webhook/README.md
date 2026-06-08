@@ -125,7 +125,7 @@ Browser ← WebSocket ← Agent broadcasts state updates ←─────┘
 ## Deployment
 
 ```bash
-npm run deploy
+pnpm run deploy
 ```
 
 After deploying:

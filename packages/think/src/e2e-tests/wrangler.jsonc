@@ -56,9 +56,20 @@
       {
         "name": "ThinkSlowChildParentE2EAgent",
         "class_name": "ThinkSlowChildParentE2EAgent"
+      },
+      {
+        "name": "TestStructuredAgent",
+        "class_name": "TestStructuredAgent"
       }
     ]
   },
+  "workflows": [
+    {
+      "name": "STEP_PROMPT_WORKFLOW",
+      "binding": "STEP_PROMPT_WORKFLOW",
+      "class_name": "StepPromptWorkflow"
+    }
+  ],
   "migrations": [
     {
       "tag": "v1",
@@ -94,6 +105,10 @@
         "ThinkSlowChildParentE2EAgent",
         "ThinkSlowChildE2EAgent"
       ]
+    },
+    {
+      "tag": "v8",
+      "new_sqlite_classes": ["TestStructuredAgent"]
     }
   ],
   "r2_buckets": [

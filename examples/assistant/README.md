@@ -6,9 +6,10 @@ the sub-agent routing primitive from `agents`.
 ## What this demonstrates
 
 - **Multi-session via sub-agent routing** — each user gets an `AssistantDirectory`
-  parent DO that owns the sidebar. Each chat is its own `MyAssistant` facet
-  (full Think DO — own extensions, memory, messages). Addressed transparently
-  via `useAgent({ sub: [{ agent: "MyAssistant", name: chatId }] })`
+  parent DO (a `Think` root used as an accumulator) that owns the sidebar. Each
+  chat is its own `MyAssistant` facet (full Think DO — own extensions, memory,
+  messages). Addressed transparently via
+  `useAgent({ sub: [{ agent: "MyAssistant", name: chatId }] })`
 - **Shared workspace across chats** — `AssistantDirectory` owns one `Workspace`
   backed by its SQLite; every `MyAssistant` child gets a `SharedWorkspace`
   proxy that forwards file I/O to the parent. A `hello.txt` written in chat A
@@ -34,6 +35,7 @@ the sub-agent routing primitive from `agents`.
 - **Non-destructive compaction** — older messages summarized when context overflows, originals preserved
 - **Mid-turn overflow recovery** — `contextOverflow` + `classifyChatError` compact and re-run a turn that exceeds the context window mid-flight, instead of failing
 - **Searchable knowledge base** — FTS5-backed `AgentSearchProvider` with `search_context` and `set_context` tools
+- **Agent Skills** — a colocated `workspace-digest` skill (`agents:skills`) the model activates on demand, with a runnable TypeScript `run_skill_script` (`skills.runner`) that inspects the shared workspace via the Worker Loader
 - **Dynamic configuration** — typed `AgentConfig` with model tier and persona, persisted in SQLite
 - **Server-side tools** — `getWeather`, `calculate` execute on the server
 - **Client-side tools** — `getUserTimezone` runs in the browser via `onToolCall`
@@ -41,7 +43,7 @@ the sub-agent routing primitive from `agents`.
 - **MCP integration** — connect external tool servers; tools appear in every chat automatically (shared at the directory level)
 - **Lifecycle hooks** — `beforeTurn`, `beforeToolCall`, `afterToolCall`, `onStepFinish`, `onChatResponse`
 - **Durable chat recovery** — Think's default `chatRecovery` wraps turns in fibers for eviction recovery, with bounded retry/exhaustion behavior
-- **Parent-owned scheduled work** — daily summary scheduled from the directory (facets can't own schedules), fans out to the most recently active chat
+- **Declarative scheduled work** — the directory is a `Think` accumulator that declares a daily-summary task via `getScheduledTasks()` (a deterministic handler), reconciled by Think on startup; it fans out to the most recently active chat
 - **Regeneration with branch navigation** — v1/v2/v3 response versions via `getBranches`
 - **Stream resumption** — page refresh replays the active stream (built into Think)
 - **useAgentChat** — Think speaks the same CF_AGENT protocol as AIChatAgent
@@ -94,32 +96,36 @@ AssistantDirectory ("alice")            ◄── one DO per authenticated GitHu
   └─ MyAssistant[chat-ghi]   [facet]
 ```
 
-`AssistantDirectory` owns the chat list, the sidebar state, the shared
-workspace, the shared MCP registry (servers, OAuth creds, live
-connections), and any cross-chat concerns (e.g. the daily-summary
-schedule — facets can't `schedule()` so the parent does it and fans
-out). `MyAssistant` is a Think DO per conversation, with its own
+`AssistantDirectory` is a `Think` root used as an accumulator (its own
+chat machinery stays dormant). It owns the chat list, the sidebar state,
+the shared workspace, the shared MCP registry (servers, OAuth creds, live
+connections), and cross-chat concerns like the daily-summary scheduled
+task it declares via `getScheduledTasks()` and fans out to one chat.
+`MyAssistant` is a Think DO per conversation, with its own
 SQLite storage, extensions, and message history — plus a
 `SharedWorkspace` proxy and a `SharedMCPClient` proxy that route file
 operations and MCP tool invocations back to the directory.
 
 The browser never chooses a DO name. It connects to `/chat` (the
 directory) and `/chat/sub/my-assistant/<chatId>` (a specific chat), and
-the Worker resolves the `AssistantDirectory` instance from the
-authenticated GitHub cookie:
+the Think generated Worker entry calls `src/server.ts`, where the app resolves
+the `AssistantDirectory` instance from the authenticated GitHub cookie:
 
 ```ts
 if (url.pathname === "/chat" || url.pathname.startsWith("/chat/")) {
   const user = await getGitHubUserFromRequest(request);
   if (!user) return createUnauthorizedResponse(request);
   const directory = await getAgentByName(env.AssistantDirectory, user.login);
-  return directory.fetch(request);
+  return think.router.routeSubAgent(request, directory, {
+    parent: "assistant"
+  });
 }
 ```
 
-The directory's built-in sub-agent router picks up the
-`/sub/my-assistant/<chatId>` tail — no per-chat plumbing lives in the
-Worker. Access control lives on the parent via `onBeforeSubAgent` as a
+Think's router resolves the friendly `/sub/my-assistant/<chatId>` tail through
+the generated manifest before handing off to the directory's built-in sub-agent
+router. No per-chat plumbing or generated class URL segment knowledge lives in
+the Worker. Access control lives on the parent via `onBeforeSubAgent` as a
 strict registry gate:
 
 ```ts
@@ -322,7 +328,7 @@ npm run deploy
 **Server** (`src/server.ts`):
 
 ```typescript
-export class AssistantDirectory extends Agent<Env, DirectoryState> {
+export class AssistantDirectory extends Think<Env, DirectoryState> {
   // Strict registry gate — clients can only reach chats this
   // directory spawned via `createChat`.
   override async onBeforeSubAgent(_req, { className, name }) {
@@ -336,6 +342,19 @@ export class AssistantDirectory extends Agent<Env, DirectoryState> {
     const id = nanoid(10);
     await this.subAgent(MyAssistant, id); // spawn the facet
     /* ... persist meta, refresh sidebar ... */
+  }
+
+  // Cross-chat scheduled work, declared (not hand-wired) and reconciled
+  // by Think on startup.
+  override getScheduledTasks() {
+    return {
+      dailySummary: {
+        schedule: "every day at 09:00",
+        handler: async () => {
+          /* RPC a summary prompt into the most-recent chat */
+        }
+      }
+    };
   }
 }
 

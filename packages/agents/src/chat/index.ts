@@ -38,6 +38,8 @@ export {
 
 export { ResumableStream, type SqlTaggedTemplate } from "./resumable-stream";
 
+export { MAX_BOUND_PARAMS, buildInClauseStrings } from "./sql-batch";
+
 export {
   createToolsFromClientSchemas,
   type ClientToolSchema

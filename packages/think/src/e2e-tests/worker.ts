@@ -4,13 +4,17 @@
  * ThinkRecoveryE2EAgent: mock slow stream with chatRecovery for kill/restart testing.
  */
 import { createWorkersAI } from "workers-ai-provider";
+import { createOpenAI } from "@ai-sdk/openai";
+import { createAnthropic } from "@ai-sdk/anthropic";
 import { Agent, callable, routeAgentRequest } from "agents";
 import { agentTool } from "agents/agent-tools";
 import { RpcTarget } from "cloudflare:workers";
+import type { WorkflowEvent } from "cloudflare:workers";
 import { tool } from "ai";
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { z } from "zod";
 import { Think, Workspace } from "../think";
+import { ThinkWorkflow, type ThinkWorkflowStep } from "../workflows";
 import type {
   ChatRecoveryContext,
   ChatRecoveryOptions,
@@ -31,9 +35,19 @@ type Env = {
   ThinkAgentToolNaturalParentE2EAgent: DurableObjectNamespace<ThinkAgentToolNaturalParentE2EAgent>;
   ThinkSlowChildE2EAgent: DurableObjectNamespace<ThinkSlowChildE2EAgent>;
   ThinkSlowChildParentE2EAgent: DurableObjectNamespace<ThinkSlowChildParentE2EAgent>;
+  TestStructuredAgent: DurableObjectNamespace<TestStructuredAgent>;
+  STEP_PROMPT_WORKFLOW: Workflow;
   AI: Ai;
   R2: R2Bucket;
+  // Optional — only set when the corresponding key is exported in the test env.
+  // The OpenAI/Anthropic legs of the structured-output e2e skip when absent.
+  OPENAI_API_KEY?: string;
+  ANTHROPIC_API_KEY?: string;
 };
+
+/** Providers exercised by the cross-provider structured-output e2e (#1685). */
+type StructuredProvider = "workers-ai" | "openai" | "anthropic";
+const STRUCTURED_PROVIDER_KEY = "test:structured-provider";
 
 // AI SDK v3 LanguageModel spec helpers (mirror tests/agents/assistant-agent-loop.ts).
 const v3FinishReason = (unified: "stop" | "tool-calls") => ({
@@ -1202,6 +1216,118 @@ export class ThinkRecoveryHelperParent extends Agent<Env> {
   }> {
     const helper = await this.subAgent(ThinkRecoveryHelperAgent, helperName);
     return helper.getRecoveryStatus();
+  }
+}
+
+/**
+ * Cross-provider regression fixture for issue #1685: `step.prompt({ output })`
+ * must return a schema-shaped object on Workers AI, OpenAI, and Anthropic.
+ *
+ * The provider is selected per-instance (persisted so it survives the workflow
+ * event re-entry / hibernation) and read synchronously in `getModel()`.
+ */
+export class TestStructuredAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override maxSteps = 6;
+  private _provider: StructuredProvider = "workers-ai";
+
+  override async onStart(): Promise<void> {
+    const stored = (await this.ctx.storage.get(STRUCTURED_PROVIDER_KEY)) as
+      | StructuredProvider
+      | undefined;
+    if (stored) this._provider = stored;
+  }
+
+  override getModel(): LanguageModel {
+    switch (this._provider) {
+      case "openai":
+        return createOpenAI({ apiKey: this.env.OPENAI_API_KEY })("gpt-4o-mini");
+      case "anthropic":
+        return createAnthropic({ apiKey: this.env.ANTHROPIC_API_KEY })(
+          "claude-haiku-4-5"
+        );
+      default:
+        return createWorkersAI({ binding: this.env.AI })(
+          "@cf/moonshotai/kimi-k2.6",
+          { sessionAffinity: this.sessionAffinity }
+        );
+    }
+  }
+
+  override getSystemPrompt(): string {
+    return "You are a helpful assistant.";
+  }
+
+  @callable()
+  async setTestProvider(provider: StructuredProvider): Promise<void> {
+    this._provider = provider;
+    await this.ctx.storage.put(STRUCTURED_PROVIDER_KEY, provider);
+  }
+
+  /**
+   * Run the structured-prompt workflow and poll to a terminal state, returning
+   * the workflow's output (the validated object) or the failure details.
+   */
+  @callable()
+  async runStructuredPrompt(
+    prompt: string,
+    mode?: "greeting" | "tool"
+  ): Promise<{
+    status: string;
+    output?: unknown;
+    error?: string;
+  }> {
+    const id = await this.runWorkflow("STEP_PROMPT_WORKFLOW", { prompt, mode });
+    for (let i = 0; i < 90; i++) {
+      const status = await this.getWorkflowStatus("STEP_PROMPT_WORKFLOW", id);
+      if (status.status === "complete") {
+        return { status: "complete", output: status.output };
+      }
+      if (status.status === "errored" || status.status === "terminated") {
+        return {
+          status: status.status,
+          error: JSON.stringify(status.error ?? status.output ?? status)
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+    return { status: "timeout" };
+  }
+}
+
+const GREETING_SCHEMA = z.object({
+  greeting: z.string()
+});
+const WORD_SCHEMA = z.object({
+  word: z.string()
+});
+
+/**
+ * `ThinkWorkflow` that issues a single structured `step.prompt`. In `greeting`
+ * mode it is the exact shape from issue #1685 (no real tool use needed). In
+ * `tool` mode the prompt forces the agent to use its workspace tools before
+ * answering, exercising the full agentic `toolChoice: "required"` path that
+ * terminates with the synthetic final-answer tool.
+ */
+export class StepPromptWorkflow extends ThinkWorkflow<TestStructuredAgent> {
+  async run(
+    event: WorkflowEvent<unknown>,
+    step: ThinkWorkflowStep
+  ): Promise<unknown> {
+    const { prompt, mode } = event.payload as {
+      prompt: string;
+      mode?: "greeting" | "tool";
+    };
+    if (mode === "tool") {
+      return step.prompt("structured-word", {
+        prompt,
+        output: WORD_SCHEMA
+      });
+    }
+    return step.prompt("structured-greeting", {
+      prompt,
+      output: GREETING_SCHEMA
+    });
   }
 }
 

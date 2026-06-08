@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import { subscribe } from "agents/observability";
 import type { UIMessage as ChatMessage } from "ai";
+import { connectChatWS } from "./test-utils";
+import { MessageType } from "../types";
 
 interface ChatRecoveryTestStub {
   setRecoveryOverride(options: {
@@ -19,7 +21,8 @@ interface ChatRecoveryTestStub {
     streamId: string,
     requestId: string,
     chunks: Array<{ body: string; index: number }>,
-    ageMs?: number
+    ageMs?: number,
+    metadata?: { messageId?: string }
   ): Promise<void>;
   insertInterruptedFiber(name: string, snapshot?: unknown): Promise<void>;
   triggerFiberRecovery(): Promise<void>;
@@ -136,6 +139,19 @@ interface ChatRecoveryTestStub {
       terminalMessage: string;
     }>
   >;
+  getPendingChatTerminalForTest(): Promise<{
+    requestId: string;
+    body: string;
+  } | null>;
+  driveSuccessfulTurnForTest(): Promise<
+    "completed" | "error" | "aborted" | "skipped"
+  >;
+  driveAbortedTurnForTest(): Promise<
+    "completed" | "error" | "aborted" | "skipped"
+  >;
+  driveErroredTurnForTest(
+    message: string
+  ): Promise<"completed" | "error" | "aborted" | "skipped">;
 }
 
 async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
@@ -933,6 +949,454 @@ describe("onChatRecovery", () => {
     expect(assistantMessages[0].id).toBe("assistant-persist");
   });
 
+  it("#1691: a new turn's orphan is its own message, NOT merged into the previous assistant", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    // History: user-one, assistant-one (already answered), user-two (new turn).
+    await agentStub.persistMessages([
+      {
+        id: "user-one",
+        role: "user",
+        parts: [{ type: "text", text: "first question" }]
+      },
+      {
+        id: "assistant-one",
+        role: "assistant",
+        parts: [{ type: "text", text: "first response" }]
+      },
+      {
+        id: "user-two",
+        role: "user",
+        parts: [{ type: "text", text: "second question" }]
+      }
+    ] as ChatMessage[]);
+
+    // New (non-continuation) response stream for user-two whose chunks carry
+    // NO provider start.messageId. The allocated assistant id is stored in
+    // stream metadata so recovery can re-create it as its own message.
+    await agentStub.insertInterruptedStream(
+      "stream-1691",
+      "req-1691",
+      makeChunks(["second response"]),
+      undefined,
+      { messageId: "assistant-two" }
+    );
+    await agentStub.triggerInterruptedStreamCheck();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const textOf = (m: ChatMessage) =>
+      m.parts
+        .filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("");
+
+    // assistant-one must remain untouched.
+    expect(textOf(messages.find((m) => m.id === "assistant-one")!)).toBe(
+      "first response"
+    );
+    // The recovered turn is its own NEW assistant message.
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+    expect(assistantMessages).toHaveLength(2);
+    expect(textOf(messages.find((m) => m.id === "assistant-two")!)).toBe(
+      "second response"
+    );
+  });
+
+  it("#1691: a continuation orphan WITHOUT a provider messageId still merges into the last assistant", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    await agentStub.persistMessages([
+      {
+        id: "user-one",
+        role: "user",
+        parts: [{ type: "text", text: "question" }]
+      },
+      {
+        id: "assistant-one",
+        role: "assistant",
+        parts: [{ type: "text", text: "partial " }]
+      }
+    ] as ChatMessage[]);
+
+    // Continuation stream: metadata records the cloned last-assistant id, so
+    // recovery reuses it and appends onto assistant-one.
+    await agentStub.insertInterruptedStream(
+      "stream-cont",
+      "req-cont",
+      makeChunks(["continued"]),
+      undefined,
+      { messageId: "assistant-one" }
+    );
+    await agentStub.triggerInterruptedStreamCheck();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+    expect(assistantMessages).toHaveLength(1);
+    expect(
+      assistantMessages[0].parts
+        .filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("")
+    ).toBe("partial continued");
+  });
+
+  it("#1691: legacy rows without metadata keep the pre-fix continuation fallback", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    await agentStub.persistMessages([
+      {
+        id: "user-one",
+        role: "user",
+        parts: [{ type: "text", text: "question" }]
+      },
+      {
+        id: "assistant-one",
+        role: "assistant",
+        parts: [{ type: "text", text: "partial " }]
+      }
+    ] as ChatMessage[]);
+
+    // No metadata (messageId omitted) → simulates a row written before #1691.
+    // Backward-compatible fallback appends to last assistant.
+    await agentStub.insertInterruptedStream(
+      "stream-legacy",
+      "req-legacy",
+      makeChunks(["continued"])
+    );
+    await agentStub.triggerInterruptedStreamCheck();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+    expect(assistantMessages).toHaveLength(1);
+    expect(
+      assistantMessages[0].parts
+        .filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("")
+    ).toBe("partial continued");
+  });
+
+  it("#1691: a provider start.messageId is preserved over the stored id (matches the live path)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    await agentStub.persistMessages([
+      {
+        id: "user-one",
+        role: "user",
+        parts: [{ type: "text", text: "question" }]
+      }
+    ] as ChatMessage[]);
+
+    // The chunks carry a provider `start.messageId` ("provider-msg"). For a new
+    // turn the live path ADOPTS that id (see `_streamSSEReply`), so the message
+    // is persisted under it. Recovery must do the same, even though metadata
+    // also recorded the id allocated before the provider id was seen — otherwise
+    // a recovered turn would diverge from a completed live turn. The stored id
+    // is only a fallback for when no provider id is present.
+    await agentStub.insertInterruptedStream(
+      "stream-prefer",
+      "req-prefer",
+      makeChunks(["answer"], "provider-msg"),
+      undefined,
+      { messageId: "allocated-msg" }
+    );
+    await agentStub.triggerInterruptedStreamCheck();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+    expect(assistantMessages).toHaveLength(1);
+    expect(assistantMessages[0].id).toBe("provider-msg");
+  });
+
+  it("#1691: recovering after an early (tool-approval) persist does not duplicate the tool part", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    // Simulate the state after an early persist at tool approval: the assistant
+    // message already exists with the tool part, and the stream's stored chunks
+    // (which recovery replays in full) reconstruct that SAME tool part. The
+    // merge must not leave two parts with the same toolCallId.
+    await agentStub.persistMessages([
+      {
+        id: "user-one",
+        role: "user",
+        parts: [{ type: "text", text: "q" }]
+      },
+      {
+        id: "assistant-early",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-myTool",
+            toolCallId: "tc-dup",
+            toolName: "myTool",
+            state: "input-available",
+            input: { x: 1 }
+          }
+        ] as unknown as ChatMessage["parts"]
+      }
+    ] as ChatMessage[]);
+
+    await agentStub.insertInterruptedStream(
+      "stream-dup",
+      "req-dup",
+      [
+        { body: JSON.stringify({ type: "start" }), index: 0 },
+        {
+          body: JSON.stringify({
+            type: "tool-input-start",
+            toolCallId: "tc-dup",
+            toolName: "myTool"
+          }),
+          index: 1
+        },
+        {
+          body: JSON.stringify({
+            type: "tool-input-available",
+            toolCallId: "tc-dup",
+            toolName: "myTool",
+            input: { x: 1 }
+          }),
+          index: 2
+        },
+        { body: JSON.stringify({ type: "text-start", id: "t" }), index: 3 },
+        {
+          body: JSON.stringify({
+            type: "text-delta",
+            id: "t",
+            delta: "answer"
+          }),
+          index: 4
+        }
+      ],
+      undefined,
+      { messageId: "assistant-early" }
+    );
+    await agentStub.triggerInterruptedStreamCheck();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistant = messages.find((m) => m.id === "assistant-early");
+    expect(assistant).toBeDefined();
+    const toolParts = assistant!.parts.filter(
+      (p) =>
+        "toolCallId" in p &&
+        (p as { toolCallId?: string }).toolCallId === "tc-dup"
+    );
+    expect(toolParts).toHaveLength(1);
+  });
+
+  it("#1691: two sequentially recovered new turns stay distinct (not merged into each other)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    // ai-chat serializes to one active stream, so orphans are recovered one at
+    // a time. Two interrupted NEW turns recovered in sequence must each become
+    // their own assistant message, never merging into one another.
+    await agentStub.persistMessages([
+      { id: "user-1", role: "user", parts: [{ type: "text", text: "q1" }] },
+      { id: "user-2", role: "user", parts: [{ type: "text", text: "q2" }] }
+    ] as ChatMessage[]);
+
+    await agentStub.insertInterruptedStream(
+      "seq-1",
+      "req-seq-1",
+      makeChunks(["answer one"]),
+      undefined,
+      { messageId: "asst-seq-1" }
+    );
+    await agentStub.triggerInterruptedStreamCheck();
+
+    await agentStub.insertInterruptedStream(
+      "seq-2",
+      "req-seq-2",
+      makeChunks(["answer two"]),
+      undefined,
+      { messageId: "asst-seq-2" }
+    );
+    await agentStub.triggerInterruptedStreamCheck();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+    expect(assistantMessages.map((m) => m.id).sort()).toEqual([
+      "asst-seq-1",
+      "asst-seq-2"
+    ]);
+    const textOf = (id: string) =>
+      messages
+        .find((m) => m.id === id)!
+        .parts.filter(
+          (p): p is { type: "text"; text: string } => p.type === "text"
+        )
+        .map((p) => p.text)
+        .join("");
+    expect(textOf("asst-seq-1")).toBe("answer one");
+    expect(textOf("asst-seq-2")).toBe("answer two");
+  });
+
+  // ── Continue-path (fiber recovery) tests ────────────────────────────────
+  // The default chatRecovery flow does NOT go through the reconnect-ACK
+  // `_persistOrphanedStream` path the tests above drive — it schedules a fiber
+  // continuation (`_chatRecoveryContinue` -> `continueLastTurn`). These tests
+  // exercise that real path via `triggerFiberRecovery` + the scheduled continue.
+  const chatTurnSnapshot = (requestId: string, userId: string) => ({
+    __cfAIChatFiberSnapshot: {
+      kind: "ai-chat-turn",
+      version: 1,
+      requestId,
+      continuation: false,
+      latestMessageId: userId,
+      latestMessageRole: "user",
+      latestUserMessageId: userId,
+      startedAt: Date.now()
+    },
+    user: null
+  });
+  const assistantText = (messages: ChatMessage[], id: string) =>
+    (messages.find((m) => m.id === id)?.parts ?? [])
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("");
+
+  it("#1691 (continue path): a recovered NEW turn continues as its own message, not the previous one", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setRecoveryOverride({});
+
+    await agentStub.persistMessages([
+      { id: "u1", role: "user", parts: [{ type: "text", text: "q1" }] },
+      {
+        id: "assistant-one",
+        role: "assistant",
+        parts: [{ type: "text", text: "first answer" }]
+      },
+      { id: "u2", role: "user", parts: [{ type: "text", text: "q2" }] }
+    ] as ChatMessage[]);
+
+    // Interrupted NEW turn for u2: partial chunks carry NO provider
+    // start.messageId, but the allocated id is recorded in stream metadata.
+    await agentStub.insertInterruptedStream(
+      "stream-fc1",
+      "req-fc1",
+      makeChunks(["partial two "]),
+      undefined,
+      { messageId: "assistant-two" }
+    );
+    await agentStub.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-fc1",
+      chatTurnSnapshot("req-fc1", "u2")
+    );
+
+    await agentStub.triggerFiberRecovery();
+    await agentStub.runScheduledRecoveryContinueForTest();
+    await agentStub.waitForIdleForTest();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(assistantText(messages, "assistant-one")).toBe("first answer");
+    const assistants = messages.filter((m) => m.role === "assistant");
+    expect(assistants).toHaveLength(2);
+    expect(assistantText(messages, "assistant-two")).toContain("partial two");
+    expect(assistantText(messages, "assistant-two")).toContain(
+      "Continued response."
+    );
+  });
+
+  it("#1691 (continue path): an empty partial (no parts persisted) does not merge the new turn into the previous one", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setRecoveryOverride({});
+
+    await agentStub.persistMessages([
+      { id: "u1", role: "user", parts: [{ type: "text", text: "q1" }] },
+      {
+        id: "assistant-one",
+        role: "assistant",
+        parts: [{ type: "text", text: "first answer" }]
+      },
+      { id: "u2", role: "user", parts: [{ type: "text", text: "q2" }] }
+    ] as ChatMessage[]);
+
+    // Interrupted in the window AFTER `start` but BEFORE any text/tool part, so
+    // the orphan reconstructs to zero parts and nothing is persisted for u2.
+    await agentStub.insertInterruptedStream(
+      "stream-fc2",
+      "req-fc2",
+      [{ body: JSON.stringify({ type: "start" }), index: 0 }],
+      undefined,
+      { messageId: "assistant-two" }
+    );
+    await agentStub.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-fc2",
+      chatTurnSnapshot("req-fc2", "u2")
+    );
+
+    await agentStub.triggerFiberRecovery();
+    await agentStub.runScheduledRecoveryContinueForTest();
+    await agentStub.runScheduledRecoveryRetryForTest();
+    await agentStub.waitForIdleForTest();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    // The previous turn must be untouched.
+    expect(assistantText(messages, "assistant-one")).toBe("first answer");
+    // u2 must get its own assistant message, not be folded into assistant-one.
+    const assistants = messages.filter((m) => m.role === "assistant");
+    expect(assistants).toHaveLength(2);
+  });
+
+  it("#1691 (continue path): persist:false on a new turn does not merge it into the previous one", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setRecoveryOverride({ persist: false });
+
+    await agentStub.persistMessages([
+      { id: "u1", role: "user", parts: [{ type: "text", text: "q1" }] },
+      {
+        id: "assistant-one",
+        role: "assistant",
+        parts: [{ type: "text", text: "first answer" }]
+      },
+      { id: "u2", role: "user", parts: [{ type: "text", text: "q2" }] }
+    ] as ChatMessage[]);
+
+    // A real partial exists, but the app opts out of persisting it.
+    await agentStub.insertInterruptedStream(
+      "stream-fc3",
+      "req-fc3",
+      makeChunks(["discarded partial "]),
+      undefined,
+      { messageId: "assistant-two" }
+    );
+    await agentStub.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-fc3",
+      chatTurnSnapshot("req-fc3", "u2")
+    );
+
+    await agentStub.triggerFiberRecovery();
+    await agentStub.runScheduledRecoveryContinueForTest();
+    await agentStub.runScheduledRecoveryRetryForTest();
+    await agentStub.waitForIdleForTest();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(assistantText(messages, "assistant-one")).toBe("first answer");
+    const assistants = messages.filter((m) => m.role === "assistant");
+    expect(assistants).toHaveLength(2);
+  });
+
   it("should skip persistence when persist: false", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
@@ -1538,5 +2002,338 @@ describe("onChatRecovery", () => {
     // A terminal outcome clears it so the indicator can't spin forever.
     await agentStub.updateIncidentForTest(begun.incidentId, "failed", "boom");
     expect(await agentStub.getChatRecoveringForTest()).toBeNull();
+  });
+
+  // #1645: a recovery that exhausts while NO client is connected currently
+  // only broadcasts the terminal frame transiently — there is no durable
+  // record, so a client that (re)connects afterward and runs the standard
+  // resume probe is told RESUME_NONE and the failed turn stays frozen.
+  // This drives the real WebSocket reconnect protocol against a real DO.
+  it("replays the terminal exhaustion to a client that reconnects after it ended (#1645)", async () => {
+    const room = `terminal-reconnect-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    const TERMINAL = "Recovery exhausted — the assistant could not finish.";
+
+    // Drive a turn to exhaustion while no client is connected (deploy-churn /
+    // reconnect-storm shape): the terminal broadcast lands on nobody.
+    await agentStub.enableExhaustedCaptureForTest(6, TERMINAL);
+    await agentStub.setForceStableTimeoutForTest(true);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-reconnect",
+      requestId: "root-reconnect",
+      recoveryKind: "continue",
+      attempt: 6,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+    await agentStub.runChatRecoveryContinueDirectForTest({
+      incidentId: "inc-reconnect",
+      originalRequestId: "root-reconnect",
+      targetAssistantId: "a-reconnect"
+    });
+
+    // Sanity: the turn really did terminalize.
+    expect(await agentStub.getExhaustedContextsForTest()).toHaveLength(1);
+
+    // A client now connects — it was NOT present during exhaustion — and runs
+    // the standard reconnect probe the transport sends on every mount. We mirror
+    // the real WebSocketChatTransport handshake exactly: send RESUME_REQUEST,
+    // and on STREAM_RESUMING reply with STREAM_RESUME_ACK so the (resumed)
+    // stream can deliver its terminal error frame — the only path that becomes
+    // useChat.error on a reconnected client.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const received: Array<Record<string, unknown>> = [];
+    ws.addEventListener("message", (e) => {
+      let frame: Record<string, unknown>;
+      try {
+        frame = JSON.parse(e.data as string) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      received.push(frame);
+      if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+        ws.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+            id: frame.id
+          })
+        );
+      }
+    });
+
+    ws.send(
+      JSON.stringify({ type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST })
+    );
+
+    await new Promise((r) => setTimeout(r, 400));
+    ws.close(1000);
+
+    // EXPECTATION (#1645): the reconnecting client learns the turn failed —
+    // it receives the configured terminal error frame, not a bare RESUME_NONE.
+    const terminal = received.find(
+      (m) =>
+        m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+        m.error === true &&
+        m.done === true
+    );
+    expect(
+      terminal,
+      `expected a terminal error frame on reconnect; received frame types: ${JSON.stringify(
+        received.map((m) => m.type)
+      )}`
+    ).toBeTruthy();
+    expect(terminal?.body).toBe(TERMINAL);
+  });
+
+  // #1645 (clear-on-success): the durable terminal record must be superseded
+  // when a LATER turn succeeds — including a turn driven purely server-side via
+  // `saveMessages` (no client request in between, which is the only path that
+  // would otherwise clear it). Otherwise the stale exhaustion replays to the
+  // next client to connect, even though the conversation has since recovered.
+  it("clears the terminal record when a later server-side turn succeeds (#1645)", async () => {
+    const room = `terminal-cleared-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    const TERMINAL = "Recovery exhausted — the assistant could not finish.";
+
+    // Drive a turn to exhaustion while no client is connected → record written.
+    await agentStub.enableExhaustedCaptureForTest(6, TERMINAL);
+    await agentStub.setForceStableTimeoutForTest(true);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-cleared",
+      requestId: "root-cleared",
+      recoveryKind: "continue",
+      attempt: 6,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+    await agentStub.runChatRecoveryContinueDirectForTest({
+      incidentId: "inc-cleared",
+      originalRequestId: "root-cleared",
+      targetAssistantId: "a-cleared"
+    });
+
+    // Precondition: the terminal record is durably present.
+    expect(await agentStub.getPendingChatTerminalForTest()).toMatchObject({
+      body: TERMINAL
+    });
+
+    // A later turn succeeds — but driven purely server-side (`saveMessages`),
+    // NOT via a client `CF_AGENT_USE_CHAT_REQUEST`. The request handler's clear
+    // never runs; only the response-hook drain loop can supersede the record.
+    await agentStub.setForceStableTimeoutForTest(false);
+    expect(await agentStub.driveSuccessfulTurnForTest()).toBe("completed");
+
+    // The stale exhaustion is gone, so a reconnecting client won't see it.
+    expect(await agentStub.getPendingChatTerminalForTest()).toBeNull();
+
+    // End-to-end: a client connecting now and running the standard resume probe
+    // is told RESUME_NONE — no terminal error frame replays.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const received: Array<Record<string, unknown>> = [];
+    ws.addEventListener("message", (e) => {
+      let frame: Record<string, unknown>;
+      try {
+        frame = JSON.parse(e.data as string) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      received.push(frame);
+      if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+        ws.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+            id: frame.id
+          })
+        );
+      }
+    });
+
+    ws.send(
+      JSON.stringify({ type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST })
+    );
+
+    await new Promise((r) => setTimeout(r, 400));
+    ws.close(1000);
+
+    const terminal = received.find(
+      (m) =>
+        m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+        m.error === true &&
+        m.done === true
+    );
+    expect(
+      terminal,
+      `expected NO terminal error frame after a successful turn; received frame types: ${JSON.stringify(
+        received.map((m) => m.type)
+      )}`
+    ).toBeUndefined();
+    expect(
+      received.some((m) => m.type === MessageType.CF_AGENT_STREAM_RESUME_NONE)
+    ).toBe(true);
+  });
+
+  // #1645 (clear-on-abort): an ABORTED server-side turn must also supersede the
+  // terminal record, not just a completed one. The conversation has moved on
+  // either way; only a fresh error should leave a terminal to replay. The
+  // client-submit path clears eagerly, so this gap is reachable only for turns
+  // driven purely server-side (`saveMessages` / `continueLastTurn` with an
+  // external abort signal).
+  it("clears the terminal record when a later server-side turn is aborted (#1645)", async () => {
+    const room = `terminal-aborted-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    const TERMINAL = "Recovery exhausted — the assistant could not finish.";
+
+    // Drive a turn to exhaustion while no client is connected → record written.
+    await agentStub.enableExhaustedCaptureForTest(6, TERMINAL);
+    await agentStub.setForceStableTimeoutForTest(true);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-aborted",
+      requestId: "root-aborted",
+      recoveryKind: "continue",
+      attempt: 6,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+    await agentStub.runChatRecoveryContinueDirectForTest({
+      incidentId: "inc-aborted",
+      originalRequestId: "root-aborted",
+      targetAssistantId: "a-aborted"
+    });
+
+    // Precondition: the terminal record is durably present.
+    expect(await agentStub.getPendingChatTerminalForTest()).toMatchObject({
+      body: TERMINAL
+    });
+
+    // A later turn is ABORTED — driven purely server-side (`saveMessages` with
+    // a pre-aborted signal), NOT via a client request. Only the response-hook
+    // drain loop can supersede the record here, and it must do so on the
+    // aborted outcome (not just on "completed").
+    await agentStub.setForceStableTimeoutForTest(false);
+    expect(await agentStub.driveAbortedTurnForTest()).toBe("aborted");
+
+    // The stale exhaustion is gone, so a reconnecting client won't replay it.
+    expect(await agentStub.getPendingChatTerminalForTest()).toBeNull();
+  });
+
+  // #1645 (record-on-error): a terminal NON-exhaustion error (e.g. a provider
+  // 500 surfaced as a stream `error` part) must also be durably recorded, not
+  // just broadcast transiently — otherwise a client disconnected at that moment
+  // never learns the turn failed and stays frozen on reconnect. Brings ai-chat
+  // to parity with Think's `_fireResponseHook`, which records on `error`.
+  it("records a durable terminal for a non-exhaustion error and replays it on reconnect (#1645)", async () => {
+    const room = `terminal-error-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    const STREAM_ERROR = "Provider returned HTTP 500.";
+
+    // Drive a turn that ends in a terminal stream error, purely server-side
+    // (no client connected at the moment of failure).
+    expect(await agentStub.driveErroredTurnForTest(STREAM_ERROR)).toBe("error");
+
+    // The error is durably recorded (not just broadcast transiently).
+    expect(await agentStub.getPendingChatTerminalForTest()).toMatchObject({
+      body: STREAM_ERROR
+    });
+
+    // End-to-end: a client connecting now and running the standard resume probe
+    // learns the turn failed — it receives the terminal error frame rather than
+    // a bare RESUME_NONE that would leave it frozen.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const received: Array<Record<string, unknown>> = [];
+    ws.addEventListener("message", (e) => {
+      let frame: Record<string, unknown>;
+      try {
+        frame = JSON.parse(e.data as string) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      received.push(frame);
+      if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+        ws.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+            id: frame.id
+          })
+        );
+      }
+    });
+
+    ws.send(
+      JSON.stringify({ type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST })
+    );
+
+    await new Promise((r) => setTimeout(r, 400));
+    ws.close(1000);
+
+    const terminal = received.find(
+      (m) =>
+        m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+        m.error === true &&
+        m.done === true
+    );
+    expect(
+      terminal,
+      `expected a terminal error frame on reconnect; received frame types: ${JSON.stringify(
+        received.map((m) => m.type)
+      )}`
+    ).toBeDefined();
+    expect(terminal?.body).toBe(STREAM_ERROR);
+  });
+
+  // #1645 (clear-on-chat-clear): clearing the conversation must also drop the
+  // terminal record. Otherwise a stale exhaustion replays onto the now-empty
+  // chat the next time a client connects and runs the resume probe.
+  it("drops the terminal record when the conversation is cleared (#1645)", async () => {
+    const room = `terminal-chatclear-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    const TERMINAL = "Recovery exhausted — the assistant could not finish.";
+
+    await agentStub.enableExhaustedCaptureForTest(6, TERMINAL);
+    await agentStub.setForceStableTimeoutForTest(true);
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-chatclear",
+      requestId: "root-chatclear",
+      recoveryKind: "continue",
+      attempt: 6,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+    await agentStub.runChatRecoveryContinueDirectForTest({
+      incidentId: "inc-chatclear",
+      originalRequestId: "root-chatclear",
+      targetAssistantId: "a-chatclear"
+    });
+    expect(await agentStub.getPendingChatTerminalForTest()).toMatchObject({
+      body: TERMINAL
+    });
+
+    // Clear the conversation over the real WS protocol.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
+    await new Promise((r) => setTimeout(r, 200));
+    ws.close(1000);
+
+    expect(await agentStub.getPendingChatTerminalForTest()).toBeNull();
   });
 });

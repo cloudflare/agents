@@ -23,11 +23,11 @@ jobs:
 
       - uses: ./.github/actions/install
 
-      - run: npm run build
+      - run: pnpm run build
 
       - name: Get Playwright version
         id: playwright-version
-        run: echo "version=$(jq -r '.packages["node_modules/playwright"].version' package-lock.json)" >> $GITHUB_OUTPUT
+        run: echo "version=$(node -p 'require(\"playwright/package.json\").version')" >> $GITHUB_OUTPUT
 
       - name: Cache Playwright browsers
         uses: actions/cache@v5
@@ -38,13 +38,13 @@ jobs:
 
       - name: Install Playwright browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium
+        run: pnpm exec playwright install --with-deps chromium
 
       - name: Run ai-chat e2e tests
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: npx playwright test --config e2e/playwright.config.ts
+        run: pnpm exec playwright test --config e2e/playwright.config.ts
         working-directory: packages/ai-chat
 
   e2e-think:
@@ -58,11 +58,11 @@ jobs:
 
       - uses: ./.github/actions/install
 
-      - run: npm run build
+      - run: pnpm run build
 
       - name: Run think e2e tests
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: npm run test:e2e
+        run: pnpm run test:e2e
         working-directory: packages/think
