@@ -908,6 +908,46 @@ describe("WorkerTransport", () => {
 
       expect(getCalls).toBe(1);
     });
+
+    // Behaviour change introduced by extending the SDK transport: the SDK
+    // refuses to reuse a *stateless* transport (no `sessionIdGenerator`)
+    // across requests, because reuse causes JSON-RPC id collisions between
+    // clients. The pre-refactor hand-rolled WorkerTransport silently allowed
+    // it. `createMcpHandler` is unaffected (it builds a transport per
+    // request); this only bites callers that hold a single stateless
+    // transport and call `handleRequest` more than once.
+    it("throws when a stateless transport is reused across requests", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        enableJsonResponse: true
+      });
+
+      const createInitRequest = () =>
+        new Request("http://example.com/", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream"
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "1",
+            method: "initialize",
+            params: {
+              capabilities: {},
+              clientInfo: { name: "test", version: "1.0" },
+              protocolVersion: "2025-03-26"
+            }
+          })
+        });
+
+      const first = await transport.handleRequest(createInitRequest());
+      expect(first.status).toBe(200);
+
+      await expect(
+        transport.handleRequest(createInitRequest())
+      ).rejects.toThrow("Stateless transport cannot be reused across requests");
+    });
   });
 
   describe("Client Capabilities Persistence (Serverless Restart)", () => {
