@@ -2379,6 +2379,42 @@ describe("WorkerTransport", () => {
     });
   });
 
+  describe("Parsed body handling", () => {
+    it("should accept the SDK handleRequest(request, { parsedBody }) signature", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        enableJsonResponse: true
+      });
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        }
+      });
+
+      const response = await transport.handleRequest(request, {
+        parsedBody: {
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        }
+      });
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        result?: { protocolVersion: string };
+      };
+      expect(body.result?.protocolVersion).toBeDefined();
+    });
+  });
+
   describe("Invalid JSON Handling", () => {
     it("should return parse error for invalid JSON body", async () => {
       const server = createTestServer();

@@ -238,6 +238,15 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
     super.closeStandaloneSSEStream();
   }
 
+  override async close(): Promise<void> {
+    for (const cleanup of Array.from(this._keepaliveCleanups.values())) {
+      cleanup();
+    }
+    this._keepaliveCleanups.clear();
+    this._closedRequestIds.clear();
+    await super.close();
+  }
+
   /**
    * Swallow two classes of message that would otherwise surface as
    * unhandled rejections from the SDK transport's `send()`:
