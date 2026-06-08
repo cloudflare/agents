@@ -19,7 +19,8 @@
     "@playwright/test": "^1.60.0",
     "@tanstack/ai": "^0.28.0",
     "ai": "^6.0.199",
-    "vitest": "4.1.8",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
@@ -76,11 +77,11 @@
     }
   },
   "scripts": {
-    "build": "tsx ./scripts/build.ts",
-    "test": "vitest run && vitest run --config vitest.runtime.config.ts && vitest run --config vitest.browser.config.ts",
+    "build": "vp run build:package",
+    "test": "vp test run && vp test run --config vitest.runtime.config.ts && vp test run --config vitest.browser.config.ts",
     "test:e2e": "playwright test --config e2e/playwright.config.ts",
-    "test:watch": "vitest",
-    "test:browser": "vitest run --config vitest.browser.config.ts"
+    "test:watch": "vp test",
+    "test:browser": "vp test run --config vitest.browser.config.ts"
   },
   "keywords": [
     "cloudflare",

@@ -1,5 +1,5 @@
 import { exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { MessageType } from "../types";
 
 // Helper to connect via WebSocket

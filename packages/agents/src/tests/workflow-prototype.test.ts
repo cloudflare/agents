@@ -6,7 +6,7 @@
  * we test the static prototype relationships and the wrapping mechanism indirectly
  * through the integration tests.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { AgentWorkflow, WorkflowRejectedError } from "../workflows";
 import type { AgentWorkflowEvent, AgentWorkflowStep } from "../workflows";
 

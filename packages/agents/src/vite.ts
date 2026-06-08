@@ -1,10 +1,19 @@
+import decoratorsPlugin from "@babel/plugin-proposal-decorators";
 import babel from "@rolldown/plugin-babel";
 import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
-import type { Plugin } from "vite";
+import type { Plugin } from "vite-plus";
 import { compileSkillScript, isCompilableSkillScript } from "./skills/compile";
+
+function unwrapDefaultExport(module: unknown): unknown {
+  return module !== null && typeof module === "object" && "default" in module
+    ? module.default
+    : module;
+}
+
+const decoratorsBabelPlugin = unwrapDefaultExport(decoratorsPlugin);
 
 const SKILLS_SPECIFIER = "agents:skills";
 const SKILLS_VIRTUAL_PREFIX = "\0agents:skills:";
@@ -461,9 +470,7 @@ export default function agents(options: AgentsPluginOptions = {}): Plugin[] {
       presets: [
         {
           preset: () => ({
-            plugins: [
-              ["@babel/plugin-proposal-decorators", { version: "2023-11" }]
-            ]
+            plugins: [[decoratorsBabelPlugin, { version: "2023-11" }]]
           }),
           rolldown: { filter: { code: "@" } }
         }

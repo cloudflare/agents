@@ -1,6 +1,6 @@
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { stripNodeModulesSourceMapReferences } from "../../scripts/vitest/strip-node-modules-source-map-references";
-import { defineConfig } from "vitest/config";
+import { defineConfig } from "vite-plus";
 
 // Durable-runtime e2e tests: a real DO host spawns the CodemodeRuntime facet
 // and runs code in a real sandbox. Kept in its own project because it needs a

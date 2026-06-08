@@ -217,7 +217,7 @@ Add the plugin to your `vite.config.ts`:
 import { cloudflare } from "@cloudflare/vite-plugin";
 import react from "@vitejs/plugin-react";
 import agents from "agents/vite";
-import { defineConfig } from "vite";
+import { defineConfig } from "vite-plus";
 
 export default defineConfig({
   plugins: [agents(), react(), cloudflare()]

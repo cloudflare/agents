@@ -4,7 +4,7 @@
  * Covers createCodeTool, tanstackTools, and resolveProvider
  * using TanStack AI tool definitions.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi } from "vite-plus/test";
 import { toolDefinition } from "@tanstack/ai";
 import type { Tool as TanStackTool, ServerTool } from "@tanstack/ai";
 import { z } from "zod";

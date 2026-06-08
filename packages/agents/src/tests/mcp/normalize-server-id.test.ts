@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { normalizeServerId, MCP_SERVER_ID_MAX_LENGTH } from "../../mcp/client";
 
 describe("normalizeServerId", () => {

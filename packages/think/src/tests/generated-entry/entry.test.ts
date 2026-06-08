@@ -1,5 +1,5 @@
 import { exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 describe("generated virtual Think entry", () => {
   it("delegates to a custom app server before falling through", async () => {

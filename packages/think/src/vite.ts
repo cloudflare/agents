@@ -1,5 +1,5 @@
 import agents from "agents/vite";
-import type { Plugin, PluginOption, ResolvedConfig } from "vite";
+import type { Plugin, PluginOption, ResolvedConfig } from "vite-plus";
 import {
   createThinkWorkerConfig,
   diagnoseThinkWorkerConfig,

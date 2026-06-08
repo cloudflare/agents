@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi
+} from "vite-plus/test";
 import { VoiceClient } from "../voice-client";
 import type { VoiceAudioInput, VoiceTransport } from "../types";
 

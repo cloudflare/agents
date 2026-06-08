@@ -45,10 +45,10 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsx ./scripts/build.ts",
-    "test": "vitest --run",
-    "test:workers": "vitest --project voice-workers",
-    "test:react": "vitest --project voice-react"
+    "build": "vp run build:package",
+    "test": "vp test --run",
+    "test:workers": "vp test --project voice-workers",
+    "test:react": "vp test --project voice-react"
   },
   "keywords": [
     "cloudflare",

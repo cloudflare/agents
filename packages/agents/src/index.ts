@@ -6790,10 +6790,10 @@ export class Agent<
         return state;
       },
       send(message: string | ArrayBuffer | ArrayBufferView) {
-        void getStored().bridge.send(message);
+        getStored().bridge.send(message);
       },
       close(code?: number, reason?: string) {
-        void getStored().bridge.close(code, reason);
+        getStored().bridge.close(code, reason);
       },
       addEventListener() {},
       removeEventListener() {}

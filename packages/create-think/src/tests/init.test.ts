@@ -1,9 +1,20 @@
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi
+} from "vite-plus/test";
 import { initCommand, type InitCommandOptions } from "../init";
-import { resolveTemplateName, THINK_TEMPLATES } from "../templates";
+import {
+  resolveTemplateName,
+  STANDALONE_CATALOG_DEPENDENCIES,
+  THINK_TEMPLATES
+} from "../templates";
 
 /**
  * A stand-in for the remote (degit) fetcher: writes a minimal template that
@@ -18,7 +29,11 @@ const writeFakeTemplate: NonNullable<
     path.join(dest, "package.json"),
     JSON.stringify({
       name: "think-basic-starter",
-      dependencies: { "@cloudflare/think": "workspace:*" }
+      dependencies: { "@cloudflare/think": "workspace:*" },
+      devDependencies: {
+        vite: "catalog:",
+        "vite-plus": "catalog:"
+      }
     }),
     "utf8"
   );
@@ -71,10 +86,19 @@ describe("create-think initCommand", () => {
 
     const pkg = JSON.parse(
       await readFile(path.join(root, "app/package.json"), "utf8")
-    ) as { name: string; dependencies: Record<string, string> };
+    ) as {
+      name: string;
+      dependencies: Record<string, string>;
+      devDependencies: Record<string, string>;
+    };
     expect(pkg.name).toBe("app");
     // workspace:* is rewritten so the standalone project installs from npm.
     expect(pkg.dependencies["@cloudflare/think"]).toBe("latest");
+    // catalog: is rewritten so the standalone project installs without a pnpm workspace.
+    expect(pkg.devDependencies.vite).toBe(STANDALONE_CATALOG_DEPENDENCIES.vite);
+    expect(pkg.devDependencies["vite-plus"]).toBe(
+      STANDALONE_CATALOG_DEPENDENCIES["vite-plus"]
+    );
     // The Worker name is updated away from the shared template name.
     expect(
       await readFile(path.join(root, "app/wrangler.jsonc"), "utf8")

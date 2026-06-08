@@ -1,6 +1,6 @@
 import path from "node:path";
-import { defineConfig } from "vitest/config";
-import { playwright } from "@vitest/browser-playwright";
+import { defineConfig } from "vite-plus";
+import { playwright } from "vite-plus/test/browser-playwright";
 
 // Must match TEST_WORKER_PORT in setup.ts
 const TEST_WORKER_PORT = 18787;

@@ -12,8 +12,8 @@
   "name": "@cloudflare/agents-anthropic-patterns",
   "private": true,
   "scripts": {
-    "deploy": "vite build && wrangler deploy",
-    "start": "vite dev"
+    "deploy": "vp build && wrangler deploy",
+    "start": "vp dev"
   },
   "type": "module",
   "version": "0.0.0"

@@ -7,7 +7,7 @@
  * scan deadline forces several passes. Covers the gap that the root-DO recovery
  * tests don't exercise the facet recovery path under multi-pass churn.
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vite-plus/test";
 import { type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

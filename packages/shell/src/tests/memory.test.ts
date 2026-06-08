@@ -1,5 +1,5 @@
 import { InMemoryFs } from "../fs/in-memory-fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { createMemoryStateBackend } from "../memory";
 import { StateBatchOperationError } from "../index";
 

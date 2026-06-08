@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   initCommand as scaffoldFromTemplate,
   looksLikeThinkApp,
+  STANDALONE_CATALOG_DEPENDENCIES,
   type InitCommandOptions as TemplateInitOptions
 } from "create-think";
 import { createThinkWorkerConfig } from "../framework/config";
@@ -333,10 +334,10 @@ const FRAMEWORK_DEPENDENCIES: Record<string, string> = {
   agents: "latest"
 };
 
-// Third-party packages are NOT released in tandem with us, so they are pinned
+// Third-party packages are NOT released in tandem with us, so most are pinned
 // to the exact ranges the starter templates are tested against (see
-// `think-starters/basic/package.json`). This avoids fresh projects pulling an
-// untested major (e.g. a new `vite`/`ai`/`wrangler`). Kept in sync with the
+// `think-starters/basic/package.json`). The Vite+ stack follows the monorepo
+// catalog and intentionally floats for scaffolded apps. Kept in sync with the
 // starter by a test in `src/cli-tests/cli.test.ts`.
 export const THIRD_PARTY_DEPENDENCIES: Record<string, string> = {
   ai: "^6.0.199",
@@ -347,7 +348,8 @@ export const THIRD_PARTY_DEV_DEPENDENCIES: Record<string, string> = {
   "@cloudflare/vite-plugin": "^1.40.1",
   "@cloudflare/workers-types": "^4.20260609.1",
   typescript: "^6.0.3",
-  vite: "^8.0.16",
+  vite: STANDALONE_CATALOG_DEPENDENCIES.vite,
+  "vite-plus": STANDALONE_CATALOG_DEPENDENCIES["vite-plus"],
   wrangler: "^4.99.0"
 };
 
@@ -358,9 +360,10 @@ function packageJsonSource(projectName: string): string {
       private: true,
       type: "module",
       scripts: {
-        dev: "vite dev",
-        build: "vite build",
-        deploy: "vite build && wrangler deploy",
+        start: "vp dev",
+        dev: "vp dev",
+        build: "vp build",
+        deploy: "vp build && wrangler deploy",
         types: "think types --all"
       },
       dependencies: {
@@ -383,7 +386,7 @@ function viteConfig(routePrefix: string | undefined): string {
   return [
     `import { cloudflare } from "@cloudflare/vite-plugin";`,
     `import { think } from "@cloudflare/think/vite";`,
-    `import { defineConfig } from "vite";`,
+    `import { defineConfig } from "vite-plus";`,
     "",
     "export default defineConfig({",
     `  plugins: [think${thinkOptions}, cloudflare()]`,

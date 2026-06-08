@@ -1,5 +1,5 @@
 import { exports } from "cloudflare:workers";
-import { expect } from "vitest";
+import { expect } from "vite-plus/test";
 import { MessageType, type OutgoingMessage } from "../types";
 
 /**

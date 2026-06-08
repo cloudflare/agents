@@ -13,7 +13,7 @@
  * work. If child.totalExecutions blows up (≈ 30 × parentTaskExecutions), the
  * parent re-running the in-flight task amplifies into a full child re-run.
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vite-plus/test";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { setDefaultAutoSelectFamily } from "node:net";
 import "./harden-net";

@@ -16,7 +16,7 @@
  * Provide keys via the shell, e.g.:
  *   OPENAI_API_KEY=sk-... ANTHROPIC_API_KEY=sk-ant-... pnpm run test:e2e
  */
-import { describe, it, expect, afterAll, beforeAll } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { setDefaultAutoSelectFamily } from "node:net";
 import "./harden-net";

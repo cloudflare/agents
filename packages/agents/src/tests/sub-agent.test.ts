@@ -1,6 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { runDurableObjectAlarm } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { getAgentByName } from "../index";
 import { MessageType } from "../types";
 

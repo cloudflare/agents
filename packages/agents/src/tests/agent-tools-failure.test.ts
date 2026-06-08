@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 import { agentTool } from "../agent-tools";
 import { __DO_NOT_USE_WILL_BREAK__agentContext as agentContext } from "../internal_context";

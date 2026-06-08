@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { getAgentByName } from "../index";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import type { TestChatSdkStateHostAgent } from "./agents";
 
 type TestEnv = typeof env & {

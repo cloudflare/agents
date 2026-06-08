@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 1
 
@@ -32,15 +32,15 @@ jobs:
         with:
           registry-url: "https://registry.npmjs.org"
 
-      - run: pnpm run build
-      - run: pnpm run check
+      - run: vp run build
+      - run: vp run check
 
       - name: Get Playwright version
         id: playwright-version
         run: echo "version=$(node -p 'require(\"playwright/package.json\").version')" >> $GITHUB_OUTPUT
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         id: playwright-cache
         with:
           path: ~/.cache/ms-playwright
@@ -48,15 +48,15 @@ jobs:
 
       - name: Install Playwright browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: pnpm exec playwright install --with-deps chromium
+        run: vp exec playwright install --with-deps chromium
 
-      - run: CI=true pnpm exec nx run-many -t test
+      - run: CI=true vp run -r test
 
       - id: changesets
-        uses: changesets/action@v1.7.0
+        uses: changesets/action@6a0a831ff30acef54f2c6aa1cbbc1096b066edaf # v1.7.0
         with:
-          version: pnpm exec tsx .github/changeset-version.ts
-          publish: pnpm exec tsx .github/changeset-publish.ts
+          version: vp exec tsx .github/changeset-version.ts
+          publish: vp exec tsx .github/changeset-publish.ts
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_CONFIG_PROVENANCE: true

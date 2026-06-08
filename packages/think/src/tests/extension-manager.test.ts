@@ -4,7 +4,7 @@
  *
  * Uses vitest-pool-workers with a real WorkerLoader binding.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vite-plus/test";
 import { env } from "cloudflare:workers";
 import { ExtensionManager, sanitizeName } from "../extensions/manager";
 import type { ExtensionManifest } from "../extensions/types";

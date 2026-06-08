@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { transition } from "../broadcast-state";
 import type { BroadcastStreamState } from "../broadcast-state";
 import type { UIMessage } from "ai";

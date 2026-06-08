@@ -4,7 +4,7 @@
  * sandbox. Connector calls travel over genuine Workers RPC.
  */
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { getAgentByName } from "agents";
 
 async function freshAgent(name?: string) {

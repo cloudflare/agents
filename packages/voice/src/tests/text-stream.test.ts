@@ -1,7 +1,7 @@
 /**
  * Tests for text-stream.ts — iterateText and SSE/NDJSON parsing.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { iterateText } from "../text-stream";
 
 async function collect(source: AsyncIterable<string>): Promise<string[]> {

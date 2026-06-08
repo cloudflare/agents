@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import type { UIMessage as ChatMessage } from "ai";
 import { WebSocketChatTransport } from "../ws-chat-transport";
 import { MessageType } from "../types";

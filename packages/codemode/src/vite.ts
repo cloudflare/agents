@@ -25,7 +25,7 @@
  */
 import { resolve, dirname, relative } from "node:path";
 import { readdirSync, statSync } from "node:fs";
-import type { Plugin } from "vite";
+import type { Plugin } from "vite-plus";
 
 const CODEMODE_PATTERN = /\.codemode\.[tj]sx?$/;
 const VIRTUAL_PREFIX = "\0codemode-connectors:";

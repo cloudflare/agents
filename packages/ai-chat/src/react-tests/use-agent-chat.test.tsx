@@ -1,5 +1,5 @@
 import { StrictMode, Suspense, act } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 import type { UIMessage } from "ai";
 import {

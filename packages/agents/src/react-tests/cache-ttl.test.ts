@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, vi } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vite-plus/test";
 import { _testUtils } from "../react";
 
 describe("Cache TTL", () => {

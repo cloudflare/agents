@@ -9,7 +9,7 @@
  * Run with: npx vitest run src/tests/sfu-integration.test.ts
  * Skip with: SKIP_SFU_INTEGRATION=1 npx vitest run src/tests/sfu-integration.test.ts
  */
-import { describe, expect, it, beforeAll } from "vitest";
+import { describe, expect, it, beforeAll } from "vite-plus/test";
 import {
   createSFUSession,
   addSFUTracks,

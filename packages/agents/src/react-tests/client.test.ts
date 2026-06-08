@@ -3,7 +3,14 @@
  * Tests connection lifecycle, identity, state sync, and RPC calls
  * against a real miniflare worker.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  vi
+} from "vite-plus/test";
 import { AgentClient, agentFetch } from "../client";
 import { getTestWorkerHost, getTestWorkerUrl } from "./test-config";
 

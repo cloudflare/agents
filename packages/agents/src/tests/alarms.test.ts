@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { getAgentByName } from "..";
 import type { TestAlarmInitAgent } from "./agents/schedule";
 

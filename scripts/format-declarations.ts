@@ -19,7 +19,7 @@ export function formatDeclarationFiles(directory = "dist") {
   const declarationFiles = findDeclarationFiles(directory);
 
   if (declarationFiles.length > 0) {
-    execFileSync("oxfmt", ["--write", ...declarationFiles], {
+    execFileSync("vp", ["fmt", "--write", ...declarationFiles], {
       stdio: "inherit"
     });
   }

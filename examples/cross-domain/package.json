@@ -6,8 +6,8 @@
   "name": "@cloudflare/agents-cross-domain",
   "private": true,
   "scripts": {
-    "start": "concurrently \"vite dev\" \"wrangler dev\" --kill-others",
-    "deploy": "vite build && wrangler deploy"
+    "start": "concurrently \"vp dev\" \"wrangler dev\" --kill-others",
+    "deploy": "vp build && wrangler deploy"
   },
   "type": "module",
   "version": "0.0.0",
@@ -24,7 +24,8 @@
     "@vitejs/plugin-react": "^6.0.2",
     "concurrently": "^10.0.3",
     "typescript": "^6.0.3",
-    "vite": "^8.0.16",
+    "vite": "catalog:",
+    "vite-plus": "catalog:",
     "wrangler": "^4.99.0"
   }
 }

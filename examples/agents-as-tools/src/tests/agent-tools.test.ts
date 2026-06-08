@@ -1,6 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import type { Assistant } from "./worker";
 
 type TestEnv = typeof env & {

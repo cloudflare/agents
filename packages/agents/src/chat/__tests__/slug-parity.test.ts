@@ -6,7 +6,7 @@
  * Both functions must produce identical slugs for any agent class name,
  * or getAgentMessages() will construct URLs the server doesn't recognize.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { camelCaseToKebabCase } from "../../utils";
 
 function agentNameToKebab(name: string): string {

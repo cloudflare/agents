@@ -1,7 +1,7 @@
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.join(__dirname, "..");
@@ -33,8 +33,8 @@ function killProcessOnPort(port: number): void {
 
 function startViteDev(): ChildProcess {
   const child = spawn(
-    "npx",
-    ["vite", "dev", "--host", "127.0.0.1", "--port", String(PORT)],
+    "vp",
+    ["dev", "--host", "127.0.0.1", "--port", String(PORT)],
     {
       cwd: APP_DIR,
       stdio: ["pipe", "pipe", "pipe"],
@@ -45,11 +45,11 @@ function startViteDev(): ChildProcess {
 
   child.stdout?.on("data", (data: Buffer) => {
     const line = data.toString().trim();
-    if (line) console.log(`[vite] ${line}`);
+    if (line) console.log(`[vp] ${line}`);
   });
   child.stderr?.on("data", (data: Buffer) => {
     const line = data.toString().trim();
-    if (line) console.log(`[vite:err] ${line}`);
+    if (line) console.log(`[vp:err] ${line}`);
   });
 
   return child;

@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { createMemoryStateBackend } from "../memory";
 import { createWorkspaceStateBackend } from "../workspace";
 import { DynamicWorkerExecutor, resolveProvider } from "@cloudflare/codemode";

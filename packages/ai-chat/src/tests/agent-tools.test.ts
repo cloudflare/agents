@@ -9,7 +9,7 @@ import type {
 } from "agents";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import type { Env } from "./worker";
 
 type ParentStub = DurableObjectStub & {

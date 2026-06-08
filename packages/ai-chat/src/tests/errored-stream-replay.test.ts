@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import type { ChatResponseResult } from "../";
 import { MessageType } from "../types";
 import { connectChatWS } from "./test-utils";

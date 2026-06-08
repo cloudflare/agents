@@ -1,4 +1,4 @@
-import { build } from "tsdown";
+import { build } from "vite-plus/pack";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
 
 async function main() {

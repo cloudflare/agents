@@ -6,7 +6,7 @@ import type {
   JSONRPCResultResponse
 } from "@modelcontextprotocol/sdk/types.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import worker from "../worker";
 import {
   initializeStreamableHTTPServer,

@@ -20,7 +20,6 @@ allowBuilds:
   core-js-pure: true
   esbuild: true
   node-liblzma: true
-  nx: true
   sharp: true
   workerd: true
 minimumReleaseAgeExclude:
@@ -39,3 +38,17 @@ minimumReleaseAgeExclude:
   - miniflare@4.20260609.0
   - workerd@1.20260609.1
   - wrangler@4.99.0
+catalog:
+  vite: npm:@voidzero-dev/vite-plus-core@^0.1.24
+  vitest: npm:@voidzero-dev/vite-plus-test@^0.1.24
+  vite-plus: ^0.1.24
+overrides:
+  vite: "catalog:"
+  vitest: "catalog:"
+peerDependencyRules:
+  allowAny:
+    - vite
+    - vitest
+  allowedVersions:
+    vite: "*"
+    vitest: "*"

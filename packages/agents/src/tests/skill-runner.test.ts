@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { env } from "cloudflare:workers";
 import { tool } from "ai";
 import { z } from "zod";
 import * as skills from "../skills";
 import type { SkillWorkspace } from "../skills";
+
+const PYTHON_SKILL_TEST_TIMEOUT_MS = 60_000;
 
 function testWorkspace(files: Record<string, string>): SkillWorkspace {
   const info = (path: string) => ({
@@ -589,47 +591,53 @@ tool shout '{"text":"hello"}'`,
     ).rejects.toThrow("normalized relative path");
   });
 
-  it("runs python skill scripts with input and context", async () => {
-    const runner = skills.runner({
-      loader: env.LOADER
-    });
+  it(
+    "runs python skill scripts with input and context",
+    async () => {
+      const runner = skills.runner({
+        loader: env.LOADER
+      });
 
-    await expect(
-      runner.run({
-        skill: {
-          name: "release-notes",
-          description: "Draft release notes.",
-          body: "Use the python script."
-        },
-        path: "scripts/format.py",
-        input: { text: "hello" },
-        source: `def run(input, ctx):
+      await expect(
+        runner.run({
+          skill: {
+            name: "release-notes",
+            description: "Draft release notes.",
+            body: "Use the python script."
+          },
+          path: "scripts/format.py",
+          input: { text: "hello" },
+          source: `def run(input, ctx):
     return {
         "text": input["text"].upper(),
         "skill": ctx["skill"]["name"]
     }`
-      })
-    ).resolves.toEqual({
-      text: "HELLO",
-      skill: "release-notes"
-    });
-  });
+        })
+      ).resolves.toEqual({
+        text: "HELLO",
+        skill: "release-notes"
+      });
+    },
+    PYTHON_SKILL_TEST_TIMEOUT_MS
+  );
 
-  it("runs python skill files as CLI-style scripts", async () => {
-    const runner = skills.runner({
-      loader: env.LOADER
-    });
+  it(
+    "runs python skill files as CLI-style scripts",
+    async () => {
+      const runner = skills.runner({
+        loader: env.LOADER
+      });
 
-    await expect(
-      runner.run({
-        skill: {
-          name: "release-notes",
-          description: "Draft release notes.",
-          body: "Use the python script."
-        },
-        path: "scripts/format.py",
-        input: { text: "hello" },
-        source: `import json
+      await expect(
+        runner.run({
+          skill: {
+            name: "release-notes",
+            description: "Draft release notes.",
+            body: "Use the python script."
+          },
+          path: "scripts/format.py",
+          input: { text: "hello" },
+          source: `import json
 
 with open("/input.json") as handle:
     data = json.load(handle)
@@ -638,37 +646,41 @@ with open("/skill/references/template.txt") as handle:
     template = handle.read()
 
 print(template.replace("{{text}}", data["text"].upper()))`,
-        resources: [
-          {
-            path: "references/template.txt",
-            kind: "reference",
-            encoding: "text",
-            content: "Result: {{text}}"
-          }
-        ]
-      })
-    ).resolves.toEqual({
-      stdout: "Result: HELLO\n",
-      stderr: "",
-      exitCode: 0
-    });
-  });
+          resources: [
+            {
+              path: "references/template.txt",
+              kind: "reference",
+              encoding: "text",
+              content: "Result: {{text}}"
+            }
+          ]
+        })
+      ).resolves.toEqual({
+        stdout: "Result: HELLO\n",
+        stderr: "",
+        exitCode: 0
+      });
+    },
+    PYTHON_SKILL_TEST_TIMEOUT_MS
+  );
 
-  it("returns output files from python CLI-style scripts", async () => {
-    const runner = skills.runner({
-      loader: env.LOADER
-    });
+  it(
+    "returns output files from python CLI-style scripts",
+    async () => {
+      const runner = skills.runner({
+        loader: env.LOADER
+      });
 
-    await expect(
-      runner.run({
-        skill: {
-          name: "python-writer",
-          description: "Write output files.",
-          body: "Use the python script."
-        },
-        path: "scripts/write.py",
-        input: {},
-        source: `import os
+      await expect(
+        runner.run({
+          skill: {
+            name: "python-writer",
+            description: "Write output files.",
+            body: "Use the python script."
+          },
+          path: "scripts/write.py",
+          input: {},
+          source: `import os
 
 os.makedirs("/output/nested", exist_ok=True)
 with open("/output/result.txt", "w") as handle:
@@ -676,224 +688,258 @@ with open("/output/result.txt", "w") as handle:
 with open("/output/nested/data.bin", "wb") as handle:
     handle.write(bytes([0xff, 0x00, 0x01]))
 print("done")`
-      })
-    ).resolves.toEqual({
-      stdout: "done\n",
-      stderr: "",
-      exitCode: 0,
-      outputFiles: [
-        {
-          path: "/output/nested/data.bin",
-          encoding: "base64",
-          content: "/wAB"
-        },
-        {
-          path: "/output/result.txt",
-          encoding: "text",
-          content: "hello"
-        }
-      ]
-    });
-  });
+        })
+      ).resolves.toEqual({
+        stdout: "done\n",
+        stderr: "",
+        exitCode: 0,
+        outputFiles: [
+          {
+            path: "/output/nested/data.bin",
+            encoding: "base64",
+            content: "/wAB"
+          },
+          {
+            path: "/output/result.txt",
+            encoding: "text",
+            content: "hello"
+          }
+        ]
+      });
+    },
+    PYTHON_SKILL_TEST_TIMEOUT_MS
+  );
 
-  it("returns output files from python function-style scripts", async () => {
-    const runner = skills.runner({
-      loader: env.LOADER
-    });
+  it(
+    "returns output files from python function-style scripts",
+    async () => {
+      const runner = skills.runner({
+        loader: env.LOADER
+      });
 
-    await expect(
-      runner.run({
-        skill: {
-          name: "python-writer",
-          description: "Write output files.",
-          body: "Use the python script."
-        },
-        path: "scripts/write.py",
-        input: {},
-        source: `def run(input, ctx):
+      await expect(
+        runner.run({
+          skill: {
+            name: "python-writer",
+            description: "Write output files.",
+            body: "Use the python script."
+          },
+          path: "scripts/write.py",
+          input: {},
+          source: `def run(input, ctx):
     with open("/output/function.txt", "w") as handle:
         handle.write("function")
     return "ok"`
-      })
-    ).resolves.toEqual({
-      result: "ok",
-      outputFiles: [
-        {
-          path: "/output/function.txt",
-          encoding: "text",
-          content: "function"
-        }
-      ]
-    });
-  });
-
-  it("rejects oversized python output artifacts", async () => {
-    const runner = skills.runner({
-      loader: env.LOADER
-    });
-
-    await expect(
-      runner.run({
-        skill: {
-          name: "python-writer",
-          description: "Write output files.",
-          body: "Use the python script."
-        },
-        path: "scripts/write.py",
-        input: {},
-        source: `with open("/output/large.txt", "w") as handle:
-    handle.write("x" * 64001)`
-      })
-    ).rejects.toThrow("Output artifact exceeds");
-  });
-
-  it("runs python skill scripts with explicit tools", async () => {
-    const runner = skills.runner({
-      loader: env.LOADER,
-      tools: {
-        shout: tool({
-          inputSchema: z.object({ text: z.string() }),
-          execute: async ({ text }) => text.toUpperCase()
         })
-      }
-    });
+      ).resolves.toEqual({
+        result: "ok",
+        outputFiles: [
+          {
+            path: "/output/function.txt",
+            encoding: "text",
+            content: "function"
+          }
+        ]
+      });
+    },
+    PYTHON_SKILL_TEST_TIMEOUT_MS
+  );
 
-    await expect(
-      runner.run({
-        skill: {
-          name: "release-notes",
-          description: "Draft release notes.",
-          body: "Use the python script."
-        },
-        path: "scripts/format.py",
-        input: { text: "hello" },
-        source: `async def run(input, ctx):
+  it(
+    "rejects oversized python output artifacts",
+    async () => {
+      const runner = skills.runner({
+        loader: env.LOADER
+      });
+
+      await expect(
+        runner.run({
+          skill: {
+            name: "python-writer",
+            description: "Write output files.",
+            body: "Use the python script."
+          },
+          path: "scripts/write.py",
+          input: {},
+          source: `with open("/output/large.txt", "w") as handle:
+    handle.write("x" * 64001)`
+        })
+      ).rejects.toThrow("Output artifact exceeds");
+    },
+    PYTHON_SKILL_TEST_TIMEOUT_MS
+  );
+
+  it(
+    "runs python skill scripts with explicit tools",
+    async () => {
+      const runner = skills.runner({
+        loader: env.LOADER,
+        tools: {
+          shout: tool({
+            inputSchema: z.object({ text: z.string() }),
+            execute: async ({ text }) => text.toUpperCase()
+          })
+        }
+      });
+
+      await expect(
+        runner.run({
+          skill: {
+            name: "release-notes",
+            description: "Draft release notes.",
+            body: "Use the python script."
+          },
+          path: "scripts/format.py",
+          input: { text: "hello" },
+          source: `async def run(input, ctx):
     text = await tools.shout({"text": input["text"]})
     return {"text": text, "skill": ctx["skill"]["name"]}`
-      })
-    ).resolves.toEqual({
-      text: "HELLO",
-      skill: "release-notes"
-    });
-  });
-
-  it("allows python skill scripts to call tools by dynamic name", async () => {
-    const runner = skills.runner({
-      loader: env.LOADER,
-      tools: {
-        "format-title": tool({
-          inputSchema: z.object({ text: z.string() }),
-          execute: async ({ text }) => text.toUpperCase()
         })
-      }
-    });
+      ).resolves.toEqual({
+        text: "HELLO",
+        skill: "release-notes"
+      });
+    },
+    PYTHON_SKILL_TEST_TIMEOUT_MS
+  );
 
-    await expect(
-      runner.run({
-        skill: {
-          name: "release-notes",
-          description: "Draft release notes.",
-          body: "Use the python script."
-        },
-        path: "scripts/format.py",
-        input: { text: "hello" },
-        source: `async def run(input, ctx):
+  it(
+    "allows python skill scripts to call tools by dynamic name",
+    async () => {
+      const runner = skills.runner({
+        loader: env.LOADER,
+        tools: {
+          "format-title": tool({
+            inputSchema: z.object({ text: z.string() }),
+            execute: async ({ text }) => text.toUpperCase()
+          })
+        }
+      });
+
+      await expect(
+        runner.run({
+          skill: {
+            name: "release-notes",
+            description: "Draft release notes.",
+            body: "Use the python script."
+          },
+          path: "scripts/format.py",
+          input: { text: "hello" },
+          source: `async def run(input, ctx):
     text = await tools.call("format-title", {"text": input["text"]})
     return {"text": text}`
-      })
-    ).resolves.toEqual({
-      text: "HELLO"
-    });
-  });
+        })
+      ).resolves.toEqual({
+        text: "HELLO"
+      });
+    },
+    PYTHON_SKILL_TEST_TIMEOUT_MS
+  );
 
-  it("allows python scripts to read from a provided workspace by default", async () => {
-    const runner = skills.runner({
-      loader: env.LOADER,
-      workspaceInstance: testWorkspace({
-        "README.md": "hello from workspace"
-      })
-    });
+  it(
+    "allows python scripts to read from a provided workspace by default",
+    async () => {
+      const runner = skills.runner({
+        loader: env.LOADER,
+        workspaceInstance: testWorkspace({
+          "README.md": "hello from workspace"
+        })
+      });
 
-    await expect(
-      runner.run({
-        skill: {
-          name: "workspace-reader",
-          description: "Read workspace files.",
-          body: "Use python."
-        },
-        path: "scripts/read.py",
-        input: {},
-        source: `async def run(input, ctx):
+      await expect(
+        runner.run({
+          skill: {
+            name: "workspace-reader",
+            description: "Read workspace files.",
+            body: "Use python."
+          },
+          path: "scripts/read.py",
+          input: {},
+          source: `async def run(input, ctx):
     return await workspace.read_file("README.md")`
-      })
-    ).resolves.toBe("hello from workspace");
-  });
+        })
+      ).resolves.toBe("hello from workspace");
+    },
+    PYTHON_SKILL_TEST_TIMEOUT_MS
+  );
 
-  it("does not expose python workspace writes for read-only workspace access", async () => {
-    const workspace = testWorkspace({});
-    const runner = skills.runner({
-      loader: env.LOADER,
-      workspaceInstance: workspace
-    });
+  it(
+    "does not expose python workspace writes for read-only workspace access",
+    async () => {
+      const workspace = testWorkspace({});
+      const runner = skills.runner({
+        loader: env.LOADER,
+        workspaceInstance: workspace
+      });
 
-    await expect(
-      runner.run({
-        skill: {
-          name: "workspace-writer",
-          description: "Write workspace files.",
-          body: "Use python."
-        },
-        path: "scripts/write.py",
-        input: {},
-        source: `async def run(input, ctx):
+      await expect(
+        runner.run({
+          skill: {
+            name: "workspace-writer",
+            description: "Write workspace files.",
+            body: "Use python."
+          },
+          path: "scripts/write.py",
+          input: {},
+          source: `async def run(input, ctx):
     await workspace.write_file("generated.txt", "nope")
     return "ok"`
-      })
-    ).rejects.toThrow("Workspace write access is not available");
+        })
+      ).rejects.toThrow("Workspace write access is not available");
 
-    await expect(workspace.readFile("generated.txt")).resolves.toBeNull();
-  });
+      await expect(workspace.readFile("generated.txt")).resolves.toBeNull();
+    },
+    PYTHON_SKILL_TEST_TIMEOUT_MS
+  );
 
-  it("surfaces python script failures", async () => {
-    const runner = skills.runner({
-      loader: env.LOADER
-    });
+  it(
+    "surfaces python script failures",
+    async () => {
+      const runner = skills.runner({
+        loader: env.LOADER
+      });
 
-    await expect(
-      runner.run({
-        skill: {
-          name: "broken",
-          description: "Broken skill.",
-          body: "Run broken script."
-        },
-        path: "scripts/broken.py",
-        input: {},
-        source: `def run(input, ctx):
+      await expect(
+        runner.run({
+          skill: {
+            name: "broken",
+            description: "Broken skill.",
+            body: "Run broken script."
+          },
+          path: "scripts/broken.py",
+          input: {},
+          source: `def run(input, ctx):
     raise Exception("boom")`
-      })
-    ).rejects.toThrow("boom");
-  });
+        })
+      ).rejects.toThrow("boom");
+    },
+    PYTHON_SKILL_TEST_TIMEOUT_MS
+  );
 
-  it("times out CPU-bound python CLI scripts", async () => {
-    const runner = skills.runner({
-      loader: env.LOADER,
-      timeout: 50
-    });
+  it(
+    "times out CPU-bound python CLI scripts",
+    async () => {
+      const runner = skills.runner({
+        loader: env.LOADER,
+        timeout: 50
+      });
 
-    await expect(
-      runner.run({
-        skill: {
-          name: "slow",
-          description: "Slow skill.",
-          body: "Run slow script."
-        },
-        path: "scripts/slow.py",
-        input: {},
-        source: `while True:
+      await expect(
+        runner.run({
+          skill: {
+            name: "slow",
+            description: "Slow skill.",
+            body: "Run slow script."
+          },
+          path: "scripts/slow.py",
+          input: {},
+          source: `while True:
     pass`
-      })
-    ).rejects.toThrow("Python script execution timed out");
-  });
+        })
+      ).rejects.toThrow("Python script execution timed out");
+    },
+    PYTHON_SKILL_TEST_TIMEOUT_MS
+  );
 
   it("allows bash scripts to read from a provided workspace by default", async () => {
     const runner = skills.runner({

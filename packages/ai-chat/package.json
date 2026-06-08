@@ -65,10 +65,10 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsx ./scripts/build.ts",
-    "test": "vitest --run",
-    "test:react": "vitest --project react",
-    "test:workers": "vitest --project workers",
-    "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts"
+    "build": "vp run build:package",
+    "test": "vp test --run",
+    "test:react": "vp test --project react",
+    "test:workers": "vp test --project workers",
+    "test:e2e": "vp test --run -c src/e2e-tests/vitest.config.ts"
   }
 }

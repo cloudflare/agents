@@ -1,6 +1,6 @@
 import type { UIMessage } from "ai";
 import { env } from "cloudflare:workers";
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach } from "vite-plus/test";
 import { getAgentByName } from "../../../..";
 
 /**

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { createBrowserRuntime, createBrowserTools } from "../tools/browser";
 
 // Shape-only tests: nothing here executes against the facet, storage, or the

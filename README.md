@@ -191,22 +191,21 @@ npm start
 
 ## Development
 
-Node 24+ required. pnpm workspaces with [Nx](https://nx.dev) for task orchestration, caching, and affected detection.
+Node 24+ required. pnpm workspaces with Vite+ for task orchestration and caching.
 
 ```sh
-pnpm install                 # install all workspaces
-pnpm run build               # build all packages (Nx, cached, dependency-ordered)
-pnpm run check               # sherif + export checks + oxfmt + oxlint + typecheck
-pnpm run test                # vitest + vitest-pool-workers (Workers runtime)
-pnpm run test:react          # Playwright-based React hook tests
-pnpm exec nx affected -t build # build only what changed
-pnpm exec nx affected -t test  # test only what changed
+vp install              # install all workspaces
+vp run build            # build all packages
+vp run check            # sherif + export checks + Vite+ check + typecheck
+vp run test             # build, then run workspace tests
+vp run agents#test:react # Playwright-based React hook tests
+vp run --filter ./packages/agents build # build a single package
 ```
 
 Changes to `packages/` need a changeset:
 
 ```sh
-pnpm exec changeset
+vp exec changeset
 ```
 
 See [`AGENTS.md`](AGENTS.md) for deeper contributor guidance.

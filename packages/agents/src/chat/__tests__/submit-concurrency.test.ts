@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { SubmitConcurrencyController } from "../submit-concurrency";
 
 function delay(ms: number): Promise<void> {

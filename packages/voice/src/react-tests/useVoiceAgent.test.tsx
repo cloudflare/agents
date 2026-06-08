@@ -3,7 +3,14 @@
  * Mocks PartySocket to isolate from real WebSocket connections.
  * VoiceClient's real protocol/state logic runs — only the network is mocked.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach
+} from "vite-plus/test";
 import { render, cleanup } from "vitest-browser-react";
 import { useEffect, act } from "react";
 import { PartySocket } from "partysocket";

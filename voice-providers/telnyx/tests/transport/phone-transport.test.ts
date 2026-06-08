@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
 import { TelnyxPhoneTransport } from "../../src/transport/phone-transport.js";
 import type { VoiceTransport } from "@cloudflare/voice/client";
 import type { TelnyxCallBridge } from "../../src/providers/call-bridge.js";

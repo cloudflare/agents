@@ -4,7 +4,7 @@
  * Tests protobuf varint encoding/decoding, packet encode/decode roundtrips,
  * and audio format conversion (48kHz stereo ↔ 16kHz mono).
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import {
   decodeVarint,
   encodeVarint,

@@ -8,7 +8,7 @@
  * hazard). This asserts the retries back off exponentially (the inter-attempt
  * gaps grow) while the row stays retained.
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vite-plus/test";
 import { type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

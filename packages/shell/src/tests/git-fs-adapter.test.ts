@@ -4,7 +4,7 @@
  * Uses InMemoryFs so these run without a Durable Object or network access.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { InMemoryFs } from "../fs/in-memory-fs";
 import { createGitFs } from "../git/fs-adapter";
 

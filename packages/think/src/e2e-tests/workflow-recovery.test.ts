@@ -11,7 +11,7 @@
  *     restart the turn is recovered and the workflow reaches a terminal state
  *     via the workflow-notification drain replay
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vite-plus/test";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { setDefaultAutoSelectFamily } from "node:net";
 import "./harden-net";

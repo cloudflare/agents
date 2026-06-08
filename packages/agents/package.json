@@ -44,13 +44,15 @@
     "@tanstack/ai": "^0.28.0",
     "@types/react": "^19.2.17",
     "@types/yargs": "^17.0.35",
-    "@vitest/browser-playwright": "^4.1.8",
     "@x402/core": "^2.14.0",
     "@x402/evm": "^2.14.0",
     "ai": "^6.0.199",
     "chat": "^4.30.0",
     "glob": "^13.0.6",
+    "playwright": "*",
     "react": "^19.2.7",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:",
     "vitest-browser-react": "^2.2.0",
     "zod": "^4.4.3"
   },
@@ -243,22 +245,17 @@
     "skills-module.d.ts",
     "README.md"
   ],
-  "nx": {
-    "implicitDependencies": [
-      "!@cloudflare/ai-chat"
-    ]
-  },
   "scripts": {
-    "build": "tsx ./scripts/build.ts",
+    "build": "vp run build:package",
     "evals": "(cd evals; evalite)",
-    "test": "vitest --run",
-    "test:cli": "vitest --project cli",
-    "test:react": "vitest --project react",
-    "test:browser": "vitest run --config src/browser-tests/vitest.config.ts",
-    "test:workers": "vitest --project workers",
-    "test:chat": "vitest --project chat",
-    "test:webmcp": "vitest --project webmcp",
-    "test:x402": "vitest --project x402",
-    "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts"
+    "test": "vp test --run",
+    "test:cli": "vp test --project cli",
+    "test:react": "vp test --project react",
+    "test:browser": "vp test run --config src/browser-tests/vitest.config.ts",
+    "test:workers": "vp test --project workers",
+    "test:chat": "vp test --project chat",
+    "test:webmcp": "vp test --project webmcp",
+    "test:x402": "vp test --project x402",
+    "test:e2e": "vp test --run -c src/e2e-tests/vitest.config.ts"
   }
 }

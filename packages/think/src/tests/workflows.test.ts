@@ -1,5 +1,5 @@
 import type { WorkflowEvent } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { z, type ZodObject } from "zod";
 import type { AgentWorkflowStep } from "agents/workflows";
 import type { SubmitMessagesResult } from "../think";

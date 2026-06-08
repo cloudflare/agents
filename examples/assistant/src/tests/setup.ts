@@ -1,4 +1,4 @@
-import { afterAll, beforeAll } from "vitest";
+import { afterAll, beforeAll } from "vite-plus/test";
 import { exports } from "cloudflare:workers";
 
 // Warm up the worker module graph before tests run. The first

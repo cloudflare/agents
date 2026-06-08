@@ -14,7 +14,7 @@
  * DETERMINISTICALLY: it injects a far-future "now" into `cleanup(now)` via a
  * @callable on the test agent rather than sleeping out the windows.
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vite-plus/test";
 import { type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

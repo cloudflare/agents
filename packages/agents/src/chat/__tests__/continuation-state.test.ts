@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi } from "vite-plus/test";
 import { ContinuationState } from "../continuation-state";
 import type { ContinuationConnection } from "../continuation-state";
 

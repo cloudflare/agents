@@ -1,6 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { getServerByName } from "partyserver";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vite-plus/test";
 import type { UIMessage } from "ai";
 import { subscribe } from "agents/observability";
 import type {

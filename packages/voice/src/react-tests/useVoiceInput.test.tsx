@@ -9,7 +9,14 @@
  * - Provides a clear() action to reset the transcript
  * - Ignores assistant responses / TTS
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach
+} from "vite-plus/test";
 import { render, cleanup } from "vitest-browser-react";
 import { useEffect, act } from "react";
 

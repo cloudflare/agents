@@ -3,9 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "deploy": "vite build && wrangler deploy",
+    "deploy": "vp build && wrangler deploy",
     "dev:wrangler": "wrangler dev",
-    "start": "vite",
+    "start": "vp dev",
     "types": "wrangler types --include-runtime false"
   },
   "dependencies": {
@@ -15,11 +15,12 @@
     "react": "^19.2.7",
     "react-chessboard": "^5.10.0",
     "react-dom": "^19.2.7",
-    "vite": "^8.0.16",
+    "vite": "catalog:",
     "vite-plugin-singlefile": "^2.3.3"
   },
   "devDependencies": {
     "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3"
+    "@types/react-dom": "^19.2.3",
+    "vite-plus": "catalog:"
   }
 }

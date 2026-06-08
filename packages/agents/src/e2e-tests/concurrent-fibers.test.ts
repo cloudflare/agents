@@ -7,7 +7,7 @@
  * per fiber, all orphan rows are cleaned up, and managed fibers reach their
  * terminal state.
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vite-plus/test";
 import { type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

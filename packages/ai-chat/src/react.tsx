@@ -2057,11 +2057,14 @@ export function useAgentChat<
       }
     }
 
+    const fallbackAckedResumeRequestIds =
+      fallbackAckedResumeRequestIdsRef.current;
+
     // A closed socket invalidates the per-socket resume-ACK dedupe: after a
     // reconnect the server sees a brand-new connection and must be ACKed
     // (and replay) again, so the previous entries must not suppress it.
     function onAgentClose() {
-      fallbackAckedResumeRequestIdsRef.current.clear();
+      fallbackAckedResumeRequestIds.clear();
     }
 
     agent.addEventListener("message", onAgentMessage);
@@ -2075,7 +2078,7 @@ export function useAgentChat<
     return () => {
       agent.removeEventListener("message", onAgentMessage);
       agent.removeEventListener("close", onAgentClose);
-      fallbackAckedResumeRequestIdsRef.current.clear();
+      fallbackAckedResumeRequestIds.clear();
       streamStateRef.current = { status: "idle" };
       setIsServerStreaming(false);
       setIsRecovering(false);

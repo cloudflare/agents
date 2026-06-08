@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -8,7 +8,7 @@ import think, {
   createThinkViteWorkerConfigResult,
   THINK_EXPERIMENTAL_NOTICE
 } from "../vite";
-import type { Plugin } from "vite";
+import type { Plugin } from "vite-plus";
 
 const files = {
   "agents/support.ts": `

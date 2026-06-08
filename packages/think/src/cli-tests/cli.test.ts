@@ -10,8 +10,15 @@ import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { THINK_TEMPLATES } from "create-think";
+import { STANDALONE_CATALOG_DEPENDENCIES, THINK_TEMPLATES } from "create-think";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi
+} from "vite-plus/test";
 import { createCli } from "../cli/create";
 import {
   initCommand,
@@ -382,7 +389,7 @@ describe("think CLI", () => {
       scripts: Record<string, string>;
     };
     expect(packageJson.name).toBe("my-app");
-    expect(packageJson.scripts.dev).toBe("vite dev");
+    expect(packageJson.scripts.dev).toBe("vp dev");
   });
 
   it("refuses a non-empty target directory", async () => {
@@ -639,10 +646,11 @@ describe("think CLI", () => {
     expect(pkg.type).toBe("module");
   });
 
-  it("pins augment third-party deps to the basic starter's ranges", () => {
+  it("keeps augment third-party deps aligned with the basic starter", () => {
     // Single source of truth for tested third-party versions is the starter
-    // template. If anyone bumps the starter (or the augment generator) without
-    // updating the other, this fails so the two can't silently drift apart.
+    // template plus standalone catalog rewrites. If anyone bumps the starter
+    // (or the augment generator) without updating the other, this fails so the
+    // two can't silently drift apart.
     const starterPath = fileURLToPath(
       new URL("../../../../think-starters/basic/package.json", import.meta.url)
     );
@@ -659,8 +667,12 @@ describe("think CLI", () => {
       ...THIRD_PARTY_DEPENDENCIES,
       ...THIRD_PARTY_DEV_DEPENDENCIES
     })) {
+      const starterRange =
+        starterRanges[name] === "catalog:"
+          ? STANDALONE_CATALOG_DEPENDENCIES[name]
+          : starterRanges[name];
       expect(
-        starterRanges[name],
+        starterRange,
         `${name} must match think-starters/basic/package.json`
       ).toBe(range);
     }

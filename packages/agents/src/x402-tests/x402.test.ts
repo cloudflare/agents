@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vite-plus/test";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Client as MCPClient } from "@modelcontextprotocol/sdk/client/index.js";
 

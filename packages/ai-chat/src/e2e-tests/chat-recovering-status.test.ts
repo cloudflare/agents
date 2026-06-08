@@ -18,7 +18,7 @@
  * for the whole ~10s continuation), and verifies the shape of the `true` frame
  * when timing lets it observe it.
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vite-plus/test";
 import { type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

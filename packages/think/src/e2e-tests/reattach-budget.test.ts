@@ -30,7 +30,7 @@
  * manual `think-e2e` project (not the default CI gate). Once the fix lands it
  * should pass without modification.
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vite-plus/test";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { setDefaultAutoSelectFamily } from "node:net";
 import "./harden-net";

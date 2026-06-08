@@ -2,7 +2,7 @@
  * Tests for the shared module (constants and helpers used by both
  * AI SDK and TanStack AI entry points).
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { DEFAULT_DESCRIPTION, normalizeProviders } from "../shared";
 import type { ToolProvider, SimpleToolRecord } from "../executor";
 

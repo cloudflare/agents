@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 describe("createMcpOAuthProvider", () => {
   it("should return a DurableObjectOAuthClientProvider by default", async () => {

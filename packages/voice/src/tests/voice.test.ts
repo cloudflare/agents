@@ -7,7 +7,7 @@
  */
 import { env } from "cloudflare:workers";
 import { createExecutionContext } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import worker from "./worker";
 
 // --- Helpers ---

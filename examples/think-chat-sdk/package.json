@@ -5,9 +5,9 @@
   "type": "module",
   "version": "0.0.0",
   "scripts": {
-    "start": "vite dev",
-    "build": "vite build",
-    "deploy": "vite build && wrangler deploy",
+    "start": "vp dev",
+    "build": "vp run build:vite",
+    "deploy": "vp build && wrangler deploy",
     "typecheck": "tsc --noEmit",
     "types": "wrangler types env.d.ts --include-runtime false"
   },
@@ -33,7 +33,8 @@
     "@vitejs/plugin-react": "^6.0.2",
     "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",
-    "vite": "^8.0.16",
+    "vite": "catalog:",
+    "vite-plus": "catalog:",
     "wrangler": "^4.99.0"
   }
 }

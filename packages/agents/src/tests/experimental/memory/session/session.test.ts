@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import type { SessionMessage } from "../../../../experimental/memory/session/types";
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach } from "vite-plus/test";
 import { getAgentByName } from "../../../..";
 import { Session } from "../../../../experimental/memory/session/session";
 import {

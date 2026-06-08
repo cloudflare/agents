@@ -1,14 +1,26 @@
-import { cloudflare } from "@cloudflare/vite-plugin";
-import { tanstackStart } from "@tanstack/react-start/plugin/vite";
-import react from "@vitejs/plugin-react";
-import { think } from "@cloudflare/think/vite";
-import { defineConfig } from "vite";
+import { viteBuildTask } from "../../scripts/vite-task-cache";
+import { defineConfig, lazyPlugins } from "vite-plus";
 
 export default defineConfig({
-  plugins: [
-    cloudflare({ viteEnvironment: { name: "ssr" } }),
-    tanstackStart(),
-    react(),
-    think({ routePrefix: "/api/agents", allowNonVirtualMain: true })
-  ]
+  plugins: lazyPlugins(async () => {
+    const [{ cloudflare }, { tanstackStart }, { default: react }, { think }] =
+      await Promise.all([
+        import("@cloudflare/vite-plugin"),
+        import("@tanstack/react-start/plugin/vite"),
+        import("@vitejs/plugin-react"),
+        import("@cloudflare/think/vite")
+      ]);
+
+    return [
+      cloudflare({ viteEnvironment: { name: "ssr" } }),
+      tanstackStart(),
+      react(),
+      think({ routePrefix: "/api/agents", allowNonVirtualMain: true })
+    ];
+  }),
+  run: {
+    tasks: {
+      "build:vite": viteBuildTask
+    }
+  }
 });

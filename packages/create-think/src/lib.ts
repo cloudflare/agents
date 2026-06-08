@@ -17,6 +17,7 @@ export {
   formatTemplateList,
   isKnownTemplate,
   resolveTemplateName,
+  STANDALONE_CATALOG_DEPENDENCIES,
   THINK_TEMPLATES,
   THINK_TEMPLATES_REPO,
   type TemplateFetcher,
