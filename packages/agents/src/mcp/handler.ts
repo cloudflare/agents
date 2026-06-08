@@ -36,7 +36,7 @@ export function createMcpHandler(
   const route = options.route ?? "/mcp";
   const {
     route: _route,
-    authContext: _authContext,
+    authContext,
     transport: providedTransport,
     ...transportOptions
   } = options;
@@ -55,8 +55,8 @@ export function createMcpHandler(
       providedTransport ?? new WorkerTransport(transportOptions);
 
     const buildAuthContext = () => {
-      if (options.authContext) {
-        return options.authContext;
+      if (authContext) {
+        return authContext;
       }
 
       if (ctx.props && Object.keys(ctx.props).length > 0) {
@@ -72,7 +72,7 @@ export function createMcpHandler(
       return await transport.handleRequest(request);
     };
 
-    const authContext = buildAuthContext();
+    const resolvedAuthContext = buildAuthContext();
 
     // Guard for stateful usage where a pre-connected transport is passed via options.
     // If someone passes a transport that's already connected to this server, skip reconnecting.
@@ -95,8 +95,8 @@ export function createMcpHandler(
     }
 
     try {
-      if (authContext) {
-        return await runWithAuthContext(authContext, handleRequest);
+      if (resolvedAuthContext) {
+        return await runWithAuthContext(resolvedAuthContext, handleRequest);
       } else {
         return await handleRequest();
       }

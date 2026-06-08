@@ -167,7 +167,7 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
    * and finally appends CORS headers + keepalive to whatever response comes
    * back.
    */
-  async handleRequest(
+  override async handleRequest(
     request: Request,
     options?: { parsedBody?: unknown; authInfo?: AuthInfo }
   ): Promise<Response> {
@@ -190,9 +190,13 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
 
     const response = await super.handleRequest(request, options);
 
-    // Snapshot state after the request — covers the initialize path as well
-    // as any later state change.
-    await this.saveState();
+    // State is persisted by the `onsessioninitialized` bridge, which the SDK
+    // fires (and awaits) during `super.handleRequest` on the initialize path —
+    // the only point session state actually changes. We deliberately do *not*
+    // snapshot again here: that would write to storage on every request
+    // (notifications, tool calls, GET, DELETE) where nothing changed, matching
+    // neither the pre-refactor behaviour (one write at init) nor the intent of
+    // the storage adapter.
 
     return this.withCorsHeaders(
       this.withKeepalive(
@@ -261,7 +265,7 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
    * unhandled-rejection tracker can fire before the caller's own `await`
    * observes it.
    */
-  async send(
+  override async send(
     message: JSONRPCMessage,
     options?: TransportSendOptions
   ): Promise<void> {
@@ -442,7 +446,10 @@ export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
       }
       // Record the first JSON-RPC request id so we can key keepalive cleanup
       // to it. Batch requests share a single SSE stream in the SDK, so we
-      // pick the first request id we see.
+      // pick the first request id we see. Eager cleanup via `closeSSEStream`
+      // only matches that first id; closing any other id in the batch tears
+      // down the same shared stream, and the keepalive interval is cleared by
+      // the TransformStream's flush/cancel when that stream actually closes.
       const firstRequest = messages.find(
         (m): m is JSONRPCMessage & { id: RequestId } =>
           typeof m === "object" && m !== null && "id" in m && "method" in m

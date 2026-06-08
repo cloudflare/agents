@@ -730,6 +730,69 @@ describe("WorkerTransport", () => {
       expect(storedState?.initialized).toBe(true);
     });
 
+    it("persists state once on initialize, not on every subsequent request", async () => {
+      const server = createTestServer();
+      let storedState: TransportState | undefined;
+      let setCalls = 0;
+
+      const mockStorage = {
+        get: async () => storedState,
+        set: async (state: TransportState) => {
+          setCalls++;
+          storedState = state;
+        }
+      };
+
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "persistent-session",
+        storage: mockStorage,
+        enableJsonResponse: true
+      });
+
+      // Initialize — this is the only point session state changes, so it's
+      // the only request that should write to storage.
+      const initResponse = await transport.handleRequest(
+        new Request("http://example.com/", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream"
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "1",
+            method: "initialize",
+            params: {
+              capabilities: {},
+              clientInfo: { name: "test", version: "1.0" },
+              protocolVersion: "2025-06-18"
+            }
+          })
+        })
+      );
+      await initResponse.json();
+
+      expect(setCalls).toBe(1);
+
+      // A subsequent notification must not trigger another storage write.
+      await transport.handleRequest(
+        new Request("http://example.com/", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+            "mcp-session-id": "persistent-session"
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            method: "notifications/initialized"
+          })
+        })
+      );
+
+      expect(setCalls).toBe(1);
+    });
+
     it("should negotiate down to latest supported version when client requests unsupported version", async () => {
       const server = createTestServer();
       const transport = await setupTransport(server, {
