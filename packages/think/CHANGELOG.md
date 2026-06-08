@@ -1,5 +1,15 @@
 # @cloudflare/think
 
+## 0.8.8
+
+### Patch Changes
+
+- [#1705](https://github.com/cloudflare/agents/pull/1705) [`611e8c3`](https://github.com/cloudflare/agents/commit/611e8c3417b06ec6b284e38c4a1ba73730530a10) Thanks [@threepointone](https://github.com/threepointone)! - Fix Think agents firing an alarm every 30s forever when they don't use workflow notifications ([#1703](https://github.com/cloudflare/agents/issues/1703)).
+
+  `alarm()` called `_startWorkflowNotificationDrain()` unconditionally, which wrapped its work in `keepAliveWhile(...)`. Acquiring the keepAlive lease armed the 30s keepAlive heartbeat alarm even though there was nothing to drain, and releasing the lease did not pull the alarm back — so the DO re-scheduled itself every 30s and never hibernated.
+
+  `_startWorkflowNotificationDrain()` now returns early when there are no pending notifications, matching its other call sites. Affected DOs self-heal on their next alarm fire after upgrading: `super.alarm()` reschedules to the next legitimate task (or clears the alarm entirely) and the drain no longer re-arms the heartbeat.
+
 ## 0.8.7
 
 ### Patch Changes
