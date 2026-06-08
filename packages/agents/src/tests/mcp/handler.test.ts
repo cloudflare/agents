@@ -332,6 +332,40 @@ describe("createMcpHandler", () => {
       expect(response.status).toBe(200);
     });
 
+    it("should pass SDK transport options through to WorkerTransport", async () => {
+      const server = createTestServer();
+      const handler = createMcpHandler(server, {
+        route: "/mcp",
+        enableDnsRebindingProtection: true,
+        allowedHosts: ["allowed.example.com"]
+      });
+
+      const ctx = createExecutionContext();
+      const request = new Request("http://blocked.example.com/mcp", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      const response = await handler(request, env, ctx);
+
+      expect(response.status).toBe(403);
+      const body = (await response.json()) as { error: { message: string } };
+      expect(body.error.message).toContain("Invalid Host header");
+    });
+
     it("should not pass handler-specific options to transport", async () => {
       const server = createTestServer();
       const handler = createMcpHandler(server, {

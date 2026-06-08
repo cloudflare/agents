@@ -34,6 +34,12 @@ export function createMcpHandler(
   ctx: ExecutionContext
 ) => Promise<Response> {
   const route = options.route ?? "/mcp";
+  const {
+    route: _route,
+    authContext: _authContext,
+    transport: providedTransport,
+    ...transportOptions
+  } = options;
 
   return async (
     request: Request,
@@ -46,14 +52,7 @@ export function createMcpHandler(
     }
 
     const transport =
-      options.transport ??
-      new WorkerTransport({
-        sessionIdGenerator: options.sessionIdGenerator,
-        enableJsonResponse: options.enableJsonResponse,
-        onsessioninitialized: options.onsessioninitialized,
-        corsOptions: options.corsOptions,
-        storage: options.storage
-      });
+      providedTransport ?? new WorkerTransport(transportOptions);
 
     const buildAuthContext = () => {
       if (options.authContext) {

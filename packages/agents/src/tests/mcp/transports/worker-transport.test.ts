@@ -800,6 +800,38 @@ describe("WorkerTransport", () => {
       expect(response.status).toBe(202);
     });
 
+    it("should not make storage-only transports require mcp-session-id", async () => {
+      const server = createTestServer();
+      const mockStorage = {
+        get: async () => ({
+          sessionId: "restored-session",
+          initialized: true
+        }),
+        set: async () => {}
+      };
+
+      const transport = await setupTransport(server, {
+        storage: mockStorage
+      });
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "MCP-Protocol-Version": "2025-06-18"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "notifications/initialized"
+        })
+      });
+
+      const response = await transport.handleRequest(request);
+
+      expect(response.status).toBe(202);
+    });
+
     it("should handle storage with no existing state", async () => {
       const server = createTestServer();
       const mockStorage = {
@@ -852,25 +884,27 @@ describe("WorkerTransport", () => {
       };
 
       const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "restored-session",
         storage: mockStorage
       });
 
       // Make multiple requests
-      const request = new Request("http://example.com/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json, text/event-stream",
-          "mcp-session-id": "restored-session"
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method: "notifications/initialized"
-        })
-      });
+      const createRequest = () =>
+        new Request("http://example.com/", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+            "mcp-session-id": "restored-session"
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            method: "notifications/initialized"
+          })
+        });
 
-      await transport.handleRequest(request);
-      await transport.handleRequest(request);
+      await transport.handleRequest(createRequest());
+      await transport.handleRequest(createRequest());
 
       expect(getCalls).toBe(1);
     });
