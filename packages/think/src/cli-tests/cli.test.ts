@@ -6,12 +6,18 @@ import {
   readdir,
   writeFile
 } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { THINK_TEMPLATES } from "create-think";
 import { createCli } from "../cli/create";
-import { initCommand } from "../cli/init";
+import {
+  initCommand,
+  THIRD_PARTY_DEPENDENCIES,
+  THIRD_PARTY_DEV_DEPENDENCIES
+} from "../cli/init";
 import { readWranglerConfig } from "../framework/project";
 
 describe("think CLI", () => {
@@ -631,6 +637,33 @@ describe("think CLI", () => {
       await readFile(path.join(root, "package.json"), "utf8")
     ) as { type: string };
     expect(pkg.type).toBe("module");
+  });
+
+  it("pins augment third-party deps to the basic starter's ranges", () => {
+    // Single source of truth for tested third-party versions is the starter
+    // template. If anyone bumps the starter (or the augment generator) without
+    // updating the other, this fails so the two can't silently drift apart.
+    const starterPath = fileURLToPath(
+      new URL("../../../../think-starters/basic/package.json", import.meta.url)
+    );
+    const starter = JSON.parse(readFileSync(starterPath, "utf8")) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    const starterRanges = {
+      ...starter.dependencies,
+      ...starter.devDependencies
+    };
+
+    for (const [name, range] of Object.entries({
+      ...THIRD_PARTY_DEPENDENCIES,
+      ...THIRD_PARTY_DEV_DEPENDENCIES
+    })) {
+      expect(
+        starterRanges[name],
+        `${name} must match think-starters/basic/package.json`
+      ).toBe(range);
+    }
   });
 
   it("shows help", async () => {

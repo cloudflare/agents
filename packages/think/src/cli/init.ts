@@ -325,6 +325,32 @@ async function runNpmInstall(root: string): Promise<void> {
   });
 }
 
+// In-repo packages float to `latest`: they release in tandem from this
+// monorepo via changesets, so a fresh project always gets the newest matching
+// set.
+const FRAMEWORK_DEPENDENCIES: Record<string, string> = {
+  "@cloudflare/think": "latest",
+  agents: "latest"
+};
+
+// Third-party packages are NOT released in tandem with us, so they are pinned
+// to the exact ranges the starter templates are tested against (see
+// `think-starters/basic/package.json`). This avoids fresh projects pulling an
+// untested major (e.g. a new `vite`/`ai`/`wrangler`). Kept in sync with the
+// starter by a test in `src/cli-tests/cli.test.ts`.
+export const THIRD_PARTY_DEPENDENCIES: Record<string, string> = {
+  ai: "^6.0.196",
+  "workers-ai-provider": "^3.1.14"
+};
+
+export const THIRD_PARTY_DEV_DEPENDENCIES: Record<string, string> = {
+  "@cloudflare/vite-plugin": "^1.39.2",
+  "@cloudflare/workers-types": "^4.20260604.1",
+  typescript: "^6.0.3",
+  vite: "^8.0.16",
+  wrangler: "^4.97.0"
+};
+
 function packageJsonSource(projectName: string): string {
   return `${JSON.stringify(
     {
@@ -338,17 +364,11 @@ function packageJsonSource(projectName: string): string {
         types: "think types --all"
       },
       dependencies: {
-        "@cloudflare/think": "latest",
-        agents: "latest",
-        ai: "latest",
-        "workers-ai-provider": "latest"
+        ...FRAMEWORK_DEPENDENCIES,
+        ...THIRD_PARTY_DEPENDENCIES
       },
       devDependencies: {
-        "@cloudflare/vite-plugin": "latest",
-        "@cloudflare/workers-types": "latest",
-        typescript: "latest",
-        vite: "latest",
-        wrangler: "latest"
+        ...THIRD_PARTY_DEV_DEPENDENCIES
       }
     },
     null,
