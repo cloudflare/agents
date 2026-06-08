@@ -20,7 +20,6 @@ async function main() {
       "src/tools/browser.ts",
       "src/tools/sandbox.ts",
       "src/cli/index.ts",
-      "src/cli.ts",
       "src/vite.ts"
     ],
     deps: {

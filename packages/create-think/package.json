@@ -24,6 +24,12 @@
   "bin": {
     "create-think": "dist/index.js"
   },
+  "exports": {
+    ".": {
+      "types": "./dist/lib.d.ts",
+      "import": "./dist/lib.js"
+    }
+  },
   "files": [
     "dist",
     "README.md"
@@ -32,7 +38,6 @@
     "access": "public"
   },
   "dependencies": {
-    "@cloudflare/think": "workspace:*",
     "tiged": "^2.12.7",
     "yargs": "^18.0.0"
   },

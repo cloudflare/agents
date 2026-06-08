@@ -36,6 +36,11 @@ export function createCli(argv = process.argv) {
             type: "string",
             describe: "Git ref to fetch remote templates from"
           })
+          .option("route-prefix", {
+            type: "string",
+            describe:
+              "Think route prefix when adding Think to an existing project"
+          })
           .option("yes", {
             alias: "y",
             type: "boolean",
@@ -59,6 +64,7 @@ export function createCli(argv = process.argv) {
           name: args.name,
           template: args.template,
           ref: args.ref,
+          routePrefix: args.routePrefix,
           yes: args.yes,
           install: args.install,
           dryRun: args.dryRun

@@ -30,6 +30,12 @@ export type ThinkTemplateName = (typeof THINK_TEMPLATES)[number]["name"];
 
 export const DEFAULT_TEMPLATE: ThinkTemplateName = THINK_TEMPLATES[0].name;
 
+/** The GitHub repo path that hosts the starter templates for remote fetches. */
+export const THINK_TEMPLATES_REPO = "cloudflare/agents/think-starters";
+
+/** Default git ref used when fetching a remote template. */
+export const DEFAULT_TEMPLATE_REF = "main";
+
 /** Files/directories that are never copied from a local workspace template. */
 const LOCAL_COPY_IGNORE = new Set([
   "node_modules",

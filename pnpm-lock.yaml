@@ -3440,9 +3440,6 @@ importers:
 
   packages/create-think:
     dependencies:
-      '@cloudflare/think':
-        specifier: workspace:*
-        version: link:../think
       tiged:
         specifier: ^2.12.7
         version: 2.12.8
@@ -3496,6 +3493,9 @@ importers:
       chat:
         specifier: ^4.30.0
         version: 4.30.0(ai@6.0.196(zod@4.4.3))(zod@4.4.3)
+      create-think:
+        specifier: workspace:*
+        version: link:../create-think
       just-bash:
         specifier: ^3.0.1
         version: 3.0.1

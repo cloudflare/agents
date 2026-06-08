@@ -1,28 +1,8 @@
 #!/usr/bin/env node
-import {
-  initCommand,
-  THINK_TEMPLATES,
-  THINK_TEMPLATES_REPO,
-  type TemplateFetchRequest
-} from "@cloudflare/think/cli";
-import tiged from "tiged";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
-
-/**
- * Remote template fetcher. Pulls a starter folder out of the agents repo with
- * degit (tiged). `create-think` injects this so it can scaffold from the
- * published templates when no local copy is available.
- */
-async function fetchTemplate({
-  template,
-  ref,
-  dest
-}: TemplateFetchRequest): Promise<void> {
-  const source = `${THINK_TEMPLATES_REPO}/${template}#${ref}`;
-  const emitter = tiged(source, { disableCache: true, mode: "tar" });
-  await emitter.clone(dest);
-}
+import { initCommand } from "./init";
+import { THINK_TEMPLATES } from "./templates";
 
 async function main(): Promise<void> {
   const templateList = THINK_TEMPLATES.map((t) => t.name).join(", ");
@@ -71,8 +51,7 @@ async function main(): Promise<void> {
     ref: args.ref,
     yes: args.yes,
     install: args.install,
-    dryRun: args.dryRun,
-    fetchTemplate
+    dryRun: args.dryRun
   });
 }
 

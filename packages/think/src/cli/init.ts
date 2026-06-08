@@ -1,42 +1,32 @@
 import { spawn } from "node:child_process";
-import { createInterface } from "node:readline/promises";
-import { stdin as input, stdout as output } from "node:process";
-import { access, mkdir, readdir, readFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
-  copyLocalTemplate,
-  finalizeTemplate,
-  findLocalTemplatesRoot,
-  formatTemplateList,
-  localTemplateExists,
-  resolveTemplateName,
-  type TemplateFetcher
-} from "./templates";
+  initCommand as scaffoldFromTemplate,
+  type InitCommandOptions as TemplateInitOptions
+} from "create-think";
+import { createThinkWorkerConfig } from "../framework/config";
+import { discoverThinkApp } from "../framework/discovery";
+import { generateThinkTypes } from "../framework/types-codegen";
 
-export interface InitCommandOptions {
-  root?: string;
-  directory?: string;
-  name?: string;
-  /** Starter template to scaffold. Defaults to `basic`. */
-  template?: string;
-  /** Git ref passed to the remote template fetcher. Defaults to `main`. */
-  ref?: string;
-  yes?: boolean;
-  install?: boolean;
-  dryRun?: boolean;
-  /** Local templates directory override (used in-repo and by tests). */
-  templatesDir?: string;
-  /**
-   * Fetches a template from a remote source (e.g. degit). Injected by
-   * `create-think`. When omitted, only local templates can be scaffolded.
-   */
-  fetchTemplate?: TemplateFetcher;
-  promptTargetDirectory?: (defaultDirectory: string) => Promise<string>;
-  installRunner?: (root: string) => Promise<void>;
+export interface InitCommandOptions extends TemplateInitOptions {
+  /** Think route prefix, used when augmenting an existing project. */
+  routePrefix?: string;
 }
 
-const SAFE_EMPTY_DIRECTORY_ENTRIES = new Set([".git", ".DS_Store"]);
-const DEFAULT_TEMPLATE_REF = "main";
+interface PlannedFile {
+  path: string;
+  content: string;
+  merge?: "package-json";
+}
+
+interface InitPlan {
+  root: string;
+  projectName: string;
+  files: PlannedFile[];
+  packageJsonPath: string;
+}
+
 const VITE_CONFIG_FILES = [
   "vite.config.ts",
   "vite.config.mts",
@@ -44,41 +34,38 @@ const VITE_CONFIG_FILES = [
   "vite.config.mjs"
 ];
 
-const ADJECTIVES = [
-  "bright",
-  "calm",
-  "clever",
-  "gentle",
-  "quiet",
-  "rapid",
-  "steady",
-  "sunny"
-];
-
-const NOUNS = [
-  "agent",
-  "brook",
-  "comet",
-  "harbor",
-  "meadow",
-  "river",
-  "signal",
-  "spark"
-];
-
+/**
+ * `think init` has two modes:
+ *
+ * - New project: when a `--template` is given, or when the command is run
+ *   outside an existing npm project. Delegates to `create-think`, which fetches
+ *   a complete starter template (no framework dependency required at runtime).
+ * - Augment in place: when run inside an existing npm project with no
+ *   `--template`. Adds Think framework files (agent, Vite/Wrangler config,
+ *   generated types) and merges dependencies into the current project.
+ */
 export async function initCommand(options: InitCommandOptions): Promise<void> {
   const baseRoot = path.resolve(options.root ?? process.cwd());
-  const template = resolveTemplateName(options.template);
-  const defaultDirectory = await uniqueDefaultDirectory(baseRoot);
-  const selectedDirectory = await selectTargetDirectory(
-    options,
-    defaultDirectory
-  );
-  const targetRoot = resolveTargetRoot(baseRoot, selectedDirectory);
-  const projectName = packageName(options.name ?? path.basename(targetRoot));
+  const insideExistingProject =
+    !options.directory &&
+    (await fileExists(path.join(baseRoot, "package.json")));
+  const useTemplate = Boolean(options.template) || !insideExistingProject;
 
-  const existingThinkApp = await looksLikeThinkApp(targetRoot);
-  if (existingThinkApp) {
+  if (useTemplate) {
+    await scaffoldFromTemplate(options);
+    return;
+  }
+
+  await augmentExistingProject(baseRoot, options);
+}
+
+async function augmentExistingProject(
+  root: string,
+  options: InitCommandOptions
+): Promise<void> {
+  const projectName = packageName(options.name ?? path.basename(root));
+
+  if (await looksLikeThinkApp(root)) {
     console.log(
       [
         "This already looks like a Think app.",
@@ -88,141 +75,175 @@ export async function initCommand(options: InitCommandOptions): Promise<void> {
     return;
   }
 
-  await assertSafeTargetDirectory(targetRoot, selectedDirectory);
-
-  if (options.dryRun) {
-    console.log(
+  const migrationReason = await unsafeMigrationReason(root);
+  if (migrationReason) {
+    throw new Error(
       [
-        `Think init would create a "${template}" app in ${targetRoot}.`,
-        (options.install ?? true)
-          ? "Would run: npm install"
-          : "Would skip dependency install."
+        "This directory already has Vite or Wrangler configuration, so `think init` will not migrate it automatically yet.",
+        migrationReason,
+        "Start a new Think app with `npm create think`, or add `@cloudflare/think/vite` and Think framework files manually."
       ].join("\n")
     );
+  }
+
+  const plan = await createInitPlan({
+    root,
+    projectName,
+    routePrefix: options.routePrefix
+  });
+
+  await assertNoUserFileConflicts(plan);
+
+  if (options.dryRun) {
+    printDryRun(plan, options.install ?? true);
     return;
   }
 
-  await mkdir(targetRoot, { recursive: true });
-  await fetchTemplate(template, targetRoot, options);
-  await finalizeTemplate(targetRoot, projectName);
+  await writePlannedFiles(plan);
 
   if (options.install ?? true) {
-    await (options.installRunner ?? runNpmInstall)(targetRoot);
+    await (options.installRunner ?? runNpmInstall)(root);
   }
 
-  printSuccess(
-    targetRoot,
-    selectedDirectory,
-    template,
-    options.install ?? true
-  );
+  printSuccess(plan, options.install ?? true);
 }
 
-async function fetchTemplate(
-  template: string,
-  targetRoot: string,
-  options: InitCommandOptions
-): Promise<void> {
-  const localRoot =
-    options.templatesDir ?? (await findLocalTemplatesRoot(template));
-  if (localRoot && (await localTemplateExists(localRoot, template))) {
-    await copyLocalTemplate(path.join(localRoot, template), targetRoot);
-    return;
+async function createInitPlan(options: {
+  root: string;
+  projectName: string;
+  routePrefix?: string;
+}): Promise<InitPlan> {
+  const sourceFiles = {
+    "agents/assistant/agent.ts": agentSource(),
+    "agents/assistant/skills/project-helper/SKILL.md": starterSkillSource()
+  };
+  const manifest = discoverThinkApp({
+    root: options.root,
+    routePrefix: options.routePrefix,
+    files: sourceFiles
+  });
+  const workerConfig = createThinkWorkerConfig(manifest, {
+    name: options.projectName,
+    routePrefix: options.routePrefix
+  });
+  workerConfig.ai = { binding: "AI" };
+  workerConfig.worker_loaders = [{ binding: "LOADER" }];
+  const typeFiles = generateThinkTypes(manifest, {
+    files: sourceFiles,
+    typesFile: "think.d.ts"
+  });
+
+  return {
+    root: options.root,
+    projectName: options.projectName,
+    packageJsonPath: "package.json",
+    files: [
+      {
+        path: "package.json",
+        content: packageJsonSource(options.projectName),
+        merge: "package-json"
+      },
+      {
+        path: "vite.config.ts",
+        content: viteConfig(options.routePrefix)
+      },
+      {
+        path: "wrangler.jsonc",
+        content: `${JSON.stringify(workerConfig, null, 2)}\n`
+      },
+      {
+        path: "tsconfig.json",
+        content: tsconfig()
+      },
+      {
+        path: "agents/assistant/agent.ts",
+        content: sourceFiles["agents/assistant/agent.ts"]
+      },
+      {
+        path: "agents/assistant/skills/project-helper/SKILL.md",
+        content: sourceFiles["agents/assistant/skills/project-helper/SKILL.md"]
+      },
+      ...typeFiles
+    ]
+  };
+}
+
+async function assertNoUserFileConflicts(plan: InitPlan): Promise<void> {
+  const conflicts: string[] = [];
+  for (const file of plan.files) {
+    const absolute = path.join(plan.root, file.path);
+    if (!(await fileExists(absolute))) continue;
+    if (file.merge === "package-json") continue;
+    conflicts.push(file.path);
   }
-  if (options.fetchTemplate) {
-    await options.fetchTemplate({
-      template,
-      ref: options.ref ?? DEFAULT_TEMPLATE_REF,
-      dest: targetRoot
-    });
-    return;
-  }
-  throw new Error(
-    [
-      "Could not find Think starter templates locally, and no remote fetcher is configured.",
-      "Run `npm create think` to scaffold a Think app.",
-      "",
-      "Available templates:",
-      formatTemplateList()
-    ].join("\n")
-  );
-}
-
-async function selectTargetDirectory(
-  options: InitCommandOptions,
-  defaultDirectory: string
-): Promise<string> {
-  if (options.directory) return normalizeTargetDirectory(options.directory);
-  if (options.yes) return defaultDirectory;
-  const target = await (options.promptTargetDirectory ?? promptTargetDirectory)(
-    defaultDirectory
-  );
-  return normalizeTargetDirectory(target || defaultDirectory);
-}
-
-async function promptTargetDirectory(
-  defaultDirectory: string
-): Promise<string> {
-  const rl = createInterface({ input, output });
-  try {
-    return await rl.question(
-      `Where should Think create your app? (${defaultDirectory}) `
+  if (conflicts.length > 0) {
+    throw new Error(
+      [
+        "Refusing to overwrite existing user-owned files:",
+        ...conflicts.map((file) => `- ${file}`)
+      ].join("\n")
     );
-  } finally {
-    rl.close();
   }
 }
 
-async function uniqueDefaultDirectory(root: string): Promise<string> {
-  for (let index = 0; index < 24; index++) {
-    const candidate = randomProjectDirectory();
-    if (!(await fileExists(path.join(root, candidate)))) return candidate;
+async function writePlannedFiles(plan: InitPlan): Promise<void> {
+  await mkdir(plan.root, { recursive: true });
+  for (const file of plan.files) {
+    const absolute = path.join(plan.root, file.path);
+    await mkdir(path.dirname(absolute), { recursive: true });
+    const content =
+      file.merge === "package-json"
+        ? await mergePackageJson(absolute, file.content)
+        : file.content;
+    await writeFile(absolute, content, "utf8");
   }
-  return `think-agent-${Date.now().toString(36)}`;
 }
 
-function randomProjectDirectory(): string {
-  const adjective = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
-  const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)];
-  return `think-agent-${adjective}-${noun}`;
+async function mergePackageJson(
+  absolutePath: string,
+  generatedContent: string
+): Promise<string> {
+  const generated = JSON.parse(generatedContent) as PackageJson;
+  const existingSource = await readTextIfExists(absolutePath);
+  if (!existingSource) return generatedContent;
+  const existing = JSON.parse(existingSource) as PackageJson;
+  return `${JSON.stringify(mergePackageJsonData(existing, generated), null, 2)}\n`;
 }
 
-function normalizeTargetDirectory(directory: string): string {
-  const normalized = directory.trim();
-  if (!normalized) throw new Error("Target directory cannot be empty.");
-  if (path.isAbsolute(normalized)) {
-    throw new Error("Target directory must be relative to the project root.");
-  }
-  return normalized;
+function mergePackageJsonData(
+  existing: PackageJson,
+  generated: PackageJson
+): PackageJson {
+  return {
+    ...generated,
+    ...existing,
+    scripts: {
+      ...generated.scripts,
+      ...existing.scripts
+    },
+    dependencies: {
+      ...generated.dependencies,
+      ...existing.dependencies
+    },
+    devDependencies: {
+      ...generated.devDependencies,
+      ...existing.devDependencies
+    }
+  };
 }
 
-function resolveTargetRoot(
-  baseRoot: string,
-  selectedDirectory: string
-): string {
-  const targetRoot = path.resolve(baseRoot, selectedDirectory);
-  const relative = path.relative(baseRoot, targetRoot);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error("Target directory must stay inside the project root.");
+async function unsafeMigrationReason(root: string): Promise<string | null> {
+  for (const file of [
+    ...VITE_CONFIG_FILES,
+    "wrangler.jsonc",
+    "wrangler.json",
+    "wrangler.toml"
+  ]) {
+    if (await fileExists(path.join(root, file))) {
+      return `Found existing ${file}.`;
+    }
   }
-  return targetRoot;
-}
-
-async function assertSafeTargetDirectory(
-  root: string,
-  selectedDirectory: string
-): Promise<void> {
-  const entries = await readDirectoryEntries(root);
-  if (entries.length === 0) return;
-  if (
-    selectedDirectory === "." &&
-    entries.every((entry) => SAFE_EMPTY_DIRECTORY_ENTRIES.has(entry))
-  ) {
-    return;
-  }
-  throw new Error(
-    "Target directory is not empty. Choose a new or empty folder for the new Think app."
-  );
+  return null;
 }
 
 async function looksLikeThinkApp(root: string): Promise<boolean> {
@@ -252,28 +273,29 @@ async function looksLikeThinkApp(root: string): Promise<boolean> {
   return hasThinkDependency && (await fileExists(path.join(root, "agents")));
 }
 
-function printSuccess(
-  root: string,
-  selectedDirectory: string,
-  template: string,
-  install: boolean
-): void {
-  const lines = [
-    `Created a "${template}" Think app in ${root}.`,
-    install ? "Installed npm dependencies." : "Skipped npm install.",
-    "",
-    "Next steps:"
-  ];
-  if (selectedDirectory !== ".") {
-    lines.push(`- cd ${selectedDirectory}`);
-  }
-  lines.push(
-    "- Edit the agent in agents/ to customize the model, prompt, tools, and skills",
-    "- npm run dev",
-    "- npm run types",
-    "- npm run deploy"
+function printDryRun(plan: InitPlan, install: boolean): void {
+  console.log(
+    [
+      "Think init would add to the current project:",
+      ...plan.files.map((file) => `- ${file.path}`),
+      install ? "Would run: npm install" : "Would skip dependency install."
+    ].join("\n")
   );
-  console.log(lines.join("\n"));
+}
+
+function printSuccess(plan: InitPlan, install: boolean): void {
+  console.log(
+    [
+      `Added Think to ${plan.root}.`,
+      install ? "Installed npm dependencies." : "Skipped npm install.",
+      "",
+      "Next steps:",
+      "- Edit agents/assistant/agent.ts to customize the model, prompt, skills, and schedules",
+      "- npm run dev",
+      "- npm run types",
+      "- npm run deploy"
+    ].join("\n")
+  );
 }
 
 async function runNpmInstall(root: string): Promise<void> {
@@ -298,6 +320,130 @@ async function runNpmInstall(root: string): Promise<void> {
   });
 }
 
+function packageJsonSource(projectName: string): string {
+  return `${JSON.stringify(
+    {
+      name: projectName,
+      private: true,
+      type: "module",
+      scripts: {
+        dev: "vite dev",
+        build: "vite build",
+        deploy: "vite build && wrangler deploy",
+        types: "think types --all"
+      },
+      dependencies: {
+        "@cloudflare/think": "latest",
+        agents: "latest",
+        ai: "latest",
+        "workers-ai-provider": "latest"
+      },
+      devDependencies: {
+        "@cloudflare/vite-plugin": "latest",
+        "@cloudflare/workers-types": "latest",
+        typescript: "latest",
+        vite: "latest",
+        wrangler: "latest"
+      }
+    },
+    null,
+    2
+  )}\n`;
+}
+
+function viteConfig(routePrefix: string | undefined): string {
+  const thinkOptions = routePrefix
+    ? `({ routePrefix: ${JSON.stringify(routePrefix)} })`
+    : "()";
+  return [
+    `import { cloudflare } from "@cloudflare/vite-plugin";`,
+    `import { think } from "@cloudflare/think/vite";`,
+    `import { defineConfig } from "vite";`,
+    "",
+    "export default defineConfig({",
+    `  plugins: [think${thinkOptions}, cloudflare()]`,
+    "});",
+    ""
+  ].join("\n");
+}
+
+function agentSource(): string {
+  return [
+    `import { Think, skills } from "@cloudflare/think";`,
+    `import { createWorkersAI } from "workers-ai-provider";`,
+    `import bundledSkills from "agents:skills";`,
+    "",
+    "type Env = Cloudflare.Env & {",
+    "  AI: Ai;",
+    "  LOADER: WorkerLoader;",
+    "};",
+    "",
+    "export class Assistant extends Think<Env> {",
+    "  override getModel() {",
+    "    return createWorkersAI({ binding: this.env.AI })(",
+    '      "@cf/moonshotai/kimi-k2.6",',
+    "      { sessionAffinity: this.sessionAffinity }",
+    "    );",
+    "  }",
+    "",
+    "  override getSystemPrompt() {",
+    '    return "You are a helpful assistant. Keep answers clear, practical, and concise.";',
+    "  }",
+    "",
+    "  override getSkills() {",
+    "    return [bundledSkills];",
+    "  }",
+    "",
+    "  override getSkillScriptRunner() {",
+    "    return skills.runner({",
+    "      loader: this.env.LOADER,",
+    "      workspaceInstance: this.workspace",
+    "    });",
+    "  }",
+    "}",
+    ""
+  ].join("\n");
+}
+
+function starterSkillSource(): string {
+  return [
+    "---",
+    "name: project-helper",
+    "description: Help users plan and explain small project changes. Use when the user asks for implementation guidance, debugging steps, or a concise project plan.",
+    "---",
+    "",
+    "# Project Helper",
+    "",
+    "Use this skill to give practical, action-oriented project help.",
+    "",
+    "## Instructions",
+    "",
+    "1. Restate the user's goal in one sentence.",
+    "2. Identify the smallest useful next step.",
+    "3. Call out any important risk or missing context.",
+    "4. Keep the answer concise and easy to act on.",
+    ""
+  ].join("\n");
+}
+
+function tsconfig(): string {
+  return `${JSON.stringify(
+    {
+      compilerOptions: {
+        target: "ES2021",
+        module: "ES2022",
+        moduleResolution: "bundler",
+        strict: true,
+        verbatimModuleSyntax: true,
+        types: ["@cloudflare/workers-types"]
+      },
+      include: ["agents", "think.d.ts", "vite.config.ts"]
+    },
+    null,
+    2
+  )}\n`;
+}
+
 function packageName(name: string): string {
   return (
     name
@@ -307,15 +453,6 @@ function packageName(name: string): string {
       .replace(/^-+|-+$/g, "")
       .replace(/^[._]+/, "") || "think-agent"
   );
-}
-
-async function readDirectoryEntries(root: string): Promise<string[]> {
-  try {
-    return await readdir(root);
-  } catch (error) {
-    if (isMissingFileError(error)) return [];
-    throw error;
-  }
 }
 
 async function readTextIfExists(file: string): Promise<string | null> {
