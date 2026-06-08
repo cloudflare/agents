@@ -4083,6 +4083,25 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
     const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
     return child.listSchedulesForTest();
   }
+
+  // ── #1703: alarm() must not arm a keepAlive heartbeat when there are
+  // no pending workflow notifications, otherwise the DO fires every 30s
+  // forever and never hibernates.
+  async getKeepAliveRefsForTest(): Promise<number> {
+    return (this as unknown as { _keepAliveRefs: number })._keepAliveRefs;
+  }
+
+  async runAlarmForTest(): Promise<{
+    keepAliveRefs: number;
+    scheduledAlarm: number | null;
+  }> {
+    await this.alarm();
+    return {
+      keepAliveRefs: (this as unknown as { _keepAliveRefs: number })
+        ._keepAliveRefs,
+      scheduledAlarm: await this.ctx.storage.getAlarm()
+    };
+  }
 }
 
 // ── ThinkAsyncHookTestAgent ──────────────────────────────────

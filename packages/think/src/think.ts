@@ -5537,6 +5537,7 @@ export class Think<
   }
 
   private _startWorkflowNotificationDrain(): void {
+    if (!this._hasPendingWorkflowNotifications()) return;
     void this.keepAliveWhile(() => this._drainWorkflowNotifications()).catch(
       (error) => {
         console.error("[Think] Failed to drain workflow notifications", error);
