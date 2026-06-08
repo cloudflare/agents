@@ -1,5 +1,22 @@
 # @cloudflare/think
 
+## 0.8.7
+
+### Patch Changes
+
+- [#1699](https://github.com/cloudflare/agents/pull/1699) [`b1b8268`](https://github.com/cloudflare/agents/commit/b1b8268e541a29201f2edfaad8e105cda8bc131f) Thanks [@threepointone](https://github.com/threepointone)! - Decouple `create-think` from `@cloudflare/think` for fast project starts.
+
+  `create-think` is now fully standalone — it owns the starter-template scaffolding logic and depends only on `tiged` + `yargs`, so `npm create think` no longer installs the entire framework just to copy a template.
+
+  `think init` now has two modes:
+  - **New project** — when `--template` is given, or when run outside an existing npm project, it delegates to `create-think` to fetch a complete starter template.
+  - **Augment in place** — when run inside an existing npm project with no `--template`, it adds Think framework files (agent, Vite/Wrangler config, generated types) and merges dependencies into the current project.
+
+  The internal `@cloudflare/think/cli` export has been removed (its scaffolding logic now lives in `create-think`).
+
+- Updated dependencies [[`b1b8268`](https://github.com/cloudflare/agents/commit/b1b8268e541a29201f2edfaad8e105cda8bc131f)]:
+  - create-think@0.0.3
+
 ## 0.8.6
 
 ### Patch Changes
