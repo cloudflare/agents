@@ -8,3 +8,7 @@ server:
   # Localhost Host/Origin validation guards local stdio/loopback servers
   # against DNS rebinding; Workers deployments sit behind real hostnames.
   - dns-rebinding-protection
+  # SHOULD-level warnings: McpAgent's internal transport does not implement
+  # SEP-1699 priming events or the retry field. Tracked in
+  # https://github.com/cloudflare/agents/issues/1723
+  - server-sse-polling

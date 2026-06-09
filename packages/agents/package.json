@@ -263,7 +263,7 @@
     "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts",
     "test:conformance": "pnpm run test:conformance:client && pnpm run test:conformance:server:mcp-agent && pnpm run test:conformance:server:handler",
     "test:conformance:client": "bash conformance/run.sh client --suite all",
-    "test:conformance:server:mcp-agent": "bash conformance/run.sh server-mcp-agent --suite all",
-    "test:conformance:server:handler": "bash conformance/run.sh server-handler --suite all"
+    "test:conformance:server:mcp-agent": "bash conformance/run.sh server-mcp-agent",
+    "test:conformance:server:handler": "bash conformance/run.sh server-handler"
   }
 }

@@ -37,6 +37,43 @@ if ! curl -s -o /dev/null "http://127.0.0.1:$PORT/"; then
   exit 1
 fi
 
+# Run every server scenario as its own conformance invocation. `--suite`
+# runs scenarios in parallel against the worker, which makes the timing-
+# sensitive SSE scenarios (server-sse-polling) record different results on
+# fast vs slow machines; sequential single-scenario runs are deterministic.
+run_server_scenarios() {
+  local url="$1" baseline="$2"
+  shift 2
+
+  if [ "$#" -gt 0 ]; then
+    pnpm exec conformance server --url "$url" --expected-failures "$baseline" "$@"
+    return
+  fi
+
+  local scenarios failed=0
+  scenarios=$(pnpm exec conformance list 2>/dev/null |
+    awk '/^Server scenarios/{f=1;next} /^Client scenarios/{f=0} f && /^  - /{print $2}')
+  if [ -z "$scenarios" ]; then
+    echo "Failed to list server scenarios" >&2
+    return 1
+  fi
+
+  local out
+  out=$(mktemp)
+  for scenario in $scenarios; do
+    if pnpm exec conformance server --url "$url" --scenario "$scenario" \
+      --expected-failures "$baseline" > "$out" 2>&1; then
+      echo "✓ $scenario"
+    else
+      echo "✗ $scenario"
+      tail -30 "$out"
+      failed=1
+    fi
+  done
+  rm -f "$out"
+  return "$failed"
+}
+
 case "$MODE" in
   client)
     CONFORMANCE_WORKER_ORIGIN="http://127.0.0.1:$PORT" pnpm exec conformance client \
@@ -45,16 +82,12 @@ case "$MODE" in
       "$@"
     ;;
   server-mcp-agent)
-    pnpm exec conformance server \
-      --url "http://127.0.0.1:$PORT/mcp-agent" \
-      --expected-failures conformance/baseline-server-mcp-agent.yml \
-      "$@"
+    run_server_scenarios "http://127.0.0.1:$PORT/mcp-agent" \
+      conformance/baseline-server-mcp-agent.yml "$@"
     ;;
   server-handler)
-    pnpm exec conformance server \
-      --url "http://127.0.0.1:$PORT/mcp-handler" \
-      --expected-failures conformance/baseline-server-handler.yml \
-      "$@"
+    run_server_scenarios "http://127.0.0.1:$PORT/mcp-handler" \
+      conformance/baseline-server-handler.yml "$@"
     ;;
   *)
     echo "Unknown mode: $MODE (expected client, server-mcp-agent, or server-handler)" >&2
