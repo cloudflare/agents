@@ -41,6 +41,381 @@ export default {
 
 That is it. Think handles the WebSocket chat protocol, message persistence, the agentic loop, message sanitization, stream resumption, client tool support, and workspace file tools. The built-in `read` tool reads text with line numbers and passes images/PDFs through to multimodal-capable models.
 
+## Think Framework
+
+The Think Vite plugin can wire agents from an `agents/` directory into a
+generated Worker entry. This removes the hand-written routing boilerplate while
+keeping stable Durable Object class names for production deployments.
+
+```typescript
+// vite.config.ts
+import { cloudflare } from "@cloudflare/vite-plugin";
+import { think } from "@cloudflare/think/vite";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [think(), cloudflare()]
+});
+```
+
+### Agent Conventions
+
+Put top-level agents under the root `agents/` directory:
+
+```text
+agents/support.ts
+agents/assistant/agent.ts
+```
+
+Put sub-agents under a nested `agents/` directory owned by the parent:
+
+```text
+agents/assistant/agent.ts
+agents/assistant/agents/researcher.ts
+agents/assistant/agents/code-reviewer/agent.ts
+```
+
+Each convention file should export one Agent-compatible class, or a default
+declarative `agent({...})` definition. If a module exports multiple
+Agent-compatible classes, Think fails with a focused diagnostic so the generated
+Durable Object export stays unambiguous.
+
+The framework derives stable generated class names from this topology:
+
+| Convention path                                  | Generated class                        |
+| ------------------------------------------------ | -------------------------------------- |
+| `agents/support.ts`                              | `ThinkAgent_Support`                   |
+| `agents/assistant/agent.ts`                      | `ThinkAgent_Assistant`                 |
+| `agents/assistant/agents/researcher.ts`          | `ThinkSubAgent_Assistant_Researcher`   |
+| `agents/assistant/agents/code-reviewer/agent.ts` | `ThinkSubAgent_Assistant_CodeReviewer` |
+
+Top-level agents need Durable Object bindings and migrations. The binding
+`class_name` must be the generated class, but the binding `name` can stay
+app-owned, such as `AssistantDirectory`. Sub-agents are facets: the generated
+Worker entry exports their classes so parent agents can use `ctx.exports`, but
+production `wrangler.jsonc` does not need facet-only Durable Object bindings,
+migrations, or public routes.
+
+Think currently supports top-level agents and one layer of sub-agents. Nested
+sub-agent conventions, such as
+`agents/assistant/agents/researcher/agents/coder.ts`, are intentionally not
+supported yet. If your app needs deeper nesting, please reach out with the use
+case so we can design the routing and lifecycle model deliberately.
+
+### Friendly Routes
+
+Generated class names are stable, but URLs stay friendly. A request can use:
+
+```text
+/agents/assistant/alice/sub/researcher/chat-1
+```
+
+Internally, the Think router resolves `assistant` and `researcher` through the
+manifest and adapts the request to the lower-level Agents facet router, which
+still expects generated class segments. Repeated child names under different
+parents are safe because sub-agent aliases are scoped by parent. Treat this as a
+routing helper contract rather than a URL-rewriting API.
+
+Use a custom route prefix when you want agents under another path:
+
+```typescript
+think({ routePrefix: "/api/agents" });
+```
+
+The generated config and routing diagnostics use that prefix, so direct routes
+become:
+
+```text
+/api/agents/assistant/alice
+```
+
+### Custom App Server
+
+If `src/server.ts` exists, the generated entry calls it first. If it returns
+`null` or `undefined`, Think handles the request. Any `Response` stops
+fallthrough, including an intentional `404`; auth-gated apps can use that to
+prevent direct `/agents/*` access.
+
+```typescript
+export default {
+  async fetch(request: Request) {
+    if (new URL(request.url).pathname === "/health") {
+      return new Response("ok");
+    }
+
+    return null;
+  }
+};
+```
+
+For auth-gated or app-owned routes, use the injected Think router. The generated
+entry passes it as the fourth argument to your `fetch()` handler:
+
+```typescript
+import { getAgentByName } from "agents";
+
+type ThinkContext = {
+  router: {
+    routeSubAgent(
+      request: Request,
+      parent: { fetch(request: Request): Promise<Response> },
+      options: { parent: string }
+    ): Promise<Response>;
+  };
+};
+
+export default {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+    think?: ThinkContext
+  ) {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/chat" || url.pathname.startsWith("/chat/")) {
+      const user = await requireUser(request);
+      const directory = await getAgentByName(
+        env.AssistantDirectory,
+        user.login
+      );
+
+      if (!think?.router) {
+        return new Response(
+          'Assistant chat routing requires "main": "virtual:think/entry".',
+          { status: 500 }
+        );
+      }
+
+      return think.router.routeSubAgent(request, directory, {
+        parent: "assistant"
+      });
+    }
+
+    return null;
+  }
+};
+```
+
+This keeps authentication and tenancy in your app code while still letting Think
+resolve friendly sub-agent URLs such as `/chat/sub/researcher/chat-1`. If a
+request has a `/sub/...` segment that cannot be resolved for the declared parent,
+`routeSubAgent()` returns `404`; paths without a `/sub/...` segment continue to
+the parent agent.
+
+### React Router Hosts
+
+React Router framework apps can use Think as an additive Vite plugin while
+React Router owns the app routes, loaders, and SSR.
+
+See `examples/think-react-router` for a complete runnable example.
+
+```typescript
+// vite.config.ts
+import { cloudflare } from "@cloudflare/vite-plugin";
+import { reactRouter } from "@react-router/dev/vite";
+import { think } from "@cloudflare/think/vite";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [
+    cloudflare({ viteEnvironment: { name: "ssr" } }),
+    reactRouter(),
+    think({ routePrefix: "/api/agents", allowNonVirtualMain: true })
+  ]
+});
+```
+
+```typescript
+// react-router.config.ts
+import type { Config } from "@react-router/dev/config";
+
+export default {
+  appDirectory: "app",
+  ssr: true,
+  future: {
+    v8_viteEnvironmentApi: true
+  }
+} satisfies Config;
+```
+
+Point `wrangler.jsonc.main` at a normal Worker entry file and make that file a
+tiny Think shim:
+
+```typescript
+// src/worker.ts
+export { default } from "virtual:think/entry";
+export * from "virtual:think/entry";
+```
+
+Then delegate ordinary app requests to React Router from `src/server.ts` and
+return `null` for Think-owned paths:
+
+```typescript
+// src/server.ts
+import { createRequestHandler } from "react-router";
+import type { ThinkAppContext } from "@cloudflare/think/server-entry";
+import type { ServerBuild } from "react-router";
+
+const reactRouterHandler = createRequestHandler(
+  () =>
+    import("virtual:react-router/server-build").then(
+      (mod) => (mod.default ?? mod) as ServerBuild
+    ),
+  import.meta.env.MODE
+);
+
+export default {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+    _think?: ThinkAppContext
+  ) {
+    const url = new URL(request.url);
+    if (url.pathname.startsWith("/api/agents/")) {
+      return null;
+    }
+
+    return reactRouterHandler(request, {
+      cloudflare: {
+        env,
+        ctx
+      }
+    });
+  }
+};
+```
+
+This is still a normal React Router app: `app/routes.ts`, `app/root.tsx`, and
+route modules stay under React Router's conventions. The Worker shim exists so
+Think can keep exporting generated Durable Object classes while the host
+framework owns app rendering.
+
+### TanStack Start Hosts
+
+TanStack Start apps use the same host-framework shape: the Cloudflare Vite plugin
+creates the `ssr` workerd environment, TanStack owns document routing, and Think
+handles its route prefix after the app server returns `null`.
+
+See `examples/think-tanstack-start` for a complete runnable example.
+
+```typescript
+// vite.config.ts
+import { cloudflare } from "@cloudflare/vite-plugin";
+import { tanstackStart } from "@tanstack/react-start/plugin/vite";
+import react from "@vitejs/plugin-react";
+import { think } from "@cloudflare/think/vite";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [
+    cloudflare({ viteEnvironment: { name: "ssr" } }),
+    tanstackStart(),
+    react(),
+    think({ routePrefix: "/api/agents", allowNonVirtualMain: true })
+  ]
+});
+```
+
+Use the same Worker shim:
+
+```typescript
+// src/worker.ts
+export { default } from "virtual:think/entry";
+export * from "virtual:think/entry";
+```
+
+Then delegate ordinary app requests to TanStack Start:
+
+```typescript
+// src/server.ts
+import handler from "@tanstack/react-start/server-entry";
+import type { ThinkAppContext } from "@cloudflare/think/server-entry";
+
+export default {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+    _think?: ThinkAppContext
+  ) {
+    const url = new URL(request.url);
+    if (url.pathname.startsWith("/api/agents/")) {
+      return null;
+    }
+
+    return handler.fetch(request);
+  }
+};
+```
+
+TanStack route modules are also part of the client build. If a route needs
+Cloudflare bindings, access them through a TanStack server function instead of
+importing `cloudflare:workers` into client-executed code.
+
+### Diagnostics
+
+During Vite build/startup, Think reads `wrangler.jsonc` or `wrangler.json`,
+watches Wrangler config files (`wrangler.jsonc`, `wrangler.json`, and
+`wrangler.toml`) plus the `agents/` tree, discovers convention agents, and
+reports framework-specific diagnostics for:
+
+- `wrangler.jsonc.main` values that bypass `virtual:think/entry`,
+- missing Durable Object bindings or migrations for top-level generated classes,
+- missing Worker Loader bindings when colocated skills require one,
+- custom `assets.run_worker_first` values that omit the configured route prefix,
+- duplicate generated class names, agent ids, route ids, or orphan sub-agents.
+
+Platform bindings such as AI, KV, R2, D1, and secrets remain user-owned. Think
+does not infer or silently add those bindings.
+
+`wrangler.toml` is watched so dev servers notice config churn, but Think's
+framework diagnostics currently parse JSON/JSONC Wrangler config. Prefer
+`wrangler.jsonc` for framework apps.
+
+Advanced embedders that intentionally do not use `virtual:think/entry` can opt
+out of the `main` diagnostic with:
+
+```typescript
+think({ allowNonVirtualMain: true });
+```
+
+Use that only when another wrapper still re-exports Think's generated Durable
+Object classes.
+
+### CLI Type Generation
+
+Use `think types` to keep Think-specific TypeScript declarations in sync with the
+discovered manifest:
+
+```bash
+npx @cloudflare/think types
+```
+
+By default, the command only writes Think-owned declarations to `think.d.ts`:
+`virtual:think/entry`, `virtual:think/router`, generated Durable Object exports,
+skill stubs, and the generated Durable Object bindings on `Cloudflare.Env`.
+
+When you also want Wrangler platform declarations, use `--all`. Wrangler flags
+can be passed through after `--`:
+
+```bash
+npx @cloudflare/think types --all -- --env production
+```
+
+With `--all`, Think runs `wrangler types env.d.ts --include-runtime false` before
+generating `think.d.ts`. Pass `--wrangler-env-file` to change Wrangler's output
+path, or pass `-- --include-runtime true` when you intentionally want Wrangler's
+runtime declarations included.
+
+`think types` does not generate an importable Env module. App code can use the
+augmented `Cloudflare.Env` directly, or define its own local alias if it prefers
+imported types.
+
+Use `think types --check` in CI to verify Think-generated files are current
+without modifying the working tree.
+
 ## Messengers
 
 Think agents can receive and reply to messenger webhooks directly. Messenger
@@ -161,7 +536,12 @@ function Chat() {
 }
 ```
 
-### wrangler.jsonc
+### Manual wrangler.jsonc
+
+This manual configuration is for using `Think` directly without the Think Vite
+framework conventions. If you are using `think()` from `@cloudflare/think/vite`,
+keep `main` set to `virtual:think/entry` and use the generated class names shown
+in the framework section above.
 
 ```jsonc
 {
@@ -282,7 +662,8 @@ instructions. A skill source provides a catalog of skill names and descriptions;
 Think adds that catalog to the system prompt and exposes tools the model can use
 when a user task matches a skill.
 
-Bundled skills are usually imported with the Agents Vite plugin:
+Bundled skills are usually imported with the Think Vite plugin, which includes
+the Agent Skills import support:
 
 ```typescript
 import { Think, skills } from "@cloudflare/think";
@@ -331,9 +712,9 @@ warning rather than failing the agent.
 The imported directory should contain one child directory per skill:
 
 ```text
-src/skills/release-notes/SKILL.md
-src/skills/release-notes/scripts/format-release-notes.ts
-src/skills/release-notes/references/style-guide.md
+agents/my-agent/skills/release-notes/SKILL.md
+agents/my-agent/skills/release-notes/scripts/format-release-notes.ts
+agents/my-agent/skills/release-notes/references/style-guide.md
 ```
 
 When skills are available, Think exposes:
@@ -637,6 +1018,8 @@ Think's `this.messages` getter reads directly from Session's tree-structured sto
 | Export                                  | Description                                                   |
 | --------------------------------------- | ------------------------------------------------------------- |
 | `@cloudflare/think`                     | `Think`, `Session`, `Workspace`, `skills` namespace           |
+| `@cloudflare/think/framework`           | Framework manifest discovery and declarative `agent()` helper |
+| `@cloudflare/think/server-entry`        | Framework Worker entry helpers for custom server handlers     |
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
 | `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
 | `@cloudflare/think/workflows`           | `ThinkWorkflow`, `step.prompt()` — Workflow prompts           |
@@ -644,17 +1027,19 @@ Think's `this.messages` getter reads directly from Session's tree-structured sto
 | `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
 | `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
 | `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
+| `@cloudflare/think/vite`                | Think Vite plugin and generated Worker config helpers         |
 
 ## Dependencies
 
 Peer dependencies you provide:
 
-| Package                  | Required | Notes                            |
-| ------------------------ | -------- | -------------------------------- |
-| `agents`                 | yes      | Cloudflare Agents SDK            |
-| `ai`                     | yes      | Vercel AI SDK v6                 |
-| `zod`                    | yes      | Schema validation (v4)           |
-| `@chat-adapter/telegram` | optional | Required for Telegram messengers |
+| Package                  | Required | Notes                                        |
+| ------------------------ | -------- | -------------------------------------------- |
+| `agents`                 | yes      | Cloudflare Agents SDK                        |
+| `ai`                     | yes      | Vercel AI SDK v6                             |
+| `zod`                    | yes      | Schema validation (v4)                       |
+| `@chat-adapter/telegram` | optional | Required for Telegram messengers             |
+| `vite`                   | optional | Required for the Think Vite plugin (`/vite`) |
 
 Bundled with `@cloudflare/think`:
 
@@ -663,6 +1048,7 @@ Bundled with `@cloudflare/think`:
 | `@cloudflare/shell`    | `Workspace` filesystem                                |
 | `@cloudflare/codemode` | Code execution for `createExecuteTool()`              |
 | `just-bash`            | Sandboxed shell for the default workspace `bash` tool |
+| `aywson`               | Wrangler JSON/JSONC parsing for the framework plugin  |
 
 The Agent Skills engine and its script runner live in
 [`agents/skills`](../../packages/agents/AGENTS.md) (so skill scripts pull

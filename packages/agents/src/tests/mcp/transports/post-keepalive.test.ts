@@ -147,6 +147,40 @@ describe("WorkerTransport SSE keepalive (issue #1583)", () => {
       await server.close();
     });
 
+    it("clears an armed GET keepalive when the transport closes", async () => {
+      const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
+      try {
+        const server = createServer();
+        const transport = await setupTransport(server, {
+          sessionIdGenerator: () => "get-session-close",
+          enableJsonResponse: true
+        });
+        await initializeSession(transport);
+        setIntervalSpy.mockClear();
+        clearIntervalSpy.mockClear();
+
+        const response = await transport.handleRequest(
+          new Request("http://localhost/mcp", {
+            method: "GET",
+            headers: {
+              Accept: "text/event-stream",
+              "mcp-session-id": "get-session-close"
+            }
+          })
+        );
+        expect(response.status).toBe(200);
+
+        const intervals = longRunningIntervals();
+        expect(intervals.length).toBeGreaterThanOrEqual(1);
+        expect(intervals[0][1]).toBe(25_000);
+
+        await transport.close();
+        expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        clearIntervalSpy.mockRestore();
+      }
+    });
+
     it("skips the keepalive when eventStore is configured", async () => {
       const server = createServer();
       const transport = await setupTransport(server, {

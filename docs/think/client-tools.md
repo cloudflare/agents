@@ -48,6 +48,41 @@ function Chat() {
 
 The `parameters` field is a JSON Schema object describing the tool's input. The `execute` function runs in the browser.
 
+## Client Tools over the Sub-Agent RPC `chat()` Path
+
+When a parent agent delegates to a Think sub-agent over RPC with `chat()` (rather than the browser WebSocket), there is no WebSocket to carry `clientTools` or to send tool results back. Pass them through `ChatOptions` instead:
+
+```typescript
+await child.chat(message, callback, {
+  signal,
+  clientTools: [
+    {
+      name: "get_user_timezone",
+      description: "Get the caller's timezone",
+      parameters: { type: "object" }
+    }
+  ],
+  onClientToolCall: async ({ toolName, input }) => {
+    // Run the client tool wherever the parent can — return its output.
+    return runClientTool(toolName, input);
+  }
+});
+```
+
+- `clientTools` registers the tool schemas for the turn, exactly like the WebSocket `clientTools` field.
+- `onClientToolCall` executes a client-tool call and returns its output. The model can call a client tool, receive the result, and continue — all within the single `chat()` call.
+
+If you omit `onClientToolCall`, the tools are registered but have no result: the model's call is surfaced through the stream callback and the turn ends with a dangling tool call (the RPC stream callback has no inbound result channel of its own). Supply `onClientToolCall` whenever you want the round trip to complete.
+
+### Behavior notes
+
+- **Recovery:** neither the schemas nor the `onClientToolCall` executor are persisted — they are per-turn only. The executor is a live RPC reference that dies with the isolate, and (unlike the WebSocket path) there is no SPA to replay a `tool-result` after an eviction. So if an eviction interrupts the turn while a client-tool call is mid-flight, chat recovery treats the orphaned call like a server tool: `continueLastTurn`'s transcript repair errors it and the model proceeds. (Persisting the schemas would instead make recovery mistake the orphan for a pending human interaction and park forever.) To re-run cleanly, the parent re-invokes `chat()` with the `clientTools` and `onClientToolCall` again.
+- **Errors:** if `onClientToolCall` throws, the failure is surfaced to the model as a tool error (`output-error`) and the turn continues — it does not crash the turn.
+- **Serialization:** the value returned from `onClientToolCall` becomes the tool output, so it must be JSON-serializable (it travels back over RPC and into the model context).
+- **No approval gate:** RPC client tools execute immediately through `onClientToolCall`. The WebSocket approval flow (`needsApproval`) does not apply on this path — gate execution inside your executor if you need it.
+- **Name precedence:** client tools are merged after server tools, so a client tool that shares a name with a server tool (for example a workspace tool) overrides it for that turn — the same as the WebSocket path.
+- **Abort:** aborting the turn via `signal` stops the loop, but an in-flight `onClientToolCall` is not itself cancelled; the turn ends after the current call resolves.
+
 ## Tool Approval
 
 Tools can require user approval before execution. This works for both server-side and client-side tools.

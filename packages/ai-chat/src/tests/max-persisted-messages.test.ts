@@ -161,6 +161,41 @@ describe("maxPersistedMessages", () => {
     ws.close(1000);
   });
 
+  it("deletes more than 100 excess messages via batched IN deletes", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    // Limit of 5 with 250 persisted messages forces a single enforcement pass
+    // to delete 245 rows — exceeding the SQLite 100 bound-parameter limit and
+    // exercising the batched `DELETE ... WHERE id IN (...)` sub-batching.
+    await agentStub.setMaxPersistedMessages(5);
+
+    const messages: ChatMessage[] = Array.from({ length: 250 }, (_, i) => ({
+      id: `msg-bulk-${i}`,
+      role: "user" as const,
+      parts: [{ type: "text" as const, text: `Message ${i}` }]
+    }));
+
+    await agentStub.persistMessages(messages);
+
+    const count = await agentStub.getMessageCount();
+    expect(count).toBe(5);
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(persisted.map((m) => m.id)).toEqual([
+      "msg-bulk-245",
+      "msg-bulk-246",
+      "msg-bulk-247",
+      "msg-bulk-248",
+      "msg-bulk-249"
+    ]);
+
+    ws.close(1000);
+  });
+
   it("can be disabled by setting to null", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

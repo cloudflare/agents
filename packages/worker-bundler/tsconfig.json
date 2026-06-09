@@ -1,4 +1,4 @@
 {
-  "extends": "agents/tsconfig",
+  "extends": "../agents/agents.tsconfig.json",
   "exclude": ["src/tests/**/*.ts"]
 }

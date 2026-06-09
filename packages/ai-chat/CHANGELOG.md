@@ -1,5 +1,37 @@
 # @cloudflare/ai-chat
 
+## 0.8.4
+
+### Patch Changes
+
+- [#1690](https://github.com/cloudflare/agents/pull/1690) [`f6a8bc4`](https://github.com/cloudflare/agents/commit/f6a8bc4a3f1836e214cc9ac984d3bfc2ba0537b2) Thanks [@threepointone](https://github.com/threepointone)! - Surface a terminal chat-recovery outcome to clients that reconnect after it ended ([#1645](https://github.com/cloudflare/agents/issues/1645)).
+
+  When a durable chat turn exhausted recovery (e.g. during a deploy/reconnect storm) while no client was connected, the terminal error was only broadcast transiently, so a client that connected afterward never learned the turn failed and the conversation appeared frozen. The outcome is now persisted durably and replayed over the resume handshake on the next reconnect — `STREAM_RESUMING` → `STREAM_RESUME_ACK` → terminal error frame on the resumed stream — which is the only path that surfaces as `useAgentChat`'s `error` on the real client. (A bare replayed frame is dropped by the client because it never reaches a transport stream reader.) The record is cleared once a later turn supersedes it — on a new client request, and also when any later turn ends in a non-error outcome (completed or aborted, including turns driven server-side via `saveMessages`), so a stale exhaustion can never replay after the conversation has recovered. Terminal non-exhaustion errors (e.g. a provider 500) are now durably recorded too, not just transiently broadcast, so they also replay to a reconnecting client.
+
+  `@cloudflare/think` previously recorded the outcome durably but only replayed it as a bare on-connect frame (dropped by the client); it now uses the same resume-handshake delivery.
+
+- [#1693](https://github.com/cloudflare/agents/pull/1693) [`6496c80`](https://github.com/cloudflare/agents/commit/6496c802d0334dff2114e21a6149acc6f3d30fe5) Thanks [@threepointone](https://github.com/threepointone)! - Fix `AIChatAgent` orphaned-stream recovery merging a new assistant turn into the previous assistant message ([#1691](https://github.com/cloudflare/agents/issues/1691)).
+
+  When a stream was interrupted before its final assistant message was persisted (Durable Object hibernation, deploy churn, isolate restart, reconnect), orphan recovery reconstructed the message from stored chunks. If those chunks carried no provider `start.messageId` — the common case — recovery fell back to the _last_ assistant message in history. That is correct for a continuation, but wrong for a normal new turn after a later user message: the recovered chunks for the new turn were appended onto the previous assistant message, corrupting both the persisted transcript and future model context.
+
+  The assistant message id allocated when a stream starts is now persisted in the resumable-stream metadata (`ResumableStream.start()` records `message_id`). When the reconstructed chunks carry no provider `start.messageId` — the common case, and the one that triggered the bug — orphan recovery now uses this stored id instead of the last-assistant fallback, so a new turn becomes its own message and a continuation still merges into the message it was extending (it stored the cloned last-assistant id). A provider `start.messageId`, when present, still wins, matching the live path which adopts it for new turns. Stream rows written before this release have no stored id and keep the previous behavior (provider id if present, otherwise the last assistant message). The metadata migration adds a single column, guarded by a schema check so it runs only once.
+
+  This also fixes two related variants of the same corruption on the durable (`chatRecovery`) continuation path:
+  - When a stream was persisted early (e.g. at a tool-approval pause) and then recovered, the merge re-appended chunks it had already stored, leaving two parts for the same tool call. Recovery now skips reconstructed parts whose `toolCallId` already exists on the message.
+  - When a new turn was interrupted before any assistant part was persisted — either because it was cut off in the window before the first chunk materialized, or because `onChatRecovery` returned `{ persist: false }` — recovery would "continue" it by cloning the previous assistant message, merging the new turn into it. Recovery now detects that the conversation leaf is still the user message (no partial to continue) and re-runs the turn fresh, so it becomes its own message.
+
+  `@cloudflare/think` is unaffected — its session-tree recovery already allocates a distinct message id per orphan and never falls back to the last assistant message.
+
+## 0.8.3
+
+### Patch Changes
+
+- [#1686](https://github.com/cloudflare/agents/pull/1686) [`1e49880`](https://github.com/cloudflare/agents/commit/1e498803fe26970aa264678d5ae3a2c96dd28258) Thanks [@threepointone](https://github.com/threepointone)! - Batch and pack chat-persistence SQLite writes to reduce rows written and round-trips.
+  - `agents`: `ResumableStream` now **packs** each buffered group of stream chunks into a single SQLite row (a JSON array of chunk bodies) instead of writing one row per chunk. Single-chunk and large-chunk segments are stored unwrapped, and a per-segment byte cap keeps rows within the 2 MB SQLite row limit. This cuts chunk rows written / stored / scanned-on-replay by up to ~10×. Reads (replay, orphan reconstruction, `getStreamChunks`) transparently unpack both packed segments and legacy per-chunk rows, so existing stored data keeps working. Adds shared `buildInClauseStrings` and `MAX_BOUND_PARAMS` helpers exported from `agents/chat`.
+  - `@cloudflare/ai-chat`: message cleanup (stale-row pruning and `maxPersistedMessages` enforcement) previously issued one `DELETE` per row in a loop; it now deletes rows in batched `DELETE ... WHERE id IN (...)` queries (capped at 100 bound parameters per query).
+  - `@cloudflare/think`: `deleteSubmissions()` cleanup previously issued one `DELETE` per terminal submission (up to 500 per call); it now deletes rows in batched `DELETE ... WHERE submission_id IN (...)` queries.
+  - `@cloudflare/ai-chat` & `@cloudflare/think`: chat-recovery incident TTL sweep previously deleted each stale incident with a separate awaited `storage.delete(key)` (which also defeats Durable Object write-coalescing); it now deletes incidents in batched `storage.delete(keys)` calls (up to 128 keys per call).
+
 ## 0.8.2
 
 ### Patch Changes

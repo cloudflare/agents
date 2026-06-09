@@ -1,5 +1,15 @@
 # @cloudflare/shell
 
+## 0.3.9
+
+### Patch Changes
+
+- [#1613](https://github.com/cloudflare/agents/pull/1613) [`124a47a`](https://github.com/cloudflare/agents/commit/124a47a91c8a9db0bcf08ab931a5dd99a2fac663) Thanks [@threepointone](https://github.com/threepointone)! - Make workspace parent directory creation safe under concurrent writes. When two
+  writes create files in the same missing directory at the same time, the
+  filesystem now creates the implicit parent idempotently without surfacing a
+  SQLite primary-key constraint error, while still emitting a single directory
+  create event.
+
 ## 0.3.8
 
 ### Patch Changes

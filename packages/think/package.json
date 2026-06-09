@@ -9,7 +9,7 @@
     "tools"
   ],
   "type": "module",
-  "version": "0.8.3",
+  "version": "0.8.8",
   "license": "MIT",
   "repository": {
     "directory": "packages/think",
@@ -20,14 +20,24 @@
   "bugs": {
     "url": "https://github.com/cloudflare/agents/issues"
   },
+  "bin": {
+    "think": "dist/cli/index.js"
+  },
   "dependencies": {
     "@cloudflare/codemode": ">=0.3.8 <1.0.0",
     "@cloudflare/shell": ">=0.3.8 <1.0.0",
+    "aywson": "^0.0.16",
     "chat": "^4.30.0",
-    "just-bash": "^3.0.1"
+    "create-think": "workspace:*",
+    "just-bash": "^3.0.1",
+    "smol-toml": "^1.6.1",
+    "yargs": "^18.0.0"
   },
   "devDependencies": {
+    "@ai-sdk/anthropic": "^3.0.81",
+    "@ai-sdk/openai": "^3.0.67",
     "@chat-adapter/telegram": "^4.30.0",
+    "@types/yargs": "^17.0.35",
     "ai": "^6.0.196",
     "zod": "^4.4.3"
   },
@@ -35,10 +45,14 @@
     "@chat-adapter/telegram": "^4.29.0",
     "agents": ">=0.14.0 <1.0.0",
     "ai": "^6.0.182",
+    "vite": ">=6 <9",
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
     "@chat-adapter/telegram": {
+      "optional": true
+    },
+    "vite": {
       "optional": true
     }
   },
@@ -54,6 +68,14 @@
     "./workflows": {
       "types": "./dist/workflows.d.ts",
       "import": "./dist/workflows.js"
+    },
+    "./framework": {
+      "types": "./dist/framework/index.d.ts",
+      "import": "./dist/framework/index.js"
+    },
+    "./server-entry": {
+      "types": "./dist/server-entry.d.ts",
+      "import": "./dist/server-entry.js"
     },
     "./messengers": {
       "types": "./dist/messengers/index.d.ts",
@@ -82,6 +104,10 @@
     "./tools/sandbox": {
       "types": "./dist/tools/sandbox.d.ts",
       "import": "./dist/tools/sandbox.js"
+    },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "import": "./dist/vite.js"
     }
   },
   "files": [
@@ -90,8 +116,11 @@
   ],
   "scripts": {
     "build": "tsx ./scripts/build.ts",
-    "test": "vitest --run -c src/tests/vitest.config.ts",
+    "test": "npm run test:workers && npm run test:generated-entry && npm run test:vite && npm run test:cli",
+    "test:cli": "vitest --run -c src/cli-tests/vitest.config.ts",
     "test:workers": "vitest --run -c src/tests/vitest.config.ts",
+    "test:generated-entry": "vitest --run -c src/tests/generated-entry/vitest.config.ts",
+    "test:vite": "vitest --run src/vite-tests",
     "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts"
   }
 }

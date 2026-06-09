@@ -603,6 +603,28 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  /**
+   * Sets a per-turn `experimental_transform` that upper-cases every `text-delta`
+   * part flowing through the stream. The transform is constructed inside the DO
+   * (it's a function and can't cross the RPC boundary). A test asserts the
+   * persisted assistant text is upper-cased, proving the transform was forwarded
+   * to `streamText` and applied. Regression for #1714.
+   */
+  async setTurnConfigTransform(): Promise<void> {
+    this._turnConfigOverride = {
+      experimental_transform: () =>
+        new TransformStream({
+          transform(chunk, controller) {
+            if (chunk.type === "text-delta") {
+              controller.enqueue({ ...chunk, text: chunk.text.toUpperCase() });
+            } else {
+              controller.enqueue(chunk);
+            }
+          }
+        })
+    };
+  }
+
   override async beforeStep(
     ctx: PrepareStepContext
   ): Promise<StepConfig | void> {
@@ -814,6 +836,36 @@ export class ThinkTestAgent extends Think {
   /** Pair with `testStartResumableStream` — clean up the simulated stream. */
   async testCompleteResumableStream(streamId: string): Promise<void> {
     this._resumableStream.complete(streamId);
+  }
+
+  /**
+   * Persist a durable terminal record exactly as recovery exhaustion does
+   * (#1645), so a test can drive the reconnect path without a full
+   * deploy-churn exhaustion.
+   */
+  async recordTerminalForTest(requestId: string, body: string): Promise<void> {
+    await (
+      this as unknown as {
+        _recordTerminalChatStatus: (
+          status: "interrupted",
+          requestId: string,
+          body: string
+        ) => Promise<void>;
+      }
+    )._recordTerminalChatStatus("interrupted", requestId, body);
+  }
+
+  /** Read the durable terminal record (#1645) so a test can assert it is
+   *  cleared when the conversation is cleared. */
+  async getPendingChatTerminalForTest(): Promise<{
+    requestId: string;
+    body: string;
+  } | null> {
+    return (
+      (await this.ctx.storage.get<{ requestId: string; body: string }>(
+        "cf:chat:last-terminal"
+      )) ?? null
+    );
   }
 
   async getLatestStreamStatusForTest(): Promise<string | null> {
@@ -2819,6 +2871,59 @@ function createToolCallingMockModel(): LanguageModel {
   } as LanguageModel;
 }
 
+// Emits a single tool call for whichever tool the turn forces via `toolChoice`
+// (or the first `think_final_answer*` tool advertised), with the configured
+// arguments. Mirrors how a real model terminates a structured workflow turn by
+// calling the synthetic final-answer tool — exercises the #1685 capture path
+// without a network round-trip.
+function createFinalAnswerMockModel(args: unknown): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-final-answer",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream(options: Record<string, unknown>) {
+      const opts = options as {
+        toolChoice?: { type?: string; toolName?: string };
+        tools?: Array<{ name?: string }>;
+      };
+      const toolName =
+        opts.toolChoice?.type === "tool" && opts.toolChoice.toolName
+          ? opts.toolChoice.toolName
+          : ((opts.tools ?? [])
+              .map((t) => t.name)
+              .find((n) => n?.startsWith("think_final_answer")) ??
+            "think_final_answer");
+      const input = JSON.stringify(args);
+      const id = "final-answer-call";
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "tool-input-start", id, toolName });
+          controller.enqueue({ type: "tool-input-delta", id, delta: input });
+          controller.enqueue({ type: "tool-input-end", id });
+          controller.enqueue({
+            type: "tool-call",
+            toolCallId: id,
+            toolName,
+            input
+          });
+          controller.enqueue({
+            type: "finish",
+            finishReason: v3FinishReason("tool-calls"),
+            usage: v3Usage(10, 5)
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
 export class ThinkToolsTestAgent extends Think {
   override maxSteps = 3;
 
@@ -3031,6 +3136,7 @@ export class ThinkProgrammaticTestAgent extends Think {
   private _throwBeforeTurnError: string | null = null;
   private _submissionStatusDelayMs = 0;
   private _programmaticResponse = "Programmatic response";
+  private _finalAnswerResponse: unknown = undefined;
   private _inBandErrorResponse: {
     errorText: string;
     textChunks: string[];
@@ -3042,6 +3148,9 @@ export class ThinkProgrammaticTestAgent extends Think {
         this._inBandErrorResponse.errorText,
         this._inBandErrorResponse.textChunks
       );
+    }
+    if (this._finalAnswerResponse !== undefined) {
+      return createFinalAnswerMockModel(this._finalAnswerResponse);
     }
     if (this._delayedChunks) {
       return createDelayedMultiChunkMockModel(
@@ -3165,6 +3274,23 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async setProgrammaticResponseForTest(response: string): Promise<void> {
     this._programmaticResponse = response;
+  }
+
+  // Make the next turn(s) terminate by calling the structured-output
+  // `think_final_answer` tool with `args` as its arguments (issue #1685).
+  async setFinalAnswerResponseForTest(args: unknown): Promise<void> {
+    this._finalAnswerResponse = args;
+  }
+
+  // Drive the assistant-message persistence chokepoint directly. Used to
+  // simulate the recovery re-persist path (which runs outside an active turn)
+  // and assert the internal `think_final_answer` tool is stripped statelessly.
+  async persistAssistantMessageForTest(msg: UIMessage): Promise<void> {
+    await (
+      this as unknown as {
+        _persistAssistantMessage: (m: UIMessage) => Promise<void>;
+      }
+    )._persistAssistantMessage(msg);
   }
 
   async setLastBodyForTest(body: Record<string, unknown>): Promise<void> {
@@ -3979,6 +4105,25 @@ export class ThinkScheduledTasksTestAgent extends ThinkProgrammaticTestAgent {
     const child = await this.subAgent(ThinkScheduledTasksTestAgent, name);
     return child.listSchedulesForTest();
   }
+
+  // ── #1703: alarm() must not arm a keepAlive heartbeat when there are
+  // no pending workflow notifications, otherwise the DO fires every 30s
+  // forever and never hibernates.
+  async getKeepAliveRefsForTest(): Promise<number> {
+    return (this as unknown as { _keepAliveRefs: number })._keepAliveRefs;
+  }
+
+  async runAlarmForTest(): Promise<{
+    keepAliveRefs: number;
+    scheduledAlarm: number | null;
+  }> {
+    await this.alarm();
+    return {
+      keepAliveRefs: (this as unknown as { _keepAliveRefs: number })
+        ._keepAliveRefs,
+      scheduledAlarm: await this.ctx.storage.getAlarm()
+    };
+  }
 }
 
 // ── ThinkAsyncHookTestAgent ──────────────────────────────────
@@ -4501,6 +4646,20 @@ export class ThinkRecoveryTestAgent extends Think {
     return self._buildIdleConnectMessages();
   }
 
+  /** The durable terminal record (#1645) the resume handshake replays. A
+   *  failed turn persists this so a client that reconnects after the turn ended
+   *  is surfaced the outcome (delivery itself is over the resume handshake). */
+  async getPendingChatTerminalForTest(): Promise<{
+    requestId: string;
+    body: string;
+  } | null> {
+    return (
+      (await this.ctx.storage.get<{ requestId: string; body: string }>(
+        "cf:chat:last-terminal"
+      )) ?? null
+    );
+  }
+
   async setRecoveryShouldThrowForTest(shouldThrow: boolean): Promise<void> {
     this._recoveryShouldThrow = shouldThrow;
   }
@@ -4845,12 +5004,15 @@ export class ThinkRecoveryTestAgent extends Think {
     const stream = streams[0];
     if (!stream) return null;
 
-    const chunks = this.sql<{ body: string }>`
-      SELECT body
-      FROM cf_ai_chat_stream_chunks
-      WHERE stream_id = ${stream.id}
-      ORDER BY chunk_index ASC
-    `;
+    // Use ResumableStream.getStreamChunks so packed segment rows are unpacked
+    // into individual chunk bodies (matching production replay/reconstruction).
+    const chunks = (
+      this as unknown as {
+        _resumableStream: {
+          getStreamChunks(id: string): Array<{ body: string }>;
+        };
+      }
+    )._resumableStream.getStreamChunks(stream.id);
 
     const text = chunks
       .map((chunk) => {
@@ -4997,6 +5159,103 @@ export class ThinkRecoveryTestAgent extends Think {
       WHERE callback = ${callback}
     `;
     return rows[0]?.count ?? 0;
+  }
+
+  /** Insert a stream-metadata row aged `ageMs` in the past (for cleanup tests). */
+  async insertAgedStreamForTest(
+    streamId: string,
+    requestId: string,
+    status: "streaming" | "completed" | "error",
+    ageMs: number
+  ): Promise<void> {
+    const createdAt = Date.now() - ageMs;
+    const completedAt = status === "streaming" ? null : createdAt + 1000;
+    this.sql`
+      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at, completed_at)
+      VALUES (${streamId}, ${requestId}, ${status}, ${createdAt}, ${completedAt})
+    `;
+  }
+
+  /** Status of a single stream-metadata row, or null if absent. */
+  async getStreamStatusForTest(streamId: string): Promise<string | null> {
+    const rows = this.sql<{ status: string }>`
+      SELECT status FROM cf_ai_chat_stream_metadata WHERE id = ${streamId}
+    `;
+    return rows[0]?.status ?? null;
+  }
+
+  /** Append a chunk to a stream dated `ageMs` in the past (last-activity sweep). */
+  async insertStreamChunkForTest(
+    streamId: string,
+    ageMs: number
+  ): Promise<void> {
+    (
+      this as unknown as {
+        _resumableStream: {
+          insertChunkAt(id: string, body: string, ageMs: number): void;
+        };
+      }
+    )._resumableStream.insertChunkAt(streamId, '{"type":"text"}', ageMs);
+  }
+
+  /** Start a stream via the cleanup-arming wrapper (without ever finishing it). */
+  async startStreamForTest(requestId: string): Promise<string> {
+    return (
+      this as unknown as {
+        _startResumableStream(requestId: string): string;
+      }
+    )._startResumableStream(requestId);
+  }
+
+  /** Invoke the alarm-driven cleanup callback directly. */
+  async runStreamCleanupForTest(): Promise<void> {
+    await (
+      this as unknown as { _cleanupStreamBuffers(): Promise<void> }
+    )._cleanupStreamBuffers();
+  }
+
+  /** Finish a stream via the cleanup-arming wrapper (mirrors a real turn end). */
+  async completeStreamForTest(streamId: string): Promise<void> {
+    (
+      this as unknown as { _completeResumableStream(id: string): void }
+    )._completeResumableStream(streamId);
+  }
+
+  /** Arm the cleanup alarm without finishing a stream (leaves no new buffer). */
+  async armStreamCleanupForTest(): Promise<void> {
+    await (
+      this as unknown as { _ensureStreamCleanupScheduled(): Promise<void> }
+    )._ensureStreamCleanupScheduled();
+  }
+
+  /**
+   * The delay (seconds) of the pending cleanup schedule, or null if none.
+   * Locks the arming interval (STREAM_CLEANUP_DELAY_SECONDS) so a regression
+   * that lengthens it back toward the old 24h leak window is caught.
+   */
+  async streamCleanupScheduleDelaySecondsForTest(): Promise<number | null> {
+    const rows = this.sql<{ delayInSeconds: number | null }>`
+      SELECT delayInSeconds
+      FROM cf_agents_schedules
+      WHERE callback = '_cleanupStreamBuffers'
+      LIMIT 1
+    `;
+    return rows[0]?.delayInSeconds ?? null;
+  }
+
+  /**
+   * Backdate any pending cleanup schedule so it is due, then run the REAL
+   * `alarm()` handler. This exercises the production path where `alarm()`
+   * deletes the fired one-shot row after the callback returns — so a re-arm
+   * must create a fresh row to survive (the idempotent-reschedule footgun).
+   */
+  async fireDueCleanupAlarmForTest(): Promise<void> {
+    this.sql`
+      UPDATE cf_agents_schedules
+      SET time = ${Math.floor(Date.now() / 1000) - 1}
+      WHERE callback = '_cleanupStreamBuffers'
+    `;
+    await this.alarm();
   }
 
   async insertInterruptedFiber(

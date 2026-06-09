@@ -2276,26 +2276,20 @@ describe("Think — onChatRecovery", () => {
     });
 
     // On (re)connect, the client must learn the turn failed instead of seeing
-    // only the current messages with no terminal signal (frozen UI).
-    const onConnect = (await agent.getIdleConnectMessagesForTest()) as Array<{
-      type: string;
-      id?: string;
-      error?: boolean;
-      done?: boolean;
-    }>;
-    const terminal = onConnect.find((m) => m.error === true && m.done === true);
-    expect(terminal).toBeTruthy();
-    expect(terminal?.id).toBe("r-fail");
+    // only the current messages with no terminal signal (frozen UI). The
+    // outcome is persisted durably and surfaced over the resume handshake (the
+    // raw on-connect path is dropped by the client), so assert the durable
+    // record the handshake replays.
+    expect(await agent.getPendingChatTerminalForTest()).toMatchObject({
+      requestId: "r-fail"
+    });
 
     // A subsequent completed turn resolves it — no stale error replayed.
     await agent.fireResponseHookForTest({
       requestId: "r-ok",
       status: "completed"
     });
-    const afterOk = (await agent.getIdleConnectMessagesForTest()) as Array<{
-      error?: boolean;
-    }>;
-    expect(afterOk.some((m) => m.error === true)).toBe(false);
+    expect(await agent.getPendingChatTerminalForTest()).toBeNull();
   });
 
   it("broadcasts + hydrates a 'recovering…' status, cleared on terminal (#1620)", async () => {
@@ -2360,15 +2354,9 @@ describe("Think — onChatRecovery", () => {
       error: "pre-stream boom"
     });
 
-    const onConnect = (await agent.getIdleConnectMessagesForTest()) as Array<{
-      id?: string;
-      body?: string;
-      error?: boolean;
-      done?: boolean;
-    }>;
-    const terminal = onConnect.find((m) => m.error === true && m.done === true);
-    expect(terminal).toBeTruthy();
-    expect(terminal?.id).toBe("r-prestream");
+    // Persisted durably and surfaced over the resume handshake on reconnect.
+    const terminal = await agent.getPendingChatTerminalForTest();
+    expect(terminal?.requestId).toBe("r-prestream");
     expect(terminal?.body).toContain("pre-stream boom");
   });
 
@@ -3283,12 +3271,7 @@ describe("Think — onChatRecovery", () => {
     // Disabling recovery abandons the turn with no superseding turn, so a
     // reconnecting client must see a terminal error rather than a frozen,
     // half-streamed turn (unlike a benign `conversation_changed` skip).
-    const onConnect = (await agent.getIdleConnectMessagesForTest()) as Array<{
-      body?: string;
-      error?: boolean;
-      done?: boolean;
-    }>;
-    const terminal = onConnect.find((m) => m.error === true && m.done === true);
+    const terminal = await agent.getPendingChatTerminalForTest();
     expect(terminal).toBeTruthy();
     expect(terminal?.body).toContain("chat recovery was disabled");
   });
@@ -3734,14 +3717,11 @@ describe("Think — onChatRecovery", () => {
     expect(exhausted[0].reason).toBe("stable_timeout");
     expect(exhausted[0].recoveryKind).toBe("continue");
     expect(exhausted[0].terminalMessage).toBe("the assistant gave up");
-    // The terminal banner is persisted so a reconnecting client isn't frozen.
-    const onConnect = (await agent.getIdleConnectMessagesForTest()) as Array<{
-      body?: string;
-      error?: boolean;
-      done?: boolean;
-    }>;
-    const terminal = onConnect.find((m) => m.error === true && m.done === true);
-    expect(terminal?.body).toBe("the assistant gave up");
+    // The terminal banner is persisted so a reconnecting client isn't frozen
+    // (delivered over the resume handshake).
+    expect((await agent.getPendingChatTerminalForTest())?.body).toBe(
+      "the assistant gave up"
+    );
   });
 
   it("exhausts via onExhausted once the stable-state retry budget is spent", async () => {
@@ -3785,13 +3765,9 @@ describe("Think — onChatRecovery", () => {
     expect(exhausted).toHaveLength(1);
     expect(exhausted[0].reason).toBe("stable_timeout");
     expect(exhausted[0].recoveryKind).toBe("retry");
-    const onConnect = (await agent.getIdleConnectMessagesForTest()) as Array<{
-      body?: string;
-      error?: boolean;
-      done?: boolean;
-    }>;
-    const terminal = onConnect.find((m) => m.error === true && m.done === true);
-    expect(terminal?.body).toBe("retry gave up");
+    expect((await agent.getPendingChatTerminalForTest())?.body).toBe(
+      "retry gave up"
+    );
   });
 
   it("terminalizes a stable-state give-up even when the incident record is missing (silent-drop guard)", async () => {
@@ -3826,13 +3802,9 @@ describe("Think — onChatRecovery", () => {
     expect(exhausted).toHaveLength(1);
     expect(exhausted[0].reason).toBe("stable_timeout");
     expect(exhausted[0].recoveryRootRequestId).toBe("root-MISS");
-    const onConnect = (await agent.getIdleConnectMessagesForTest()) as Array<{
-      body?: string;
-      error?: boolean;
-      done?: boolean;
-    }>;
-    const terminal = onConnect.find((m) => m.error === true && m.done === true);
-    expect(terminal?.body).toBe("lost incident gave up");
+    expect((await agent.getPendingChatTerminalForTest())?.body).toBe(
+      "lost incident gave up"
+    );
   });
 
   it("terminalizes a stable-state give-up with no incidentId at all", async () => {

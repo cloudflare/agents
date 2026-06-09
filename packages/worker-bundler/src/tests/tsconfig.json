@@ -1,5 +1,5 @@
 {
-  "extends": "agents/tsconfig",
+  "extends": "../../../agents/agents.tsconfig.json",
   "compilerOptions": {
     "types": [
       "@cloudflare/workers-types",

@@ -27,6 +27,35 @@ export class MyAgent extends Think<Env> {
 
 That's it. Think handles the WebSocket chat protocol, message persistence, the agentic loop, message sanitization, stream resumption, client tool support, and workspace file tools. Connect from the browser with `useAgentChat` from `@cloudflare/ai-chat`.
 
+## Think framework
+
+The Think Vite plugin can generate the Worker entry, stable Durable Object
+exports, friendly route helpers, and inferred Worker config from an `agents/`
+directory:
+
+```ts
+import { cloudflare } from "@cloudflare/vite-plugin";
+import { think } from "@cloudflare/think/vite";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [think(), cloudflare()]
+});
+```
+
+Use `main: "virtual:think/entry"` in framework projects. Top-level agents under
+`agents/` get generated Durable Object bindings and migrations; nested
+`agents/*/agents/*` entries are facet exports for `ctx.exports` and do not need
+production Wrangler bindings or migrations. Apps with auth or custom routing can
+add `src/server.ts`; the generated entry still wraps it and injects
+`think.router` for manifest-aware routing.
+
+The framework supports one sub-agent layer today. If you need nested sub-agents,
+please reach out with your use case so we can design that model deliberately.
+
+See the full Think framework docs in `docs/think/index.md` for conventions,
+custom server handlers, diagnostics, and route-prefix configuration.
+
 ## Messengers
 
 Think can own messenger ingress directly. Declare providers with
@@ -296,12 +325,15 @@ Script execution requires a Worker Loader binding:
 | Export                                  | Description                                                   |
 | --------------------------------------- | ------------------------------------------------------------- |
 | `@cloudflare/think`                     | `Think`, `Session`, `Workspace` — main class + re-exports     |
+| `@cloudflare/think/framework`           | Framework manifest discovery and declarative `agent()` helper |
+| `@cloudflare/think/server-entry`        | Framework Worker entry helpers for custom server handlers     |
 | `@cloudflare/think/messengers`          | Messenger contracts, Chat SDK bridge, state agent, delivery   |
 | `@cloudflare/think/messengers/telegram` | Telegram messenger provider and delivery helpers              |
 | `@cloudflare/think/tools/workspace`     | `createWorkspaceTools()` — for custom storage backends        |
 | `@cloudflare/think/tools/execute`       | `createExecuteTool()` — sandboxed code execution via codemode |
 | `@cloudflare/think/tools/extensions`    | `createExtensionTools()` — LLM-driven extension loading       |
 | `@cloudflare/think/extensions`          | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
+| `@cloudflare/think/vite`                | Think Vite plugin and generated Worker config helpers         |
 
 ## Think
 

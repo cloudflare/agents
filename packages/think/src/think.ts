@@ -95,10 +95,11 @@ import type {
 } from "ai";
 import {
   convertToModelMessages,
+  hasToolCall,
   jsonSchema,
-  Output,
   stepCountIs,
-  streamText
+  streamText,
+  tool
 } from "ai";
 import * as skills from "agents/skills";
 import { SkillRegistry } from "agents/skills";
@@ -151,11 +152,14 @@ import {
   resolveToolMergeId,
   createChatFiberSnapshot,
   unwrapChatFiberSnapshot,
-  wrapChatFiberSnapshot
+  wrapChatFiberSnapshot,
+  MAX_BOUND_PARAMS,
+  buildInClauseStrings
 } from "agents/chat";
 import type {
   StreamChunkData,
   ClientToolSchema,
+  ClientToolExecutor,
   MessagePart,
   SubmitConcurrencyDecision,
   ChatFiberSnapshot
@@ -697,6 +701,9 @@ const DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE =
 // Incidents that have not seen a new attempt within this window are assumed
 // abandoned and swept so durable storage does not grow without bound.
 const CHAT_RECOVERY_INCIDENT_TTL_MS = 60 * 60 * 1000;
+// Max keys per Durable Object KV `delete([...])` call.
+// See https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
+const KV_DELETE_MAX_KEYS = 128;
 // PRIMARY recovery bound (#1637): seal an incident that has made no forward
 // progress for this long. Keyed to `lastProgressAt`, which resets on every
 // progress-bearing attempt — so a turn that keeps producing content survives
@@ -722,6 +729,16 @@ const CHAT_RECOVERING_FLAG_TTL_MS = 15 * 60 * 1000;
 // ANY restart always bumps — guaranteeing every recovery attempt that observes
 // child output registers forward progress.
 const AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS = 5_000;
+
+// How far ahead to schedule the resumable-stream buffer cleanup alarm. Set to
+// ResumableStream's short completion-grace window (COMPLETED_RETENTION_MS, 10m)
+// so a finished buffer is reclaimed promptly. The re-arm-while-reclaimable loop
+// (see _cleanupStreamBuffers) revisits any longer-lived rows — e.g. an
+// abandoned in-flight buffer on its 1h window — by waking again each interval
+// until they age out, then stops. Driving cleanup from an alarm (rather than
+// only piggybacking on the next stream completion) ensures idle/one-off chat
+// DOs still reclaim their buffers without waking forever (#1706).
+const STREAM_CLEANUP_DELAY_SECONDS = 10 * 60;
 
 // Ephemeral user message appended when a model request would otherwise end in
 // an assistant message (see `ensureValidContinueCheckpoint`).
@@ -821,6 +838,28 @@ export interface StreamableResult {
  */
 export interface ChatOptions {
   signal?: AbortSignal;
+  /**
+   * Client-defined tool schemas to expose to the model for this turn, mirroring
+   * the `clientTools` carried over the WebSocket chat protocol. Use this when a
+   * parent agent delegates to a Think sub-agent over RPC but the sub-agent still
+   * needs access to tools the client (or parent) defines at runtime.
+   *
+   * On their own these are execute-less — the model's call surfaces as a tool
+   * call through the stream callback. Provide {@link ChatOptions.onClientToolCall}
+   * to also resolve those calls inline so the turn can continue to completion.
+   */
+  clientTools?: ClientToolSchema[];
+  /**
+   * Executes a client tool call and returns its output, completing the
+   * round trip for {@link ChatOptions.clientTools} within the same turn.
+   *
+   * Without this, a client-tool call has no result and the turn ends with a
+   * dangling tool call (the RPC stream callback has no inbound result channel).
+   * With it, the model can call a client tool, receive the result, and keep
+   * going — the same multi-step behavior the WebSocket path gets from
+   * `cf_agent_tool_result` messages.
+   */
+  onClientToolCall?: ClientToolExecutor;
 }
 
 type AgentToolChildRunStatus =
@@ -1013,6 +1052,50 @@ type ThinkWorkflowPromptContext = {
 
 const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
 
+/**
+ * Reserved name for the synthetic tool a workflow `step.prompt` turn uses to
+ * deliver its structured final answer. The agent runs a full multi-step,
+ * tool-using turn and ends it by calling this tool with arguments matching the
+ * requested schema — exactly the way a sub-agent returns a result.
+ *
+ * Why a tool instead of the AI SDK `output`/`response_format` path: streaming a
+ * JSON Schema `response_format` is rejected by some providers (Workers AI
+ * returns `AiError 5023: JSON Schema mode is not supported with stream mode`),
+ * whereas plain tool-calling streams on every provider. Capturing the tool
+ * call's INPUT as the result keeps Think's single streaming engine intact
+ * (persistence, recovery, resumable streams) and works uniformly across
+ * Workers AI, OpenAI, and Anthropic.
+ *
+ * The name is namespaced to avoid clashing with user tools; if a user tool
+ * already uses it, the turn picks a suffixed variant (see `_handleTurn`).
+ */
+const THINK_FINAL_ANSWER_TOOL_NAME = "think_final_answer";
+
+/**
+ * Whether `name` is (or is a collision-suffixed variant of) the reserved
+ * structured-output final-answer tool. Used to strip the internal tool's parts
+ * from persisted assistant messages regardless of which per-turn name was used.
+ */
+function isThinkFinalAnswerToolName(name: string): boolean {
+  return (
+    name === THINK_FINAL_ANSWER_TOOL_NAME ||
+    name.startsWith(`${THINK_FINAL_ANSWER_TOOL_NAME}_`)
+  );
+}
+
+/**
+ * Build the system-prompt instruction that tells the model to terminate a
+ * structured workflow turn by calling the given final-answer tool.
+ */
+function thinkFinalAnswerInstruction(toolName: string): string {
+  return (
+    "When you have everything you need to answer, you MUST call the " +
+    `\`${toolName}\` tool exactly once with arguments that match the required ` +
+    "schema. Do not write the final answer as plain text — the " +
+    `\`${toolName}\` tool call IS the answer and ends the task.`
+  );
+}
+
 export type ThinkSubmissionInspection = {
   submissionId: string;
   idempotencyKey?: string;
@@ -1107,6 +1190,13 @@ export interface TurnInput {
   signal?: AbortSignal;
   /** Client-provided tool schemas for dynamic tool registration. */
   clientTools?: ClientToolSchema[];
+  /**
+   * Executor that resolves client-tool calls inline (RPC `chat()` path). When
+   * present, `clientTools` are built WITH an `execute` that delegates to it, so
+   * the turn completes the tool round trip itself instead of surfacing a
+   * dangling tool call. Not persisted — recovery cannot replay a live executor.
+   */
+  clientToolExecutor?: ClientToolExecutor;
   /** Custom body fields from the client request. */
   body?: Record<string, unknown>;
   /** Internal workflow prompt configuration, never sourced from client body. */
@@ -1201,6 +1291,16 @@ export interface TurnConfig {
   experimental_telemetry?: Parameters<
     typeof streamText
   >[0]["experimental_telemetry"];
+  /**
+   * Optional AI SDK stream transform(s) for this turn (`experimental_transform`).
+   * Forwarded to `streamText` so callers can inspect/rewrite the stream — e.g.
+   * detecting tool results that carry `{ content, sources }` and enqueuing
+   * additional `source` parts via the transform's controller. Accepts a single
+   * transform or an array applied in order.
+   */
+  experimental_transform?: Parameters<
+    typeof streamText
+  >[0]["experimental_transform"];
   /**
    * Optional structured-output specification (AI SDK `output`).
    * Forwarded to `streamText` so the model's final response is parsed
@@ -2055,6 +2155,10 @@ export class Think<
 
   private async _clearHistory(): Promise<void> {
     await this.session.clearMessages();
+    // Drop any pending terminal record (#1645) so a stale exhaustion can't
+    // replay onto a freshly-cleared (empty) conversation on reconnect. Covers
+    // both the WS `chat-clear` path and the programmatic `clearMessages()` API.
+    await this._clearChatTerminal();
   }
 
   /** Append a message while keeping Think's live message cache coherent. */
@@ -3247,7 +3351,12 @@ export class Think<
     await this._refreshSkillsIfChanged();
     const contextTools = await this.session.tools();
     const skillTools = this._skillRegistry?.tools() ?? {};
-    const clientToolSet = createToolsFromClientSchemas(input.clientTools);
+    const clientToolSet = createToolsFromClientSchemas(
+      input.clientTools,
+      input.clientToolExecutor
+        ? { execute: input.clientToolExecutor }
+        : undefined
+    );
     const tools: ToolSet = {
       ...workspaceTools,
       ...baseTools,
@@ -3284,11 +3393,14 @@ export class Think<
     const subclassConfig = (await this.beforeTurn(ctx)) ?? {};
     const config = await this._pipelineExtensionBeforeTurn(ctx, subclassConfig);
     const workflowPrompt = input.workflowPrompt;
-    const workflowOutput = workflowPrompt?.output
-      ? Output.object({
-          schema: jsonSchema(workflowPrompt.output.schema as never)
-        })
+    // Workflow `step.prompt` turns produce their structured result by calling
+    // the synthetic `final_answer` tool (see THINK_FINAL_ANSWER_TOOL_NAME) —
+    // NOT via the AI SDK `output`/`response_format` path, which some providers
+    // reject when streaming. We pre-build the JSON Schema once here.
+    const structuredOutputSchema = workflowPrompt?.output
+      ? jsonSchema(workflowPrompt.output.schema as never)
       : undefined;
+    const wantsStructuredOutput = structuredOutputSchema !== undefined;
 
     const finalModel = config.model ?? model;
     const finalSystem =
@@ -3309,6 +3421,25 @@ export class Think<
     // `substitute` returns `output` directly, `allow` runs the original
     // (optionally with modified `input`).
     const finalTools: ToolSet = this._wrapToolsWithDecision(mergedTools);
+    // For a structured workflow turn, expose a final-answer tool alongside the
+    // agent's real tools. The agent loops with its tools and terminates by
+    // calling this one; its arguments are captured as the structured result.
+    // Guard against a clash with a user tool of the same name by suffixing.
+    let finalAnswerToolName = THINK_FINAL_ANSWER_TOOL_NAME;
+    if (structuredOutputSchema) {
+      let suffix = 1;
+      while (finalAnswerToolName in finalTools) {
+        finalAnswerToolName = `${THINK_FINAL_ANSWER_TOOL_NAME}_${suffix++}`;
+      }
+      finalTools[finalAnswerToolName] = tool({
+        description:
+          "Provide your final answer. The arguments MUST match the required " +
+          "schema. Calling this tool ends the task — call it exactly once when " +
+          "you have everything you need.",
+        inputSchema: structuredOutputSchema,
+        execute: async () => "Final answer recorded."
+      });
+    }
 
     // Baseline for the proactive context guard: everything the AI SDK appends
     // to the model-message list after the assembled turn messages belongs to
@@ -3326,9 +3457,38 @@ export class Think<
     // the watchdog. `??` so a `0` override is honored, not treated as "unset".
     this._activeStallTimeoutMs =
       config.chatStreamStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
-    const finalOutput = workflowOutput ?? config.output;
+    // `output` (AI SDK structured-output / `response_format`) is reserved for
+    // the opt-in chat `TurnConfig.output` API. Workflow prompts use the
+    // `final_answer` tool instead (see `wantsStructuredOutput`).
+    const finalOutput = config.output;
+    // On a structured workflow turn, append the instruction telling the model to
+    // finish by calling `final_answer`. `filter(Boolean)` drops an absent system
+    // prompt so we never stringify `undefined` into the prompt.
+    const turnSystem = wantsStructuredOutput
+      ? [finalSystem, thinkFinalAnswerInstruction(finalAnswerToolName)]
+          .filter(Boolean)
+          .join("\n\n")
+      : finalSystem;
+    // Structured turns must not end with a plain-text answer that skips
+    // `final_answer` (some models, e.g. Workers AI llama, otherwise just reply
+    // in text and stop). Force tool use: when the agent has real tools, require
+    // *a* tool each step so it can do work and then call `final_answer`; with no
+    // real tools, pin the choice directly to `final_answer`. A caller-provided
+    // `toolChoice` still wins.
+    const structuredHasRealTools =
+      wantsStructuredOutput &&
+      Object.keys(finalTools).some((name) => name !== finalAnswerToolName);
+    const finalToolChoice = wantsStructuredOutput
+      ? (config.toolChoice ??
+        (structuredHasRealTools
+          ? "required"
+          : { type: "tool" as const, toolName: finalAnswerToolName }))
+      : config.toolChoice;
     const finalStopWhen = [
       stepCountIs(finalMaxSteps),
+      // Stop as soon as the model calls `final_answer` so the structured turn
+      // terminates at the answer instead of continuing to stream more steps.
+      ...(wantsStructuredOutput ? [hasToolCall(finalAnswerToolName)] : []),
       ...(Array.isArray(config.stopWhen)
         ? config.stopWhen
         : config.stopWhen
@@ -3338,11 +3498,17 @@ export class Think<
 
     const result = streamText({
       model: finalModel,
-      system: finalSystem,
+      system: turnSystem,
       messages: finalMessages,
       tools: finalTools,
-      activeTools: config.activeTools,
-      toolChoice: config.toolChoice,
+      // Keep the synthetic final-answer tool callable even when a caller
+      // restricts `activeTools` — otherwise a structured turn could never call
+      // it and would fail to produce output.
+      activeTools:
+        wantsStructuredOutput && config.activeTools
+          ? [...config.activeTools, finalAnswerToolName]
+          : config.activeTools,
+      toolChoice: finalToolChoice,
       maxOutputTokens: config.maxOutputTokens,
       temperature: config.temperature,
       topP: config.topP,
@@ -3359,6 +3525,10 @@ export class Think<
         | Parameters<typeof streamText>[0]["providerOptions"]
         | undefined,
       experimental_telemetry: config.experimental_telemetry,
+      // Forward the per-turn stream transform(s) from TurnConfig so callers
+      // can inspect/rewrite the stream (e.g. emit `source` parts derived from
+      // tool results) without owning the stream pipeline themselves.
+      experimental_transform: config.experimental_transform,
       // Forward the per-turn structured-output spec from TurnConfig so
       // callers can use AI SDK `Output.object({ schema })` / `Output.text()`
       // on the terminal turn without dropping tools at model construction.
@@ -3388,10 +3558,29 @@ export class Think<
         // Only apply the guard's recompacted messages when the subclass didn't
         // set its own `messages` override for this step.
         const baseMessages = (base as { messages?: unknown }).messages;
-        if (guarded && baseMessages === undefined) {
-          return { ...base, messages: guarded };
+        const withMessages =
+          guarded && baseMessages === undefined
+            ? { ...base, messages: guarded }
+            : base;
+        // Safety net for structured workflow turns: on the final permitted step,
+        // force the model to call `final_answer` so the turn always terminates
+        // with a schema-shaped result instead of running out of steps. Respect a
+        // `toolChoice` the subclass already set for this step.
+        if (
+          wantsStructuredOutput &&
+          event.stepNumber >= finalMaxSteps - 1 &&
+          (withMessages as { toolChoice?: unknown }).toolChoice === undefined
+        ) {
+          return {
+            ...withMessages,
+            toolChoice: {
+              type: "tool" as const,
+              toolName: finalAnswerToolName
+            },
+            activeTools: [finalAnswerToolName]
+          };
         }
-        return base;
+        return withMessages;
       }) satisfies PrepareStepFunction<ToolSet>,
       onChunk: async (event) => {
         // Pass the AI SDK's chunk event through unchanged — gives users
@@ -3415,6 +3604,10 @@ export class Think<
       // accurate `durationMs` and the discriminated `success`/`error`
       // outcome — including failures that propagate out of `execute`.
       experimental_onToolCallFinish: (async (event) => {
+        // The synthetic final-answer tool is internal plumbing for structured
+        // workflow turns — do not surface it to user `afterToolCall` hooks or
+        // extensions.
+        if (event.toolCall.toolName === finalAnswerToolName) return;
         const base = {
           ...event.toolCall,
           stepNumber: event.stepNumber,
@@ -3431,8 +3624,26 @@ export class Think<
       }) satisfies StreamTextOnToolCallFinishCallback<ToolSet>
     });
 
-    const outputPromise =
-      finalOutput && result.output ? Promise.resolve(result.output) : undefined;
+    const outputPromise = wantsStructuredOutput
+      ? // Structured workflow result = the `final_answer` tool call's INPUT
+        // (its arguments), captured after the stream finishes. Take the last
+        // call in case the model emitted more than one. `result.toolCalls` is a
+        // `PromiseLike`, so wrap it to get a real `Promise` (for `.catch` below).
+        Promise.resolve(result.toolCalls).then((calls) => {
+          const finalCalls = calls.filter(
+            (call) => call.toolName === finalAnswerToolName
+          );
+          const last = finalCalls[finalCalls.length - 1];
+          if (!last) {
+            throw new Error(
+              `Model ended the turn without calling the ${finalAnswerToolName} tool`
+            );
+          }
+          return last.input;
+        })
+      : finalOutput && result.output
+        ? Promise.resolve(result.output)
+        : undefined;
     if (outputPromise) {
       // Attach a rejection observer immediately. `_streamResult()` will still
       // await this promise when captureOutput is enabled, but aborted streams can
@@ -3931,6 +4142,23 @@ export class Think<
       );
     }
 
+    // Client tools supplied by the caller (e.g. a parent agent delegating to
+    // this sub-agent). Both the schemas and the `onClientToolCall` executor are
+    // forwarded per-turn only — deliberately NOT persisted into
+    // `_lastClientTools`. The executor is a live RPC ref that dies with the
+    // isolate, so unlike the WebSocket path there is no SPA that could ever
+    // replay a `tool-result` after an eviction. Persisting the names would put
+    // them in `_clientResolvableToolNames()`, causing recovery to misclassify a
+    // dangling `input-available` orphan as a pending human interaction and park
+    // forever. Keeping them per-turn lets such an orphan recover like a server
+    // tool: `continueLastTurn`'s transcript repair errors it and the model
+    // proceeds. `_runInferenceLoop` sources client tools from `input.clientTools`
+    // (not `_lastClientTools`), so the live turn is unaffected.
+    const clientTools = options?.clientTools?.length
+      ? options.clientTools
+      : undefined;
+    const clientToolExecutor = options?.onClientToolCall;
+
     try {
       await callback.onStart({ requestId });
       await this.keepAliveWhile(async () => {
@@ -3968,6 +4196,8 @@ export class Think<
                   () =>
                     this._runInferenceLoop({
                       signal: abortSignal,
+                      clientTools,
+                      clientToolExecutor,
                       continuation: false
                     })
                 );
@@ -5385,6 +5615,7 @@ export class Think<
   }
 
   private _startWorkflowNotificationDrain(): void {
+    if (!this._hasPendingWorkflowNotifications()) return;
     void this.keepAliveWhile(() => this._drainWorkflowNotifications()).catch(
       (error) => {
         console.error("[Think] Failed to drain workflow notifications", error);
@@ -5528,15 +5759,21 @@ export class Think<
       )
       .slice(0, limit);
 
+    const idsToDelete = rows
+      .filter((row) => this._isTerminalSubmissionStatus(row.status))
+      .map((row) => row.submission_id);
+
+    // Batch deletes into `IN (...)` queries within the SQLite 100
+    // bound-parameter limit to minimize round-trips during cleanup.
     let deleted = 0;
-    for (const row of rows) {
-      if (!this._isTerminalSubmissionStatus(row.status)) continue;
-      this.sql`
-        DELETE FROM cf_think_submissions
-        WHERE submission_id = ${row.submission_id}
-          AND status IN ('completed', 'aborted', 'skipped', 'error')
-      `;
-      deleted++;
+    for (let i = 0; i < idsToDelete.length; i += MAX_BOUND_PARAMS) {
+      const batch = idsToDelete.slice(i, i + MAX_BOUND_PARAMS);
+      const strings = buildInClauseStrings(
+        "DELETE FROM cf_think_submissions WHERE status IN ('completed', 'aborted', 'skipped', 'error') AND submission_id IN ",
+        batch.length
+      );
+      this.sql(strings, ...batch);
+      deleted += batch.length;
     }
     return deleted;
   }
@@ -6561,7 +6798,7 @@ export class Think<
   ): Promise<void> {
     switch (event.type) {
       case "stream-resume-request":
-        this._handleStreamResumeRequest(connection);
+        await this._handleStreamResumeRequest(connection);
         break;
 
       case "stream-resume-ack":
@@ -6624,7 +6861,9 @@ export class Think<
     }
   }
 
-  private _handleStreamResumeRequest(connection: Connection): void {
+  private async _handleStreamResumeRequest(
+    connection: Connection
+  ): Promise<void> {
     if (this._resumableStream.hasActiveStream()) {
       if (
         this._continuation.activeRequestId ===
@@ -6645,6 +6884,11 @@ export class Think<
         this._continuation.pending.connectionId === connection.id)
     ) {
       this._continuation.awaitingConnections.set(connection.id, connection);
+    } else if (await this._replayTerminalOnResume(connection)) {
+      // A turn terminalized while no client was connected (#1645): drive the
+      // resume handshake so the terminal error frame can be delivered on the
+      // resumed stream (the only path that surfaces on the client) once this
+      // connection ACKs — see `_handleStreamResumeAck`.
     } else {
       sendIfOpen(connection, JSON.stringify({ type: MSG_STREAM_RESUME_NONE }));
     }
@@ -6668,6 +6912,9 @@ export class Think<
       }
     } else if (this._resumableStream.hasActiveStream()) {
       // Ignore ACKs for a different active stream request id.
+    } else if (await this._replayTerminalOnAck(connection, requestId)) {
+      // Delivered the pending terminal error frame on the resumed stream the
+      // client just ACKed (#1645).
     } else if (
       !this._resumableStream.replayCompletedChunksByRequestId(
         connection,
@@ -6742,6 +6989,15 @@ export class Think<
       this._completeSkippedRequest(connection, requestId);
       return;
     }
+
+    // A genuinely-new turn supersedes any pending terminal record (#1645) so a
+    // stale exhaustion can't replay over the resume handshake to a client that
+    // reconnects in the window between accepting this submit and the new turn
+    // streaming. Mirrors `@cloudflare/ai-chat`; without it a reconnect in that
+    // gap would surface the previous failed turn's error even though the user
+    // has already moved on. Completion clears it too, but only once the turn
+    // resolves — which leaves the gap open.
+    await this._clearChatTerminal();
 
     const releasePendingEnqueue = this._submitConcurrency.beginEnqueue();
     let pendingEnqueue = true;
@@ -7119,7 +7375,7 @@ export class Think<
     status: "completed" | "error" | "aborted" | "overflow_retry";
     error?: string;
   }> {
-    const streamId = this._resumableStream.start(requestId);
+    const streamId = this._startResumableStream(requestId);
     const accumulator = new StreamAccumulator({
       messageId: crypto.randomUUID()
     });
@@ -7245,15 +7501,15 @@ export class Think<
       // The live-streamed chunks already reached clients; the driver's
       // post-retry `_broadcastMessages()` reconciles them to the real answer.
       if (overflowRetry) {
-        this._resumableStream.complete(streamId);
+        this._completeResumableStream(streamId);
         streamFinalized = true;
         return { status: "overflow_retry", error: streamError };
       }
 
       if (streamError) {
-        this._resumableStream.markError(streamId);
+        this._errorResumableStream(streamId);
       } else {
-        this._resumableStream.complete(streamId);
+        this._completeResumableStream(streamId);
       }
       streamFinalized = true;
       this._broadcastChat({
@@ -7314,7 +7570,7 @@ export class Think<
         });
         if (outcome === "scheduled") {
           if (!streamFinalized) {
-            this._resumableStream.complete(streamId);
+            this._completeResumableStream(streamId);
             streamFinalized = true;
           }
           if (!doneSent) {
@@ -7341,7 +7597,7 @@ export class Think<
           // Finalize the stream and return WITHOUT the generic terminal path,
           // which would otherwise re-broadcast the raw stall error.
           if (!streamFinalized) {
-            this._resumableStream.markError(streamId);
+            this._errorResumableStream(streamId);
             streamFinalized = true;
           }
           doneSent = true;
@@ -7357,7 +7613,7 @@ export class Think<
         // generic terminal path below (unchanged watchdog behavior).
       }
       if (!streamFinalized) {
-        this._resumableStream.markError(streamId);
+        this._errorResumableStream(streamId);
         streamFinalized = true;
       }
       if (!doneSent) {
@@ -7590,7 +7846,7 @@ export class Think<
     }
   ): Promise<StreamResultStatus> {
     const clearGen = this._turnQueue.generation;
-    const streamId = this._resumableStream.start(requestId);
+    const streamId = this._startResumableStream(requestId);
     const continuation = options?.continuation ?? false;
     const parentId = options?.parentId;
 
@@ -7743,7 +7999,7 @@ export class Think<
       // The live-streamed chunks already reached clients; the retry's
       // `_broadcastMessages()` reconciles them to the real answer.
       if (overflowRetry && options?.overflowRecovery) {
-        this._resumableStream.complete(streamId);
+        this._completeResumableStream(streamId);
         this._pendingResumeConnections.clear();
         doneSent = true;
         options.overflowRecovery.onRetry(streamError);
@@ -7752,9 +8008,9 @@ export class Think<
       }
 
       if (streamError) {
-        this._resumableStream.markError(streamId);
+        this._errorResumableStream(streamId);
       } else {
-        this._resumableStream.complete(streamId);
+        this._completeResumableStream(streamId);
       }
       this._pendingResumeConnections.clear();
       this._broadcastChat({
@@ -7792,7 +8048,7 @@ export class Think<
           // Recovering: close the stream cleanly (no terminal error frame); the
           // scheduled continuation drives the turn to completion. Report
           // `aborted` so the caller does not terminalize the turn.
-          this._resumableStream.complete(streamId);
+          this._completeResumableStream(streamId);
           this._pendingResumeConnections.clear();
           if (!doneSent) {
             this._broadcastChat({
@@ -7819,7 +8075,7 @@ export class Think<
           // submission interrupted), identical to deploy-recovery exhaustion.
           // Finalize the stream and report `aborted` (not `error`) so the caller
           // does not re-run the generic terminal path on top of it.
-          this._resumableStream.markError(streamId);
+          this._errorResumableStream(streamId);
           this._pendingResumeConnections.clear();
           doneSent = true;
           this._streamingAssistant = null;
@@ -7833,7 +8089,7 @@ export class Think<
       if (options?.captureProgrammaticStreamError) {
         this._programmaticStreamErrors.set(requestId, streamError);
       }
-      this._resumableStream.markError(streamId);
+      this._errorResumableStream(streamId);
       this._pendingResumeConnections.clear();
       if (!doneSent) {
         this._broadcastChat({
@@ -7848,7 +8104,7 @@ export class Think<
       }
     } finally {
       if (!doneSent) {
-        this._resumableStream.markError(streamId);
+        this._errorResumableStream(streamId);
         this._pendingResumeConnections.clear();
         this._broadcastChat({
           type: MSG_CHAT_RESPONSE,
@@ -7921,7 +8177,51 @@ export class Think<
     msg: UIMessage,
     parentId?: string
   ): Promise<void> {
+    const stripped = this._stripInternalFinalAnswerParts(msg);
+    if (stripped !== msg) {
+      // If removing the internal final-answer tool leaves nothing user-facing
+      // (only structural `step-start` markers, or nothing), skip persistence so
+      // a structured workflow turn does not leave an empty assistant message in
+      // the conversation.
+      const hasMeaningfulParts = stripped.parts.some(
+        (part) => (part as { type?: string }).type !== "step-start"
+      );
+      if (!hasMeaningfulParts) return;
+      await this._upsertMessageInHistory(stripped, parentId);
+      return;
+    }
     await this._upsertMessageInHistory(msg, parentId);
+  }
+
+  /**
+   * Remove parts belonging to Think's internal structured-output final-answer
+   * tool (`think_final_answer`, or a collision-suffixed variant) from a UI
+   * message so the internal call/result never enters the persisted conversation
+   * (and is never re-fed to the model on later turns). Stateless and matched by
+   * the reserved name so it also covers recovery re-persist paths. Handles both
+   * the static (`tool-<name>`) and dynamic (`dynamic-tool`) part shapes the AI
+   * SDK can emit.
+   */
+  private _stripInternalFinalAnswerParts(msg: UIMessage): UIMessage {
+    const parts = msg.parts.filter((part) => {
+      const candidate = part as { type?: string; toolName?: string };
+      if (
+        typeof candidate.type === "string" &&
+        candidate.type.startsWith("tool-") &&
+        isThinkFinalAnswerToolName(candidate.type.slice("tool-".length))
+      ) {
+        return false;
+      }
+      if (
+        candidate.type === "dynamic-tool" &&
+        typeof candidate.toolName === "string" &&
+        isThinkFinalAnswerToolName(candidate.toolName)
+      ) {
+        return false;
+      }
+      return true;
+    });
+    return parts.length === msg.parts.length ? msg : { ...msg, parts };
   }
 
   /**
@@ -8396,8 +8696,10 @@ export class Think<
         staleKeys.push(key);
       }
     }
-    for (const key of staleKeys) {
-      await this.ctx.storage.delete(key);
+    // Batch deletes — the DO storage KV delete accepts up to 128 keys per call,
+    // collapsing N awaited round-trips into ceil(N / 128).
+    for (let i = 0; i < staleKeys.length; i += KV_DELETE_MAX_KEYS) {
+      await this.ctx.storage.delete(staleKeys.slice(i, i + KV_DELETE_MAX_KEYS));
     }
   }
 
@@ -8690,8 +8992,13 @@ export class Think<
     // window recovery exhausts in), and if it threw before this broadcast the
     // user would be left staring at a half-finished message with no terminal
     // resolution. The broadcast itself touches no storage, so ordering it first
-    // makes the banner resilient to a failing `_markRecoveredSubmissionInterrupted`
-    // / `_recordTerminalChatStatus`.
+    // makes the banner resilient to a failing `_recordTerminalChatStatus` /
+    // `_markRecoveredSubmissionInterrupted`.
+    //
+    // (`@cloudflare/ai-chat` persists before broadcasting instead. Ordering
+    // can't rescue a terminal-record write that itself fails, so that choice
+    // gains no reconnect reliability under storage failure while losing this
+    // banner resilience — hence Think keeps broadcast-first.)
     this._broadcastChat({
       type: MSG_CHAT_RESPONSE,
       id: incident.requestId,
@@ -8699,15 +9006,18 @@ export class Think<
       done: true,
       error: true
     });
+    // Write the durable terminal record (#1645) FIRST among the storage writes:
+    // it's the record a disconnected client replays on reconnect, so it must
+    // not be skipped if the (independent) submission-row write below throws.
+    await this._recordTerminalChatStatus(
+      "interrupted",
+      incident.requestId,
+      config.terminalMessage
+    );
     // The submission is keyed by the recovery ROOT request id; `incident.requestId`
     // is the latest per-continuation id and won't match a chained submission.
     await this._markRecoveredSubmissionInterrupted(
       incident.recoveryRootRequestId ?? incident.requestId,
-      config.terminalMessage
-    );
-    await this._recordTerminalChatStatus(
-      "interrupted",
-      incident.requestId,
       config.terminalMessage
     );
     // The exhausted record is retained for inspection and reclaimed later by
@@ -8953,7 +9263,7 @@ export class Think<
       }
 
       if (streamStillActive) {
-        this._resumableStream.complete(streamId);
+        this._completeResumableStream(streamId);
       }
 
       const shouldRetry =
@@ -10307,11 +10617,15 @@ export class Think<
   }
 
   /**
-   * Persist (on `error`) or clear (on `completed`/`aborted`) a durable record of
-   * the last terminal turn so it can be replayed to clients on connect. A
-   * `completed`/`aborted` turn is conveyed by the persisted messages, so the
-   * record is cleared; an `error`/`interrupted` turn has no durable trace
-   * otherwise, so it is kept until a later turn resolves.
+   * Persist (on `error`/`interrupted`) or clear (on `completed`/`aborted`) the
+   * durable terminal record so it can be replayed to clients on reconnect, and
+   * resolve any in-progress "recovering…" indicator. A `completed`/`aborted`
+   * turn is conveyed by the persisted messages, so the record is cleared; an
+   * `error`/`interrupted` turn has no durable trace otherwise, so it is kept
+   * until a later turn supersedes it.
+   *
+   * The storage primitives are shared with `@cloudflare/ai-chat`
+   * (`_recordChatTerminal` / `_clearChatTerminal` / `_pendingChatTerminal`).
    */
   private async _recordTerminalChatStatus(
     status: ChatResponseResult["status"] | "interrupted",
@@ -10319,9 +10633,9 @@ export class Think<
     body: string
   ): Promise<void> {
     if (status === "error" || status === "interrupted") {
-      await this.ctx.storage.put(CHAT_LAST_TERMINAL_KEY, { requestId, body });
+      await this._recordChatTerminal(requestId, body);
     } else {
-      await this.ctx.storage.delete(CHAT_LAST_TERMINAL_KEY);
+      await this._clearChatTerminal();
     }
     // Any terminal turn outcome resolves an in-progress recovery (#1620): a
     // recovered turn that completes, errors, or is exhausted must clear the
@@ -10329,7 +10643,25 @@ export class Think<
     await this._setChatRecovering(false);
   }
 
-  private async _pendingTerminalChatResponse(): Promise<{
+  /**
+   * Persist a durable record of the last terminal turn so a client that
+   * (re)connects after the turn ended still learns its outcome (#1645). Kept
+   * until a later turn supersedes it (`_clearChatTerminal`); a single record is
+   * sufficient because only the most recent terminal is relevant.
+   */
+  private async _recordChatTerminal(
+    requestId: string,
+    body: string
+  ): Promise<void> {
+    await this.ctx.storage.put(CHAT_LAST_TERMINAL_KEY, { requestId, body });
+  }
+
+  /** Clear the durable terminal record once a later turn supersedes it (#1645). */
+  private async _clearChatTerminal(): Promise<void> {
+    await this.ctx.storage.delete(CHAT_LAST_TERMINAL_KEY);
+  }
+
+  private async _pendingChatTerminal(): Promise<{
     requestId: string;
     body: string;
   } | null> {
@@ -10338,6 +10670,52 @@ export class Think<
         CHAT_LAST_TERMINAL_KEY
       )) ?? null
     );
+  }
+
+  /**
+   * Replay a pending terminal outcome (#1645) over the resume handshake so a
+   * reconnecting client surfaces it exactly like a live exhaustion. A bare
+   * terminal frame sent on connect is dropped by the `useAgentChat` client
+   * because it never reaches a transport stream reader; only a frame delivered
+   * on a resumed stream becomes `useChat.error` (this is why the terminal is
+   * NOT included in `_buildIdleConnectMessages`). So we drive `STREAM_RESUMING`
+   * here and send the error frame once the client ACKs (see
+   * `_replayTerminalOnAck`). Returns true if a terminal was pending.
+   */
+  private async _replayTerminalOnResume(
+    connection: Connection
+  ): Promise<boolean> {
+    const pending = await this._pendingChatTerminal();
+    if (!pending) return false;
+    sendIfOpen(
+      connection,
+      JSON.stringify({ type: MSG_STREAM_RESUMING, id: pending.requestId })
+    );
+    return true;
+  }
+
+  /**
+   * Deliver the pending terminal error frame on the resumed stream the client
+   * ACKed (#1645). The record is retained (cleared only when a later turn
+   * supersedes it) so concurrent reconnects each learn the outcome.
+   */
+  private async _replayTerminalOnAck(
+    connection: Connection,
+    requestId: string
+  ): Promise<boolean> {
+    const pending = await this._pendingChatTerminal();
+    if (!pending || pending.requestId !== requestId) return false;
+    sendIfOpen(
+      connection,
+      JSON.stringify({
+        body: pending.body,
+        done: true,
+        error: true,
+        id: pending.requestId,
+        type: MSG_CHAT_RESPONSE
+      })
+    );
+    return true;
   }
 
   /**
@@ -10383,9 +10761,15 @@ export class Think<
 
   /**
    * Messages sent to a client on connect when no stream is active: the current
-   * transcript, plus a replay of the last terminal error (if any) so a turn
-   * that failed while the client was disconnected is surfaced rather than
-   * silently frozen.
+   * transcript, plus a replay of an in-progress "recovering…" status (if any).
+   *
+   * A terminal error is deliberately NOT replayed here. A bare
+   * `MSG_CHAT_RESPONSE` frame on connect is dropped by the `useAgentChat`
+   * client because it never reaches a transport stream reader, so it cannot
+   * become `useChat.error` — a failed turn would still look frozen (#1645).
+   * The terminal outcome is instead surfaced over the resume handshake
+   * (`_replayTerminalOnResume` → ACK → `_replayTerminalOnAck`), the only path
+   * that lands on the stream reader.
    */
   private async _buildIdleConnectMessages(): Promise<
     Array<Record<string, unknown>>
@@ -10393,19 +10777,11 @@ export class Think<
     const messages: Array<Record<string, unknown>> = [
       { type: MSG_CHAT_MESSAGES, messages: this.messages }
     ];
-    const pending = await this._pendingTerminalChatResponse();
-    if (pending) {
-      messages.push({
-        type: MSG_CHAT_RESPONSE,
-        id: pending.requestId,
-        body: pending.body,
-        done: true,
-        error: true
-      });
-    }
     // Replay an in-progress "recovering…" status so a client that connects
-    // mid-recovery reads the turn as working rather than frozen (#1620). It's
-    // mutually exclusive with `pending` (a terminal outcome clears recovering).
+    // mid-recovery reads the turn as working rather than frozen (#1620). This
+    // is a plain status frame the client handles on connect (unlike a terminal
+    // error, which must go through the resume handshake). It's mutually
+    // exclusive with a terminal record (any terminal outcome clears recovering).
     // Skip a stale record (older than the flag TTL) so a turn whose recovery
     // was abandoned without a terminal can't show "recovering…" forever on
     // reconnect.
@@ -10439,6 +10815,86 @@ export class Think<
     );
     if (sent) {
       this._pendingResumeConnections.add(connection.id);
+    }
+  }
+
+  /**
+   * Start a resumable stream and arm buffer cleanup. Wrapper around
+   * `ResumableStream.start`: arming on START as well as finish guarantees a
+   * stream whose DO is evicted mid-flight and never reaches a finish still gets
+   * a future sweep instead of leaking its buffer.
+   *
+   * When a turn runs inside `runFiber` (durable recovery), the DO already
+   * self-heals: `runFiber` holds `keepAlive`, which leaves a durable alarm in
+   * storage that survives eviction, fires within ~keepAliveIntervalMs, and runs
+   * the fiber-recovery scan — finalizing the stream (which arms cleanup) without
+   * any client reconnect. Arming here is the safety net for any non-fiber stream
+   * path, where no such alarm exists. The last-activity sweep threshold prevents
+   * an actively streaming run from being reclaimed before it goes quiet (#1706).
+   */
+  protected _startResumableStream(
+    requestId: string,
+    options?: { messageId?: string }
+  ): string {
+    const streamId = this._resumableStream.start(requestId, options);
+    void this._ensureStreamCleanupScheduled();
+    return streamId;
+  }
+
+  /**
+   * Mark a resumable stream completed and arm buffer cleanup. Wrapper around
+   * `ResumableStream.complete` so every stream-finish path also schedules the
+   * cleanup alarm (#1706).
+   */
+  protected _completeResumableStream(streamId: string): void {
+    this._resumableStream.complete(streamId);
+    void this._ensureStreamCleanupScheduled();
+  }
+
+  /**
+   * Mark a resumable stream errored and arm buffer cleanup. Wrapper around
+   * `ResumableStream.markError` — see {@link _completeResumableStream}.
+   */
+  protected _errorResumableStream(streamId: string): void {
+    this._resumableStream.markError(streamId);
+    void this._ensureStreamCleanupScheduled();
+  }
+
+  /**
+   * Ensure a single cleanup alarm is pending for this DO's resumable-stream
+   * buffers. Armed whenever a stream finishes so that idle/one-off chat DOs
+   * still reclaim their buffers — the lazy sweep in {@link ResumableStream}
+   * only fires when a *subsequent* stream completes, which never happens for a
+   * chat that receives a single turn (#1706).
+   *
+   * `idempotent` dedupes on (callback, payload, owner) so repeated finishes
+   * collapse onto one pending alarm rather than stacking.
+   */
+  protected async _ensureStreamCleanupScheduled({
+    idempotent = true
+  }: { idempotent?: boolean } = {}): Promise<void> {
+    await this.schedule(
+      STREAM_CLEANUP_DELAY_SECONDS,
+      "_cleanupStreamBuffers",
+      undefined,
+      { idempotent }
+    );
+  }
+
+  /**
+   * Alarm callback: sweep aged stream buffers, then re-arm only while rows
+   * remain so a fully-swept DO stops waking itself.
+   */
+  async _cleanupStreamBuffers(): Promise<void> {
+    this._resumableStream.cleanup();
+    if (this._resumableStream.hasReclaimableStreams()) {
+      // Must NOT be idempotent: this runs INSIDE the currently-executing
+      // one-shot schedule row, which `alarm()` deletes only after we return. An
+      // idempotent reschedule would dedup onto that row and then be deleted with
+      // it — the re-arm would silently never fire, leaving buffers that survived
+      // this sweep (e.g. a younger turn) uncollected. A fresh delayed row
+      // survives the deletion (mirrors the chat-recovery reschedule).
+      await this._ensureStreamCleanupScheduled({ idempotent: false });
     }
   }
 

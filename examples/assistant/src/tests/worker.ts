@@ -28,9 +28,11 @@
 
 import { routeAgentRequest } from "agents";
 
-export { AssistantDirectory, MyAssistant } from "../server";
+export { AssistantDirectory } from "../../agents/assistant/agent";
+export { MyAssistant } from "../../agents/assistant/agents/my-assistant/agent";
 
-import type { AssistantDirectory, MyAssistant } from "../server";
+import type { AssistantDirectory } from "../../agents/assistant/agent";
+import type { MyAssistant } from "../../agents/assistant/agents/my-assistant/agent";
 
 export type Env = {
   AssistantDirectory: DurableObjectNamespace<AssistantDirectory>;

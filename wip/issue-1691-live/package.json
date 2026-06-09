@@ -1,0 +1,27 @@
+{
+  "name": "@cloudflare/agents-issue-1691-live",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "repro": "tsx scripts/repro.ts",
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.81",
+    "@ai-sdk/openai": "^3.0.67",
+    "@cloudflare/ai-chat": "*",
+    "@cloudflare/think": "*",
+    "agents": "*",
+    "ai": "^6.0.196",
+    "workers-ai-provider": "^3.1.14"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260604.1",
+    "@types/node": "^25.9.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.97.0"
+  }
+}

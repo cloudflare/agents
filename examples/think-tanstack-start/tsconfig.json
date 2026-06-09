@@ -1,0 +1,14 @@
+{
+  "extends": "agents/tsconfig",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "vite/client"],
+    "verbatimModuleSyntax": false
+  },
+  "include": [
+    "agents/**/*.ts",
+    "think.d.ts",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "vite.config.ts"
+  ]
+}

@@ -50,6 +50,41 @@ describe("Workspace — SqlStorage detection", () => {
     const content = await agent.read("/detect.txt");
     expect(content).toBe("via sql storage");
   });
+
+  it("creates missing parent directories idempotently for concurrent writes", async () => {
+    const agent = await getAgentByName(
+      env.TestWorkspaceAgent,
+      "concurrent-parent"
+    );
+
+    await expect(agent.concurrentWriteToMissingParent()).resolves.toEqual({
+      first: "first",
+      second: "second",
+      parentType: "directory"
+    });
+  });
+
+  it("emits one create event for concurrent implicit parent creation", async () => {
+    const agent = await getAgentByName(
+      env.TestWorkspaceAgent,
+      "concurrent-parent-events"
+    );
+
+    const log = (await agent.concurrentWriteToMissingParentWithEvents()) as {
+      type: string;
+      path: string;
+      entryType: string;
+    }[];
+
+    expect(
+      log.filter(
+        (event) =>
+          event.type === "create" &&
+          event.path === "/race-events" &&
+          event.entryType === "directory"
+      )
+    ).toHaveLength(1);
+  });
 });
 
 describe("Workspace — duplicate construction on same {sql, namespace}", () => {

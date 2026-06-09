@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Plugin } from "vite";
 import agents from "../vite";
+import { compileSkillScript, isCompilableSkillScript } from "../skills/compile";
 
 type ResolveIdFn = (
   source: string,
@@ -133,6 +134,35 @@ describe("agents:skills vite plugin", () => {
     expect(warnings.join("\n")).toContain('Duplicate bundled skill name "dup"');
   });
 
+  it("compiles TypeScript and multi-file skill scripts to self-contained JS", async () => {
+    const skillsDir = join(dir, "skills");
+    await mkdir(skillsDir, { recursive: true });
+    await writeSkill(skillsDir, "scripted", async () => {
+      const scriptsDir = join(skillsDir, "scripted", "scripts");
+      await mkdir(scriptsDir, { recursive: true });
+      await writeFile(
+        join(scriptsDir, "helper.ts"),
+        "export function format(text: string): string {\n  return text.toUpperCase();\n}\n"
+      );
+      await writeFile(
+        join(scriptsDir, "run.ts"),
+        'import { format } from "./helper";\ntype Input = { text: string };\nexport default async function run(input: Input) {\n  return format(input.text);\n}\n'
+      );
+    });
+
+    const plugin = skillsPlugin();
+    const ctx: PluginContext = { warn: () => {}, addWatchFile: () => {} };
+    const code = await load(plugin, ctx)(`\0agents:skills:${skillsDir}`);
+    const manifest = code as string;
+
+    // The script resource is marked precompiled, the sibling import is inlined,
+    // and TypeScript type syntax has been stripped.
+    expect(manifest).toContain('"precompiled":true');
+    expect(manifest).not.toContain('from "./helper"');
+    expect(manifest).not.toContain("type Input");
+    expect(manifest).toContain("toUpperCase()");
+  });
+
   it("warns when a bundled asset exceeds the size threshold", async () => {
     const skillsDir = join(dir, "skills");
     await mkdir(skillsDir, { recursive: true });
@@ -155,6 +185,54 @@ describe("agents:skills vite plugin", () => {
     const joined = warnings.join("\n");
     expect(joined).toContain("assets/big.bin");
     expect(joined).toContain("skills.r2()");
+  });
+});
+
+describe("compileSkillScript", () => {
+  let compileDir: string;
+
+  beforeEach(async () => {
+    compileDir = await mkdtemp(join(tmpdir(), "agents-compile-"));
+  });
+
+  afterEach(async () => {
+    await rm(compileDir, { recursive: true, force: true });
+  });
+
+  it("flags compilable script extensions", () => {
+    expect(isCompilableSkillScript("scripts/run.ts")).toBe(true);
+    expect(isCompilableSkillScript("scripts/run.tsx")).toBe(true);
+    expect(isCompilableSkillScript("scripts/run.js")).toBe(true);
+    expect(isCompilableSkillScript("scripts/run.mjs")).toBe(true);
+    expect(isCompilableSkillScript("scripts/run.py")).toBe(false);
+    expect(isCompilableSkillScript("scripts/run.sh")).toBe(false);
+    expect(isCompilableSkillScript("references/guide.md")).toBe(false);
+  });
+
+  it("bundles a TypeScript entry with sibling imports into self-contained ESM", async () => {
+    await writeFile(
+      join(compileDir, "helper.ts"),
+      "export function shout(text: string): string {\n  return text.toUpperCase();\n}\n"
+    );
+    const entry = join(compileDir, "run.ts");
+    await writeFile(
+      entry,
+      'import { shout } from "./helper";\ntype Input = { text: string };\nexport default async function run(input: Input) {\n  return shout(input.text);\n}\n'
+    );
+
+    const result = await compileSkillScript(entry);
+
+    expect(result.precompiled).toBe(true);
+    expect(result.content).not.toContain('from "./helper"');
+    expect(result.content).not.toContain("type Input");
+    expect(result.content).toContain("toUpperCase()");
+    expect(result.content).toMatch(/as default/);
+  });
+
+  it("throws when the entry file does not exist", async () => {
+    await expect(
+      compileSkillScript(join(compileDir, "missing.ts"))
+    ).rejects.toThrow();
   });
 });
 

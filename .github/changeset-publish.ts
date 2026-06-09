@@ -1,8 +1,8 @@
 import { execSync } from "node:child_process";
 
-execSync("npx tsx ./.github/resolve-workspace-versions.ts", {
+execSync("pnpm exec tsx ./.github/resolve-workspace-versions.ts", {
   stdio: "inherit"
 });
-execSync("npx changeset publish", {
+execSync("pnpm exec changeset publish", {
   stdio: "inherit"
 });

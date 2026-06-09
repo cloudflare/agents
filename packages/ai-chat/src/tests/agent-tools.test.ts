@@ -232,8 +232,22 @@ describe("AIChatAgent as an agent-tool child", () => {
       chunks.some((chunk) => chunk.body.includes("write the report"))
     ).toBe(true);
 
+    // Each forwarded chunk must be an individual, unpacked chunk event — never
+    // a packed segment array — and sequences must be contiguous per chunk so a
+    // tailing parent can switch from stored replay to the live counter without
+    // gaps. Guards the chunk-packing storage format (segment rows are unpacked
+    // back into per-chunk bodies before forwarding).
+    chunks.forEach((chunk, i) => {
+      expect(chunk.sequence).toBe(i);
+      const parsed = JSON.parse(chunk.body) as unknown;
+      expect(Array.isArray(parsed)).toBe(false);
+      expect(parsed).toMatchObject({ type: expect.any(String) });
+    });
+
     const laterChunks = await parent.getChildChunks(runId, 0);
     expect(laterChunks.every((chunk) => chunk.sequence > 0)).toBe(true);
+    // afterSequence is a per-chunk cursor: everything past sequence 0.
+    expect(laterChunks).toEqual(chunks.slice(1));
   });
 
   it("finalizes lifecycle hooks and terminal events during parent recovery reconciliation", async () => {
