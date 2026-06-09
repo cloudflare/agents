@@ -3132,7 +3132,7 @@ export class Agent<
       // connection is in the agent context — deliver the actual error through
       // the onError(connection, error) overload so user overrides written
       // with the two-parameter signature receive it in the error slot (#388).
-      const connection = agentContext.getStore()?.connection;
+      const { connection } = getCurrentAgent();
       if (connection) {
         await this.onError(connection, e);
       } else {

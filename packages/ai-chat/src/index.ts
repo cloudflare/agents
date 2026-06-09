@@ -14,6 +14,7 @@ import {
   type Connection,
   type ConnectionContext,
   type FiberRecoveryContext,
+  getCurrentAgent,
   type WSMessage
 } from "agents";
 
@@ -1753,7 +1754,7 @@ export class AIChatAgent<
       // context, deliver the actual error through onError(connection, error)
       // so two-parameter user overrides receive it in the error slot (#388),
       // then rethrow the original error rather than onError's return value.
-      const connection = agentContext.getStore()?.connection;
+      const { connection } = getCurrentAgent();
       if (connection) {
         await this.onError(connection, e);
       } else {
