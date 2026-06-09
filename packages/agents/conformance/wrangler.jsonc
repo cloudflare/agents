@@ -1,0 +1,32 @@
+{
+  "name": "agents-mcp-conformance-host",
+  "main": "worker.ts",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "ConformanceHost",
+        "name": "ConformanceHost"
+      },
+      {
+        "class_name": "EverythingMcpAgent",
+        "name": "EverythingMcpAgent"
+      },
+      {
+        "class_name": "EverythingHandlerAgent",
+        "name": "EverythingHandlerAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "ConformanceHost",
+        "EverythingMcpAgent",
+        "EverythingHandlerAgent"
+      ]
+    }
+  ]
+}

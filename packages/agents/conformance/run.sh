@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Runs the MCP conformance suite against the implementations in this package.
+#
+# 1. Starts the conformance worker (workerd via wrangler dev) hosting:
+#      - the MCP client under test (Agent + MCPClientManager)
+#      - two MCP servers under test (McpAgent at /mcp-agent,
+#        createMcpHandler + WorkerTransport at /mcp-handler)
+# 2. Runs the @modelcontextprotocol/conformance CLI in the requested mode.
+#
+# Usage:
+#   conformance/run.sh client          [extra conformance CLI args]
+#   conformance/run.sh server-mcp-agent [extra conformance CLI args]
+#   conformance/run.sh server-handler   [extra conformance CLI args]
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+MODE="${1:?Usage: run.sh <client|server-mcp-agent|server-handler> [conformance CLI args]}"
+shift
+
+PORT="${CONFORMANCE_WORKER_PORT:-8788}"
+
+pnpm exec wrangler dev --config conformance/wrangler.jsonc --port "$PORT" --ip 127.0.0.1 &
+WRANGLER_PID=$!
+trap 'kill "$WRANGLER_PID" 2>/dev/null || true' EXIT
+
+echo "Waiting for conformance worker on port $PORT..."
+for _ in $(seq 1 60); do
+  if curl -s -o /dev/null "http://127.0.0.1:$PORT/"; then
+    break
+  fi
+  sleep 1
+done
+
+if ! curl -s -o /dev/null "http://127.0.0.1:$PORT/"; then
+  echo "Conformance worker failed to start" >&2
+  exit 1
+fi
+
+case "$MODE" in
+  client)
+    CONFORMANCE_WORKER_ORIGIN="http://127.0.0.1:$PORT" pnpm exec conformance client \
+      --command "node conformance/driver.mjs" \
+      --expected-failures conformance/baseline-client.yml \
+      "$@"
+    ;;
+  server-mcp-agent)
+    pnpm exec conformance server \
+      --url "http://127.0.0.1:$PORT/mcp-agent" \
+      --expected-failures conformance/baseline-server-mcp-agent.yml \
+      "$@"
+    ;;
+  server-handler)
+    pnpm exec conformance server \
+      --url "http://127.0.0.1:$PORT/mcp-handler" \
+      --expected-failures conformance/baseline-server-handler.yml \
+      "$@"
+    ;;
+  *)
+    echo "Unknown mode: $MODE (expected client, server-mcp-agent, or server-handler)" >&2
+    exit 1
+    ;;
+esac

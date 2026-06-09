@@ -1,0 +1,20 @@
+# Expected failures for the MCP client conformance suite.
+# Each entry documents a known gap — remove entries as gaps are fixed.
+client:
+  # Elicitation is delegated to the platform (McpAgent.elicitInput / custom
+  # handleElicitationRequest overrides); MCPClientConnection hardcodes the
+  # `elicitation` capability without `form.applyDefaults`, so SEP-1034
+  # client-side defaults are not applied.
+  - elicitation-sep1034-client-defaults
+  # SHOULD-level warning only (all checks pass): the client registers via
+  # dynamic client registration instead of using a URL-based client ID
+  # (client_id_metadata_document, CIMD).
+  - auth/basic-cimd
+  # The client_credentials grant (SEP-835 extension) is not supported by
+  # DurableObjectOAuthClientProvider, which implements the
+  # authorization_code + refresh_token flows.
+  - auth/client-credentials-jwt
+  - auth/client-credentials-basic
+  # Requires RFC 8693 token exchange (extension; also baselined by the MCP
+  # TypeScript SDK).
+  - auth/cross-app-access-complete-flow

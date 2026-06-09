@@ -113,6 +113,18 @@ export class MCPClientConnection {
     | StreamableHTTPClientTransport
     | SSEClientTransport
     | RPCClientTransport;
+
+  /**
+   * Transport that received the 401 during the initial connect attempt.
+   * Kept so finishAuth() runs on the transport that captured the resource
+   * metadata URL from the WWW-Authenticate header — a fresh transport would
+   * rediscover from defaults and exchange the code at the wrong token
+   * endpoint when the authorization server is not at the default location.
+   */
+  private _pendingAuthTransport?:
+    | StreamableHTTPClientTransport
+    | SSEClientTransport
+    | RPCClientTransport;
   prompts: Prompt[] = [];
   resources: Resource[] = [];
   resourceTemplates: ResourceTemplate[] = [];
@@ -157,6 +169,19 @@ export class MCPClientConnection {
     const transportType = this.options.transport.type;
     if (!transportType) {
       throw new Error("Transport type must be specified");
+    }
+
+    // init() can be re-entered after a mid-session 401 → OAuth → reconnect
+    // cycle (e.g. scope step-up, token revocation). The SDK client refuses
+    // to connect while a previous transport is still attached, so detach it
+    // first.
+    if (this.client.transport) {
+      this._transport = undefined;
+      try {
+        await this.client.close();
+      } catch {
+        // Closing a transport that just failed auth is best-effort.
+      }
     }
 
     const res = await this.tryConnect(transportType);
@@ -230,6 +255,21 @@ export class MCPClientConnection {
 
     if (configuredType === "rpc") {
       throw new Error("RPC transport does not support authentication");
+    }
+
+    // Prefer the transport that triggered authentication (initial-connect
+    // 401, or the active transport for a mid-session 401 such as a scope
+    // step-up): it holds the resource metadata URL from the WWW-Authenticate
+    // header that finishAuth() needs to locate the authorization server.
+    const authTransport = this._pendingAuthTransport ?? this._transport;
+    this._pendingAuthTransport = undefined;
+    if (
+      authTransport &&
+      "finishAuth" in authTransport &&
+      typeof authTransport.finishAuth === "function"
+    ) {
+      await authTransport.finishAuth(code);
+      return;
     }
 
     if (configuredType === "sse" || configuredType === "streamable-http") {
@@ -768,6 +808,7 @@ export class MCPClientConnection {
       try {
         await this.client.connect(transport);
         this._transport = transport;
+        this._pendingAuthTransport = undefined;
 
         return {
           state: MCPConnectionState.CONNECTED,
@@ -777,6 +818,7 @@ export class MCPClientConnection {
         const error = e instanceof Error ? e : new Error(String(e));
 
         if (isUnauthorized(error)) {
+          this._pendingAuthTransport = transport;
           return {
             state: MCPConnectionState.AUTHENTICATING
           };

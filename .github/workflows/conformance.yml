@@ -1,0 +1,37 @@
+name: MCP Conformance
+
+on:
+  pull_request:
+    paths:
+      - "packages/agents/**"
+      - ".github/workflows/conformance.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "packages/agents/**"
+      - ".github/workflows/conformance.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  client-conformance:
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install
+      - run: pnpm --filter agents run test:conformance:client
+
+  server-conformance:
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        variant: [mcp-agent, handler]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install
+      - run: pnpm --filter agents run test:conformance:server:${{ matrix.variant }}
