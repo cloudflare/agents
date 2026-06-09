@@ -1,12 +1,14 @@
 /**
  * Codemode snippets.
  *
- * A snippet is a saved sandbox script — a reusable code pattern that the model
- * has already written and verified. Snippets are durable: they live on the
- * CodemodeRuntime facet, are addressable by name, and accumulate over time as
- * the model promotes working code with `codemode.save(name)`.
+ * A snippet is a saved sandbox script — a reusable code pattern that already
+ * ran and worked. Snippets are durable: they live on the CodemodeRuntime
+ * facet, are addressable by name, and accumulate over time as the developer
+ * promotes working executions with `runtime.saveSnippet(name)`.
  *
- * Connectors provide raw capability. Snippets are recipes the model learned.
+ * Connectors provide raw capability. Snippets are recipes that worked. The
+ * model reuses them (`codemode.run`, `codemode.search`); the developer decides
+ * what is worth keeping.
  */
 
 /** A saved, addressable sandbox script. */
@@ -23,8 +25,10 @@ export interface Snippet {
   inputSchema?: unknown;
 }
 
-/** Options when promoting the current execution to a saved snippet. */
+/** Options when promoting an execution's script to a saved snippet. */
 export interface SaveSnippetOptions {
   description?: string;
   inputSchema?: unknown;
+  /** Execution to take the code from. Defaults to the current execution. */
+  executionId?: string;
 }

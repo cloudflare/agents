@@ -2,11 +2,13 @@
 
 Connectors are class-based integrations that bridge external services into the codemode sandbox. Each connector extends `WorkerEntrypoint`, making it serializable, RPC-callable, and available as `ctx.exports.ConnectorName`.
 
-Connectors define the service and execute tools. The [Runtime](./runtime.md) facet routes every tool call through a durable log — the connector owns definition and execution, while the runtime owns state, approvals, and rollback.
+**Why this exists:** there should be one way to add a capability. Whether the source is an MCP server, an OpenAPI spec, an AI SDK toolset, or your own service, the answer is the same — wrap it in a connector class, put it in a runtime, and the model sees it as a typed global (`github.list_pull_requests(...)`). The model-facing protocol never changes; only the class you subclass does.
+
+Connectors define and execute tools. The [Runtime](./runtime.md) facet routes every call through a durable log — the connector owns definition and execution, while the runtime owns state, approvals, and rollback.
+
+A connector answers three questions: what global name does the model use (`name`), what guidance does the model get (`instructions`), and what tools exist (`tools`). Each tool carries its own docs, schema, approval requirement, execution, and optional revert — **everything about a tool lives in one place**.
 
 ## Base class
-
-All connectors extend `CodemodeConnector`:
 
 ```ts
 import { CodemodeConnector } from "@cloudflare/codemode";
@@ -20,21 +22,15 @@ export class MyConnector extends CodemodeConnector<Env> {
     return "Use for interacting with My Service.";
   }
 
-  protected annotations() {
-    return {
-      listItems: { observation: true },
-      createItem: { requiresApproval: true, approvalDescription: "Create item" }
-    };
-  }
-
-  protected async loadDescriptors() {
+  protected tools() {
     return {
       listItems: {
         description: "List all items.",
         inputSchema: {
           type: "object",
           properties: { limit: { type: "number" } }
-        }
+        },
+        execute: (args) => this.env.MY_SERVICE.list(args)
       },
       createItem: {
         description: "Create an item.",
@@ -42,52 +38,82 @@ export class MyConnector extends CodemodeConnector<Env> {
           type: "object",
           properties: { title: { type: "string" } },
           required: ["title"]
-        }
+        },
+        requiresApproval: true,
+        execute: (args) => this.env.MY_SERVICE.create(args),
+        revert: (_args, result) => this.env.MY_SERVICE.delete(result.id)
       }
     };
-  }
-
-  async executeTool(method: string, args: unknown) {
-    if (method === "listItems") return this.env.MY_SERVICE.list(args);
-    if (method === "createItem") return this.env.MY_SERVICE.create(args);
-    throw new Error(`Unknown method: ${method}`);
   }
 }
 ```
 
-### Template methods
+### Authoring surface
 
-| Method                      | Required | Purpose                                                    |
-| --------------------------- | -------- | ---------------------------------------------------------- |
-| `name()`                    | Yes      | Unique namespace in the sandbox (`github`, `stripe`, etc.) |
-| `instructions()`            | No       | Human-readable instructions for the LLM                    |
-| `annotations()`             | No       | Per-method permissions — observation, requiresApproval     |
-| `loadDescriptors()`         | Yes      | JSON Schema descriptors for search/describe                |
-| `executeTool(method, args)` | Yes      | Execute a tool method by name                              |
-| `simulate(method, args)`    | No       | Return a provisional result for approval-pending actions   |
+| Method           | Required | Purpose                                                                          |
+| ---------------- | -------- | -------------------------------------------------------------------------------- |
+| `name()`         | Yes      | Unique namespace in the sandbox (`github`, `stripe`, etc.)                       |
+| `instructions()` | No       | Guidance shown to the model                                                      |
+| `tools()`        | Yes      | One record, one entry per tool (derived connectors generate it for you)          |
+| `tool(name, t)`  | No       | Decoration hook — adjust tools you didn't author inline (approval, revert, docs) |
 
-### RPC surface
+### Each tool
 
-The connector exposes these RPC methods (called by the proxy tool):
+```ts
+type ConnectorTool = {
+  description?: string;
+  inputSchema?: JSONSchema7; // defaults to an open object
+  outputSchema?: JSONSchema7;
+  requiresApproval?: boolean; // omit to execute immediately
+  execute: (args: unknown) => Promise<unknown> | unknown;
+  revert?: (args: unknown, result: unknown) => Promise<void> | void;
+};
+```
 
-- `describe()` — returns connector docs (name, instructions, descriptors, annotations)
-- `getTypeScriptTypes()` — returns TypeScript declarations for the LLM
-- `getAnnotations()` — returns the annotation map
-- `executeTool(method, args)` — called by the session facet to execute
+`requiresApproval: true` pauses the run for [approval](./approvals.md). `revert` enables [rollback](./runtime.md#rollback). Everything else executes immediately and is recorded in the durable log.
+
+AI SDK tools are shape-compatible — an existing `ToolSet` can be returned from `tools()` directly:
+
+```ts
+export class LinearConnector extends CodemodeConnector<Env> {
+  name() {
+    return "linear";
+  }
+  protected tools() {
+    return linearTools; // an AI SDK ToolSet
+  }
+}
+```
+
+### RPC surface (derived — you don't implement this)
+
+The proxy tool talks to connectors over Workers RPC. The base class derives this wire surface from the tools record:
+
+- `describe()` — name, instructions, descriptors, annotations
+- `getTypeScriptTypes()` — TypeScript declarations for describe
+- `executeTool(method, args)` — dispatch to the tool's `execute`
+- `revertAction(method, args, result)` — dispatch to the tool's `revert`
 
 ## McpConnector
 
-Wraps an MCP server. Each MCP tool becomes a method on the connector namespace.
+Wraps an MCP server. Each MCP tool becomes one entry in the tools record, executing through `connection.client.callTool()`. Tool names are sanitized into valid JS identifiers.
 
-Under the hood: fetches tools via `listTools()`, creates JSON Schema descriptors per tool, dispatches calls through `connection.client.callTool()`. Tool names are sanitized into valid JS identifiers.
+Implement `createConnection()`; decorate derived tools with the `tool(name, t)` hook:
 
 ```ts
-import { McpConnector, type McpConnectionLike } from "@cloudflare/codemode";
+import {
+  McpConnector,
+  type McpConnectionLike,
+  type ConnectorTool
+} from "@cloudflare/codemode";
 
 export class GithubConnector extends McpConnector<Env> {
-  #conn?: McpConnectionLike;
-  setConnection(conn: McpConnectionLike) {
-    this.#conn = conn;
+  constructor(
+    ctx: ExecutionContext,
+    env: Env,
+    private conn: McpConnectionLike
+  ) {
+    super(ctx, env);
   }
 
   name() {
@@ -97,23 +123,21 @@ export class GithubConnector extends McpConnector<Env> {
     return "Use for GitHub operations.";
   }
   protected createConnection() {
-    return this.#conn!;
+    return this.conn;
   }
 
-  protected annotations() {
-    return {
-      list_pull_requests: { observation: true },
-      search_issues: { observation: true },
-      create_issue: {
+  protected tool(name: string, t: ConnectorTool): ConnectorTool {
+    if (name === "create_issue") {
+      return {
+        ...t,
         requiresApproval: true,
-        approvalDescription: "Create issue"
-      }
-    };
+        revert: (_args, result) => this.closeIssue(result)
+      };
+    }
+    return t;
   }
 }
 ```
-
-### MCP-specific methods
 
 | Method               | Purpose                                                              |
 | -------------------- | -------------------------------------------------------------------- |
@@ -163,8 +187,6 @@ export class StripeConnector extends OpenApiConnector<Env> {
 }
 ```
 
-### OpenAPI-specific methods
-
 | Method             | Purpose                                                                                         |
 | ------------------ | ----------------------------------------------------------------------------------------------- |
 | `spec()`           | Required. Return the OpenAPI spec document. May be async.                                       |
@@ -187,48 +209,15 @@ const result = await stripe.request({
 });
 ```
 
-## ToolsetConnector
-
-Wraps an existing AI SDK `ToolSet` or codemode `ToolDescriptors`. Each tool becomes a method on the connector namespace.
-
-```ts
-import { ToolsetConnector } from "@cloudflare/codemode";
-
-export class LinearConnector extends ToolsetConnector<Env> {
-  name() {
-    return "linear";
-  }
-  protected instructions() {
-    return "Use for Linear issue tracking.";
-  }
-  protected tools() {
-    return linearTools;
-  }
-}
-```
-
-### Toolset-specific methods
-
-| Method    | Purpose                                      |
-| --------- | -------------------------------------------- |
-| `tools()` | Required. Return the tool set. May be async. |
-
-Sandbox sees one method per tool:
-
-```ts
-linear.createIssue({ title, description });
-linear.listIssues({ projectId });
-```
-
 ## File convention
 
-Connector files use the `*.codemode.ts` extension. The codemode vite plugin discovers them and auto-exports the classes from the worker entry module.
+Connector files use the `*.codemode.ts` extension. The codemode [Vite plugin](./vite-plugin.md) discovers them and auto-exports the classes from the worker entry module.
 
 ```
 src/
   github.codemode.ts     → export class GithubConnector extends McpConnector
   stripe.codemode.ts     → export class StripeConnector extends OpenApiConnector
-  linear.codemode.ts     → export class LinearConnector extends ToolsetConnector
+  linear.codemode.ts     → export class LinearConnector extends CodemodeConnector
   server.ts              → import with { type: "connectors" }
 ```
 
@@ -246,7 +235,7 @@ Constructors are for **dependencies** — connections, tokens, clients. Service 
 // Good — constructor receives dependency
 export class GithubConnector extends McpConnector<Env> {
   constructor(
-    ctx: any,
+    ctx: ExecutionContext,
     env: Env,
     private conn: McpConnectionLike
   ) {
@@ -268,7 +257,7 @@ export class StripeConnector extends OpenApiConnector<Env> {
   protected spec() {
     return stripeSpec;
   }
-  protected async request(input) {
+  protected async request(options: OpenApiRequestOptions) {
     // Uses this.env.STRIPE_KEY
   }
 }

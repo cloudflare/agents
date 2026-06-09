@@ -1,5 +1,4 @@
-import type { JsonSchemaToolDescriptors } from "../json-schema-types";
-import { CodemodeConnector } from "./base";
+import { CodemodeConnector, type ConnectorTools } from "./base";
 
 export type OpenApiRequestOptions = {
   /** Path or URL to call, e.g. an OpenAPI path from `spec()`. */
@@ -51,12 +50,13 @@ export abstract class OpenApiConnector<
 
   protected abstract request(options: OpenApiRequestOptions): Promise<unknown>;
 
-  protected override async loadDescriptors(): Promise<JsonSchemaToolDescriptors> {
+  protected override tools(): ConnectorTools {
     return {
       spec: {
         description:
           "Return the OpenAPI spec document so you can find operations in code.",
-        inputSchema: { type: "object", properties: {} }
+        inputSchema: { type: "object", properties: {} },
+        execute: () => this.spec()
       },
       request: {
         description:
@@ -74,18 +74,9 @@ export abstract class OpenApiConnector<
             }
           },
           required: ["path"]
-        }
+        },
+        execute: (args) => this.request(args as OpenApiRequestOptions)
       }
     };
-  }
-
-  async executeTool(method: string, args: unknown): Promise<unknown> {
-    if (method === "spec") {
-      return this.spec();
-    }
-    if (method === "request") {
-      return this.request(args as OpenApiRequestOptions);
-    }
-    throw new Error(`Unknown method "${method}" on ${this.name()}`);
   }
 }

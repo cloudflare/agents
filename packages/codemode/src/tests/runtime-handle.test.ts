@@ -90,4 +90,32 @@ describe("createCodemodeRuntime", () => {
 
     await expect(runtime.pending()).resolves.toEqual(pending);
   });
+
+  it("exposes the audit trail and snippet curation to the developer", async () => {
+    const executions = [
+      { id: "exec_2", code: "async () => 2", status: "completed", log: [] }
+    ];
+    const snippet = { name: "s", description: "", code: "", savedAt: 1 };
+    const runtimeStub = {
+      listExecutions: vi.fn(async () => executions),
+      saveSnippet: vi.fn(async () => snippet),
+      listSnippets: vi.fn(async () => [snippet]),
+      deleteSnippet: vi.fn(async () => true)
+    };
+    const runtime = createCodemodeRuntime({
+      ctx: createMockCtx(runtimeStub),
+      executor: createMockExecutor(),
+      connectors: []
+    });
+
+    await expect(runtime.executions()).resolves.toEqual(executions);
+    await expect(
+      runtime.saveSnippet("s", { executionId: "exec_2" })
+    ).resolves.toEqual(snippet);
+    expect(runtimeStub.saveSnippet).toHaveBeenCalledWith("s", {
+      executionId: "exec_2"
+    });
+    await expect(runtime.snippets()).resolves.toEqual([snippet]);
+    await expect(runtime.deleteSnippet("s")).resolves.toBe(true);
+  });
 });

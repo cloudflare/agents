@@ -3,12 +3,12 @@
  *
  * One AI SDK tool with `{ code: string }`. Code runs in the Executor sandbox.
  * The CodemodeRuntime facet makes execution durable via abort-and-replay:
- * every tool call is logged; observations execute and record; approval-required
+ * every tool call is logged; reads execute and record; approval-required
  * actions abort the run; `continue` replays the log and runs the approved action.
  *
  * Inside the sandbox:
  *   - Connector SDKs as globals: `<connector>.<method>(...)`
- *   - Platform SDK: `codemode.search/describe/step/save/run`
+ *   - Platform SDK: `codemode.search/describe/step/run`
  */
 import { tool, type Tool } from "ai";
 import { z } from "zod";
@@ -51,6 +51,7 @@ interface RuntimeStub {
   actionsToRevert(): Promise<ToolLogEntry[]>;
   markReverted(seq: number): Promise<void>;
   getExecution(id?: string): Promise<ExecutionState | null>;
+  listExecutions(): Promise<ExecutionState[]>;
   saveSnippet(name: string, options?: SaveSnippetOptions): Promise<Snippet>;
   getSnippet(name: string): Promise<Snippet | null>;
   listSnippets(): Promise<Snippet[]>;
@@ -195,13 +196,7 @@ function createPlatformProvider(
           await runtime.listSnippets()
         ),
 
-      // Snippets — durable, addressable saved scripts
-      save: async (name: unknown, options?: unknown) =>
-        runtime.saveSnippet(
-          String(name),
-          options as SaveSnippetOptions | undefined
-        ),
-
+      // Snippets — durable saved scripts the developer promoted
       run: async (...args: unknown[]) => {
         const snippet = await runtime.getSnippet(String(args[0]));
         if (!snippet) return { error: `Snippet "${args[0]}" not found.` };
@@ -262,9 +257,8 @@ function buildDescription(
     "## Snippets",
     "",
     "Snippets are saved scripts you can reuse.",
-    '- `codemode.save("name", { description })` saves the current script so you can run it again later. Save a script once it works and is worth reusing.',
-    '- `codemode.run("name", input)` runs a saved snippet. If a snippet needs input, write it as `async (input) => { ... }`.',
-    "- `codemode.snippets()` lists saved snippets.",
+    '- `codemode.run("name", input)` runs a saved snippet. Snippets appear in `codemode.search` results.',
+    "- If a script may be saved as a snippet later, write it as `async (input) => { ... }` so it can take input.",
     "",
     "## Available connectors",
     "",
@@ -395,6 +389,9 @@ function getRuntime(
     class: CodemodeRuntime
   })) as unknown as RuntimeStub;
 }
+
+/** Internal: the runtime handle uses this to reach the facet. Not public API. */
+export const getCodemodeRuntime = getRuntime;
 
 // ---------------------------------------------------------------------------
 // Resume — approve a pending action and continue via replay

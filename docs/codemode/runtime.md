@@ -2,7 +2,69 @@
 
 The **Executor** is a simple, stateless sandbox: it runs a block of code once and dispatches tool calls back. The **Runtime** wraps an executor and makes execution durable.
 
+**Why this exists:** approvals can take minutes or hours, and agents hibernate. A model may write a script that reads data, asks to create an issue, and continues after the user approves — possibly in a different request, after the Durable Object restarted. That needs durable state, which cannot live in the executor or in a single request. The runtime is where it lives.
+
 The public runtime handle owns the executor and connectors for the current request. `CodemodeRuntime` is the DurableObject facet behind that handle. It owns the durable state: the tool-call log, pending approvals, and snippets.
+
+## Configure
+
+```ts
+import {
+  createCodemodeRuntime,
+  DynamicWorkerExecutor
+} from "@cloudflare/codemode";
+
+const runtime = createCodemodeRuntime({
+  ctx: this.ctx, // the agent's DurableObjectState
+  executor: new DynamicWorkerExecutor({ loader: this.env.LOADER }),
+  connectors: [github, repoApi]
+});
+```
+
+| Handle method                                        | Purpose                                                              |
+| ---------------------------------------------------- | -------------------------------------------------------------------- |
+| `runtime.tool(options?)`                             | The single model-facing AI SDK tool, `codemode({ code })`            |
+| `runtime.pending()`                                  | List actions awaiting approval — drives approval UIs                 |
+| `runtime.approve({ executionId? })`                  | Approve the pending action and continue via replay                   |
+| `runtime.reject({ seq })`                            | Reject a pending action; ends the execution                          |
+| `runtime.rollback()`                                 | Revert applied actions in reverse order via each tool's `revert`     |
+| `runtime.executions()`                               | All executions, newest first — the audit trail for developer UIs     |
+| `runtime.saveSnippet(name, opts?)`                   | Promote an execution's script to a reusable [snippet](./snippets.md) |
+| `runtime.snippets()` / `runtime.deleteSnippet(name)` | List / remove saved snippets                                         |
+
+## The sandbox API (`codemode.*`)
+
+The runtime also provides the model's API. Inside the sandbox, `codemode` is a global with four methods — discover, learn, do-once, reuse:
+
+| Sandbox method               | Purpose                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------ |
+| `codemode.search(query)`     | Ranked search across connector methods and saved snippets                |
+| `codemode.describe(target)`  | TypeScript docs for a connector, method, or snippet — fetched on demand  |
+| `codemode.step(name, fn)`    | Run a side-effectful or nondeterministic closure once; replay its result |
+| `codemode.run(name, input?)` | Run a [snippet](./snippets.md) the developer saved                       |
+
+Connector methods appear next to it as their own globals (`github.list_pull_requests(...)`).
+
+**Why discovery lives in the sandbox:** the alternative is generating types for every tool and putting them all in the tool description, which floods the context as the tool count grows. `search` and `describe` return results **into the running code**, not into the prompt — the model pays for exactly the type information it asks for.
+
+```ts
+const matches = await codemode.search("pull request");
+// { results: [{ path: "github.list_pull_requests", kind: "method", score: 145 }, ...], total, truncated }
+
+const docs = await codemode.describe("github.list_pull_requests");
+// { path, description, types: "type ListPullRequestsInput = { owner: string; ... }", kind: "method" }
+```
+
+`describe` works on a connector (`"github"`), a method (`"github.list_pull_requests"`), or a snippet name. Search ranks with executor-style matching: names are normalized (`camelCase`/`snake_case`/dots split into tokens), fields are scored by weight (path 12, method 10, connector 8, description 5) with bonuses for exact/prefix/phrase matches, and results are capped at 50 — when `truncated` is true the model should search again with a more specific query.
+
+`codemode.step` is the explicit side-effect boundary that makes [abort-and-replay](#abort-and-replay) correct: the closure runs inside the sandbox, the result is recorded in the log, and on replay the closure is skipped.
+
+```ts
+const id = await codemode.step("gen-id", () => crypto.randomUUID());
+const data = await codemode.step("fetch", async () =>
+  (await fetch(url)).json()
+);
+```
 
 ## Executor vs Runtime
 
@@ -19,9 +81,9 @@ The executor runs code. The runtime wraps the executor and adds durability, appr
 
 The core mechanism. When the model's code runs, every tool call is recorded in a durable log:
 
-1. **Observation** (read-only) → executes, result recorded in the log.
+1. **Read** (no annotation) → executes, result recorded in the log.
 2. **Approval-required action** → recorded as `pending`, and the run **aborts**.
-3. On **continue** → the same code re-runs. Every call already in the log is served from it (a noop replay — observations return their recorded result, applied actions return theirs). The newly-approved action executes for real. The run proceeds to the next pause or to completion.
+3. On **continue** → the same code re-runs. Every call already in the log is served from it (a noop replay — reads return their recorded result, applied actions return theirs). The newly-approved action executes for real. The run proceeds to the next pause or to completion.
 
 ```
 run 1:  search() ──exec──> "results"        [logged: applied]
@@ -61,54 +123,35 @@ type ToolLogEntry = {
   args: unknown;
   result?: unknown; // recorded for replay
   requiresApproval: boolean;
-  description?: string;
   state: "applied" | "pending" | "reverted";
 };
 ```
 
-## Lifecycle
-
-```ts
-const runtime = createCodemodeRuntime({ ctx, executor, connectors });
-
-// expose the model-facing tool
-tools: {
-  codemode: runtime.tool();
-}
-
-// list actions awaiting approval
-const pending = await runtime.pending();
-
-// approve + continue (re-runs via replay)
-await runtime.approve({ executionId });
-
-// reject a pending action (ends the execution)
-await runtime.reject({ seq });
-
-// rollback applied actions in reverse order
-await runtime.rollback();
-```
-
 ## Rollback
 
-Rollback walks the log backward and calls `revertAction` on each applied action's connector:
+Rollback walks the log backward and calls each applied action's `revert`:
 
 ```ts
-class GithubConnector extends McpConnector<Env> {
-  async revertAction(method: string, args: unknown, result: unknown) {
-    if (method === "create_issue") {
-      const { number } = result as { number: number };
-      await this.closeIssue(number);
-    }
+protected tool(name: string, t: ConnectorTool): ConnectorTool {
+  if (name === "create_issue") {
+    return {
+      ...t,
+      requiresApproval: true,
+      revert: async (_args, result) => {
+        const { number } = result as { number: number };
+        await this.closeIssue(number);
+      }
+    };
   }
+  return t;
 }
 ```
 
-Connectors that don't implement `revertAction` are skipped (the user is told the action can't be auto-reverted). Observations are never reverted.
+Tools without a `revert` are skipped (the user is told the action can't be auto-reverted). Reads are never reverted.
 
 ## Snippets
 
-The runtime also stores [snippets](./snippets.md) — durable, addressable scripts the model saves with `codemode.save(name)` and re-runs with `codemode.run(name)`. They live here because the runtime is the natural home for learned, accumulated state (unlike the executor and connectors, which are transient).
+The runtime also stores [snippets](./snippets.md) — durable, addressable scripts the developer promotes with `runtime.saveSnippet(name)` and the model re-runs with `codemode.run(name)`. They live here because the runtime is the natural home for accumulated state (unlike the executor and connectors, which are transient).
 
 ## Runtime identity
 

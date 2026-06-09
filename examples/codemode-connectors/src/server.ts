@@ -93,8 +93,7 @@ export class Chat extends AIChatAgent<Env> {
     // Create connectors. Connectors extend WorkerEntrypoint, whose constructor
     // expects an ExecutionContext; inside a Durable Object we pass `this.ctx`.
     const ctx = this.ctx as unknown as ExecutionContext;
-    const github = new GithubConnector(ctx, this.env);
-    github.setConnection(conn);
+    const github = new GithubConnector(ctx, this.env, conn);
     const repoApi = new RepoApiConnector(ctx, this.env);
 
     const runtime = createCodemodeRuntime({
@@ -114,7 +113,6 @@ export class Chat extends AIChatAgent<Env> {
         '  - await codemode.search("query") to discover methods and saved snippets',
         '  - await codemode.describe("connector.method") for TypeScript docs',
         "  - await <connector>.<method>(args) to call methods directly",
-        '  - await codemode.save("name", { description }) to save a working script for reuse',
         '  - await codemode.run("name", input) to run a saved snippet',
         "",
         `The current date and time is ${new Date().toISOString()}.`

@@ -8,10 +8,10 @@
  *
  *   - Every tool call AND every `codemode.step(name, fn)` is recorded in a
  *     durable log (the replay spine).
- *   - Observations / steps execute and their result is recorded.
+ *   - Reads / steps execute and their result is recorded.
  *   - Actions requiring approval are recorded as pending, and the run aborts.
  *   - On `continue`, the same code re-runs. Calls already in the log are served
- *     from it (noop — observations/steps return recorded results, applied
+ *     from it (noop — reads/steps return recorded results, applied
  *     actions return theirs). The newly-approved action executes for real, then
  *     the run proceeds to the next pause or completion.
  *
@@ -47,9 +47,8 @@ export type ToolLogEntry = {
   args: unknown;
   /** Recorded result for replay. Present once applied. */
   result?: unknown;
-  /** Whether this call required approval (vs. an observation or step). */
+  /** Whether this call required approval (vs. a read or step). */
   requiresApproval: boolean;
-  description?: string;
   state: ToolLogEntryState;
 };
 
@@ -71,7 +70,6 @@ export type PendingAction = {
   connector: string;
   method: string;
   args: unknown;
-  description?: string;
 };
 
 /**
@@ -150,7 +148,7 @@ export class CodemodeRuntime extends DurableObject {
    * Applied → replay its result. Pending → it was just approved, execute it.
    * Reverted → treat as a fresh call.
    *
-   * New call: step or observation → execute. Approval-required → record
+   * New call: step or read → execute. Approval-required → record
    * pending, pause.
    */
   async decide(
@@ -190,7 +188,6 @@ export class CodemodeRuntime extends DurableObject {
       method,
       args,
       requiresApproval,
-      description: annotation?.approvalDescription,
       state: requiresApproval ? "pending" : "applied"
     };
     state.log[seq] = entry;
@@ -247,8 +244,7 @@ export class CodemodeRuntime extends DurableObject {
         seq: e.seq,
         connector: e.connector,
         method: e.method,
-        args: e.args,
-        description: e.description
+        args: e.args
       }));
   }
 
@@ -268,7 +264,7 @@ export class CodemodeRuntime extends DurableObject {
   // Rollback — walk the log backward; the proxy tool calls revertAction.
   // -----------------------------------------------------------------------
 
-  /** Return applied actions (not observations/steps) in reverse order. */
+  /** Return applied actions (not reads/steps) in reverse order. */
   async actionsToRevert(): Promise<ToolLogEntry[]> {
     const state = await this.#current();
     if (!state) return [];
@@ -296,20 +292,37 @@ export class CodemodeRuntime extends DurableObject {
     return this.#current();
   }
 
+  /** List all executions, newest first. The audit trail for developer UIs. */
+  async listExecutions(): Promise<ExecutionState[]> {
+    const map = await this.ctx.storage.list<ExecutionState | string>({
+      prefix: "execution:"
+    });
+    const executions: ExecutionState[] = [];
+    for (const [key, value] of map) {
+      if (key === CURRENT_KEY || typeof value === "string") continue;
+      executions.push(value);
+    }
+    return executions.sort((a, b) => b.id.localeCompare(a.id));
+  }
+
   // -----------------------------------------------------------------------
   // Snippets — durable, addressable saved scripts
   // -----------------------------------------------------------------------
 
   /**
-   * Promote the current execution's code to a saved, addressable snippet.
-   * This is the "save what just ran" hook — the model calls it after a script
-   * works so it can be re-run later with `codemode.run(name)`.
+   * Promote an execution's code to a saved, addressable snippet. This is the
+   * "save what ran" hook — the developer calls it (via runtime.saveSnippet)
+   * after a script proves useful, so the model can re-run it later with
+   * `codemode.run(name)`.
    */
   async saveSnippet(
     name: string,
     options?: SaveSnippetOptions
   ): Promise<Snippet> {
-    const state = await this.#requireCurrent();
+    const state = options?.executionId
+      ? await this.#get(options.executionId)
+      : await this.#current();
+    if (!state) throw new Error("No execution to save a snippet from");
     const snippet: Snippet = {
       name,
       description: options?.description ?? "",

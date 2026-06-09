@@ -5,12 +5,8 @@ import type { JsonSchemaToolDescriptors } from "../json-schema-types";
 // ---------------------------------------------------------------------------
 
 export type ToolAnnotations = {
-  /** Read-only operation. No side effects. */
-  observation?: boolean;
-  /** Requires user approval before executing. */
+  /** Requires user approval before executing. Unannotated methods execute immediately. */
   requiresApproval?: boolean;
-  /** Human-readable description shown in approval UI. */
-  approvalDescription?: string;
 };
 
 // ---------------------------------------------------------------------------

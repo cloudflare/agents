@@ -240,12 +240,19 @@ Under the hood: fetches tools from the MCP connection via `listTools()`, creates
 
 ```ts
 // github.codemode.ts
-import { McpConnector, type McpConnectionLike } from "@cloudflare/codemode";
+import {
+  McpConnector,
+  type McpConnectionLike,
+  type ConnectorTool
+} from "@cloudflare/codemode";
 
 export class GithubConnector extends McpConnector<Env> {
-  #conn?: McpConnectionLike;
-  setConnection(conn: McpConnectionLike) {
-    this.#conn = conn;
+  constructor(
+    ctx: ExecutionContext,
+    env: Env,
+    private conn: McpConnectionLike
+  ) {
+    super(ctx, env);
   }
 
   name() {
@@ -255,20 +262,15 @@ export class GithubConnector extends McpConnector<Env> {
     return "Use for GitHub operations.";
   }
   protected createConnection() {
-    return this.#conn!;
+    return this.conn;
   }
 
   // Override to customize tool naming
   // protected toolName(tool: McpTool) { return sanitizeToolName(tool.name); }
 
-  protected annotations() {
-    return {
-      list_pull_requests: { observation: true },
-      create_issue: {
-        requiresApproval: true,
-        approvalDescription: "Create issue"
-      }
-    };
+  // Decorate derived tools: mark approvals, attach reverts
+  protected tool(name: string, t: ConnectorTool): ConnectorTool {
+    return name === "create_issue" ? { ...t, requiresApproval: true } : t;
   }
 }
 ```
@@ -330,47 +332,9 @@ const intent = await stripe.request({
 });
 ```
 
-### `ToolsetConnector`
-
-Wraps an existing AI SDK `ToolSet` or codemode `ToolDescriptors`. Each tool in the set becomes a method on the connector namespace.
-
-Under the hood: dispatches calls to the tool's `execute` function by name. No schema descriptors are generated automatically — the tools carry their own schemas.
-
-```ts
-// linear.codemode.ts
-import { ToolsetConnector } from "@cloudflare/codemode";
-import { linearTools } from "./linear-tools";
-
-export class LinearConnector extends ToolsetConnector<Env> {
-  name() {
-    return "linear";
-  }
-  protected instructions() {
-    return "Use for Linear issue tracking.";
-  }
-  protected tools() {
-    return linearTools;
-  }
-}
-```
-
-Sandbox sees:
-
-```ts
-linear.createIssue({ title, description });
-linear.listIssues({ projectId });
-// ... one method per tool in the set
-```
-
 ### `CodemodeConnector` (base class)
 
-All connectors extend `CodemodeConnector`, which extends `WorkerEntrypoint`. The base class provides:
-
-- **RPC surface**: `describe()`, `callTool(method, args)`, `getTypeScriptTypes()` — compatible with the Gatekeeper interface
-- **Template methods**: `name()`, `instructions()`, `annotations()`, `loadDescriptors()`, `executeTool()`
-- **Caching**: descriptors are loaded once via `loadDescriptors()` and cached
-
-To build a custom connector from scratch:
+All connectors extend `CodemodeConnector`, which extends `WorkerEntrypoint`. A connector is three things — `name()`, optional `instructions()`, and `tools()`. Each tool carries its own docs, schema, approval requirement, execution, and optional revert, so everything about a tool lives in one place:
 
 ```ts
 import { CodemodeConnector } from "@cloudflare/codemode";
@@ -380,55 +344,59 @@ export class MyConnector extends CodemodeConnector<Env> {
     return "myService";
   }
 
-  protected async loadDescriptors() {
+  protected tools() {
     return {
-      doThing: {
-        description: "Do a thing.",
+      listThings: {
+        description: "List things.",
+        inputSchema: { type: "object" },
+        execute: (args) => this.env.MY_SERVICE.list(args)
+      },
+      createThing: {
+        description: "Create a thing.",
         inputSchema: {
           type: "object",
-          properties: { id: { type: "string" } },
-          required: ["id"]
-        }
+          properties: { title: { type: "string" } },
+          required: ["title"]
+        },
+        requiresApproval: true, // pauses the run for user approval
+        execute: (args) => this.env.MY_SERVICE.create(args),
+        revert: (_args, result) => this.env.MY_SERVICE.delete(result.id) // enables rollback
       }
     };
   }
+}
+```
 
-  async executeTool(method: string, args: unknown) {
-    if (method === "doThing") return this.env.MY_SERVICE.doThing(args);
-    throw new Error(`Unknown method: ${method}`);
+An existing AI SDK `ToolSet` is shape-compatible and can be returned from `tools()` directly:
+
+```ts
+export class LinearConnector extends CodemodeConnector<Env> {
+  name() {
+    return "linear";
+  }
+  protected tools() {
+    return linearTools; // AI SDK ToolSet
   }
 }
 ```
 
-### Annotations
+The `tool(name, t)` decoration hook adjusts tools you didn't author inline (used with MCP/OpenAPI-derived tools). The RPC wire surface (`describe()`, `executeTool()`, `revertAction()`, `getTypeScriptTypes()`) is derived from the tools record — you don't implement it.
 
-Connectors classify methods so the runtime knows how to treat them. Calls to `requiresApproval` methods pause the run until the user approves (see [docs/codemode/approvals.md](../../docs/codemode/approvals.md)):
-
-```ts
-annotations() {
-  return {
-    listItems: { observation: true },                          // read-only
-    createItem: { requiresApproval: true, approvalDescription: "Create item" },  // needs approval
-  };
-}
-```
-
-The agent drives approvals through the runtime: `runtime.pending()`, `runtime.approve()`, `runtime.reject({ seq })`, `runtime.rollback()`.
+The agent drives approvals through the runtime: `runtime.pending()`, `runtime.approve()`, `runtime.reject({ seq })`, `runtime.rollback()` (see [docs/codemode/approvals.md](../../docs/codemode/approvals.md)).
 
 ### Snippets
 
-Snippets are durable, addressable saved scripts. The model writes a script, confirms it works, then promotes it for reuse — they accumulate on the runtime over time. No authoring step, no skill-source interface.
+Snippets are durable, addressable saved scripts. The model writes and runs scripts; the developer promotes the ones worth keeping (`runtime.saveSnippet`), and the model reuses them (`codemode.run`). No authoring step, no skill-source interface.
 
 ```ts
-// inside sandbox code
-const prs = await github.list_pull_requests({ owner, repo, state: "open" });
-
-// save the current script for reuse
-await codemode.save("list-open-prs", {
+// host side: review runs, promote one
+const runs = await runtime.executions();
+await runtime.saveSnippet("list-open-prs", {
+  executionId: runs[0].id,
   description: "List open PRs for a repo."
 });
 
-// run it later by name
+// sandbox side: the model runs it by name
 const prs = await codemode.run("list-open-prs");
 ```
 

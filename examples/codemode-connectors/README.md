@@ -44,12 +44,6 @@ export class GithubConnector extends McpConnector<Env> {
   protected createConnection() {
     return this.conn;
   }
-  annotations() {
-    return {
-      list_pull_requests: { observation: true },
-      search_issues: { observation: true }
-    };
-  }
 }
 ```
 
@@ -65,13 +59,15 @@ export class RepoApiConnector extends OpenApiConnector<Env> {
 
 ### Snippets
 
-Once a script works, the model can save it as a reusable snippet and run it again later:
+Once a script works, the developer can promote it to a reusable snippet (e.g. from a `@callable` wired to a UI button), and the model runs it again later:
 
 ```ts
-await codemode.save("repo-overview", {
+// host side
+await runtime.saveSnippet("repo-overview", {
   description: "Fetch repo metadata, open PRs, and latest releases."
 });
 
+// sandbox side (the model)
 const overview = await codemode.run("repo-overview", {
   owner: "cloudflare",
   repo: "agents"
@@ -107,4 +103,4 @@ Then try:
 
 - "List open pull requests for cloudflare/agents"
 - "Get repository metadata for cloudflare/agents"
-- "Give me an overview of cloudflare/agents, then save that script as a snippet"
+- "Give me an overview of cloudflare/agents"

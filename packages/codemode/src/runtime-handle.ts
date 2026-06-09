@@ -3,6 +3,7 @@ import type { CodemodeConnector } from "./connectors";
 import type { Executor } from "./executor";
 import {
   createProxyTool,
+  getCodemodeRuntime,
   pendingCodemode,
   rejectCodemode,
   resumeCodemode,
@@ -10,7 +11,8 @@ import {
   type ProxyToolInput,
   type ProxyToolOutput
 } from "./proxy-tool";
-import type { PendingAction } from "./runtime";
+import type { ExecutionState, PendingAction } from "./runtime";
+import type { SaveSnippetOptions, Snippet } from "./snippet";
 
 export type CreateCodemodeRuntimeOptions = {
   ctx: DurableObjectState;
@@ -38,6 +40,12 @@ export interface CodemodeRuntimeHandle {
   reject(options: CodemodeRejectOptions): Promise<void>;
   rollback(): Promise<void>;
   pending(): Promise<PendingAction[]>;
+  /** All executions, newest first — the audit trail. */
+  executions(): Promise<ExecutionState[]>;
+  /** Promote an execution's script to a named, reusable snippet. */
+  saveSnippet(name: string, options?: SaveSnippetOptions): Promise<Snippet>;
+  snippets(): Promise<Snippet[]>;
+  deleteSnippet(name: string): Promise<boolean>;
 }
 
 export function createCodemodeRuntime(
@@ -93,5 +101,25 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
       ctx: this.#options.ctx,
       connectors: this.#options.connectors
     });
+  }
+
+  executions(): Promise<ExecutionState[]> {
+    return this.#runtime().listExecutions();
+  }
+
+  saveSnippet(name: string, options?: SaveSnippetOptions): Promise<Snippet> {
+    return this.#runtime().saveSnippet(name, options);
+  }
+
+  snippets(): Promise<Snippet[]> {
+    return this.#runtime().listSnippets();
+  }
+
+  deleteSnippet(name: string): Promise<boolean> {
+    return this.#runtime().deleteSnippet(name);
+  }
+
+  #runtime() {
+    return getCodemodeRuntime(this.#options.ctx, this.#options.connectors);
   }
 }

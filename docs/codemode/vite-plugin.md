@@ -2,6 +2,8 @@
 
 The `@cloudflare/codemode/vite` plugin handles connector discovery and auto-export so users don't need manual wrangler configuration.
 
+**Why this exists:** connectors extend `WorkerEntrypoint` and must be exported from the worker entry module to be reachable over Workers RPC, and the `CodemodeRuntime` facet class must be exported for facet spawning. That's plumbing nobody should hand-maintain — the plugin derives it from a file convention (`*.codemode.ts`) instead.
+
 ## Setup
 
 ```ts

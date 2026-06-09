@@ -790,7 +790,7 @@ importers:
         specifier: '*'
         version: link:../../packages/codemode
       '@cloudflare/kumo':
-        specifier: ^2.2.1
+        specifier: ^2.4.1
         version: 2.4.1(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.16)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
       '@modelcontextprotocol/sdk':
         specifier: '*'
@@ -808,10 +808,10 @@ importers:
         specifier: ^5.1.11
         version: 5.1.11
       react:
-        specifier: ^19.2.6
+        specifier: ^19.2.7
         version: 19.2.7
       react-dom:
-        specifier: ^19.2.6
+        specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
         specifier: '*'
@@ -821,19 +821,19 @@ importers:
         version: 4.4.3
     devDependencies:
       '@cloudflare/vite-plugin':
-        specifier: ^1.37.2
+        specifier: ^1.39.2
         version: 1.39.2(vite@8.0.16(@types/node@25.9.1)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(workerd@1.20260601.1)(wrangler@4.97.0(@cloudflare/workers-types@4.20260604.1))
       '@cloudflare/workers-types':
-        specifier: ^4.20260519.1
+        specifier: ^4.20260604.1
         version: 4.20260604.1
       '@tailwindcss/vite':
         specifier: ^4
         version: 4.3.0(vite@8.0.16(@types/node@25.9.1)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
       '@types/node':
-        specifier: ^25.9.0
+        specifier: ^25.9.1
         version: 25.9.1
       '@types/react':
-        specifier: ^19.2.14
+        specifier: ^19.2.16
         version: 19.2.16
       '@types/react-dom':
         specifier: ^19.2.3
@@ -848,10 +848,10 @@ importers:
         specifier: ^6.0.3
         version: 6.0.3
       vite:
-        specifier: ^8.0.13
+        specifier: ^8.0.16
         version: 8.0.16(@types/node@25.9.1)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
       wrangler:
-        specifier: ^4.93.0
+        specifier: ^4.97.0
         version: 4.97.0(@cloudflare/workers-types@4.20260604.1)
 
   examples/codemode-mcp:

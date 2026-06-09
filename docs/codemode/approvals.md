@@ -1,36 +1,37 @@
 # Approvals
 
-Connectors annotate methods that require user approval. When the model's code calls one, the run **pauses** (aborts), the action is recorded as pending, and the user is asked to approve. On approval the execution **continues via replay** — see [Runtime](./runtime.md) for the mechanism.
+A tool with `requiresApproval: true` pauses the run when the model's code calls it (the run aborts), the action is recorded as pending, and the user is asked to approve. On approval the execution **continues via replay** — see [Runtime](./runtime.md) for the mechanism.
 
-## Annotations
+## Marking tools
+
+On a custom connector, set it on the tool itself:
+
+```ts
+protected tools() {
+  return {
+    create_issue: {
+      description: "Create a GitHub issue.",
+      requiresApproval: true,
+      execute: (args) => this.client.createIssue(args)
+    }
+  };
+}
+```
+
+On a derived connector (MCP, OpenAPI), decorate via the `tool(name, t)` hook:
 
 ```ts
 class GithubConnector extends McpConnector<Env> {
-  annotations() {
-    return {
-      // Read-only — executes immediately, result recorded
-      list_pull_requests: { observation: true },
-      search_issues: { observation: true },
-
-      // Needs approval — pauses the run
-      create_issue: {
-        requiresApproval: true,
-        approvalDescription: "Create a new GitHub issue"
-      },
-      merge_pull_request: {
-        requiresApproval: true,
-        approvalDescription: "Merge a pull request"
-      }
-    };
+  protected tool(name: string, t: ConnectorTool): ConnectorTool {
+    if (name === "create_issue" || name === "merge_pull_request") {
+      return { ...t, requiresApproval: true };
+    }
+    return t;
   }
 }
 ```
 
-| Field                 | Type      | Purpose                           |
-| --------------------- | --------- | --------------------------------- |
-| `observation`         | `boolean` | Read-only. No side effects.       |
-| `requiresApproval`    | `boolean` | Pauses the run for user approval. |
-| `approvalDescription` | `string`  | Shown in the approval UI.         |
+`requiresApproval: true` is the entire surface. Mark only what needs a human — everything else executes immediately and is still recorded in the durable log for replay and audit.
 
 ## Flow
 
@@ -62,7 +63,6 @@ type PendingAction = {
   connector: string;
   method: string;
   args: unknown;
-  description?: string;
 };
 ```
 
@@ -117,13 +117,13 @@ class GithubConnector extends McpConnector<Env> {
 }
 ```
 
-Connectors without `revertAction` are skipped. Observations are never reverted.
+Connectors without `revertAction` are skipped. Reads are never reverted.
 
 ## Comparison with Gatekeeper
 
 | Concept              | Gatekeeper                         | Codemode                              |
 | -------------------- | ---------------------------------- | ------------------------------------- |
-| Read classification  | `authorizeObservation()`           | `{ observation: true }`               |
+| Read classification  | `authorizeObservation()`           | unannotated (default)                 |
 | Write classification | `submitAction()`                   | `{ requiresApproval: true }`          |
 | Pending state        | Simulated in the session           | Logged; run aborts                    |
 | Continue             | Session simulates ahead            | Abort-and-replay                      |

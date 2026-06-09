@@ -1,9 +1,8 @@
 import type { JSONSchema7 } from "json-schema";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Tool as McpTool } from "@modelcontextprotocol/sdk/types.js";
-import type { JsonSchemaToolDescriptors } from "../json-schema-types";
 import { sanitizeToolName } from "../utils";
-import { CodemodeConnector } from "./base";
+import { CodemodeConnector, type ConnectorTools } from "./base";
 
 type CallToolResult = Awaited<ReturnType<Client["callTool"]>>;
 
@@ -41,9 +40,12 @@ function unwrapMcpResult(result: CallToolResult): unknown {
 }
 
 /**
- * Connector backed by an MCP connection.
+ * Connector backed by an MCP connection. Each MCP tool becomes one entry in
+ * the tools record, executing through `connection.client.callTool()`.
  *
- * Subclass and implement `createConnection()`.
+ * Subclass and implement `createConnection()`. To mark a derived tool as
+ * requiring approval or to attach a revert, override the `tool(name, t)`
+ * decoration hook from the base class.
  */
 export abstract class McpConnector<
   Env = unknown,
@@ -57,17 +59,12 @@ export abstract class McpConnector<
     return sanitizeToolName(tool.name);
   }
 
-  // Cached connection and tools
+  // Cached connection
   #connectionPromise?: Promise<McpConnectionLike>;
   protected getConnection(): Promise<McpConnectionLike> {
     return (this.#connectionPromise ??= Promise.resolve(
       this.createConnection()
     ));
-  }
-
-  #toolsPromise?: Promise<McpTool[]>;
-  protected listTools(): Promise<McpTool[]> {
-    return (this.#toolsPromise ??= this.fetchTools());
   }
 
   protected async fetchTools(): Promise<McpTool[]> {
@@ -88,29 +85,25 @@ export abstract class McpConnector<
     return desc;
   }
 
-  protected override async loadDescriptors(): Promise<JsonSchemaToolDescriptors> {
-    const tools = await this.listTools();
-    const descriptors: JsonSchemaToolDescriptors = {};
-    for (const tool of tools) {
-      descriptors[this.toolName(tool)] = {
+  protected override async tools(): Promise<ConnectorTools> {
+    const mcpTools = await this.fetchTools();
+    const out: ConnectorTools = {};
+    for (const tool of mcpTools) {
+      out[this.toolName(tool)] = {
         description: tool.description,
         inputSchema: tool.inputSchema as JSONSchema7,
-        outputSchema: tool.outputSchema as JSONSchema7 | undefined
+        outputSchema: tool.outputSchema as JSONSchema7 | undefined,
+        execute: async (args: unknown) => {
+          const connection = await this.getConnection();
+          return unwrapMcpResult(
+            await connection.client.callTool({
+              name: tool.name,
+              arguments: args as Record<string, unknown>
+            })
+          );
+        }
       };
     }
-    return descriptors;
-  }
-
-  async executeTool(method: string, args: unknown): Promise<unknown> {
-    const connection = await this.getConnection();
-    const tools = await this.listTools();
-    const tool = tools.find((t) => this.toolName(t) === method);
-    if (!tool) throw new Error(`Tool "${method}" not found on ${this.name()}`);
-    return unwrapMcpResult(
-      await connection.client.callTool({
-        name: tool.name,
-        arguments: args as Record<string, unknown>
-      })
-    );
+    return out;
   }
 }

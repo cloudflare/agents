@@ -1,25 +1,31 @@
 # Snippets
 
-A **snippet** is a saved sandbox script — a reusable pattern the model has already written and verified. Snippets are durable: they live on the [Runtime](./runtime.md) facet, are addressable by name, and accumulate over time as the model promotes working code.
+A **snippet** is a saved sandbox script — a reusable pattern that already ran and worked. Snippets are durable: they live on the [Runtime](./runtime.md) facet, are addressable by name, and accumulate over time.
 
-Connectors provide raw capability. Snippets are recipes the model learned.
+Connectors provide raw capability. Snippets are recipes that worked. The split is deliberate: **the model writes and reuses scripts; the developer decides which ones are worth keeping.** Promotion is a curation decision — wire it to a "save this script" button, an eval, or your own heuristics, not to the model's judgement.
 
 ## Lifecycle
 
 ```ts
-// 1. The model writes and runs a script
+// 1. The model writes and runs a script (one execution)
 const prs = await github.list_pull_requests({ owner, repo, state: "open" });
+```
 
-// 2. If it works and is worth reusing, save it — captures the current script
-await codemode.save("list-open-prs", {
+```ts
+// 2. The developer reviews the run and promotes it — e.g. from a @callable
+const runs = await runtime.executions(); // newest first
+await runtime.saveSnippet("list-open-prs", {
+  executionId: runs[0].id, // defaults to the current execution
   description: "List open pull requests for a repository."
 });
+```
 
-// 3. Later, run it by name
+```ts
+// 3. The model finds it via codemode.search and runs it by name
 const prs = await codemode.run("list-open-prs");
 ```
 
-`codemode.save(name, options?)` snapshots **the code of the current execution** — the script that is running when `save` is called. That is the "save what just ran" hook: the model writes a script, confirms it works, and promotes it in one line.
+`runtime.saveSnippet(name, options?)` snapshots **an execution's code** — by default the current one, or any past run via `executionId`. `runtime.snippets()` lists what's saved and `runtime.deleteSnippet(name)` removes it.
 
 ## Parameterised snippets
 
@@ -46,7 +52,7 @@ Snippets with no input are written `async () => { ... }` and run with `codemode.
 
 ## Discovery
 
-Snippets surface alongside connector methods:
+Once saved, snippets surface to the model alongside connector methods:
 
 ```ts
 codemode.search("open pull requests"); // returns methods AND snippets (kind: "snippet")
@@ -55,10 +61,11 @@ codemode.describe("list-open-prs"); // returns the snippet's description + sourc
 
 ## API
 
-| Call                                                  | Effect                                                    |
-| ----------------------------------------------------- | --------------------------------------------------------- |
-| `codemode.save(name, { description?, inputSchema? })` | Save the current script as `name`. Returns the `Snippet`. |
-| `codemode.run(name, input?)`                          | Run a saved snippet, optionally with input.               |
+| Call                                                                      | Who       | Effect                                                          |
+| ------------------------------------------------------------------------- | --------- | --------------------------------------------------------------- |
+| `runtime.saveSnippet(name, { executionId?, description?, inputSchema? })` | Developer | Promote an execution's script to `name`. Returns the `Snippet`. |
+| `runtime.snippets()` / `runtime.deleteSnippet(name)`                      | Developer | List / remove saved snippets.                                   |
+| `codemode.run(name, input?)`                                              | Model     | Run a saved snippet, optionally with input.                     |
 
 ```ts
 interface Snippet {
@@ -80,11 +87,12 @@ Snippets live on the runtime, and the runtime's identity is derived from the con
 
 So snippet validity is **structural**, not tracked per-snippet: a snippet is always run against exactly the connectors it was written with. There is no orphaned-reference problem and no dependency bookkeeping.
 
-## Why durable, not authored
+## Why durable and curated, not authored
 
 Earlier designs passed in a static list of "skills" at construction. Snippets replace that:
 
-- **Learned, not authored** — the model saves what works, instead of a human pre-writing recipes.
+- **Grown, not authored** — snippets come from real runs that worked, instead of a human pre-writing recipes.
+- **Curated, not self-promoted** — the developer (or their user) decides what the model gets to reuse; the model doesn't grade its own work.
 - **Durable** — they persist on the facet across runs and conversations.
 - **Self-consistent** — bound to the connector set that can run them.
 
