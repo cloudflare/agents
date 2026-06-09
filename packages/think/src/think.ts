@@ -7307,7 +7307,7 @@ export class Think<
     status: "completed" | "error" | "aborted" | "overflow_retry";
     error?: string;
   }> {
-    const streamId = this._resumableStream.start(requestId);
+    const streamId = this._startResumableStream(requestId);
     const accumulator = new StreamAccumulator({
       messageId: crypto.randomUUID()
     });
