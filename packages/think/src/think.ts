@@ -1292,6 +1292,16 @@ export interface TurnConfig {
     typeof streamText
   >[0]["experimental_telemetry"];
   /**
+   * Optional AI SDK stream transform(s) for this turn (`experimental_transform`).
+   * Forwarded to `streamText` so callers can inspect/rewrite the stream — e.g.
+   * detecting tool results that carry `{ content, sources }` and enqueuing
+   * additional `source` parts via the transform's controller. Accepts a single
+   * transform or an array applied in order.
+   */
+  experimental_transform?: Parameters<
+    typeof streamText
+  >[0]["experimental_transform"];
+  /**
    * Optional structured-output specification (AI SDK `output`).
    * Forwarded to `streamText` so the model's final response is parsed
    * against the supplied schema. Use the AI SDK's `Output.object({ schema })`
@@ -3515,6 +3525,10 @@ export class Think<
         | Parameters<typeof streamText>[0]["providerOptions"]
         | undefined,
       experimental_telemetry: config.experimental_telemetry,
+      // Forward the per-turn stream transform(s) from TurnConfig so callers
+      // can inspect/rewrite the stream (e.g. emit `source` parts derived from
+      // tool results) without owning the stream pipeline themselves.
+      experimental_transform: config.experimental_transform,
       // Forward the per-turn structured-output spec from TurnConfig so
       // callers can use AI SDK `Output.object({ schema })` / `Output.text()`
       // on the terminal turn without dropping tools at model construction.
