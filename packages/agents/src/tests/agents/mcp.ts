@@ -1054,6 +1054,45 @@ export class TestHttpMcpDedupAgent extends Agent {
       };
     }
   }
+
+  // #1378: capture console.warn during addMcpServer to assert the default
+  // callback URL warning fires (and stays silent with an explicit path).
+  private async _captureWarnings(
+    fn: () => Promise<unknown>
+  ): Promise<string[]> {
+    const captured: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      captured.push(args.map(String).join(" "));
+    };
+    try {
+      await fn();
+    } catch {
+      // connection failures from the mocked transport are expected
+    } finally {
+      console.warn = originalWarn;
+    }
+    return captured;
+  }
+
+  async testDefaultCallbackUrlWarns() {
+    const warnings = await this._captureWarnings(() =>
+      this.addMcpServer("warn-server", "https://mcp.example.com/warn", {
+        callbackHost: "https://example.com"
+      })
+    );
+    return { warnings };
+  }
+
+  async testExplicitCallbackPathDoesNotWarn() {
+    const warnings = await this._captureWarnings(() =>
+      this.addMcpServer("no-warn-server", "https://mcp.example.com/no-warn", {
+        callbackHost: "https://example.com",
+        callbackPath: "/auth/mcp-callback"
+      })
+    );
+    return { warnings };
+  }
 }
 
 /**

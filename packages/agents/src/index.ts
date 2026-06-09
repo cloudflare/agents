@@ -10779,9 +10779,21 @@ export class Agent<
     let callbackUrl: string | undefined;
     if (resolvedCallbackHost) {
       const normalizedHost = resolvedCallbackHost.replace(/\/$/, "");
-      callbackUrl = resolvedCallbackPath
-        ? `${normalizedHost}/${resolvedCallbackPath.replace(/^\//, "")}`
-        : `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
+      if (resolvedCallbackPath) {
+        callbackUrl = `${normalizedHost}/${resolvedCallbackPath.replace(/^\//, "")}`;
+      } else {
+        // The sendIdentityOnConnect:false guard above throws for this case;
+        // every other path that lands here gets a warning instead — the
+        // default URL leaks the instance name and only works when the Worker
+        // routes the agents prefix through routeAgentRequest (#1378).
+        callbackUrl = `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
+        console.warn(
+          `addMcpServer("${serverName}"): no callbackPath was provided, falling back to the default OAuth callback URL ${callbackUrl}. ` +
+            `This exposes the agent instance name in the URL and only works if your Worker routes /${resolvedAgentsPrefix}/* ` +
+            `through routeAgentRequest. If that route is handled elsewhere (e.g. static assets), the OAuth flow will hang in ` +
+            `AUTHENTICATING — pass an explicit callbackPath and route it to this agent via getAgentByName.`
+        );
+      }
     }
 
     const id = requestedId ?? nanoid(8);
