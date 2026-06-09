@@ -43,9 +43,15 @@ export interface CompactAfterOptions {
   /**
    * Override the token estimate used by auto-compaction and status broadcasts.
    *
-   * The default is a Workers-safe heuristic over message parts plus the
-   * Session-managed frozen system prompt. Callers that have model-reported
-   * usage or a tokenizer can provide a more precise counter here.
+   * Usually unnecessary: when assistant messages carry model-reported usage
+   * in their metadata (`metadata.usage` / `metadata.totalUsage`), the Session
+   * uses it automatically — last reported usage plus a heuristic for newer
+   * messages. Without usage metadata the default is a Workers-safe heuristic
+   * over message parts plus the Session-managed frozen system prompt.
+   *
+   * The counter is whole-prompt scoped by signature; ignoring the input and
+   * returning a model-reported total (e.g. `() => lastUsage.inputTokens`) is
+   * legal — the boundary logic auto-calibrates around it.
    */
   tokenCounter?: SessionTokenCounter;
 }
@@ -61,6 +67,14 @@ export interface CompactAfterOptions {
 export interface CompactContext {
   /** The Session's token counter (from `compactAfter`/options), if configured. */
   tokenCounter?: SessionTokenCounter;
+
+  /**
+   * Best-known size of the current context in model tokens, derived from
+   * usage metadata on assistant messages (last reported usage plus the
+   * heuristic for any trailing messages). Lets the boundary walk calibrate
+   * the built-in heuristic to the model's scale with zero configuration.
+   */
+  contextTokens?: number;
 }
 
 export type CompactionErrorHandler = (error: unknown) => void | Promise<void>;
@@ -75,6 +89,14 @@ export interface SessionMessage {
   role: string;
   parts: SessionMessagePart[];
   createdAt?: Date;
+  /**
+   * Arbitrary message metadata (AI SDK `UIMessage.metadata` is structurally
+   * compatible). When an assistant message carries model-reported usage here
+   * (`metadata.usage` or `metadata.totalUsage`, e.g. from the AI SDK's
+   * `messageMetadata` callback), the Session uses it for token accounting —
+   * no `tokenCounter` configuration needed.
+   */
+  metadata?: unknown;
 }
 
 /**

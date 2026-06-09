@@ -1,6 +1,11 @@
 export {
   estimateStringTokens,
   estimateMessageTokens,
+  calculateContextTokens,
+  getAssistantUsage,
+  estimateContextTokensFromUsage,
+  type MessageUsage,
+  type ContextUsageEstimate,
   CHARS_PER_TOKEN,
   WORDS_TOKEN_MULTIPLIER,
   TOKENS_PER_MESSAGE

@@ -20,7 +20,11 @@ import {
   createCompactFunction,
   type CompactResult
 } from "../../../../experimental/memory/utils/compaction-helpers";
-import { estimateMessageTokens } from "../../../../experimental/memory/utils/tokens";
+import {
+  calculateContextTokens,
+  estimateContextTokensFromUsage,
+  estimateMessageTokens
+} from "../../../../experimental/memory/utils/tokens";
 
 // ── Test helpers ────────────────────────────────────────────────
 
@@ -1941,6 +1945,167 @@ describe("createCompactFunction", () => {
     // The budget must be honored at the model's scale: two tail messages
     // protected, not the single-message minTailMessages degradation.
     expect(compactions[0].toMessageId).toBe("tool-5");
+  });
+
+  it("uses an explicit countTokens counter per-message with no probing, winning over tokenCounter", async () => {
+    const messages = usageStyleHistory();
+    const perToolMsg10x = estimateMessageTokens([messages[1]]) * 10;
+    const seenMessageCounts: number[] = [];
+
+    const compact = createCompactFunction({
+      summarize: async () => "summary",
+      protectHead: 1,
+      minTailMessages: 1,
+      tailTokenBudget: Math.floor(perToolMsg10x * 2.5),
+      countTokens: (counted) => {
+        seenMessageCounts.push(counted.length);
+        return estimateMessageTokens(counted) * 10;
+      },
+      tokenCounter: () => {
+        throw new Error(
+          "tokenCounter must not be called when countTokens is set"
+        );
+      }
+    });
+
+    const result = await compact(messages);
+    // The declared message-scoped counter skips shape detection entirely:
+    // only single-message walk calls, never the [] / full-history probes.
+    expect(seenMessageCounts.length).toBeGreaterThan(0);
+    expect(seenMessageCounts.every((count) => count === 1)).toBe(true);
+    expect(result).toMatchObject({
+      fromMessageId: "tool-0",
+      toMessageId: "tool-5",
+      summary: "summary"
+    });
+  });
+
+  it("calibrates the boundary from CompactContext.contextTokens when no counter is configured", async () => {
+    const messages = usageStyleHistory();
+    const perToolMsg10x = estimateMessageTokens([messages[1]]) * 10;
+
+    const compact = createCompactFunction({
+      summarize: async () => "summary",
+      protectHead: 1,
+      minTailMessages: 1,
+      tailTokenBudget: Math.floor(perToolMsg10x * 2.5)
+    });
+
+    // Without the usage-derived total the raw heuristic under-counts the
+    // tool-heavy tail, the budget covers everything, and compaction no-ops.
+    expect(await compact(messages)).toBeNull();
+
+    // With it, the heuristic is calibrated to the model's scale and the
+    // budget protects exactly two tail messages.
+    const result = await compact(messages, {
+      contextTokens: estimateMessageTokens(messages) * 10
+    });
+    expect(result).toMatchObject({
+      fromMessageId: "tool-0",
+      toMessageId: "tool-5",
+      summary: "summary"
+    });
+  });
+
+  it("compacts a tool-heavy Session with zero config when assistant messages carry usage metadata", async () => {
+    let summarizeCalls = 0;
+    const history = usageStyleHistory();
+    const fixedTotal = estimateMessageTokens(history) * 10;
+    // The AI SDK messageMetadata convention: model-reported usage attached
+    // to the assistant message. No tokenCounter anywhere.
+    history[history.length - 1].metadata = {
+      usage: { totalTokens: fixedTotal }
+    };
+
+    const compactFn = createCompactFunction({
+      summarize: async () => {
+        summarizeCalls++;
+        return "usage summary";
+      },
+      protectHead: 1,
+      minTailMessages: 1,
+      tailTokenBudget: Math.floor(
+        estimateMessageTokens([history[1]]) * 10 * 2.5
+      )
+    });
+
+    const { session, messages, compactions } =
+      createCompactableSession(compactFn);
+    session.compactAfter(1000);
+
+    messages.push(...history.slice(0, -1));
+    await session.appendMessage(history[history.length - 1]);
+
+    // Fire decision used the usage metadata (the heuristic alone is ~10x
+    // smaller but still > 1000, so also assert the boundary calibration).
+    expect(summarizeCalls).toBe(1);
+    expect(compactions).toHaveLength(1);
+    expect(compactions[0].summary).toBe("usage summary");
+    // Boundary honored at the model's scale via CompactContext.contextTokens.
+    expect(compactions[0].toMessageId).toBe("tool-5");
+  });
+});
+
+describe("usage metadata token accounting", () => {
+  it("calculateContextTokens prefers totalTokens, falls back to component sums", () => {
+    expect(calculateContextTokens({ totalTokens: 1200 })).toBe(1200);
+    expect(
+      calculateContextTokens({ inputTokens: 1000, outputTokens: 200 })
+    ).toBe(1200);
+    expect(
+      calculateContextTokens({ promptTokens: 800, completionTokens: 100 })
+    ).toBe(900);
+    expect(
+      calculateContextTokens({
+        inputTokens: 500,
+        outputTokens: 100,
+        cachedInputTokens: 400
+      })
+    ).toBe(1000);
+    expect(calculateContextTokens({})).toBe(0);
+    expect(calculateContextTokens({ totalTokens: Number.NaN })).toBe(0);
+  });
+
+  it("estimateContextTokensFromUsage uses the last assistant usage plus trailing heuristic", () => {
+    const messages: SessionMessage[] = [
+      { id: "u1", role: "user", parts: [{ type: "text", text: "hello" }] },
+      {
+        id: "a1",
+        role: "assistant",
+        parts: [{ type: "text", text: "old reply" }],
+        metadata: { usage: { totalTokens: 50_000 } }
+      },
+      {
+        id: "a2",
+        role: "assistant",
+        parts: [{ type: "text", text: "new reply" }],
+        metadata: { totalUsage: { inputTokens: 90_000, outputTokens: 1_000 } }
+      },
+      { id: "u2", role: "user", parts: [{ type: "text", text: "follow-up" }] }
+    ];
+
+    const estimate = estimateContextTokensFromUsage(messages);
+    expect(estimate).not.toBeNull();
+    // Newest usage wins (a2, totalUsage shape), trailing user message is
+    // covered by the heuristic.
+    expect(estimate!.lastUsageIndex).toBe(2);
+    expect(estimate!.usageTokens).toBe(91_000);
+    expect(estimate!.trailingTokens).toBe(estimateMessageTokens([messages[3]]));
+    expect(estimate!.tokens).toBe(
+      estimate!.usageTokens + estimate!.trailingTokens
+    );
+
+    // Usage on a user message is ignored; no assistant usage → null.
+    expect(
+      estimateContextTokensFromUsage([
+        {
+          id: "u3",
+          role: "user",
+          parts: [{ type: "text", text: "hi" }],
+          metadata: { usage: { totalTokens: 99 } }
+        }
+      ])
+    ).toBeNull();
   });
 });
 

@@ -441,9 +441,18 @@ export interface CompactOptions {
   minTailMessages?: number;
 
   /**
-   * Optional counter for tail-budget decisions. Use this when a tokenizer or
-   * model-reported accounting is available; otherwise the Workers-safe
-   * heuristic is used.
+   * Strictly message-scoped token counter: returns tokens for exactly the
+   * messages passed (a tokenizer). Used directly by the per-message tail
+   * walk with no shape detection. Prefer this over `tokenCounter` when you
+   * know your counter's scope. Wins over `tokenCounter` if both are set.
+   */
+  countTokens?: CompactTokenCounter;
+
+  /**
+   * Optional counter for tail-budget decisions when the scope is unknown.
+   * Use `countTokens` instead when you have a tokenizer; otherwise the
+   * Workers-safe heuristic is used (calibrated by `CompactContext`'s
+   * usage-derived `contextTokens` when available).
    *
    * Both counter shapes work: a message-scoped counter (returns tokens for
    * exactly the messages passed) is used per-message, with any fixed per-call
@@ -538,6 +547,29 @@ async function resolveTailCounter(
 }
 
 /**
+ * Zero-config calibration: when the Session derived a whole-prompt total from
+ * usage metadata on assistant messages (`CompactContext.contextTokens`),
+ * scale the heuristic to the model's token scale — same as the calibration
+ * path of `resolveTailCounter`, with no counter configured at all.
+ */
+function usageCalibratedCounter(
+  contextTokens: number | undefined,
+  messages: SessionMessage[]
+): CompactTokenCounter | undefined {
+  if (
+    typeof contextTokens !== "number" ||
+    !Number.isFinite(contextTokens) ||
+    contextTokens <= 0
+  ) {
+    return undefined;
+  }
+  const heuristicTotal = estimateMessageTokens(messages);
+  if (heuristicTotal <= 0) return undefined;
+  const scale = contextTokens / heuristicTotal;
+  return (msgs) => estimateMessageTokens(msgs) * scale;
+}
+
+/**
  * Reference compaction implementation.
  *
  * Implements the full hermes-style compaction algorithm:
@@ -592,9 +624,13 @@ export function createCompactFunction(opts: CompactOptions) {
               contextBlocks: []
             })
         : undefined);
-    const tailCounter = rawCounter
-      ? await resolveTailCounter(rawCounter, messages)
-      : undefined;
+    // Priority: explicit message-scoped counter > shape-detected counter >
+    // usage-metadata calibration (zero config) > raw heuristic.
+    const tailCounter =
+      opts.countTokens ??
+      (rawCounter
+        ? await resolveTailCounter(rawCounter, messages)
+        : usageCalibratedCounter(context?.contextTokens, messages));
 
     // 1. Find compression boundaries
     let compressStart = protectHead;
