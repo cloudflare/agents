@@ -444,8 +444,65 @@ export interface CompactOptions {
    * Optional counter for tail-budget decisions. Use this when a tokenizer or
    * model-reported accounting is available; otherwise the Workers-safe
    * heuristic is used.
+   *
+   * Both counter shapes work: a message-scoped counter (returns tokens for
+   * exactly the messages passed) is used per-message; a whole-prompt /
+   * usage-style counter (e.g. `() => usage.inputTokens`, ignoring its
+   * arguments) is detected automatically and used to calibrate the built-in
+   * heuristic to the model's scale. See `resolveTailCounter`.
    */
   tokenCounter?: CompactTokenCounter;
+}
+
+/**
+ * Result of an empty-message probe above which a counter is treated as
+ * whole-prompt scoped. A message-scoped counter (tokenizer-style) returns ~0
+ * for zero messages; a usage-style counter that ignores its input (e.g.
+ * `() => usage.inputTokens`) returns its fixed total.
+ */
+const WHOLE_PROMPT_PROBE_THRESHOLD = 8;
+
+/**
+ * Make any user counter safe for the per-message tail-budget walk (#1593).
+ *
+ * Counters come in two shapes:
+ * - message-scoped (tokenizer-style): tokens of exactly the messages passed.
+ *   Used directly — the walk calls it once per message.
+ * - whole-prompt / usage-style: a model-reported total that ignores (or
+ *   over-spans) the messages passed, e.g. `() => usage.inputTokens`. Calling
+ *   it per message would return the same huge value every time, degrading
+ *   `tailTokenBudget` to `minTailMessages`.
+ *
+ * Detection: probe with zero messages. A message-scoped counter returns ~0;
+ * a whole-prompt counter returns its total. For the latter, call it once over
+ * the full history and scale the Workers-safe heuristic by
+ * `total / heuristic(history)` — per-message estimates then carry the model's
+ * scale, so `tailTokenBudget` keeps meaning "model tokens". This also costs
+ * O(1) counter calls per compaction instead of O(n), which matters for
+ * async/remote counters (e.g. a `count_tokens` API).
+ */
+async function resolveTailCounter(
+  counter: CompactTokenCounter,
+  messages: SessionMessage[]
+): Promise<CompactTokenCounter> {
+  let probe: number;
+  try {
+    probe = await counter([]);
+  } catch {
+    return counter;
+  }
+  if (!Number.isFinite(probe) || probe <= WHOLE_PROMPT_PROBE_THRESHOLD) {
+    return counter;
+  }
+
+  const total = await counter(messages);
+  const heuristicTotal = estimateMessageTokens(messages);
+  if (!Number.isFinite(total) || total <= 0 || heuristicTotal <= 0) {
+    return counter;
+  }
+
+  const scale = total / heuristicTotal;
+  return (msgs) => estimateMessageTokens(msgs) * scale;
 }
 
 /**
@@ -491,19 +548,9 @@ export function createCompactFunction(opts: CompactOptions) {
     // the boundary cut too — without it, a fire counter + the default heuristic
     // under-counting a tool-heavy history makes compaction fire every turn but
     // never shorten anything. The session counter is whole-prompt shaped; for
-    // the tail walk we feed it individual messages with empty system/context.
-    //
-    // Caveat: this counter is invoked once PER MESSAGE. A tokenizer-style
-    // counter yields accurate per-message tokens; a counter that returns a
-    // fixed whole-prompt total (e.g. `usage.inputTokens`) returns the same
-    // value for every message, which degrades `tailTokenBudget` to
-    // `minTailMessages` — compaction still runs and context stays bounded, but
-    // the byte budget is effectively ignored. It is also called O(n) times per
-    // compaction, so an async/remote counter (e.g. a `count_tokens` API) will
-    // be slow. For precise tail budgeting with such counters, pass an explicit
-    // per-message `CompactOptions.tokenCounter` instead.
+    // the tail walk we feed it message subsets with empty system/context.
     const sessionCounter = context?.tokenCounter;
-    const tailCounter: CompactTokenCounter | undefined =
+    const rawCounter: CompactTokenCounter | undefined =
       opts.tokenCounter ??
       (sessionCounter
         ? (msgs) =>
@@ -513,6 +560,9 @@ export function createCompactFunction(opts: CompactOptions) {
               contextBlocks: []
             })
         : undefined);
+    const tailCounter = rawCounter
+      ? await resolveTailCounter(rawCounter, messages)
+      : undefined;
 
     // 1. Find compression boundaries
     let compressStart = protectHead;

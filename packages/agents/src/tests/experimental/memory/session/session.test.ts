@@ -1748,6 +1748,126 @@ describe("createCompactFunction", () => {
     expect(result).toMatchObject({ summary: "summary" });
     expect(summarizeCalls).toBe(1);
   });
+
+  // #1593: the naive counter users write returns a fixed model-reported
+  // total (usage.inputTokens) regardless of which messages are passed.
+  // The boundary walk must not degrade to minTailMessages for it — the
+  // authoritative total should calibrate the heuristic instead so
+  // tailTokenBudget keeps meaning "tokens", just at the model's scale.
+  const usageStyleHistory = (): SessionMessage[] => [
+    { id: "head", role: "user", parts: [{ type: "text", text: "start" }] },
+    ...Array.from(
+      { length: 8 },
+      (_, i): SessionMessage => ({
+        id: `tool-${i}`,
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-read_many",
+            toolCallId: `call-${i}`,
+            toolName: "read_many",
+            state: "output-available",
+            input: { glob: "**/*.ts" },
+            output: "x".repeat(2000)
+          }
+        ]
+      })
+    )
+  ];
+
+  it("respects tailTokenBudget with a usage-style counter that ignores its arguments (#1593)", async () => {
+    const messages = usageStyleHistory();
+    const perToolMsg = estimateMessageTokens([messages[1]]);
+    const heuristicAll = estimateMessageTokens(messages);
+    // Model reports 10x what the heuristic sees (tool-heavy under-count).
+    const fixedTotal = heuristicAll * 10;
+    // At the model's scale this budget fits exactly two tail messages.
+    const tailTokenBudget = Math.floor(perToolMsg * 10 * 2.5);
+
+    let summarizeCalls = 0;
+    const compact = createCompactFunction({
+      summarize: async () => {
+        summarizeCalls++;
+        return "summary";
+      },
+      protectHead: 1,
+      minTailMessages: 1,
+      tailTokenBudget
+    });
+
+    const result = await compact(messages, {
+      // Ignores its arguments entirely — the documented #1593 shape.
+      tokenCounter: () => fixedTotal
+    });
+
+    expect(summarizeCalls).toBe(1);
+    expect(result).toMatchObject({
+      fromMessageId: "tool-0",
+      // Two messages protected in the tail (tool-6, tool-7) — NOT the
+      // minTailMessages degradation, which would compress through tool-6.
+      toMessageId: "tool-5",
+      summary: "summary"
+    });
+  });
+
+  it("calls a usage-style counter twice (probe + calibration), not per-message (#1593)", async () => {
+    const messages = usageStyleHistory();
+    const fixedTotal = estimateMessageTokens(messages) * 10;
+    const seenMessageCounts: number[] = [];
+
+    const compact = createCompactFunction({
+      summarize: async () => "summary",
+      protectHead: 1,
+      minTailMessages: 1,
+      tailTokenBudget: 1
+    });
+
+    await compact(messages, {
+      tokenCounter: ({ messages: counted }) => {
+        seenMessageCounts.push(counted.length);
+        return fixedTotal;
+      }
+    });
+
+    // One empty probe to detect the counter's scope, one whole-history
+    // call to calibrate the heuristic. A remote/async counter therefore
+    // costs O(1) calls per compaction instead of O(n).
+    expect(seenMessageCounts).toEqual([0, messages.length]);
+  });
+
+  it("compacts a tool-heavy Session end-to-end with a usage-style counter (#1593)", async () => {
+    let summarizeCalls = 0;
+    const history = usageStyleHistory();
+    const fixedTotal = estimateMessageTokens(history) * 10;
+
+    const compactFn = createCompactFunction({
+      summarize: async () => {
+        summarizeCalls++;
+        return "e2e summary";
+      },
+      protectHead: 1,
+      minTailMessages: 1,
+      tailTokenBudget: Math.floor(
+        estimateMessageTokens([history[1]]) * 10 * 2.5
+      )
+    });
+
+    const { session, messages, compactions, setTokenThreshold } =
+      createCompactableSession(compactFn);
+    // The issue's repro: trigger counter reports a fixed model total.
+    session.compactAfter(1000, { tokenCounter: () => fixedTotal });
+    setTokenThreshold(1000);
+
+    messages.push(...history.slice(0, -1));
+    await session.appendMessage(history[history.length - 1]);
+
+    expect(summarizeCalls).toBe(1);
+    expect(compactions).toHaveLength(1);
+    expect(compactions[0].summary).toBe("e2e summary");
+    // The budget must be honored at the model's scale: two tail messages
+    // protected, not the single-message minTailMessages degradation.
+    expect(compactions[0].toMessageId).toBe("tool-5");
+  });
 });
 
 // ── DO-backed tests (session isolation, system prompt persistence) ──
