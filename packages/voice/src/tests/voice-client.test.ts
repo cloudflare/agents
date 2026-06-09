@@ -273,6 +273,29 @@ describe("VoiceClient playback interrupt", () => {
     expect(errors).toContain("Could not switch audio output device.");
   });
 
+  it("clears output device errors after a later successful switch", async () => {
+    const transport = new MockTransport();
+    const errors: Array<string | null> = [];
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      outputDeviceId: "missing-speaker"
+    });
+    audioElement.rejectSinkId = true;
+    client.addEventListener("error", (error) => errors.push(error));
+
+    client.connect();
+    transport.receive(JSON.stringify({ type: "audio_config", format: "mp3" }));
+    transport.receive(new ArrayBuffer(4));
+    await waitForConnectedSource();
+
+    audioElement.rejectSinkId = false;
+    await client.setOutputDevice("speaker-1");
+
+    expect(errors).toContain("Could not switch audio output device.");
+    expect(errors.at(-1)).toBeNull();
+  });
+
   it("falls back to the default AudioContext destination when HTML audio playback is unavailable", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const transport = new MockTransport();

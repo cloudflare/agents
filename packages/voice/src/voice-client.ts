@@ -95,6 +95,10 @@ type AudioElementWithSinkId = HTMLAudioElement & {
   setSinkId?: (sinkId: string) => Promise<void>;
 };
 
+const UNSUPPORTED_OUTPUT_DEVICE_ERROR =
+  "Audio output device selection is not supported in this browser.";
+const OUTPUT_DEVICE_SWITCH_ERROR = "Could not switch audio output device.";
+
 /** Maps each event name to the data type passed to its listeners. */
 export interface VoiceClientEventMap {
   statuschange: VoiceStatus;
@@ -762,16 +766,22 @@ export class VoiceClient {
     const setSinkId = (audio as AudioElementWithSinkId).setSinkId;
     if (!setSinkId) {
       if (sinkId === "default") return;
-      this.#error =
-        "Audio output device selection is not supported in this browser.";
+      this.#error = UNSUPPORTED_OUTPUT_DEVICE_ERROR;
       this.#emit("error", this.#error);
       return;
     }
 
     try {
       await setSinkId.call(audio, sinkId);
+      if (
+        this.#error === UNSUPPORTED_OUTPUT_DEVICE_ERROR ||
+        this.#error === OUTPUT_DEVICE_SWITCH_ERROR
+      ) {
+        this.#error = null;
+        this.#emit("error", null);
+      }
     } catch {
-      this.#error = "Could not switch audio output device.";
+      this.#error = OUTPUT_DEVICE_SWITCH_ERROR;
       this.#emit("error", this.#error);
     }
   }
