@@ -880,6 +880,27 @@ describe("Think — beforeTurn config overrides", () => {
     expect(result.done).toBe(true);
   });
 
+  it("experimental_transform override is forwarded to streamText and applied", async () => {
+    // #1714 — TurnConfig.experimental_transform should reach streamText so
+    // callers can inspect/rewrite the stream. The transform here upper-cases
+    // every text-delta; we assert the persisted assistant text is upper-cased.
+    const agent = await freshAgent("bt-transform");
+    await agent.setResponse("hello from the assistant");
+    await agent.setTurnConfigTransform();
+
+    const result = await agent.testChat("Transform turn");
+    expect(result.done).toBe(true);
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const assistant = messages.filter((m) => m.role === "assistant");
+    const last = assistant[assistant.length - 1];
+    const text = last.parts
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("");
+    expect(text).toBe("HELLO FROM THE ASSISTANT");
+  });
+
   it("sends reasoning chunks by default on the chat() path", async () => {
     const agent = await freshAgent("bt-reasoning-default");
     await agent.setReasoningResponse("Final answer", "Visible thinking");

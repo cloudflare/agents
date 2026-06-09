@@ -603,6 +603,28 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  /**
+   * Sets a per-turn `experimental_transform` that upper-cases every `text-delta`
+   * part flowing through the stream. The transform is constructed inside the DO
+   * (it's a function and can't cross the RPC boundary). A test asserts the
+   * persisted assistant text is upper-cased, proving the transform was forwarded
+   * to `streamText` and applied. Regression for #1714.
+   */
+  async setTurnConfigTransform(): Promise<void> {
+    this._turnConfigOverride = {
+      experimental_transform: () =>
+        new TransformStream({
+          transform(chunk, controller) {
+            if (chunk.type === "text-delta") {
+              controller.enqueue({ ...chunk, text: chunk.text.toUpperCase() });
+            } else {
+              controller.enqueue(chunk);
+            }
+          }
+        })
+    };
+  }
+
   override async beforeStep(
     ctx: PrepareStepContext
   ): Promise<StepConfig | void> {
