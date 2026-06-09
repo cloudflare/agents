@@ -249,6 +249,7 @@ export function useVoiceAgent(
   );
 
   const enabled = options.enabled ?? true;
+  const outputDeviceId = options.outputDeviceId;
 
   const connectionKey = useMemo(
     () =>
@@ -386,6 +387,10 @@ export function useVoiceAgent(
     client.addEventListener("custommessage", onCustom);
     return () => client.removeEventListener("custommessage", onCustom);
   }, [effectKey]);
+
+  useEffect(() => {
+    void clientRef.current?.setOutputDevice(outputDeviceId);
+  }, [effectKey, outputDeviceId]);
 
   return {
     status,

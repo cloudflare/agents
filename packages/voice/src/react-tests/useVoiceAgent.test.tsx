@@ -66,6 +66,7 @@ import {
   type UseVoiceAgentReturn,
   type UseVoiceAgentOptions
 } from "../voice-react";
+import { VoiceClient } from "../voice-client";
 
 // --- Audio API mocks ---
 
@@ -100,6 +101,7 @@ function createMockAudioContext() {
     resume: vi.fn(async () => {}),
     close: vi.fn(async () => {}),
     destination: {},
+    createMediaStreamDestination: vi.fn(() => ({ stream: {} })),
     audioWorklet: {
       addModule: vi.fn(async () => {})
     },
@@ -135,6 +137,19 @@ function setupAudioMocks() {
     "AudioWorkletNode",
     vi.fn(function () {
       return mockAudioCtx._mockWorkletNode;
+    })
+  );
+
+  vi.stubGlobal(
+    "Audio",
+    vi.fn(function () {
+      return {
+        autoplay: false,
+        srcObject: null,
+        play: vi.fn(async () => {}),
+        pause: vi.fn(),
+        setSinkId: vi.fn(async () => {})
+      };
     })
   );
 
@@ -434,6 +449,35 @@ describe("useVoiceAgent", () => {
       expect(vi.mocked(PartySocket)).toHaveBeenCalledTimes(2);
       expect(socketOptions?.room).toBe("second");
       expect(onReconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it("should update output device without reconnecting", async () => {
+      const setOutputDevice = vi.spyOn(
+        VoiceClient.prototype,
+        "setOutputDevice"
+      );
+      const screen = await render(
+        <TestVoiceComponent
+          options={{ agent: "voice-agent", outputDeviceId: "speaker-1" }}
+          onResult={vi.fn()}
+        />
+      );
+      await sleep(10);
+
+      await act(async () => {
+        screen.rerender(
+          <TestVoiceComponent
+            options={{ agent: "voice-agent", outputDeviceId: "speaker-2" }}
+            onResult={vi.fn()}
+          />
+        );
+        await sleep(10);
+      });
+
+      expect(socketClose).not.toHaveBeenCalled();
+      expect(vi.mocked(PartySocket)).toHaveBeenCalledTimes(1);
+      expect(setOutputDevice).toHaveBeenCalledWith("speaker-1");
+      expect(setOutputDevice).toHaveBeenCalledWith("speaker-2");
     });
 
     it("should disconnect and reset state when enabled flips true to false", async () => {

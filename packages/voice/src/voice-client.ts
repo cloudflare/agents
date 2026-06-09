@@ -81,7 +81,19 @@ export interface VoiceClientOptions {
   interruptChunks?: number;
   /** Maximum transcript messages to keep in memory. @default 200 */
   maxTranscriptMessages?: number;
+
+  /**
+   * Preferred audio output device for assistant playback.
+   * Pass a MediaDeviceInfo.deviceId from an audiooutput device.
+   * Unsupported browsers continue playing through the default output.
+   * @default "default"
+   */
+  outputDeviceId?: string;
 }
+
+type AudioElementWithSinkId = HTMLAudioElement & {
+  setSinkId?: (sinkId: string) => Promise<void>;
+};
 
 /** Maps each event name to the data type passed to its listeners. */
 export interface VoiceClientEventMap {
@@ -279,6 +291,7 @@ export class VoiceClient {
   #playbackElement: HTMLAudioElement | null = null;
   #playbackDestination: MediaStreamAudioDestinationNode | null = null;
   #useDefaultPlaybackDestination = false;
+  #outputDeviceId: string;
   #playbackGeneration = 0;
   #interruptChunkCount = 0;
 
@@ -292,6 +305,7 @@ export class VoiceClient {
     this.#interruptThreshold = options.interruptThreshold ?? 0.05;
     this.#interruptChunks = options.interruptChunks ?? 2;
     this.#maxTranscriptMessages = options.maxTranscriptMessages ?? 200;
+    this.#outputDeviceId = options.outputDeviceId ?? "default";
   }
 
   // --- Public getters ---
@@ -552,6 +566,17 @@ export class VoiceClient {
   }
 
   /**
+   * Set the preferred audio output device for assistant playback.
+   * Unsupported browsers continue playing through the default output.
+   */
+  async setOutputDevice(outputDeviceId?: string): Promise<void> {
+    this.#outputDeviceId = outputDeviceId ?? "default";
+    if (this.#playbackElement) {
+      await this.#applyOutputDevice(this.#playbackElement);
+    }
+  }
+
+  /**
    * The last custom (non-voice-protocol) message received from the server.
    * Listen for the `"custommessage"` event to be notified when this changes.
    */
@@ -718,6 +743,7 @@ export class VoiceClient {
       audio.srcObject = destination.stream;
       this.#playbackElement = audio;
       this.#playbackDestination = destination;
+      await this.#applyOutputDevice(audio);
       await audio.play();
       return destination;
     } catch (err) {
@@ -728,6 +754,25 @@ export class VoiceClient {
       this.#closePlaybackOutput();
       this.#useDefaultPlaybackDestination = true;
       return ctx.destination;
+    }
+  }
+
+  async #applyOutputDevice(audio: HTMLAudioElement): Promise<void> {
+    const sinkId = this.#outputDeviceId;
+    const setSinkId = (audio as AudioElementWithSinkId).setSinkId;
+    if (!setSinkId) {
+      if (sinkId === "default") return;
+      this.#error =
+        "Audio output device selection is not supported in this browser.";
+      this.#emit("error", this.#error);
+      return;
+    }
+
+    try {
+      await setSinkId.call(audio, sinkId);
+    } catch {
+      this.#error = "Could not switch audio output device.";
+      this.#emit("error", this.#error);
     }
   }
 

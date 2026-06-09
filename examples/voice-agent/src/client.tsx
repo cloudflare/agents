@@ -382,6 +382,7 @@ function App() {
   );
   const [sttModel, setSttModel] = useState<"flux" | "nova-3">("flux");
   const [llmModel, setLlmModel] = useState<LlmModel>("glm");
+  const [outputDeviceId, setOutputDeviceId] = useState("default");
 
   const {
     status,
@@ -400,6 +401,7 @@ function App() {
     agent: "my-voice-agent",
     name: sessionId,
     query: { model: sttModel, llm: llmModel },
+    outputDeviceId,
     onReconnect: () => {
       setToast("Reconnected to agent.");
     }
@@ -413,7 +415,6 @@ function App() {
   const [audioOutputDevices, setAudioOutputDevices] = useState<
     MediaDeviceInfo[]
   >([]);
-  const [outputDeviceId, setOutputDeviceId] = useState("default");
 
   // Listen for custom protocol messages (speaker_conflict, kicked, speaker_available)
   // by observing the VoiceClient's raw message events. Since useVoiceAgent abstracts
@@ -693,35 +694,6 @@ function App() {
           </Button>
         </div>
 
-        {/* Audio output picker */}
-        <Surface className="mb-4 rounded-xl p-3 ring ring-kumo-line">
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-xs text-kumo-secondary">Speaker</span>
-              <span className="text-[10px] text-kumo-secondary">
-                Selected output is not wired to SDK playback yet
-              </span>
-            </div>
-            <select
-              value={outputDeviceId}
-              onChange={(event) => setOutputDeviceId(event.target.value)}
-              className="min-w-0 flex-1 rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-sm text-kumo-default"
-            >
-              <option value="default">System default</option>
-              {audioOutputDevices
-                .filter((device) => device.deviceId !== "default")
-                .map((device, index) => (
-                  <option key={device.deviceId} value={device.deviceId}>
-                    {getAudioOutputLabel(device, index)}
-                  </option>
-                ))}
-            </select>
-            <span className="text-[11px] text-kumo-secondary">
-              Call audio still uses the SDK default output.
-            </span>
-          </div>
-        </Surface>
-
         {/* Toast notification */}
         {toast && (
           <div className="mb-4 px-4 py-2.5 rounded-lg bg-blue-500/10 border border-blue-500/20 text-sm text-blue-600 dark:text-blue-400">
@@ -866,7 +838,21 @@ function App() {
         </Surface>
 
         {/* Controls */}
-        <div className="flex items-center justify-center gap-4">
+        <div className="flex flex-col items-center justify-center gap-3 sm:flex-row">
+          <select
+            value={outputDeviceId}
+            onChange={(event) => setOutputDeviceId(event.target.value)}
+            className="min-w-0 rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-sm text-kumo-default"
+          >
+            <option value="default">System default</option>
+            {audioOutputDevices
+              .filter((device) => device.deviceId !== "default")
+              .map((device, index) => (
+                <option key={device.deviceId} value={device.deviceId}>
+                  {getAudioOutputLabel(device, index)}
+                </option>
+              ))}
+          </select>
           {!isInCall ? (
             <Button
               onClick={startCall}
