@@ -30,6 +30,31 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
     });
   }
 
+  // Probe for base-onError behavior tests (#388): calls the base onError the
+  // way partyserver does and reports what it threw.
+  async probeOnError(
+    kind: "ws-undefined-error" | "ws-error" | "server-error"
+  ): Promise<{ thrown: string; message: string }> {
+    const fakeConnection = { id: "probe-connection" } as Connection;
+    try {
+      if (kind === "ws-undefined-error") {
+        // partyserver forwards ErrorEvent.error, which the runtime can leave
+        // undefined: this.onError(connection, e.error)
+        await this.onError(fakeConnection, undefined);
+      } else if (kind === "ws-error") {
+        await this.onError(fakeConnection, new Error("ws boom"));
+      } else {
+        await this.onError(new Error("server boom"));
+      }
+    } catch (e) {
+      return {
+        thrown: e instanceof Error ? "Error" : typeof e,
+        message: e instanceof Error ? e.message : String(e)
+      };
+    }
+    return { thrown: "nothing", message: "" };
+  }
+
   // HTTP handler for testing agentFetch and path routing
   // Only handles specific test paths - returns 404 for others to preserve routing test behavior
   async onRequest(request: Request): Promise<Response> {

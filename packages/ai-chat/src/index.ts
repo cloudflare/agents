@@ -1749,7 +1749,17 @@ export class AIChatAgent<
     try {
       return await fn();
     } catch (e) {
-      throw this.onError(e);
+      // Mirror Agent._tryCatch: when a websocket connection is in the agent
+      // context, deliver the actual error through onError(connection, error)
+      // so two-parameter user overrides receive it in the error slot (#388),
+      // then rethrow the original error rather than onError's return value.
+      const connection = agentContext.getStore()?.connection;
+      if (connection) {
+        await this.onError(connection, e);
+      } else {
+        await this.onError(e);
+      }
+      throw e;
     }
   }
 

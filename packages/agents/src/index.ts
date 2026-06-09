@@ -3122,7 +3122,20 @@ export class Agent<
     try {
       return await fn();
     } catch (e) {
-      throw this.onError(e);
+      // When the failure happened while handling a websocket message, the
+      // connection is in the agent context — deliver the actual error through
+      // the onError(connection, error) overload so user overrides written
+      // with the two-parameter signature receive it in the error slot (#388).
+      const connection = agentContext.getStore()?.connection;
+      if (connection) {
+        await this.onError(connection, e);
+      } else {
+        await this.onError(e);
+      }
+      // Rethrow the original error, not onError's return value — a user
+      // override that returns normally must not turn the failure into
+      // `throw undefined`.
+      throw e;
     }
   }
 
@@ -3193,11 +3206,17 @@ export class Agent<
     error: unknown
   ): void | Promise<void>;
   override onError(error: unknown): void | Promise<void>;
-  override onError(connectionOrError: Connection | unknown, error?: unknown) {
+  override onError(
+    connectionOrError: Connection | unknown,
+    ...rest: [unknown?]
+  ) {
     let theError: unknown;
-    if (connectionOrError && error) {
-      theError = error;
-      // this is a websocket connection error
+    if (rest.length > 0) {
+      // Two-argument call: a websocket connection error. Discriminated on
+      // arity, not truthiness — an undefined error must not be misrouted
+      // into the server branch (which would throw the Connection object
+      // itself). The error is rethrown exactly as received, never replaced.
+      theError = rest[0];
       console.error(
         "Error on websocket connection:",
         (connectionOrError as Connection).id,
