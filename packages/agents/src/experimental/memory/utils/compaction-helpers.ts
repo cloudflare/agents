@@ -446,61 +446,93 @@ export interface CompactOptions {
    * heuristic is used.
    *
    * Both counter shapes work: a message-scoped counter (returns tokens for
-   * exactly the messages passed) is used per-message; a whole-prompt /
-   * usage-style counter (e.g. `() => usage.inputTokens`, ignoring its
-   * arguments) is detected automatically and used to calibrate the built-in
-   * heuristic to the model's scale. See `resolveTailCounter`.
+   * exactly the messages passed) is used per-message, with any fixed per-call
+   * overhead (chat-template priming, a baked-in system prompt) detected and
+   * subtracted; a whole-prompt / usage-style counter (e.g.
+   * `() => usage.inputTokens`, ignoring its arguments) is detected
+   * automatically and used to calibrate the built-in heuristic to the
+   * model's scale. See `resolveTailCounter`.
    */
   tokenCounter?: CompactTokenCounter;
 }
 
 /**
- * Result of an empty-message probe above which a counter is treated as
- * whole-prompt scoped. A message-scoped counter (tokenizer-style) returns ~0
- * for zero messages; a usage-style counter that ignores its input (e.g.
- * `() => usage.inputTokens`) returns its fixed total.
+ * Minimum growth between the empty probe and the full-history probe —
+ * as a fraction of the heuristic estimate for that history — for a counter
+ * to be treated as message-scoped. Real tokenizers land near (usually above)
+ * the chars/4 heuristic, so 0.5 sits far from both shapes: a counter that
+ * registers its input grows by ~1× the heuristic; a usage-style counter that
+ * ignores its input grows by ~0×.
  */
-const WHOLE_PROMPT_PROBE_THRESHOLD = 8;
+const MESSAGE_SCOPED_MIN_GROWTH = 0.5;
 
 /**
  * Make any user counter safe for the per-message tail-budget walk (#1593).
  *
  * Counters come in two shapes:
  * - message-scoped (tokenizer-style): tokens of exactly the messages passed.
- *   Used directly — the walk calls it once per message.
- * - whole-prompt / usage-style: a model-reported total that ignores (or
- *   over-spans) the messages passed, e.g. `() => usage.inputTokens`. Calling
- *   it per message would return the same huge value every time, degrading
- *   `tailTokenBudget` to `minTailMessages`.
+ *   Used per-message by the walk — possibly with a fixed per-call overhead
+ *   (chat-template priming, a baked-in system prompt) subtracted.
+ * - whole-prompt / usage-style: a model-reported total that ignores the
+ *   messages passed, e.g. `() => usage.inputTokens`. Calling it per message
+ *   would return the same huge value every time, degrading `tailTokenBudget`
+ *   to `minTailMessages`.
  *
- * Detection: probe with zero messages. A message-scoped counter returns ~0;
- * a whole-prompt counter returns its total. For the latter, call it once over
- * the full history and scale the Workers-safe heuristic by
- * `total / heuristic(history)` — per-message estimates then carry the model's
- * scale, so `tailTokenBudget` keeps meaning "model tokens". This also costs
- * O(1) counter calls per compaction instead of O(n), which matters for
- * async/remote counters (e.g. a `count_tokens` API).
+ * Detection is a two-point probe — classification depends on whether the
+ * counter *responds to its input*, never on an absolute token threshold:
+ *
+ * 1. `base = counter([])`. A throw means the counter reads its input, so it
+ *    is message-scoped by construction; `base <= 0` means it counts exactly
+ *    what it is given. Both are used per-message as-is.
+ * 2. Otherwise `total = counter(history)`. If the counter grew by at least
+ *    half the heuristic's estimate of the history, it counts its input and
+ *    `base` is fixed per-call overhead — use it per-message minus `base`, so
+ *    the walk doesn't pay the overhead once per message. If it stayed flat,
+ *    it is whole-prompt scoped — scale the Workers-safe heuristic by
+ *    `total / heuristic(history)`, so per-message estimates carry the model's
+ *    scale and `tailTokenBudget` keeps meaning "model tokens".
+ *
+ * The flat path costs O(1) counter calls per compaction instead of O(n),
+ * which matters for async/remote counters (e.g. a `count_tokens` API). Any
+ * probe failure (throw, NaN, ≤0) falls back to the unwrapped counter.
  */
 async function resolveTailCounter(
   counter: CompactTokenCounter,
   messages: SessionMessage[]
 ): Promise<CompactTokenCounter> {
-  let probe: number;
+  let base: number;
   try {
-    probe = await counter([]);
+    base = await counter([]);
   } catch {
+    // Reads its input — message-scoped by construction.
     return counter;
   }
-  if (!Number.isFinite(probe) || probe <= WHOLE_PROMPT_PROBE_THRESHOLD) {
+  if (!Number.isFinite(base) || base <= 0) {
+    // Counts exactly what it is given — message-scoped.
     return counter;
   }
 
-  const total = await counter(messages);
+  // base > 0: either fixed per-call overhead or a whole-prompt total.
+  // A second probe over the full history tells the two apart.
+  let total: number;
+  try {
+    total = await counter(messages);
+  } catch {
+    return counter;
+  }
   const heuristicTotal = estimateMessageTokens(messages);
   if (!Number.isFinite(total) || total <= 0 || heuristicTotal <= 0) {
     return counter;
   }
 
+  if (total - base >= heuristicTotal * MESSAGE_SCOPED_MIN_GROWTH) {
+    // Message-scoped with fixed overhead: keep its per-message accuracy but
+    // don't charge the overhead to every message in the walk.
+    return async (msgs) => Math.max(0, (await counter(msgs)) - base);
+  }
+
+  // Whole-prompt/usage-style: flat with respect to its input. Calibrate the
+  // heuristic to the model's scale using its authoritative total.
   const scale = total / heuristicTotal;
   return (msgs) => estimateMessageTokens(msgs) * scale;
 }

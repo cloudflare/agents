@@ -1835,6 +1835,80 @@ describe("createCompactFunction", () => {
     expect(seenMessageCounts).toEqual([0, messages.length]);
   });
 
+  it("keeps per-message accuracy for a message-scoped counter with fixed per-call overhead", async () => {
+    const messages = usageStyleHistory();
+    const perToolMsg10x = estimateMessageTokens([messages[1]]) * 10;
+    // Overhead large enough that either failure mode — charging it per
+    // message in the walk, or folding it into a calibrated heuristic scale —
+    // would protect one fewer tail message. E.g. a counter that includes
+    // chat-template priming or a baked-in system prompt on every call.
+    const overhead = perToolMsg10x * 3;
+    const seenMessageCounts: number[] = [];
+
+    const compact = createCompactFunction({
+      summarize: async () => "summary",
+      protectHead: 1,
+      minTailMessages: 1,
+      // Fits exactly two tail messages at the counter's (overhead-free) scale.
+      tailTokenBudget: Math.floor(perToolMsg10x * 2.5),
+      tokenCounter: (counted) => {
+        seenMessageCounts.push(counted.length);
+        return overhead + estimateMessageTokens(counted) * 10;
+      }
+    });
+
+    const result = await compact(messages);
+    // Probe ([]), classification (full history), then per-message walk —
+    // the overhead is detected, subtracted, and not paid once per message.
+    expect(seenMessageCounts.slice(0, 2)).toEqual([0, messages.length]);
+    expect(seenMessageCounts.slice(2)).toContain(1);
+    expect(result).toMatchObject({
+      fromMessageId: "tool-0",
+      toMessageId: "tool-5",
+      summary: "summary"
+    });
+  });
+
+  it("uses a counter that throws on empty input per-message, as before", async () => {
+    const messages = usageStyleHistory();
+    const perToolMsg10x = estimateMessageTokens([messages[1]]) * 10;
+
+    const compact = createCompactFunction({
+      summarize: async () => "summary",
+      protectHead: 1,
+      minTailMessages: 1,
+      tailTokenBudget: Math.floor(perToolMsg10x * 2.5),
+      tokenCounter: (counted) => {
+        if (counted.length === 0) throw new Error("no messages");
+        return estimateMessageTokens(counted) * 10;
+      }
+    });
+
+    // The probe throw classifies it as message-scoped (it reads its input);
+    // the walk then uses it directly and the budget is honored at its scale.
+    const result = await compact(messages);
+    expect(result).toMatchObject({
+      fromMessageId: "tool-0",
+      toMessageId: "tool-5",
+      summary: "summary"
+    });
+  });
+
+  it("degrades gracefully when the counter returns non-finite values", async () => {
+    const messages = usageStyleHistory();
+    const compact = createCompactFunction({
+      summarize: async () => "summary",
+      protectHead: 1,
+      minTailMessages: 1,
+      tailTokenBudget: 1,
+      tokenCounter: () => Number.NaN
+    });
+
+    // Must not throw — a broken counter falls back to the pre-existing
+    // behavior (NaN accumulation protects everything → no-op).
+    expect(await compact(messages)).toBeNull();
+  });
+
   it("compacts a tool-heavy Session end-to-end with a usage-style counter (#1593)", async () => {
     let summarizeCalls = 0;
     const history = usageStyleHistory();
