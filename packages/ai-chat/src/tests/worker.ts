@@ -689,6 +689,11 @@ export class TestChatAgent extends AIChatAgent<Env> {
     `;
   }
 
+  /** Append a chunk to a stream dated `ageMs` in the past (last-activity sweep). */
+  testInsertStreamChunkAt(streamId: string, ageMs: number): void {
+    this._resumableStream.insertChunkAt(streamId, '{"type":"text"}', ageMs);
+  }
+
   testInsertOldErroredStream(
     streamId: string,
     requestId: string,
@@ -711,6 +716,51 @@ export class TestChatAgent extends AIChatAgent<Env> {
     // We do this by starting and immediately completing a dummy stream
     const dummyId = this._startStream("cleanup-trigger");
     this._completeStream(dummyId);
+  }
+
+  /** Invoke the alarm-driven cleanup callback directly (no new stream needed). */
+  async testRunStreamCleanup(): Promise<void> {
+    await this._cleanupStreamBuffers();
+  }
+
+  /** Number of pending alarm-driven stream-cleanup schedules for this DO. */
+  testCountStreamCleanupSchedules(): number {
+    return this.getSchedules().filter(
+      (s) => s.callback === "_cleanupStreamBuffers"
+    ).length;
+  }
+
+  /**
+   * The delay (seconds) of the pending cleanup schedule, or null if none.
+   * Locks the arming interval (STREAM_CLEANUP_DELAY_SECONDS) so a regression
+   * that lengthens it back toward the old 24h leak window is caught.
+   */
+  testStreamCleanupScheduleDelaySeconds(): number | null {
+    const schedule = this.getSchedules().find(
+      (s) => s.callback === "_cleanupStreamBuffers"
+    );
+    if (!schedule || schedule.type !== "delayed") return null;
+    return schedule.delayInSeconds;
+  }
+
+  /** Arm the cleanup alarm without finishing a stream (leaves no new buffer). */
+  async testArmStreamCleanup(): Promise<void> {
+    await this._ensureStreamCleanupScheduled();
+  }
+
+  /**
+   * Backdate any pending cleanup schedule so it is due, then run the REAL
+   * `alarm()` handler. This exercises the production path where `alarm()`
+   * deletes the fired one-shot row after the callback returns — so a re-arm
+   * must create a fresh row to survive (the idempotent-reschedule footgun).
+   */
+  async testFireDueCleanupAlarm(): Promise<void> {
+    this.sql`
+      update cf_agents_schedules
+      set time = ${Math.floor(Date.now() / 1000) - 1}
+      where callback = '_cleanupStreamBuffers'
+    `;
+    await this.alarm();
   }
 
   /**

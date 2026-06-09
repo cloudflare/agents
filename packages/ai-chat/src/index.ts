@@ -226,6 +226,16 @@ const CHAT_RECOVERING_FLAG_TTL_MS = 15 * 60 * 1000;
 // child output registers forward progress.
 const AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS = 5_000;
 
+// How far ahead to schedule the resumable-stream buffer cleanup alarm. Set to
+// ResumableStream's short completion-grace window (COMPLETED_RETENTION_MS, 10m)
+// so a finished buffer is reclaimed promptly. The re-arm-while-reclaimable loop
+// (see _cleanupStreamBuffers) revisits any longer-lived rows — e.g. an
+// abandoned in-flight buffer on its 1h window — by waking again each interval
+// until they age out, then stops. Driving cleanup from an alarm (rather than
+// only piggybacking on the next stream completion) ensures idle/one-off chat
+// DOs still reclaim their buffers without waking forever (#1706).
+const STREAM_CLEANUP_DELAY_SECONDS = 10 * 60;
+
 type StreamResultStatus = {
   status: Exclude<SaveMessagesResult["status"], "skipped">;
   error?: string;
@@ -1367,6 +1377,17 @@ export class AIChatAgent<
       this._flushAwaitingStreamStartConnections();
       this._activateDeferredAutoContinuation();
     }
+    // Arm on START as well as finish so a stream whose DO is evicted mid-flight
+    // and never reaches a finish still gets a future sweep instead of leaking.
+    // This matters for `chatRecovery: false` (the default): those turns don't
+    // run inside `runFiber`, so there is no durable keepAlive alarm and no
+    // fiber-recovery scan — if the client never reconnects, nothing else ever
+    // wakes the DO to finalize the orphan. (With `chatRecovery: true` the
+    // leftover keepAlive alarm wakes the DO within ~keepAliveIntervalMs and
+    // recovery finalizes the stream, which arms cleanup anyway — so this is
+    // belt-and-suspenders there.) The last-activity sweep threshold keeps an
+    // actively streaming run from being reclaimed before it goes quiet (#1706).
+    void this._ensureStreamCleanupScheduled();
     return streamId;
   }
 
@@ -1378,6 +1399,48 @@ export class AIChatAgent<
     if (completedRequestId === this._continuation.activeRequestId) {
       this._continuation.activeRequestId = null;
       this._continuation.activeConnectionId = null;
+    }
+    void this._ensureStreamCleanupScheduled();
+  }
+
+  /**
+   * Ensure a single cleanup alarm is pending for this DO's resumable-stream
+   * buffers. Armed whenever a stream finishes (completes or errors) so that
+   * idle/one-off chat DOs still reclaim their buffers — the lazy sweep in
+   * {@link ResumableStream} only fires when a *subsequent* stream completes,
+   * which never happens for a chat that receives a single turn (#1706).
+   *
+   * `idempotent` dedupes on (callback, payload, owner) so repeated finishes
+   * collapse onto one pending alarm rather than stacking.
+   * @internal
+   */
+  protected async _ensureStreamCleanupScheduled({
+    idempotent = true
+  }: { idempotent?: boolean } = {}): Promise<void> {
+    await this.schedule(
+      STREAM_CLEANUP_DELAY_SECONDS,
+      "_cleanupStreamBuffers",
+      undefined,
+      { idempotent }
+    );
+  }
+
+  /**
+   * Alarm callback: sweep aged stream buffers, then re-arm only while rows
+   * remain so a fully-swept DO stops waking itself. Public so it is reachable
+   * as a schedule callback.
+   * @internal
+   */
+  async _cleanupStreamBuffers(): Promise<void> {
+    this._resumableStream.cleanup();
+    if (this._resumableStream.hasReclaimableStreams()) {
+      // Must NOT be idempotent: this runs INSIDE the currently-executing
+      // one-shot schedule row, which `alarm()` deletes only after we return. An
+      // idempotent reschedule would dedup onto that row and then be deleted with
+      // it — the re-arm would silently never fire, leaving buffers that survived
+      // this sweep (e.g. a younger turn) uncollected. A fresh delayed row
+      // survives the deletion.
+      await this._ensureStreamCleanupScheduled({ idempotent: false });
     }
   }
 
@@ -1435,6 +1498,7 @@ export class AIChatAgent<
       this._continuation.activeRequestId = null;
       this._continuation.activeConnectionId = null;
     }
+    void this._ensureStreamCleanupScheduled();
   }
 
   /**
@@ -4191,6 +4255,7 @@ export class AIChatAgent<
 
       if (streamStillActive) {
         this._resumableStream.complete(streamId);
+        void this._ensureStreamCleanupScheduled();
       }
 
       // A NEW turn (not a continuation) that produced no persisted assistant

@@ -5139,6 +5139,103 @@ export class ThinkRecoveryTestAgent extends Think {
     return rows[0]?.count ?? 0;
   }
 
+  /** Insert a stream-metadata row aged `ageMs` in the past (for cleanup tests). */
+  async insertAgedStreamForTest(
+    streamId: string,
+    requestId: string,
+    status: "streaming" | "completed" | "error",
+    ageMs: number
+  ): Promise<void> {
+    const createdAt = Date.now() - ageMs;
+    const completedAt = status === "streaming" ? null : createdAt + 1000;
+    this.sql`
+      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at, completed_at)
+      VALUES (${streamId}, ${requestId}, ${status}, ${createdAt}, ${completedAt})
+    `;
+  }
+
+  /** Status of a single stream-metadata row, or null if absent. */
+  async getStreamStatusForTest(streamId: string): Promise<string | null> {
+    const rows = this.sql<{ status: string }>`
+      SELECT status FROM cf_ai_chat_stream_metadata WHERE id = ${streamId}
+    `;
+    return rows[0]?.status ?? null;
+  }
+
+  /** Append a chunk to a stream dated `ageMs` in the past (last-activity sweep). */
+  async insertStreamChunkForTest(
+    streamId: string,
+    ageMs: number
+  ): Promise<void> {
+    (
+      this as unknown as {
+        _resumableStream: {
+          insertChunkAt(id: string, body: string, ageMs: number): void;
+        };
+      }
+    )._resumableStream.insertChunkAt(streamId, '{"type":"text"}', ageMs);
+  }
+
+  /** Start a stream via the cleanup-arming wrapper (without ever finishing it). */
+  async startStreamForTest(requestId: string): Promise<string> {
+    return (
+      this as unknown as {
+        _startResumableStream(requestId: string): string;
+      }
+    )._startResumableStream(requestId);
+  }
+
+  /** Invoke the alarm-driven cleanup callback directly. */
+  async runStreamCleanupForTest(): Promise<void> {
+    await (
+      this as unknown as { _cleanupStreamBuffers(): Promise<void> }
+    )._cleanupStreamBuffers();
+  }
+
+  /** Finish a stream via the cleanup-arming wrapper (mirrors a real turn end). */
+  async completeStreamForTest(streamId: string): Promise<void> {
+    (
+      this as unknown as { _completeResumableStream(id: string): void }
+    )._completeResumableStream(streamId);
+  }
+
+  /** Arm the cleanup alarm without finishing a stream (leaves no new buffer). */
+  async armStreamCleanupForTest(): Promise<void> {
+    await (
+      this as unknown as { _ensureStreamCleanupScheduled(): Promise<void> }
+    )._ensureStreamCleanupScheduled();
+  }
+
+  /**
+   * The delay (seconds) of the pending cleanup schedule, or null if none.
+   * Locks the arming interval (STREAM_CLEANUP_DELAY_SECONDS) so a regression
+   * that lengthens it back toward the old 24h leak window is caught.
+   */
+  async streamCleanupScheduleDelaySecondsForTest(): Promise<number | null> {
+    const rows = this.sql<{ delayInSeconds: number | null }>`
+      SELECT delayInSeconds
+      FROM cf_agents_schedules
+      WHERE callback = '_cleanupStreamBuffers'
+      LIMIT 1
+    `;
+    return rows[0]?.delayInSeconds ?? null;
+  }
+
+  /**
+   * Backdate any pending cleanup schedule so it is due, then run the REAL
+   * `alarm()` handler. This exercises the production path where `alarm()`
+   * deletes the fired one-shot row after the callback returns — so a re-arm
+   * must create a fresh row to survive (the idempotent-reschedule footgun).
+   */
+  async fireDueCleanupAlarmForTest(): Promise<void> {
+    this.sql`
+      UPDATE cf_agents_schedules
+      SET time = ${Math.floor(Date.now() / 1000) - 1}
+      WHERE callback = '_cleanupStreamBuffers'
+    `;
+    await this.alarm();
+  }
+
   async insertInterruptedFiber(
     name: string,
     snapshot?: unknown

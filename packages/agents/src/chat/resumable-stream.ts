@@ -28,8 +28,28 @@ const CHUNK_BUFFER_MAX_SIZE = 100;
 const SEGMENT_MAX_BYTES = 512_000;
 /** Default cleanup interval for old streams (ms) - every 10 minutes */
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
-/** Default age threshold for cleaning up completed streams (ms) - 24 hours */
-const CLEANUP_AGE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+/**
+ * Retention for completed/errored stream buffers, measured from completion.
+ *
+ * The assistant message is persisted separately (`cf_ai_chat_agent_messages`),
+ * so once a stream completes its buffer is no longer the source of truth — it
+ * is only a brief reconnect-and-replay grace window: long enough to cover a
+ * client that dropped at the completion boundary and reconnects to replay the
+ * just-finished stream, and to deliver a pending terminal error frame on a
+ * resumed stream (#1645). It is deliberately short (not the chat's lifetime)
+ * so idle/one-off chat DOs don't accumulate stale buffers (#1706).
+ */
+const COMPLETED_RETENTION_MS = 10 * 60 * 1000;
+/**
+ * Retention for abandoned `streaming` rows, measured from LAST chunk activity.
+ *
+ * Generous relative to {@link COMPLETED_RETENTION_MS}: an interrupted turn must
+ * have ample time to be resumed by a reconnecting client or healed by fiber
+ * recovery before its buffer is reaped. Only a stream that has produced no
+ * chunk for this long is treated as truly dead. Keyed off last activity (not
+ * start time) so a long but still-active stream is never swept mid-flight.
+ */
+const ABANDONED_STREAM_RETENTION_MS = 60 * 60 * 1000;
 /** Shared encoder for UTF-8 byte length measurement */
 const textEncoder = new TextEncoder();
 
@@ -595,6 +615,29 @@ export class ResumableStream {
     this._activeRequestId = null;
   }
 
+  /**
+   * Force a sweep of aged stream buffers now, bypassing the lazy interval
+   * gate used by {@link _maybeCleanupOldStreams}. Intended to be driven by an
+   * alarm so idle/hibernated chat DOs still reclaim buffers even when no
+   * further stream ever completes to trigger the lazy path.
+   */
+  cleanup(now: number = Date.now()): void {
+    this._lastCleanupTime = now;
+    this._sweepOldStreams(now);
+  }
+
+  /**
+   * True if any stream rows remain at all. Used by alarm-driven cleanup to
+   * decide whether to re-arm: once no rows remain there is nothing left to
+   * sweep, so the DO can stop waking itself.
+   */
+  hasReclaimableStreams(): boolean {
+    const rows = this.sql<{ n: number }>`
+      select count(*) as n from cf_ai_chat_stream_metadata
+    `;
+    return (rows?.[0]?.n ?? 0) > 0;
+  }
+
   // ── Internal ───────────────────────────────────────────────────────
 
   private _maybeCleanupOldStreams() {
@@ -603,34 +646,64 @@ export class ResumableStream {
       return;
     }
     this._lastCleanupTime = now;
+    this._sweepOldStreams(now);
+  }
 
-    const cutoff = now - CLEANUP_AGE_THRESHOLD_MS;
+  /** Delete completed/errored buffers past the completion grace window, plus
+   *  abandoned "streaming" rows past the stale-in-flight window. The two use
+   *  different retentions: a completed buffer is redundant with the persisted
+   *  message and needs only a brief replay grace, whereas an in-flight buffer
+   *  must outlive resume/recovery before it is presumed dead. */
+  private _sweepOldStreams(now: number) {
+    const completedCutoff = now - COMPLETED_RETENTION_MS;
     this.sql`
       delete from cf_ai_chat_stream_chunks 
       where stream_id in (
         select id from cf_ai_chat_stream_metadata 
-        where status in ('completed', 'error') and completed_at < ${cutoff}
+        where status in ('completed', 'error') and completed_at < ${completedCutoff}
       )
     `;
     this.sql`
       delete from cf_ai_chat_stream_metadata 
-      where status in ('completed', 'error') and completed_at < ${cutoff}
+      where status in ('completed', 'error') and completed_at < ${completedCutoff}
     `;
 
     // Clean up abandoned "streaming" rows. These are orphaned streams that
     // were never completed or recovered (e.g. non-durable agents that never
     // reconnected). By this point, fiber recovery has already had its chance
     // to claim them — safe to delete.
+    //
+    // "Abandoned" is keyed off LAST ACTIVITY (the most recent chunk write),
+    // not the stream's start time: a long-running stream that is still
+    // actively emitting chunks must never be swept mid-flight just because it
+    // started long ago. A row with no chunks falls back to its start time.
+    // Note `created_at <= max(chunk.created_at)` always (the row is inserted
+    // before any chunk), so this set is stable across the two deletes even
+    // though the first removes the chunks the second's subquery reads.
+    const abandonedCutoff = now - ABANDONED_STREAM_RETENTION_MS;
     this.sql`
       delete from cf_ai_chat_stream_chunks
       where stream_id in (
-        select id from cf_ai_chat_stream_metadata
-        where status = 'streaming' and created_at < ${cutoff}
+        select m.id from cf_ai_chat_stream_metadata m
+        where m.status = 'streaming'
+          and coalesce(
+            (select max(c.created_at) from cf_ai_chat_stream_chunks c
+             where c.stream_id = m.id),
+            m.created_at
+          ) < ${abandonedCutoff}
       )
     `;
     this.sql`
       delete from cf_ai_chat_stream_metadata
-      where status = 'streaming' and created_at < ${cutoff}
+      where id in (
+        select m.id from cf_ai_chat_stream_metadata m
+        where m.status = 'streaming'
+          and coalesce(
+            (select max(c.created_at) from cf_ai_chat_stream_chunks c
+             where c.stream_id = m.id),
+            m.created_at
+          ) < ${abandonedCutoff}
+      )
     `;
   }
 
@@ -697,6 +770,20 @@ export class ResumableStream {
     this.sql`
       insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
       values (${streamId}, ${requestId}, 'streaming', ${createdAt})
+    `;
+  }
+
+  /**
+   * Append a chunk to a stream dated `ageMs` in the past. Used to exercise the
+   * last-activity sweep threshold: a long-running streaming row with a *recent*
+   * chunk must survive even when its start time is older than the cutoff.
+   * @internal For testing only
+   */
+  insertChunkAt(streamId: string, body: string, ageMs: number): void {
+    const createdAt = Date.now() - ageMs;
+    this.sql`
+      insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
+      values (${nanoid()}, ${streamId}, ${body}, 0, ${createdAt})
     `;
   }
 }

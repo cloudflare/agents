@@ -1771,7 +1771,7 @@ describe("Resumable Streaming", () => {
 
       const agentStub = await getAgentByName(env.TestChatAgent, room);
 
-      // Insert an old errored stream (25 hours old, past the 24h cleanup threshold)
+      // Insert an old errored stream (25 hours old, well past the completion grace)
       await agentStub.testInsertOldErroredStream(
         "old-errored",
         "req-errored",
@@ -1795,7 +1795,7 @@ describe("Resumable Streaming", () => {
       ws.close(1000);
     });
 
-    it("abandoned streaming rows are cleaned up after 24 hours", async () => {
+    it("abandoned streaming rows are cleaned up after the stale-in-flight window", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
       await new Promise((r) => setTimeout(r, 50));
@@ -1820,6 +1820,315 @@ describe("Resumable Streaming", () => {
         "abandoned-streaming"
       );
       expect(afterMetadata).toBeNull();
+
+      await new Promise((r) => setTimeout(r, 50));
+      ws.close(1000);
+    });
+  });
+
+  describe("alarm-driven stream cleanup (#1706)", () => {
+    it("arms a single cleanup alarm when a stream finishes, deduping repeats", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      // No cleanup alarm before any stream finishes.
+      expect(await agentStub.testCountStreamCleanupSchedules()).toBe(0);
+
+      // Finishing a stream arms exactly one cleanup alarm.
+      await agentStub.testTriggerStreamCleanup();
+      expect(await agentStub.testCountStreamCleanupSchedules()).toBe(1);
+
+      // Subsequent finishes collapse onto the same pending alarm (idempotent),
+      // so DOs with many turns never accumulate cleanup schedules.
+      await agentStub.testTriggerStreamCleanup();
+      await agentStub.testTriggerStreamCleanup();
+      expect(await agentStub.testCountStreamCleanupSchedules()).toBe(1);
+
+      await new Promise((r) => setTimeout(r, 50));
+      ws.close(1000);
+    });
+
+    it("reclaims aged buffers when the alarm fires without a new stream completing", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      // The exact #1706 scenario: a one-off chat whose buffers age out, with no
+      // further stream ever completing to drive the lazy in-line sweep.
+      await agentStub.testInsertOldErroredStream(
+        "old-errored",
+        "req-errored",
+        25 * 60 * 60 * 1000
+      );
+      await agentStub.testInsertStaleStream(
+        "abandoned-streaming",
+        "req-abandoned",
+        25 * 60 * 60 * 1000
+      );
+
+      // The alarm callback alone (no completeStream) reclaims both.
+      await agentStub.testRunStreamCleanup();
+
+      expect(await agentStub.getStreamMetadata("old-errored")).toBeNull();
+      expect(
+        await agentStub.getStreamMetadata("abandoned-streaming")
+      ).toBeNull();
+
+      await new Promise((r) => setTimeout(r, 50));
+      ws.close(1000);
+    });
+
+    it("re-arms only while reclaimable buffers remain", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      // Fully-swept DO: running cleanup with nothing left does NOT re-arm, so an
+      // idle/dead chat stops waking itself.
+      await agentStub.testRunStreamCleanup();
+      expect(await agentStub.testCountStreamCleanupSchedules()).toBe(0);
+
+      // A still-recent stream survives the sweep (not yet aged), so the DO must
+      // keep an alarm pending to revisit it later.
+      await agentStub.testInsertStaleStream(
+        "recent-streaming",
+        "req-recent",
+        60 * 1000
+      );
+      await agentStub.testRunStreamCleanup();
+      expect(
+        await agentStub.getStreamMetadata("recent-streaming")
+      ).not.toBeNull();
+      expect(await agentStub.testCountStreamCleanupSchedules()).toBe(1);
+
+      await new Promise((r) => setTimeout(r, 50));
+      ws.close(1000);
+    });
+
+    it("survives the real alarm fire and re-arms when a younger buffer remains", async () => {
+      // Guards the idempotent-reschedule footgun: when the cleanup alarm fires,
+      // `alarm()` deletes the fired one-shot row after the callback returns. An
+      // idempotent re-arm would dedup onto that doomed row and vanish with it,
+      // leaking any buffer that survived the sweep. The re-arm must be fresh.
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      await agentStub.testInsertStaleStream("young", "req-young", 60 * 1000);
+      await agentStub.testArmStreamCleanup();
+      expect(await agentStub.testCountStreamCleanupSchedules()).toBe(1);
+
+      // Fire the alarm for real — the fired row is deleted after the callback.
+      await agentStub.testFireDueCleanupAlarm();
+
+      // The young buffer survived the sweep, so a FRESH cleanup alarm must
+      // remain pending (this is exactly 0 if the re-arm were idempotent).
+      expect(await agentStub.getStreamMetadata("young")).not.toBeNull();
+      expect(await agentStub.testCountStreamCleanupSchedules()).toBe(1);
+
+      await new Promise((r) => setTimeout(r, 50));
+      ws.close(1000);
+    });
+
+    it("stops re-arming after the real alarm sweeps the last buffer", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      await agentStub.testInsertOldErroredStream(
+        "old",
+        "req-old",
+        25 * 60 * 60 * 1000
+      );
+      await agentStub.testArmStreamCleanup();
+      expect(await agentStub.testCountStreamCleanupSchedules()).toBe(1);
+
+      await agentStub.testFireDueCleanupAlarm();
+
+      // Nothing reclaimable remains, so no re-arm: the DO stops waking itself.
+      expect(await agentStub.getStreamMetadata("old")).toBeNull();
+      expect(await agentStub.testCountStreamCleanupSchedules()).toBe(0);
+
+      await new Promise((r) => setTimeout(r, 50));
+      ws.close(1000);
+    });
+
+    it("does not sweep a long-running stream that is still emitting chunks", async () => {
+      // The abandoned-streaming sweep keys off LAST chunk activity, not start
+      // time: a stream that began > 24h ago but is still writing chunks must
+      // survive, while one that has been silent past the window is reclaimed.
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      // Started 25h ago but emitted a chunk a minute ago — still active.
+      await agentStub.testInsertStaleStream(
+        "long-active",
+        "req-active",
+        25 * 60 * 60 * 1000
+      );
+      await agentStub.testInsertStreamChunkAt("long-active", 60 * 1000);
+
+      // Started 25h ago and went silent (last chunk 25h ago) — abandoned.
+      await agentStub.testInsertStaleStream(
+        "long-silent",
+        "req-silent",
+        25 * 60 * 60 * 1000
+      );
+      await agentStub.testInsertStreamChunkAt(
+        "long-silent",
+        25 * 60 * 60 * 1000
+      );
+
+      await agentStub.testRunStreamCleanup();
+
+      expect(await agentStub.getStreamMetadata("long-active")).not.toBeNull();
+      expect(await agentStub.getStreamMetadata("long-silent")).toBeNull();
+
+      await new Promise((r) => setTimeout(r, 50));
+      ws.close(1000);
+    });
+
+    it("arms cleanup when a stream starts (covers never-finished orphans)", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      // No alarm yet on a fresh DO.
+      expect(await agentStub.testCountStreamCleanupSchedules()).toBe(0);
+
+      // Starting a stream (without ever finishing it) must arm cleanup so an
+      // evicted, never-resumed mid-stream orphan still gets a future sweep.
+      await agentStub.testStartStream("req-orphan");
+      expect(await agentStub.testCountStreamCleanupSchedules()).toBe(1);
+
+      await new Promise((r) => setTimeout(r, 50));
+      ws.close(1000);
+    });
+
+    it("arms the cleanup alarm at the completion-grace delay (10 minutes)", async () => {
+      // Locks the arming interval: a regression that lengthens it back toward
+      // the old 24h window (re-introducing the #1706 leak) fails here.
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      await agentStub.testArmStreamCleanup();
+      expect(await agentStub.testStreamCleanupScheduleDelaySeconds()).toBe(
+        10 * 60
+      );
+
+      await new Promise((r) => setTimeout(r, 50));
+      ws.close(1000);
+    });
+
+    it("sweeps a finished buffer past the 10-minute grace, keeps a recent one", async () => {
+      // Completion retention is short: the assistant message is persisted
+      // separately, so a finished buffer is only a brief replay grace.
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      await agentStub.testInsertOldErroredStream(
+        "done-stale",
+        "req-done-stale",
+        11 * 60 * 1000
+      );
+      await agentStub.testInsertOldErroredStream(
+        "done-recent",
+        "req-done-recent",
+        5 * 60 * 1000
+      );
+
+      await agentStub.testRunStreamCleanup();
+
+      expect(await agentStub.getStreamMetadata("done-stale")).toBeNull();
+      expect(await agentStub.getStreamMetadata("done-recent")).not.toBeNull();
+
+      await new Promise((r) => setTimeout(r, 50));
+      ws.close(1000);
+    });
+
+    it("keeps an abandoned in-flight buffer until the 1-hour stale window", async () => {
+      // In-flight retention is generous so an interrupted turn has ample time
+      // to be resumed or recovered before its buffer is presumed dead.
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      await agentStub.testInsertStaleStream(
+        "inflight-recent",
+        "req-inflight-recent",
+        30 * 60 * 1000
+      );
+      await agentStub.testInsertStaleStream(
+        "inflight-stale",
+        "req-inflight-stale",
+        70 * 60 * 1000
+      );
+
+      await agentStub.testRunStreamCleanup();
+
+      expect(
+        await agentStub.getStreamMetadata("inflight-recent")
+      ).not.toBeNull();
+      expect(await agentStub.getStreamMetadata("inflight-stale")).toBeNull();
+
+      await new Promise((r) => setTimeout(r, 50));
+      ws.close(1000);
+    });
+
+    it("keeps an in-flight buffer's chunks reconstructable past the completion grace", async () => {
+      // Recovery reconstructs a partial assistant message from the stream
+      // buffer (getStreamChunks / _persistOrphanedStream), and only ever does
+      // so for an ACTIVE `streaming` row — which uses the generous 1h
+      // last-activity window, NOT the 10min completion grace. A buffer whose
+      // last chunk is older than the completion grace but within the in-flight
+      // window must survive a sweep with its chunks intact, otherwise a turn
+      // interrupted >10min could not be recovered.
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      await agentStub.testInsertStaleStream(
+        "recovering",
+        "req-recovering",
+        30 * 60 * 1000
+      );
+      // Last chunk 20 minutes ago: past the 10min grace, within the 1h window.
+      await agentStub.testInsertStreamChunkAt("recovering", 20 * 60 * 1000);
+
+      await agentStub.testRunStreamCleanup();
+
+      expect((await agentStub.getStreamMetadata("recovering"))?.status).toBe(
+        "streaming"
+      );
+      expect(
+        (await agentStub.getStreamChunks("recovering")).length
+      ).toBeGreaterThan(0);
 
       await new Promise((r) => setTimeout(r, 50));
       ws.close(1000);

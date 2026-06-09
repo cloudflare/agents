@@ -729,6 +729,16 @@ const CHAT_RECOVERING_FLAG_TTL_MS = 15 * 60 * 1000;
 // child output registers forward progress.
 const AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS = 5_000;
 
+// How far ahead to schedule the resumable-stream buffer cleanup alarm. Set to
+// ResumableStream's short completion-grace window (COMPLETED_RETENTION_MS, 10m)
+// so a finished buffer is reclaimed promptly. The re-arm-while-reclaimable loop
+// (see _cleanupStreamBuffers) revisits any longer-lived rows — e.g. an
+// abandoned in-flight buffer on its 1h window — by waking again each interval
+// until they age out, then stops. Driving cleanup from an alarm (rather than
+// only piggybacking on the next stream completion) ensures idle/one-off chat
+// DOs still reclaim their buffers without waking forever (#1706).
+const STREAM_CLEANUP_DELAY_SECONDS = 10 * 60;
+
 // Ephemeral user message appended when a model request would otherwise end in
 // an assistant message (see `ensureValidContinueCheckpoint`).
 const CONTINUE_CHECKPOINT_PROMPT =
@@ -7423,15 +7433,15 @@ export class Think<
       // The live-streamed chunks already reached clients; the driver's
       // post-retry `_broadcastMessages()` reconciles them to the real answer.
       if (overflowRetry) {
-        this._resumableStream.complete(streamId);
+        this._completeResumableStream(streamId);
         streamFinalized = true;
         return { status: "overflow_retry", error: streamError };
       }
 
       if (streamError) {
-        this._resumableStream.markError(streamId);
+        this._errorResumableStream(streamId);
       } else {
-        this._resumableStream.complete(streamId);
+        this._completeResumableStream(streamId);
       }
       streamFinalized = true;
       this._broadcastChat({
@@ -7492,7 +7502,7 @@ export class Think<
         });
         if (outcome === "scheduled") {
           if (!streamFinalized) {
-            this._resumableStream.complete(streamId);
+            this._completeResumableStream(streamId);
             streamFinalized = true;
           }
           if (!doneSent) {
@@ -7519,7 +7529,7 @@ export class Think<
           // Finalize the stream and return WITHOUT the generic terminal path,
           // which would otherwise re-broadcast the raw stall error.
           if (!streamFinalized) {
-            this._resumableStream.markError(streamId);
+            this._errorResumableStream(streamId);
             streamFinalized = true;
           }
           doneSent = true;
@@ -7535,7 +7545,7 @@ export class Think<
         // generic terminal path below (unchanged watchdog behavior).
       }
       if (!streamFinalized) {
-        this._resumableStream.markError(streamId);
+        this._errorResumableStream(streamId);
         streamFinalized = true;
       }
       if (!doneSent) {
@@ -7768,7 +7778,7 @@ export class Think<
     }
   ): Promise<StreamResultStatus> {
     const clearGen = this._turnQueue.generation;
-    const streamId = this._resumableStream.start(requestId);
+    const streamId = this._startResumableStream(requestId);
     const continuation = options?.continuation ?? false;
     const parentId = options?.parentId;
 
@@ -7921,7 +7931,7 @@ export class Think<
       // The live-streamed chunks already reached clients; the retry's
       // `_broadcastMessages()` reconciles them to the real answer.
       if (overflowRetry && options?.overflowRecovery) {
-        this._resumableStream.complete(streamId);
+        this._completeResumableStream(streamId);
         this._pendingResumeConnections.clear();
         doneSent = true;
         options.overflowRecovery.onRetry(streamError);
@@ -7930,9 +7940,9 @@ export class Think<
       }
 
       if (streamError) {
-        this._resumableStream.markError(streamId);
+        this._errorResumableStream(streamId);
       } else {
-        this._resumableStream.complete(streamId);
+        this._completeResumableStream(streamId);
       }
       this._pendingResumeConnections.clear();
       this._broadcastChat({
@@ -7970,7 +7980,7 @@ export class Think<
           // Recovering: close the stream cleanly (no terminal error frame); the
           // scheduled continuation drives the turn to completion. Report
           // `aborted` so the caller does not terminalize the turn.
-          this._resumableStream.complete(streamId);
+          this._completeResumableStream(streamId);
           this._pendingResumeConnections.clear();
           if (!doneSent) {
             this._broadcastChat({
@@ -7997,7 +8007,7 @@ export class Think<
           // submission interrupted), identical to deploy-recovery exhaustion.
           // Finalize the stream and report `aborted` (not `error`) so the caller
           // does not re-run the generic terminal path on top of it.
-          this._resumableStream.markError(streamId);
+          this._errorResumableStream(streamId);
           this._pendingResumeConnections.clear();
           doneSent = true;
           this._streamingAssistant = null;
@@ -8011,7 +8021,7 @@ export class Think<
       if (options?.captureProgrammaticStreamError) {
         this._programmaticStreamErrors.set(requestId, streamError);
       }
-      this._resumableStream.markError(streamId);
+      this._errorResumableStream(streamId);
       this._pendingResumeConnections.clear();
       if (!doneSent) {
         this._broadcastChat({
@@ -8026,7 +8036,7 @@ export class Think<
       }
     } finally {
       if (!doneSent) {
-        this._resumableStream.markError(streamId);
+        this._errorResumableStream(streamId);
         this._pendingResumeConnections.clear();
         this._broadcastChat({
           type: MSG_CHAT_RESPONSE,
@@ -9185,7 +9195,7 @@ export class Think<
       }
 
       if (streamStillActive) {
-        this._resumableStream.complete(streamId);
+        this._completeResumableStream(streamId);
       }
 
       const shouldRetry =
@@ -10737,6 +10747,86 @@ export class Think<
     );
     if (sent) {
       this._pendingResumeConnections.add(connection.id);
+    }
+  }
+
+  /**
+   * Start a resumable stream and arm buffer cleanup. Wrapper around
+   * `ResumableStream.start`: arming on START as well as finish guarantees a
+   * stream whose DO is evicted mid-flight and never reaches a finish still gets
+   * a future sweep instead of leaking its buffer.
+   *
+   * When a turn runs inside `runFiber` (durable recovery), the DO already
+   * self-heals: `runFiber` holds `keepAlive`, which leaves a durable alarm in
+   * storage that survives eviction, fires within ~keepAliveIntervalMs, and runs
+   * the fiber-recovery scan — finalizing the stream (which arms cleanup) without
+   * any client reconnect. Arming here is the safety net for any non-fiber stream
+   * path, where no such alarm exists. The last-activity sweep threshold prevents
+   * an actively streaming run from being reclaimed before it goes quiet (#1706).
+   */
+  protected _startResumableStream(
+    requestId: string,
+    options?: { messageId?: string }
+  ): string {
+    const streamId = this._resumableStream.start(requestId, options);
+    void this._ensureStreamCleanupScheduled();
+    return streamId;
+  }
+
+  /**
+   * Mark a resumable stream completed and arm buffer cleanup. Wrapper around
+   * `ResumableStream.complete` so every stream-finish path also schedules the
+   * cleanup alarm (#1706).
+   */
+  protected _completeResumableStream(streamId: string): void {
+    this._resumableStream.complete(streamId);
+    void this._ensureStreamCleanupScheduled();
+  }
+
+  /**
+   * Mark a resumable stream errored and arm buffer cleanup. Wrapper around
+   * `ResumableStream.markError` — see {@link _completeResumableStream}.
+   */
+  protected _errorResumableStream(streamId: string): void {
+    this._resumableStream.markError(streamId);
+    void this._ensureStreamCleanupScheduled();
+  }
+
+  /**
+   * Ensure a single cleanup alarm is pending for this DO's resumable-stream
+   * buffers. Armed whenever a stream finishes so that idle/one-off chat DOs
+   * still reclaim their buffers — the lazy sweep in {@link ResumableStream}
+   * only fires when a *subsequent* stream completes, which never happens for a
+   * chat that receives a single turn (#1706).
+   *
+   * `idempotent` dedupes on (callback, payload, owner) so repeated finishes
+   * collapse onto one pending alarm rather than stacking.
+   */
+  protected async _ensureStreamCleanupScheduled({
+    idempotent = true
+  }: { idempotent?: boolean } = {}): Promise<void> {
+    await this.schedule(
+      STREAM_CLEANUP_DELAY_SECONDS,
+      "_cleanupStreamBuffers",
+      undefined,
+      { idempotent }
+    );
+  }
+
+  /**
+   * Alarm callback: sweep aged stream buffers, then re-arm only while rows
+   * remain so a fully-swept DO stops waking itself.
+   */
+  async _cleanupStreamBuffers(): Promise<void> {
+    this._resumableStream.cleanup();
+    if (this._resumableStream.hasReclaimableStreams()) {
+      // Must NOT be idempotent: this runs INSIDE the currently-executing
+      // one-shot schedule row, which `alarm()` deletes only after we return. An
+      // idempotent reschedule would dedup onto that row and then be deleted with
+      // it — the re-arm would silently never fire, leaving buffers that survived
+      // this sweep (e.g. a younger turn) uncollected. A fresh delayed row
+      // survives the deletion (mirrors the chat-recovery reschedule).
+      await this._ensureStreamCleanupScheduled({ idempotent: false });
     }
   }
 

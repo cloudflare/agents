@@ -70,7 +70,7 @@ function Chat() {
 - Chunks are batched (every 10 chunks) and flushed to SQLite for performance
 - When a client sends `CF_AGENT_STREAM_RESUME_REQUEST`, the server checks for active streams and responds with `CF_AGENT_STREAM_RESUMING`
 - Stale streams (older than 5 minutes) are cleaned up on restore
-- Completed streams older than 24 hours are periodically garbage collected
+- Stream buffers are garbage collected from a scheduled alarm: completed or errored streams are retained for 10 minutes (a brief reconnect-and-replay grace; the assistant message itself is persisted separately), and abandoned in-flight streams are retained for 1 hour after their last chunk before being reclaimed
 
 ### Client-side (`useAgentChat`)
 
