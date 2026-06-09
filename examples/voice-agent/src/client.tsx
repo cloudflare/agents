@@ -110,6 +110,12 @@ function ModeToggle() {
 
 type LlmModel = "kimi" | "glm" | "gpt-oss-20b";
 
+function getAudioOutputLabel(device: MediaDeviceInfo, index: number) {
+  if (device.deviceId === "default") return "System default";
+  if (device.deviceId === "communications") return "Communications default";
+  return device.label || `Speaker ${index + 1}`;
+}
+
 function WebRTCApp({
   llmModel,
   onLlmModelChange
@@ -404,6 +410,10 @@ function App() {
   const [speakerConflict, setSpeakerConflict] = useState(false);
   const [kicked, setKicked] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [audioOutputDevices, setAudioOutputDevices] = useState<
+    MediaDeviceInfo[]
+  >([]);
+  const [outputDeviceId, setOutputDeviceId] = useState("default");
 
   // Listen for custom protocol messages (speaker_conflict, kicked, speaker_available)
   // by observing the VoiceClient's raw message events. Since useVoiceAgent abstracts
@@ -431,6 +441,32 @@ function App() {
       return () => clearTimeout(timer);
     }
   }, [toast]);
+
+  const refreshAudioOutputs = useCallback(async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    setAudioOutputDevices(
+      devices.filter((device) => device.kind === "audiooutput")
+    );
+  }, []);
+
+  useEffect(() => {
+    refreshAudioOutputs().catch(() => {
+      setToast("Could not list speakers for this browser.");
+    });
+
+    navigator.mediaDevices?.addEventListener(
+      "devicechange",
+      refreshAudioOutputs
+    );
+    return () => {
+      navigator.mediaDevices?.removeEventListener(
+        "devicechange",
+        refreshAudioOutputs
+      );
+    };
+  }, [refreshAudioOutputs]);
 
   // Auto-scroll transcript
   useEffect(() => {
@@ -656,6 +692,35 @@ function App() {
             Kimi
           </Button>
         </div>
+
+        {/* Audio output picker */}
+        <Surface className="mb-4 rounded-xl p-3 ring ring-kumo-line">
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs text-kumo-secondary">Speaker</span>
+              <span className="text-[10px] text-kumo-secondary">
+                Selected output is not wired to SDK playback yet
+              </span>
+            </div>
+            <select
+              value={outputDeviceId}
+              onChange={(event) => setOutputDeviceId(event.target.value)}
+              className="min-w-0 flex-1 rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-sm text-kumo-default"
+            >
+              <option value="default">System default</option>
+              {audioOutputDevices
+                .filter((device) => device.deviceId !== "default")
+                .map((device, index) => (
+                  <option key={device.deviceId} value={device.deviceId}>
+                    {getAudioOutputLabel(device, index)}
+                  </option>
+                ))}
+            </select>
+            <span className="text-[11px] text-kumo-secondary">
+              Call audio still uses the SDK default output.
+            </span>
+          </div>
+        </Surface>
 
         {/* Toast notification */}
         {toast && (
