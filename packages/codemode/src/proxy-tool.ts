@@ -177,7 +177,7 @@ function createPlatformProvider(
   executor: Executor
 ): ResolvedProvider {
   const { descriptions } = setup;
-  return {
+  const provider: ResolvedProvider = {
     name: "codemode",
     prelude: STEP_PRELUDE,
     fns: {
@@ -200,10 +200,12 @@ function createPlatformProvider(
       run: async (...args: unknown[]) => {
         const snippet = await runtime.getSnippet(String(args[0]));
         if (!snippet) return { error: `Snippet "${args[0]}" not found.` };
+        // Snippets are saved execution code, so they may use the codemode
+        // SDK (e.g. codemode.step) — run them with this same provider.
         const result = await runCode({
           code: `async () => {\n  const snippet = (${snippet.code});\n  return await snippet(${JSON.stringify(args[1])});\n}`,
           executor,
-          providers: [],
+          providers: [provider],
           connectors: bindings
         });
         return result.result;
@@ -221,6 +223,7 @@ function createPlatformProvider(
       }
     }
   };
+  return provider;
 }
 
 // ---------------------------------------------------------------------------

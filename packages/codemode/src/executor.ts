@@ -406,8 +406,11 @@ export class DynamicWorkerExecutor implements Executor {
     const connectorProxyInits = connectors.map(
       (c) =>
         `    const ${c.name} = new Proxy({}, {\n` +
-        `      get: (_, toolName) => async (...args) => {\n` +
-        `        return this.env.__connectors.${c.name}.callTool(String(toolName), args[0]);\n` +
+        `      get: (_, toolName) => {\n` +
+        `        if (typeof toolName !== "string") return undefined;\n` +
+        `        return async (...args) => {\n` +
+        `          return this.env.__connectors.${c.name}.callTool(toolName, args[0]);\n` +
+        `        };\n` +
         `      }\n` +
         `    });`
     );

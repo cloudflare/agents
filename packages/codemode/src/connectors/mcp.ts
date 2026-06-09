@@ -88,8 +88,18 @@ export abstract class McpConnector<
   protected override async tools(): Promise<ConnectorTools> {
     const mcpTools = await this.fetchTools();
     const out: ConnectorTools = {};
+    const sources = new Map<string, string>();
     for (const tool of mcpTools) {
-      out[this.toolName(tool)] = {
+      const name = this.toolName(tool);
+      const existing = sources.get(name);
+      if (existing !== undefined) {
+        throw new Error(
+          `MCP tools "${existing}" and "${tool.name}" on ${this.name()} both ` +
+            `map to "${name}". Override toolName() to disambiguate.`
+        );
+      }
+      sources.set(name, tool.name);
+      out[name] = {
         description: tool.description,
         inputSchema: tool.inputSchema as JSONSchema7,
         outputSchema: tool.outputSchema as JSONSchema7 | undefined,
