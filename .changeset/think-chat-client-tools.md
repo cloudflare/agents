@@ -1,6 +1,6 @@
 ---
-"@cloudflare/think": minor
-"agents": minor
+"@cloudflare/think": patch
+"agents": patch
 ---
 
 Support client tools on the Think sub-agent `chat()` RPC path (#1709)
