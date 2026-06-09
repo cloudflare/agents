@@ -486,6 +486,17 @@ export async function rejectCodemode(options: {
 }
 
 // ---------------------------------------------------------------------------
+// Pending — list actions awaiting approval, for approval UIs
+// ---------------------------------------------------------------------------
+
+export async function pendingCodemode(options: {
+  ctx: DurableObjectState;
+  connectors: CodemodeConnector[];
+}): Promise<PendingAction[]> {
+  return getRuntime(options.ctx, options.connectors).listPending();
+}
+
+// ---------------------------------------------------------------------------
 // Rollback — revert applied actions in reverse order
 // ---------------------------------------------------------------------------
 

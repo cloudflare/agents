@@ -195,7 +195,30 @@ await executor.execute(code, [resolveProvider(dbProvider)]);
 
 Connectors are class-based integrations that bridge external services into the codemode sandbox. Each connector extends `WorkerEntrypoint`, making it serializable, RPC-callable, and available as `ctx.exports.ConnectorName`.
 
-The model gets one tool (`codemode`) that executes code. Inside the sandbox, each connector is available as a global named after the connector, and a platform SDK (`codemode`) provides discovery:
+Create a runtime with an executor and connectors, then expose `runtime.tool()` to the model:
+
+```ts
+import {
+  createCodemodeRuntime,
+  DynamicWorkerExecutor
+} from "@cloudflare/codemode";
+
+const runtime = createCodemodeRuntime({
+  ctx: this.ctx,
+  executor: new DynamicWorkerExecutor({ loader: this.env.LOADER }),
+  connectors: [github, repoApi]
+});
+
+const result = streamText({
+  model,
+  messages,
+  tools: {
+    codemode: runtime.tool()
+  }
+});
+```
+
+Inside the sandbox, each connector is available as a global named after the connector. The `codemode` platform SDK provides discovery:
 
 ```ts
 // discover
@@ -260,9 +283,7 @@ github.search_issues({ query });
 
 ### `OpenApiConnector`
 
-Wraps an OpenAPI spec. Exposes **two methods** in the sandbox — `search` and `request` — rather than one method per endpoint. This keeps the tool surface small for large APIs.
-
-Under the hood: `search` does substring matching across paths, methods, operationIds, and summaries in the spec. `request` delegates to the subclass's `request()` method with `{ operationId, params, body }`.
+Wraps an OpenAPI spec. The model is good at writing code, so the surface is data plus an authenticated capability. Override two methods: `spec()` returns the OpenAPI document into the sandbox (no prompt tokens), and `request()` performs an authenticated request. The model reads the spec, finds the operation it wants in code, and calls `request()`.
 
 ```ts
 // stripe.codemode.ts
@@ -276,16 +297,17 @@ export class StripeConnector extends OpenApiConnector<Env> {
     return "stripe";
   }
   protected instructions() {
-    return "Use for Stripe payment operations.";
+    return "Use for Stripe payments. Read stripe.spec() and call stripe.request(...).";
   }
   protected spec() {
     return stripeOpenApiSpec;
   }
 
-  protected async request(input: OpenApiRequestOptions) {
-    return fetch(`https://api.stripe.com/v1/...`, {
-      headers: { Authorization: `Bearer ${this.env.STRIPE_KEY}` }
-      // map input.operationId, input.params, input.body to the right endpoint
+  protected request(options: OpenApiRequestOptions) {
+    return fetch(`https://api.stripe.com${options.path}`, {
+      method: options.method ?? "GET",
+      headers: { Authorization: `Bearer ${this.env.STRIPE_KEY}` },
+      body: options.body ? JSON.stringify(options.body) : undefined
     }).then((r) => r.json());
   }
 }
@@ -294,14 +316,17 @@ export class StripeConnector extends OpenApiConnector<Env> {
 Sandbox sees:
 
 ```ts
-// Find endpoints
-const ops = await stripe.search("payment intent");
-// [{ path: "/v1/payment_intents", method: "post", operationId: "CreatePaymentIntent", summary: "..." }]
+const spec = await stripe.spec();
+const op = Object.entries(spec.paths)
+  .flatMap(([path, methods]) =>
+    Object.entries(methods).map(([method, o]) => ({ path, method, ...o }))
+  )
+  .find((o) => o.operationId === "CreatePaymentIntent");
 
-// Call an endpoint
 const intent = await stripe.request({
-  operationId: "CreatePaymentIntent",
-  params: { amount: 2000, currency: "usd" }
+  path: op.path,
+  method: op.method,
+  body: { amount: 2000, currency: "usd" }
 });
 ```
 
@@ -377,16 +402,18 @@ export class MyConnector extends CodemodeConnector<Env> {
 
 ### Annotations
 
-Connectors can classify methods for future permission/approval enforcement:
+Connectors classify methods so the runtime knows how to treat them. Calls to `requiresApproval` methods pause the run until the user approves (see [docs/codemode/approvals.md](../../docs/codemode/approvals.md)):
 
 ```ts
-protected annotations() {
+annotations() {
   return {
     listItems: { observation: true },                          // read-only
     createItem: { requiresApproval: true, approvalDescription: "Create item" },  // needs approval
   };
 }
 ```
+
+The agent drives approvals through the runtime: `runtime.pending()`, `runtime.approve()`, `runtime.reject({ seq })`, `runtime.rollback()`, `runtime.fork()`.
 
 ### Snippets
 
@@ -691,22 +718,23 @@ const types = generateTypes(myAiSdkTools);
 
 ## Module Structure
 
-| Module                             | Peer deps             | Exports                                                                                                                                                              |
-| ---------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@cloudflare/codemode`             | None                  | `sanitizeToolName`, `normalizeCode`, `generateTypesFromJsonSchema`, `jsonSchemaToType`, `DynamicWorkerExecutor`, `ToolDispatcher`, `ToolProvider`, `resolveProvider` |
-| `@cloudflare/codemode/ai`          | `ai`, `zod`           | `createCodeTool`, `generateTypes`, `aiTools`, `resolveProvider`, `ToolDescriptor`, `ToolDescriptors`                                                                 |
-| `@cloudflare/codemode/tanstack-ai` | `@tanstack/ai`, `zod` | `createCodeTool`, `generateTypes`, `tanstackTools`, `resolveProvider`                                                                                                |
-| `@cloudflare/codemode/browser`     | None                  | `createBrowserCodeTool`, `IframeSandboxExecutor`, `Executor`, `ExecuteResult`, `ResolvedProvider`, JSON Schema tool descriptor types                                 |
+| Module                             | Peer deps             | Exports                                                                                                                              |
+| ---------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `@cloudflare/codemode`             | None                  | `createCodemodeRuntime`, connector base classes, `DynamicWorkerExecutor`, executor utilities, JSON Schema type helpers               |
+| `@cloudflare/codemode/ai`          | `ai`, `zod`           | `createCodeTool`, `generateTypes`, `aiTools`, `resolveProvider`, `ToolDescriptor`, `ToolDescriptors`                                 |
+| `@cloudflare/codemode/tanstack-ai` | `@tanstack/ai`, `zod` | `createCodeTool`, `generateTypes`, `tanstackTools`, `resolveProvider`                                                                |
+| `@cloudflare/codemode/browser`     | None                  | `createBrowserCodeTool`, `IframeSandboxExecutor`, `Executor`, `ExecuteResult`, `ResolvedProvider`, JSON Schema tool descriptor types |
 
 ## Limitations
 
-- **Tool approval (`needsApproval`) is not supported yet.** Tools with `needsApproval: true` or a `needsApproval` function are excluded from codemode instead of pausing execution for approval. Support for approval flows within codemode is planned. For now, use approval-required tools through standard AI SDK tool calling instead.
+- Runtime approval support applies to connector annotations. Legacy `createCodeTool` still excludes tools with `needsApproval: true` instead of pausing execution.
 - Browser iframe execution uses nonce-scoped internal messages, but its timeout cannot preempt tight synchronous loops like `while (true) {}` because those block the browser event loop.
 - Requires Cloudflare Workers environment for `DynamicWorkerExecutor`
 - Limited to JavaScript execution
 
 ## Examples
 
+- [`examples/codemode-connectors/`](../../examples/codemode-connectors/) — Runtime and connector example with MCP and OpenAPI connectors
 - [`examples/codemode/`](../../examples/codemode/) — Full working example with task management tools
 - [`examples/codemode-browser/`](../../examples/codemode-browser/) — Browser iframe executor example with dynamic client tools
 

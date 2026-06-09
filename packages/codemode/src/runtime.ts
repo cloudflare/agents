@@ -2,8 +2,8 @@
  * CodemodeRuntime — durable execution engine, implemented as a DurableObject
  * facet of the agent.
  *
- * The Executor is a dumb sandbox: it runs code once and dispatches tool calls
- * back. The Runtime wraps an executor and makes execution durable via
+ * The Executor is a simple, stateless sandbox: it runs code once and dispatches
+ * tool calls back. The Runtime wraps an executor and makes execution durable via
  * abort-and-replay:
  *
  *   - Every tool call AND every `codemode.step(name, fn)` is recorded in a

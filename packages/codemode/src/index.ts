@@ -29,11 +29,20 @@ export {
   type PendingAction
 } from "./runtime";
 export { type Snippet, type SaveSnippetOptions } from "./snippet";
+export {
+  createCodemodeRuntime,
+  type CreateCodemodeRuntimeOptions,
+  type CodemodeRuntimeHandle,
+  type CodemodeRuntimeToolOptions,
+  type CodemodeApproveOptions,
+  type CodemodeRejectOptions
+} from "./runtime-handle";
 
 export {
   createProxyTool,
   resumeCodemode,
   forkCodemode,
+  pendingCodemode,
   rejectCodemode,
   rollbackCodemode,
   type CreateProxyToolOptions,

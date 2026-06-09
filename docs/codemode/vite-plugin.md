@@ -65,7 +65,7 @@ src/
   github.codemode.ts        → GithubConnector
   stripe.codemode.ts        → StripeConnector
   linear.codemode.ts        → LinearConnector
-  server.ts                 → agent + createProxyTool
+  server.ts                 → agent + createCodemodeRuntime
   vite.config.ts            → plugins: [codemode()]
 ```
 

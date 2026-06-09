@@ -25,8 +25,8 @@ const openapiSpec = {
 /**
  * Repository API connector — backed by an OpenAPI spec.
  *
- * Exposes repository metadata and release operations in the codemode
- * sandbox as `repoApi.search(query)` and `repoApi.request(options)`.
+ * The model reads the spec with `repoApi.spec()` and makes authenticated
+ * calls with `repoApi.request({ path, method, params, body })`.
  */
 export class RepoApiConnector extends OpenApiConnector<Env> {
   name() {
@@ -34,16 +34,18 @@ export class RepoApiConnector extends OpenApiConnector<Env> {
   }
 
   protected override instructions() {
-    return "Use for repository metadata and release information.";
+    return "Use for repository metadata and release information. Read repoApi.spec() and call repoApi.request(...).";
   }
 
   protected spec() {
     return openapiSpec;
   }
 
-  protected async request(input: OpenApiRequestOptions) {
-    const p = input.params as { owner: string; repo: string };
-    if (input.operationId === "get_repository") {
+  // Authenticated request. A real connector would build a URL from `path` +
+  // `params` and attach credentials; this demo returns canned data.
+  protected async request(options: OpenApiRequestOptions) {
+    const p = (options.params ?? {}) as { owner?: string; repo?: string };
+    if (options.path === "/repos/{owner}/{repo}") {
       return {
         fullName: `${p.owner}/${p.repo}`,
         stars: 1234,

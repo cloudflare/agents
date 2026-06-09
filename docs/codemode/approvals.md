@@ -42,7 +42,7 @@ Model calls codemode({ code }) where code calls github.create_issue(...)
 Agent shows the pending action to the user.
 User approves.
 
-Agent calls resumeCodemode({ ctx, connectors, executor })
+Agent calls runtime.approve({ executionId })
   → runtime replays the log, runs create_issue for real, continues
   → returns { status: "completed", result } (or pauses again at the next action)
 ```
@@ -68,23 +68,22 @@ type PendingAction = {
 
 ## Resolving approvals
 
-The agent drives resolution with the exported helpers:
+The agent drives resolution through the runtime handle:
 
 ```ts
-import {
-  resumeCodemode,
-  rejectCodemode,
-  rollbackCodemode
-} from "@cloudflare/codemode";
+const runtime = createCodemodeRuntime({ ctx: this.ctx, connectors, executor });
+
+// List actions awaiting approval, for approval UIs
+await runtime.pending();
 
 // Approve the pending action(s) and continue
-await resumeCodemode({ ctx: this.ctx, connectors, executor });
+await runtime.approve({ executionId });
 
 // Reject — ends the execution
-await rejectCodemode({ ctx: this.ctx, connectors, seq });
+await runtime.reject({ seq });
 
 // Roll back applied actions in reverse order
-await rollbackCodemode({ ctx: this.ctx, connectors });
+await runtime.rollback();
 ```
 
 Wire these to callable agent methods so the client UI can approve/reject:
@@ -93,19 +92,12 @@ Wire these to callable agent methods so the client UI can approve/reject:
 export class Chat extends AIChatAgent<Env> {
   @callable()
   async listPending() {
-    const runtime = this.ctx.facets.get("codemode", () => ({
-      class: CodemodeRuntime
-    }));
-    return runtime.listPending();
+    return this.codemodeRuntime().pending();
   }
 
   @callable()
-  async approve() {
-    return resumeCodemode({
-      ctx: this.ctx,
-      connectors: this.connectors,
-      executor: this.executor
-    });
+  async approve(executionId?: string) {
+    return this.codemodeRuntime().approve({ executionId });
   }
 }
 ```
@@ -129,14 +121,14 @@ Connectors without `revertAction` are skipped. Observations are never reverted.
 
 ## Comparison with Gatekeeper
 
-| Concept              | Gatekeeper                         | Codemode                                   |
-| -------------------- | ---------------------------------- | ------------------------------------------ |
-| Read classification  | `authorizeObservation()`           | `{ observation: true }`                    |
-| Write classification | `submitAction()`                   | `{ requiresApproval: true }`               |
-| Pending state        | Simulated in the session           | Logged; run aborts                         |
-| Continue             | Session simulates ahead            | Abort-and-replay                           |
-| Apply                | `applyAction(action)`              | `resumeCodemode(...)` replays + runs       |
-| Reject               | `rejectAction(action)`             | `rejectCodemode({ ctx, connectors, seq })` |
-| Revert               | `revertAction(action, revertInfo)` | `revertAction(method, args, result)`       |
+| Concept              | Gatekeeper                         | Codemode                              |
+| -------------------- | ---------------------------------- | ------------------------------------- |
+| Read classification  | `authorizeObservation()`           | `{ observation: true }`               |
+| Write classification | `submitAction()`                   | `{ requiresApproval: true }`          |
+| Pending state        | Simulated in the session           | Logged; run aborts                    |
+| Continue             | Session simulates ahead            | Abort-and-replay                      |
+| Apply                | `applyAction(action)`              | `runtime.approve(...)` replays + runs |
+| Reject               | `rejectAction(action)`             | `runtime.reject({ seq })`             |
+| Revert               | `revertAction(action, revertInfo)` | `revertAction(method, args, result)`  |
 
 The key difference: Gatekeeper _simulates_ pending actions so code keeps running. Codemode _aborts and replays_ — simpler and fully durable, at the cost of re-running the code (cheap, since prior calls are served from the log).

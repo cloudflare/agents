@@ -129,9 +129,12 @@ github.search_issues({ query });
 
 ## OpenApiConnector
 
-Wraps an OpenAPI spec. Exposes **two methods** — `search` and `request` — rather than one method per endpoint. This keeps the tool surface small for large APIs.
+Wraps an OpenAPI spec. The model is good at writing code, so the surface is data plus an authenticated capability. Override two methods:
 
-Under the hood: `search` does substring matching across paths, methods, operationIds, and summaries. `request` delegates to the subclass's `request()` method.
+- `spec()` returns the OpenAPI document into the sandbox (no prompt tokens).
+- `request()` performs an authenticated request.
+
+The model reads the spec, finds the operation it wants in code, and calls `request()`. There are no pre-baked per-operation methods.
 
 ```ts
 import {
@@ -144,15 +147,17 @@ export class StripeConnector extends OpenApiConnector<Env> {
     return "stripe";
   }
   protected instructions() {
-    return "Use for Stripe payments.";
+    return "Use for Stripe payments. Read stripe.spec() and call stripe.request(...).";
   }
   protected spec() {
     return stripeOpenApiSpec;
   }
 
-  protected async request(input: OpenApiRequestOptions) {
-    return fetch(`https://api.stripe.com/v1/...`, {
-      headers: { Authorization: `Bearer ${this.env.STRIPE_KEY}` }
+  protected request(options: OpenApiRequestOptions) {
+    return fetch(`https://api.stripe.com${options.path}`, {
+      method: options.method ?? "GET",
+      headers: { Authorization: `Bearer ${this.env.STRIPE_KEY}` },
+      body: options.body ? JSON.stringify(options.body) : undefined
     }).then((r) => r.json());
   }
 }
@@ -160,18 +165,25 @@ export class StripeConnector extends OpenApiConnector<Env> {
 
 ### OpenAPI-specific methods
 
-| Method           | Purpose                                                                       |
-| ---------------- | ----------------------------------------------------------------------------- |
-| `spec()`         | Required. Return the OpenAPI spec document. May be async.                     |
-| `request(input)` | Required. Execute an API operation. Receives `{ operationId, params, body }`. |
+| Method             | Purpose                                                                                         |
+| ------------------ | ----------------------------------------------------------------------------------------------- |
+| `spec()`           | Required. Return the OpenAPI spec document. May be async.                                       |
+| `request(options)` | Required. Perform an authenticated request. Receives `{ path, method, params, body, headers }`. |
 
 Sandbox sees:
 
 ```ts
-const ops = await stripe.search("payment intent");
+const spec = await stripe.spec();
+const op = Object.entries(spec.paths)
+  .flatMap(([path, methods]) =>
+    Object.entries(methods).map(([method, o]) => ({ path, method, ...o }))
+  )
+  .find((o) => o.operationId === "CreatePaymentIntent");
+
 const result = await stripe.request({
-  operationId: "CreatePaymentIntent",
-  params: { amount: 2000 }
+  path: op.path,
+  method: op.method,
+  body: { amount: 2000, currency: "usd" }
 });
 ```
 

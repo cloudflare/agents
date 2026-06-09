@@ -2,16 +2,44 @@ import type { JsonSchemaToolDescriptors } from "../json-schema-types";
 import { CodemodeConnector } from "./base";
 
 export type OpenApiRequestOptions = {
-  operationId: string;
+  /** Path or URL to call, e.g. an OpenAPI path from `spec()`. */
+  path: string;
+  method?: string;
+  /** Path/query params to substitute or append. */
   params?: Record<string, unknown>;
   body?: unknown;
+  headers?: Record<string, string>;
 };
 
 /**
  * Connector backed by an OpenAPI spec.
  *
- * Subclass and override `name()`, `spec()`, and `request()`.
- * Exposes two sandbox methods: `search` and `request`.
+ * The model is good at writing code, so the surface is data plus an
+ * authenticated capability. Override two methods:
+ *
+ *   - `spec()`    returns the OpenAPI document into the sandbox (no prompt tokens)
+ *   - `request()` performs an authenticated request
+ *
+ * The model reads the spec, finds the operation it wants in code, and calls
+ * `request()`. No pre-baked per-operation methods.
+ *
+ * (The sandbox-facing method is exposed as `request`, not `fetch`, because
+ * `fetch` is reserved by `WorkerEntrypoint` for the Worker HTTP handler.)
+ *
+ * ```ts
+ * const spec = await stripe.spec();
+ * const op = Object.entries(spec.paths)
+ *   .flatMap(([path, methods]) =>
+ *     Object.entries(methods).map(([method, o]) => ({ path, method, ...o }))
+ *   )
+ *   .find((o) => o.operationId === "CreatePaymentIntent");
+ *
+ * const result = await stripe.request({
+ *   path: op.path,
+ *   method: op.method,
+ *   body: { amount: 2000, currency: "usd" }
+ * });
+ * ```
  */
 export abstract class OpenApiConnector<
   Env = unknown,
@@ -21,78 +49,43 @@ export abstract class OpenApiConnector<
     | Record<string, unknown>
     | Promise<Record<string, unknown>>;
 
-  protected abstract request(input: OpenApiRequestOptions): Promise<unknown>;
+  protected abstract request(options: OpenApiRequestOptions): Promise<unknown>;
 
   protected override async loadDescriptors(): Promise<JsonSchemaToolDescriptors> {
     return {
-      search: {
-        description: "Search the OpenAPI spec for operations.",
-        inputSchema: {
-          type: "object",
-          properties: { query: { type: "string" } },
-          required: ["query"]
-        }
+      spec: {
+        description:
+          "Return the OpenAPI spec document so you can find operations in code.",
+        inputSchema: { type: "object", properties: {} }
       },
       request: {
-        description: "Execute an OpenAPI operation by operationId.",
+        description:
+          "Perform an authenticated request. Pass a path (and optional method, params, body, headers).",
         inputSchema: {
           type: "object",
           properties: {
-            operationId: { type: "string" },
+            path: { type: "string" },
+            method: { type: "string" },
             params: { type: "object", additionalProperties: true },
-            body: {}
+            body: {},
+            headers: {
+              type: "object",
+              additionalProperties: { type: "string" }
+            }
           },
-          required: ["operationId"]
+          required: ["path"]
         }
       }
     };
   }
 
   async executeTool(method: string, args: unknown): Promise<unknown> {
-    if (method === "search") {
-      const { query } = args as { query: string };
-      return searchOpenApiSpec(await this.spec(), query);
+    if (method === "spec") {
+      return this.spec();
     }
     if (method === "request") {
       return this.request(args as OpenApiRequestOptions);
     }
     throw new Error(`Unknown method "${method}" on ${this.name()}`);
   }
-}
-
-function searchOpenApiSpec(
-  spec: Record<string, unknown>,
-  query: string
-): unknown[] {
-  const q = query.toLowerCase();
-  const paths = (spec.paths ?? {}) as Record<string, Record<string, unknown>>;
-  return Object.entries(paths).flatMap(([path, methods]) =>
-    Object.entries(methods).flatMap(([method, operation]) => {
-      const op = operation as {
-        operationId?: string;
-        summary?: string;
-        description?: string;
-      };
-      const haystack = [
-        path,
-        method,
-        op.operationId,
-        op.summary,
-        op.description
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      return haystack.includes(q)
-        ? [
-            {
-              path,
-              method,
-              operationId: op.operationId,
-              summary: op.summary
-            }
-          ]
-        : [];
-    })
-  );
 }

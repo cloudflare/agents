@@ -6,7 +6,7 @@ import { describe, it, expect, vi } from "vitest";
 import { createCodeTool } from "../tool";
 import { z } from "zod";
 import type { ToolDescriptors } from "../tool-types";
-import type { Runtime, ExecuteResult, ResolvedProvider } from "../executor";
+import type { Executor, ExecuteResult, ResolvedProvider } from "../executor";
 
 /** A mock executor that records calls and returns configurable results. */
 function createMockExecutor(result: ExecuteResult = { result: "ok" }) {
@@ -15,7 +15,7 @@ function createMockExecutor(result: ExecuteResult = { result: "ok" }) {
     fnNames: string[];
     providers: ResolvedProvider[];
   }[] = [];
-  const executor: Runtime = {
+  const executor: Executor = {
     execute: vi.fn(
       async (
         code: string,
@@ -117,7 +117,7 @@ describe("createCodeTool", () => {
     };
 
     let capturedProviders: ResolvedProvider[] = [];
-    const executor: Runtime = {
+    const executor: Executor = {
       execute: vi.fn(async (_code: string, p: unknown) => {
         const providers = p as ResolvedProvider[];
         capturedProviders = providers;
@@ -150,7 +150,7 @@ describe("createCodeTool", () => {
     };
 
     let capturedFnNames: string[] = [];
-    const executor: Runtime = {
+    const executor: Executor = {
       execute: vi.fn(async (_code: string, p: unknown) => {
         const providers = p as ResolvedProvider[];
         capturedFnNames = providers.flatMap((pr) => Object.keys(pr.fns));
@@ -184,7 +184,7 @@ describe("createCodeTool", () => {
     };
 
     let capturedFnNames: string[] = [];
-    const executor: Runtime = {
+    const executor: Executor = {
       execute: vi.fn(async (_code: string, p: unknown) => {
         const providers = p as ResolvedProvider[];
         capturedFnNames = providers.flatMap((pr) => Object.keys(pr.fns));
@@ -222,7 +222,7 @@ describe("createCodeTool", () => {
     };
 
     let capturedFnNames: string[] = [];
-    const executor: Runtime = {
+    const executor: Executor = {
       execute: vi.fn(async (_code: string, p: unknown) => {
         const providers = p as ResolvedProvider[];
         capturedFnNames = providers.flatMap((pr) => Object.keys(pr.fns));
@@ -254,7 +254,7 @@ describe("createCodeTool", () => {
     };
 
     let capturedFnNames: string[] = [];
-    const executor: Runtime = {
+    const executor: Executor = {
       execute: vi.fn(async (_code: string, p: unknown) => {
         const providers = p as ResolvedProvider[];
         capturedFnNames = providers.flatMap((pr) => Object.keys(pr.fns));
@@ -477,7 +477,7 @@ describe("createCodeTool", () => {
     };
 
     let capturedProviders: ResolvedProvider[] = [];
-    const executor: Runtime = {
+    const executor: Executor = {
       execute: vi.fn(async (_code: string, p: unknown) => {
         capturedProviders = p as ResolvedProvider[];
         return { result: null };
@@ -510,7 +510,7 @@ describe("createCodeTool", () => {
       }
     };
 
-    const executor: Runtime = {
+    const executor: Executor = {
       execute: vi.fn(async (_code: string, p: unknown) => {
         const providers = p as ResolvedProvider[];
         const result = await providers[0].fns.increment({});

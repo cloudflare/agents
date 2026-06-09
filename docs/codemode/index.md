@@ -15,18 +15,20 @@ Codemode lets LLMs write and execute TypeScript instead of making individual too
 
 ```
 Agent DO
-  ├─ facet: codemode             (CodemodeRuntime — durable log, approvals, state)
-  └─ createProxyTool
-       ├─ spawns the runtime facet
-       ├─ builds platform SDK (codemode namespace)
-       └─ runs code in the Executor sandbox
+  ├─ runtime handle              (executor, connectors, lifecycle helpers)
+  └─ facet: codemode             (CodemodeRuntime — durable log, approvals, state)
+
+runtime.tool()
+  ├─ spawns the runtime facet
+  ├─ builds platform SDK (codemode namespace)
+  └─ runs code in the Executor sandbox
 
 Executor sandbox (isolated Worker)
   ├─ codemode.search("query")           → platform SDK
   ├─ codemode.describe("github.foo")    → platform SDK
   ├─ codemode.get/set("key")            → runtime facet (durable scratchpad)
   ├─ github.list_pull_requests(args)    → runtime decides → connector
-  └─ repoApi.request(args)              → runtime decides → connector
+  └─ repoApi.request(args)                → runtime decides → connector
 ```
 
 Every tool call routes through the runtime, which records it in a durable log
@@ -58,7 +60,10 @@ export class GithubConnector extends McpConnector<Env> {
 
 ```ts
 // server.ts
-import { createProxyTool, DynamicWorkerExecutor } from "@cloudflare/codemode";
+import {
+  createCodemodeRuntime,
+  DynamicWorkerExecutor
+} from "@cloudflare/codemode";
 import { GithubConnector } from "./github.codemode" with { type: "connectors" };
 
 export class Chat extends AIChatAgent<Env> {
@@ -66,13 +71,15 @@ export class Chat extends AIChatAgent<Env> {
     const github = new GithubConnector(this.ctx as any, this.env);
     github.setConnection(conn);
 
+    const runtime = createCodemodeRuntime({
+      ctx: this.ctx,
+      executor: new DynamicWorkerExecutor({ loader: this.env.LOADER }),
+      connectors: [github]
+    });
+
     const result = streamText({
       tools: {
-        codemode: createProxyTool({
-          ctx: this.ctx,
-          executor: new DynamicWorkerExecutor({ loader: this.env.LOADER }),
-          connectors: [github]
-        })
+        codemode: runtime.tool()
       }
     });
   }

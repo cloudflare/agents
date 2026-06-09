@@ -5,7 +5,10 @@ import { AIChatAgent } from "@cloudflare/ai-chat";
 import { createWorkersAI } from "workers-ai-provider";
 import { streamText, convertToModelMessages, stepCountIs } from "ai";
 import { routeAgentRequest } from "agents";
-import { createProxyTool, DynamicWorkerExecutor } from "@cloudflare/codemode";
+import {
+  createCodemodeRuntime,
+  DynamicWorkerExecutor
+} from "@cloudflare/codemode";
 import { GithubConnector } from "./github.codemode" with { type: "connectors" };
 import { RepoApiConnector } from "./repoapi.codemode" with { type: "connectors" };
 
@@ -94,6 +97,12 @@ export class Chat extends AIChatAgent<Env> {
     github.setConnection(conn);
     const repoApi = new RepoApiConnector(ctx, this.env);
 
+    const runtime = createCodemodeRuntime({
+      ctx: this.ctx,
+      executor,
+      connectors: [github, repoApi]
+    });
+
     const result = streamText({
       model: workersai("@cf/moonshotai/kimi-k2.6", {
         sessionAffinity: this.sessionAffinity
@@ -113,11 +122,7 @@ export class Chat extends AIChatAgent<Env> {
       ].join("\n"),
       messages: await convertToModelMessages(this.messages),
       tools: {
-        codemode: createProxyTool({
-          ctx: this.ctx,
-          executor,
-          connectors: [github, repoApi]
-        })
+        codemode: runtime.tool()
       },
       stopWhen: stepCountIs(10)
     });

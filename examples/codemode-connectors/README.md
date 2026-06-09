@@ -10,11 +10,21 @@ const matches = await codemode.search("pull request");
 const docs = await codemode.describe("github.list_pull_requests");
 
 // call
-const prs = await github.list_pull_requests({ owner: "cloudflare", repo: "agents" });
-const repo = await repoApi.request({ operationId: "get_repository", params: { owner: "cloudflare", repo: "agents" } });
+const prs = await github.list_pull_requests({
+  owner: "cloudflare",
+  repo: "agents"
+});
+const spec = await repoApi.spec();
+const repo = await repoApi.request({
+  path: "/repos/{owner}/{repo}",
+  params: { owner: "cloudflare", repo: "agents" }
+});
 
-// run a saved skill
-const overview = await codemode.run("repo-overview", { owner: "cloudflare", repo: "agents" });
+// run a saved snippet
+const overview = await codemode.run("repo-overview", {
+  owner: "cloudflare",
+  repo: "agents"
+});
 ```
 
 ## What this example demonstrates
@@ -25,13 +35,19 @@ const overview = await codemode.run("repo-overview", { owner: "cloudflare", repo
 
 ```ts
 export class GithubConnector extends McpConnector<Env> {
-  name() { return "github"; }
-  protected instructions() { return "Use for GitHub operations."; }
-  protected createConnection() { return this.conn; }
-  protected annotations() {
+  name() {
+    return "github";
+  }
+  protected instructions() {
+    return "Use for GitHub operations.";
+  }
+  protected createConnection() {
+    return this.conn;
+  }
+  annotations() {
     return {
       list_pull_requests: { observation: true },
-      search_issues: { observation: true },
+      search_issues: { observation: true }
     };
   }
 }
@@ -47,29 +63,36 @@ export class RepoApiConnector extends OpenApiConnector<Env> {
 }
 ```
 
-### Skills
+### Snippets
 
-**`skills.ts`** — reusable code patterns that combine connector methods:
+Once a script works, the model can save it as a reusable snippet and run it again later:
 
 ```ts
-export const bundledSkills: CodemodeSkillSource = {
-  id: "bundled",
-  async list() { return skills; },
-  async load(name) { return skills.find(s => s.name === name) ?? null; },
-};
+await codemode.save("repo-overview", {
+  description: "Fetch repo metadata, open PRs, and latest releases."
+});
+
+const overview = await codemode.run("repo-overview", {
+  owner: "cloudflare",
+  repo: "agents"
+});
 ```
+
+Snippets are stored durably on the runtime and surface in `codemode.search` and `codemode.describe` alongside connector methods.
 
 ### Wiring
 
-**`server.ts`** — the agent wires connectors and skills into `createProxyTool`:
+**`server.ts`** — the agent wires connectors into a runtime and exposes `runtime.tool()`:
 
 ```ts
+const runtime = createCodemodeRuntime({
+  ctx,
+  executor,
+  connectors: [github, repoApi]
+});
+
 tools: {
-  codemode: createProxyTool({
-    executor,
-    connectors: [github, repoApi],
-    skills: [bundledSkills],
-  }),
+  codemode: runtime.tool();
 }
 ```
 
@@ -84,4 +107,4 @@ Then try:
 
 - "List open pull requests for cloudflare/agents"
 - "Get repository metadata for cloudflare/agents"
-- "Give me an overview of cloudflare/agents" (uses the `repo-overview` skill)
+- "Give me an overview of cloudflare/agents, then save that script as a snippet"

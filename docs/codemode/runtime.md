@@ -1,8 +1,8 @@
 # Runtime
 
-The **Executor** is a dumb sandbox — it runs a block of code once and dispatches tool calls back. The **Runtime** wraps an executor and makes execution durable.
+The **Executor** is a simple, stateless sandbox: it runs a block of code once and dispatches tool calls back. The **Runtime** wraps an executor and makes execution durable.
 
-`CodemodeRuntime` is a DurableObject facet of the agent. It owns the durable state — the tool-call log, pending approvals, and scratchpad — and drives the executor with abort-and-replay semantics.
+The public runtime handle owns the executor and connectors for the current request. `CodemodeRuntime` is the DurableObject facet behind that handle. It owns the durable state: the tool-call log, pending approvals, and scratchpad.
 
 ## Executor vs Runtime
 
@@ -69,24 +69,28 @@ type ToolLogEntry = {
 ## Lifecycle
 
 ```ts
-// start a run — pauses at the first approval-required action
-const result = await codemodeTool.execute({ code });
-// { status: "paused", executionId, pending: [...] }
-//   or
-// { status: "completed", result, logs }
+const runtime = createCodemodeRuntime({ ctx, executor, connectors });
+
+// expose the model-facing tool
+tools: {
+  codemode: runtime.tool();
+}
+
+// list actions awaiting approval
+const pending = await runtime.pending();
 
 // approve + continue (re-runs via replay)
-await resumeCodemode({ ctx, connectors, executor });
+await runtime.approve({ executionId });
 
 // reject a pending action (ends the execution)
-await rejectCodemode({ ctx, connectors, seq });
+await runtime.reject({ seq });
 
 // rollback applied actions in reverse order
-await rollbackCodemode({ ctx, connectors });
+await runtime.rollback();
 
 // fork the current execution into an independent branch
-const forkId = await forkCodemode({ ctx, connectors });
-await resumeCodemode({ ctx, connectors, executor, executionId: forkId });
+const forkId = await runtime.fork();
+await runtime.approve({ executionId: forkId });
 ```
 
 ## Rollback
@@ -132,13 +136,14 @@ The runtime facet's identity is **derived from the connector set** it was create
 
 So snippet validity is **structural**: a snippet is always run against exactly the connectors it was written with. No per-snippet dependency tracking, no orphaned references, no validation. The same applies to paused executions — a paused run can only resume against the connector set it started with.
 
-The lifecycle helpers all take `connectors` so they address the same runtime:
+The runtime handle keeps the same `ctx`, `executor`, and `connectors` together, so lifecycle calls address the same durable facet:
 
 ```ts
-resumeCodemode({ ctx, connectors, executor });
-forkCodemode({ ctx, connectors });
-rejectCodemode({ ctx, connectors, seq });
-rollbackCodemode({ ctx, connectors });
+const runtime = createCodemodeRuntime({ ctx, executor, connectors });
+await runtime.approve({ executionId });
+await runtime.fork();
+await runtime.reject({ seq });
+await runtime.rollback();
 ```
 
 ## Why a facet

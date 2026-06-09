@@ -10,7 +10,7 @@
  * Then import a directory of *.codemode.ts files:
  * ```ts
  * import connectors from "./connectors" with { type: "connectors" };
- * // connectors is CodemodeConnector[] — pass directly to createProxyTool
+ * // pass connectors to createCodemodeRuntime({ ctx, executor, connectors })
  * ```
  *
  * Or import a single connector file:
