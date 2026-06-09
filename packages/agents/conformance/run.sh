@@ -76,9 +76,13 @@ run_server_scenarios() {
 
 case "$MODE" in
   client)
+    # --timeout: scenarios that exercise SSE reconnection legitimately take
+    # >30s (default) on slow CI runners once the SDK's retry interval and
+    # connection backoff stack up.
     CONFORMANCE_WORKER_ORIGIN="http://127.0.0.1:$PORT" pnpm exec conformance client \
       --command "node conformance/driver.mjs" \
       --expected-failures conformance/baseline-client.yml \
+      --timeout 90000 \
       "$@"
     ;;
   server-mcp-agent)

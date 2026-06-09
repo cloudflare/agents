@@ -210,7 +210,9 @@ export class ConformanceHost extends Agent<Env> {
    * connection is re-established in the background (establishConnection), so
    * the next /run call has to poll for the terminal state.
    */
-  private async waitForReady(serverId: string, timeoutMs = 25_000) {
+  // Generous timeout: on cold CI runners, connection retries (exponential
+  // backoff) plus the SDK's SSE retry interval can stack well past 25s.
+  private async waitForReady(serverId: string, timeoutMs = 50_000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const conn = this.mcp.mcpConnections[serverId];
