@@ -10782,10 +10782,13 @@ export class Agent<
       if (resolvedCallbackPath) {
         callbackUrl = `${normalizedHost}/${resolvedCallbackPath.replace(/^\//, "")}`;
       } else {
-        // The sendIdentityOnConnect:false guard above throws for this case;
-        // every other path that lands here gets a warning instead — the
-        // default URL leaks the instance name and only works when the Worker
-        // routes the agents prefix through routeAgentRequest (#1378).
+        // The guard above throws only for sendIdentityOnConnect:false with an
+        // explicitly provided callbackHost. Every path that still lands here —
+        // sendIdentityOnConnect:true, or an auto-derived host regardless of
+        // that option — gets a warning instead: the default URL leaks the
+        // instance name and only works when the Worker routes the agents
+        // prefix through routeAgentRequest (#1378). Escalating the derived-
+        // host case to a throw would break currently-working setups.
         callbackUrl = `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
         console.warn(
           `addMcpServer("${serverName}"): no callbackPath was provided, falling back to the default OAuth callback URL ${callbackUrl}. ` +
