@@ -159,6 +159,7 @@ import {
 import type {
   StreamChunkData,
   ClientToolSchema,
+  ClientToolExecutor,
   MessagePart,
   SubmitConcurrencyDecision,
   ChatFiberSnapshot
@@ -837,6 +838,28 @@ export interface StreamableResult {
  */
 export interface ChatOptions {
   signal?: AbortSignal;
+  /**
+   * Client-defined tool schemas to expose to the model for this turn, mirroring
+   * the `clientTools` carried over the WebSocket chat protocol. Use this when a
+   * parent agent delegates to a Think sub-agent over RPC but the sub-agent still
+   * needs access to tools the client (or parent) defines at runtime.
+   *
+   * On their own these are execute-less — the model's call surfaces as a tool
+   * call through the stream callback. Provide {@link ChatOptions.onClientToolCall}
+   * to also resolve those calls inline so the turn can continue to completion.
+   */
+  clientTools?: ClientToolSchema[];
+  /**
+   * Executes a client tool call and returns its output, completing the
+   * round trip for {@link ChatOptions.clientTools} within the same turn.
+   *
+   * Without this, a client-tool call has no result and the turn ends with a
+   * dangling tool call (the RPC stream callback has no inbound result channel).
+   * With it, the model can call a client tool, receive the result, and keep
+   * going — the same multi-step behavior the WebSocket path gets from
+   * `cf_agent_tool_result` messages.
+   */
+  onClientToolCall?: ClientToolExecutor;
 }
 
 type AgentToolChildRunStatus =
@@ -1167,6 +1190,13 @@ export interface TurnInput {
   signal?: AbortSignal;
   /** Client-provided tool schemas for dynamic tool registration. */
   clientTools?: ClientToolSchema[];
+  /**
+   * Executor that resolves client-tool calls inline (RPC `chat()` path). When
+   * present, `clientTools` are built WITH an `execute` that delegates to it, so
+   * the turn completes the tool round trip itself instead of surfacing a
+   * dangling tool call. Not persisted — recovery cannot replay a live executor.
+   */
+  clientToolExecutor?: ClientToolExecutor;
   /** Custom body fields from the client request. */
   body?: Record<string, unknown>;
   /** Internal workflow prompt configuration, never sourced from client body. */
@@ -3311,7 +3341,12 @@ export class Think<
     await this._refreshSkillsIfChanged();
     const contextTools = await this.session.tools();
     const skillTools = this._skillRegistry?.tools() ?? {};
-    const clientToolSet = createToolsFromClientSchemas(input.clientTools);
+    const clientToolSet = createToolsFromClientSchemas(
+      input.clientTools,
+      input.clientToolExecutor
+        ? { execute: input.clientToolExecutor }
+        : undefined
+    );
     const tools: ToolSet = {
       ...workspaceTools,
       ...baseTools,
@@ -4093,6 +4128,23 @@ export class Think<
       );
     }
 
+    // Client tools supplied by the caller (e.g. a parent agent delegating to
+    // this sub-agent). Both the schemas and the `onClientToolCall` executor are
+    // forwarded per-turn only — deliberately NOT persisted into
+    // `_lastClientTools`. The executor is a live RPC ref that dies with the
+    // isolate, so unlike the WebSocket path there is no SPA that could ever
+    // replay a `tool-result` after an eviction. Persisting the names would put
+    // them in `_clientResolvableToolNames()`, causing recovery to misclassify a
+    // dangling `input-available` orphan as a pending human interaction and park
+    // forever. Keeping them per-turn lets such an orphan recover like a server
+    // tool: `continueLastTurn`'s transcript repair errors it and the model
+    // proceeds. `_runInferenceLoop` sources client tools from `input.clientTools`
+    // (not `_lastClientTools`), so the live turn is unaffected.
+    const clientTools = options?.clientTools?.length
+      ? options.clientTools
+      : undefined;
+    const clientToolExecutor = options?.onClientToolCall;
+
     try {
       await callback.onStart({ requestId });
       await this.keepAliveWhile(async () => {
@@ -4130,6 +4182,8 @@ export class Think<
                   () =>
                     this._runInferenceLoop({
                       signal: abortSignal,
+                      clientTools,
+                      clientToolExecutor,
                       continuation: false
                     })
                 );

@@ -3554,3 +3554,212 @@ describe("malformed tool_use.input repair (provider 400 wedge)", () => {
     expect(part.input).toEqual({ prompt: "a cat" });
   });
 });
+
+// ── Client tools over the sub-agent RPC chat() path (#1709) ──────
+
+describe("Think — client tools via chat() RPC", () => {
+  it("completes the client-tool round trip inline when an executor is supplied", async () => {
+    const agent = await freshAgent();
+
+    const result = await agent.runChatWithClientTools("use client tool", {
+      withExecutor: true
+    });
+
+    expect(await agent.getLastTurnToolNames()).toContain("client_action");
+
+    // The model called the client tool; the executor resolved it and the turn
+    // continued to a text answer — all within a single chat() call.
+    expect(result.error).toBeUndefined();
+    expect(result.done).toBe(true);
+    expect(result.executorCalls).toEqual([
+      {
+        toolName: "client_action",
+        inputJson: JSON.stringify({ action: "do_thing" })
+      }
+    ]);
+    expect(result.assistantText).toContain("Continuation after tool");
+    // The tool call was resolved (not left dangling at input-available).
+    expect(result.toolPartStates).toContain("output-available");
+    expect(result.toolPartStates).not.toContain("input-available");
+  });
+
+  it("registers client tools for the turn WITHOUT polluting the persisted registry (recovery safety)", async () => {
+    const agent = await freshAgent();
+
+    await agent.runChatWithClientTools("use client tool", {
+      withExecutor: true
+    });
+
+    // The tool was registered for the inference turn...
+    expect(await agent.getLastTurnToolNames()).toContain("client_action");
+    // ...but the RPC executor path must NOT persist it into `_lastClientTools`.
+    // Otherwise an `input-available` orphan left by an eviction would be
+    // misclassified by `_clientResolvableToolNames()` as a pending human
+    // interaction (no SPA can replay it — the executor died with the isolate),
+    // wedging recovery into parking forever instead of repairing the orphan.
+    expect(await agent.getCapturedClientTools()).toBeUndefined();
+  });
+
+  it("does not classify an interrupted RPC client-tool call as a pending human interaction (recovers, not parks)", async () => {
+    const agent = await freshAgent();
+
+    // RPC path: the executor is gone after an eviction and nothing will replay
+    // the call — so the orphan must NOT be treated as awaiting a human, letting
+    // recovery repair it instead of parking forever.
+    const pendingWhenNotPersisted = await agent.probeClientToolOrphanPending({
+      polluteRegistry: false
+    });
+    expect(pendingWhenNotPersisted).toBe(false);
+  });
+
+  it("would wedge recovery if the RPC client tool were persisted (guards the fix)", async () => {
+    const agent = await freshAgent();
+
+    // Demonstrates the lever: had the RPC path persisted the schema into
+    // `_lastClientTools` (like the WebSocket path), the very same orphan would
+    // be misclassified as a pending human interaction — which is exactly why
+    // `chat()` keeps RPC client tools per-turn only.
+    const pendingWhenPersisted = await agent.probeClientToolOrphanPending({
+      polluteRegistry: true
+    });
+    expect(pendingWhenPersisted).toBe(true);
+  });
+
+  it("handles an executor that throws without crashing the turn", async () => {
+    const agent = await freshAgent();
+
+    const result = await agent.runChatWithClientTools("use client tool", {
+      withExecutor: true,
+      executorThrows: true
+    });
+
+    // The executor was invoked and threw; the failure is surfaced to the model
+    // as a tool error (not an unhandled crash) and the call resolves.
+    expect(result.executorCalls).toHaveLength(1);
+    expect(result.done).toBe(true);
+    expect(result.toolPartStates).toContain("output-error");
+    expect(result.toolPartStates).not.toContain("output-available");
+  });
+
+  it("surfaces a dangling tool call when no executor is supplied (documents the gap the executor closes)", async () => {
+    const agent = await freshAgent();
+
+    const result = await agent.runChatWithClientTools("use client tool");
+
+    // Without an executor the client tool has no result: the model's call is
+    // surfaced to the caller and the turn ends with a dangling tool call rather
+    // than continuing to a text answer.
+    expect(result.error).toBeUndefined();
+    expect(result.done).toBe(true);
+    expect(result.executorCalls).toEqual([]);
+    expect(result.assistantText).not.toContain("Continuation after tool");
+    expect(result.toolPartStates).toContain("input-available");
+    expect(result.toolPartStates).not.toContain("output-available");
+  });
+
+  it("resolves multiple client tools called in parallel within one turn", async () => {
+    const agent = await freshAgent();
+
+    const result = await agent.runChatWithClientTools("use client tools", {
+      withExecutor: true,
+      mode: "parallel"
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.done).toBe(true);
+    // Both parallel calls were dispatched to the executor and resolved.
+    expect(result.executorCalls.map((c) => c.toolName).sort()).toEqual([
+      "client_action",
+      "client_action_2"
+    ]);
+    expect(
+      result.toolCalls
+        .filter((c) => c.state === "output-available")
+        .map((c) => c.toolName)
+        .sort()
+    ).toEqual(["client_action", "client_action_2"]);
+    expect(result.assistantText).toContain("Continuation after parallel tools");
+  });
+
+  it("invokes the executor across multiple sequential steps in one turn", async () => {
+    const agent = await freshAgent();
+
+    const result = await agent.runChatWithClientTools("use client tools", {
+      withExecutor: true,
+      mode: "multistep"
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.done).toBe(true);
+    // Step 1 called client_action, step 2 (after its result) called
+    // client_action_2 — the executor fired once per step, in order.
+    expect(result.executorCalls.map((c) => c.toolName)).toEqual([
+      "client_action",
+      "client_action_2"
+    ]);
+    expect(
+      result.toolCalls
+        .filter((c) => c.state === "output-available")
+        .map((c) => c.toolName)
+        .sort()
+    ).toEqual(["client_action", "client_action_2"]);
+    expect(result.assistantText).toContain("Done after two steps");
+  });
+
+  it("invokes onClientToolCall across the RPC boundary (caller-supplied executor)", async () => {
+    const agent = await freshAgent();
+    await agent.enableExecutableClientToolForTest();
+
+    // The callback and executor are defined HERE (the caller's isolate) and
+    // passed into the child's chat() over RPC — the child calls them back
+    // across the isolate boundary, exactly as a parent agent driving a Think
+    // sub-agent would. Functions cross RPC as stubs, so this exercises the real
+    // serialization path, not an in-process shortcut.
+    let executorRan = false;
+    let executorInputJson = "";
+    const callback = {
+      onStart() {},
+      onEvent() {},
+      onDone() {},
+      onError() {}
+    };
+
+    await agent.chat("use client tool", callback as never, {
+      clientTools: [
+        {
+          name: "client_action",
+          description: "A client tool",
+          parameters: {
+            type: "object",
+            properties: { action: { type: "string" } }
+          }
+        }
+      ],
+      onClientToolCall: ({ input }: { toolName: string; input: unknown }) => {
+        executorRan = true;
+        executorInputJson = JSON.stringify(input);
+        return { ok: true, echoed: input };
+      }
+    });
+
+    // The executor (in this isolate) was invoked by the child across RPC...
+    expect(executorRan).toBe(true);
+    expect(executorInputJson).toBe(JSON.stringify({ action: "do_thing" }));
+
+    // ...and its returned output flowed back into the child's turn, which
+    // resolved the call and continued to a text answer.
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const parts = messages
+      .filter((m) => m.role === "assistant")
+      .flatMap((m) => m.parts as Array<Record<string, unknown>>);
+    const text = parts
+      .filter((p) => p.type === "text")
+      .map((p) => p.text as string)
+      .join("");
+    const toolStates = parts
+      .filter((p) => p.toolCallId === "tc-client-1")
+      .map((p) => p.state as string);
+    expect(text).toContain("Continuation after tool");
+    expect(toolStates).toContain("output-available");
+  });
+});
