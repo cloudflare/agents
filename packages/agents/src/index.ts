@@ -2565,9 +2565,15 @@ export class Agent<
             }
           );
         } catch (e) {
-          // onStateChanged/onStateUpdate errors should not affect state or broadcasts
+          // onStateChanged/onStateUpdate errors should not affect state or broadcasts.
+          // When the update came from a connection, deliver the error through
+          // the onError(connection, error) overload (#388).
           try {
-            await this.onError(e);
+            if (connection) {
+              await this.onError(connection, e);
+            } else {
+              await this.onError(e);
+            }
           } catch {
             // swallow
           }

@@ -386,22 +386,23 @@ This status persists across hibernation — a connection that was marked as no-p
 
 ## Error Handling
 
-Handle errors gracefully with `onError`:
+Handle errors gracefully with `onError`. The two signatures are TypeScript overloads — at runtime there is a single method, so one implementation must handle both call shapes. When the error is associated with a connection (e.g. your `onMessage` handler threw), it arrives as `onError(connection, error)` with the actual thrown error in the second parameter; server errors (alarms, schedules, background work) arrive as `onError(error)`:
 
 ```typescript
 export class MyAgent extends Agent {
-  // WebSocket connection error
-  onError(connection: Connection, error: unknown): void {
-    console.error(`WebSocket error on ${connection.id}:`, error);
-    connection.send(
-      JSON.stringify({ type: "error", message: "Connection error" })
-    );
-  }
-
-  // Server error (overloaded signature - no connection parameter)
-  onError(error: unknown): void {
-    console.error("Server error:", error);
-    // Log to external service, etc.
+  onError(connectionOrError: Connection | unknown, error?: unknown): void {
+    if (error !== undefined) {
+      // WebSocket connection error — `error` is the actual thrown error
+      const connection = connectionOrError as Connection;
+      console.error(`WebSocket error on ${connection.id}:`, error);
+      connection.send(
+        JSON.stringify({ type: "error", message: "Connection error" })
+      );
+    } else {
+      // Server error
+      console.error("Server error:", connectionOrError);
+      // Log to external service, etc.
+    }
   }
 }
 ```

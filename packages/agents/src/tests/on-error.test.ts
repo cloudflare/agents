@@ -1,6 +1,7 @@
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
+import { MessageType } from "../types";
 import type { OnErrorCapture } from "./agents/on-error.ts";
 
 // Regression tests for #388: when .sql (or anything else) throws while the
@@ -46,6 +47,35 @@ describe("onError receives the actual error thrown by .sql (#388)", () => {
     expect(capture.errorName).toBe("SqlError");
     expect(capture.errorMessage).toContain("no such table");
     // …and the connection slot must carry the Connection, not the error.
+    expect(capture.firstArgIsConnection).toBe(true);
+    expect(capture.firstArgErrorMessage).toBeNull();
+  });
+
+  it("delivers (connection, error) when a state persistence hook throws on a connection-driven update", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectWS(`/agents/test-on-error-agent/${room}`);
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_STATE,
+        state: { count: 999 }
+      })
+    );
+
+    const agent = await getAgentByName(env.TestOnErrorAgent, room);
+    let captures: OnErrorCapture[] = [];
+    const start = Date.now();
+    while (captures.length === 0 && Date.now() - start < 2000) {
+      captures = await agent.getCaptures();
+      if (captures.length === 0) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    }
+    ws.close();
+
+    expect(captures.length).toBe(1);
+    const capture = captures[0];
+    expect(capture.errorDefined).toBe(true);
+    expect(capture.errorMessage).toBe("state hook boom");
     expect(capture.firstArgIsConnection).toBe(true);
     expect(capture.firstArgErrorMessage).toBeNull();
   });

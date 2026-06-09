@@ -9,15 +9,24 @@ export type OnErrorCapture = {
   errorMessage: string | null;
 };
 
+export type OnErrorTestState = { count: number };
+
 // Overrides onError exactly the way users do per the documented websocket
 // signature (#388): two parameters, reading the error from the second one.
 // The captures record what actually arrived in each slot.
-export class TestOnErrorAgent extends Agent<Cloudflare.Env> {
+export class TestOnErrorAgent extends Agent<Cloudflare.Env, OnErrorTestState> {
+  initialState: OnErrorTestState = { count: 0 };
   captures: OnErrorCapture[] = [];
 
   async onMessage(_connection: Connection, message: WSMessage) {
     if (message === "throw-sql") {
       this.sql`SELECT * FROM table_that_does_not_exist`;
+    }
+  }
+
+  onStateChanged(state: OnErrorTestState, _source: Connection | "server") {
+    if (state.count === 999) {
+      throw new Error("state hook boom");
     }
   }
 
