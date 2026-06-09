@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VoiceClient } from "../voice-client";
 import type { VoiceAudioInput, VoiceTransport } from "../types";
 
@@ -39,8 +39,11 @@ class FakeAudioBufferSourceNode {
   onended: (() => void) | null = null;
   stopped = false;
   started = false;
+  connectedTo: unknown = null;
 
-  connect(): void {}
+  connect(destination: unknown): void {
+    this.connectedTo = destination;
+  }
 
   start(): void {
     this.started = true;
@@ -59,6 +62,7 @@ class FakeAudioContext {
   deferDecode = false;
   pendingDecode: (() => void) | null = null;
   destination = {};
+  mediaStreamDestination = { stream: {} };
 
   async resume(): Promise<void> {}
 
@@ -74,6 +78,28 @@ class FakeAudioContext {
   createBufferSource(): AudioBufferSourceNode {
     this.source = new FakeAudioBufferSourceNode();
     return this.source as unknown as AudioBufferSourceNode;
+  }
+
+  createMediaStreamDestination(): MediaStreamAudioDestinationNode {
+    return this
+      .mediaStreamDestination as unknown as MediaStreamAudioDestinationNode;
+  }
+}
+
+class FakeAudioElement {
+  autoplay = false;
+  srcObject: MediaStream | null = null;
+  paused = false;
+  playCount = 0;
+  rejectPlay = false;
+
+  async play(): Promise<void> {
+    this.playCount++;
+    if (this.rejectPlay) throw new Error("play rejected");
+  }
+
+  pause(): void {
+    this.paused = true;
   }
 }
 
@@ -93,25 +119,37 @@ class FakeAudioInput implements VoiceAudioInput {
 }
 
 let originalAudioContext: typeof AudioContext | undefined;
+let originalAudio: typeof Audio | undefined;
 let audioContext: FakeAudioContext;
+let audioElement: FakeAudioElement;
 
-async function waitForSource(): Promise<FakeAudioBufferSourceNode> {
+async function waitForConnectedSource(): Promise<FakeAudioBufferSourceNode> {
   for (let i = 0; i < 10; i++) {
-    if (audioContext.source) return audioContext.source;
+    if (audioContext.source?.connectedTo) return audioContext.source;
     await Promise.resolve();
   }
-  throw new Error("expected audio source to be created");
+  throw new Error("expected audio source to be connected");
 }
 
 describe("VoiceClient playback interrupt", () => {
   beforeEach(() => {
     originalAudioContext = globalThis.AudioContext;
+    originalAudio = globalThis.Audio;
     audioContext = new FakeAudioContext();
+    audioElement = new FakeAudioElement();
     Object.defineProperty(globalThis, "AudioContext", {
       configurable: true,
       value: class {
         constructor() {
           return audioContext;
+        }
+      }
+    });
+    Object.defineProperty(globalThis, "Audio", {
+      configurable: true,
+      value: class {
+        constructor() {
+          return audioElement;
         }
       }
     });
@@ -121,6 +159,10 @@ describe("VoiceClient playback interrupt", () => {
     Object.defineProperty(globalThis, "AudioContext", {
       configurable: true,
       value: originalAudioContext
+    });
+    Object.defineProperty(globalThis, "Audio", {
+      configurable: true,
+      value: originalAudio
     });
   });
 
@@ -133,8 +175,13 @@ describe("VoiceClient playback interrupt", () => {
     transport.receive(new ArrayBuffer(4));
     transport.receive(new ArrayBuffer(4));
 
-    const source = await waitForSource();
+    const source = await waitForConnectedSource();
     expect(source.stopped).toBe(false);
+    expect(source.connectedTo).toBe(audioContext.mediaStreamDestination);
+    expect(audioElement.srcObject).toBe(
+      audioContext.mediaStreamDestination.stream
+    );
+    expect(audioElement.playCount).toBe(1);
 
     transport.receive(JSON.stringify({ type: "playback_interrupt" }));
     expect(() =>
@@ -142,6 +189,44 @@ describe("VoiceClient playback interrupt", () => {
     ).not.toThrow();
 
     expect(source.stopped).toBe(true);
+  });
+
+  it("releases the HTML audio playback output when the call ends", async () => {
+    const transport = new MockTransport();
+    const client = new VoiceClient({ agent: "test-agent", transport });
+
+    client.connect();
+    transport.receive(JSON.stringify({ type: "audio_config", format: "mp3" }));
+    transport.receive(new ArrayBuffer(4));
+
+    await waitForConnectedSource();
+    client.endCall();
+
+    expect(audioElement.paused).toBe(true);
+    expect(audioElement.srcObject).toBeNull();
+  });
+
+  it("falls back to the default AudioContext destination when HTML audio playback is unavailable", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const transport = new MockTransport();
+    const client = new VoiceClient({ agent: "test-agent", transport });
+    audioElement.rejectPlay = true;
+
+    try {
+      client.connect();
+      transport.receive(
+        JSON.stringify({ type: "audio_config", format: "mp3" })
+      );
+      transport.receive(new ArrayBuffer(4));
+
+      const source = await waitForConnectedSource();
+
+      expect(source.connectedTo).toBe(audioContext.destination);
+      expect(audioElement.playCount).toBe(1);
+      expect(audioElement.srcObject).toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("does not start playback if interrupted while audio is decoding", async () => {

@@ -276,6 +276,9 @@ export class VoiceClient {
   #playbackQueue: ArrayBuffer[] = [];
   #isPlaying = false;
   #activeSource: AudioBufferSourceNode | null = null;
+  #playbackElement: HTMLAudioElement | null = null;
+  #playbackDestination: MediaStreamAudioDestinationNode | null = null;
+  #useDefaultPlaybackDestination = false;
   #playbackGeneration = 0;
   #interruptChunkCount = 0;
 
@@ -465,6 +468,8 @@ export class VoiceClient {
       startMsg.preferred_format = this.#options.preferredFormat;
     }
     this.#transport.sendJSON(startMsg);
+    const ctx = await this.#getAudioContext();
+    await this.#getPlaybackDestination(ctx);
     if (this.#options.audioInput) {
       this.#options.audioInput.onAudioLevel = (rms) =>
         this.#processAudioLevel(rms);
@@ -695,10 +700,45 @@ export class VoiceClient {
   /** Close the AudioContext and release resources. */
   #closeAudioContext(): void {
     if (this.#audioContext) {
+      this.#closePlaybackOutput();
       this.#audioContext.close().catch(() => {});
       this.#audioContext = null;
       this.#workletRegistered = false;
     }
+  }
+
+  async #getPlaybackDestination(ctx: AudioContext): Promise<AudioNode> {
+    if (this.#playbackDestination) return this.#playbackDestination;
+    if (this.#useDefaultPlaybackDestination) return ctx.destination;
+
+    try {
+      const destination = ctx.createMediaStreamDestination();
+      const audio = new Audio();
+      audio.autoplay = true;
+      audio.srcObject = destination.stream;
+      this.#playbackElement = audio;
+      this.#playbackDestination = destination;
+      await audio.play();
+      return destination;
+    } catch (err) {
+      console.warn(
+        "[VoiceClient] HTMLAudioElement playback output unavailable; using default AudioContext destination.",
+        err
+      );
+      this.#closePlaybackOutput();
+      this.#useDefaultPlaybackDestination = true;
+      return ctx.destination;
+    }
+  }
+
+  #closePlaybackOutput(): void {
+    if (this.#playbackElement) {
+      this.#playbackElement.pause();
+      this.#playbackElement.srcObject = null;
+      this.#playbackElement = null;
+    }
+    this.#playbackDestination = null;
+    this.#useDefaultPlaybackDestination = false;
   }
 
   // --- Audio playback ---
@@ -724,7 +764,8 @@ export class VoiceClient {
 
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
-      source.connect(ctx.destination);
+      const destination = await this.#getPlaybackDestination(ctx);
+      source.connect(destination);
       if (generation !== this.#playbackGeneration) return;
       this.#activeSource = source;
 
