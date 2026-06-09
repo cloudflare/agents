@@ -1740,6 +1740,78 @@ describe("workspace — security: LIKE injection", () => {
   });
 });
 
+// Regression tests for #1539: deleteDescendants/glob use a range scan on the
+// path primary key ([`${dir}/`, `${dir}0`)) instead of LIKE/ESCAPE, which D1
+// can reject with "LIKE or GLOB pattern too complex".
+
+describe("workspace — rm recursive range-scan boundaries (#1539)", () => {
+  it("removes a deep skill-shaped tree entirely", async () => {
+    const agent = await freshAgent("rm-range-skill-tree");
+    await agent.write("/skill/SKILL.md", "skill");
+    await agent.write("/skill/scripts/setup.mjs", "setup");
+    await agent.write("/skill/references/readme.md", "ref");
+    await agent.write("/skill/assets/sample.txt", "asset");
+    await agent.rmCall("/skill", { recursive: true });
+    expect(await agent.stat("/skill")).toBeNull();
+    expect(await agent.stat("/skill/scripts/setup.mjs")).toBeNull();
+    expect(await agent.stat("/skill/assets/sample.txt")).toBeNull();
+  });
+
+  it("does not delete siblings sharing the directory name as a prefix", async () => {
+    const agent = await freshAgent("rm-range-prefix-sibling");
+    await agent.write("/skill/inside.txt", "in dir");
+    await agent.write("/skill-extra/other.txt", "sibling dir");
+    await agent.write("/skill.txt", "sibling file");
+    await agent.rmCall("/skill", { recursive: true });
+    expect(await agent.stat("/skill")).toBeNull();
+    expect((await agent.read("/skill-extra/other.txt")) as unknown).toBe(
+      "sibling dir"
+    );
+    expect((await agent.read("/skill.txt")) as unknown).toBe("sibling file");
+  });
+
+  it("does not delete siblings at the upper range boundary ('0' after '/')", async () => {
+    const agent = await freshAgent("rm-range-upper-boundary");
+    await agent.write("/dir/inside.txt", "in dir");
+    await agent.write("/dir0", "boundary file");
+    await agent.write("/dir00/nested.txt", "boundary dir");
+    await agent.rmCall("/dir", { recursive: true });
+    expect(await agent.stat("/dir")).toBeNull();
+    expect((await agent.read("/dir0")) as unknown).toBe("boundary file");
+    expect((await agent.read("/dir00/nested.txt")) as unknown).toBe(
+      "boundary dir"
+    );
+  });
+});
+
+describe("workspace — glob range-scan prefilter (#1539)", () => {
+  it("matches inside directories with LIKE special chars in the name", async () => {
+    const agent = await freshAgent("glob-range-special-chars");
+    await agent.write("/a%b/match.ts", "x");
+    await agent.write("/a_b/match.ts", "y");
+    await agent.write("/axb/decoy.ts", "z");
+    const percent = (await agent.globCall(
+      "/a%b/*.ts"
+    )) as unknown as FileInfo[];
+    expect(percent.map((f) => f.path)).toEqual(["/a%b/match.ts"]);
+    const underscore = (await agent.globCall(
+      "/a_b/*.ts"
+    )) as unknown as FileInfo[];
+    expect(underscore.map((f) => f.path)).toEqual(["/a_b/match.ts"]);
+  });
+
+  it("does not match prefix-sibling directories outside the glob prefix", async () => {
+    const agent = await freshAgent("glob-range-prefix-sibling");
+    await agent.write("/a/file.ts", "a");
+    await agent.write("/a-extra/file.ts", "b");
+    await agent.write("/a0/file.ts", "c");
+    const results = (await agent.globCall(
+      "/a/**/*.ts"
+    )) as unknown as FileInfo[];
+    expect(results.map((f) => f.path)).toEqual(["/a/file.ts"]);
+  });
+});
+
 describe("workspace — security: path normalization", () => {
   it(".. is resolved so files are reachable via readDir", async () => {
     const agent = await freshAgent("sec-dotdot-resolve");

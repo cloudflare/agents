@@ -187,7 +187,6 @@ const TEXT_DECODER = new TextDecoder();
 
 const MAX_SYMLINK_DEPTH = 40;
 const VALID_NAMESPACE = /^[a-zA-Z][a-zA-Z0-9_]*$/;
-const LIKE_ESCAPE = "\\";
 const MAX_STREAM_SIZE = 100 * 1024 * 1024;
 const MAX_DIFF_LINES = 10_000;
 const MAX_PATH_LENGTH = 4096;
@@ -1072,9 +1071,18 @@ export class Workspace {
     await this.ensureInit();
     const normalized = normalizePath(pattern);
     const prefix = getGlobPrefix(normalized);
-    const likePattern = escapeLike(prefix) + "%";
     const regex = globToRegex(normalized);
     const T = this.tableName;
+
+    // Prefilter with a range scan on the path primary key instead of LIKE
+    // (D1 can reject LIKE/ESCAPE with "LIKE or GLOB pattern too complex",
+    // see #1539). getGlobPrefix returns either a directory prefix ending in
+    // "/" — covered by [prefix, prefix-with-trailing-"/"-bumped-to-"0")
+    // since "0" is the character right after "/" — or, when the pattern has
+    // no wildcards, the whole pattern, which the regex matches exactly.
+    const [whereSql, params]: [string, string[]] = prefix.endsWith("/")
+      ? ["path >= ? AND path < ?", [prefix, `${prefix.slice(0, -1)}0`]]
+      : ["path = ?", [prefix]];
 
     const rows = await this.sql.query<{
       path: string;
@@ -1088,10 +1096,9 @@ export class Workspace {
     }>(
       `SELECT path, name, type, mime_type, size, created_at, modified_at, target
       FROM ${T}
-      WHERE path LIKE ? ESCAPE ?
+      WHERE ${whereSql}
       ORDER BY path`,
-      likePattern,
-      LIKE_ESCAPE
+      ...params
     );
 
     return rows.filter((r) => regex.test(r.path)).map(toFileInfo);
@@ -1512,16 +1519,22 @@ export class Workspace {
   }
 
   private async deleteDescendants(dirPath: string): Promise<void> {
-    const pattern = escapeLike(dirPath) + "/%";
+    // Range scan on the path primary key instead of LIKE: D1 can reject
+    // LIKE/ESCAPE with "LIKE or GLOB pattern too complex" (#1539), and the
+    // range predicate uses the index directly. "0" is the character right
+    // after "/", so [`${dirPath}/`, `${dirPath}0`) matches exactly the
+    // paths strictly under dirPath (dirPath is normalized and never "/").
+    const lower = `${dirPath}/`;
+    const upper = `${dirPath}0`;
     const T = this.tableName;
 
     const r2Rows = await this.sql.query<{ r2_key: string }>(
       `SELECT r2_key FROM ${T}
-      WHERE path LIKE ? ESCAPE ?
+      WHERE path >= ? AND path < ?
         AND storage_backend = 'r2'
         AND r2_key IS NOT NULL`,
-      pattern,
-      LIKE_ESCAPE
+      lower,
+      upper
     );
 
     if (r2Rows.length > 0) {
@@ -1533,9 +1546,9 @@ export class Workspace {
     }
 
     await this.sql.run(
-      `DELETE FROM ${T} WHERE path LIKE ? ESCAPE ?`,
-      pattern,
-      LIKE_ESCAPE
+      `DELETE FROM ${T} WHERE path >= ? AND path < ?`,
+      lower,
+      upper
     );
   }
 }
@@ -1569,10 +1582,6 @@ function base64ToBytes(b64: string): Uint8Array {
 }
 
 // ── Path helpers ─────────────────────────────────────────────────────
-
-function escapeLike(s: string): string {
-  return s.replace(/[\\%_]/g, (ch) => "\\" + ch);
-}
 
 function normalizePath(path: string): string {
   if (!path.startsWith("/")) path = "/" + path;
