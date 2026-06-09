@@ -4426,6 +4426,21 @@ export class Agent<
       if (disposed) return;
       disposed = true;
       this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
+      // When the last lease is released, recompute the alarm from persistent
+      // state so a short-lived keepAlive does not leave a stale
+      // `now + keepAliveIntervalMs` heartbeat armed. The dispose contract is
+      // synchronous, so fire-and-forget the async reschedule via waitUntil
+      // (mirrors `_cf_releaseFacetKeepAlive`).
+      if (this._keepAliveRefs === 0) {
+        this.ctx.waitUntil(
+          this._scheduleNextAlarm().catch((e) => {
+            console.error(
+              "[Agent] Failed to reschedule alarm after keepAlive dispose:",
+              e
+            );
+          })
+        );
+      }
     };
   }
 
