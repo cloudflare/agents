@@ -116,7 +116,6 @@ export class Chat extends AIChatAgent<Env> {
         "  - await <connector>.<method>(args) to call methods directly",
         '  - await codemode.save("name", { description }) to save a working script for reuse',
         '  - await codemode.run("name", input) to run a saved snippet',
-        "  - await codemode.pending() to check pending approvals",
         "",
         `The current date and time is ${new Date().toISOString()}.`
       ].join("\n"),

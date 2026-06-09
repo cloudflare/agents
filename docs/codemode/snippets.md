@@ -51,7 +51,6 @@ Snippets surface alongside connector methods:
 ```ts
 codemode.search("open pull requests"); // returns methods AND snippets (kind: "snippet")
 codemode.describe("list-open-prs"); // returns the snippet's description + source
-codemode.snippets(); // lists all saved snippets
 ```
 
 ## API
@@ -60,7 +59,6 @@ codemode.snippets(); // lists all saved snippets
 | ----------------------------------------------------- | --------------------------------------------------------- |
 | `codemode.save(name, { description?, inputSchema? })` | Save the current script as `name`. Returns the `Snippet`. |
 | `codemode.run(name, input?)`                          | Run a saved snippet, optionally with input.               |
-| `codemode.snippets()`                                 | List all saved snippets.                                  |
 
 ```ts
 interface Snippet {

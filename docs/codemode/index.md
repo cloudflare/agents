@@ -5,7 +5,7 @@ Codemode lets LLMs write and execute TypeScript instead of making individual too
 ## Concepts
 
 - [Connectors](./connectors.md) — class-based integrations that bridge external services
-- [Runtime](./runtime.md) — durable execution engine; abort-and-replay, rollback, scratchpad state
+- [Runtime](./runtime.md) — durable execution engine; abort-and-replay, approvals, rollback
 - [Snippets](./snippets.md) — durable, addressable saved scripts the model learns and reuses
 - [Search & Describe](./search-and-describe.md) — in-sandbox discovery via the `codemode` platform SDK
 - [Approvals](./approvals.md) — annotation-based HITL via pause and replay
@@ -26,7 +26,6 @@ runtime.tool()
 Executor sandbox (isolated Worker)
   ├─ codemode.search("query")           → platform SDK
   ├─ codemode.describe("github.foo")    → platform SDK
-  ├─ codemode.get/set("key")            → runtime facet (durable scratchpad)
   ├─ github.list_pull_requests(args)    → runtime decides → connector
   └─ repoApi.request(args)                → runtime decides → connector
 ```

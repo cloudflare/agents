@@ -8,7 +8,7 @@
  *
  * Inside the sandbox:
  *   - Connector SDKs as globals: `<connector>.<method>(...)`
- *   - Platform SDK: `codemode.search/describe/connectors/run/save/snippets/pending/step/fork/get/set`
+ *   - Platform SDK: `codemode.search/describe/step/save/run`
  */
 import { tool, type Tool } from "ai";
 import { z } from "zod";
@@ -46,14 +46,11 @@ interface RuntimeStub {
   recordResult(seq: number, result: unknown): Promise<void>;
   complete(result: unknown, logs?: string[]): Promise<void>;
   fail(error: string, logs?: string[]): Promise<void>;
-  fork(): Promise<string>;
   listPending(): Promise<PendingAction[]>;
   reject(seq: number): Promise<void>;
   actionsToRevert(): Promise<ToolLogEntry[]>;
   markReverted(seq: number): Promise<void>;
   getExecution(id?: string): Promise<ExecutionState | null>;
-  getState(key: string): Promise<unknown>;
-  setState(key: string, value: unknown): Promise<void>;
   saveSnippet(name: string, options?: SaveSnippetOptions): Promise<Snippet>;
   getSnippet(name: string): Promise<Snippet | null>;
   listSnippets(): Promise<Snippet[]>;
@@ -198,34 +195,12 @@ function createPlatformProvider(
           await runtime.listSnippets()
         ),
 
-      connectors: async () =>
-        descriptions.map((d) => ({
-          name: d.name,
-          instructions: d.instructions,
-          methodCount: Object.keys(d.descriptors).length
-        })),
-
-      // Execution control
-      pending: async () => runtime.listPending(),
-
-      fork: async () => runtime.fork(),
-
-      // Per-execution scratchpad
-      get: async (key: unknown) => runtime.getState(String(key)),
-
-      set: async (key: unknown, value: unknown) => {
-        await runtime.setState(String(key), value);
-        return true;
-      },
-
       // Snippets — durable, addressable saved scripts
       save: async (name: unknown, options?: unknown) =>
         runtime.saveSnippet(
           String(name),
           options as SaveSnippetOptions | undefined
         ),
-
-      snippets: async () => runtime.listSnippets(),
 
       run: async (...args: unknown[]) => {
         const snippet = await runtime.getSnippet(String(args[0]));
@@ -278,9 +253,6 @@ function buildDescription(
     "",
     "- `codemode.search(query)` returns ranked matches across connector methods and saved snippets.",
     '- `codemode.describe("connector.method")` returns TypeScript type declarations.',
-    "- `codemode.connectors()` lists available connectors.",
-    "- `codemode.pending()` lists actions awaiting approval.",
-    "- `codemode.get(key)` / `codemode.set(key, value)` persist state across runs.",
     "- `codemode.step(name, fn)` wraps side-effectful or nondeterministic work (raw fetch, random, time) so it runs once and is replayed on resume. Use it for anything that isn't a connector call.",
     "- Some methods require approval. The run pauses until the user approves, then resumes automatically. Write code as if the call returns normally.",
     "- All code outside connector calls and `codemode.step` must be deterministic so resume can replay it.",
@@ -453,24 +425,6 @@ export async function resumeCodemode(
 
   await runtime.configure(setup.annotations);
   return runPass(execution.code, setup, runtime, options.executor);
-}
-
-// ---------------------------------------------------------------------------
-// Fork — snapshot the current execution into an independent branch
-// ---------------------------------------------------------------------------
-
-/**
- * Clone the current (typically paused) execution into a new independent
- * execution and return its id. The fork inherits the full log and scratchpad
- * but diverges going forward — useful for checkpoints, handing a task off to a
- * subagent, or trying alternative inputs. Resume the fork with
- * `resumeCodemode({ executionId })`.
- */
-export async function forkCodemode(options: {
-  ctx: DurableObjectState;
-  connectors: CodemodeConnector[];
-}): Promise<string> {
-  return getRuntime(options.ctx, options.connectors).fork();
 }
 
 // ---------------------------------------------------------------------------

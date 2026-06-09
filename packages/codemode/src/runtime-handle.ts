@@ -3,7 +3,6 @@ import type { CodemodeConnector } from "./connectors";
 import type { Executor } from "./executor";
 import {
   createProxyTool,
-  forkCodemode,
   pendingCodemode,
   rejectCodemode,
   resumeCodemode,
@@ -17,7 +16,6 @@ export type CreateCodemodeRuntimeOptions = {
   ctx: DurableObjectState;
   connectors: CodemodeConnector[];
   executor: Executor;
-  description?: string;
 };
 
 export type CodemodeRuntimeToolOptions = {
@@ -37,10 +35,8 @@ export interface CodemodeRuntimeHandle {
     options?: CodemodeRuntimeToolOptions
   ): Tool<ProxyToolInput, ProxyToolOutput>;
   approve(options?: CodemodeApproveOptions): Promise<ProxyToolOutput>;
-  resume(options?: CodemodeApproveOptions): Promise<ProxyToolOutput>;
   reject(options: CodemodeRejectOptions): Promise<void>;
   rollback(): Promise<void>;
-  fork(): Promise<string>;
   pending(): Promise<PendingAction[]>;
 }
 
@@ -64,15 +60,11 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
       ctx: this.#options.ctx,
       executor: this.#options.executor,
       connectors: this.#options.connectors,
-      description: options?.description ?? this.#options.description
+      description: options?.description
     });
   }
 
   approve(options?: CodemodeApproveOptions): Promise<ProxyToolOutput> {
-    return this.resume(options);
-  }
-
-  resume(options?: CodemodeApproveOptions): Promise<ProxyToolOutput> {
     return resumeCodemode({
       ctx: this.#options.ctx,
       executor: this.#options.executor,
@@ -91,13 +83,6 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
 
   rollback(): Promise<void> {
     return rollbackCodemode({
-      ctx: this.#options.ctx,
-      connectors: this.#options.connectors
-    });
-  }
-
-  fork(): Promise<string> {
-    return forkCodemode({
       ctx: this.#options.ctx,
       connectors: this.#options.connectors
     });

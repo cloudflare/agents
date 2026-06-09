@@ -38,18 +38,7 @@ export {
   type CodemodeRejectOptions
 } from "./runtime-handle";
 
-export {
-  createProxyTool,
-  resumeCodemode,
-  forkCodemode,
-  pendingCodemode,
-  rejectCodemode,
-  rollbackCodemode,
-  type CreateProxyToolOptions,
-  type ResumeCodemodeOptions,
-  type ProxyToolInput,
-  type ProxyToolOutput
-} from "./proxy-tool";
+export { type ProxyToolInput, type ProxyToolOutput } from "./proxy-tool";
 export {
   CodemodeConnector,
   McpConnector,

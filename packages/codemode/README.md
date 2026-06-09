@@ -413,7 +413,7 @@ annotations() {
 }
 ```
 
-The agent drives approvals through the runtime: `runtime.pending()`, `runtime.approve()`, `runtime.reject({ seq })`, `runtime.rollback()`, `runtime.fork()`.
+The agent drives approvals through the runtime: `runtime.pending()`, `runtime.approve()`, `runtime.reject({ seq })`, `runtime.rollback()`.
 
 ### Snippets
 
@@ -432,7 +432,7 @@ await codemode.save("list-open-prs", {
 const prs = await codemode.run("list-open-prs");
 ```
 
-Snippets appear in `codemode.search` results (with `kind: "snippet"`), are documented via `codemode.describe(name)`, and listed with `codemode.snippets()`. They live on the runtime facet, whose identity is derived from the connector set — so a snippet is always run against exactly the connectors it was written with. See [docs/codemode/snippets.md](../../docs/codemode/snippets.md).
+Snippets appear in `codemode.search` results (with `kind: "snippet"`) and are documented via `codemode.describe(name)`. They live on the runtime facet, whose identity is derived from the connector set — so a snippet is always run against exactly the connectors it was written with. See [docs/codemode/snippets.md](../../docs/codemode/snippets.md).
 
 ### Vite plugin
 

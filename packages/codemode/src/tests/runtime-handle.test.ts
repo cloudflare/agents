@@ -39,8 +39,7 @@ describe("createCodemodeRuntime", () => {
       id: "exec_1",
       code: "async () => 'approved'",
       status: "running" as const,
-      log: [],
-      scratch: {}
+      log: []
     };
     const runtimeStub = {
       resume: vi.fn(async () => execution),

@@ -96,18 +96,6 @@ const docs = await codemode.describe("repo-overview");
 // }
 ```
 
-## `codemode.connectors()`
-
-List all available connectors with method counts.
-
-```ts
-const list = await codemode.connectors();
-// [
-//   { name: "github", instructions: "Use for GitHub operations.", methodCount: 5 },
-//   { name: "repoApi", instructions: "Use for repository metadata.", methodCount: 2 },
-// ]
-```
-
 ## `codemode.run(name, input)`
 
 Run a saved snippet by name. See [Snippets](./snippets.md).
@@ -117,17 +105,6 @@ const overview = await codemode.run("repo-overview", {
   owner: "cloudflare",
   repo: "agents"
 });
-```
-
-## `codemode.pending()`
-
-List all actions awaiting approval across all connectors. See [Approvals](./approvals.md).
-
-```ts
-const pending = await codemode.pending();
-// [
-//   { id: "action_1", connector: "github", method: "create_issue", args: { title: "Fix bug" }, ... },
-// ]
 ```
 
 ## Types

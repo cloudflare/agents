@@ -2,16 +2,16 @@
 
 The **Executor** is a simple, stateless sandbox: it runs a block of code once and dispatches tool calls back. The **Runtime** wraps an executor and makes execution durable.
 
-The public runtime handle owns the executor and connectors for the current request. `CodemodeRuntime` is the DurableObject facet behind that handle. It owns the durable state: the tool-call log, pending approvals, and scratchpad.
+The public runtime handle owns the executor and connectors for the current request. `CodemodeRuntime` is the DurableObject facet behind that handle. It owns the durable state: the tool-call log, pending approvals, and snippets.
 
 ## Executor vs Runtime
 
-|          | Executor                                         | Runtime                                    |
-| -------- | ------------------------------------------------ | ------------------------------------------ |
-| What     | Code sandbox                                     | Durable execution engine                   |
-| Lifetime | One `execute()` call                             | Whole conversation (DO facet)              |
-| State    | None                                             | Tool-call log, pending actions, scratchpad |
-| Examples | `DynamicWorkerExecutor`, `IframeSandboxExecutor` | `CodemodeRuntime`                          |
+|          | Executor                                         | Runtime                                  |
+| -------- | ------------------------------------------------ | ---------------------------------------- |
+| What     | Code sandbox                                     | Durable execution engine                 |
+| Lifetime | One `execute()` call                             | Whole conversation (DO facet)            |
+| State    | None                                             | Tool-call log, pending actions, snippets |
+| Examples | `DynamicWorkerExecutor`, `IframeSandboxExecutor` | `CodemodeRuntime`                        |
 
 The executor runs code. The runtime wraps the executor and adds durability, approvals, rollback, and state.
 
@@ -87,10 +87,6 @@ await runtime.reject({ seq });
 
 // rollback applied actions in reverse order
 await runtime.rollback();
-
-// fork the current execution into an independent branch
-const forkId = await runtime.fork();
-await runtime.approve({ executionId: forkId });
 ```
 
 ## Rollback
@@ -110,18 +106,6 @@ class GithubConnector extends McpConnector<Env> {
 
 Connectors that don't implement `revertAction` are skipped (the user is told the action can't be auto-reverted). Observations are never reverted.
 
-## Scratchpad state
-
-The runtime is a durable facet, so it doubles as a persistent scratchpad:
-
-```ts
-// inside sandbox code
-await codemode.set("prs", prs); // persists in the execution's scratchpad
-const prs = await codemode.get("prs");
-```
-
-Scratchpad state is **per-execution** — a fork gets an independent copy, so branches don't clobber each other. Because the runtime owns it durably, replay reads the same values.
-
 ## Snippets
 
 The runtime also stores [snippets](./snippets.md) — durable, addressable scripts the model saves with `codemode.save(name)` and re-runs with `codemode.run(name)`. They live here because the runtime is the natural home for learned, accumulated state (unlike the executor and connectors, which are transient).
@@ -140,8 +124,8 @@ The runtime handle keeps the same `ctx`, `executor`, and `connectors` together, 
 
 ```ts
 const runtime = createCodemodeRuntime({ ctx, executor, connectors });
+await runtime.pending();
 await runtime.approve({ executionId });
-await runtime.fork();
 await runtime.reject({ seq });
 await runtime.rollback();
 ```

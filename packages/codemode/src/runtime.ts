@@ -20,10 +20,7 @@
  * and replayed thereafter, so replay correctness does not depend on the code
  * being incidentally deterministic.
  *
- * Executions are addressable by id, so `fork` can snapshot one into an
- * independent branch (checkpoint / hand-off to a subagent / try alt inputs).
- *
- * The facet owns only durable state: the log, pending actions, scratchpad.
+ * The facet owns only durable state: the log, pending actions, snippets.
  * The executor and connector stubs are transient — the proxy tool re-provides
  * them on each message (they can't survive hibernation anyway).
  */
@@ -60,13 +57,9 @@ export type ExecutionStatus = "running" | "paused" | "completed" | "error";
 
 export type ExecutionState = {
   id: string;
-  /** Set when this execution was forked from another. */
-  parentId?: string;
   code: string;
   status: ExecutionStatus;
   log: ToolLogEntry[];
-  /** Per-execution scratchpad (codemode.get/set). Forks get an independent copy. */
-  scratch: Record<string, unknown>;
   result?: unknown;
   error?: string;
   logs?: string[];
@@ -126,8 +119,7 @@ export class CodemodeRuntime extends DurableObject {
       id,
       code,
       status: "running",
-      log: [],
-      scratch: {}
+      log: []
     };
     this.ctx.storage.put(execKey(id), state);
     this.ctx.storage.put(CURRENT_KEY, id);
@@ -241,30 +233,6 @@ export class CodemodeRuntime extends DurableObject {
   }
 
   // -----------------------------------------------------------------------
-  // Fork — snapshot the current execution into an independent branch
-  // -----------------------------------------------------------------------
-
-  /**
-   * Clone the current (typically paused) execution into a new execution with a
-   * fresh id. The fork inherits the full log and scratchpad but is independent
-   * going forward. Does not change which execution is current. Returns the new id.
-   */
-  async fork(): Promise<string> {
-    const state = await this.#requireCurrent();
-    const newId = `exec_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-    const clone: ExecutionState = {
-      ...state,
-      id: newId,
-      parentId: state.id,
-      // Deep copy log + scratch so the branches don't share references.
-      log: state.log.map((e) => ({ ...e })),
-      scratch: { ...state.scratch }
-    };
-    this.ctx.storage.put(execKey(newId), clone);
-    return newId;
-  }
-
-  // -----------------------------------------------------------------------
   // Approvals
   // -----------------------------------------------------------------------
 
@@ -320,23 +288,12 @@ export class CodemodeRuntime extends DurableObject {
   }
 
   // -----------------------------------------------------------------------
-  // Inspection + scratchpad state (per-execution)
+  // Inspection
   // -----------------------------------------------------------------------
 
   async getExecution(id?: string): Promise<ExecutionState | null> {
     if (id) return this.#get(id);
     return this.#current();
-  }
-
-  async getState(key: string): Promise<unknown> {
-    const state = await this.#current();
-    return state?.scratch[key] ?? null;
-  }
-
-  async setState(key: string, value: unknown): Promise<void> {
-    const state = await this.#requireCurrent();
-    state.scratch[key] = value;
-    this.ctx.storage.put(execKey(state.id), state);
   }
 
   // -----------------------------------------------------------------------
