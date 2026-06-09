@@ -115,6 +115,26 @@
         "class_name": "ThinkExecuteHitlAgent",
         "name": "ThinkExecuteHitlAgent"
       },
+      {
+        "class_name": "ThinkOnStartReconcileFailureAgent",
+        "name": "ThinkOnStartReconcileFailureAgent"
+      },
+      {
+        "class_name": "ThinkOnStartHydrationFailureAgent",
+        "name": "ThinkOnStartHydrationFailureAgent"
+      },
+      {
+        "class_name": "ThinkWindowedHydrationAgent",
+        "name": "ThinkWindowedHydrationAgent"
+      },
+      {
+        "class_name": "ThinkMediaEvictionAgent",
+        "name": "ThinkMediaEvictionAgent"
+      },
+      {
+        "class_name": "ThinkMediaEvictionAutoAgent",
+        "name": "ThinkMediaEvictionAutoAgent"
+      },
       // Facet-only class. vitest-pool-workers needs it listed as a binding so
       // a facet-compatible class value resolves; it stays out of
       // new_sqlite_classes below (the host agent owns the SQLite store).
@@ -154,7 +174,12 @@
         "ThinkExtensionHookAgent",
         "ThinkMessengerRouteTestAgent",
         "ThinkExecuteToolAgent",
-        "ThinkExecuteHitlAgent"
+        "ThinkExecuteHitlAgent",
+        "ThinkOnStartReconcileFailureAgent",
+        "ThinkOnStartHydrationFailureAgent",
+        "ThinkWindowedHydrationAgent",
+        "ThinkMediaEvictionAgent",
+        "ThinkMediaEvictionAutoAgent"
       ],
       "tag": "v1"
     }

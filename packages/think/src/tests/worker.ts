@@ -31,7 +31,12 @@ export {
   ThinkExtensionHookAgent,
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
-  ThinkMessengerRouteTestAgent
+  ThinkMessengerRouteTestAgent,
+  ThinkOnStartReconcileFailureAgent,
+  ThinkOnStartHydrationFailureAgent,
+  ThinkWindowedHydrationAgent,
+  ThinkMediaEvictionAgent,
+  ThinkMediaEvictionAutoAgent
 } from "./agents";
 
 import type {
@@ -60,7 +65,12 @@ import type {
   ThinkExtensionHookAgent,
   ThinkExecuteToolAgent,
   ThinkExecuteHitlAgent,
-  ThinkMessengerRouteTestAgent
+  ThinkMessengerRouteTestAgent,
+  ThinkOnStartReconcileFailureAgent,
+  ThinkOnStartHydrationFailureAgent,
+  ThinkWindowedHydrationAgent,
+  ThinkMediaEvictionAgent,
+  ThinkMediaEvictionAutoAgent
 } from "./agents";
 
 export type Env = {
@@ -90,6 +100,11 @@ export type Env = {
   ThinkMessengerRouteTestAgent: DurableObjectNamespace<ThinkMessengerRouteTestAgent>;
   ThinkExecuteToolAgent: DurableObjectNamespace<ThinkExecuteToolAgent>;
   ThinkExecuteHitlAgent: DurableObjectNamespace<ThinkExecuteHitlAgent>;
+  ThinkOnStartReconcileFailureAgent: DurableObjectNamespace<ThinkOnStartReconcileFailureAgent>;
+  ThinkOnStartHydrationFailureAgent: DurableObjectNamespace<ThinkOnStartHydrationFailureAgent>;
+  ThinkWindowedHydrationAgent: DurableObjectNamespace<ThinkWindowedHydrationAgent>;
+  ThinkMediaEvictionAgent: DurableObjectNamespace<ThinkMediaEvictionAgent>;
+  ThinkMediaEvictionAutoAgent: DurableObjectNamespace<ThinkMediaEvictionAutoAgent>;
   LOADER: WorkerLoader;
 };
 

@@ -3,7 +3,12 @@
  */
 
 import type { ToolSet } from "ai";
-import type { SessionProvider, StoredCompaction } from "./provider";
+import type {
+  HistoryRowStat,
+  RecentHistoryResult,
+  SessionProvider,
+  StoredCompaction
+} from "./provider";
 import type {
   CompactAfterOptions,
   CompactContext,
@@ -400,6 +405,38 @@ export class Session {
   async getHistory(leafId?: string | null): Promise<SessionMessage[]> {
     await this._ensureRestored();
     return this.storage.getHistory(leafId);
+  }
+
+  /**
+   * Byte-budgeted read of the most recent messages on the active branch
+   * path (always at least the leaf message). Lets hosts hydrate a bounded
+   * window instead of the full transcript so wake-time memory scales with
+   * the budget rather than total session history (#1710).
+   *
+   * Falls back to a full (untruncated) read when the provider doesn't
+   * implement `getRecentHistory`.
+   */
+  async getRecentHistory(
+    maxContentBytes: number
+  ): Promise<RecentHistoryResult> {
+    await this._ensureRestored();
+    if (this.storage.getRecentHistory) {
+      return this.storage.getRecentHistory(null, maxContentBytes);
+    }
+    const messages = await this.storage.getHistory();
+    return { messages, truncated: false, totalContentBytes: 0 };
+  }
+
+  /**
+   * Per-row stored sizes for the active branch path (root → leaf) WITHOUT
+   * loading message content, or `null` when the provider doesn't support it.
+   * Lets hosts find oversized rows (e.g. inline base64 media) and process
+   * them one at a time with bounded memory.
+   */
+  async getHistoryRowStats(): Promise<HistoryRowStat[] | null> {
+    await this._ensureRestored();
+    if (!this.storage.getHistoryRowStats) return null;
+    return this.storage.getHistoryRowStats();
   }
 
   async getMessage(id: string): Promise<SessionMessage | null> {

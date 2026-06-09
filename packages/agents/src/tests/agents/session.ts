@@ -58,6 +58,14 @@ export class TestSessionAgent extends Agent {
     return this.session.getPathLength();
   }
 
+  async getRecentHistory(maxContentBytes: number) {
+    return this.session.getRecentHistory(maxContentBytes);
+  }
+
+  async getHistoryRowStats() {
+    return this.session.getHistoryRowStats();
+  }
+
   // ── Compaction ──────────────────────────────────────────────────
 
   async addCompaction(
@@ -78,6 +86,30 @@ export class TestSessionAgent extends Agent {
     query: string
   ): Promise<Array<{ id: string; role: string; content: string }>> {
     return this.session.search(query);
+  }
+
+  // ── Test helpers ────────────────────────────────────────────────
+
+  /**
+   * Append `count` alternating user/assistant text messages server-side,
+   * ids `${prefix}0..${prefix}${count - 1}`. Keeps long-chain tests to a
+   * single RPC round trip.
+   */
+  async appendLinearChainForTest(count: number, prefix = "m"): Promise<void> {
+    for (let i = 0; i < count; i++) {
+      await this.session.appendMessage({
+        id: `${prefix}${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `${prefix} message ${i}` }]
+      });
+    }
+  }
+
+  /** Overwrite a stored message's content with invalid JSON. */
+  async corruptMessageForTest(id: string): Promise<void> {
+    const invalid = "{ this is not valid json";
+    this
+      .sql`UPDATE assistant_messages SET content = ${invalid} WHERE id = ${id}`;
   }
 }
 

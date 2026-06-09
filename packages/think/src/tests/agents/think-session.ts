@@ -24,6 +24,7 @@ import type {
   ThinkSubmissionInspection,
   ThinkSubmissionStatus,
   SubmitMessagesResult,
+  MediaEvictionConfig,
   ThinkScheduledTask,
   ThinkScheduledTaskContext,
   ThinkScheduledTasks,
@@ -5929,4 +5930,276 @@ export class ThinkNonRecoveryTestAgent extends Think {
   async getTurnCallCount(): Promise<number> {
     return this._turnCallCount;
   }
+}
+
+// ── onStart degradation agents (#1710) ──────────────────────────
+// Verify that data-driven failures inside Think's internal onStart steps
+// degrade (recorded + skipped) instead of throwing. A throw out of onStart
+// is terminal: partyserver resets init state and rethrows on every wake, so
+// an alarm-driven wake would retry the failing onStart forever and the DO
+// would be permanently bricked.
+
+export type OnStartDegradationForTest = { step: string; error: string };
+
+/** getScheduledTasks() throws → step 9 (declared-task reconcile) fails. */
+export class ThinkOnStartReconcileFailureAgent extends Think {
+  override getModel(): LanguageModel {
+    return createMockModel("reconcile-failure agent response");
+  }
+
+  override getScheduledTasks(): ThinkScheduledTasks {
+    throw new Error("simulated getScheduledTasks failure");
+  }
+
+  async getOnStartDegradationsForTest(): Promise<OnStartDegradationForTest[]> {
+    return this._onStartDegradations.map((d) => ({
+      step: d.step,
+      error: String(d.error)
+    }));
+  }
+
+  async testChat(message: string): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
+    };
+  }
+
+  async getStoredMessages(): Promise<UIMessage[]> {
+    return this.getMessages();
+  }
+}
+
+/**
+ * The first session.getHistory() call — onStart transcript hydration —
+ * throws, simulating SQLITE_NOMEM on an oversized transcript. Subsequent
+ * reads succeed, matching "allocator pressure at boot, normal afterwards".
+ */
+export class ThinkOnStartHydrationFailureAgent extends Think {
+  private _hydrationReadsFailed = 0;
+
+  override configureSession(session: Session): Session {
+    // onStart hydration reads through `getRecentHistory` (budgeted) with
+    // `getHistory` as the unbudgeted fallback — fail the FIRST read on
+    // either path, then behave normally.
+    let failedOnce = false;
+    const failFirstRead = () => {
+      if (failedOnce) return;
+      failedOnce = true;
+      this._hydrationReadsFailed++;
+      throw new Error("SQL query failed: out of memory: SQLITE_NOMEM");
+    };
+    const originalHistory = session.getHistory.bind(session);
+    session.getHistory = async (leafId?: string | null) => {
+      failFirstRead();
+      return originalHistory(leafId);
+    };
+    const originalRecent = session.getRecentHistory.bind(session);
+    session.getRecentHistory = async (maxContentBytes: number) => {
+      failFirstRead();
+      return originalRecent(maxContentBytes);
+    };
+    return session;
+  }
+
+  override getModel(): LanguageModel {
+    return createMockModel("hydration-failure agent response");
+  }
+
+  async getOnStartDegradationsForTest(): Promise<OnStartDegradationForTest[]> {
+    return this._onStartDegradations.map((d) => ({
+      step: d.step,
+      error: String(d.error)
+    }));
+  }
+
+  async getHydrationReadsFailedForTest(): Promise<number> {
+    return this._hydrationReadsFailed;
+  }
+
+  async testChat(message: string): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
+    };
+  }
+
+  async getStoredMessages(): Promise<UIMessage[]> {
+    return this.getMessages();
+  }
+
+  /** Re-read the live cache from durable storage at a safe boundary. */
+  async resyncForTest(): Promise<UIMessage[]> {
+    return this.syncMessagesFromStorage();
+  }
+}
+
+// ── Windowed hydration agent (#1710, step 2) ────────────────────
+// `hydrationByteBudget` bounds how much of the stored transcript is
+// hydrated into `this.messages` on each cache refresh. Seeding happens in
+// configureSession, which runs BEFORE onStart's hydration — so the first
+// boot already sees an oversized stored transcript, like a real wake of a
+// long-lived session.
+
+export class ThinkWindowedHydrationAgent extends Think {
+  // ~30KB per message, 10 messages ≈ 300KB stored; budget 64KB → only the
+  // most recent couple of messages fit the hydration window.
+  override hydrationByteBudget = 64 * 1024;
+  override mediaEviction: boolean = false;
+
+  override async configureSession(session: Session): Promise<Session> {
+    if (this.name.includes("seeded")) {
+      const existing = await session.getHistory();
+      if (existing.length === 0) {
+        for (let i = 0; i < 10; i++) {
+          await session.appendMessage({
+            id: `seed-${i}`,
+            role: i % 2 === 0 ? "user" : "assistant",
+            parts: [{ type: "text", text: `seed ${i} ${"x".repeat(30_000)}` }]
+          });
+        }
+      }
+    }
+    return session;
+  }
+
+  override getModel(): LanguageModel {
+    return createMockModel("windowed hydration agent response");
+  }
+
+  async getHydrationInfoForTest(): Promise<{
+    truncated: boolean;
+    totalContentBytes: number;
+    hydratedMessages: number;
+  } | null> {
+    return this._lastHydration;
+  }
+
+  async getCachedMessageIdsForTest(): Promise<string[]> {
+    return this.messages.map((m) => m.id);
+  }
+
+  async getFullHistoryIdsForTest(): Promise<string[]> {
+    return (await this.session.getHistory()).map((m) => m.id);
+  }
+
+  async getOnStartDegradationsForTest(): Promise<OnStartDegradationForTest[]> {
+    return this._onStartDegradations.map((d) => ({
+      step: d.step,
+      error: String(d.error)
+    }));
+  }
+
+  async testChat(message: string): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      interruptedCalls: cb.interruptedCalls
+    };
+  }
+}
+
+// ── Media eviction agents (#1710, step 3) ───────────────────────
+
+const BIG_MEDIA_CHARS = 12_000;
+
+/**
+ * Eviction disabled by default so tests can seed deterministically, then
+ * enable a specific config and run passes explicitly.
+ */
+export class ThinkMediaEvictionAgent extends Think {
+  override mediaEviction: MediaEvictionConfig | boolean = false;
+
+  override getModel(): LanguageModel {
+    return createMockModel("media eviction agent response");
+  }
+
+  async setMediaEvictionForTest(
+    config: MediaEvictionConfig | boolean
+  ): Promise<void> {
+    this.mediaEviction = config;
+  }
+
+  /**
+   * Seed: 2 aged messages with oversized media (a data-URL file part and a
+   * tool output with a nested big string) + small filler so a
+   * `keepRecentMessages: 2` config leaves the media messages aged.
+   */
+  async seedMediaHistoryForTest(prefix = "m"): Promise<void> {
+    await this.appendMessageToHistory({
+      id: `${prefix}0`,
+      role: "user",
+      parts: [
+        { type: "text", text: "look at this screenshot" },
+        {
+          type: "file",
+          mediaType: "image/png",
+          url: `data:image/png;base64,${"A".repeat(BIG_MEDIA_CHARS)}`
+        }
+      ]
+    } as UIMessage);
+    await this.appendMessageToHistory({
+      id: `${prefix}1`,
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-screenshot",
+          toolCallId: `${prefix}-call-1`,
+          state: "output-available",
+          input: {},
+          output: {
+            mediaType: "image/png",
+            data: "B".repeat(BIG_MEDIA_CHARS),
+            note: "small structured field"
+          }
+        }
+      ]
+    } as unknown as UIMessage);
+    await this.appendMessageToHistory({
+      id: `${prefix}2`,
+      role: "user",
+      parts: [{ type: "text", text: "recent question" }]
+    } as UIMessage);
+    await this.appendMessageToHistory({
+      id: `${prefix}3`,
+      role: "assistant",
+      parts: [{ type: "text", text: "recent answer" }]
+    } as UIMessage);
+  }
+
+  async runEvictionForTest(): Promise<{
+    messages: number;
+    parts: number;
+    bytes: number;
+    externalizedBytes: number;
+  } | null> {
+    return this._evictAgedMediaBestEffort();
+  }
+
+  async getStoredMessageForTest(id: string): Promise<UIMessage | null> {
+    return (await this.session.getMessage(id)) as UIMessage | null;
+  }
+
+  async readWorkspaceFileForTest(path: string): Promise<string | null> {
+    return this.workspace.readFile(path);
+  }
+}
+
+/** Eviction enabled with tiny thresholds — exercises the background pass. */
+export class ThinkMediaEvictionAutoAgent extends ThinkMediaEvictionAgent {
+  override mediaEviction: MediaEvictionConfig = {
+    keepRecentMessages: 2,
+    minPartBytes: 10_000
+  };
 }

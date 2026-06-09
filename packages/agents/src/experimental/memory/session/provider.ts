@@ -23,6 +23,27 @@ export interface StoredCompaction {
   createdAt: string;
 }
 
+/** Per-row size info for the active branch path, root → leaf order. */
+export interface HistoryRowStat {
+  id: string;
+  /** Serialized content size of the stored row in bytes. */
+  bytes: number;
+}
+
+/** Result of a byte-budgeted history read. */
+export interface RecentHistoryResult {
+  /**
+   * The most recent messages on the active branch path whose summed stored
+   * content size fits `maxContentBytes` (always at least the leaf message),
+   * root → leaf order, with compaction overlays applied within the window.
+   */
+  messages: SessionMessage[];
+  /** True when older messages were left out to satisfy the byte budget. */
+  truncated: boolean;
+  /** Summed stored content size of the FULL path, in bytes. */
+  totalContentBytes: number;
+}
+
 /**
  * Session storage provider.
  * Messages are tree-structured via parentId for branching.
@@ -47,6 +68,27 @@ export interface SessionProvider {
   getBranches(messageId: string): SessionMessage[] | Promise<SessionMessage[]>;
 
   getPathLength(leafId?: string | null): number | Promise<number>;
+
+  /**
+   * Optional: byte-budgeted read of the most recent messages on the active
+   * branch path. Lets hosts hydrate a bounded window instead of the full
+   * transcript, so wake-time memory scales with the budget rather than total
+   * session history (#1710). Providers that don't implement it fall back to
+   * a full `getHistory()` read in `Session.getRecentHistory()`.
+   */
+  getRecentHistory?(
+    leafId: string | null | undefined,
+    maxContentBytes: number
+  ): RecentHistoryResult | Promise<RecentHistoryResult>;
+
+  /**
+   * Optional: per-row stored sizes for the active branch path (root → leaf),
+   * WITHOUT loading message content. Lets hosts find oversized rows (e.g.
+   * inline base64 media) and process them one at a time with bounded memory.
+   */
+  getHistoryRowStats?(
+    leafId?: string | null
+  ): HistoryRowStat[] | Promise<HistoryRowStat[]>;
 
   // ── Write ──────────────────────────────────────────────────────
 

@@ -170,6 +170,11 @@ import type {
 } from "agents/chat";
 import { Session } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
+import {
+  evictLargeMediaFromMessage,
+  resolveMediaEvictionConfig,
+  type MediaEvictionConfig
+} from "./media-eviction";
 import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "./tools/workspace";
 import { truncatePausedExecutionOutput } from "./tools/execute";
@@ -781,6 +786,29 @@ const CHAT_LAST_TERMINAL_KEY = "cf:chat:last-terminal";
 // terminal outcome (completed/skipped/failed/exhausted) so the indicator can't
 // spin forever.
 const CHAT_RECOVERING_KEY = "cf:chat:recovering";
+
+/**
+ * A best-effort internal `onStart` step that failed on this wake and was
+ * skipped so the agent could still come up (#1710).
+ *
+ * - `transcript-hydration` — reading the persisted conversation into the
+ *   in-memory message cache failed (e.g. `SQLITE_NOMEM` on an oversized,
+ *   media-heavy transcript). The agent starts with an empty in-memory view;
+ *   persisted history is untouched and the next safe-boundary sync retries.
+ * - `scheduled-task-reconcile` — declarative scheduled tasks were not
+ *   reconciled on this wake; the next successful wake reconciles them.
+ * - `durable-work-recovery` — pending submissions / workflow notifications
+ *   were not recovered or drained on this wake.
+ */
+export interface OnStartDegradation {
+  step:
+    | "transcript-hydration"
+    | "scheduled-task-reconcile"
+    | "durable-work-recovery";
+  error: unknown;
+}
+
+export type { MediaEvictionConfig } from "./media-eviction";
 
 /**
  * Callback interface for streaming chat events from a Think sub-agent.
@@ -1713,6 +1741,55 @@ export class Think<
   messageConcurrency: MessageConcurrency = "queue";
 
   /**
+   * Byte budget for hydrating the persisted transcript into the in-memory
+   * message cache (`this.messages`).
+   *
+   * Hydration runs on every wake (and at safe boundaries during a session).
+   * Without a budget it materializes the ENTIRE stored conversation — for
+   * long-lived, media-heavy sessions that footprint approaches the isolate's
+   * 128MB memory budget and the next SQLite allocation fails with
+   * `SQLITE_NOMEM`, permanently bricking the DO (#1710).
+   *
+   * When the stored path exceeds the budget, only the most recent messages
+   * that fit are hydrated (always at least the latest message), a
+   * `chat:hydration:windowed` observability event is emitted, and
+   * `this.messages` exposes the bounded window. Durable storage is never
+   * truncated by this — `session.getHistory()` still reads the full path.
+   * The model-facing context is unaffected in practice: older content is
+   * already truncated at read time before each turn.
+   *
+   * The default (24MB) leaves headroom for the ~2-3x amplification between
+   * stored JSON and parsed in-memory messages. Set to
+   * `Number.POSITIVE_INFINITY` (or any non-positive value) to disable
+   * windowing and always hydrate the full transcript.
+   *
+   * @default 24 * 1024 * 1024
+   */
+  hydrationByteBudget: number = 24 * 1024 * 1024;
+
+  /**
+   * Bound the PERSISTED transcript footprint by evicting oversized inline
+   * media (base64 data-URL attachments, large strings inside tool outputs)
+   * from messages that have aged out of the recent window.
+   *
+   * Read-time truncation already hides aged media from the model, but the
+   * bytes stay in storage forever and are rehydrated on every wake — the
+   * boot footprint grows with every image a session ever produced until
+   * SQLite's allocator fails with `SQLITE_NOMEM` (#1710). Eviction passes
+   * run in the background after the agent starts and as the conversation
+   * grows; each pass processes a bounded number of oversized rows.
+   *
+   * By default evicted values are preserved as workspace files under
+   * `/attachments/evicted/` (same Durable Object storage, but outside the
+   * hydration path) and the in-message marker records the file path. Set
+   * `externalizeToWorkspace: false` to drop the bytes instead, or `false`
+   * to disable eviction entirely.
+   *
+   * @default true
+   */
+  mediaEviction: MediaEvictionConfig | boolean = true;
+
+  /**
    * When true, chat turns are wrapped in `runFiber` for durable execution.
    * Enables `onChatRecovery` hook and `this.stash()` during streaming.
    *
@@ -1737,6 +1814,18 @@ export class Think<
 
   /** Cached messages — kept in sync with session storage. */
   private _cachedMessages: UIMessage[] = [];
+
+  /**
+   * Internal onStart steps that failed on this wake and were skipped so the
+   * agent could still come up.
+   *
+   * onStart failures are terminal: partyserver resets its init state and
+   * rethrows, so every subsequent wake — including platform alarm retries —
+   * re-runs the failing onStart. A data-driven failure (e.g. SQLITE_NOMEM
+   * hydrating an oversized transcript) would otherwise permanently brick the
+   * DO and drive an unbounded alarm-retry loop (#1710).
+   */
+  protected _onStartDegradations: OnStartDegradation[] = [];
 
   private _activeMessengerContext?: MessengerContext;
 
@@ -1819,6 +1908,9 @@ export class Think<
             } else {
               this._upsertCachedMessage(event.message as UIMessage);
             }
+            // The conversation grew — older messages may have aged out of
+            // the keep-recent window; evict their inline media (#1710).
+            this._scheduleMediaEvictionPass();
             break;
           case "update":
             this._patchCachedMessage(event.message as UIMessage);
@@ -1838,7 +1930,26 @@ export class Think<
       // Force Session to initialize its tables (assistant_messages,
       // assistant_compactions, assistant_config, etc.) so that subsequent
       // config reads work.
-      await this._syncMessages();
+      //
+      // This hydrates the FULL persisted transcript on every wake. On
+      // oversized sessions (typically inline base64 media in old tool
+      // results) the read can fail with SQLITE_NOMEM — that failure must not
+      // escape onStart, or the DO is bricked (#1710). Degrade to an empty
+      // in-memory view; persisted history is untouched and the next
+      // safe-boundary `_syncMessages()` retries the full read.
+      this._onStartDegradations = [];
+      const hydrated = await this._runBestEffortOnStartStep(
+        "transcript-hydration",
+        () => this._syncMessages(),
+        "The agent is starting with an empty in-memory message view; " +
+          "persisted history is untouched. If the error is SQLITE_NOMEM, " +
+          "the stored transcript is too large to hydrate (often inline " +
+          "base64 media in tool results) — compact or clear the session " +
+          "to recover."
+      );
+      if (!hydrated) {
+        this._replaceCachedMessages([]);
+      }
 
       // 3-6. Extension initialization (if extensionLoader is set)
       if (this.extensionLoader) {
@@ -1857,18 +1968,39 @@ export class Think<
 
       // 9. Declarative scheduled tasks are code-defined and should reconcile
       // before draining any recovered programmatic work they may enqueue.
-      await this._reconcileDeclaredScheduledTasks();
+      // Best-effort: reconcile runs after the agent is otherwise functional,
+      // and a failure (user getScheduledTasks() throwing, storage pressure)
+      // must not brick the DO (#1710).
+      await this._runBestEffortOnStartStep(
+        "scheduled-task-reconcile",
+        () => this._reconcileDeclaredScheduledTasks(),
+        "Declared scheduled tasks were not reconciled on this wake; the " +
+          "next successful wake will reconcile them."
+      );
 
       // 10. Durable submissions may run user-defined model/hooks, so start them
-      // after subclass initialization has completed.
-      await this._recoverSubmissionsOnStart();
-      this._recoverWorkflowNotifications();
-      if (this._hasPendingSubmissions()) {
-        this._startSubmissionDrain();
-      }
-      if (this._hasPendingWorkflowNotifications()) {
-        this._startWorkflowNotificationDrain();
-      }
+      // after subclass initialization has completed. Best-effort for the same
+      // reason as step 9.
+      await this._runBestEffortOnStartStep(
+        "durable-work-recovery",
+        async () => {
+          await this._recoverSubmissionsOnStart();
+          this._recoverWorkflowNotifications();
+          if (this._hasPendingSubmissions()) {
+            this._startSubmissionDrain();
+          }
+          if (this._hasPendingWorkflowNotifications()) {
+            this._startWorkflowNotificationDrain();
+          }
+        },
+        "Pending submissions / workflow notifications were not recovered on " +
+          "this wake; the next successful wake will recover them."
+      );
+
+      // 11. Background bound on the persisted transcript: evict aged inline
+      // media so the hydration footprint stops growing with session age
+      // (#1710). Runs after `blockConcurrencyWhile` releases — no boot cost.
+      this._scheduleMediaEvictionPass();
     };
   }
 
@@ -1879,6 +2011,10 @@ export class Think<
    * through this cache so in-flight turns, tool updates, and recovery state all
    * observe the same message list. Use `_syncMessages()` only at safe
    * boundaries where a full storage reread cannot drop in-flight state.
+   *
+   * When the stored transcript exceeds `hydrationByteBudget`, this view is a
+   * bounded window of the most recent messages (see `_lastHydration`); the
+   * full history remains readable via `session.getHistory()`.
    */
   get messages(): UIMessage[] {
     return this._cachedMessages;
@@ -2107,15 +2243,196 @@ export class Think<
     return repair.messages;
   }
 
+  /**
+   * Run a best-effort internal onStart step, degrading on failure instead of
+   * throwing.
+   *
+   * Throwing out of `onStart` is terminal: partyserver resets its init state
+   * and rethrows, so every wake — including platform alarm retries — re-runs
+   * the failing `onStart` and fails again. A data-driven failure (oversized
+   * transcript, bad declared-task config) would permanently brick the DO and
+   * drive an unbounded alarm-retry loop (#1710). Instead, record the
+   * degradation, emit `chat:onstart:degraded`, and let the agent come up so
+   * it stays reachable for remediation (compaction, clearing, redeploy).
+   *
+   * Returns `true` when the step succeeded.
+   */
+  private async _runBestEffortOnStartStep(
+    step: OnStartDegradation["step"],
+    fn: () => unknown | Promise<unknown>,
+    hint: string
+  ): Promise<boolean> {
+    try {
+      await fn();
+      return true;
+    } catch (error) {
+      this._onStartDegradations.push({ step, error });
+      console.error(
+        `[Think] onStart step "${step}" failed; continuing with degraded state. ${hint}`,
+        error
+      );
+      this._emit("chat:onstart:degraded", {
+        step,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return false;
+    }
+  }
+
+  private _mediaEvictionRunning = false;
+  private _mediaEvictionScheduled = false;
+
+  /**
+   * Schedule a background media-eviction pass (see `mediaEviction`).
+   * Coalesces repeated requests; the timer fires after the current
+   * event-loop work (and after `onStart`'s `blockConcurrencyWhile`), so
+   * boot and turn latency are unaffected.
+   */
+  private _scheduleMediaEvictionPass(): void {
+    if (this._mediaEvictionScheduled || this._mediaEvictionRunning) return;
+    if (!resolveMediaEvictionConfig(this.mediaEviction)) return;
+    this._mediaEvictionScheduled = true;
+    setTimeout(() => {
+      this._mediaEvictionScheduled = false;
+      void this._evictAgedMediaBestEffort();
+    }, 0);
+  }
+
+  /**
+   * Evict oversized inline media from aged stored messages (#1710).
+   *
+   * Memory-bounded by design: row sizes come from `getHistoryRowStats()`
+   * (no content loaded), only rows large enough to contain an evictable
+   * part are parsed, and they are processed one at a time. Evicted values
+   * are written to the workspace BEFORE the row is rewritten, so a failed
+   * pass never loses data. Best-effort: failures are logged and the next
+   * pass retries.
+   *
+   * Returns the pass totals, or `null` when eviction is disabled, already
+   * running, or the provider cannot enumerate row sizes.
+   */
+  protected async _evictAgedMediaBestEffort(): Promise<{
+    messages: number;
+    parts: number;
+    bytes: number;
+    externalizedBytes: number;
+  } | null> {
+    if (this._mediaEvictionRunning) return null;
+    const config = resolveMediaEvictionConfig(this.mediaEviction);
+    if (!config) return null;
+    this._mediaEvictionRunning = true;
+    try {
+      const stats = await this.session.getHistoryRowStats();
+      if (!stats) return null;
+      const aged = stats.slice(
+        0,
+        Math.max(0, stats.length - config.keepRecentMessages)
+      );
+
+      let processed = 0;
+      const totals = { messages: 0, parts: 0, bytes: 0, externalizedBytes: 0 };
+      for (const row of aged) {
+        // A row smaller than the part threshold cannot contain an
+        // evictable value — skip without parsing. Rewritten rows shrink
+        // below the threshold, so later passes skip them here too.
+        if (row.bytes < config.minPartBytes) continue;
+        if (processed >= config.maxRowsPerPass) break;
+        processed++;
+
+        const message = (await this.session.getMessage(
+          row.id
+        )) as UIMessage | null;
+        if (!message) continue;
+
+        const result = evictLargeMediaFromMessage(message, {
+          minPartBytes: config.minPartBytes,
+          externalize: config.externalizeToWorkspace,
+          pathFor: (index, extension) =>
+            `/attachments/evicted/${message.id}-${index}.${extension}`
+        });
+        if (!result.changed) continue;
+
+        for (const blob of result.blobs) {
+          await this.workspace.writeFile(blob.path, blob.data);
+          totals.externalizedBytes += blob.data.length;
+        }
+        await this.session.updateMessage(sanitizeMessage(result.message));
+        totals.messages++;
+        totals.parts += result.parts;
+        totals.bytes += result.bytes;
+      }
+
+      if (totals.messages > 0) {
+        this._emit("chat:media:evicted", totals);
+      }
+      return totals;
+    } catch (error) {
+      console.error(
+        "[Think] media eviction pass failed; a later pass will retry.",
+        error
+      );
+      return null;
+    } finally {
+      this._mediaEvictionRunning = false;
+    }
+  }
+
   /** Replace the live cache with a durable storage snapshot. */
   private _replaceCachedMessages(messages: UIMessage[]): UIMessage[] {
     this._cachedMessages = messages;
     return this._cachedMessages;
   }
 
-  /** Refresh the live cache from durable storage at a safe boundary. */
+  /**
+   * Result of the most recent cache refresh when `hydrationByteBudget` is
+   * active. `truncated` means `this.messages` is a bounded recent window of
+   * a larger stored transcript.
+   */
+  protected _lastHydration: {
+    truncated: boolean;
+    totalContentBytes: number;
+    hydratedMessages: number;
+  } | null = null;
+
+  private _warnedHydrationWindowed = false;
+
+  /**
+   * Refresh the live cache from durable storage at a safe boundary.
+   *
+   * Bounded by `hydrationByteBudget`: oversized transcripts hydrate as a
+   * recent window instead of exhausting the isolate's memory (#1710).
+   */
   private async _syncMessages(): Promise<UIMessage[]> {
-    return this._replaceCachedMessages(await this._readMessagesFromStorage());
+    const budget = this.hydrationByteBudget;
+    if (!Number.isFinite(budget) || budget <= 0) {
+      this._lastHydration = null;
+      return this._replaceCachedMessages(await this._readMessagesFromStorage());
+    }
+
+    const recent = await this.session.getRecentHistory(budget);
+    this._lastHydration = {
+      truncated: recent.truncated,
+      totalContentBytes: recent.totalContentBytes,
+      hydratedMessages: recent.messages.length
+    };
+    if (recent.truncated) {
+      if (!this._warnedHydrationWindowed) {
+        this._warnedHydrationWindowed = true;
+        console.warn(
+          `[Think] Stored transcript (${recent.totalContentBytes} bytes) ` +
+            `exceeds hydrationByteBudget (${budget} bytes); hydrated the ` +
+            `most recent ${recent.messages.length} message(s) instead of ` +
+            "the full history. Durable storage is untouched. Compact the " +
+            "session (or enable media eviction) to shrink it."
+        );
+      }
+      this._emit("chat:hydration:windowed", {
+        totalContentBytes: recent.totalContentBytes,
+        budgetBytes: budget,
+        hydratedMessages: recent.messages.length
+      });
+    }
+    return this._replaceCachedMessages(recent.messages as UIMessage[]);
   }
 
   /** Patch or append one message in the live cache after a durable write. */

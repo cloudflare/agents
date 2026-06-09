@@ -9,7 +9,9 @@ import type { SessionMessage } from "../types";
 import type {
   SessionProvider,
   SearchResult,
-  StoredCompaction
+  StoredCompaction,
+  HistoryRowStat,
+  RecentHistoryResult
 } from "../provider";
 import { COMPACTION_PREFIX } from "../../utils/compaction-helpers";
 
@@ -19,6 +21,17 @@ export interface SqlProvider {
     ...values: (string | number | boolean | null)[]
   ): T[];
 }
+
+/**
+ * Rows fetched per query when hydrating message content for a history path.
+ *
+ * Message rows can be up to ~1.8MB each (see ROW_MAX_BYTES in agents/chat),
+ * so content is fetched in bounded batches rather than one statement to keep
+ * any per-statement buffering in the SQLite layer small. In workerd the
+ * SQLite allocator shares the isolate's memory budget with the JS heap —
+ * oversized transient result sets surface as SQLITE_NOMEM (#1710).
+ */
+const HISTORY_CONTENT_CHUNK_SIZE = 50;
 
 export class AgentSessionProvider implements SessionProvider {
   private agent: SqlProvider;
@@ -101,35 +114,68 @@ export class AgentSessionProvider implements SessionProvider {
   getHistory(leafId?: string | null): SessionMessage[] {
     this.ensureTable();
 
-    const leaf = leafId
-      ? this.agent.sql<{ id: string }>`
-          SELECT id FROM assistant_messages WHERE id = ${leafId} AND session_id = ${this.sessionId}
-        `[0]
-      : this.latestLeafRow();
+    const leaf = leafId ? this.leafRowById(leafId) : this.latestLeafRow();
 
     if (!leaf) return [];
 
-    const path = this.agent.sql<{ content: string }>`
-      WITH RECURSIVE path AS (
-        SELECT *, 0 as depth FROM assistant_messages WHERE id = ${leaf.id}
-        UNION ALL
-        SELECT m.*, p.depth + 1 FROM assistant_messages m
-        JOIN path p ON m.id = p.parent_id
-        WHERE m.session_id = ${this.sessionId} AND p.depth < 10000
-      )
-      SELECT content FROM path ORDER BY depth DESC
-    `;
-
-    const messages = this.parseRows(path);
+    const messages = this.messagesByPathIds(
+      this.pathRowStats(leaf.id).map((row) => row.id)
+    );
     const compactions = this.getCompactions();
     if (compactions.length === 0) return messages;
     return this.applyCompactions(messages, compactions);
   }
 
+  getRecentHistory(
+    leafId: string | null | undefined,
+    maxContentBytes: number
+  ): RecentHistoryResult {
+    this.ensureTable();
+
+    const leaf = leafId ? this.leafRowById(leafId) : this.latestLeafRow();
+    if (!leaf) {
+      return { messages: [], truncated: false, totalContentBytes: 0 };
+    }
+
+    const stats = this.pathRowStats(leaf.id);
+    const totalContentBytes = stats.reduce((sum, row) => sum + row.bytes, 0);
+
+    // Take the longest suffix (most recent messages) that fits the budget.
+    // The leaf message is always included so the window is never empty.
+    let start = stats.length - 1;
+    let used = stats[start]?.bytes ?? 0;
+    while (start > 0 && used + stats[start - 1].bytes <= maxContentBytes) {
+      start--;
+      used += stats[start].bytes;
+    }
+
+    const messages = this.messagesByPathIds(
+      stats.slice(start).map((row) => row.id)
+    );
+    // Compactions whose anchors fall outside the window are skipped by
+    // applyCompactions (no matching fromMessageId) — the window then shows
+    // the raw recent messages, which is the intended degraded view.
+    const compactions = this.getCompactions();
+    return {
+      messages:
+        compactions.length === 0
+          ? messages
+          : this.applyCompactions(messages, compactions),
+      truncated: start > 0,
+      totalContentBytes
+    };
+  }
+
+  getHistoryRowStats(leafId?: string | null): HistoryRowStat[] {
+    this.ensureTable();
+    const leaf = leafId ? this.leafRowById(leafId) : this.latestLeafRow();
+    return leaf ? this.pathRowStats(leaf.id) : [];
+  }
+
   getLatestLeaf(): SessionMessage | null {
     this.ensureTable();
     const row = this.latestLeafRow();
-    return row ? this.parse(row.content) : null;
+    return row ? this.getMessage(row.id) : null;
   }
 
   getBranches(messageId: string): SessionMessage[] {
@@ -299,14 +345,79 @@ export class AgentSessionProvider implements SessionProvider {
 
   // ── Internal ───────────────────────────────────────────────────
 
-  private latestLeafRow(): { id: string; content: string } | null {
-    const rows = this.agent.sql<{ id: string; content: string }>`
-      SELECT m.id, m.content FROM assistant_messages m
+  private latestLeafRow(): { id: string } | null {
+    // id-only on purpose: the ORDER BY sorter would otherwise carry every
+    // leaf candidate's full content blob while ranking rows.
+    const rows = this.agent.sql<{ id: string }>`
+      SELECT m.id FROM assistant_messages m
       LEFT JOIN assistant_messages c ON c.parent_id = m.id AND c.session_id = ${this.sessionId}
       WHERE c.id IS NULL AND m.session_id = ${this.sessionId}
       ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1
     `;
     return rows[0] ?? null;
+  }
+
+  private leafRowById(leafId: string): { id: string } | null {
+    const rows = this.agent.sql<{ id: string }>`
+      SELECT id FROM assistant_messages WHERE id = ${leafId} AND session_id = ${this.sessionId}
+    `;
+    return rows[0] ?? null;
+  }
+
+  /**
+   * The active branch path as (id, content size) pairs, root → leaf.
+   *
+   * Recurses over (id, parent_id) only. Carrying `content` through the
+   * recursive queue AND the ORDER BY sorter materializes the entire
+   * transcript several times over inside SQLite's allocator, which in
+   * workerd shares the isolate's memory budget with the JS heap — large
+   * media-heavy sessions then fail with SQLITE_NOMEM on wake (#1710).
+   * Content is fetched separately in bounded chunks (`messagesByPathIds`).
+   */
+  private pathRowStats(leafId: string): HistoryRowStat[] {
+    return this.agent.sql<{ id: string; bytes: number }>`
+      WITH RECURSIVE path(id, parent_id, depth) AS (
+        SELECT id, parent_id, 0 FROM assistant_messages WHERE id = ${leafId}
+        UNION ALL
+        SELECT m.id, m.parent_id, p.depth + 1 FROM assistant_messages m
+        JOIN path p ON m.id = p.parent_id
+        WHERE m.session_id = ${this.sessionId} AND p.depth < 10000
+      )
+      SELECT path.id AS id, LENGTH(CAST(am.content AS BLOB)) AS bytes
+      FROM path JOIN assistant_messages am ON am.id = path.id
+      ORDER BY path.depth DESC
+    `;
+  }
+
+  /**
+   * Fetch and parse message content for an ordered list of path ids.
+   *
+   * Content is read in bounded chunks (no ORDER BY — SQLite streams rows
+   * without materializing the result set) and reassembled in path order.
+   * Rows that fail to parse are skipped, matching previous behavior.
+   */
+  private messagesByPathIds(ids: string[]): SessionMessage[] {
+    const contentById = new Map<string, string>();
+    for (let i = 0; i < ids.length; i += HISTORY_CONTENT_CHUNK_SIZE) {
+      const chunk = ids.slice(i, i + HISTORY_CONTENT_CHUNK_SIZE);
+      const rows = this.agent.sql<{ id: string; content: string }>`
+        SELECT id, content FROM assistant_messages
+        WHERE session_id = ${this.sessionId}
+          AND id IN (SELECT value FROM json_each(${JSON.stringify(chunk)}))
+      `;
+      for (const row of rows) {
+        contentById.set(row.id, row.content);
+      }
+    }
+
+    const result: SessionMessage[] = [];
+    for (const id of ids) {
+      const content = contentById.get(id);
+      if (content === undefined) continue;
+      const msg = this.parse(content);
+      if (msg) result.push(msg);
+    }
+    return result;
   }
 
   private indexFTS(message: SessionMessage): void {
