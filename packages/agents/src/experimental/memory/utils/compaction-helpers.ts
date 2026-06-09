@@ -9,10 +9,6 @@
 import type { CompactContext, SessionMessage } from "../session/types";
 import { estimateMessageTokens } from "./tokens";
 
-export type CompactTokenCounter = (
-  messages: SessionMessage[]
-) => number | Promise<number>;
-
 // ── Compaction ID constants ─────────────────────────────────────────
 
 /** Prefix for all compaction messages (overlays and summaries) */
@@ -157,32 +153,6 @@ export function findTailCutByTokens(
   const cutIdx = minCut >= headEnd ? Math.min(tokenCut, minCut) : tokenCut;
 
   // Align to avoid splitting tool groups
-  return alignBoundaryBackward(messages, cutIdx);
-}
-
-async function findTailCutByTokensWithCounter(
-  messages: SessionMessage[],
-  headEnd: number,
-  tokenCounter: CompactTokenCounter,
-  tailTokenBudget = 20000,
-  minTailMessages = 2
-): Promise<number> {
-  const n = messages.length;
-  let accumulated = 0;
-  let tokenCut = n;
-
-  for (let i = n - 1; i >= headEnd; i--) {
-    const msgTokens = await tokenCounter([messages[i]]);
-
-    if (accumulated + msgTokens > tailTokenBudget && tokenCut < n) {
-      break;
-    }
-    accumulated += msgTokens;
-    tokenCut = i;
-  }
-
-  const minCut = n - minTailMessages;
-  const cutIdx = minCut >= headEnd ? Math.min(tokenCut, minCut) : tokenCut;
   return alignBoundaryBackward(messages, cutIdx);
 }
 
@@ -439,44 +409,36 @@ export interface CompactOptions {
 
   /** Minimum tail messages to protect (default: 2) */
   minTailMessages?: number;
-
-  /**
-   * Strictly message-scoped token counter: returns tokens for exactly the
-   * messages passed (i.e. a tokenizer). The tail walk calls it once per
-   * message. Do NOT pass a whole-prompt total here (e.g.
-   * `() => usage.inputTokens`) — attach usage metadata to assistant messages
-   * or set a counter on `compactAfter()` instead; those flow in as
-   * `CompactContext.contextTokens` and calibrate the built-in heuristic.
-   */
-  tokenCounter?: CompactTokenCounter;
 }
 
 /**
- * Calibrate the Workers-safe heuristic to the model's token scale (#1593).
+ * Express `tailTokenBudget` (model tokens) in the heuristic's units (#1593).
  *
  * `contextTokens` is the Session's authoritative whole-prompt size — from a
  * `compactAfter()` counter or usage metadata on assistant messages. The
- * heuristic under-counts tool-heavy histories, so a `tailTokenBudget`
- * expressed in model tokens would otherwise protect far too much tail (often
- * everything, making compaction a silent no-op). Scaling each per-message
- * estimate by `contextTokens / heuristic(history)` keeps the walk's
- * distribution while making the budget mean "model tokens".
+ * heuristic under-counts tool-heavy histories, so a budget expressed in model
+ * tokens would otherwise protect far too much tail (often everything, making
+ * compaction a silent no-op). Dividing the budget by
+ * `contextTokens / heuristic(history)` is equivalent to scaling every
+ * per-message estimate up to the model's scale: the walk's distribution is
+ * unchanged and the budget keeps meaning "model tokens". Without an
+ * authoritative total the budget is used as-is.
  */
-function calibratedHeuristic(
+function tailBudgetInHeuristicUnits(
+  tailTokenBudget: number,
   contextTokens: number | undefined,
   messages: SessionMessage[]
-): CompactTokenCounter | undefined {
+): number {
   if (
     typeof contextTokens !== "number" ||
     !Number.isFinite(contextTokens) ||
     contextTokens <= 0
   ) {
-    return undefined;
+    return tailTokenBudget;
   }
   const heuristicTotal = estimateMessageTokens(messages);
-  if (heuristicTotal <= 0) return undefined;
-  const scale = contextTokens / heuristicTotal;
-  return (msgs) => estimateMessageTokens(msgs) * scale;
+  if (heuristicTotal <= 0) return tailTokenBudget;
+  return (tailTokenBudget * heuristicTotal) / contextTokens;
 }
 
 /**
@@ -517,33 +479,20 @@ export function createCompactFunction(opts: CompactOptions) {
       return null;
     }
 
-    // Per-message accounting for the tail walk: an explicit message-scoped
-    // counter wins; otherwise the heuristic, calibrated to the model's scale
-    // when the Session knows the real context size. The Session's counter is
-    // whole-prompt shaped and is never called per-message — its total arrives
-    // pre-computed as `context.contextTokens`.
-    const tailCounter =
-      opts.tokenCounter ??
-      calibratedHeuristic(context?.contextTokens, messages);
-
     // 1. Find compression boundaries
     let compressStart = protectHead;
     compressStart = alignBoundaryForward(messages, compressStart);
 
-    let compressEnd = tailCounter
-      ? await findTailCutByTokensWithCounter(
-          messages,
-          compressStart,
-          tailCounter,
-          tailTokenBudget,
-          minTailMessages
-        )
-      : findTailCutByTokens(
-          messages,
-          compressStart,
-          tailTokenBudget,
-          minTailMessages
-        );
+    const compressEnd = findTailCutByTokens(
+      messages,
+      compressStart,
+      tailBudgetInHeuristicUnits(
+        tailTokenBudget,
+        context?.contextTokens,
+        messages
+      ),
+      minTailMessages
+    );
 
     if (compressEnd <= compressStart) {
       return null;

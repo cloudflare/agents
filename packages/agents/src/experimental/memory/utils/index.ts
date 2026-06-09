@@ -24,6 +24,5 @@ export {
   findTailCutByTokens,
   computeSummaryBudget,
   buildSummaryPrompt,
-  type CompactOptions,
-  type CompactTokenCounter
+  type CompactOptions
 } from "./compaction-helpers";

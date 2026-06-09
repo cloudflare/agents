@@ -209,6 +209,8 @@ Session.create(agent).onCompaction(compactFn).compactAfter(20000); // token thre
 
 After every `appendMessage`, the session estimates tokens in the history. If it exceeds the threshold, `compact()` runs automatically. Failures are non-fatal — the message is always persisted.
 
+Token accounting resolves in priority order: a `compactAfter(threshold, { tokenCounter })` counter (whole-prompt; returning model-reported usage is fine), then model-reported usage attached to assistant message metadata (`metadata.usage` / `metadata.totalUsage`, e.g. via the AI SDK's `messageMetadata`), then a Workers-safe heuristic. The same number flows to `createCompactFunction` so the tail budget is honored at the model's token scale even when the heuristic under-counts tool-heavy histories.
+
 ### Manual Compaction
 
 ```typescript

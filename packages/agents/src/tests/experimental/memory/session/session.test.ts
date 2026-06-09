@@ -1653,56 +1653,6 @@ describe("createCompactFunction", () => {
     expect(summarizeCalls).toBe(0);
   });
 
-  it("uses a supplied token counter for tail budgeting tool-heavy histories", async () => {
-    let summarizeCalls = 0;
-    const messages: SessionMessage[] = [
-      {
-        id: "head",
-        role: "user",
-        parts: [{ type: "text", text: "start" }]
-      },
-      ...Array.from(
-        { length: 8 },
-        (_, i): SessionMessage => ({
-          id: `tool-${i}`,
-          role: "assistant",
-          parts: [
-            {
-              type: "tool-read_many",
-              toolCallId: `call-${i}`,
-              toolName: "read_many",
-              state: "output-available",
-              input: { glob: "**/*.ts" },
-              output: "x".repeat(25_000)
-            }
-          ]
-        })
-      )
-    ];
-
-    const compact = createCompactFunction({
-      summarize: async () => {
-        summarizeCalls++;
-        return "summary";
-      },
-      protectHead: 1,
-      minTailMessages: 1,
-      tailTokenBudget: 10_000,
-      tokenCounter: (countedMessages) =>
-        countedMessages.reduce(
-          (sum, message) => sum + JSON.stringify(message.parts).length,
-          0
-        )
-    });
-
-    const result = await compact(messages);
-    expect(result).toMatchObject({
-      fromMessageId: "tool-0",
-      summary: "summary"
-    });
-    expect(summarizeCalls).toBe(1);
-  });
-
   // #1593: a tool-heavy history the chars/4 heuristic under-counts ~10x.
   // The Session's authoritative total (compactAfter counter or usage
   // metadata) flows in as CompactContext.contextTokens and calibrates the
@@ -1728,48 +1678,20 @@ describe("createCompactFunction", () => {
     )
   ];
 
-  it("calls an explicit tokenCounter once per message, never probing it", async () => {
-    const messages = usageStyleHistory();
-    const perToolMsg10x = estimateMessageTokens([messages[1]]) * 10;
-    const seenMessageCounts: number[] = [];
-
-    const compact = createCompactFunction({
-      summarize: async () => "summary",
-      protectHead: 1,
-      minTailMessages: 1,
-      // Fits exactly two tail messages at the counter's scale.
-      tailTokenBudget: Math.floor(perToolMsg10x * 2.5),
-      tokenCounter: (counted) => {
-        seenMessageCounts.push(counted.length);
-        return estimateMessageTokens(counted) * 10;
-      }
-    });
-
-    const result = await compact(messages);
-    // The contract is strictly message-scoped: only single-message walk
-    // calls, never an empty or whole-history invocation.
-    expect(seenMessageCounts.length).toBeGreaterThan(0);
-    expect(seenMessageCounts.every((count) => count === 1)).toBe(true);
-    expect(result).toMatchObject({
-      fromMessageId: "tool-0",
-      toMessageId: "tool-5",
-      summary: "summary"
-    });
-  });
-
-  it("degrades gracefully when the counter returns non-finite values", async () => {
+  it("ignores a non-finite contextTokens and falls back to the raw heuristic", async () => {
     const messages = usageStyleHistory();
     const compact = createCompactFunction({
       summarize: async () => "summary",
       protectHead: 1,
       minTailMessages: 1,
-      tailTokenBudget: 1,
-      tokenCounter: () => Number.NaN
+      // Above the heuristic total, so the uncalibrated walk protects
+      // everything and compaction no-ops.
+      tailTokenBudget: estimateMessageTokens(messages) + 1
     });
 
-    // Must not throw — a broken counter degrades to a no-op (NaN
-    // accumulation protects everything).
-    expect(await compact(messages)).toBeNull();
+    // Must not throw and must not produce a bogus boundary.
+    expect(await compact(messages, { contextTokens: Number.NaN })).toBeNull();
+    expect(await compact(messages, { contextTokens: -5 })).toBeNull();
   });
 
   it("compacts a tool-heavy Session end-to-end with a usage-style counter (#1593)", async () => {
