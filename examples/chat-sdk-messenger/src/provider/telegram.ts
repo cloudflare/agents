@@ -1,11 +1,6 @@
-import type { TextStreamCallback } from "../intelligence/stream-callback";
-
 export const WEBHOOK_PATH = "/webhooks/telegram";
-export const TELEGRAM_STREAM_SOFT_LIMIT = 3_400;
-export const TELEGRAM_FOLLOWUP_CHUNK_LIMIT = 3_500;
 
 const TELEGRAM_API_BASE = "https://api.telegram.org";
-const TELEGRAM_DEDUPE_PREFIX = "dedupe:telegram:";
 
 export type TelegramWebhookSetupResult = {
   ok: boolean;
@@ -140,74 +135,4 @@ export async function setupTelegramWebhook(
     alreadyConfigured: false,
     description: next.description ?? "Telegram webhook configured."
   } satisfies TelegramWebhookSetupResult);
-}
-
-export function isIgnorableDeliveryError(error: unknown): boolean {
-  if (error === undefined || error === null) {
-    return false;
-  }
-
-  const candidate = error as { code?: unknown; message?: unknown };
-  const code = typeof candidate.code === "string" ? candidate.code : undefined;
-  const message =
-    typeof candidate.message === "string"
-      ? candidate.message.toLowerCase()
-      : String(error).toLowerCase();
-
-  return (
-    code === "VALIDATION_ERROR" && message.includes("message is not modified")
-  );
-}
-
-export function isExpectedFinalEditNoop(
-  error: unknown,
-  callback: Pick<TextStreamCallback, "visibleLimitReached">
-): boolean {
-  return callback.visibleLimitReached() && isIgnorableDeliveryError(error);
-}
-
-export function shardTelegramStateKey(
-  key: string,
-  shardThread: (threadId: string) => string
-): string | undefined {
-  if (!key.startsWith(TELEGRAM_DEDUPE_PREFIX)) {
-    return undefined;
-  }
-
-  const chatId = key.slice(TELEGRAM_DEDUPE_PREFIX.length).split(":")[0];
-  return chatId ? shardThread(`telegram:${chatId}`) : undefined;
-}
-
-export function splitTelegramMessageText(
-  text: string,
-  limit = TELEGRAM_FOLLOWUP_CHUNK_LIMIT
-): string[] {
-  if (!text.trim()) {
-    return [];
-  }
-
-  const chunks: string[] = [];
-  let remaining = text;
-
-  while (remaining.length > limit) {
-    let splitAt = remaining.lastIndexOf("\n\n", limit);
-    if (splitAt < Math.floor(limit * 0.5)) {
-      splitAt = remaining.lastIndexOf("\n", limit);
-    }
-    if (splitAt < Math.floor(limit * 0.5)) {
-      splitAt = remaining.lastIndexOf(" ", limit);
-    }
-    if (splitAt < Math.floor(limit * 0.5)) {
-      splitAt = limit;
-    }
-
-    chunks.push(remaining.slice(0, splitAt));
-    remaining = remaining.slice(splitAt);
-  }
-
-  if (remaining) {
-    chunks.push(remaining);
-  }
-
-  return chunks;
 }

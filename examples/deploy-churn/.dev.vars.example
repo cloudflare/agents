@@ -1,0 +1,3 @@
+# Copy to .dev.vars to run the Anthropic prefill probe locally:
+#   /probe/trailing-assistant?provider=anthropic&model=claude-sonnet-4-6
+ANTHROPIC_API_KEY=sk-ant-...

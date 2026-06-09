@@ -7,7 +7,10 @@ import type {
   JSONRPCNotification,
   JSONRPCResultResponse
 } from "@modelcontextprotocol/sdk/types.js";
-import { describe, expect, it } from "vitest";
+import type { Connection } from "partyserver";
+import { describe, expect, it, vi } from "vitest";
+import { __DO_NOT_USE_WILL_BREAK__agentContext as agentContext } from "../../../internal_context";
+import { StreamableHTTPServerTransport } from "../../../mcp/transport";
 import worker from "../../worker";
 import {
   TEST_MESSAGES,
@@ -391,6 +394,161 @@ describe("Streamable HTTP Transport", () => {
       await reader1?.cancel();
       await reader2?.cancel();
     });
+
+    it("keeps colliding request ids on their originating POST streams", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+      const collidingRequest = (label: string): JSONRPCMessage => ({
+        id: "same-id",
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          arguments: { label },
+          name: "collisionBarrierEcho"
+        }
+      });
+
+      const [responseA, responseB] = await Promise.all([
+        sendPostRequest(ctx, baseUrl, collidingRequest("A"), sessionId),
+        sendPostRequest(ctx, baseUrl, collidingRequest("B"), sessionId)
+      ]);
+      const readerA = responseA.body?.getReader();
+      const readerB = responseB.body?.getReader();
+      expect(readerA).toBeTruthy();
+      expect(readerB).toBeTruthy();
+      if (!readerA || !readerB) throw new Error("No POST stream reader");
+
+      const [frameA, frameB] = await Promise.all([
+        readSSEEventWithTimeout(readerA, 1000),
+        readSSEEventWithTimeout(readerB, 1000)
+      ]);
+
+      expect(frameA).not.toBeNull();
+      expect(frameB).not.toBeNull();
+      expect(frameA).toContain("collision:A");
+      expect(frameB).toContain("collision:B");
+
+      await readerA.cancel();
+      await readerB.cancel();
+    });
+  });
+
+  describe("Ambiguous request id routing", () => {
+    const createConnection = (
+      id: string,
+      requestIds: string[] = ["same-id"]
+    ) => ({
+      id,
+      state: { streamId: id, requestIds },
+      send: vi.fn()
+    });
+
+    const createTransport = (
+      liveConnections: ReturnType<typeof createConnection>[]
+    ) => {
+      const agent = {
+        deleteStreamRequestIds: vi.fn(async () => undefined),
+        getConnections: () => liveConnections,
+        getSessionId: () => "session-id"
+      };
+      const transport = agentContext.run(
+        {
+          agent,
+          connection: undefined,
+          email: undefined,
+          request: undefined
+        },
+        () => new StreamableHTTPServerTransport({})
+      );
+      return { agent, transport };
+    };
+
+    const result = {
+      id: "same-id",
+      jsonrpc: "2.0" as const,
+      result: { content: "right response" }
+    };
+
+    it("returns internal errors to duplicate live streams when no origin is available", async () => {
+      const first = createConnection("first");
+      const second = createConnection("second");
+      const { agent, transport } = createTransport([first, second]);
+
+      await agentContext.run(
+        {
+          agent,
+          connection: undefined,
+          email: undefined,
+          request: undefined
+        },
+        () => transport.send(result)
+      );
+
+      for (const connection of [first, second]) {
+        expect(connection.send).toHaveBeenCalledOnce();
+        const event = JSON.parse(String(connection.send.mock.calls[0][0])) as {
+          event: string;
+          close?: boolean;
+        };
+        const error = parseSSEData(event.event) as {
+          error: { code: number; message: string };
+          id: string;
+        };
+        expect(error).toMatchObject({
+          error: { code: -32603, message: "Internal error" },
+          id: "same-id"
+        });
+        expect(event.event).not.toContain("right response");
+        expect(event.close).toBe(true);
+      }
+    });
+
+    it("routes to a live resumed stream instead of a stale originating stream", async () => {
+      const staleOrigin = createConnection("closed-post");
+      const resumed = createConnection("resumed-get");
+      const { agent, transport } = createTransport([resumed]);
+
+      await agentContext.run(
+        {
+          agent,
+          connection: staleOrigin as unknown as Connection,
+          email: undefined,
+          request: undefined
+        },
+        () => transport.send(result)
+      );
+
+      expect(staleOrigin.send).not.toHaveBeenCalled();
+      expect(resumed.send).toHaveBeenCalledOnce();
+    });
+
+    it("tracks colliding batch response completion independently per stream", async () => {
+      const batch = createConnection("batch", ["same-id", "batch-only"]);
+      const colliding = createConnection("colliding");
+      const { agent, transport } = createTransport([batch, colliding]);
+      const sendFrom = (
+        connection: ReturnType<typeof createConnection>,
+        id: string
+      ) =>
+        agentContext.run(
+          {
+            agent,
+            connection: connection as unknown as Connection,
+            email: undefined,
+            request: undefined
+          },
+          () => transport.send({ ...result, id })
+        );
+
+      await sendFrom(batch, "same-id");
+      await sendFrom(colliding, "same-id");
+      await sendFrom(batch, "batch-only");
+
+      const finalBatchEvent = JSON.parse(
+        String(batch.send.mock.calls.at(-1)?.[0])
+      ) as { close?: boolean };
+      expect(finalBatchEvent.close).toBe(true);
+    });
   });
 
   describe("Streamable HTTP Standalone SSE (GET)", () => {
@@ -674,6 +832,210 @@ describe("Streamable HTTP Transport", () => {
       // Verify sessionId is passed through extra data
       expect(echoedData.sessionId).toBeDefined();
       expect(echoedData.sessionId).toBe(sessionId);
+    });
+  });
+
+  describe("Standalone fan-out and resume supersession", () => {
+    const makeConnection = (
+      id: string,
+      state: {
+        streamId?: string;
+        _standaloneSse?: boolean;
+        requestIds?: string[];
+      }
+    ) => ({
+      id,
+      state,
+      send: vi.fn(),
+      close: vi.fn(),
+      setState: vi.fn()
+    });
+
+    const makeTransport = (
+      connections: ReturnType<typeof makeConnection>[],
+      agentOverrides: Record<string, unknown> = {}
+    ) => {
+      const agent = {
+        deleteStreamRequestIds: vi.fn(async () => undefined),
+        getStreamRequestIds: vi.fn(async () => undefined),
+        getConnections: () => connections,
+        getSessionId: () => "session-id",
+        ...agentOverrides
+      };
+      const transport = agentContext.run(
+        {
+          agent,
+          connection: undefined,
+          email: undefined,
+          request: undefined
+        },
+        () => new StreamableHTTPServerTransport({})
+      );
+      return { agent, transport };
+    };
+
+    it("sends a server notification on exactly one standalone stream", async () => {
+      // MCP: the server MUST send each message on only one stream and
+      // MUST NOT broadcast across multiple. `handleGetRequest`
+      // supersedes prior standalone connections so only one is ever
+      // live; this asserts the send path honours that and never
+      // touches a POST bridge.
+      const standalone = makeConnection("sse-1", { _standaloneSse: true });
+      const postBridge = makeConnection("post", {
+        streamId: "post",
+        requestIds: ["r1"]
+      });
+      const { agent, transport } = makeTransport([standalone, postBridge]);
+
+      const notification: JSONRPCNotification = {
+        jsonrpc: "2.0",
+        method: "notifications/message",
+        params: { level: "info", data: "hello" }
+      };
+
+      await agentContext.run(
+        {
+          agent,
+          connection: undefined,
+          email: undefined,
+          request: undefined
+        },
+        () => transport.send(notification)
+      );
+
+      expect(standalone.send).toHaveBeenCalledOnce();
+      // The POST bridge is not a standalone stream — it must not receive it.
+      expect(postBridge.send).not.toHaveBeenCalled();
+    });
+
+    it("stores but does not write when no standalone stream is live", async () => {
+      // No `_standaloneSse` connection attached: the event is stored
+      // for replay (verified elsewhere) and no live write happens.
+      const postBridge = makeConnection("post", {
+        streamId: "post",
+        requestIds: ["r1"]
+      });
+      let stored = 0;
+      const { agent, transport } = makeTransport([postBridge]);
+      (transport as unknown as { _eventStore: unknown })._eventStore = {
+        storeEvent: async () => {
+          stored++;
+          return "_GET_stream:0";
+        }
+      };
+
+      const notification: JSONRPCNotification = {
+        jsonrpc: "2.0",
+        method: "notifications/message",
+        params: { level: "info", data: "hello" }
+      };
+
+      await agentContext.run(
+        {
+          agent,
+          connection: undefined,
+          email: undefined,
+          request: undefined
+        },
+        () => transport.send(notification)
+      );
+
+      expect(stored).toBe(1);
+      expect(postBridge.send).not.toHaveBeenCalled();
+    });
+
+    it("closes a stale POST connection when a GET resumes its stream", async () => {
+      // Behavioural change: resuming an active POST stream supersedes
+      // any prior connection bound to the same streamId by closing it,
+      // so `send()` can't route tool progress to the dead bridge.
+      const stalePost = makeConnection("stream-A", {
+        streamId: "stream-A",
+        requestIds: ["r1"]
+      });
+      const resuming = makeConnection("resume-conn", {});
+      const { agent, transport } = makeTransport([stalePost, resuming], {
+        getStreamRequestIds: vi.fn(async () => ["r1"])
+      });
+      // Resolve the resumed event id back to stream-A.
+      (transport as unknown as { _eventStore: unknown })._eventStore = {
+        getStreamIdForEventId: async () => "stream-A",
+        storeEvent: async () => "stream-A:0",
+        replayEventsAfter: async () => "stream-A"
+      };
+
+      const req = new Request("http://example.com/mcp", {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          "mcp-session-id": "session-id",
+          "last-event-id": "stream-A:0000000000000001"
+        }
+      });
+
+      await agentContext.run(
+        {
+          agent,
+          connection: resuming as unknown as Connection,
+          email: undefined,
+          request: req
+        },
+        () => transport.handleGetRequest(req)
+      );
+
+      // The stale POST bridge is superseded.
+      expect(stalePost.close).toHaveBeenCalledOnce();
+      expect(stalePost.close).toHaveBeenCalledWith(
+        1000,
+        "Superseded by resumed stream"
+      );
+      // The resuming connection is not closed.
+      expect(resuming.close).not.toHaveBeenCalled();
+      // And it claims the persisted requestIds.
+      expect(resuming.setState).toHaveBeenCalledWith(
+        expect.objectContaining({ streamId: "stream-A", requestIds: ["r1"] })
+      );
+    });
+
+    it("supersedes a prior standalone GET when a fresh GET opens", async () => {
+      // MCP allows only one standalone GET per session. A fresh GET
+      // (no Last-Event-ID) closes the prior standalone connection
+      // rather than running two in parallel.
+      const priorStandalone = makeConnection("old-get", {
+        streamId: "_GET_stream",
+        _standaloneSse: true
+      });
+      const freshGet = makeConnection("new-get", {});
+      const { agent, transport } = makeTransport([priorStandalone, freshGet]);
+
+      const req = new Request("http://example.com/mcp", {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          "mcp-session-id": "session-id"
+        }
+      });
+
+      await agentContext.run(
+        {
+          agent,
+          connection: freshGet as unknown as Connection,
+          email: undefined,
+          request: req
+        },
+        () => transport.handleGetRequest(req)
+      );
+
+      expect(priorStandalone.close).toHaveBeenCalledWith(
+        1000,
+        "Superseded by resumed stream"
+      );
+      expect(freshGet.close).not.toHaveBeenCalled();
+      expect(freshGet.setState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          streamId: "_GET_stream",
+          _standaloneSse: true
+        })
+      );
     });
   });
 });

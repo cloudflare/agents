@@ -373,7 +373,8 @@ const session = Session.create(this)
         generateText({ model: myModel, prompt }).then((r) => r.text),
       protectHead: 3, // Keep first 3 messages (default: 3)
       tailTokenBudget: 20000, // Protect ~20K tokens at the tail (default: 20000)
-      minTailMessages: 2 // Always keep at least 2 tail messages (default: 2)
+      minTailMessages: 2, // Always keep at least 2 tail messages (default: 2)
+      tokenCounter: async (messages) => estimateWithYourTokenizer({ messages })
     })
   )
   .compactAfter(100_000); // Auto-compact at 100K estimated tokens
@@ -405,9 +406,20 @@ const overlays = await session.getCompactions();
 
 When `.compactAfter(threshold)` is set, `appendMessage()` checks the estimated token count after each write. If it exceeds the threshold, `compact()` is called automatically. Auto-compaction failure is non-fatal — the message is already saved.
 
+> Auto-compaction is checked **between turns** (on each `appendMessage()`), not within a turn. A single long, tool-heavy turn can grow past the model's context window mid-flight, before the next check. `@cloudflare/think` adds opt-in mid-turn recovery on top of this — see [Context-window overflow recovery](./think/index.md#context-window-overflow-recovery).
+
 By default, the estimate includes stored message parts plus the Session-managed frozen system prompt. That means context blocks and cached prompts managed by `Session` contribute to the threshold. The estimate does not include framework-specific prompt additions or tool schema serialization that happen outside `Session`, such as Think's final capability prompt and tool catalog.
 
-Use `tokenCounter` when you have model-reported usage or your own tokenizer:
+There are two token-counting decisions:
+
+- `.compactAfter(threshold, { tokenCounter })` controls when automatic compaction is triggered after writes. It can include the frozen system prompt and context blocks.
+- `createCompactFunction({ tokenCounter })` controls which tail messages are protected from summarization. Use this when tool-heavy histories are much larger than the Workers-safe heuristic can estimate.
+
+You usually only need to configure one counter. The `.compactAfter()` counter now also flows into `createCompactFunction`'s boundary walk (via `CompactContext`) when no explicit `createCompactFunction({ tokenCounter })` is given, so a single counter drives both "should we compact?" and "what should we compact?". Without this, a fire-only counter plus the under-counting heuristic could make compaction trigger every turn but silently no-op on tool-heavy histories (fixed in [#1593](https://github.com/cloudflare/agents/issues/1593)).
+
+Caveat: the flowed counter is invoked **per message** during the boundary walk. A tokenizer-style counter budgets accurately; a usage-only counter that returns a fixed whole-prompt total (e.g. `usage.inputTokens` regardless of which messages are passed) degrades the tail budget to `minTailMessages` — compaction still runs and context stays bounded, but the byte budget is effectively ignored. Pass an explicit per-message `createCompactFunction({ tokenCounter })` for precise tail budgeting.
+
+Use a custom counter when you have model-reported usage or your own tokenizer:
 
 ```typescript
 const session = Session.create(this)

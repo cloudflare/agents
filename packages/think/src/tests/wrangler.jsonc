@@ -32,6 +32,10 @@
         "name": "LoopToolTestAgent"
       },
       {
+        "class_name": "OverflowRecoveryTestAgent",
+        "name": "OverflowRecoveryTestAgent"
+      },
+      {
         "class_name": "ThinkTestAgent",
         "name": "ThinkTestAgent"
       },
@@ -98,6 +102,10 @@
       {
         "class_name": "ThinkExtensionHookAgent",
         "name": "ThinkExtensionHookAgent"
+      },
+      {
+        "class_name": "ThinkMessengerRouteTestAgent",
+        "name": "ThinkMessengerRouteTestAgent"
       }
     ]
   },
@@ -111,6 +119,7 @@
         "BareAssistantAgent",
         "LoopTestAgent",
         "LoopToolTestAgent",
+        "OverflowRecoveryTestAgent",
         "ThinkTestAgent",
         "ThinkToolsTestAgent",
         "ThinkFiberTestAgent",
@@ -126,7 +135,9 @@
         "ThinkRecoveryTestAgent",
         "ThinkNonRecoveryTestAgent",
         "ThinkAgentToolParent",
-        "ThinkExtensionHookAgent"
+        "StuckThinkAgentToolChild",
+        "ThinkExtensionHookAgent",
+        "ThinkMessengerRouteTestAgent"
       ],
       "tag": "v1"
     }

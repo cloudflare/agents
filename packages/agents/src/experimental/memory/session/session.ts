@@ -6,6 +6,7 @@ import type { ToolSet } from "ai";
 import type { SessionProvider, StoredCompaction } from "./provider";
 import type {
   CompactAfterOptions,
+  CompactContext,
   CompactionErrorHandler,
   SessionMessage,
   SessionOptions,
@@ -74,8 +75,12 @@ export class Session {
   private _pending?: PendingContext[];
   private _cachedPrompt?: WritableContextProvider | true;
   private _compactionFn?:
-    | ((messages: SessionMessage[]) => Promise<CompactResult | null>)
+    | ((
+        messages: SessionMessage[],
+        context?: CompactContext
+      ) => Promise<CompactResult | null>)
     | null;
+  private _warnedCompactionNoOp = false;
   private _tokenThreshold?: number;
   private _tokenCounter?: SessionTokenCounter;
   private _compactionErrorHandler?: CompactionErrorHandler;
@@ -167,7 +172,10 @@ export class Session {
    * message history into a summary overlay.
    */
   onCompaction(
-    fn: (messages: SessionMessage[]) => Promise<CompactResult | null>
+    fn: (
+      messages: SessionMessage[],
+      context?: CompactContext
+    ) => Promise<CompactResult | null>
   ): this {
     this._compactionFn = fn;
     return this;
@@ -534,6 +542,22 @@ export class Session {
     ) {
       try {
         compacted = Boolean(await this.compact());
+        if (!compacted && !this._warnedCompactionNoOp) {
+          // The trigger fired (over threshold) but the compaction function
+          // returned null — history was not shortened, so this will fire again
+          // next turn. Most often the boundary heuristic under-counts a
+          // tool-heavy history; surface it once instead of looping silently.
+          this._warnedCompactionNoOp = true;
+          console.warn(
+            `[Session] Auto-compaction fired (~${tokenEstimate} tokens > ${this._tokenThreshold}) but the compaction function returned null, so history was not shortened. ` +
+              (this._tokenCounter
+                ? `A tokenCounter is configured and now flows to the boundary logic, but it is invoked per-message there — a whole-prompt/usage counter (e.g. returning a fixed usage.inputTokens regardless of which messages are passed) degrades the tail budget to minTailMessages and can still no-op. Pass a per-message CompactOptions.tokenCounter for precise tail budgeting.`
+                : `If your history is tool-heavy, configure a tokenCounter on compactAfter() — it flows to createCompactFunction's boundary logic automatically.`)
+          );
+        } else if (compacted) {
+          // Re-arm the one-time warning so a later regression is surfaced again.
+          this._warnedCompactionNoOp = false;
+        }
       } catch (err) {
         // Auto-compact failure is non-fatal — message is already appended
         await this._handleAutoCompactionError(err);
@@ -605,7 +629,13 @@ export class Session {
 
     let result: CompactResult | null;
     try {
-      result = await this._compactionFn(await this.getHistory());
+      // Pass the Session's authoritative token counter so the compaction
+      // function's boundary logic can use the same accounting as the
+      // fire/no-fire decision (see CompactContext). The function still wins if
+      // it was given its own explicit counter.
+      result = await this._compactionFn(await this.getHistory(), {
+        tokenCounter: this._tokenCounter
+      });
     } catch (err) {
       this._emitError(err instanceof Error ? err.message : String(err));
       return null;

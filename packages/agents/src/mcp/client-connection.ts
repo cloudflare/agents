@@ -252,19 +252,26 @@ export class MCPClientConnection {
   /**
    * Complete OAuth authorization
    */
-  async completeAuthorization(code: string): Promise<void> {
-    if (this.connectionState !== MCPConnectionState.AUTHENTICATING) {
+  async completeAuthorization(
+    code: string,
+    options: { alreadyAccepted?: boolean } = {}
+  ): Promise<void> {
+    const expectedState = options.alreadyAccepted
+      ? MCPConnectionState.CONNECTING
+      : MCPConnectionState.AUTHENTICATING;
+    if (this.connectionState !== expectedState) {
       throw new Error(
-        "Connection must be in authenticating state to complete authorization"
+        `Connection must be in ${expectedState} state to complete authorization`
       );
+    }
+
+    if (!options.alreadyAccepted) {
+      this.connectionState = MCPConnectionState.CONNECTING;
     }
 
     try {
       // Finish OAuth by probing transports per configuration
       await this.finishAuthProbe(code);
-
-      // Mark as connecting
-      this.connectionState = MCPConnectionState.CONNECTING;
     } catch (error) {
       this.connectionState = MCPConnectionState.FAILED;
       throw error;

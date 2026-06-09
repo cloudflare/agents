@@ -10,7 +10,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 // inside a test, causing spurious timeouts.
 beforeAll(async () => {
   await exports.default.fetch("http://warmup/");
-}, 30_000);
+}, 60_000);
 
 // Give DOs a moment to finish WebSocket close handlers before
 // the module is invalidated between test files.

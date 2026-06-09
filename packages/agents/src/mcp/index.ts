@@ -67,22 +67,14 @@ export abstract class McpAgent<
   }
 
   /**
-   * Storage key prefix for the `streamId -> requestIds` mapping used to
-   * support POST stream resumption across WebSocket reconnects. See
-   * {@link StreamableHTTPServerTransport.handleGetRequest}.
+   * Storage key prefix for the `streamId -> requestIds` mapping used
+   * to support POST stream resumption across WebSocket reconnects.
    *
    * @internal
    */
   private static readonly STREAM_REQS_KEY_PREFIX = "__mcp_stream_reqs__:";
 
-  /**
-   * Persist the `requestIds` belonging to a POST tool-call stream so a
-   * future GET reconnect (carrying `Last-Event-ID`) can restore them
-   * onto a fresh WebSocket connection. Internal — used by the streamable
-   * HTTP transport.
-   *
-   * @internal
-   */
+  /** Persist the `requestIds` for a POST stream. @internal */
   async setStreamRequestIds(
     streamId: string,
     requestIds: RequestId[]
@@ -93,12 +85,7 @@ export abstract class McpAgent<
     );
   }
 
-  /**
-   * Read the persisted `requestIds` for a POST stream, or `undefined`
-   * if the stream has already completed (or never existed). Internal.
-   *
-   * @internal
-   */
+  /** Read the persisted `requestIds` for a POST stream. @internal */
   async getStreamRequestIds(
     streamId: string
   ): Promise<RequestId[] | undefined> {
@@ -107,15 +94,55 @@ export abstract class McpAgent<
     );
   }
 
-  /**
-   * Drop the persisted `requestIds` for a POST stream. Internal.
-   *
-   * @internal
-   */
+  /** Drop the persisted `requestIds` for a POST stream. @internal */
   async deleteStreamRequestIds(streamId: string): Promise<void> {
     await this.ctx.storage.delete(
       `${McpAgent.STREAM_REQS_KEY_PREFIX}${streamId}`
     );
+  }
+
+  /**
+   * Reverse lookup: find which POST stream a given `requestId` belongs
+   * to, and return the stream's full `requestIds` list in the same
+   * pass. Used by the transport when the originating WS has dropped,
+   * so `send()` can still record events for replay and decide whether
+   * the stream is fully responded — mirrors the SDK's
+   * `_requestToStreamMapping` which outlives connection loss.
+   *
+   * Returning `requestIds` alongside `streamId` lets `send()` skip a
+   * second `getStreamRequestIds` read on the same key.
+   *
+   * O(n) in the number of in-flight POST streams — single-digit in
+   * practice since each stream is cleaned up on its final response.
+   * The `limit` is a defensive ceiling so an abandoned-POST leak can't
+   * unbounded-load this scan; if you hit it, something else has gone
+   * wrong and `send()` will throw `No active stream found`.
+   *
+   * @internal
+   */
+  async getStreamForRequestId(
+    requestId: RequestId
+  ): Promise<{ streamId: string; requestIds: RequestId[] } | undefined> {
+    const STREAM_REQS_SCAN_LIMIT = 1000;
+    const rows = await this.ctx.storage.list<RequestId[]>({
+      prefix: McpAgent.STREAM_REQS_KEY_PREFIX,
+      limit: STREAM_REQS_SCAN_LIMIT
+    });
+    if (rows.size === STREAM_REQS_SCAN_LIMIT) {
+      console.warn(
+        `McpAgent: getStreamForRequestId hit the ${STREAM_REQS_SCAN_LIMIT}-key scan cap; ` +
+          `stale __mcp_stream_reqs__ entries may be accumulating from abandoned POSTs`
+      );
+    }
+    for (const [key, requestIds] of rows) {
+      if (requestIds?.includes(requestId)) {
+        return {
+          streamId: key.slice(McpAgent.STREAM_REQS_KEY_PREFIX.length),
+          requestIds
+        };
+      }
+    }
+    return undefined;
   }
 
   /** Read the transport type for this agent.
@@ -179,59 +206,21 @@ export abstract class McpAgent<
   }
 
   /**
-   * Returns the {@link EventStore} used for SSE resumability on the streamable
-   * HTTP transport. Defaults to a {@link DurableObjectEventStore} backed by
-   * this agent's storage, which lets clients reconnect with `Last-Event-ID`
-   * after the Cloudflare edge closes an idle SSE stream (~5 minute watchdog)
-   * instead of relying on a server-side keepalive that would block DO
-   * hibernation.
+   * Returns the {@link EventStore} for SSE resumability. Defaults to a
+   * {@link DurableObjectEventStore} backed by this agent's storage,
+   * letting clients reconnect with `Last-Event-ID` after the Cloudflare
+   * edge closes an idle SSE stream (~5 minute watchdog) instead of
+   * relying on a server-side keepalive that would block hibernation.
    *
-   * Override to disable resumability (`return undefined`) or to plug in a
-   * different store.
+   * Per-stream events are cleared by the transport immediately after
+   * the final response is written to the wire, so there's no
+   * background cleanup — storage cost is bounded by the in-flight
+   * streams alone.
+   *
+   * Override to disable (`return undefined`) or swap implementations.
    */
   protected getEventStore(): EventStore | undefined {
     return new DurableObjectEventStore(this.ctx.storage);
-  }
-
-  /**
-   * Maximum age (in milliseconds) of an event in the SSE event store.
-   * Events older than this are dropped by the periodic sweep scheduled in
-   * {@link onStart}. Default 24 hours — generous enough for clients to
-   * reconnect with `Last-Event-ID` after long pauses, while still bounding
-   * storage growth from abandoned POST streams whose clients never
-   * returned.
-   *
-   * Override (in conjunction with {@link getEventStore}) to customise.
-   * Return `Infinity` to disable the sweep.
-   */
-  protected getEventStoreMaxAgeMs(): number {
-    return 24 * 60 * 60 * 1000; // 24 hours
-  }
-
-  /**
-   * Cron expression for the recurring sweep that prunes expired SSE events
-   * from the default {@link DurableObjectEventStore}. Default: every hour,
-   * at minute 0. Override to change the cadence; return `undefined` to
-   * disable scheduling entirely.
-   */
-  protected getEventStoreSweepCron(): string | undefined {
-    return "0 * * * *";
-  }
-
-  /**
-   * Scheduled callback that prunes expired events from the default
-   * {@link DurableObjectEventStore}. Wired up by {@link onStart}; not
-   * intended to be called directly.
-   *
-   * @internal
-   */
-  async _cf_sweepEventStore(): Promise<void> {
-    if (!(this._transport instanceof StreamableHTTPServerTransport)) return;
-    const store = (this._transport as StreamableHTTPServerTransport).eventStore;
-    if (!(store instanceof DurableObjectEventStore)) return;
-    const maxAgeMs = this.getEventStoreMaxAgeMs();
-    if (!Number.isFinite(maxAgeMs)) return;
-    await store.sweep(maxAgeMs);
   }
 
   /** Returns a new transport matching the type of the Agent. */
@@ -296,21 +285,6 @@ export abstract class McpAgent<
     await server.connect(this._transport);
 
     await this.reinitializeServer();
-
-    // Schedule a recurring sweep of the default event store. `idempotent`
-    // means re-running onStart after hibernation/restart won't enqueue
-    // duplicates. No-op if the user has disabled the sweep by returning
-    // undefined from getEventStoreSweepCron().
-    const cron = this.getEventStoreSweepCron();
-    if (
-      cron &&
-      this._transport instanceof StreamableHTTPServerTransport &&
-      this._transport.eventStore instanceof DurableObjectEventStore
-    ) {
-      await this.schedule(cron, "_cf_sweepEventStore", undefined, {
-        idempotent: true
-      });
-    }
   }
 
   /** Validates new WebSocket connections. */
@@ -684,6 +658,7 @@ export {
 export { getMcpAuthContext, type McpAuthContext } from "./auth-context";
 
 export { DurableObjectEventStore } from "./event-store";
+export type { ClearableEventStore } from "./transport";
 
 export {
   WorkerTransport,

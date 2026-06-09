@@ -231,3 +231,158 @@ describe("Think — onConnect broadcast policy", () => {
     await closeWS(ws);
   });
 });
+
+// #1645: a turn that terminalizes (recovery exhaustion / interruption) while no
+// client is connected must be surfaced to a client that reconnects afterward.
+// Think records the outcome durably, but currently only replays it as a RAW
+// `cf_agent_use_chat_response` frame in `_buildIdleConnectMessages` on connect —
+// which the shared `useAgentChat` client DROPS (it never reaches a transport
+// stream reader, so it never becomes `useChat.error`). The only path that
+// surfaces on the real client is the resume handshake: STREAM_RESUMING → ACK →
+// error frame on the resumed stream (this is what `@cloudflare/ai-chat` does).
+// This test drives the exact reconnect probe the real client sends and asserts
+// the terminal is delivered over that handshake.
+describe("Think — terminal replay on reconnect (#1645)", () => {
+  const MSG_STREAM_RESUME_REQUEST = "cf_agent_stream_resume_request";
+  const TERMINAL = "Recovery exhausted — the assistant could not finish.";
+
+  it("delivers the terminal over the resume handshake to a client that reconnects after it ended", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+
+    // A turn terminalized while no client was connected.
+    await (
+      agent as unknown as {
+        recordTerminalForTest: (id: string, body: string) => Promise<void>;
+      }
+    ).recordTerminalForTest("root-think", TERMINAL);
+
+    const { ws } = await connectWS(room);
+
+    const received: Array<Record<string, unknown>> = [];
+    let resumingId: string | null = null;
+    const terminalViaHandshake = await new Promise<Record<
+      string,
+      unknown
+    > | null>((resolve) => {
+      let acked = false;
+      const timer = setTimeout(() => resolve(null), 1500);
+      ws.addEventListener("message", (e: MessageEvent) => {
+        let frame: Record<string, unknown>;
+        try {
+          frame = JSON.parse(e.data as string) as Record<string, unknown>;
+        } catch {
+          return;
+        }
+        received.push(frame);
+        if (frame.type === MSG_STREAM_RESUMING) {
+          resumingId = frame.id as string;
+          acked = true;
+          ws.send(
+            JSON.stringify({ type: MSG_STREAM_RESUME_ACK, id: frame.id })
+          );
+        }
+        // Only count a terminal error frame delivered AFTER the resume
+        // handshake — the raw on-connect frame is dropped by the real client.
+        if (
+          acked &&
+          frame.type === MSG_CHAT_RESPONSE &&
+          frame.error === true &&
+          frame.done === true
+        ) {
+          clearTimeout(timer);
+          resolve(frame);
+        }
+      });
+
+      ws.send(JSON.stringify({ type: MSG_STREAM_RESUME_REQUEST }));
+    });
+
+    await closeWS(ws);
+
+    expect(
+      resumingId,
+      `expected STREAM_RESUMING for the terminal on reconnect; received frame types: ${JSON.stringify(
+        received.map((m) => m.type)
+      )}`
+    ).toBe("root-think");
+    expect(terminalViaHandshake?.body).toBe(TERMINAL);
+  });
+
+  it("drops the terminal record when the conversation is cleared", async () => {
+    const room = crypto.randomUUID();
+    const agent = (await freshAgent(room)) as unknown as {
+      recordTerminalForTest: (id: string, body: string) => Promise<void>;
+      getPendingChatTerminalForTest: () => Promise<{
+        requestId: string;
+        body: string;
+      } | null>;
+      clearMessages: () => Promise<void>;
+    };
+
+    await agent.recordTerminalForTest("root-clear", TERMINAL);
+    expect(await agent.getPendingChatTerminalForTest()).toMatchObject({
+      body: TERMINAL
+    });
+
+    // Clearing the conversation must also drop the terminal record, otherwise a
+    // stale exhaustion would replay onto the now-empty chat on reconnect (#1645).
+    await agent.clearMessages();
+    expect(await agent.getPendingChatTerminalForTest()).toBeNull();
+  });
+
+  it("eagerly drops the terminal record when a new turn is submitted, before it streams (#1645)", async () => {
+    const room = crypto.randomUUID();
+    const agent = (await freshAgent(room)) as unknown as {
+      recordTerminalForTest: (id: string, body: string) => Promise<void>;
+      getPendingChatTerminalForTest: () => Promise<{
+        requestId: string;
+        body: string;
+      } | null>;
+      setBeforeStepAsyncDelay: (ms: number) => Promise<void>;
+    };
+
+    // A previous turn failed terminally.
+    await agent.recordTerminalForTest("root-old", TERMINAL);
+    // Park the NEW turn indefinitely at its first step so it never reaches
+    // completion during this test. This isolates the eager submit-time clear
+    // from the turn-completion clear: any observed clear must come from the
+    // submit path, not from the new turn finishing.
+    await agent.setBeforeStepAsyncDelay(60_000);
+
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 100); // drain the on-connect frames
+
+    // Submit a genuinely-new turn. The user hasn't waited for it to stream.
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_use_chat_request",
+        id: "root-new",
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [
+              {
+                id: "u-new",
+                role: "user",
+                parts: [{ type: "text", text: "hi" }]
+              }
+            ]
+          })
+        }
+      })
+    );
+
+    // The eager clear lands at submit time, while the new turn is still parked
+    // in `beforeStep`. Without it, a reconnecting tab in this window would
+    // replay `root-old`'s stale exhaustion over the resume handshake.
+    let pending = await agent.getPendingChatTerminalForTest();
+    for (let i = 0; i < 50 && pending !== null; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      pending = await agent.getPendingChatTerminalForTest();
+    }
+    expect(pending).toBeNull();
+
+    await closeWS(ws);
+  });
+});

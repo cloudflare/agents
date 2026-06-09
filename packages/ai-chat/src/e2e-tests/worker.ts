@@ -20,6 +20,15 @@ type Env = {
   ChatRecoveryTestAgent: DurableObjectNamespace<ChatRecoveryTestAgent>;
 };
 
+type RecoveryContextLogEntry = {
+  streamId: string;
+  requestId: string;
+  partialText: string;
+  recoveryData: unknown;
+};
+
+const RECOVERY_CONTEXTS_KEY = "test:recovery-contexts";
+
 function makeSSEStream(
   chunks: Array<{ type: string; [k: string]: unknown }>,
   delayMs: number
@@ -43,13 +52,6 @@ function makeSSEStream(
 export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
   override chatRecovery = true;
-
-  recoveryContexts: Array<{
-    streamId: string;
-    requestId: string;
-    partialText: string;
-    recoveryData: unknown;
-  }> = [];
 
   override async onChatMessage(
     _onFinish: unknown,
@@ -77,17 +79,22 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   override async onChatRecovery(
     ctx: ChatRecoveryContext
   ): Promise<ChatRecoveryOptions> {
-    this.recoveryContexts.push({
+    const contexts =
+      (await this.ctx.storage.get<RecoveryContextLogEntry[]>(
+        RECOVERY_CONTEXTS_KEY
+      )) ?? [];
+    contexts.push({
       streamId: ctx.streamId,
       requestId: ctx.requestId,
       partialText: ctx.partialText,
       recoveryData: ctx.recoveryData
     });
+    await this.ctx.storage.put(RECOVERY_CONTEXTS_KEY, contexts);
     return {};
   }
 
   @callable()
-  getRecoveryStatus(): {
+  async getRecoveryStatus(): Promise<{
     recoveryCount: number;
     contexts: Array<{
       streamId: string;
@@ -97,13 +104,17 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     }>;
     messageCount: number;
     assistantMessages: number;
-  } {
+  }> {
     const assistantMsgs = this.messages.filter(
       (m: ChatMessage) => m.role === "assistant"
     );
+    const contexts =
+      (await this.ctx.storage.get<RecoveryContextLogEntry[]>(
+        RECOVERY_CONTEXTS_KEY
+      )) ?? [];
     return {
-      recoveryCount: this.recoveryContexts.length,
-      contexts: this.recoveryContexts,
+      recoveryCount: contexts.length,
+      contexts,
       messageCount: this.messages.length,
       assistantMessages: assistantMsgs.length
     };

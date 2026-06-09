@@ -263,10 +263,12 @@ export class Assistant extends Think<Env> {
 ```
 
 For deterministic fan-out, call `this.runAgentTool(Researcher, { input })`
-directly. In React, use `useAgentToolEvents({ agent })` to render retained and
-replayed child timelines. AIChatAgent children run headlessly, so browser
-client tools require a separate bridge; server-side tools work normally. See
-the full [Agent Tools guide](../../docs/agent-tools.md).
+directly. Parent recovery reconciles stale child rows after restarts and marks
+unrecoverable runs `interrupted` instead of hanging. In React, use
+`useAgentToolEvents({ agent })` to render retained and replayed child timelines.
+AIChatAgent children run headlessly, so browser client tools require a separate
+bridge; server-side tools work normally. See the full
+[Agent Tools guide](../../docs/agent-tools.md).
 
 ### WebSocket Connections
 

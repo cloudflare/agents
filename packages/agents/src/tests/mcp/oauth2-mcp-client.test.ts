@@ -630,7 +630,7 @@ describe("OAuth2 MCP Client - Multiple Servers", () => {
 });
 
 describe("OAuth2 MCP Client - State Security", () => {
-  it("should reject reused state (single-use enforcement)", async () => {
+  it("should treat reused state as stale success after auth is already complete", async () => {
     const agentId = env.TestOAuthAgent.newUniqueId();
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
@@ -665,9 +665,9 @@ describe("OAuth2 MCP Client - State Security", () => {
     const response2 = await agentStub.fetch(
       new Request(`${callbackUrl}?code=test-code&state=${state}`)
     );
-    expect(response2.status).toBeGreaterThanOrEqual(400);
-    const body = (await response2.json()) as { error: string };
-    expect(body.error).toContain("State not found or already used");
+    expect(response2.status).toBe(200);
+    const body = (await response2.json()) as { success: boolean };
+    expect(body.success).toBe(true);
   });
 
   it("should reject state with mismatched serverId", async () => {
@@ -747,6 +747,7 @@ describe("OAuth2 MCP Client - Custom Handler", () => {
       callbackUrl,
       "client-id"
     );
+    await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
     const state = await createStateWithSetup(agentStub, serverId);
     const response = await agentStub.fetch(
@@ -789,6 +790,7 @@ describe("OAuth2 MCP Client - Custom Handler", () => {
       callbackUrl,
       "client-id"
     );
+    await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
     const state = await createStateWithSetup(agentStub, serverId);
     // Send OAuth error

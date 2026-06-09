@@ -1562,6 +1562,116 @@ describe("SubAgent", () => {
         ws.close();
       }
     });
+
+    // ── issue #1677: a facet must never touch the ROOT DO's sockets ──
+    //
+    // In production, a facet's `getConnections()`/`getConnection()` falling
+    // through to `super.*` resolves to the HOST/ROOT DO's hibernatable
+    // WebSockets; reading them from the facet's I/O context throws
+    // "Cannot perform I/O on behalf of a different Durable Object (Native)".
+    // These tests assert the behavioral invariant (a facet only sees its own
+    // virtual connections) which is what prevents that crash. Note the native
+    // crash itself only manifests on deployed workerd, not in miniflare, so
+    // these guard the invariant rather than reproducing the raw I/O error.
+
+    it("a facet's getConnections() excludes the ROOT's direct connections", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      // ROOT holds a live direct WebSocket connection.
+      const ws = await connectWS(`/agents/test-sub-agent-parent/${parentName}`);
+      try {
+        const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+        // Sanity: the ROOT itself sees its own direct connection.
+        expect(await parent.connectionCount()).toBeGreaterThanOrEqual(1);
+        const rootConnId = await parent.firstConnectionId();
+        expect(rootConnId).not.toBeNull();
+
+        // The facet must NOT see the root's connection (and must not throw).
+        const ids = await parent.subAgentConnectionIds(childName);
+        expect(ids).toEqual([]);
+        expect(await parent.subAgentConnectionCount(childName)).toBe(0);
+
+        // getConnection(rootConnId) on the facet must not resolve the root's
+        // connection either.
+        expect(
+          await parent.subAgentHasConnection(childName, rootConnId as string)
+        ).toBe(false);
+      } finally {
+        ws.close();
+      }
+    });
+
+    it("a facet can setState while the ROOT holds a live connection", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const ws = await connectWS(`/agents/test-sub-agent-parent/${parentName}`);
+      try {
+        const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+        const result = await parent.subAgentTrySetState(childName, 7, "io");
+        expect(result.error).toBe("");
+        expect(result.persistedCount).toBe(7);
+        expect(result.persistedMsg).toBe("io");
+      } finally {
+        ws.close();
+      }
+    });
+
+    it("a facet can broadcast while the ROOT holds a live connection", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const ws = await connectWS(`/agents/test-sub-agent-parent/${parentName}`);
+      try {
+        const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+        const error = await parent.subAgentTryBroadcast(childName, "hi");
+        expect(error).toBe("");
+      } finally {
+        ws.close();
+      }
+    });
+
+    it("delivers facet state updates to the sub-agent's own client even when the ROOT also holds a connection", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      // ROOT direct connection AND a client connected directly to the facet.
+      const rootWs = await connectWS(
+        `/agents/test-sub-agent-parent/${parentName}`
+      );
+      const childWs = await connectWS(
+        `/agents/test-sub-agent-parent/${parentName}/sub/broadcast-sub-agent/${childName}`
+      );
+      try {
+        await waitForJsonMessage<{
+          type: MessageType;
+          state?: { count: number; lastMsg: string };
+        }>(
+          childWs,
+          (data) =>
+            data.type === MessageType.CF_AGENT_STATE && data.state?.count === 0
+        );
+
+        const stateUpdatePromise = waitForJsonMessage<{
+          type: MessageType;
+          state?: { count: number; lastMsg: string };
+        }>(
+          childWs,
+          (data) =>
+            data.type === MessageType.CF_AGENT_STATE && data.state?.count === 99
+        );
+
+        const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+        const result = await parent.subAgentTrySetState(childName, 99, "both");
+        expect(result.error).toBe("");
+
+        // The facet's own client still receives the broadcast — virtual
+        // connections are preserved by the #1677 fix.
+        const update = await stateUpdatePromise;
+        expect(update.state).toEqual({ count: 99, lastMsg: "both" });
+      } finally {
+        rootWs.close();
+        childWs.close();
+      }
+    });
   });
 
   // ── parentPath / selfPath / hasSubAgent / listSubAgents ────────────

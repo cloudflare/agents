@@ -49,10 +49,14 @@ export class AbortRegistry {
     this.controllers.delete(id);
   }
 
-  /** Abort all pending requests and clear the registry. */
-  destroyAll(): void {
+  /**
+   * Abort all pending requests and clear the registry. Optionally propagate a
+   * reason — surfaces as `signal.reason` on each controller and through any
+   * `AbortError` it produces downstream, exactly like {@link cancel}.
+   */
+  destroyAll(reason?: unknown): void {
     for (const controller of this.controllers.values()) {
-      controller.abort();
+      controller.abort(reason);
     }
     this.controllers.clear();
   }

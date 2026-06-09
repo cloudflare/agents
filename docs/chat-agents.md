@@ -600,6 +600,10 @@ export class ChatAgent extends AIChatAgent {
 
 When enabled, every `onChatMessage` call runs inside a fiber. If the agent is evicted mid-stream, the fiber row survives in SQLite. On the next activation, the framework detects the interrupted fiber, reconstructs the partial response from buffered stream chunks, and calls `onChatRecovery`.
 
+`AIChatAgent` defaults `chatRecovery` to `false` so existing chat agents only get client reconnect/resumable-stream behavior. `Think` defaults it to `true`.
+
+> **Assign `chatRecovery` as a class field or in the constructor — never in `onStart()`.** On every wake the SDK evaluates recovery budgets (and may seal an interrupted turn, firing `onExhausted`) _before_ your `onStart()` body runs. A config produced inside `onStart()` is therefore read as the built-in defaults at the moment recovery decides, so your `maxRecoveryWork` / `shouldKeepRecovering` / `onExhausted` silently never apply to the recovery that matters. The SDK logs a one-time warning if it detects `chatRecovery` being assigned during `onStart()`.
+
 #### `onChatRecovery`
 
 Override to implement provider-specific recovery. The default behavior persists the partial response and schedules a continuation via `continueLastTurn()`.
@@ -622,17 +626,21 @@ export class ChatAgent extends AIChatAgent {
 
 **`ChatRecoveryContext`:**
 
-| Field             | Type                                   | Description                                                           |
-| ----------------- | -------------------------------------- | --------------------------------------------------------------------- |
-| `streamId`        | `string`                               | ID of the interrupted stream                                          |
-| `requestId`       | `string`                               | ID of the original chat request                                       |
-| `partialText`     | `string`                               | Text generated before eviction                                        |
-| `partialParts`    | `MessagePart[]`                        | Message parts (text, reasoning, tool calls) generated before eviction |
-| `recoveryData`    | `unknown \| null`                      | Data from `this.stash()` — entirely user-controlled                   |
-| `messages`        | `ChatMessage[]`                        | Full conversation history                                             |
-| `lastBody`        | `Record<string, unknown> \| undefined` | The original request body                                             |
-| `lastClientTools` | `ClientToolSchema[] \| undefined`      | Client tool schemas from the original request                         |
-| `createdAt`       | `number`                               | Epoch milliseconds when the underlying fiber started                  |
+| Field             | Type                                   | Description                                                                              |
+| ----------------- | -------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `incidentId`      | `string`                               | Stable ID for this recovery incident                                                     |
+| `attempt`         | `number`                               | Current attempt number for this incident, starting at 1                                  |
+| `maxAttempts`     | `number`                               | Configured attempt cap before terminal exhaustion                                        |
+| `recoveryKind`    | `"retry" \| "continue"`                | Whether recovery will retry an unanswered user turn or continue a partial assistant turn |
+| `streamId`        | `string`                               | ID of the interrupted stream                                                             |
+| `requestId`       | `string`                               | ID of the original chat request                                                          |
+| `partialText`     | `string`                               | Text generated before eviction                                                           |
+| `partialParts`    | `MessagePart[]`                        | Message parts (text, reasoning, tool calls) generated before eviction                    |
+| `recoveryData`    | `unknown \| null`                      | Data from `this.stash()` — entirely user-controlled                                      |
+| `messages`        | `ChatMessage[]`                        | Full conversation history                                                                |
+| `lastBody`        | `Record<string, unknown> \| undefined` | The original request body                                                                |
+| `lastClientTools` | `ClientToolSchema[] \| undefined`      | Client tool schemas from the original request                                            |
+| `createdAt`       | `number`                               | Epoch milliseconds when the underlying fiber started                                     |
 
 **`ChatRecoveryOptions`:**
 
@@ -645,9 +653,99 @@ Common return values:
 
 - `{}` — persist partial + auto-continue (default, works with providers that support assistant prefill)
 - `{ continue: false }` — persist partial but do not auto-continue (handle continuation yourself)
-- `{ persist: false, continue: false }` — handle everything yourself (e.g., retrieve a completed response from the provider)
+- `{ persist: false, continue: false }` — do not persist the unsettled remainder and handle everything yourself (e.g., retrieve a completed response from the provider)
+
+Settled work is never dropped: `persist: false` only suppresses persistence of a partial that has nothing settled to lose. A partial that already carries settled tool results (completed, often non-idempotent work) is persisted regardless, so an app cannot accidentally discard completed tool calls — and never needs `{ persist: true }` just to stay safe.
 
 When recovery happens before any stream chunks were written, there is no partial assistant message to continue. If the latest persisted message is still the unanswered user message from the interrupted turn, the framework retries that turn automatically unless `continue` is `false`.
+
+`chatRecovery` can also be configured with budgets and terminal behavior:
+
+```typescript
+override chatRecovery = {
+  maxAttempts: 10,
+  stableTimeoutMs: 10_000,
+  terminalMessage: "The assistant was interrupted and could not recover.",
+  // Primary stuck-turn bound. Resets on every progress-bearing attempt, so a
+  // turn that keeps producing content survives unbounded interruption.
+  noProgressTimeoutMs: 5 * 60 * 1000,
+  // Runaway-loop guard. Defaults to Infinity (no cap). Set a finite value to
+  // seal a turn that keeps emitting content but never converges.
+  maxRecoveryWork: 200,
+  // Caller policy consulted from the second recovery attempt onward. Return
+  // false to stop recovery. This is where you enforce a token/cost budget.
+  // Note: this is called as `config.shouldKeepRecovering(ctx)`, so it is not
+  // bound to the agent instance — track spend in your own store keyed by the
+  // incident.
+  async shouldKeepRecovering(ctx) {
+    return (await getSpendForTurn(ctx.recoveryRootRequestId)) < MAX_SPEND;
+  },
+  async onExhausted(ctx) {
+    console.warn("Chat recovery exhausted", ctx.incidentId, ctx.reason);
+  }
+};
+```
+
+**`chatRecovery` configuration:**
+
+| Field                  | Default           | Description                                                                                                                                                                                                                                                                                                |
+| ---------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `maxAttempts`          | `10`              | Attempt cap before terminal exhaustion. Resets on forward progress, so it catches a tight no-progress alarm loop, not a healthy long turn.                                                                                                                                                                 |
+| `stableTimeoutMs`      | `10_000`          | How long a recovery attempt waits for the isolate to reach stable state before rescheduling.                                                                                                                                                                                                               |
+| `terminalMessage`      | generic message   | The message shown to the user when recovery is given up on.                                                                                                                                                                                                                                                |
+| `noProgressTimeoutMs`  | `300_000` (5 min) | Primary stuck-turn bound: how long an incident may go without forward progress before it is sealed (`no_progress_timeout`). **Resets on every progress-bearing attempt**, so a turn that keeps producing content survives unbounded interruption.                                                          |
+| `maxRecoveryWork`      | `Infinity`        | Runaway-loop guard. Maximum produced content/tool units since the incident began before a still-progressing turn is sealed. Defaults to no cap.                                                                                                                                                            |
+| `shouldKeepRecovering` | —                 | Caller policy consulted from the second recovery attempt onward (never on the first detection, never once a hard bound has sealed the incident). Return `false` to stop recovery. The hook point for a token/cost budget — `ctx.work` is a coarse segment count, not tokens, so track real spend yourself. |
+| `onExhausted`          | —                 | Called once when recovery is given up on, before the terminal message is delivered. Inspect `ctx.reason` for why.                                                                                                                                                                                          |
+
+**`ChatRecoveryProgressContext`** (the `ctx` passed to `shouldKeepRecovering`):
+
+| Field                   | Type                    | Description                                                                                       |
+| ----------------------- | ----------------------- | ------------------------------------------------------------------------------------------------- |
+| `incidentId`            | `string`                | Stable ID for this recovery incident.                                                             |
+| `requestId`             | `string`                | Request ID for the current continuation (changes per chained continuation).                       |
+| `recoveryRootRequestId` | `string`                | Stable ID for the whole continuation chain — the right key for per-incident budget tracking.      |
+| `attempt`               | `number`                | Attempt number for this incident (2 or greater when this hook runs).                              |
+| `maxAttempts`           | `number`                | Configured attempt cap.                                                                           |
+| `recoveryKind`          | `"retry" \| "continue"` | Whether recovery retries an unanswered user turn or continues a partial assistant turn.           |
+| `work`                  | `number`                | Coarse, monotonic count of content/tool segments produced since the incident opened (not tokens). |
+| `ageMs`                 | `number`                | Wall-clock ms since the incident's first interruption.                                            |
+
+A progressing turn is never terminated by the framework on its own — it survives unbounded interruption (for example a dense deploy window) as long as it keeps making forward progress. Recovery is sealed only by one of these `ctx.reason` values:
+
+- `no_progress_timeout` — no forward progress within the no-progress window (a stuck turn).
+- `max_attempts_exceeded` — the attempt cap was spent on a tight no-progress alarm loop.
+- `work_budget_exceeded` — the turn kept producing content but exceeded `maxRecoveryWork` (a runaway loop).
+- `recovery_aborted` — your `shouldKeepRecovering` hook returned `false`.
+- `stable_timeout` — recovery attempts kept timing out waiting for stable state until the budget drained (extreme churn).
+
+> Setting a finite `maxRecoveryWork` reintroduces a false-positive risk for a legitimately long turn — pick a cap well above what a healthy turn produces, or prefer `shouldKeepRecovering` with real token/cost accounting for a precise budget.
+
+#### Turns waiting on a human are not sealed
+
+A turn parked on a pending **client** interaction — a tool part in `input-available` state for a client-side tool (one with no server `execute`, whose result the client replays), or a part in `approval-requested` state — is _waiting on the human_, not stuck. While such an interaction is pending, the turn is exempt from every recovery budget: the no-progress window, attempt cap, `maxRecoveryWork`, and `shouldKeepRecovering` are all suspended, so a slow human (for example, a user who takes minutes to answer a confirmation prompt that was interrupted by a deploy) never trips a seal. Instead of rescheduling or exhausting, recovery **parks** the incident (status `skipped`, reason `awaiting_client_interaction`) and clears the live "recovering…" indicator; the client's eventual reconnect-and-replay resumes the turn through the normal continuation path. A client that never returns is reclaimed by the incident TTL sweep and Durable Object idle eviction.
+
+This exemption is intentionally **client-only**. A server tool whose `execute()` died with the evicted isolate is a genuine orphan — nothing will ever resolve it — so server-tool interruptions are not exempt and recover normally through the transcript-repair pass.
+
+Monitor recovery through observability:
+
+```ts
+import { subscribe } from "agents/observability";
+
+const unsubscribe = subscribe("chat", (event) => {
+  if (event.type === "chat:recovery:exhausted") {
+    console.error("Chat recovery exhausted", event.payload);
+  }
+});
+```
+
+#### Recovering status on the client
+
+While a turn is being recovered, the agent broadcasts a `cf_agent_chat_recovering` status frame so clients can show a "recovering…" indicator instead of looking frozen. It is set when a recovery continuation is scheduled and cleared on every terminal outcome (so the indicator never spins forever). `@cloudflare/think` also replays it on connect, so a client that joins mid-recovery still learns the turn is working. Consume it via `useAgentChat`'s `isRecovering` flag (see [Client API](#useagentchat)). The signal is purely advisory and backward-compatible — clients that do not understand it ignore it.
+
+> `@cloudflare/ai-chat` broadcasts the live signal but does not yet replay it on connect (a client connecting mid-recovery will not be re-told until it reconnects to an active stream).
+
+Transcript repairs — healing orphaned tool calls (preserving them as errored results rather than deleting them, so the record survives and the model does not silently re-run the tool) and normalizing malformed/stringified or missing tool inputs before a provider call — are emitted on the `transcript` channel.
 
 #### Guarding against stale recoveries
 
@@ -770,7 +868,8 @@ function Chat() {
     setMessages,
     status,
     isServerStreaming,
-    isStreaming
+    isStreaming,
+    isRecovering
   } = useAgentChat({ agent });
 
   // ...
@@ -793,17 +892,18 @@ function Chat() {
 
 ### Return Values
 
-| Property                  | Type                               | Description                                                                |
-| ------------------------- | ---------------------------------- | -------------------------------------------------------------------------- |
-| `messages`                | `ChatMessage[]`                    | Current conversation messages                                              |
-| `sendMessage`             | `(message) => void`                | Send a message                                                             |
-| `clearHistory`            | `() => void`                       | Clear conversation (client and server)                                     |
-| `addToolOutput`           | `({ toolCallId, output }) => void` | Provide output for a client-side tool                                      |
-| `addToolApprovalResponse` | `({ id, approved }) => void`       | Approve or reject a tool requiring approval                                |
-| `setMessages`             | `(messages \| updater) => void`    | Set messages directly (syncs to server)                                    |
-| `status`                  | `string`                           | `"idle"`, `"submitted"`, `"streaming"`, or `"error"`                       |
-| `isServerStreaming`       | `boolean`                          | `true` when a server-initiated stream is active (e.g. from `saveMessages`) |
-| `isStreaming`             | `boolean`                          | `true` when any stream is active (client or server-initiated)              |
+| Property                  | Type                               | Description                                                                                                                                                                                                                                   |
+| ------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `messages`                | `ChatMessage[]`                    | Current conversation messages                                                                                                                                                                                                                 |
+| `sendMessage`             | `(message) => void`                | Send a message                                                                                                                                                                                                                                |
+| `clearHistory`            | `() => void`                       | Clear conversation (client and server)                                                                                                                                                                                                        |
+| `addToolOutput`           | `({ toolCallId, output }) => void` | Provide output for a client-side tool                                                                                                                                                                                                         |
+| `addToolApprovalResponse` | `({ id, approved }) => void`       | Approve or reject a tool requiring approval                                                                                                                                                                                                   |
+| `setMessages`             | `(messages \| updater) => void`    | Set messages directly (syncs to server)                                                                                                                                                                                                       |
+| `status`                  | `string`                           | `"idle"`, `"submitted"`, `"streaming"`, or `"error"`                                                                                                                                                                                          |
+| `isServerStreaming`       | `boolean`                          | `true` when a server-initiated stream is active (e.g. from `saveMessages`)                                                                                                                                                                    |
+| `isStreaming`             | `boolean`                          | `true` when any stream is active (client or server-initiated)                                                                                                                                                                                 |
+| `isRecovering`            | `boolean`                          | `true` while a durable turn is being recovered (interrupted and resuming). Distinct from `isStreaming` — a recovering turn is not producing tokens yet. Render a "recovering…" hint; most UIs treat `isStreaming \|\| isRecovering` as "busy" |
 
 ## Tools
 
@@ -1544,11 +1644,11 @@ The originating client receives the streaming response. All other clients receiv
 
 ### Exports
 
-| Import path                 | Exports                                                                                     |
-| --------------------------- | ------------------------------------------------------------------------------------------- |
-| `@cloudflare/ai-chat`       | `AIChatAgent`, `createToolsFromClientSchemas`, `ChatRecoveryContext`, `ChatRecoveryOptions` |
-| `@cloudflare/ai-chat/react` | `useAgentChat`                                                                              |
-| `@cloudflare/ai-chat/types` | `MessageType`, `OutgoingMessage`, `IncomingMessage`                                         |
+| Import path                 | Exports                                                                                                                                                                         |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@cloudflare/ai-chat`       | `AIChatAgent`, `createToolsFromClientSchemas`, `ChatRecoveryContext`, `ChatRecoveryOptions`, `ChatRecoveryConfig`, `ChatRecoveryExhaustedContext`, `ResolvedChatRecoveryConfig` |
+| `@cloudflare/ai-chat/react` | `useAgentChat`                                                                                                                                                                  |
+| `@cloudflare/ai-chat/types` | `MessageType`, `OutgoingMessage`, `IncomingMessage`                                                                                                                             |
 
 ### WebSocket Protocol
 

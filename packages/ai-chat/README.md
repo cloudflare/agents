@@ -248,6 +248,35 @@ Streams automatically resume on disconnect/reconnect. No configuration needed.
 
 When a client disconnects mid-stream, chunks are buffered in SQLite. On reconnect, the client receives all buffered chunks and continues receiving the live stream.
 
+This handles browser disconnects, navigation, and React cleanup while the Durable Object keeps running. To recover after the Durable Object itself is evicted during a model call, opt in to `chatRecovery`.
+
+## Durable Chat Recovery
+
+`AIChatAgent` defaults `chatRecovery` to `false`. Enable it when you want chat turns to survive Worker deploys, Durable Object eviction, or process restarts:
+
+```typescript
+import type {
+  ChatRecoveryContext,
+  ChatRecoveryOptions
+} from "@cloudflare/ai-chat";
+
+export class ChatAgent extends AIChatAgent<Env> {
+  override chatRecovery = {
+    maxAttempts: 6,
+    terminalMessage: "The assistant was interrupted. Please try again."
+  };
+
+  override async onChatRecovery(
+    ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    console.log("Recovering", ctx.incidentId, ctx.recoveryKind);
+    return {}; // persist partial output and continue/retry when possible
+  }
+}
+```
+
+See [`docs/chat-agents.md`](../../docs/chat-agents.md#stream-recovery) for provider-specific recovery strategies and observability events.
+
 Generic client stream abort/cleanup is local-only by default: the server turn continues and can be resumed later. An explicit `stop()` still cancels the server turn:
 
 ```tsx
@@ -431,9 +460,11 @@ Extends `Agent` from the `agents` package.
 | Property / Method                    | Type                          | Description                                                                                                            |
 | ------------------------------------ | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `messages`                           | `ChatMessage[]`               | Current conversation messages (loaded from SQLite)                                                                     |
+| `chatRecovery`                       | `ChatRecoveryConfig`          | Opt-in Durable Object eviction recovery for chat turns. Default: `false`                                               |
 | `maxPersistedMessages`               | `number \| undefined`         | Max messages to keep in SQLite. Default: unlimited                                                                     |
 | `messageConcurrency`                 | `MessageConcurrency`          | Concurrency strategy for `sendMessage()` submits. Default: `"queue"`                                                   |
 | `onChatMessage(onFinish?, options?)` | Override                      | Handle incoming chat messages. Return a `Response`. `onFinish` is optional.                                            |
+| `onChatRecovery(ctx)`                | Override                      | Customize recovery after a chat turn is interrupted while `chatRecovery` is enabled                                    |
 | `onChatResponse(result)`             | Override                      | Called after a chat turn completes. `result` has `message`, `requestId`, `status`, `continuation`                      |
 | `persistMessages(messages)`          | `Promise<void>`               | Manually persist messages (usually automatic)                                                                          |
 | `saveMessages(messages, options?)`   | `Promise<SaveMessagesResult>` | Persist messages and trigger `onChatMessage`. Accepts array or function. `options.signal` cancels the turn externally. |
@@ -472,11 +503,11 @@ React hook for chat interactions. Wraps the AI SDK's `useChat` with WebSocket tr
 
 ### Exports
 
-| Import path                 | What it provides                                             |
-| --------------------------- | ------------------------------------------------------------ |
-| `@cloudflare/ai-chat`       | `AIChatAgent`, `ChatMessage`, `createToolsFromClientSchemas` |
-| `@cloudflare/ai-chat/react` | `useAgentChat`                                               |
-| `@cloudflare/ai-chat/types` | `MessageType`, `OutgoingMessage`, `IncomingMessage`          |
+| Import path                 | What it provides                                                                                          |
+| --------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `@cloudflare/ai-chat`       | `AIChatAgent`, `ChatMessage`, `createToolsFromClientSchemas`, `ChatRecoveryContext`, `ChatRecoveryConfig` |
+| `@cloudflare/ai-chat/react` | `useAgentChat`                                                                                            |
+| `@cloudflare/ai-chat/types` | `MessageType`, `OutgoingMessage`, `IncomingMessage`                                                       |
 
 ## Examples
 

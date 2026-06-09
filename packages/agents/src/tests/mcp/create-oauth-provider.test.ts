@@ -38,4 +38,30 @@ describe("createMcpOAuthProvider", () => {
     expect(result.overrideWasCalled).toBe(true);
     expect(result.restoredProviderClientId).toBe("custom-client-id");
   });
+
+  it("should resolve PKCE verifiers by OAuth callback state", async () => {
+    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentStub = env.TestOAuthAgent.get(agentId);
+
+    const result = await agentStub.testPkceVerifierStateCorrelation();
+
+    expect(result.state1Verifier).toMatch(/^verifier-one-/);
+    expect(result.state2Verifier).toMatch(/^verifier-two-/);
+    expect(result.staleStateIgnoredVerifier).toMatch(/^verifier-three-/);
+    expect(result.challengeVerifierAfterFallbackCleanup).toMatch(
+      /^verifier-four-/
+    );
+    expect(result.state1Verifier).not.toBe(result.state2Verifier);
+    expect(result.staleStateIgnoredVerifier).not.toBe(result.state1Verifier);
+    expect(result.staleStateIgnoredVerifier).not.toBe(result.state2Verifier);
+    expect(result.challengeVerifierAfterFallbackCleanup).not.toBe(
+      result.state1Verifier
+    );
+    expect(result.challengeVerifierAfterFallbackCleanup).not.toBe(
+      result.state2Verifier
+    );
+    expect(result.challengeVerifierAfterFallbackCleanup).not.toBe(
+      result.staleStateIgnoredVerifier
+    );
+  });
 });

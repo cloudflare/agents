@@ -8,33 +8,34 @@
     "start": "vite dev",
     "deploy": "vite build && wrangler deploy",
     "test": "vitest --run --config src/tests/vitest.config.ts",
-    "types": "wrangler types env.d.ts --include-runtime false"
+    "types": "think types"
   },
   "dependencies": {
     "@cloudflare/ai-chat": "*",
     "@cloudflare/codemode": "*",
-    "@cloudflare/kumo": "^2.2.1",
+    "@cloudflare/kumo": "^2.4.1",
     "@cloudflare/shell": "*",
     "@cloudflare/think": "*",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "ai": "^6.0.185",
-    "react": "^19.2.6",
-    "react-dom": "^19.2.6",
+    "ai": "^6.0.196",
+    "nanoid": "^5.1.11",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
     "workers-ai-provider": "^3.1.14",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.37.2",
-    "@cloudflare/workers-types": "^4.20260519.1",
+    "@cloudflare/vite-plugin": "^1.39.2",
+    "@cloudflare/workers-types": "^4.20260604.1",
     "@tailwindcss/vite": "^4",
-    "@types/node": "^25.9.0",
-    "@types/react": "^19.2.14",
+    "@types/node": "^25.9.1",
+    "@types/react": "^19.2.16",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
     "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",
-    "vite": "^8.0.13",
-    "wrangler": "^4.93.0"
+    "vite": "^8.0.16",
+    "wrangler": "^4.97.0"
   }
 }

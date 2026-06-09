@@ -31,6 +31,10 @@
       {
         "class_name": "ChatSdkStateAgent",
         "name": "ChatSdkStateAgent"
+      },
+      {
+        "class_name": "TestChatSdkStateAgent",
+        "name": "TestChatSdkStateAgent"
       }
     ]
   },

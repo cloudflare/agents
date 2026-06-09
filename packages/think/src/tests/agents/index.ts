@@ -3,7 +3,8 @@ export { TestAssistantAgentAgent } from "./assistant-agent";
 export {
   BareAssistantAgent,
   LoopTestAgent,
-  LoopToolTestAgent
+  LoopToolTestAgent,
+  OverflowRecoveryTestAgent
 } from "./assistant-agent-loop";
 export {
   ThinkTestAgent,
@@ -24,3 +25,4 @@ export {
 export { ThinkFiberTestAgent } from "./fiber";
 export { ThinkClientToolsAgent } from "./client-tools";
 export { ThinkExtensionHookAgent } from "./extension-hooks";
+export { ThinkMessengerRouteTestAgent } from "./messengers";

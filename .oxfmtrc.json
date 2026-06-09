@@ -3,5 +3,10 @@
   "trailingComma": "none",
   "printWidth": 80,
   "experimentalSortPackageJson": false,
-  "ignorePatterns": ["packages/agents/CHANGELOG.md", "site/agents/.astro"]
+  "ignorePatterns": [
+    "packages/agents/CHANGELOG.md",
+    "site/agents/.astro",
+    "**/routeTree.gen.ts",
+    "**/think.d.ts"
+  ]
 }

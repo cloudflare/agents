@@ -56,6 +56,46 @@ export type StreamChunkData = {
   [key: string]: unknown;
 };
 
+/** Whether a value is a plain (non-array, non-null) object. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Coerce a tool part's `input` into a provider-acceptable object.
+ *
+ * The Anthropic Messages API requires `tool_use.input` to be a JSON **object** —
+ * `null`, `undefined`, `""`, a raw string, **or an array** are all rejected with
+ * `tool_use.input: Input should be an object` (verified empirically against the
+ * live API: `{}` → 200, but `""`, `[]`, and `[{...}]` all → 400). A streamed
+ * tool call that finishes with no `input_json_delta` events (the model called
+ * the tool with no args), or whose input surfaces as a stringified JSON blob,
+ * can persist one of these shapes — and because it lives in durable storage, the
+ * session is then wedged across reconnects, redeploys, and DO evictions.
+ * Enforcing the invariant at the write boundary (and as a read-side repair
+ * backstop) keeps the transcript valid.
+ *
+ * - A plain (non-array) object is returned untouched (`changed: false`).
+ * - A string that parses to a plain object is parsed.
+ * - Everything else (`null`, `undefined`, `""`, arrays, primitives, non-object
+ *   or unparseable JSON) collapses to `{}`.
+ */
+export function normalizeToolInput(raw: unknown): {
+  input: unknown;
+  changed: boolean;
+} {
+  if (isPlainObject(raw)) return { input: raw, changed: false };
+  if (typeof raw === "string" && raw.trim().startsWith("{")) {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (isPlainObject(parsed)) return { input: parsed, changed: true };
+    } catch {
+      // Unparseable / partial JSON — fall through to the empty-object default.
+    }
+  }
+  return { input: {}, changed: true };
+}
+
 /**
  * Applies a stream chunk to a mutable parts array, building up the message
  * incrementally. Returns true if the chunk was handled, false if it was
@@ -242,7 +282,7 @@ export function applyChunkToParts(
         // resolved input/output. See the comment on tool-input-start.
         if (p.state === "input-streaming") {
           p.state = "input-available";
-          p.input = chunk.input;
+          p.input = normalizeToolInput(chunk.input).input;
           if (chunk.providerExecuted != null) {
             p.providerExecuted = chunk.providerExecuted;
           }
@@ -260,7 +300,7 @@ export function applyChunkToParts(
         toolCallId: chunk.toolCallId,
         toolName: chunk.toolName,
         state: "input-available",
-        input: chunk.input,
+        input: normalizeToolInput(chunk.input).input,
         ...(chunk.providerExecuted != null
           ? { providerExecuted: chunk.providerExecuted }
           : {}),
@@ -289,7 +329,7 @@ export function applyChunkToParts(
         }
         p.state = "output-error";
         p.errorText = chunk.errorText;
-        p.input = chunk.input;
+        p.input = normalizeToolInput(chunk.input).input;
         if (chunk.providerExecuted != null) {
           p.providerExecuted = chunk.providerExecuted;
         }
@@ -302,7 +342,7 @@ export function applyChunkToParts(
           toolCallId: chunk.toolCallId,
           toolName: chunk.toolName,
           state: "output-error",
-          input: chunk.input,
+          input: normalizeToolInput(chunk.input).input,
           errorText: chunk.errorText,
           ...(chunk.providerExecuted != null
             ? { providerExecuted: chunk.providerExecuted }

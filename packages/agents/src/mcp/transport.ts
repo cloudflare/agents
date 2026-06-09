@@ -75,10 +75,30 @@ export class McpSSETransport implements Transport {
  */
 export interface StreamableHTTPServerTransportOptions {
   /**
-   * Event store for resumability support
-   * If provided, resumability will be enabled, allowing clients to reconnect and resume messages
+   * Event store for resumability support.
+   * If provided, resumability will be enabled, allowing clients to
+   * reconnect and resume messages.
+   *
+   * If the store also implements {@link ClearableEventStore.clearStream}
+   * the transport will call it after the final response of a POST
+   * stream is written, so storage stays bounded without any background
+   * sweep. {@link DurableObjectEventStore} is the canonical example.
    */
-  eventStore?: EventStore;
+  eventStore?: EventStore | ClearableEventStore;
+}
+
+/**
+ * An {@link EventStore} that supports dropping all events for a single
+ * stream id. Implemented by {@link DurableObjectEventStore}.
+ */
+export interface ClearableEventStore extends EventStore {
+  clearStream(streamId: StreamId): Promise<void>;
+}
+
+function isClearableEventStore(
+  store: EventStore | ClearableEventStore
+): store is ClearableEventStore {
+  return typeof (store as ClearableEventStore).clearStream === "function";
 }
 
 /**
@@ -104,19 +124,16 @@ type TransportConnState = {
   requestIds?: RequestId[];
 };
 
-/** Subset of {@link EventStore} that supports clearing a stream’s events. Optional. */
-type ClearableEventStore = EventStore & {
-  clearStream?: (streamId: string) => Promise<void>;
-};
-
 export class StreamableHTTPServerTransport implements Transport {
   private _started = false;
-  private _eventStore?: EventStore;
+  private _eventStore?: EventStore | ClearableEventStore;
 
-  // This is to keep track whether all messages from a single POST request have been answered.
-  // I's fine that we don't persist this since it's only for backwards compatibility as clients
-  // should no longer batch requests, per the spec.
-  private _requestResponseMap: Map<RequestId, JSONRPCMessage> = new Map();
+  // This tracks which messages on each POST stream have been answered.
+  // It is fine that we do not persist this since it only supports backwards
+  // compatibility for clients batching requests, which the spec discourages.
+  // Keying by stream avoids colliding ids on independent POST streams sharing
+  // completion state with one another.
+  private _streamResponseIds: Map<string, Set<RequestId>> = new Map();
 
   sessionId: string;
   onclose?: () => void;
@@ -142,15 +159,6 @@ export class StreamableHTTPServerTransport implements Transport {
     // so we'll always have this available.
     this.sessionId = agent.getSessionId();
     this._eventStore = options.eventStore;
-  }
-
-  /**
-   * The configured event store, if any. Exposed so the owning Agent can
-   * run sweeps / maintenance against it without having to track it
-   * separately. Read-only.
-   */
-  get eventStore(): EventStore | undefined {
-    return this._eventStore;
   }
 
   /**
@@ -191,33 +199,83 @@ export class StreamableHTTPServerTransport implements Transport {
     const lastEventId = req.headers.get("last-event-id");
 
     // Resume path: the client identifies which stream it lost via
-    // Last-Event-ID. Recover the original streamId; if it has persisted
-    // requestIds we resume a POST stream, otherwise we resume the
-    // standalone listen stream.
+    // Last-Event-ID. Recover the original streamId from the event
+    // store and register this connection under it. Matches the SDK
+    // reference implementation (typescript-sdk's `replayEvents`):
+    // the resumed connection is mapped to the *original* streamId,
+    // no dual-role tagging.
+    //
+    // Forward routing then depends on what kind of stream it was:
+    //   - active POST: persisted requestIds are restored so further
+    //     tool responses route to this new WS via state.requestIds.
+    //   - standalone listen stream: tag with _standaloneSse so
+    //     server-initiated notifications continue to land here.
+    //   - completed POST / unknown: this connection is a one-shot
+    //     replay channel. No future messages will be routed to it.
+    //
+    // In every resumable case we supersede any prior connection bound
+    // to the same streamId by closing it, so there is at most one live
+    // connection per stream. This keeps `send()` routing deterministic
+    // and keeps us within the MCP rule that each message goes out on
+    // exactly one stream.
     if (this._eventStore && lastEventId) {
-      const streamId =
+      const resumedStreamId =
         await this._eventStore.getStreamIdForEventId?.(lastEventId);
-      if (streamId) {
-        const persistedReqs = await agent.getStreamRequestIds(streamId);
-        const resumeState: TransportConnState =
-          persistedReqs && persistedReqs.length > 0
-            ? // POST stream resumption: claim the original requestIds so
-              // `send()` routes ongoing tool responses to the new WS.
-              { streamId, requestIds: persistedReqs }
-            : // Standalone listen stream resumption.
-              { streamId, _standaloneSse: true };
+      if (resumedStreamId) {
+        const resumeState: TransportConnState = {
+          streamId: resumedStreamId
+        };
+        if (resumedStreamId === STANDALONE_STREAM_ID) {
+          resumeState._standaloneSse = true;
+        } else {
+          const persistedReqs =
+            await agent.getStreamRequestIds(resumedStreamId);
+          if (persistedReqs && persistedReqs.length > 0) {
+            resumeState.requestIds = persistedReqs;
+          }
+        }
+        this.supersedePriorStreamConnections(
+          agent,
+          connection.id,
+          resumedStreamId
+        );
         connection.setState(resumeState);
         await this.replayEvents(lastEventId);
         return;
       }
     }
 
-    // Fresh standalone listen stream.
+    // Fresh standalone listen stream. The MCP spec allows only one
+    // standalone GET per session, so supersede any existing one.
+    this.supersedePriorStreamConnections(
+      agent,
+      connection.id,
+      STANDALONE_STREAM_ID
+    );
     const standaloneState: TransportConnState = {
       streamId: STANDALONE_STREAM_ID,
       _standaloneSse: true
     };
     connection.setState(standaloneState);
+  }
+
+  /**
+   * Close any connection (other than `selfId`) currently bound to
+   * `streamId`, so at most one live connection serves a given stream.
+   * Closing rather than mutating sibling state mirrors how the SDK's
+   * single `_streamMapping` entry gives last-writer-wins for free, and
+   * keeps `send()` from routing to a stale bridge.
+   */
+  private supersedePriorStreamConnections(
+    agent: McpAgent,
+    selfId: string,
+    streamId: string
+  ): void {
+    for (const other of agent.getConnections<TransportConnState>()) {
+      if (other.id === selfId) continue;
+      if (other.state?.streamId !== streamId) continue;
+      other.close(1000, "Superseded by resumed stream");
+    }
   }
 
   /**
@@ -374,99 +432,192 @@ export class StreamableHTTPServerTransport implements Transport {
     this.onclose?.();
   }
 
+  /**
+   * Store the event, decide whether this is the final response, write
+   * the SSE frame iff a live connection is attached, then run cleanup.
+   * Caller resolves `streamId` and `relatedIds` (from connection state
+   * or persisted reverse lookup) and passes `liveConnection` as null
+   * when the originating WS has dropped.
+   */
+  private async sendOnStream(
+    agent: McpAgent,
+    streamId: string,
+    relatedIds: readonly RequestId[],
+    liveConnection: Connection<TransportConnState> | null,
+    message: JSONRPCMessage,
+    requestId: RequestId
+  ): Promise<void> {
+    const eventId = await this._eventStore?.storeEvent(streamId, message);
+
+    let shouldClose = false;
+    if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
+      let responseIds = this._streamResponseIds.get(streamId);
+      if (!responseIds) {
+        responseIds = new Set<RequestId>();
+        this._streamResponseIds.set(streamId, responseIds);
+      }
+      responseIds.add(requestId);
+      shouldClose = relatedIds.every((id) => responseIds.has(id));
+      if (shouldClose) this._streamResponseIds.delete(streamId);
+    }
+
+    // Write FIRST, clean up SECOND. Clearing before the write would
+    // leave a mid-flight client with a wiped stream on reconnect.
+    // `writeSSEEvent` is sync (enqueues, doesn't await), so the bytes
+    // are committed before any cleanup await can interleave. Wrap in
+    // try/catch so a dead WS can't skip cleanup and orphan the
+    // stream-reqs + stored events.
+    if (liveConnection) {
+      try {
+        this.writeSSEEvent(liveConnection, message, eventId, shouldClose);
+      } catch (error) {
+        this.onerror?.(error as Error);
+      }
+    }
+
+    if (shouldClose) {
+      // A concurrent GET resume between these awaits would replay
+      // events about to be deleted — benign.
+      await agent.deleteStreamRequestIds(streamId);
+      if (this._eventStore && isClearableEventStore(this._eventStore)) {
+        await this._eventStore.clearStream(streamId);
+      }
+    }
+  }
+
   async send(
     message: JSONRPCMessage,
     options?: { relatedRequestId?: RequestId }
   ): Promise<void> {
-    const { agent } = getCurrentAgent<McpAgent>();
-    if (!agent) throw new Error("Agent was not found in send");
+    // Request-scoped (response / `relatedRequestId` notification) vs
+    // server-initiated on the standalone GET stream. Two helpers.
+    const isResponse =
+      isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message);
+    const requestId = isResponse ? message.id : options?.relatedRequestId;
 
-    let requestId = options?.relatedRequestId;
-    if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
-      // If the message is a response, use the request ID from the message
-      requestId = message.id;
-    }
-
-    // Check if this message should be sent on the standalone SSE stream (no request ID)
-    // Ignore notifications from tools (which have relatedRequestId set)
-    // Those will be sent via dedicated response SSE streams
     if (requestId === undefined) {
-      // For standalone SSE streams, we can only send requests and notifications
-      if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
+      if (isResponse) {
         throw new Error(
           "Cannot send a response on a standalone SSE stream unless resuming a previous client request"
         );
       }
+      return this.sendStandalone(message);
+    }
 
-      let standaloneConnection: Connection<TransportConnState> | undefined;
-      for (const conn of agent.getConnections<TransportConnState>()) {
-        if (conn.state?._standaloneSse) standaloneConnection = conn;
-      }
+    return this.sendForRequest(message, requestId);
+  }
 
-      if (standaloneConnection === undefined) {
-        // The spec says the server MAY send messages on the stream, so it's ok to discard if no stream
-        return;
-      }
+  /**
+   * Server-initiated message on the standalone GET stream. Stored under
+   * a fixed streamId so it's replayable even when no live connection is
+   * currently attached.
+   *
+   * Sent on exactly one stream, per MCP: "the server MUST send each of
+   * its JSON-RPC messages on only one of the connected streams; it MUST
+   * NOT broadcast the same message across multiple streams."
+   * `handleGetRequest` supersedes prior standalone connections, so
+   * there is at most one to send on.
+   */
+  private async sendStandalone(message: JSONRPCMessage): Promise<void> {
+    const { agent } = getCurrentAgent<McpAgent>();
+    if (!agent) throw new Error("Agent was not found in send");
 
-      // Generate and store event ID if event store is provided. Use the
-      // connection's `streamId` rather than its raw `id` so the event-id
-      // remains stable across WS reconnects (resumed GET shares the
-      // original streamId via Last-Event-ID).
-      let eventId: string | undefined;
-      if (this._eventStore) {
-        const streamId =
-          standaloneConnection.state?.streamId ?? standaloneConnection.id;
-        eventId = await this._eventStore.storeEvent(streamId, message);
-      }
+    const eventId = await this._eventStore?.storeEvent(
+      STANDALONE_STREAM_ID,
+      message
+    );
 
-      // Send the message to the standalone SSE stream
-      this.writeSSEEvent(standaloneConnection, message, eventId);
+    const standalone = Array.from(
+      agent.getConnections<TransportConnState>()
+    ).find((conn) => conn.state?._standaloneSse);
+    // No live standalone stream: the event is stored above and replays
+    // when a client reconnects with Last-Event-ID. Per spec the server
+    // MAY send on the stream, so dropping the live write is fine.
+    if (standalone) {
+      this.writeSSEEvent(standalone, message, eventId);
+    }
+  }
+
+  /**
+   * Message scoped to a specific in-flight client request: a tool
+   * response, error, or progress notification. Resolves which stream
+   * owns the request id (live POST connection, resumed GET, or
+   * persisted reverse lookup for a dropped WS) and delegates to
+   * {@link sendOnStream} for the actual store / write / cleanup.
+   */
+  private async sendForRequest(
+    message: JSONRPCMessage,
+    requestId: RequestId
+  ): Promise<void> {
+    const { agent, connection: originatingConnection } =
+      getCurrentAgent<McpAgent>();
+    if (!agent) throw new Error("Agent was not found in send");
+
+    // Pick the live connection that should receive this message. Normally
+    // request ids uniquely identify a POST connection. If a client violates
+    // that constraint, prefer the connection whose handler is currently
+    // producing this message rather than leaking a plausible response to
+    // the first matching POST stream. Only prefer an originating connection
+    // while it is still live: after a POST stream disconnects, a resumed
+    // GET connection inherits requestIds and must be allowed to receive
+    // the eventual response.
+    const matchingConnections = Array.from(
+      agent.getConnections<TransportConnState>()
+    ).filter((conn) => conn.state?.requestIds?.includes(requestId));
+    const liveConnection =
+      matchingConnections.find(
+        (conn) => conn.id === originatingConnection?.id
+      ) ?? (matchingConnections.length === 1 ? matchingConnections[0] : null);
+
+    // Ambiguous routing: multiple live POST connections claim the same
+    // request id, none of which is the originating connection. Terminate
+    // each with a protocol error rather than guessing.
+    if (!liveConnection && matchingConnections.length > 1) {
+      const routingError: JSONRPCMessage = {
+        jsonrpc: "2.0",
+        id: requestId,
+        error: { code: -32603, message: "Internal error" }
+      };
+      await Promise.all(
+        matchingConnections.map((candidate) =>
+          this.sendOnStream(
+            agent,
+            candidate.state?.streamId ?? candidate.id,
+            candidate.state?.requestIds ?? [],
+            candidate,
+            routingError,
+            requestId
+          )
+        )
+      );
       return;
     }
 
-    // Get the response for this request. We look up by `requestIds` on
-    // connection state, which is set both for fresh POST connections and
-    // for resumed GET connections that inherited the POST's requestIds
-    // via Last-Event-ID.
-    const connection = Array.from(
-      agent.getConnections<TransportConnState>()
-    ).find((conn) => conn.state?.requestIds?.includes(requestId as RequestId));
-    if (!connection) {
-      throw new Error(
-        `No connection established for request ID: ${String(requestId)}`
-      );
-    }
-
-    const streamId = connection.state?.streamId ?? connection.id;
-
-    let eventId: string | undefined;
-
-    if (this._eventStore) {
-      eventId = await this._eventStore.storeEvent(streamId, message);
-    }
-
-    let shouldClose = false;
-
-    if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
-      this._requestResponseMap.set(requestId, message);
-      const relatedIds = connection.state?.requestIds ?? [];
-      // Check if we have responses for all requests using this connection
-      shouldClose = relatedIds.every((id) => this._requestResponseMap.has(id));
-
-      if (shouldClose) {
-        // Clean up
-        for (const id of relatedIds) {
-          this._requestResponseMap.delete(id);
-        }
-
-        // POST stream is fully responded — drop the persisted requestIds
-        // mapping and the stored events. No client should resume past
-        // this point.
-        await agent.deleteStreamRequestIds(streamId);
-        const clearable = this._eventStore as ClearableEventStore | undefined;
-        await clearable?.clearStream?.(streamId);
+    // Resolve streamId + relatedIds. Prefer the live connection's state;
+    // when the originating WS has dropped fall back to the persisted
+    // reverse lookup so the event can still be stored for replay —
+    // mirrors the SDK's `_requestToStreamMapping` which outlives
+    // connection loss.
+    let streamId = liveConnection?.state?.streamId;
+    let relatedIds = liveConnection?.state?.requestIds;
+    if (!streamId) {
+      const stored = await agent.getStreamForRequestId(requestId);
+      if (!stored) {
+        throw new Error(
+          `No active stream found for request ID: ${String(requestId)}`
+        );
       }
+      streamId = stored.streamId;
+      relatedIds = stored.requestIds;
     }
-    this.writeSSEEvent(connection, message, eventId, shouldClose);
+
+    await this.sendOnStream(
+      agent,
+      streamId,
+      relatedIds ?? [],
+      liveConnection,
+      message,
+      requestId
+    );
   }
 }

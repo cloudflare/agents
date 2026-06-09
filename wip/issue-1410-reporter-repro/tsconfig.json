@@ -1,4 +1,0 @@
-{
-  "extends": "agents/tsconfig",
-  "include": ["src/**/*.ts"]
-}

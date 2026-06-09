@@ -606,6 +606,96 @@ export class MCPClientManager {
     return { serverId, authSuccess: false, authError: error };
   }
 
+  private isAuthAcceptedConnection(conn: MCPClientConnection): boolean {
+    return (
+      conn.connectionState === MCPConnectionState.READY ||
+      conn.connectionState === MCPConnectionState.CONNECTED ||
+      conn.connectionState === MCPConnectionState.CONNECTING ||
+      conn.connectionState === MCPConnectionState.DISCOVERING
+    );
+  }
+
+  private oauthCallbackSuccess(
+    serverId: string,
+    conn: MCPClientConnection
+  ): MCPOAuthCallbackResult {
+    this.clearServerAuthUrl(serverId);
+    conn.connectionError = null;
+    return { serverId, authSuccess: true };
+  }
+
+  private async runWithCodeVerifierState<T>(
+    authProvider: AgentMcpOAuthProvider,
+    state: string,
+    callback: () => Promise<T>
+  ): Promise<T> {
+    if (authProvider.runWithCodeVerifierState) {
+      return authProvider.runWithCodeVerifierState(state, callback);
+    }
+    return callback();
+  }
+
+  private async consumeStaleOAuthState(
+    serverId: string,
+    authProvider: AgentMcpOAuthProvider,
+    state: string
+  ): Promise<void> {
+    try {
+      const stateValidation = await authProvider.checkState(state);
+      if (!stateValidation.valid) {
+        console.warn(
+          `[MCPClientManager] Ignoring stale OAuth callback with invalid state for server "${serverId}": ${stateValidation.error ?? "Invalid state"}`
+        );
+        return;
+      }
+      await authProvider.consumeState(state);
+    } catch (cleanupError) {
+      console.warn(
+        `[MCPClientManager] Failed to clean up stale OAuth callback state for server "${serverId}":`,
+        cleanupError
+      );
+    }
+  }
+
+  private async completeAuthorizationAndCleanupVerifier(
+    serverId: string,
+    conn: MCPClientConnection,
+    authProvider: AgentMcpOAuthProvider,
+    state: string,
+    code: string
+  ): Promise<void> {
+    await this.runWithCodeVerifierState(authProvider, state, async () => {
+      let completeError: unknown;
+      let cleanupError: unknown;
+
+      try {
+        await conn.completeAuthorization(code, { alreadyAccepted: true });
+      } catch (error) {
+        completeError = error;
+      }
+
+      try {
+        await authProvider.deleteCodeVerifier();
+      } catch (deleteError) {
+        cleanupError = deleteError;
+      }
+
+      if (completeError) {
+        if (cleanupError) {
+          console.warn(
+            `[MCPClientManager] Failed to clean up OAuth code verifier for server "${serverId}":`,
+            cleanupError
+          );
+        }
+        throw completeError;
+      }
+
+      if (cleanupError) {
+        throw cleanupError;
+      }
+    });
+  }
+
   /**
    * Create an auth provider for a server
    * @internal
@@ -939,9 +1029,29 @@ export class MCPClientManager {
     // Handle OAuth completion if we have a reconnect code
     if (options.reconnect?.oauthCode) {
       try {
-        await this.mcpConnections[id].completeAuthorization(
-          options.reconnect.oauthCode
-        );
+        const authProvider =
+          this.mcpConnections[id].options.transport.authProvider;
+        let completeError: unknown;
+        try {
+          await this.mcpConnections[id].completeAuthorization(
+            options.reconnect.oauthCode
+          );
+        } catch (error) {
+          completeError = error;
+        }
+
+        try {
+          await authProvider?.deleteCodeVerifier();
+        } catch (cleanupError) {
+          console.warn(
+            `[MCPClientManager] Failed to clean up OAuth code verifier for server "${id}":`,
+            cleanupError
+          );
+        }
+
+        if (completeError) {
+          throw completeError;
+        }
 
         // Reinitialize connection
         await this.mcpConnections[id].init();
@@ -1208,7 +1318,7 @@ export class MCPClientManager {
     req: Request
   ):
     | { valid: true; serverId: string; code: string; state: string }
-    | { valid: false; serverId?: string; error: string } {
+    | { valid: false; serverId?: string; state?: string; error: string } {
     const url = new URL(req.url);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
@@ -1235,6 +1345,7 @@ export class MCPClientManager {
     if (error) {
       return {
         serverId: serverId,
+        state: state,
         valid: false,
         error: errorDescription || error
       };
@@ -1243,6 +1354,7 @@ export class MCPClientManager {
     if (!code) {
       return {
         serverId: serverId,
+        state: state,
         valid: false,
         error: "Unauthorized: no code provided"
       };
@@ -1278,7 +1390,22 @@ export class MCPClientManager {
     const validation = this.validateCallbackRequest(req);
 
     if (!validation.valid) {
-      if (validation.serverId && this.mcpConnections[validation.serverId]) {
+      const conn = validation.serverId
+        ? this.mcpConnections[validation.serverId]
+        : undefined;
+      if (validation.serverId && conn) {
+        if (this.isAuthAcceptedConnection(conn)) {
+          const authProvider = conn.options.transport.authProvider;
+          if (validation.state && authProvider) {
+            authProvider.serverId = validation.serverId;
+            await this.consumeStaleOAuthState(
+              validation.serverId,
+              authProvider,
+              validation.state
+            );
+          }
+          return this.oauthCallbackSuccess(validation.serverId, conn);
+        }
         return this.failConnection(validation.serverId, validation.error);
       }
 
@@ -1306,16 +1433,18 @@ export class MCPClientManager {
       // This prevents DoS attacks where attacker consumes valid state before legitimate callback
       const stateValidation = await authProvider.checkState(state);
       if (!stateValidation.valid) {
+        if (this.isAuthAcceptedConnection(conn)) {
+          await this.consumeStaleOAuthState(serverId, authProvider, state);
+          return this.oauthCallbackSuccess(serverId, conn);
+        }
         throw new Error(stateValidation.error || "Invalid state");
       }
 
-      // Already authenticated - just return success
-      if (
-        conn.connectionState === MCPConnectionState.READY ||
-        conn.connectionState === MCPConnectionState.CONNECTED
-      ) {
-        this.clearServerAuthUrl(serverId);
-        return { serverId, authSuccess: true };
+      // A stale popup can complete after another callback already exchanged tokens.
+      // Treat it as success, but consume its state so it cannot be replayed.
+      if (this.isAuthAcceptedConnection(conn)) {
+        await this.consumeStaleOAuthState(serverId, authProvider, state);
+        return this.oauthCallbackSuccess(serverId, conn);
       }
 
       if (conn.connectionState !== MCPConnectionState.AUTHENTICATING) {
@@ -1324,15 +1453,20 @@ export class MCPClientManager {
         );
       }
 
+      conn.connectionState = MCPConnectionState.CONNECTING;
       await authProvider.consumeState(state);
-      await conn.completeAuthorization(code);
+      await this.completeAuthorizationAndCleanupVerifier(
+        serverId,
+        conn,
+        authProvider,
+        state,
+        code
+      );
       this.updateStoredSessionId(serverId, conn.sessionId);
-      await authProvider.deleteCodeVerifier();
-      this.clearServerAuthUrl(serverId);
-      conn.connectionError = null;
+      const result = this.oauthCallbackSuccess(serverId, conn);
       this._onServerStateChanged.fire();
 
-      return { serverId, authSuccess: true };
+      return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return this.failConnection(serverId, message);

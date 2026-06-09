@@ -29,6 +29,16 @@ function createMockStateStorage() {
   };
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function createMockAuthProvider(
   stateStorage: ReturnType<typeof createMockStateStorage>
 ) {
@@ -236,6 +246,63 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(manager.mcpConnections[serverId]).toBe(connection);
       expect(connection.connectionState).toBe("authenticating");
     });
+
+    it("should clean up verifier after deprecated OAuth reconnect completion", async () => {
+      const serverId = "test-server-id";
+      const authProvider = {
+        authUrl: undefined,
+        clientId: "test-client-id",
+        serverId,
+        redirectUrl: "http://localhost:3000/callback",
+        clientMetadata: {
+          client_name: "test-client",
+          client_uri: "http://localhost:3000",
+          redirect_uris: ["http://localhost:3000/callback"]
+        },
+        tokens: vi.fn(),
+        saveTokens: vi.fn(),
+        clientInformation: vi.fn(),
+        saveClientInformation: vi.fn(),
+        redirectToAuthorization: vi.fn(),
+        saveCodeVerifier: vi.fn(),
+        codeVerifier: vi.fn(),
+        checkState: vi.fn().mockResolvedValue({ valid: true }),
+        consumeState: vi.fn().mockResolvedValue(undefined),
+        deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
+      };
+      const connection = new MCPClientConnection(
+        new URL("http://example.com"),
+        { name: "test-client", version: "1.0.0" },
+        { transport: { type: "auto", authProvider }, client: {} }
+      );
+      connection.connectionState = "authenticating";
+      connection.init = vi.fn().mockResolvedValue(undefined);
+      connection.completeAuthorization = vi
+        .fn()
+        .mockImplementation(async () => {
+          connection.connectionState = "connected";
+        });
+      manager.mcpConnections[serverId] = connection;
+      vi.spyOn(manager, "discoverIfConnected").mockResolvedValue({
+        state: "ready",
+        success: true
+      });
+
+      const result = await manager.connect("http://example.com", {
+        reconnect: {
+          id: serverId,
+          oauthClientId: "test-client-id",
+          oauthCode: "test-auth-code"
+        },
+        transport: { type: "auto", authProvider }
+      });
+
+      expect(result.id).toBe(serverId);
+      expect(connection.completeAuthorization).toHaveBeenCalledWith(
+        "test-auth-code"
+      );
+      expect(authProvider.deleteCodeVerifier).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe("Callback URL Management", () => {
@@ -349,7 +416,9 @@ describe("MCPClientManager OAuth Integration", () => {
 
       expect(result.serverId).toBe(serverId);
       expect(result.authSuccess).toBe(true);
-      expect(completeAuthSpy).toHaveBeenCalledWith(authCode);
+      expect(completeAuthSpy).toHaveBeenCalledWith(authCode, {
+        alreadyAccepted: true
+      });
       // Verify auth provider has correct serverId and preserved clientId
       expect(connection.options.transport.authProvider?.serverId).toBe(
         serverId
@@ -1110,6 +1179,420 @@ describe("MCPClientManager OAuth Integration", () => {
         new Request(`${callbackUrl}?code=code2&state=${state2}`)
       );
       expect(result2.authSuccess).toBe(true);
+    });
+
+    it("should ignore stale valid callback after auth is already progressing", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi
+        .fn()
+        .mockImplementation(async () => {
+          connection.connectionState = "connecting";
+        });
+      manager.mcpConnections[serverId] = connection;
+
+      const state1 = stateStorage.createState(serverId);
+      const state2 = stateStorage.createState(serverId);
+      const [state2Nonce] = state2.split(".");
+      if (!state2Nonce) {
+        throw new Error("Test setup failed to create an OAuth state nonce");
+      }
+
+      const result1 = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code1&state=${state1}`)
+      );
+      expect(result1.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+
+      const result2 = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code2&state=${state2}`)
+      );
+      expect(result2.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+      expect(connection.connectionError).toBe(null);
+      expect(connection.completeAuthorization).toHaveBeenCalledTimes(1);
+      expect(stateStorage.storage.has(state2Nonce)).toBe(false);
+    });
+
+    it("should ignore callback that becomes stale while state validation is pending", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const state1 = stateStorage.createState(serverId);
+      const state2 = stateStorage.createState(serverId);
+      const [state2Nonce] = state2.split(".");
+      if (!state2Nonce) {
+        throw new Error("Test setup failed to create an OAuth state nonce");
+      }
+
+      const state2CheckStarted = createDeferred<void>();
+      const releaseState2Check = createDeferred<void>();
+      const baseAuthProvider = createMockAuthProvider(stateStorage);
+      const mockAuthProvider = {
+        ...baseAuthProvider,
+        async checkState(
+          state: string
+        ): Promise<{ valid: boolean; serverId?: string; error?: string }> {
+          if (state === state2) {
+            state2CheckStarted.resolve(undefined);
+            await releaseState2Check.promise;
+          }
+          return baseAuthProvider.checkState(state);
+        }
+      };
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi
+        .fn()
+        .mockImplementation(async () => {
+          connection.connectionState = "connecting";
+        });
+      manager.mcpConnections[serverId] = connection;
+
+      const result2Promise = manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code2&state=${state2}`)
+      );
+      await state2CheckStarted.promise;
+
+      const result1 = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code1&state=${state1}`)
+      );
+      expect(result1.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+
+      releaseState2Check.resolve(undefined);
+      const result2 = await result2Promise;
+
+      expect(result2.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+      expect(connection.connectionError).toBe(null);
+      expect(connection.completeAuthorization).toHaveBeenCalledTimes(1);
+      expect(stateStorage.storage.has(state2Nonce)).toBe(false);
+    });
+
+    it("should ignore stale OAuth error callback after auth is already progressing", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi
+        .fn()
+        .mockImplementation(async () => {
+          connection.connectionState = "connecting";
+        });
+      manager.mcpConnections[serverId] = connection;
+
+      const state1 = stateStorage.createState(serverId);
+      const state2 = stateStorage.createState(serverId);
+      const [state2Nonce] = state2.split(".");
+      if (!state2Nonce) {
+        throw new Error("Test setup failed to create an OAuth state nonce");
+      }
+
+      const result1 = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code1&state=${state1}`)
+      );
+      expect(result1.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+
+      const result2 = await manager.handleCallbackRequest(
+        new Request(
+          `${callbackUrl}?error=access_denied&state=${state2}&error_description=denied`
+        )
+      );
+
+      expect(result2.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+      expect(connection.connectionError).toBe(null);
+      expect(connection.completeAuthorization).toHaveBeenCalledTimes(1);
+      expect(stateStorage.storage.has(state2Nonce)).toBe(false);
+    });
+
+    it("should not consume an invalid stale OAuth error callback state", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const baseAuthProvider = createMockAuthProvider(stateStorage);
+      const mockAuthProvider = {
+        ...baseAuthProvider,
+        consumeState: vi.fn(baseAuthProvider.consumeState)
+      };
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "connecting";
+      manager.mcpConnections[serverId] = connection;
+
+      const result = await manager.handleCallbackRequest(
+        new Request(
+          `${callbackUrl}?error=access_denied&state=forged-nonce.${serverId}`
+        )
+      );
+
+      expect(result.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+      expect(connection.connectionError).toBe(null);
+      expect(mockAuthProvider.consumeState).not.toHaveBeenCalled();
+    });
+
+    it("should ignore stale OAuth error callback after auth is accepted but before state cleanup finishes", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const state1 = stateStorage.createState(serverId);
+      const state2 = stateStorage.createState(serverId);
+      const [state1Nonce] = state1.split(".");
+      const [state2Nonce] = state2.split(".");
+      if (!state1Nonce || !state2Nonce) {
+        throw new Error("Test setup failed to create OAuth state nonces");
+      }
+
+      const consumeStateStarted = createDeferred<void>();
+      const releaseConsumeState = createDeferred<void>();
+      const baseAuthProvider = createMockAuthProvider(stateStorage);
+      const mockAuthProvider = {
+        ...baseAuthProvider,
+        async consumeState(state: string): Promise<void> {
+          if (state === state1) {
+            consumeStateStarted.resolve(undefined);
+            await releaseConsumeState.promise;
+          }
+          await baseAuthProvider.consumeState(state);
+        }
+      };
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi
+        .fn()
+        .mockImplementation(async () => {
+          connection.connectionState = "connecting";
+        });
+      manager.mcpConnections[serverId] = connection;
+
+      const result1Promise = manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code1&state=${state1}`)
+      );
+      await consumeStateStarted.promise;
+      expect(connection.connectionState).toBe("connecting");
+
+      const result2 = await manager.handleCallbackRequest(
+        new Request(
+          `${callbackUrl}?error=access_denied&state=${state2}&error_description=denied`
+        )
+      );
+      expect(result2.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+      expect(connection.connectionError).toBe(null);
+      expect(stateStorage.storage.has(state2Nonce)).toBe(false);
+
+      releaseConsumeState.resolve(undefined);
+      const result1 = await result1Promise;
+      expect(result1.authSuccess).toBe(true);
+      expect(connection.connectionState).toBe("connecting");
+      expect(connection.connectionError).toBe(null);
+      expect(connection.completeAuthorization).toHaveBeenCalledTimes(1);
+      expect(stateStorage.storage.has(state1Nonce)).toBe(false);
+    });
+
+    it("should not delete active verifier for duplicate callback with same state", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const state = stateStorage.createState(serverId);
+      const completeAuthorizationStarted = createDeferred<void>();
+      const releaseCompleteAuthorization = createDeferred<void>();
+      const mockAuthProvider = {
+        ...createMockAuthProvider(stateStorage),
+        deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
+      };
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi
+        .fn()
+        .mockImplementation(async () => {
+          completeAuthorizationStarted.resolve(undefined);
+          await releaseCompleteAuthorization.promise;
+        });
+      manager.mcpConnections[serverId] = connection;
+
+      const result1Promise = manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code1&state=${state}`)
+      );
+      await completeAuthorizationStarted.promise;
+      expect(connection.connectionState).toBe("connecting");
+
+      const result2 = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code1&state=${state}`)
+      );
+      expect(result2.authSuccess).toBe(true);
+      expect(mockAuthProvider.deleteCodeVerifier).not.toHaveBeenCalled();
+
+      releaseCompleteAuthorization.resolve(undefined);
+      const result1 = await result1Promise;
+      expect(result1.authSuccess).toBe(true);
+      expect(mockAuthProvider.deleteCodeVerifier).toHaveBeenCalledTimes(1);
+      expect(connection.completeAuthorization).toHaveBeenCalledTimes(1);
+    });
+
+    it("should run token exchange with callback state for PKCE lookup", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const state = stateStorage.createState(serverId);
+      const runWithCodeVerifierStateSpy = vi.fn();
+      const mockAuthProvider = {
+        ...createMockAuthProvider(stateStorage),
+        async runWithCodeVerifierState<T>(
+          stateArg: string,
+          callback: () => Promise<T>
+        ): Promise<T> {
+          runWithCodeVerifierStateSpy(stateArg);
+          expect(stateArg).toBe(state);
+          return callback();
+        }
+      };
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi.fn().mockResolvedValue(undefined);
+      manager.mcpConnections[serverId] = connection;
+
+      const result = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code1&state=${state}`)
+      );
+
+      expect(result.authSuccess).toBe(true);
+      expect(runWithCodeVerifierStateSpy).toHaveBeenCalledTimes(1);
+      expect(runWithCodeVerifierStateSpy.mock.calls[0]?.[0]).toBe(state);
     });
   });
 

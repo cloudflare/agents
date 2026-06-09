@@ -19,5 +19,5 @@
       }
     ]
   },
-  "ignorePatterns": ["**/env.d.ts"]
+  "ignorePatterns": ["**/env.d.ts", "**/routeTree.gen.ts"]
 }

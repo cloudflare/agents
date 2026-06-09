@@ -115,4 +115,64 @@ describe("agent tool event reducer", () => {
     expect(state.runsById.r.status).toBe("interrupted");
     expect(state.runsById.r.error).toBe("parent restarted");
   });
+
+  it("propagates the typed interrupt reason and childStillRunning to run state (#1630)", () => {
+    let state = createAgentToolEventState();
+    state = applyAgentToolEvent(
+      state,
+      frame(0, {
+        kind: "started",
+        runId: "r",
+        agentType: "Researcher",
+        order: 0
+      })
+    );
+    state = applyAgentToolEvent(
+      state,
+      frame(1, {
+        kind: "interrupted",
+        runId: "r",
+        error: "the parent gave up while the child kept advancing",
+        reason: "no-progress",
+        childStillRunning: true
+      })
+    );
+
+    // A UI must be able to branch on the machine-readable cause and whether the
+    // child is still running without parsing the human-readable `error` prose.
+    expect(state.runsById.r).toMatchObject({
+      status: "interrupted",
+      reason: "no-progress",
+      childStillRunning: true
+    });
+  });
+
+  it("propagates a torn-down (window-exceeded) interrupt to run state (#1630)", () => {
+    let state = createAgentToolEventState();
+    state = applyAgentToolEvent(
+      state,
+      frame(0, {
+        kind: "started",
+        runId: "r",
+        agentType: "Researcher",
+        order: 0
+      })
+    );
+    state = applyAgentToolEvent(
+      state,
+      frame(1, {
+        kind: "interrupted",
+        runId: "r",
+        error: "the parent gave up at the hard re-attach ceiling",
+        reason: "window-exceeded",
+        childStillRunning: false
+      })
+    );
+
+    expect(state.runsById.r).toMatchObject({
+      status: "interrupted",
+      reason: "window-exceeded",
+      childStillRunning: false
+    });
+  });
 });

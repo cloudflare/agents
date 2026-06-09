@@ -14,7 +14,7 @@
     "@cloudflare/voice": "*"
   },
   "dependencies": {
-    "@telnyx/webrtc": "^2.26.2"
+    "@telnyx/webrtc": "^2.27.1"
   },
   "exports": {
     ".": {

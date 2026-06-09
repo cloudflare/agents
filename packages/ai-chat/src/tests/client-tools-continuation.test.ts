@@ -925,6 +925,8 @@ describe("Client tools continuation", () => {
         }
       ]);
 
+      // Parallel tool calls in one step: both results must arrive before the
+      // continuation runs (#1649). The first alone must NOT start a turn.
       ws.send(
         JSON.stringify({
           type: MessageType.CF_AGENT_TOOL_RESULT,
@@ -934,7 +936,18 @@ describe("Client tools continuation", () => {
           autoContinue: true
         })
       );
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_RESULT,
+          toolCallId: "call_second_stream_error",
+          toolName: "secondTool",
+          output: { ok: true },
+          autoContinue: true
+        })
+      );
 
+      // The single continuation becomes active (its error stream is delayed
+      // 250ms) once the batch is complete.
       let activeContinuation:
         | Awaited<ReturnType<typeof agentStub.getContinuationStateForTest>>
         | undefined;
@@ -948,16 +961,6 @@ describe("Client tools continuation", () => {
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
       expect(activeContinuation).toBeDefined();
-
-      ws.send(
-        JSON.stringify({
-          type: MessageType.CF_AGENT_TOOL_RESULT,
-          toolCallId: "call_second_stream_error",
-          toolName: "secondTool",
-          output: { ok: true },
-          autoContinue: true
-        })
-      );
 
       await agentStub.waitForIdleForTest();
       await new Promise((resolve) => setTimeout(resolve, 300));
@@ -1394,5 +1397,17 @@ describe("Client tools continuation", () => {
       wsA.close(1000);
       wsB.close(1000);
     }
+  });
+
+  it("serializes overlapping tool-result applies so neither clobbers the other (#1649, defensive)", async () => {
+    // ai-chat's apply is synchronous today so it doesn't exhibit the #1649
+    // clobber, but the interaction-apply queue guards the invariant. Two
+    // overlapping read-modify-writes: without serialization the second reads
+    // the stale value before the first commits and the result is 1; serialized,
+    // the second waits and it is 2.
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    const result = await agentStub.testInteractionApplySerialization();
+    expect(result).toBe(2);
   });
 });

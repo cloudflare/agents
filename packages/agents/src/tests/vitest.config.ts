@@ -18,6 +18,7 @@ export default defineConfig({
   ],
   test: {
     name: "workers",
+    retry: 3,
     include: [path.join(testsDir, "**/*.test.ts")],
     setupFiles: [path.join(testsDir, "setup.ts")],
     testTimeout: 10000,

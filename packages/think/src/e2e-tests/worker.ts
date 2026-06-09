@@ -4,14 +4,23 @@
  * ThinkRecoveryE2EAgent: mock slow stream with chatRecovery for kill/restart testing.
  */
 import { createWorkersAI } from "workers-ai-provider";
+import { createOpenAI } from "@ai-sdk/openai";
+import { createAnthropic } from "@ai-sdk/anthropic";
 import { Agent, callable, routeAgentRequest } from "agents";
+import { agentTool } from "agents/agent-tools";
 import { RpcTarget } from "cloudflare:workers";
-import type { LanguageModel, UIMessage } from "ai";
+import type { WorkflowEvent } from "cloudflare:workers";
+import { tool } from "ai";
+import type { LanguageModel, ToolSet, UIMessage } from "ai";
+import { z } from "zod";
 import { Think, Workspace } from "../think";
+import { ThinkWorkflow, type ThinkWorkflowStep } from "../workflows";
 import type {
   ChatRecoveryContext,
   ChatRecoveryOptions,
-  StreamCallback
+  StreamCallback,
+  TurnConfig,
+  TurnContext
 } from "../think";
 
 type Env = {
@@ -19,9 +28,324 @@ type Env = {
   ThinkRecoveryE2EAgent: DurableObjectNamespace<ThinkRecoveryE2EAgent>;
   ThinkRecoveryHelperParent: DurableObjectNamespace<ThinkRecoveryHelperParent>;
   ThinkRecoveryHelperAgent: DurableObjectNamespace<ThinkRecoveryHelperAgent>;
+  ThinkToolRollbackE2EAgent: DurableObjectNamespace<ThinkToolRollbackE2EAgent>;
+  ThinkPersistFalseE2EAgent: DurableObjectNamespace<ThinkPersistFalseE2EAgent>;
+  ThinkStallRecoveryE2EAgent: DurableObjectNamespace<ThinkStallRecoveryE2EAgent>;
+  ThinkTaskParentE2EAgent: DurableObjectNamespace<ThinkTaskParentE2EAgent>;
+  ThinkAgentToolNaturalParentE2EAgent: DurableObjectNamespace<ThinkAgentToolNaturalParentE2EAgent>;
+  ThinkSlowChildE2EAgent: DurableObjectNamespace<ThinkSlowChildE2EAgent>;
+  ThinkSlowChildParentE2EAgent: DurableObjectNamespace<ThinkSlowChildParentE2EAgent>;
+  TestStructuredAgent: DurableObjectNamespace<TestStructuredAgent>;
+  STEP_PROMPT_WORKFLOW: Workflow;
   AI: Ai;
   R2: R2Bucket;
+  // Optional — only set when the corresponding key is exported in the test env.
+  // The OpenAI/Anthropic legs of the structured-output e2e skip when absent.
+  OPENAI_API_KEY?: string;
+  ANTHROPIC_API_KEY?: string;
 };
+
+/** Providers exercised by the cross-provider structured-output e2e (#1685). */
+type StructuredProvider = "workers-ai" | "openai" | "anthropic";
+const STRUCTURED_PROVIDER_KEY = "test:structured-provider";
+
+// AI SDK v3 LanguageModel spec helpers (mirror tests/agents/assistant-agent-loop.ts).
+const v3FinishReason = (unified: "stop" | "tool-calls") => ({
+  unified,
+  raw: undefined
+});
+const v3Usage = (inputTokens: number, outputTokens: number) => ({
+  inputTokens: {
+    total: inputTokens,
+    noCache: inputTokens,
+    cacheRead: 0,
+    cacheWrite: 0
+  },
+  outputTokens: { total: outputTokens, text: outputTokens, reasoning: 0 }
+});
+
+/**
+ * Deterministic agentic-loop model for rollback testing. Each step it counts
+ * how many `recordStep` results already exist in the prompt and emits the NEXT
+ * `recordStep(index)` tool call — so the step it picks is driven entirely by the
+ * conversation history the recovery path reconstructs. If recovery loses a
+ * completed step, this model re-emits a lower index, which the non-idempotent
+ * ledger surfaces as a duplicate row (the "rollback depth" signal).
+ */
+function createToolLoopMockModel(totalSteps: number): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-tool-loop",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream(options: Record<string, unknown>) {
+      const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+      const completed = messages.filter(
+        (m): m is Record<string, unknown> =>
+          typeof m === "object" &&
+          m !== null &&
+          (m as Record<string, unknown>).role === "tool"
+      ).length;
+      const nextIndex = completed + 1;
+
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (nextIndex > totalSteps) {
+            controller.enqueue({ type: "text-start", id: "done" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "done",
+              delta: "DONE"
+            });
+            controller.enqueue({ type: "text-end", id: "done" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("stop"),
+              usage: v3Usage(10, 5)
+            });
+          } else {
+            const id = `tc-${nextIndex}`;
+            const input = JSON.stringify({ index: nextIndex });
+            controller.enqueue({
+              type: "tool-input-start",
+              id,
+              toolName: "recordStep"
+            });
+            controller.enqueue({ type: "tool-input-delta", id, delta: input });
+            controller.enqueue({ type: "tool-input-end", id });
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: id,
+              toolName: "recordStep",
+              input
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("tool-calls"),
+              usage: v3Usage(10, 5)
+            });
+          }
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+const TOOL_ROLLBACK_TOTAL_STEPS = 30;
+const TOOL_ROLLBACK_EXEC_DELAY_MS = 600;
+
+/**
+ * Recovery + non-idempotent tool agent for measuring rollback DEPTH under rapid
+ * kill/restart churn. One long turn → many `recordStep` tool steps; each
+ * execution appends a ledger row. A completed step that re-runs after an
+ * eviction shows up as a duplicate index.
+ */
+export class ThinkToolRollbackE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override chatRecovery = true;
+  override maxSteps = 500;
+  private _ledgerReady = false;
+
+  override getModel(): LanguageModel {
+    return createToolLoopMockModel(TOOL_ROLLBACK_TOTAL_STEPS);
+  }
+
+  override getSystemPrompt(): string {
+    return "Record each step in order using the recordStep tool.";
+  }
+
+  override getTools(): ToolSet {
+    return {
+      recordStep: tool({
+        description: "Record a step by its index.",
+        inputSchema: z.object({ index: z.number() }),
+        execute: async ({ index }) => {
+          this._ensureLedger();
+          this
+            .sql`INSERT INTO tool_ledger (idx, at) VALUES (${index}, ${Date.now()})`;
+          // Widen the in-flight window so a SIGKILL can land mid-execution.
+          await new Promise((r) => setTimeout(r, TOOL_ROLLBACK_EXEC_DELAY_MS));
+          return { recorded: index };
+        }
+      })
+    };
+  }
+
+  override async onChatRecovery(): Promise<ChatRecoveryOptions> {
+    const n = (await this.ctx.storage.get<number>("tool:recovery-count")) ?? 0;
+    await this.ctx.storage.put("tool:recovery-count", n + 1);
+    return { continue: true };
+  }
+
+  private _ensureLedger(): void {
+    if (this._ledgerReady) return;
+    this
+      .sql`CREATE TABLE IF NOT EXISTS tool_ledger (seq INTEGER PRIMARY KEY AUTOINCREMENT, idx INTEGER, at INTEGER)`;
+    this._ledgerReady = true;
+  }
+
+  @callable()
+  async getLedgerStatus(): Promise<{
+    totalExecutions: number;
+    uniqueIndices: number;
+    maxIndex: number;
+    duplicates: Array<{ index: number; count: number }>;
+    recoveryCount: number;
+    assistantMessages: number;
+    hasFiberRows: boolean;
+  }> {
+    this._ensureLedger();
+    const rows = this.sql<{ idx: number; count: number }>`
+      SELECT idx, COUNT(*) as count FROM tool_ledger GROUP BY idx ORDER BY idx
+    `;
+    const fiberRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    return {
+      totalExecutions: rows.reduce((n, r) => n + r.count, 0),
+      uniqueIndices: rows.length,
+      maxIndex: rows.reduce((m, r) => Math.max(m, r.idx), 0),
+      duplicates: rows
+        .filter((r) => r.count > 1)
+        .map((r) => ({ index: r.idx, count: r.count })),
+      recoveryCount:
+        (await this.ctx.storage.get<number>("tool:recovery-count")) ?? 0,
+      assistantMessages: this.messages.filter((m) => m.role === "assistant")
+        .length,
+      hasFiberRows: (fiberRows[0]?.c ?? 0) > 0
+    };
+  }
+
+  @callable()
+  override async getMessages(): Promise<UIMessage[]> {
+    return this.messages;
+  }
+}
+
+/**
+ * #1631 (R1) e2e: a `recordStep` tool loop whose `onChatRecovery` returns
+ * `{ persist: false, continue: false }` — the explicit "stop this turn"
+ * override. Under a real SIGKILL, recovery fires and returns persist:false;
+ * R1 guarantees the SETTLED tool results produced before the kill are still
+ * preserved in the durable transcript (never dropped), while continue:false
+ * stops the turn (no re-run). This proves the persist:false no-loss default
+ * survives a REAL process kill, not just a unit-seeded incident.
+ */
+export class ThinkPersistFalseE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override chatRecovery = true;
+  override maxSteps = 500;
+  private _ledgerReady = false;
+
+  override getModel(): LanguageModel {
+    return createToolLoopMockModel(TOOL_ROLLBACK_TOTAL_STEPS);
+  }
+
+  override getSystemPrompt(): string {
+    return "Record each step in order using the recordStep tool.";
+  }
+
+  override getTools(): ToolSet {
+    return {
+      recordStep: tool({
+        description: "Record a step by its index.",
+        inputSchema: z.object({ index: z.number() }),
+        execute: async ({ index }) => {
+          this._ensureLedger();
+          this
+            .sql`INSERT INTO tool_ledger (idx, at) VALUES (${index}, ${Date.now()})`;
+          await new Promise((r) => setTimeout(r, TOOL_ROLLBACK_EXEC_DELAY_MS));
+          return { recorded: index };
+        }
+      })
+    };
+  }
+
+  override async onChatRecovery(): Promise<ChatRecoveryOptions> {
+    const n = (await this.ctx.storage.get<number>("tool:recovery-count")) ?? 0;
+    await this.ctx.storage.put("tool:recovery-count", n + 1);
+    // Explicit "stop this turn" — but R1 must STILL preserve the settled work.
+    return { persist: false, continue: false };
+  }
+
+  private _ensureLedger(): void {
+    if (this._ledgerReady) return;
+    this
+      .sql`CREATE TABLE IF NOT EXISTS tool_ledger (seq INTEGER PRIMARY KEY AUTOINCREMENT, idx INTEGER, at INTEGER)`;
+    this._ledgerReady = true;
+  }
+
+  @callable()
+  async getPersistFalseStatus(): Promise<{
+    totalExecutions: number;
+    uniqueIndices: number;
+    maxIndex: number;
+    recoveryCount: number;
+    assistantMessages: number;
+    settledToolPartsInTranscript: number;
+    hasFiberRows: boolean;
+  }> {
+    this._ensureLedger();
+    const rows = this.sql<{ idx: number; count: number }>`
+      SELECT idx, COUNT(*) as count FROM tool_ledger GROUP BY idx ORDER BY idx
+    `;
+    const fiberRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    const assistant = this.messages.filter((m) => m.role === "assistant");
+    const settledToolPartsInTranscript = assistant.reduce((n, m) => {
+      return (
+        n +
+        m.parts.filter((p) => {
+          const part = p as {
+            type?: unknown;
+            output?: unknown;
+            state?: unknown;
+          };
+          return (
+            typeof part.type === "string" &&
+            part.type.startsWith("tool-") &&
+            (part.output !== undefined || part.state === "output-available")
+          );
+        }).length
+      );
+    }, 0);
+    return {
+      totalExecutions: rows.reduce((n, r) => n + r.count, 0),
+      uniqueIndices: rows.length,
+      maxIndex: rows.reduce((m, r) => Math.max(m, r.idx), 0),
+      recoveryCount:
+        (await this.ctx.storage.get<number>("tool:recovery-count")) ?? 0,
+      assistantMessages: assistant.length,
+      settledToolPartsInTranscript,
+      hasFiberRows: (fiberRows[0]?.c ?? 0) > 0
+    };
+  }
+}
+
+type RecoveryContextLogEntry = {
+  streamId: string;
+  requestId: string;
+  partialText: string;
+};
+
+type AgentToolRunStatus = {
+  runId: string;
+  status: string;
+  error: string | null;
+};
+
+const RECOVERY_CONTEXTS_KEY = "test:recovery-contexts";
+const RECOVERY_BEHAVIOR_KEY = "test:recovery-behavior";
+const BEFORE_TURN_ERROR_KEY = "test:before-turn-error";
+const ON_ERROR_LOG_KEY = "test:on-error-log";
+const ON_CHAT_ERROR_LOG_KEY = "test:on-chat-error-log";
 
 export class TestAssistant extends Think<Env> {
   override workspace = new Workspace({
@@ -93,12 +417,6 @@ function createSlowE2EMockModel(): LanguageModel {
 export class ThinkRecoveryE2EAgent extends Think<Env> {
   override chatRecovery = true;
 
-  private _recoveryContexts: Array<{
-    streamId: string;
-    requestId: string;
-    partialText: string;
-  }> = [];
-
   override getModel(): LanguageModel {
     return createSlowE2EMockModel();
   }
@@ -110,12 +428,46 @@ export class ThinkRecoveryE2EAgent extends Think<Env> {
   override async onChatRecovery(
     ctx: ChatRecoveryContext
   ): Promise<ChatRecoveryOptions> {
-    this._recoveryContexts.push({
+    const contexts =
+      (await this.ctx.storage.get<RecoveryContextLogEntry[]>(
+        RECOVERY_CONTEXTS_KEY
+      )) ?? [];
+    contexts.push({
       streamId: ctx.streamId,
       requestId: ctx.requestId,
       partialText: ctx.partialText
     });
-    return { continue: false };
+    await this.ctx.storage.put(RECOVERY_CONTEXTS_KEY, contexts);
+
+    const behavior =
+      (await this.ctx.storage.get<"continue" | "stop">(
+        RECOVERY_BEHAVIOR_KEY
+      )) ?? "stop";
+    return { continue: behavior === "continue" };
+  }
+
+  override async beforeTurn(_ctx: TurnContext): Promise<TurnConfig | void> {
+    const error = await this.ctx.storage.get<string>(BEFORE_TURN_ERROR_KEY);
+    if (!error) return;
+    await this.ctx.storage.delete(BEFORE_TURN_ERROR_KEY);
+    throw new Error(error);
+  }
+
+  override async onError(error: unknown): Promise<void> {
+    const log = (await this.ctx.storage.get<string[]>(ON_ERROR_LOG_KEY)) ?? [];
+    log.push(error instanceof Error ? error.message : String(error));
+    await this.ctx.storage.put(ON_ERROR_LOG_KEY, log);
+  }
+
+  override onChatError(error: unknown): unknown {
+    const message = error instanceof Error ? error.message : String(error);
+    this.ctx.storage
+      .get<string[]>(ON_CHAT_ERROR_LOG_KEY)
+      .then((log = []) =>
+        this.ctx.storage.put(ON_CHAT_ERROR_LOG_KEY, [...log, message])
+      )
+      .catch(console.error);
+    return error;
   }
 
   @callable()
@@ -130,12 +482,36 @@ export class ThinkRecoveryE2EAgent extends Think<Env> {
     assistantMessages: number;
   }> {
     const messages = await this.getMessages();
+    const contexts =
+      (await this.ctx.storage.get<RecoveryContextLogEntry[]>(
+        RECOVERY_CONTEXTS_KEY
+      )) ?? [];
     return {
-      recoveryCount: this._recoveryContexts.length,
-      contexts: this._recoveryContexts,
+      recoveryCount: contexts.length,
+      contexts,
       messageCount: messages.length,
       assistantMessages: messages.filter((m) => m.role === "assistant").length
     };
+  }
+
+  @callable()
+  async setRecoveryBehavior(behavior: "continue" | "stop"): Promise<void> {
+    await this.ctx.storage.put(RECOVERY_BEHAVIOR_KEY, behavior);
+  }
+
+  @callable()
+  async throwBeforeNextTurn(message: string): Promise<void> {
+    await this.ctx.storage.put(BEFORE_TURN_ERROR_KEY, message);
+  }
+
+  @callable()
+  async getOnErrorLog(): Promise<string[]> {
+    return (await this.ctx.storage.get<string[]>(ON_ERROR_LOG_KEY)) ?? [];
+  }
+
+  @callable()
+  async getOnChatErrorLog(): Promise<string[]> {
+    return (await this.ctx.storage.get<string[]>(ON_CHAT_ERROR_LOG_KEY)) ?? [];
   }
 
   @callable()
@@ -144,6 +520,577 @@ export class ThinkRecoveryE2EAgent extends Think<Env> {
       SELECT COUNT(*) as count FROM cf_agents_runs
     `;
     return rows[0].count > 0;
+  }
+}
+
+/**
+ * #1626 stall-recovery: the FIRST inference streams a little text then hangs
+ * forever (a parked provider/transport); later inferences stream a full
+ * response. With `chatStreamStallTimeoutMs` armed + chatRecovery on, the
+ * watchdog aborts the hung first attempt and routes it into bounded recovery;
+ * the scheduled continuation (a later, non-stalling inference) completes the
+ * turn — instead of failing terminally.
+ */
+function createStallThenStreamMockModel(nextCall: () => number): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-stall-then-stream",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream() {
+      // The counter lives on the agent instance (survives the stall, which does
+      // NOT restart the isolate), so only the FIRST inference stalls; the
+      // recovery continuation streams to completion.
+      const stallThisCall = nextCall() === 1;
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: "t-stall" });
+          controller.enqueue({
+            type: "text-delta",
+            id: "t-stall",
+            delta: "partial "
+          });
+          if (stallThisCall) {
+            // Park forever — the inactivity watchdog must abort this attempt.
+            await new Promise(() => {});
+            return;
+          }
+          controller.enqueue({
+            type: "text-delta",
+            id: "t-stall",
+            delta: "RECOVERED"
+          });
+          controller.enqueue({ type: "text-end", id: "t-stall" });
+          controller.enqueue({
+            type: "finish",
+            finishReason: v3FinishReason("stop"),
+            usage: v3Usage(10, 5)
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+export class ThinkStallRecoveryE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override chatRecovery = true;
+  // Small window so the e2e is fast: the first inference hangs, the watchdog
+  // fires within ~2s, and the scheduled continuation completes the turn.
+  override chatStreamStallTimeoutMs = 2_000;
+  private _inferenceCount = 0;
+
+  override getModel(): LanguageModel {
+    return createStallThenStreamMockModel(() => ++this._inferenceCount);
+  }
+
+  override getSystemPrompt(): string {
+    return "Stall-recovery e2e agent.";
+  }
+
+  @callable()
+  async getStallStatus(): Promise<{
+    assistantMessages: number;
+    finalText: string;
+    hasFiberRows: boolean;
+  }> {
+    const assistant = this.messages.filter((m) => m.role === "assistant");
+    const final = assistant[assistant.length - 1];
+    const finalText = final
+      ? final.parts
+          .filter((p): p is { type: "text"; text: string } => p.type === "text")
+          .map((p) => p.text)
+          .join("")
+      : "";
+    const fiberRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    return {
+      assistantMessages: assistant.length,
+      finalText,
+      hasFiberRows: (fiberRows[0]?.c ?? 0) > 0
+    };
+  }
+
+  @callable()
+  override async getMessages(): Promise<UIMessage[]> {
+    return this.messages;
+  }
+}
+
+/**
+ * Deterministic parent model: call `runTask` once, then finish. Used to test
+ * whether an eviction while a `task` (child-agent) step is in flight causes the
+ * parent to re-run the task — and thus re-run the entire child turn.
+ */
+function createSingleTaskMockModel(): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-single-task",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream(options: Record<string, unknown>) {
+      const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+      const hasToolResult = messages.some(
+        (m): m is Record<string, unknown> =>
+          typeof m === "object" &&
+          m !== null &&
+          (m as Record<string, unknown>).role === "tool"
+      );
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (!hasToolResult) {
+            const id = "task-1";
+            const input = JSON.stringify({ taskId: 1 });
+            controller.enqueue({
+              type: "tool-input-start",
+              id,
+              toolName: "runTask"
+            });
+            controller.enqueue({ type: "tool-input-delta", id, delta: input });
+            controller.enqueue({ type: "tool-input-end", id });
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: id,
+              toolName: "runTask",
+              input
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("tool-calls"),
+              usage: v3Usage(10, 5)
+            });
+          } else {
+            controller.enqueue({ type: "text-start", id: "done" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "done",
+              delta: "DONE"
+            });
+            controller.enqueue({ type: "text-end", id: "done" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("stop"),
+              usage: v3Usage(10, 5)
+            });
+          }
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+const CHILD_TASK_RUN_ID = "child-task-1";
+
+/**
+ * Parent agent whose single turn calls a `runTask` tool that drives a child
+ * agent (`ThinkToolRollbackE2EAgent`, a long ledger tool-loop) via
+ * `runAgentTool`. Lets us measure whether one in-flight `task` step re-runs the
+ * whole child turn (the "amplification" hypothesis) under eviction.
+ */
+export class ThinkTaskParentE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override chatRecovery = true;
+  override maxSteps = 50;
+
+  override getModel(): LanguageModel {
+    return createSingleTaskMockModel();
+  }
+
+  override getSystemPrompt(): string {
+    return "Run the seeding task exactly once using runTask.";
+  }
+
+  override getTools(): ToolSet {
+    return {
+      runTask: tool({
+        description: "Run the seeding task as a child agent.",
+        inputSchema: z.object({ taskId: z.number() }),
+        execute: async ({ taskId }) => {
+          this
+            .sql`CREATE TABLE IF NOT EXISTS parent_task_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER)`;
+          this.sql`INSERT INTO parent_task_log (at) VALUES (${Date.now()})`;
+          // Stable runId → runAgentTool is idempotent by design (the "correct"
+          // pattern). The question is whether eviction defeats that under churn.
+          const result = await this.runAgentTool(ThinkToolRollbackE2EAgent, {
+            runId: CHILD_TASK_RUN_ID,
+            input: `seed task ${taskId}`
+          });
+          return { childStatus: result.status };
+        }
+      })
+    };
+  }
+
+  override async onChatRecovery(): Promise<ChatRecoveryOptions> {
+    const n =
+      (await this.ctx.storage.get<number>("parent:recovery-count")) ?? 0;
+    await this.ctx.storage.put("parent:recovery-count", n + 1);
+    return { continue: true };
+  }
+
+  @callable()
+  async getTaskStatus(): Promise<{
+    parentTaskExecutions: number;
+    parentRecoveries: number;
+    parentHasFiberRows: boolean;
+    child: {
+      totalExecutions: number;
+      uniqueIndices: number;
+      maxIndex: number;
+      duplicates: Array<{ index: number; count: number }>;
+      recoveryCount: number;
+      hasFiberRows: boolean;
+    } | null;
+  }> {
+    this
+      .sql`CREATE TABLE IF NOT EXISTS parent_task_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER)`;
+    const parentRuns =
+      this.sql<{ c: number }>`SELECT COUNT(*) as c FROM parent_task_log`[0]
+        ?.c ?? 0;
+    const fiberRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    let child: {
+      totalExecutions: number;
+      uniqueIndices: number;
+      maxIndex: number;
+      duplicates: Array<{ index: number; count: number }>;
+      recoveryCount: number;
+      hasFiberRows: boolean;
+    } | null = null;
+    try {
+      const childStub = await this.subAgent(
+        ThinkToolRollbackE2EAgent,
+        CHILD_TASK_RUN_ID
+      );
+      const ledger = await childStub.getLedgerStatus();
+      child = {
+        totalExecutions: ledger.totalExecutions,
+        uniqueIndices: ledger.uniqueIndices,
+        maxIndex: ledger.maxIndex,
+        duplicates: ledger.duplicates,
+        recoveryCount: ledger.recoveryCount,
+        hasFiberRows: ledger.hasFiberRows
+      };
+    } catch {
+      child = null;
+    }
+    return {
+      parentTaskExecutions: parentRuns,
+      parentRecoveries:
+        (await this.ctx.storage.get<number>("parent:recovery-count")) ?? 0,
+      parentHasFiberRows: (fiberRows[0]?.c ?? 0) > 0,
+      child
+    };
+  }
+}
+
+// The stable runId agentTool() derives from the mock model's tool call id
+// ("task-1") — `agent-tool:${toolCallId}`. getTaskStatus uses it to find the
+// child facet.
+const NATURAL_CHILD_TASK_RUN_ID = "agent-tool:task-1";
+
+/**
+ * Same shape as {@link ThinkTaskParentE2EAgent}, but the seeding task is wired
+ * through `agentTool()` — the NATURAL path that does not hand-pick a stable
+ * runId (#1630). Before the fix, `agentTool()` minted a fresh `nanoid` per
+ * call, so a turn re-run by recovery spawned a brand-new child and re-ran the
+ * whole ledger ("amplification"). After the fix, `agentTool()` derives a stable
+ * runId from the (recovery-preserved) tool call id, so the re-issue re-attaches
+ * to the same idempotent child instead of re-running its work.
+ */
+export class ThinkAgentToolNaturalParentE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override chatRecovery = true;
+  override maxSteps = 50;
+
+  override getModel(): LanguageModel {
+    return createSingleTaskMockModel();
+  }
+
+  override getSystemPrompt(): string {
+    return "Run the seeding task exactly once using runTask.";
+  }
+
+  override getTools(): ToolSet {
+    return {
+      runTask: agentTool(ThinkToolRollbackE2EAgent, {
+        description: "Run the seeding task as a child agent.",
+        inputSchema: z.object({ taskId: z.number() })
+      })
+    };
+  }
+
+  override async onChatRecovery(): Promise<ChatRecoveryOptions> {
+    const n =
+      (await this.ctx.storage.get<number>("parent:recovery-count")) ?? 0;
+    await this.ctx.storage.put("parent:recovery-count", n + 1);
+    return { continue: true };
+  }
+
+  @callable()
+  async getTaskStatus(): Promise<{
+    parentTaskExecutions: number;
+    parentRecoveries: number;
+    parentHasFiberRows: boolean;
+    parentChildStatus: string | null;
+    child: {
+      totalExecutions: number;
+      uniqueIndices: number;
+      maxIndex: number;
+      duplicates: Array<{ index: number; count: number }>;
+      recoveryCount: number;
+      hasFiberRows: boolean;
+    } | null;
+  }> {
+    const parentRunRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agent_tool_runs
+    `;
+    // The status the PARENT collected for the child run (#1630 / N6): after a
+    // real eviction the child self-heals its durable submission and the parent
+    // re-attaches and collects `completed` — not `interrupted` (abandoned).
+    const parentChildRunRows = this.sql<{ status: string }>`
+      SELECT status FROM cf_agent_tool_runs
+      WHERE run_id = ${NATURAL_CHILD_TASK_RUN_ID}
+      LIMIT 1
+    `;
+    const fiberRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    let child: {
+      totalExecutions: number;
+      uniqueIndices: number;
+      maxIndex: number;
+      duplicates: Array<{ index: number; count: number }>;
+      recoveryCount: number;
+      hasFiberRows: boolean;
+    } | null = null;
+    try {
+      const childStub = await this.subAgent(
+        ThinkToolRollbackE2EAgent,
+        NATURAL_CHILD_TASK_RUN_ID
+      );
+      const ledger = await childStub.getLedgerStatus();
+      child = {
+        totalExecutions: ledger.totalExecutions,
+        uniqueIndices: ledger.uniqueIndices,
+        maxIndex: ledger.maxIndex,
+        duplicates: ledger.duplicates,
+        recoveryCount: ledger.recoveryCount,
+        hasFiberRows: ledger.hasFiberRows
+      };
+    } catch {
+      child = null;
+    }
+    return {
+      // The agentTool() path doesn't write a parent_task_log; the parent run
+      // row count is the closest analogue to "how many times the task ran".
+      parentTaskExecutions: parentRunRows[0]?.c ?? 0,
+      parentRecoveries:
+        (await this.ctx.storage.get<number>("parent:recovery-count")) ?? 0,
+      parentHasFiberRows: (fiberRows[0]?.c ?? 0) > 0,
+      parentChildStatus: parentChildRunRows[0]?.status ?? null,
+      child
+    };
+  }
+}
+
+// ── Re-attach budget bug: a deploy-interrupted child that is HEALTHY but needs
+// longer than the parent's re-attach budget to finish is sealed `interrupted`.
+//
+// The re-attach budget (`DEFAULT_AGENT_TOOL_REATTACH_TIMEOUT_MS`, 120s) is a
+// flat wall-clock timer that is NOT reset by child forward-progress, and the
+// child facet cannot self-drive its own recovery (facets share the root isolate
+// and cannot arm a physical alarm). So a parent that re-attaches after a deploy
+// abandons a child that is still healthily advancing once the 120s elapse.
+//
+// Unlike the other task agents, these deliberately use the PRODUCTION-DEFAULT
+// keepAlive (30s) — the `keepAliveIntervalMs: 2_000` override the rollback/task
+// agents use drives facet recovery ~15x faster and masks this bug.
+const SLOW_CHILD_TOTAL_STEPS = 60;
+// ~2.7s/step × 60 ≈ 162s of continuous child work — comfortably beyond the
+// parent's 120s re-attach budget, so the budget always expires before the
+// (healthy) child reaches its terminal result.
+const SLOW_CHILD_EXEC_DELAY_MS = 2_700;
+
+/**
+ * A long child tool-loop (same shape as {@link ThinkToolRollbackE2EAgent}) whose
+ * recovered turn legitimately takes longer than the parent's 120s re-attach
+ * budget. Production-default keepAlive (no 2s override).
+ */
+export class ThinkSlowChildE2EAgent extends Think<Env> {
+  override chatRecovery = true;
+  override maxSteps = 200;
+  private _ledgerReady = false;
+
+  override getModel(): LanguageModel {
+    return createToolLoopMockModel(SLOW_CHILD_TOTAL_STEPS);
+  }
+
+  override getSystemPrompt(): string {
+    return "Record each step in order using the recordStep tool.";
+  }
+
+  override getTools(): ToolSet {
+    return {
+      recordStep: tool({
+        description: "Record a step by its index.",
+        inputSchema: z.object({ index: z.number() }),
+        execute: async ({ index }) => {
+          this._ensureLedger();
+          this
+            .sql`INSERT INTO tool_ledger (idx, at) VALUES (${index}, ${Date.now()})`;
+          await new Promise((r) => setTimeout(r, SLOW_CHILD_EXEC_DELAY_MS));
+          return { recorded: index };
+        }
+      })
+    };
+  }
+
+  override async onChatRecovery(): Promise<ChatRecoveryOptions> {
+    const n = (await this.ctx.storage.get<number>("tool:recovery-count")) ?? 0;
+    await this.ctx.storage.put("tool:recovery-count", n + 1);
+    return { continue: true };
+  }
+
+  private _ensureLedger(): void {
+    if (this._ledgerReady) return;
+    this
+      .sql`CREATE TABLE IF NOT EXISTS tool_ledger (seq INTEGER PRIMARY KEY AUTOINCREMENT, idx INTEGER, at INTEGER)`;
+    this._ledgerReady = true;
+  }
+
+  @callable()
+  async getLedgerStatus(): Promise<{
+    totalExecutions: number;
+    uniqueIndices: number;
+    maxIndex: number;
+    duplicates: Array<{ index: number; count: number }>;
+    recoveryCount: number;
+    hasFiberRows: boolean;
+  }> {
+    this._ensureLedger();
+    const rows = this.sql<{ idx: number; count: number }>`
+      SELECT idx, COUNT(*) as count FROM tool_ledger GROUP BY idx ORDER BY idx
+    `;
+    const fiberRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    return {
+      totalExecutions: rows.reduce((n, r) => n + r.count, 0),
+      uniqueIndices: rows.length,
+      maxIndex: rows.reduce((m, r) => Math.max(m, r.idx), 0),
+      duplicates: rows
+        .filter((r) => r.count > 1)
+        .map((r) => ({ index: r.idx, count: r.count })),
+      recoveryCount:
+        (await this.ctx.storage.get<number>("tool:recovery-count")) ?? 0,
+      hasFiberRows: (fiberRows[0]?.c ?? 0) > 0
+    };
+  }
+}
+
+/**
+ * Parent that drives {@link ThinkSlowChildE2EAgent} via the natural `agentTool()`
+ * path (stable runId `agent-tool:task-1`). Production-default keepAlive. A single
+ * deploy mid-child is enough to expose the budget bug: the parent re-attaches,
+ * the budget elapses while the child is still advancing, and the run is sealed
+ * `interrupted` instead of `completed`.
+ */
+export class ThinkSlowChildParentE2EAgent extends Think<Env> {
+  override chatRecovery = true;
+  override maxSteps = 50;
+
+  override getModel(): LanguageModel {
+    return createSingleTaskMockModel();
+  }
+
+  override getSystemPrompt(): string {
+    return "Run the seeding task exactly once using runTask.";
+  }
+
+  override getTools(): ToolSet {
+    return {
+      runTask: agentTool(ThinkSlowChildE2EAgent, {
+        description: "Run the seeding task as a child agent.",
+        inputSchema: z.object({ taskId: z.number() })
+      })
+    };
+  }
+
+  override async onChatRecovery(): Promise<ChatRecoveryOptions> {
+    const n =
+      (await this.ctx.storage.get<number>("parent:recovery-count")) ?? 0;
+    await this.ctx.storage.put("parent:recovery-count", n + 1);
+    return { continue: true };
+  }
+
+  @callable()
+  async getTaskStatus(): Promise<{
+    parentRecoveries: number;
+    parentHasFiberRows: boolean;
+    parentChildStatus: string | null;
+    parentChildError: string | null;
+    child: {
+      maxIndex: number;
+      uniqueIndices: number;
+      recoveryCount: number;
+      hasFiberRows: boolean;
+    } | null;
+  }> {
+    const parentChildRunRows = this.sql<{
+      status: string;
+      error_message: string | null;
+    }>`
+      SELECT status, error_message FROM cf_agent_tool_runs
+      WHERE run_id = ${NATURAL_CHILD_TASK_RUN_ID}
+      LIMIT 1
+    `;
+    const fiberRows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    let child: {
+      maxIndex: number;
+      uniqueIndices: number;
+      recoveryCount: number;
+      hasFiberRows: boolean;
+    } | null = null;
+    try {
+      const childStub = await this.subAgent(
+        ThinkSlowChildE2EAgent,
+        NATURAL_CHILD_TASK_RUN_ID
+      );
+      const ledger = await childStub.getLedgerStatus();
+      child = {
+        maxIndex: ledger.maxIndex,
+        uniqueIndices: ledger.uniqueIndices,
+        recoveryCount: ledger.recoveryCount,
+        hasFiberRows: ledger.hasFiberRows
+      };
+    } catch {
+      child = null;
+    }
+    return {
+      parentRecoveries:
+        (await this.ctx.storage.get<number>("parent:recovery-count")) ?? 0,
+      parentHasFiberRows: (fiberRows[0]?.c ?? 0) > 0,
+      parentChildStatus: parentChildRunRows[0]?.status ?? null,
+      parentChildError: parentChildRunRows[0]?.error_message ?? null,
+      child
+    };
   }
 }
 
@@ -212,6 +1159,45 @@ export class ThinkRecoveryHelperParent extends Agent<Env> {
   }
 
   @callable()
+  async startHelperAgentToolRun(
+    runId: string,
+    prompt: string
+  ): Promise<string> {
+    // #1630: a parent that re-attaches to a still-running child after a deploy
+    // must follow it to its REAL terminal instead of abandoning it as
+    // `interrupted`. The child facet is named by `runId` (runAgentTool resolves
+    // it via subAgent(cls, runId)), so configure it to self-heal (continue) on
+    // recovery BEFORE starting the run — the re-attached parent then collects
+    // `completed`, not an abandoned interrupt.
+    const child = await this.subAgent(ThinkRecoveryHelperAgent, runId);
+    await child.setRecoveryBehavior("continue");
+
+    void this.runAgentTool(ThinkRecoveryHelperAgent, {
+      runId,
+      input: prompt
+    }).catch((error) => {
+      console.error("[test] helper agent-tool run failed:", error);
+    });
+
+    for (let i = 0; i < 20; i++) {
+      const rows = this.getAgentToolRuns();
+      if (rows.some((row) => row.runId === runId)) return runId;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    throw new Error("Timed out waiting for helper agent-tool row");
+  }
+
+  @callable()
+  getAgentToolRuns(): AgentToolRunStatus[] {
+    return this.sql<AgentToolRunStatus>`
+      SELECT run_id as runId, status, error_message as error
+      FROM cf_agent_tool_runs
+      ORDER BY started_at ASC
+    `;
+  }
+
+  @callable()
   async helperHasFiberRows(helperName: string): Promise<boolean> {
     const helper = await this.subAgent(ThinkRecoveryHelperAgent, helperName);
     return helper.hasFiberRows();
@@ -230,6 +1216,118 @@ export class ThinkRecoveryHelperParent extends Agent<Env> {
   }> {
     const helper = await this.subAgent(ThinkRecoveryHelperAgent, helperName);
     return helper.getRecoveryStatus();
+  }
+}
+
+/**
+ * Cross-provider regression fixture for issue #1685: `step.prompt({ output })`
+ * must return a schema-shaped object on Workers AI, OpenAI, and Anthropic.
+ *
+ * The provider is selected per-instance (persisted so it survives the workflow
+ * event re-entry / hibernation) and read synchronously in `getModel()`.
+ */
+export class TestStructuredAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override maxSteps = 6;
+  private _provider: StructuredProvider = "workers-ai";
+
+  override async onStart(): Promise<void> {
+    const stored = (await this.ctx.storage.get(STRUCTURED_PROVIDER_KEY)) as
+      | StructuredProvider
+      | undefined;
+    if (stored) this._provider = stored;
+  }
+
+  override getModel(): LanguageModel {
+    switch (this._provider) {
+      case "openai":
+        return createOpenAI({ apiKey: this.env.OPENAI_API_KEY })("gpt-4o-mini");
+      case "anthropic":
+        return createAnthropic({ apiKey: this.env.ANTHROPIC_API_KEY })(
+          "claude-haiku-4-5"
+        );
+      default:
+        return createWorkersAI({ binding: this.env.AI })(
+          "@cf/moonshotai/kimi-k2.6",
+          { sessionAffinity: this.sessionAffinity }
+        );
+    }
+  }
+
+  override getSystemPrompt(): string {
+    return "You are a helpful assistant.";
+  }
+
+  @callable()
+  async setTestProvider(provider: StructuredProvider): Promise<void> {
+    this._provider = provider;
+    await this.ctx.storage.put(STRUCTURED_PROVIDER_KEY, provider);
+  }
+
+  /**
+   * Run the structured-prompt workflow and poll to a terminal state, returning
+   * the workflow's output (the validated object) or the failure details.
+   */
+  @callable()
+  async runStructuredPrompt(
+    prompt: string,
+    mode?: "greeting" | "tool"
+  ): Promise<{
+    status: string;
+    output?: unknown;
+    error?: string;
+  }> {
+    const id = await this.runWorkflow("STEP_PROMPT_WORKFLOW", { prompt, mode });
+    for (let i = 0; i < 90; i++) {
+      const status = await this.getWorkflowStatus("STEP_PROMPT_WORKFLOW", id);
+      if (status.status === "complete") {
+        return { status: "complete", output: status.output };
+      }
+      if (status.status === "errored" || status.status === "terminated") {
+        return {
+          status: status.status,
+          error: JSON.stringify(status.error ?? status.output ?? status)
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+    return { status: "timeout" };
+  }
+}
+
+const GREETING_SCHEMA = z.object({
+  greeting: z.string()
+});
+const WORD_SCHEMA = z.object({
+  word: z.string()
+});
+
+/**
+ * `ThinkWorkflow` that issues a single structured `step.prompt`. In `greeting`
+ * mode it is the exact shape from issue #1685 (no real tool use needed). In
+ * `tool` mode the prompt forces the agent to use its workspace tools before
+ * answering, exercising the full agentic `toolChoice: "required"` path that
+ * terminates with the synthetic final-answer tool.
+ */
+export class StepPromptWorkflow extends ThinkWorkflow<TestStructuredAgent> {
+  async run(
+    event: WorkflowEvent<unknown>,
+    step: ThinkWorkflowStep
+  ): Promise<unknown> {
+    const { prompt, mode } = event.payload as {
+      prompt: string;
+      mode?: "greeting" | "tool";
+    };
+    if (mode === "tool") {
+      return step.prompt("structured-word", {
+        prompt,
+        output: WORD_SCHEMA
+      });
+    }
+    return step.prompt("structured-greeting", {
+      prompt,
+      output: GREETING_SCHEMA
+    });
   }
 }
 

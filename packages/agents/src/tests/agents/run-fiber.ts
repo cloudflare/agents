@@ -39,6 +39,9 @@ export class TestRunFiberAgent extends Agent {
     if (ctx.name === "managed-recovery-throws") {
       throw new Error("Recovery failed");
     }
+    if (ctx.name === "unmanaged-recovery-throws") {
+      throw new Error("Unmanaged recovery failed");
+    }
   }
 
   // ── Test methods exposed via RPC ──────────────────────────────
@@ -552,6 +555,18 @@ export class TestRunFiberAgent extends Agent {
     this.sql`
       INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
       VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
+    `;
+  }
+
+  /** Insert an unmanaged interrupted fiber row with a backdated created_at. */
+  async insertAgedInterruptedFiber(
+    id: string,
+    name: string,
+    ageMs: number
+  ): Promise<void> {
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${id}, ${name}, NULL, ${Date.now() - ageMs})
     `;
   }
 

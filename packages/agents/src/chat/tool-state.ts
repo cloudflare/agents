@@ -74,6 +74,75 @@ export function toolResultUpdate(
 }
 
 /**
+ * Build an update descriptor for a terminal tool result that belongs to a
+ * tool part in a *different* (earlier) assistant message than the one
+ * currently being streamed.
+ *
+ * This is the "cross-message" case: an approved server tool executes during a
+ * continuation stream, but its tool part lives in the assistant message that
+ * originally requested it. `StreamAccumulator` surfaces this as a
+ * `cross-message-tool-update` action because the accumulator only owns the
+ * current turn's new content and cannot mutate a part from a prior message.
+ *
+ * Compared to {@link toolResultUpdate} this builder is deliberately more
+ * defensive, mirroring the equivalent fallback in `@cloudflare/ai-chat`:
+ *
+ * - It matches the broad set of pre-terminal **and** terminal states, so a
+ *   provider that replays the entire prior tool round-trip during a
+ *   continuation (notably the OpenAI Responses API — issue #1404) still
+ *   resolves to the same part instead of silently missing it.
+ * - It is **first-write-wins**: a chunk arriving for a tool that already holds
+ *   a terminal result is treated as a replay and the existing output is never
+ *   overwritten. In that case `apply` returns the *same part reference*, which
+ *   callers use as an idempotent-no-op signal to skip the durable write and a
+ *   redundant `MESSAGE_UPDATED` broadcast.
+ * - It preserves a streamed `preliminary` flag when one is present, otherwise
+ *   marks the result final (`preliminary: false`).
+ */
+export function crossMessageToolResultUpdate(
+  toolCallId: string,
+  updateType: "output-available" | "output-error",
+  output?: unknown,
+  errorText?: string,
+  preliminary?: boolean
+): ToolPartUpdate {
+  return {
+    toolCallId,
+    matchStates: [
+      "input-streaming",
+      "input-available",
+      "approval-requested",
+      "approval-responded",
+      "output-available",
+      "output-error",
+      "output-denied"
+    ],
+    apply: (part) => {
+      if (
+        part.state === "output-available" ||
+        part.state === "output-error" ||
+        part.state === "output-denied"
+      ) {
+        return part;
+      }
+      if (updateType === "output-error") {
+        return {
+          ...part,
+          state: "output-error",
+          errorText: errorText ?? "Tool execution failed"
+        };
+      }
+      return {
+        ...part,
+        state: "output-available",
+        output,
+        preliminary: preliminary ?? false
+      };
+    }
+  };
+}
+
+/**
  * Build an update descriptor for applying a tool approval.
  *
  * Matches parts in `input-available` or `approval-requested` state.

@@ -1596,6 +1596,158 @@ describe("createCompactFunction", () => {
     expect(result!.fromMessageId).toMatch(/^m/);
     expect(result!.toMessageId).toMatch(/^m/);
   });
+
+  it("documents that tail budgeting can skip tool-heavy histories when the heuristic under-counts", async () => {
+    let summarizeCalls = 0;
+    const messages: SessionMessage[] = [
+      {
+        id: "head",
+        role: "user",
+        parts: [{ type: "text", text: "start" }]
+      },
+      ...Array.from({ length: 8 }, (_, i): SessionMessage => {
+        const output = Array.from({ length: 120 }, (__, j) => ({
+          file: `/repo/file-${i}-${j}.ts`,
+          line: j,
+          snippet: `export const value${j} = ${JSON.stringify({
+            nested: ["alpha", "beta", "gamma"],
+            enabled: true
+          })};`
+        }));
+        return {
+          id: `tool-${i}`,
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-read_many",
+              toolCallId: `call-${i}`,
+              toolName: "read_many",
+              state: "output-available",
+              input: { glob: "**/*.ts" },
+              output
+            }
+          ]
+        };
+      })
+    ];
+
+    const heuristicTailTokens = estimateMessageTokens(messages.slice(1));
+    const tailTokenBudget = heuristicTailTokens + 1;
+    const modelReportedTailTokens = heuristicTailTokens * 5;
+    const compact = createCompactFunction({
+      summarize: async () => {
+        summarizeCalls++;
+        return "summary";
+      },
+      protectHead: 1,
+      minTailMessages: 1,
+      tailTokenBudget
+    });
+
+    expect(modelReportedTailTokens).toBeGreaterThan(tailTokenBudget);
+    await expect(compact(messages)).resolves.toBeNull();
+    expect(summarizeCalls).toBe(0);
+  });
+
+  it("uses a supplied token counter for tail budgeting tool-heavy histories", async () => {
+    let summarizeCalls = 0;
+    const messages: SessionMessage[] = [
+      {
+        id: "head",
+        role: "user",
+        parts: [{ type: "text", text: "start" }]
+      },
+      ...Array.from(
+        { length: 8 },
+        (_, i): SessionMessage => ({
+          id: `tool-${i}`,
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-read_many",
+              toolCallId: `call-${i}`,
+              toolName: "read_many",
+              state: "output-available",
+              input: { glob: "**/*.ts" },
+              output: "x".repeat(25_000)
+            }
+          ]
+        })
+      )
+    ];
+
+    const compact = createCompactFunction({
+      summarize: async () => {
+        summarizeCalls++;
+        return "summary";
+      },
+      protectHead: 1,
+      minTailMessages: 1,
+      tailTokenBudget: 10_000,
+      tokenCounter: (countedMessages) =>
+        countedMessages.reduce(
+          (sum, message) => sum + JSON.stringify(message.parts).length,
+          0
+        )
+    });
+
+    const result = await compact(messages);
+    expect(result).toMatchObject({
+      fromMessageId: "tool-0",
+      summary: "summary"
+    });
+    expect(summarizeCalls).toBe(1);
+  });
+
+  it("uses the Session-flowed tokenCounter (CompactContext) when no explicit counter is given", async () => {
+    let summarizeCalls = 0;
+    const messages: SessionMessage[] = [
+      { id: "head", role: "user", parts: [{ type: "text", text: "start" }] },
+      ...Array.from(
+        { length: 8 },
+        (_, i): SessionMessage => ({
+          id: `tool-${i}`,
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-read_many",
+              toolCallId: `call-${i}`,
+              toolName: "read_many",
+              state: "output-available",
+              input: { glob: "**/*.ts" },
+              output: "x".repeat(4000)
+            }
+          ]
+        })
+      )
+    ];
+
+    // Budget set just above the heuristic total so the default heuristic
+    // protects the entire tail (the failure mode from the issue).
+    const heuristicTailTokens = estimateMessageTokens(messages.slice(1));
+    const compact = createCompactFunction({
+      summarize: async () => {
+        summarizeCalls++;
+        return "summary";
+      },
+      protectHead: 1,
+      minTailMessages: 1,
+      tailTokenBudget: heuristicTailTokens + 1
+    });
+
+    // No explicit counter and no context → heuristic under-counts → no-op.
+    expect(await compact(messages)).toBeNull();
+    expect(summarizeCalls).toBe(0);
+
+    // Same function, but the Session flows its authoritative counter via
+    // CompactContext (whole-prompt shape) → the boundary now compresses.
+    const result = await compact(messages, {
+      tokenCounter: ({ messages: counted }) =>
+        estimateMessageTokens(counted) * 5
+    });
+    expect(result).toMatchObject({ summary: "summary" });
+    expect(summarizeCalls).toBe(1);
+  });
 });
 
 // ── DO-backed tests (session isolation, system prompt persistence) ──

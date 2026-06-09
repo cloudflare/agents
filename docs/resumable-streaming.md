@@ -2,6 +2,8 @@
 
 The `AIChatAgent` class provides **automatic resumable streaming** out of the box. When a client disconnects and reconnects during an active stream, the response automatically resumes from where it left off.
 
+This is client reconnect recovery, not Durable Object eviction recovery. If the Worker process or Durable Object is evicted while the model call is in flight, enable `chatRecovery` so the turn runs inside a recoverable fiber. `Think` enables `chatRecovery` by default; plain `AIChatAgent` subclasses opt in with `override chatRecovery = true`.
+
 ## How It Works
 
 When you use `AIChatAgent` with `useAgentChat`:
@@ -68,7 +70,7 @@ function Chat() {
 - Chunks are batched (every 10 chunks) and flushed to SQLite for performance
 - When a client sends `CF_AGENT_STREAM_RESUME_REQUEST`, the server checks for active streams and responds with `CF_AGENT_STREAM_RESUMING`
 - Stale streams (older than 5 minutes) are cleaned up on restore
-- Completed streams older than 24 hours are periodically garbage collected
+- Stream buffers are garbage collected from a scheduled alarm: completed or errored streams are retained for 10 minutes (a brief reconnect-and-replay grace; the assistant message itself is persisted separately), and abandoned in-flight streams are retained for 1 hour after their last chunk before being reclaimed
 
 ### Client-side (`useAgentChat`)
 

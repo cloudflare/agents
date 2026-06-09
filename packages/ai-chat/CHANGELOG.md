@@ -1,5 +1,327 @@
 # @cloudflare/ai-chat
 
+## 0.8.4
+
+### Patch Changes
+
+- [#1690](https://github.com/cloudflare/agents/pull/1690) [`f6a8bc4`](https://github.com/cloudflare/agents/commit/f6a8bc4a3f1836e214cc9ac984d3bfc2ba0537b2) Thanks [@threepointone](https://github.com/threepointone)! - Surface a terminal chat-recovery outcome to clients that reconnect after it ended ([#1645](https://github.com/cloudflare/agents/issues/1645)).
+
+  When a durable chat turn exhausted recovery (e.g. during a deploy/reconnect storm) while no client was connected, the terminal error was only broadcast transiently, so a client that connected afterward never learned the turn failed and the conversation appeared frozen. The outcome is now persisted durably and replayed over the resume handshake on the next reconnect — `STREAM_RESUMING` → `STREAM_RESUME_ACK` → terminal error frame on the resumed stream — which is the only path that surfaces as `useAgentChat`'s `error` on the real client. (A bare replayed frame is dropped by the client because it never reaches a transport stream reader.) The record is cleared once a later turn supersedes it — on a new client request, and also when any later turn ends in a non-error outcome (completed or aborted, including turns driven server-side via `saveMessages`), so a stale exhaustion can never replay after the conversation has recovered. Terminal non-exhaustion errors (e.g. a provider 500) are now durably recorded too, not just transiently broadcast, so they also replay to a reconnecting client.
+
+  `@cloudflare/think` previously recorded the outcome durably but only replayed it as a bare on-connect frame (dropped by the client); it now uses the same resume-handshake delivery.
+
+- [#1693](https://github.com/cloudflare/agents/pull/1693) [`6496c80`](https://github.com/cloudflare/agents/commit/6496c802d0334dff2114e21a6149acc6f3d30fe5) Thanks [@threepointone](https://github.com/threepointone)! - Fix `AIChatAgent` orphaned-stream recovery merging a new assistant turn into the previous assistant message ([#1691](https://github.com/cloudflare/agents/issues/1691)).
+
+  When a stream was interrupted before its final assistant message was persisted (Durable Object hibernation, deploy churn, isolate restart, reconnect), orphan recovery reconstructed the message from stored chunks. If those chunks carried no provider `start.messageId` — the common case — recovery fell back to the _last_ assistant message in history. That is correct for a continuation, but wrong for a normal new turn after a later user message: the recovered chunks for the new turn were appended onto the previous assistant message, corrupting both the persisted transcript and future model context.
+
+  The assistant message id allocated when a stream starts is now persisted in the resumable-stream metadata (`ResumableStream.start()` records `message_id`). When the reconstructed chunks carry no provider `start.messageId` — the common case, and the one that triggered the bug — orphan recovery now uses this stored id instead of the last-assistant fallback, so a new turn becomes its own message and a continuation still merges into the message it was extending (it stored the cloned last-assistant id). A provider `start.messageId`, when present, still wins, matching the live path which adopts it for new turns. Stream rows written before this release have no stored id and keep the previous behavior (provider id if present, otherwise the last assistant message). The metadata migration adds a single column, guarded by a schema check so it runs only once.
+
+  This also fixes two related variants of the same corruption on the durable (`chatRecovery`) continuation path:
+  - When a stream was persisted early (e.g. at a tool-approval pause) and then recovered, the merge re-appended chunks it had already stored, leaving two parts for the same tool call. Recovery now skips reconstructed parts whose `toolCallId` already exists on the message.
+  - When a new turn was interrupted before any assistant part was persisted — either because it was cut off in the window before the first chunk materialized, or because `onChatRecovery` returned `{ persist: false }` — recovery would "continue" it by cloning the previous assistant message, merging the new turn into it. Recovery now detects that the conversation leaf is still the user message (no partial to continue) and re-runs the turn fresh, so it becomes its own message.
+
+  `@cloudflare/think` is unaffected — its session-tree recovery already allocates a distinct message id per orphan and never falls back to the last assistant message.
+
+## 0.8.3
+
+### Patch Changes
+
+- [#1686](https://github.com/cloudflare/agents/pull/1686) [`1e49880`](https://github.com/cloudflare/agents/commit/1e498803fe26970aa264678d5ae3a2c96dd28258) Thanks [@threepointone](https://github.com/threepointone)! - Batch and pack chat-persistence SQLite writes to reduce rows written and round-trips.
+  - `agents`: `ResumableStream` now **packs** each buffered group of stream chunks into a single SQLite row (a JSON array of chunk bodies) instead of writing one row per chunk. Single-chunk and large-chunk segments are stored unwrapped, and a per-segment byte cap keeps rows within the 2 MB SQLite row limit. This cuts chunk rows written / stored / scanned-on-replay by up to ~10×. Reads (replay, orphan reconstruction, `getStreamChunks`) transparently unpack both packed segments and legacy per-chunk rows, so existing stored data keeps working. Adds shared `buildInClauseStrings` and `MAX_BOUND_PARAMS` helpers exported from `agents/chat`.
+  - `@cloudflare/ai-chat`: message cleanup (stale-row pruning and `maxPersistedMessages` enforcement) previously issued one `DELETE` per row in a loop; it now deletes rows in batched `DELETE ... WHERE id IN (...)` queries (capped at 100 bound parameters per query).
+  - `@cloudflare/think`: `deleteSubmissions()` cleanup previously issued one `DELETE` per terminal submission (up to 500 per call); it now deletes rows in batched `DELETE ... WHERE submission_id IN (...)` queries.
+  - `@cloudflare/ai-chat` & `@cloudflare/think`: chat-recovery incident TTL sweep previously deleted each stale incident with a separate awaited `storage.delete(key)` (which also defeats Durable Object write-coalescing); it now deletes incidents in batched `storage.delete(keys)` calls (up to 128 keys per call).
+
+## 0.8.2
+
+### Patch Changes
+
+- [#1684](https://github.com/cloudflare/agents/pull/1684) [`ab6dd95`](https://github.com/cloudflare/agents/commit/ab6dd95b791a60fe5a5806852e05d4eeffecf9fd) Thanks [@threepointone](https://github.com/threepointone)! - warn when `chatRecovery` is configured in `onStart()` (applied too late for wake recovery)
+
+  On every Durable Object wake the SDK evaluates chat-recovery budgets — and may seal an interrupted turn, firing `onExhausted` — **before** the user's `onStart()` runs (`_checkRunFibers()` is ordered ahead of `onStart()`). A `chatRecovery` config produced inside `onStart()` is therefore read as the built-in defaults at the moment recovery decides, so a configured `maxRecoveryWork` / `shouldKeepRecovering` / `onExhausted` silently never applies to the recovery that matters.
+
+  This is now documented on `ChatRecoveryConfig` and the `chatRecovery` fields of `Think` / `AIChatAgent`, and the SDK logs a one-time warning if it detects `chatRecovery` being reassigned during `onStart()`. The warning fires both for a custom config object and for `chatRecovery = true` (enabling recovery / its defaults too late); assigning `false` (disabling) in `onStart()` is intentionally not warned, since recovery already ran with the pre-`onStart()` value and disabling it afterward is a benign no-op for that wake. The fix is to assign `chatRecovery` as a class field or in the constructor.
+
+- [#1684](https://github.com/cloudflare/agents/pull/1684) [`ab6dd95`](https://github.com/cloudflare/agents/commit/ab6dd95b791a60fe5a5806852e05d4eeffecf9fd) Thanks [@threepointone](https://github.com/threepointone)! - fix(chat-recovery): don't seal a human-in-the-loop turn that is waiting on a pending client tool call
+
+  A turn parked on a pending CLIENT interaction — an `input-available` client-tool part (no server `execute`) or an `approval-requested` part, as detected by `hasPendingInteraction()` — is _waiting on the human_, not stuck. After a mid-turn Durable Object restart (e.g. a deploy), the in-memory pending-interaction promise is gone, so `waitUntilStable()` repeatedly times out until the client reconnects and replays the tool-result/approval. That replay drives a fresh continuation via the auto-continuation barrier independently of recovery — but the recovery loop was treating those timeouts as deploy churn:
+  - each stable-state timeout burned a recovery attempt, eventually sealing a perfectly healthy turn with `reason="stable_timeout"`, and
+  - the no-progress window (which never advances while no content is produced) could seal it with `reason="no_progress_timeout"` once it elapsed.
+
+  The net effect: an interrupted human-in-the-loop turn whose user simply took longer than the configured `noProgressTimeoutMs` / attempt budget to answer a tool prompt was terminalized with a "session interrupted" banner, even though nothing had actually failed.
+
+  While a client interaction is pending the turn is now **budget-free**:
+  - `_beginChatRecoveryIncident` suppresses the no-progress window, attempt cap, work budget, and `shouldKeepRecovering` predicate, and keeps the no-progress clock fresh so the turn gets a full window once the human finally answers.
+  - `_chatRecoveryContinue` / `_chatRecoveryRetry` **park** (mark the incident `skipped` with `reason="awaiting_client_interaction"`, resolving the live "recovering…" indicator) instead of rescheduling or exhausting — the client's eventual replay resumes the turn. A client that never returns is reclaimed by the incident TTL sweep and DO idle-eviction.
+
+  In `@cloudflare/think`, a `submitMessages`-backed turn additionally has its durable submission row **completed** at park time. The recovery loop is that row's sole completion driver after a restart, and the client's replay resumes the conversation as an independent auto-continuation that never touches the submission — so parking without completing would leave the row `running`, and the next restart's `_recoverSubmissionsOnStart` would sweep it to `error` (a false "session recovery error"). The park condition is a fully-materialized client tool call in the leaf, which is exactly the terminal state a non-interrupted submission reaches when its step emits a client tool call (the model does not block on client tools), so `completed` is the correct, consistent outcome.
+
+  SERVER-tool orphans are deliberately excluded (their `execute()` died with the isolate and nothing will resolve them), so they still recover normally via the transcript-repair pass.
+
+  Both `@cloudflare/think` and `@cloudflare/ai-chat` (which carries its own copy of the recovery engine) are fixed. In `@cloudflare/think` the client/server distinction already lived in `hasPendingInteraction()`. `@cloudflare/ai-chat`'s `hasPendingInteraction()` (used by `waitUntilStable`) does not distinguish client from server tools, so a new, narrower client-only predicate `hasPendingClientInteraction()` was added there and gates the exemption — leaving `waitUntilStable`'s existing behavior untouched so server-tool orphans keep reschedule/exhaust semantics.
+
+  The exemption depends on knowing the request's client tools. `@cloudflare/ai-chat` restores them in its constructor, so they are available when boot recovery evaluates budgets. `@cloudflare/think` restored them in `onStart()`, which the base `Agent` runs _after_ the boot-recovery path (`_handleInternalFiberRecovery` -> `_beginChatRecoveryIncident`) — so on a fresh wake the in-memory cache was still empty and a client-tool `input-available` orphan re-detected past the no-progress window was misread as "stuck" and wrongly sealed. `_beginChatRecoveryIncident` now re-hydrates `_lastClientTools` from the durable `think_config` store before evaluating the budget, closing that hibernation-ordering hole (`approval-requested` turns were never affected, since that branch does not depend on the client tool set).
+
+- [#1672](https://github.com/cloudflare/agents/pull/1672) [`f96a2ba`](https://github.com/cloudflare/agents/commit/f96a2bab7a668465b0e68c7f70b4b1b93ae53296) Thanks [@threepointone](https://github.com/threepointone)! - fix(chat-recovery): a turn making forward progress now survives unbounded deploy churn; add a work budget + `shouldKeepRecovering` runaway guard
+
+  Durable chat recovery used to bound a single incident with a non-resetting 15-minute wall-clock ceiling (`CHAT_RECOVERY_MAX_WINDOW_MS`). That ceiling was overloaded — it served as both a recovery-duration bound and a runaway-loop guard — and it terminated _healthy, actively-progressing_ turns that simply took longer than 15 minutes of wall-clock to finish while being repeatedly interrupted by a dense deploy window, sealing them with `reason="max_recovery_window_exceeded"` and discarding completed work.
+
+  The two jobs are now decoupled (see `design/rfc-chat-recovery-work-budget.md`):
+  - **Duration is no longer a bound for a progressing turn.** The non-resetting wall-clock ceiling is removed. A turn that keeps producing content survives unbounded deploy churn. Stuck turns are still sealed by the no-progress window (5 min, resets on progress); tight no-progress alarm loops by the attempt cap.
+  - **New runaway-loop guard, keyed to work, not time.** The existing durable, monotonic, reconnect-immune progress counter is reused as a work meter. `chatRecovery.maxRecoveryWork` caps the produced content/tool units since an incident opened; exceeding it seals with `reason="work_budget_exceeded"`. **Defaults to `Infinity`** — the SDK ships the mechanism but imposes no implicit cap, so it never terminates a progressing turn on its own.
+  - **New caller predicate.** `chatRecovery.shouldKeepRecovering(ctx)` is consulted per recovery attempt from the second onward (only when no hard bound has already sealed the incident); returning `false` seals with `reason="recovery_aborted"`. This is where integrators express token/cost/step budgets the SDK should not hardcode. A throwing predicate is logged and treated as "keep recovering".
+  - **The no-progress timeout is now configurable.** `chatRecovery.noProgressTimeoutMs` (default 5 min, resets on progress) is the primary stuck-turn bound, now overridable per agent instead of a hardcoded constant.
+
+  New public types from `agents/chat`: `ChatRecoveryProgressContext`. New `ChatRecoveryConfig` fields: `maxRecoveryWork`, `shouldKeepRecovering`, `noProgressTimeoutMs`. `ChatRecoveryExhaustedContext.reason` gains `work_budget_exceeded` and `recovery_aborted`; `max_recovery_window_exceeded` is retained as an open-string value but is no longer emitted.
+
+  Both `@cloudflare/ai-chat` and `@cloudflare/think` (which carries its own copy of the recovery engine) are updated identically. Defaults are unchanged except that a progressing turn is no longer terminated by wall-clock age.
+
+- [#1670](https://github.com/cloudflare/agents/pull/1670) [`5d64940`](https://github.com/cloudflare/agents/commit/5d64940c2115822ef5ba4c8b35bfe5c2632ce11d) Thanks [@threepointone](https://github.com/threepointone)! - Fix: a deploy that interrupts an in-flight `runAgentTool` child no longer abandons the still-running child as `interrupted`.
+
+  Parent recovery re-attaches to a still-running child and tails it to its real terminal. Previously that re-attach used a flat 120s wall-clock budget that was **not** reset by the child's forward progress, so a healthy child whose recovery legitimately ran longer than the budget was sealed `interrupted` (and its already-completed work re-run from scratch), even while it was actively streaming.
+
+  The re-attach budget is now **progress-keyed**: it bounds how long the parent waits with _no_ forward progress from the child (resetting on every forwarded chunk), so a genuinely hung/silent child still seals `interrupted` after one no-progress window and can never block recovery forever, while a healthy child that keeps streaming is followed through to terminal. The parent re-arms (opens a fresh tail) **only when the child's stream closes cleanly while it is still advancing** — i.e. a re-evicted-but-progressing child. A full no-progress window (the child went silent) seals `no-progress` immediately even if the child streamed earlier in that window; it no longer grants a bonus window. This is both the honest stall signal and what keeps at most one pending tail reader alive per re-attach (no per-cycle reader accumulation).
+
+  `@cloudflare/think` and `@cloudflare/ai-chat` additionally finalize a child facet's own agent-tool run row as soon as its recovered turn settles — regardless of whether recovery took the continue path (`_chatRecoveryContinue`) or the pre-stream retry path (`_chatRecoveryRetry`) — so a re-attached parent collects the terminal result immediately instead of waiting out a full no-progress window after the child has already finished.
+
+  This release also adds:
+  - **Typed interrupted cause.** `RunAgentToolResult`, the `agentTool()` `AgentToolFailure` envelope, the `onAgentToolFinish` lifecycle result, and the `agent-tool-event` wire event (kind `"interrupted"`) now carry a machine-readable `reason` (`AgentToolInterruptedReason`: `"no-progress" | "window-exceeded" | "not-tailable" | "inspect-timeout" | "inspect-failed" | "recovery-deadline"`) and a `childStillRunning` boolean on `interrupted` results, so callers (and UIs) can branch on _why_ a run was abandoned (and whether the child is still running) instead of pattern-matching the human-readable `error` prose. `retryable` stays coarse (always `true` for `interrupted`); refine with `reason` / `childStillRunning`. These fields are **persisted** (schema bump), so they survive a reconnect replay — a client that reconnects after an interrupt reconstructs the same `reason` / `childStillRunning` a live client saw, rather than `undefined`. The persisted cause is cleared when a soft `interrupted` row is later repaired to `completed`/`error`.
+  - **Configurable re-attach budgets.** Two new public `AgentStaticOptions` — `agentToolReattachNoProgressTimeoutMs` (default 120000, the progress-keyed no-progress budget) and `agentToolReattachMaxWindowMs` (default **`Infinity`** — no implicit wall-clock cap) — let an Agent tune re-attach. The hard ceiling defaults to uncapped to mirror chat-recovery's `maxRecoveryWork: Infinity`: a re-attached parent follows a healthy, still-advancing child for as long as it makes progress — exactly as it would on the live (never-evicted) path — so it never abandons a long-running-but-healthy child that simply outlasts a fixed wall clock under deploy churn. A hung/silent child is bounded by the no-progress budget; a content-runaway is bounded uniformly (live and recovery) by the child's own `maxRecoveryWork` / `shouldKeepRecovering`. Integrators that want a hard wall-clock cap (and the `window-exceeded` child teardown it triggers) can set `agentToolReattachMaxWindowMs` to a finite value. Symmetrically, setting `agentToolReattachNoProgressTimeoutMs` to `Infinity` now means **"never seal on no-progress"** (a silent-but-alive child is followed until its stream closes or the hard ceiling fires) instead of silently skipping the wait — `0` remains the "don't wait, collect only an already-terminal child" sentinel.
+  - **Give-up teardown (ceiling only).** When the parent gives up at the hard `window-exceeded` ceiling — where the child has had its full recovery window and is truly exhausted — it now cancels the child (`childStillRunning: false`) so it stops consuming a fiber / keep-alive. `no-progress` give-ups stay **soft** (`childStillRunning: true`): the child is left running so a re-issue can still re-attach and repair it if it self-heals, preserving the repair-on-re-issue path. In both `@cloudflare/think` and `@cloudflare/ai-chat`, `cancelAgentToolRun` also aborts an in-flight chat-recovery turn (not just the original in-isolate run) and releases live tails — Think sweeps its `_submissionAbortControllers`, ai-chat its request `AbortRegistry` (`abortAllRequests`) — so a torn-down child stops grinding instead of finishing an orphaned recovered turn.
+
+## 0.8.1
+
+### Patch Changes
+
+- [#1661](https://github.com/cloudflare/agents/pull/1661) [`41315b6`](https://github.com/cloudflare/agents/commit/41315b602c4d68dbd5cad99cc949fbf13e256c51) Thanks [@threepointone](https://github.com/threepointone)! - Heal a malformed `tool_use.input` when loading persisted messages.
+
+  `AIChatAgent` delegates `convertToModelMessages` to your `onChatMessage`, so it has no framework-side pre-send pass to repair a transcript. A session that persisted a non-object tool `input` — `null`, `undefined`, `""`, an array, or a raw string — before the write-side guard shipped would therefore keep 400ing with `tool_use.input: Input should be an object` on every turn, wedged across reconnects/redeploys/evictions.
+
+  `autoTransformMessage` (run on every load) now normalizes malformed tool inputs to `{}` (parsing stringified-JSON objects, and leaving healthy object inputs untouched), so existing wedged sessions self-heal on their next load without per-DO storage surgery. Healthy messages are returned by reference, so the persistence cache stays a no-op for them.
+
+- [#1654](https://github.com/cloudflare/agents/pull/1654) [`f34cd30`](https://github.com/cloudflare/agents/commit/f34cd30253f1e808677c9621905395150503420e) Thanks [@cjol](https://github.com/cjol)! - Fix `isStreaming` staying true after aborting during server-side tool calls.
+
+- [#1657](https://github.com/cloudflare/agents/pull/1657) [`7bff8d7`](https://github.com/cloudflare/agents/commit/7bff8d74c927a53ec11ee4a89dc6cff6b63db0ad) Thanks [@threepointone](https://github.com/threepointone)! - fix(think): serialize parallel client-tool result/approval applies so siblings aren't clobbered ([#1649](https://github.com/cloudflare/agents/issues/1649) follow-up)
+
+  The auto-continuation barrier added in [#1651](https://github.com/cloudflare/agents/issues/1651) stopped premature continuation, but a deeper race remained in Think. Each `tool-result`/`tool-approval` WebSocket message fired an independent read-modify-write of the whole assistant message, and `_applyToolUpdateToMessages` awaits a storage read before its write. When the model fanned out parallel tool calls, the concurrent applies all read the same `input-available` snapshot, each patched only its own part, and the last write clobbered its siblings back to `input-available`. The continuation barrier then timed out and the transcript-repair backstop errored the lost calls with "The tool call was interrupted before a result was recorded."
+
+  Applies are now chained off a serialization tail so each read-modify-write commits atomically in arrival order. `_pendingInteractionPromise` still tracks the newest link, so the barrier's single-slot wake-up transitively waits for every predecessor.
+
+  The same serialization is applied to `@cloudflare/ai-chat` defensively: its apply is currently synchronous (no await between the message read and the SQLite write), so it does not exhibit this clobber today, but the queue keeps the invariant safe if that ever changes.
+
+## 0.8.0
+
+### Minor Changes
+
+- [#1636](https://github.com/cloudflare/agents/pull/1636) [`f5a0d00`](https://github.com/cloudflare/agents/commit/f5a0d00cf59b19cd4db54c7de6e441b8da669521) Thanks [@threepointone](https://github.com/threepointone)! - Expose recovery incident identity and enrich the `onExhausted` payload so
+  products can build a terminal-state policy without re-deriving anything ([#1631](https://github.com/cloudflare/agents/issues/1631)).
+  - `ChatRecoveryContext` (the `onChatRecovery` argument) now includes
+    `recoveryRootRequestId` — the stable request ID for the whole continuation
+    chain. Unlike `requestId`, it doesn't change across chained continuations, so
+    it's the right key for per-incident budget tracking / fresh-incident detection
+    without re-deriving identity from message IDs.
+  - `ChatRecoveryExhaustedContext` (the `onExhausted` argument) now carries
+    `recoveryRootRequestId`, `terminalMessage` (the exact text shown to the user),
+    `partialText` / `partialParts` (what the turn produced before it was given up
+    on), and `streamId` / `createdAt` — enough to render or persist a user-facing
+    terminal banner AND emit correlated terminal telemetry (e.g. time-since-turn-start,
+    stream correlation) directly, without re-deriving anything.
+
+  All fields are additive. Applied across `agents` (shared types),
+  `@cloudflare/think`, and `@cloudflare/ai-chat`.
+
+- [#1648](https://github.com/cloudflare/agents/pull/1648) [`d6827ab`](https://github.com/cloudflare/agents/commit/d6827ab03fa703058e755d17e3f5db0cd90c94b6) Thanks [@threepointone](https://github.com/threepointone)! - Surface a live "recovering…" status to chat clients during durable recovery ([#1620](https://github.com/cloudflare/agents/issues/1620))
+
+  When a durable chat turn is interrupted (a deploy/eviction, or a stream-stall
+  watchdog abort) and resumes, clients had no "in progress" signal — the turn
+  looked frozen until it completed or a terminal error was replayed. A new
+  `cf_agent_chat_recovering` protocol frame is now broadcast on recovery schedule
+  and cleared on every terminal outcome (completed/skipped/failed/exhausted), so
+  the indicator can't spin forever. In `@cloudflare/think` it's also persisted and
+  replayed on connect, so a client that joins mid-recovery learns the turn is
+  working. `useAgentChat` exposes a new `isRecovering` flag (distinct from
+  `isStreaming` — a recovering turn isn't producing tokens yet); most UIs render
+  `isStreaming || isRecovering` as "busy". Backward-compatible: clients that don't
+  understand the frame ignore it.
+
+  > Note: `@cloudflare/ai-chat` broadcasts the live signal but does not yet replay
+  > it on connect (it has no idle-connect hydration path; tracked in [#1645](https://github.com/cloudflare/agents/issues/1645)).
+  > `@cloudflare/think` has both.
+
+  For recovery telemetry, subscribe to the `chat:recovery:*` observability events
+  and route them to your analytics sink.
+
+- [#1611](https://github.com/cloudflare/agents/pull/1611) [`02f9380`](https://github.com/cloudflare/agents/commit/02f93809587aca310ad39fa5683de57ee9f6e070) Thanks [@threepointone](https://github.com/threepointone)! - Add bounded, observable recovery foundations for durable chat turns and fibers.
+  - Add dedicated recovery observability channels/events for fibers, chat recovery, transcript repair, and agent-tool recovery.
+  - Bound internal framework fiber recovery hooks and parent agent-tool recovery scans so startup and recovery work cannot wedge indefinitely.
+  - Add shared chat recovery incident tracking with attempt counts, configurable `chatRecovery` defaults, and terminal exhaustion behavior for `AIChatAgent` and `Think`. Think recovery now exhausts after six failed attempts by default and sends a terminal error frame instead of spinning indefinitely.
+  - Keep the recovery attempt budget bounded even when an interrupted turn flips between `retry` and `continue` recovery kinds (the incident identity no longer includes the kind), guard a throwing `onExhausted` hook so the terminal UX is still delivered, mark incidents `failed` when the recovery dispatch throws, and reclaim incident records on success plus a TTL sweep for abandoned ones so durable storage does not grow without bound.
+  - Bound generic unmanaged fiber recovery with a configurable `fiberRecoveryMaxAgeMs` so a repeatedly-throwing `onFiberRecovered()` hook cannot re-trigger forever across restarts.
+  - Surface Think post-persist chat request failures through `onChatError(error, ctx)` and `chat:request:failed`.
+  - Repair incomplete Think tool-call transcripts before provider calls and allow `createCompactFunction()` to use a supplied token counter for tail budgeting.
+
+- [#1638](https://github.com/cloudflare/agents/pull/1638) [`b6c8dea`](https://github.com/cloudflare/agents/commit/b6c8dea255aff6b2c0fe0e30068c143c5eac6334) Thanks [@threepointone](https://github.com/threepointone)! - Make chat recovery's budget wall-clock-keyed-to-progress instead of raw attempt
+  count, so a healthy turn under deploy churn isn't sealed prematurely ([#1637](https://github.com/cloudflare/agents/issues/1637)).
+
+  Under continuous deploys the attempt count is the wrong primary bound: one
+  rollout drops/reconnects the socket several times (~11–22s), each firing a
+  recovery alarm, so the count inflated far faster than the real interruption rate
+  and exhausted turns that were still advancing (0/23 model calls errored in the
+  reported incident — it was pure eviction churn).
+
+  Now:
+  - **Primary bound: a 5-minute no-progress wall clock** keyed to `lastProgressAt`,
+    which resets on every progress-bearing attempt. A turn that keeps producing
+    content survives churn indefinitely; one that genuinely goes quiet is sealed
+    within 5 minutes.
+  - **Alarm debounce (~30s):** recovery alarms bunched within the window (a single
+    rollout's reconnect storm) collapse into one attempt.
+  - **Attempt cap is now a high secondary backstop** (default raised 6 → 10),
+    resets on progress; it only catches a pathological tight alarm-loop.
+  - The existing 15-minute absolute incident-age ceiling is kept as the final
+    non-resetting hard stop.
+  - **Progress signal moved to production time** (when new content is durably
+    flushed/streamed) instead of persist time — so it advances only on genuinely
+    new content and is immune to client reconnects and recovery re-persists, which
+    the no-progress window depends on. (Builds on the compaction-immune counter
+    from [#1628](https://github.com/cloudflare/agents/issues/1628).)
+
+  Applies to both `@cloudflare/think` and `@cloudflare/ai-chat`, including the
+  `TaskSubAgent`/sub-agent recovery path.
+
+### Patch Changes
+
+- [#1634](https://github.com/cloudflare/agents/pull/1634) [`a4225fd`](https://github.com/cloudflare/agents/commit/a4225fd9044ff096a29b4b36ad6cccb6b5484164) Thanks [@threepointone](https://github.com/threepointone)! - Stop chat recovery from discarding settled work when a turn is given up on
+  ([#1631](https://github.com/cloudflare/agents/issues/1631)).
+
+  Two paths could throw away a partial assistant message containing completed,
+  often non-idempotent tool results:
+  - When the framework's own recovery budget was exhausted, `_exhaustChatRecovery`
+    sealed the turn (terminal status + banner) **before** the orphaned stream was
+    ever persisted — so every settled tool result the turn had produced was lost
+    and the model re-ran them on the next message. Exhaustion now persists the
+    settled partial first, using the same gating as the normal recovery path so it
+    can't duplicate an already-saved partial.
+  - A subclass `onChatRecovery` returning `{ persist: false }` to stop a turn used
+    to silently drop the settled partial. Settled work is now **never** dropped:
+    `persist: false` only suppresses persistence of a partial that has nothing
+    settled to lose; a partial carrying settled tool results is persisted
+    regardless. An app can no longer accidentally discard completed work — and it
+    never needs `{ persist: true }` just to stay safe. (A safe default beats a
+    warning about an unsafe one.)
+
+  Applied identically to `@cloudflare/think` and `@cloudflare/ai-chat`.
+
+- [#1633](https://github.com/cloudflare/agents/pull/1633) [`1aca578`](https://github.com/cloudflare/agents/commit/1aca578fe2329e38e19d6723e64f86743cda083d) Thanks [@threepointone](https://github.com/threepointone)! - Fix chat recovery prematurely exhausting its retry budget under compaction
+  ([#1628](https://github.com/cloudflare/agents/issues/1628)). The deploy-churn forward-progress signal — which resets the recovery
+  budget when an interrupted turn is actually advancing — was recomputed from the
+  live transcript by counting assistant messages. Compaction collapses older
+  assistant messages into a summary, lowering that count, so a turn that had
+  genuinely advanced could read as "no progress" between recovery attempts and
+  exhaust at `maxAttempts`, sealing a healthy turn. Progress is now tracked by a
+  durable, monotonic counter incremented when `_persistOrphanedStream` materializes
+  a non-empty partial (the exact event the message count was proxying for), so
+  compaction can never lower it. A turn that genuinely fails to advance still
+  exhausts at the cap, and the 15-minute wall-clock ceiling is unchanged.
+
+- [#1615](https://github.com/cloudflare/agents/pull/1615) [`51a771f`](https://github.com/cloudflare/agents/commit/51a771ff7a640eae4b530b588d0f741300ddb0dc) Thanks [@threepointone](https://github.com/threepointone)! - Chat recovery no longer permanently abandons a turn under repeated deploys. A
+  mid-turn deploy resets the Durable Object ("code was updated") and the
+  interrupted continuation is re-detected on the next wake; previously every such
+  interruption consumed one of the bounded recovery attempts, so a deploy every
+  few minutes exhausted the budget (`max_attempts_exceeded`) and the turn was
+  terminally abandoned even though each fresh isolate was healthy. Recovery now
+  distinguishes an interruption that followed forward progress (more persisted
+  assistant content than the previous attempt observed) — treated as environmental
+  and not counted against the budget — from a turn that never advances, which still
+  exhausts at `maxAttempts`. A 15-minute wall-clock ceiling per incident bounds the
+  worst case so a continuously churning environment cannot retry forever.
+
+- [#1608](https://github.com/cloudflare/agents/pull/1608) [`7c17736`](https://github.com/cloudflare/agents/commit/7c17736fafa58c218181d7dcb30e36d3605d4395) Thanks [@cjol](https://github.com/cjol)! - Fix auto-continuation stream resumes so immediate client-tool resume requests attach to the pending continuation instead of receiving `cf_agent_stream_resume_none`.
+
+- [#1651](https://github.com/cloudflare/agents/pull/1651) [`d118d11`](https://github.com/cloudflare/agents/commit/d118d1101a3eb76a921ee50eb96d02c5e159e5d4) Thanks [@threepointone](https://github.com/threepointone)! - Fix auto-continuation firing before all parallel client-tool results arrive
+  ([#1649](https://github.com/cloudflare/agents/issues/1649)). When the model emitted multiple tool calls in one step and the client
+  resolved them independently via `addToolOutput`, a fast result's `autoContinue`
+  could trigger the next inference while a slower sibling was still
+  `input-available`. That fed the provider an incomplete tool-result set
+  (`MissingToolResultsError`) or — via the transcript-repair backstop — silently
+  flipped the in-flight sibling to errored and ran a spurious extra continuation.
+
+  Auto-continuation now waits until the transcript is stable (no
+  `input-available`/`approval-requested` parts) before continuing, so a fanned-out
+  tool batch coalesces into a single continuation regardless of result arrival
+  order. The wait is bounded, so a genuinely orphaned tool call (e.g. the client
+  disconnected mid-batch) still falls through to the existing backstop instead of
+  pinning the continuation open.
+
+- [#1641](https://github.com/cloudflare/agents/pull/1641) [`3aa1936`](https://github.com/cloudflare/agents/commit/3aa1936eb17bfff05eaa0dc225176bf408ddea78) Thanks [@threepointone](https://github.com/threepointone)! - Count a sub-agent's progress as the orchestrating parent's recovery progress
+
+  A parent turn whose work is "run a sub-agent and await its result" produced no
+  recoverable content of its own, so under deploy churn the **parent's** own
+  chat-recovery no-progress window could exhaust while the child was still
+  healthily streaming — abandoning the turn as `interrupted` and collecting an
+  interrupted result even though the child went on to complete. (Reproduced by
+  the `examples/deploy-churn --mode subagent` harness: the parent exhausted at
+  `attempt 6/6` with `progress: 1` while the child self-healed all 30 steps.)
+
+  Forwarding a child's stream to the parent's connections is now treated as
+  genuine forward progress for the parent's recovery budget: `Think` and
+  `AIChatAgent` advance their durable recovery-progress marker (throttled) each
+  time `_forwardAgentToolStream` forwards child output, so a parent that keeps
+  re-attaching to and streaming a live child survives churn indefinitely. The
+  credit is only granted when the child actually produces output — a silent or
+  hung child still lets the parent exhaust on its own no-progress timer, so a
+  stuck sub-agent can never pin a parent's recovery open forever.
+
+  This completes the sub-agent recovery story started by the stable-runId +
+  bounded re-attach fix ([#1630](https://github.com/cloudflare/agents/issues/1630)): the child self-heals and the parent both
+  re-attaches to it _and_ keeps its own recovery alive while doing so.
+
+- [#1646](https://github.com/cloudflare/agents/pull/1646) [`a245a4a`](https://github.com/cloudflare/agents/commit/a245a4ad6fd0ad1a0fcd2609c8541109df8c6ad5) Thanks [@threepointone](https://github.com/threepointone)! - Terminalize a chat-recovery turn through `onExhausted` when it gives up waiting for stable state
+
+  Under extreme churn (a long turn interrupted many times in quick succession), a
+  recovery callback (`_chatRecoveryRetry` / `_chatRecoveryContinue`) could keep
+  timing out waiting for the isolate to reach stable state until its retry budget
+  drained. The give-up path only marked the incident `failed` and completed the
+  recovered submission as `error` — it **bypassed `_exhaustChatRecovery`**, so
+  `onExhausted` never fired, the `chat:recovery:exhausted` event was not emitted,
+  the configured `terminalMessage` banner was never delivered, and the terminal
+  chat status was not recorded. Apps relying on `onExhausted` for the terminal
+  banner saw an eternal spinner with no terminal signal.
+
+  The stable-state-timeout give-up now routes through the **same**
+  `_exhaustChatRecovery` path as deploy-recovery and stall exhaustion: it fires
+  `onExhausted` (with `reason: "stable_timeout"`), emits `chat:recovery:exhausted`,
+  marks the durable submission interrupted, records the terminal chat status, and
+  delivers the `terminalMessage`. As an extra backstop against silent drops, the
+  give-up also terminalizes when the incident record is missing (no `incidentId`,
+  or it was swept/deleted before a stale alarm fired) by synthesizing a terminal
+  incident from the recovery-root request id — so a turn can never be dropped with
+  no terminal UX.
+
+- [#1623](https://github.com/cloudflare/agents/pull/1623) [`4c8b371`](https://github.com/cloudflare/agents/commit/4c8b3712b11d2b07298e384e5884844272f4697a) Thanks [@threepointone](https://github.com/threepointone)! - Fix chat recovery falsely marking a durable submission as `error` under repeated mid-turn deploys.
+
+  When several deploys interrupt a single turn, recovery runs a _chain_ of continuations. Three bugs combined to leave the submission in `error` even when the turn actually completed every step:
+  - **Lost ownership.** The submission link (`recoveredRequestId`) was derived from each continuation's own (fresh) requestId, so chained continuations dropped it — the continuation that finally completed the turn could no longer mark the submission `completed`.
+  - **Stale-continuation clobber.** A superseded continuation tripped the `conversation_changed` guard because the leaf had advanced via recovery's _own_ forward progress (a new assistant message), not a new user turn, and overwrote the still-running submission to `error`.
+  - **Premature `stable_timeout`.** A timeout while waiting for the isolate to settle (common while a deploy is in flight) failed the turn terminally at the first attempt.
+
+  Now: submission ownership is keyed off the stable recovery root and threaded through the entire continuation chain (including the terminal abandon paths — recovery exhaustion and `{ continue: false }` — which previously marked the submission by the per-continuation requestId and so left a chained submission stuck `running`); a superseded continuation skips benignly (only a genuinely newer user turn marks the submission `skipped`, never `error`); and a stable-state timeout reschedules within the `maxAttempts` budget. A turn that completes under deploy churn now ends `completed`, not `error`.
+
+  `@cloudflare/ai-chat` has the same recovery machinery but no durable-submission layer, so it receives the `stable_timeout` reschedule fix only: a transient stable-state timeout now retries within the attempt budget instead of permanently abandoning a recoverable turn at the first attempt.
+
+- [#1606](https://github.com/cloudflare/agents/pull/1606) [`7419fbc`](https://github.com/cloudflare/agents/commit/7419fbcf1e4a0101660b1371517c4a77bb33cab3) Thanks [@threepointone](https://github.com/threepointone)! - Serialize client-tool continuation resumes so they do not overlap the active AI SDK chat request.
+
+- [#1640](https://github.com/cloudflare/agents/pull/1640) [`edb126a`](https://github.com/cloudflare/agents/commit/edb126a72d1a6b52fa0057191d6d461ee902e914) Thanks [@threepointone](https://github.com/threepointone)! - Re-attach to a still-running sub-agent (`agentTool()`) run on parent recovery instead of abandoning and re-running it ([#1630](https://github.com/cloudflare/agents/issues/1630)).
+
+  When a parent agent was interrupted (deploy / Durable Object eviction) while a child `agentTool()` run was still in flight, recovery marked the run `interrupted` within a ~5s window and the parent re-issued the task — re-running the child's already-completed work. For long-running children under continuous deploys this surfaced to users as "the agent went all the way back and lost the files it already wrote."
+
+  Three changes fix this:
+  - **Stable child runId.** `agentTool()` now derives the child `runId` from the (recovery-preserved) tool call id (`agent-tool:<toolCallId>`) instead of minting a fresh `nanoid` per call. A turn re-run by chat recovery now resolves to the **same** idempotent child facet rather than spawning a brand-new one, so completed child work is never re-run.
+  - **Bounded re-attach.** A duplicate non-terminal `runId` (in `runAgentTool`) and a still-running child during startup reconciliation now **tail the live child to its real terminal result** and collect it, instead of immediately sealing `interrupted`. Re-attach is bounded by a generous wall-clock budget (`DEFAULT_AGENT_TOOL_REATTACH_TIMEOUT_MS`, 120s, internal): a child that keeps advancing toward terminal within the window is collected; a genuinely hung child still seals `interrupted` so recovery can never block forever.
+  - **Durable child-run reconcile.** A child facet self-heals its interrupted turn via its own `chatRecovery`, but that recovery path never wrote the child's agent-tool run row — so after a real eviction the row stranded `running` (think) / was force-errored (ai-chat) and the parent could never collect the recovered result. Both `@cloudflare/think` and `@cloudflare/ai-chat` now reconcile a stale child-run row from the durable transcript on inspect: while recovery is still resolving the row stays `running`; once it settles, a completed assistant response surfaces as `completed` (so the parent collects the real result) and an empty/failed recovery as `error`. This keeps the child's own (working) recovery path untouched.
+
+  No new public configuration. Adds an internal `agent_tool:recovery:reattach` observability event. `@cloudflare/think` and `@cloudflare/ai-chat` child tails are now read-only on consumer detach (a parent's re-attach budget expiring never cancels the still-running child).
+
 ## 0.7.2
 
 ### Patch Changes

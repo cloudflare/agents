@@ -286,6 +286,168 @@ describe("Client-side tool duplicate message prevention", () => {
     ws.close(1000);
   });
 
+  it("waits for ALL parallel client-tool results before continuing (#1649)", async () => {
+    const room = crypto.randomUUID();
+    const res = await exports.default.fetch(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    // Assistant turn that emitted TWO parallel client tool calls.
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Use two tools" }]
+      },
+      {
+        id: "assistant-parallel",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId: "call_fast",
+            state: "input-available",
+            input: { which: "fast" }
+          },
+          {
+            type: "tool-testTool",
+            toolCallId: "call_slow",
+            state: "input-available",
+            input: { which: "slow" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    // Fast result arrives first, with autoContinue. The slow sibling is still
+    // in flight, so NO continuation may run yet.
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId: "call_fast",
+        toolName: "testTool",
+        output: { which: "fast" },
+        autoContinue: true
+      })
+    );
+
+    // Well past the coalesce window (and the no-active-stream settle delay).
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
+    // The batch is incomplete — the continuation (onChatMessage) must not have
+    // run.
+    expect(await agentStub.getChatMessageCallCountForTest()).toBe(0);
+
+    // Slow result completes the batch and triggers exactly one continuation.
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId: "call_slow",
+        toolName: "testTool",
+        output: { which: "slow" },
+        autoContinue: true
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    await agentStub.waitForIdleForTest();
+
+    expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistant = messages.find((m) => m.id === "assistant-parallel")!;
+    const partFor = (toolCallId: string) =>
+      assistant.parts.find(
+        (p) => "toolCallId" in p && p.toolCallId === toolCallId
+      ) as { state: string; output?: unknown };
+    expect(partFor("call_fast").state).toBe("output-available");
+    expect(partFor("call_fast").output).toEqual({ which: "fast" });
+    expect(partFor("call_slow").state).toBe("output-available");
+    expect(partFor("call_slow").output).toEqual({ which: "slow" });
+
+    ws.close(1000);
+  });
+
+  it("holds the barrier when a settled dynamic-tool sits beside a pending tool (#1649)", async () => {
+    const room = crypto.randomUUID();
+    const res = await exports.default.fetch(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    // Parallel batch mixing a `dynamic-tool` part with a regular tool part.
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Use a dynamic tool and a regular tool" }]
+      },
+      {
+        id: "assistant-dynamic",
+        role: "assistant",
+        parts: [
+          {
+            type: "dynamic-tool",
+            toolName: "dynAction",
+            toolCallId: "call_dyn",
+            state: "input-available",
+            input: { which: "dyn" }
+          },
+          {
+            type: "tool-testTool",
+            toolCallId: "call_reg",
+            state: "input-available",
+            input: { which: "reg" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    // Resolve the dynamic tool first (autoContinue). The regular tool is still
+    // pending → the continuation must NOT run yet.
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId: "call_dyn",
+        toolName: "dynAction",
+        output: { which: "dyn" },
+        autoContinue: true
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect(await agentStub.getChatMessageCallCountForTest()).toBe(0);
+
+    // Resolve the regular tool: batch complete → exactly one continuation.
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId: "call_reg",
+        toolName: "testTool",
+        output: { which: "reg" },
+        autoContinue: true
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    await agentStub.waitForIdleForTest();
+
+    expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
+
+    ws.close(1000);
+  });
+
   it("preserves earlier assistant parts across chained continuation approvals (#1160)", async () => {
     const room = crypto.randomUUID();
     const res = await exports.default.fetch(

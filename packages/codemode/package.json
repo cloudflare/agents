@@ -17,9 +17,9 @@
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
     "@playwright/test": "^1.60.0",
-    "@tanstack/ai": "^0.18.0",
-    "ai": "^6.0.185",
-    "vitest": "4.1.6",
+    "@tanstack/ai": "^0.27.0",
+    "ai": "^6.0.196",
+    "vitest": "4.1.8",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
@@ -78,7 +78,7 @@
   "scripts": {
     "build": "tsx ./scripts/build.ts",
     "test": "vitest run && vitest run --config vitest.browser.config.ts",
-    "test:e2e": "npx playwright test --config e2e/playwright.config.ts",
+    "test:e2e": "playwright test --config e2e/playwright.config.ts",
     "test:watch": "vitest",
     "test:browser": "vitest run --config vitest.browser.config.ts"
   },

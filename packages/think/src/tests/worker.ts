@@ -8,6 +8,7 @@ export {
   BareAssistantAgent,
   LoopTestAgent,
   LoopToolTestAgent,
+  OverflowRecoveryTestAgent,
   ThinkTestAgent,
   ThinkToolsTestAgent,
   ThinkFiberTestAgent,
@@ -24,7 +25,8 @@ export {
   ThinkNonRecoveryTestAgent,
   ThinkAgentToolParent,
   StuckThinkAgentToolChild,
-  ThinkExtensionHookAgent
+  ThinkExtensionHookAgent,
+  ThinkMessengerRouteTestAgent
 } from "./agents";
 
 import type {
@@ -33,6 +35,7 @@ import type {
   BareAssistantAgent,
   LoopTestAgent,
   LoopToolTestAgent,
+  OverflowRecoveryTestAgent,
   ThinkTestAgent,
   ThinkToolsTestAgent,
   ThinkFiberTestAgent,
@@ -49,7 +52,8 @@ import type {
   ThinkNonRecoveryTestAgent,
   ThinkAgentToolParent,
   StuckThinkAgentToolChild,
-  ThinkExtensionHookAgent
+  ThinkExtensionHookAgent,
+  ThinkMessengerRouteTestAgent
 } from "./agents";
 
 export type Env = {
@@ -58,6 +62,7 @@ export type Env = {
   BareAssistantAgent: DurableObjectNamespace<BareAssistantAgent>;
   LoopTestAgent: DurableObjectNamespace<LoopTestAgent>;
   LoopToolTestAgent: DurableObjectNamespace<LoopToolTestAgent>;
+  OverflowRecoveryTestAgent: DurableObjectNamespace<OverflowRecoveryTestAgent>;
   ThinkTestAgent: DurableObjectNamespace<ThinkTestAgent>;
   ThinkToolsTestAgent: DurableObjectNamespace<ThinkToolsTestAgent>;
   ThinkFiberTestAgent: DurableObjectNamespace<ThinkFiberTestAgent>;
@@ -75,6 +80,7 @@ export type Env = {
   ThinkAgentToolParent: DurableObjectNamespace<ThinkAgentToolParent>;
   StuckThinkAgentToolChild: DurableObjectNamespace<StuckThinkAgentToolChild>;
   ThinkExtensionHookAgent: DurableObjectNamespace<ThinkExtensionHookAgent>;
+  ThinkMessengerRouteTestAgent: DurableObjectNamespace<ThinkMessengerRouteTestAgent>;
   LOADER: WorkerLoader;
 };
 

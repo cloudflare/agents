@@ -1,10 +1,12 @@
 import { afterAll, beforeAll } from "vitest";
 import { exports } from "cloudflare:workers";
 
+const WARMUP_TIMEOUT_MS = 60_000;
+
 // Warm up the worker module graph before tests run.
 beforeAll(async () => {
   await exports.default.fetch("http://warmup/");
-}, 30_000);
+}, WARMUP_TIMEOUT_MS);
 
 // Give DOs a moment to finish WebSocket close handlers before
 // the module is invalidated between test files.

@@ -41,6 +41,10 @@ export const channels = {
   state: channel("agents:state"),
   rpc: channel("agents:rpc"),
   message: channel("agents:message"),
+  chat: channel("agents:chat"),
+  transcript: channel("agents:transcript"),
+  fiber: channel("agents:fiber"),
+  agentTool: channel("agents:agent_tool"),
   schedule: channel("agents:schedule"),
   lifecycle: channel("agents:lifecycle"),
   workflow: channel("agents:workflow"),
@@ -49,11 +53,25 @@ export const channels = {
 } as const;
 
 /**
+ * Channel keys whose diagnostics channel name differs from `agents:${key}`.
+ * Keep this in sync with {@link channels} for any camelCase key that maps to a
+ * snake_case diagnostics channel.
+ */
+const CHANNEL_DIAGNOSTIC_NAME_OVERRIDES: Partial<Record<string, string>> = {
+  agentTool: "agents:agent_tool"
+};
+
+/**
  * Map event type prefixes to their diagnostics channel.
  */
 function getChannel(type: string): Channel {
   if (type.startsWith("mcp:")) return channels.mcp;
   if (type.startsWith("workflow:")) return channels.workflow;
+  if (type.startsWith("fiber:")) return channels.fiber;
+  if (type.startsWith("transcript:") || type.startsWith("chat:transcript:"))
+    return channels.transcript;
+  if (type.startsWith("chat:")) return channels.chat;
+  if (type.startsWith("agent_tool:")) return channels.agentTool;
   if (type.startsWith("schedule:") || type.startsWith("queue:"))
     return channels.schedule;
   if (
@@ -91,6 +109,16 @@ export type ChannelEventMap = {
     ObservabilityEvent,
     { type: `message:${string}` | `tool:${string}` | `submission:${string}` }
   >;
+  chat: Exclude<
+    Extract<ObservabilityEvent, { type: `chat:${string}` }>,
+    { type: `chat:transcript:${string}` }
+  >;
+  transcript: Extract<
+    ObservabilityEvent,
+    { type: `transcript:${string}` | `chat:transcript:${string}` }
+  >;
+  fiber: Extract<ObservabilityEvent, { type: `fiber:${string}` }>;
+  agentTool: Extract<ObservabilityEvent, { type: `agent_tool:${string}` }>;
   schedule: Extract<
     ObservabilityEvent,
     { type: `schedule:${string}` | `queue:${string}` }
@@ -121,7 +149,8 @@ export function subscribe<K extends keyof ChannelEventMap>(
   channelKey: K,
   callback: (event: ChannelEventMap[K]) => void
 ): () => void {
-  const name = `agents:${channelKey}`;
+  const name =
+    CHANNEL_DIAGNOSTIC_NAME_OVERRIDES[channelKey] ?? `agents:${channelKey}`;
   const handler = (message: unknown, _name: string | symbol) =>
     callback(message as ChannelEventMap[K]);
   dcSubscribe(name, handler);

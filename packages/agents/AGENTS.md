@@ -21,8 +21,11 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/ai-chat-agent`       | `src/ai-chat-agent.ts`       | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                          |
 | `agents/ai-react`            | `src/ai-react.tsx`           | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                         |
 | `agents/tsconfig`            | `agents.tsconfig.json`       | Shared TypeScript config for all projects in the repo                        |
-| `agents/vite`                | `src/vite.ts`                | Vite plugin — decorator transforms and Agents-specific build config          |
+| `agents/vite`                | `src/vite.ts`                | Vite plugin — decorator transforms and the `agents:skills` import transform  |
+| `agents/skills`              | `src/skills/index.ts`        | Framework-agnostic Agent Skills engine — sources, `SkillRegistry`, runner    |
 | `agents/experimental/webmcp` | `src/experimental/webmcp.ts` | WebMCP adapter — bridges MCP tools to Chrome's `navigator.modelContext`      |
+
+The `agents:skills` virtual-module types ship from `skills-module.d.ts` (referenced from the built `dist/index.d.ts`); `@cloudflare/think` consumes `agents/skills` and `@cloudflare/ai-chat` can too.
 
 ## Source layout
 
@@ -77,6 +80,15 @@ src/
   codemode/             # Experimental code generation
     ai.ts
 
+  skills/               # Framework-agnostic Agent Skills engine
+    index.ts            # Barrel — sources, registry, runner, types
+    types.ts            # SkillSource, SkillRegistrySnapshot, SkillRunContext, etc.
+    frontmatter.ts      # SKILL.md YAML frontmatter parser
+    registry.ts         # SkillRegistry — catalog prompt + activation tools
+    manifest.ts         # fromManifest() source (bundled skills)
+    r2.ts               # r2() source (read-only R2-backed skills)
+    runner.ts           # Experimental script runner + single capability bridge
+
   experimental/         # Experimental features (published but unstable)
     webmcp.ts           # WebMCP adapter (browser-side, uses MCP SDK client)
 
@@ -87,7 +99,7 @@ src/
 ## Build
 
 ```bash
-npm run build           # runs tsx scripts/build.ts
+pnpm run build          # runs tsx scripts/build.ts
 ```
 
 Uses **tsdown** (ESM-only, with .d.ts generation and sourcemaps). Build entry points are explicitly listed in `scripts/build.ts` — if you add a new export, add it there too.
@@ -103,7 +115,7 @@ Multiple separate test suites, each with its own vitest config:
 ### Workers tests (`src/tests/`)
 
 ```bash
-npm run test:workers    # or: vitest -r src/tests
+pnpm run test:workers   # or: vitest -r src/tests
 ```
 
 Runs inside the Workers runtime via `@cloudflare/vitest-pool-workers`. Uses a `wrangler.jsonc` to configure Durable Object bindings, queues, workflows, etc. Tests cover: state, scheduling, sub-agent routing, callable methods, WebSocket message handling, email routing, MCP protocol, workflows.
@@ -111,7 +123,7 @@ Runs inside the Workers runtime via `@cloudflare/vitest-pool-workers`. Uses a `w
 ### React tests (`src/react-tests/`)
 
 ```bash
-npm run test:react      # or: vitest -r src/react-tests
+pnpm run test:react     # or: vitest -r src/react-tests
 ```
 
 Runs in **Playwright (Chromium, headless)** via `vitest-browser-react`. A global setup script starts a miniflare worker on port 18787. Tests cover: `useAgent` hook, cache invalidation, cache TTL, state sync.
@@ -119,7 +131,7 @@ Runs in **Playwright (Chromium, headless)** via `vitest-browser-react`. A global
 ### CLI tests (`src/cli-tests/`)
 
 ```bash
-npm run test:cli        # or: vitest -r src/cli-tests
+pnpm run test:cli       # or: vitest -r src/cli-tests
 ```
 
 Plain Node.js environment. Tests the `npx agents` CLI.
@@ -127,7 +139,7 @@ Plain Node.js environment. Tests the `npx agents` CLI.
 ### WebMCP tests (`src/webmcp-tests/`)
 
 ```bash
-npm run test:webmcp     # or: vitest --project webmcp
+pnpm run test:webmcp    # or: vitest --project webmcp
 ```
 
 Runs in **Playwright (Chromium, headless)** via `@vitest/browser-playwright`. Tests the experimental WebMCP adapter: tool discovery, registration, execution relay, watch mode (SSE re-sync), error handling, and edge cases.
@@ -135,7 +147,7 @@ Runs in **Playwright (Chromium, headless)** via `@vitest/browser-playwright`. Te
 ### x402 tests (`src/x402-tests/`)
 
 ```bash
-npm run test:x402      # or: vitest --project x402
+pnpm run test:x402     # or: vitest --project x402
 ```
 
 Focused tests for the x402 payment / auth integration.
@@ -157,7 +169,7 @@ Files ending in `.test-d.ts`. These use `expectTypeOf` / `assertType` to verify 
 ### E2E tests (`src/e2e/`)
 
 ```bash
-npm run test:e2e        # or: vitest run src/e2e/e2e.test.ts
+pnpm run test:e2e       # or: vitest run src/e2e/e2e.test.ts
 ```
 
 End-to-end tests that start real workers and test MCP server flows.
@@ -165,7 +177,7 @@ End-to-end tests that start real workers and test MCP server flows.
 ### Evals (`evals/`)
 
 ```bash
-npm run evals           # runs evalite inside evals/
+pnpm run evals          # runs evalite inside evals/
 ```
 
 AI evaluation suite (scheduling accuracy, etc.). Requires API keys in `.env`.

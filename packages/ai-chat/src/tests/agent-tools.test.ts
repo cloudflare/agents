@@ -64,6 +64,13 @@ type ParentStub = DurableObjectStub & {
   ): Promise<{
     events: AgentToolEventMessage[];
     finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
+    status: string | null;
+  }>;
+  reattachStuckTailableChildForTest(runId?: string): Promise<{
+    events: AgentToolEventMessage[];
+    finishes: { run: AgentToolRunInfo; result: AgentToolLifecycleResult }[];
+    elapsedMs: number;
+    status: string | null;
   }>;
   reconcileMissingChildForTest(runId?: string): Promise<{
     events: AgentToolEventMessage[];
@@ -164,6 +171,15 @@ type ParentStub = DurableObjectStub & {
   }>;
   testPreAbortedForwardStreamReleasesReaderLock(): Promise<boolean>;
   forwardMalformedAgentToolStreamForTest(): Promise<AgentToolEventMessage[]>;
+  childReconcileStaleRunViaRecoveryForTest(
+    path: "continue" | "retry",
+    withAssistantTurn: boolean
+  ): Promise<{ before: string | null; after: string | null }>;
+  childCancelAgentToolRunAbortsRecoveryForTest(): Promise<{
+    abortedBefore: boolean;
+    abortedAfter: boolean;
+    childStatus: string | null;
+  }>;
 };
 
 function getParent(name = crypto.randomUUID()) {
@@ -216,8 +232,22 @@ describe("AIChatAgent as an agent-tool child", () => {
       chunks.some((chunk) => chunk.body.includes("write the report"))
     ).toBe(true);
 
+    // Each forwarded chunk must be an individual, unpacked chunk event — never
+    // a packed segment array — and sequences must be contiguous per chunk so a
+    // tailing parent can switch from stored replay to the live counter without
+    // gaps. Guards the chunk-packing storage format (segment rows are unpacked
+    // back into per-chunk bodies before forwarding).
+    chunks.forEach((chunk, i) => {
+      expect(chunk.sequence).toBe(i);
+      const parsed = JSON.parse(chunk.body) as unknown;
+      expect(Array.isArray(parsed)).toBe(false);
+      expect(parsed).toMatchObject({ type: expect.any(String) });
+    });
+
     const laterChunks = await parent.getChildChunks(runId, 0);
     expect(laterChunks.every((chunk) => chunk.sequence > 0)).toBe(true);
+    // afterSequence is a per-chunk cursor: everything past sequence 0.
+    expect(laterChunks).toEqual(chunks.slice(1));
   });
 
   it("finalizes lifecycle hooks and terminal events during parent recovery reconciliation", async () => {
@@ -263,40 +293,72 @@ describe("AIChatAgent as an agent-tool child", () => {
     });
   });
 
-  it("marks still-running recovered children interrupted and emits lifecycle events", async () => {
+  it("re-attaches a still-running recovered child and finalizes it completed (#1630)", async () => {
     const parent = await getParent();
     const runId = crypto.randomUUID();
 
-    const { events, finishes } = await parent.reconcileRunningChildForTest(
-      { prompt: "still running child" },
-      runId
-    );
+    const { events, finishes, status } =
+      await parent.reconcileRunningChildForTest(
+        { prompt: "child completes during reattach" },
+        runId
+      );
 
+    expect(status).toBe("completed");
     expect(finishes).toEqual([
       {
         run: expect.objectContaining({
           runId,
           parentToolCallId: "test-tool-call",
           agentType: "AIChatAgentToolChild",
-          status: "interrupted",
-          inputPreview: "still running child"
+          status: "completed",
+          inputPreview: "child completes during reattach"
         }),
         result: expect.objectContaining({
-          status: "interrupted",
-          error:
-            "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
+          status: "completed"
         })
       }
     ]);
+    expect(events.map((event) => event.event.kind)).toContain("finished");
     expect(events.at(-1)).toMatchObject({
       parentToolCallId: "test-tool-call",
       event: {
-        kind: "interrupted",
-        runId,
-        error:
-          "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
+        kind: "finished",
+        runId
       }
     });
+  });
+
+  it("bounds re-attach when a tail-able child never reaches terminal (#1630)", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    const { finishes, elapsedMs, status } =
+      await parent.reattachStuckTailableChildForTest(runId);
+
+    expect(elapsedMs).toBeLessThan(5000);
+    expect(status).toBe("interrupted");
+    expect(finishes).toEqual([
+      {
+        run: expect.objectContaining({
+          runId,
+          parentToolCallId: "test-tool-call",
+          agentType: "AIChatAgentToolChild",
+          status: "interrupted"
+        }),
+        result: expect.objectContaining({
+          status: "interrupted",
+          // Typed cause (#1630 follow-up) so callers don't parse the prose: the
+          // child made no forward progress within the no-progress budget. This
+          // seal is SOFT — the child is NOT torn down (`childStillRunning: true`)
+          // so a re-issue can still re-attach and repair it if it self-heals.
+          // Only the `window-exceeded` hard ceiling tears the child down.
+          reason: "no-progress",
+          childStillRunning: true,
+          error:
+            "Agent tool run was still running but made no forward progress within the re-attach no-progress budget; the parent gave up."
+        })
+      }
+    ]);
   });
 
   it("marks uninspectable recovered children interrupted and emits lifecycle events", async () => {
@@ -628,5 +690,52 @@ describe("AIChatAgent as an agent-tool child", () => {
       runId,
       status: "aborted"
     });
+  });
+
+  it("finalizes a stranded child run row when its own recovery CONTINUES (#1630)", async () => {
+    // A recovered assistant turn → the reconcile in `_chatRecoveryContinue`'s
+    // finally seals the stranded row `completed` so a re-attached parent
+    // collects immediately instead of waiting out a no-progress window.
+    const parent = await getParent();
+    const completed = await parent.childReconcileStaleRunViaRecoveryForTest(
+      "continue",
+      true
+    );
+    expect(completed.before).toBe("running");
+    expect(completed.after).toBe("completed");
+
+    // No recovered assistant turn → the same finally seals it `error`.
+    const errored = await (
+      await getParent()
+    ).childReconcileStaleRunViaRecoveryForTest("continue", false);
+    expect(errored.before).toBe("running");
+    expect(errored.after).toBe("error");
+  });
+
+  it("finalizes a stranded child run row when its own recovery RETRIES a pre-stream turn (#1630)", async () => {
+    // The pre-stream-eviction path settles via `_chatRecoveryRetry`, which
+    // (like continue) never hits `startAgentToolRun`'s finalizer — so its
+    // finally must run the same reconcile. This is the path the earlier review
+    // flagged as missing on the AIChatAgent retry branch.
+    const completed = await (
+      await getParent()
+    ).childReconcileStaleRunViaRecoveryForTest("retry", true);
+    expect(completed.before).toBe("running");
+    expect(completed.after).toBe("completed");
+
+    const errored = await (
+      await getParent()
+    ).childReconcileStaleRunViaRecoveryForTest("retry", false);
+    expect(errored.before).toBe("running");
+    expect(errored.after).toBe("error");
+  });
+
+  it("cancelAgentToolRun aborts an in-flight recovery turn and seals the child aborted (#1630)", async () => {
+    const result = await (
+      await getParent()
+    ).childCancelAgentToolRunAbortsRecoveryForTest();
+    expect(result.abortedBefore).toBe(false);
+    expect(result.abortedAfter).toBe(true);
+    expect(result.childStatus).toBe("aborted");
   });
 });

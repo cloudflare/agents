@@ -9,7 +9,7 @@
     "durable objects"
   ],
   "type": "module",
-  "version": "0.13.3",
+  "version": "0.15.0",
   "license": "MIT",
   "repository": {
     "directory": "packages/agents",
@@ -24,34 +24,38 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "@babel/plugin-proposal-decorators": "^7.29.0",
+    "@babel/plugin-proposal-decorators": "^7.29.7",
     "@cfworker/json-schema": "^4.1.1",
+    "@cloudflare/codemode": "*",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@rolldown/plugin-babel": "^0.2.3",
     "cron-schedule": "^6.0.0",
+    "esbuild": "^0.28.0",
+    "just-bash": "^3.0.1",
     "mimetext": "^3.0.28",
     "nanoid": "^5.1.11",
     "partyserver": "^0.5.6",
     "partysocket": "1.1.19",
+    "yaml": "^2.9.0",
     "yargs": "^18.0.0"
   },
   "devDependencies": {
-    "@ai-sdk/react": "^3.0.187",
-    "@tanstack/ai": "^0.18.0",
-    "@types/react": "^19.2.14",
+    "@ai-sdk/react": "^3.0.198",
+    "@tanstack/ai": "^0.27.0",
+    "@types/react": "^19.2.16",
     "@types/yargs": "^17.0.35",
-    "@vitest/browser-playwright": "^4.1.6",
-    "@x402/core": "^2.12.0",
-    "@x402/evm": "^2.12.0",
-    "ai": "^6.0.185",
-    "chat": "^4.29.0",
-    "react": "^19.2.6",
+    "@vitest/browser-playwright": "^4.1.8",
+    "@x402/core": "^2.14.0",
+    "@x402/evm": "^2.14.0",
+    "ai": "^6.0.196",
+    "chat": "^4.30.0",
+    "glob": "^11.1.0",
+    "react": "^19.2.7",
     "vitest-browser-react": "^2.2.0",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "@cloudflare/ai-chat": ">=0.6.1 <1.0.0",
-    "@cloudflare/codemode": ">=0.3.4 <1.0.0",
+    "@cloudflare/ai-chat": ">=0.8.0 <1.0.0",
     "@tanstack/ai": ">=0.10.2 <1.0.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",
@@ -63,9 +67,6 @@
   },
   "peerDependenciesMeta": {
     "@cloudflare/ai-chat": {
-      "optional": true
-    },
-    "@cloudflare/codemode": {
       "optional": true
     },
     "@tanstack/ai": {
@@ -221,6 +222,16 @@
       "types": "./dist/vite.d.ts",
       "import": "./dist/vite.js",
       "require": "./dist/vite.js"
+    },
+    "./skills": {
+      "types": "./dist/skills/index.d.ts",
+      "import": "./dist/skills/index.js",
+      "require": "./dist/skills/index.js"
+    },
+    "./skills/compile": {
+      "types": "./dist/skills/compile.d.ts",
+      "import": "./dist/skills/compile.js",
+      "require": "./dist/skills/compile.js"
     }
   },
   "publishConfig": {
@@ -229,12 +240,12 @@
   "files": [
     "dist",
     "agents.tsconfig.json",
+    "skills-module.d.ts",
     "README.md"
   ],
   "nx": {
     "implicitDependencies": [
-      "!@cloudflare/ai-chat",
-      "!@cloudflare/codemode"
+      "!@cloudflare/ai-chat"
     ]
   },
   "scripts": {

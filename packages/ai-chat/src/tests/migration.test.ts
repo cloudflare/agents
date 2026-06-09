@@ -49,6 +49,92 @@ describe("AI SDK v5 Migration", () => {
       expect(autoTransformMessage(msg)).toBe(msg);
     });
 
+    it("heals a malformed tool_use.input on an already-v5 message", () => {
+      const cases: Array<[string, unknown]> = [
+        ["empty string", ""],
+        ["null", null],
+        ["array", [{ id: 1 }]],
+        ["number", 7]
+      ];
+      for (const [label, badInput] of cases) {
+        const result = autoTransformMessage({
+          id: `tool-bad-${label}`,
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-doThing",
+              toolCallId: "call_1",
+              state: "output-available",
+              input: badInput,
+              output: { ok: true }
+            }
+          ]
+        } as unknown as UIMessage);
+        const part = result.parts[0] as Record<string, unknown>;
+        expect(part.input).toEqual({});
+        // Other fields are preserved.
+        expect(part.state).toBe("output-available");
+        expect(part.output).toEqual({ ok: true });
+      }
+    });
+
+    it("heals a tool part with an absent input key (undefined dropped on serialize)", () => {
+      // A JSON round-trip of `input: undefined` drops the key entirely (e.g. a
+      // tool call interrupted at tool-input-start). The repair must still coerce.
+      const result = autoTransformMessage({
+        id: "tool-no-input",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-doThing",
+            toolCallId: "call_1",
+            state: "output-available",
+            output: { ok: true }
+            // note: no `input` key at all
+          }
+        ]
+      } as unknown as UIMessage);
+      const part = result.parts[0] as Record<string, unknown>;
+      expect(part.input).toEqual({});
+      expect(part.state).toBe("output-available");
+      expect(part.output).toEqual({ ok: true });
+    });
+
+    it("parses a stringified-JSON tool input on an already-v5 message", () => {
+      const result = autoTransformMessage({
+        id: "tool-str",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-doThing",
+            toolCallId: "call_1",
+            state: "input-available",
+            input: '{"prompt":"a cat"}'
+          }
+        ]
+      } as unknown as UIMessage);
+      expect((result.parts[0] as Record<string, unknown>).input).toEqual({
+        prompt: "a cat"
+      });
+    });
+
+    it("leaves a healthy v5 tool message untouched (same reference)", () => {
+      const msg = {
+        id: "tool-ok",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-doThing",
+            toolCallId: "call_1",
+            state: "output-available",
+            input: { a: 1 },
+            output: "done"
+          }
+        ]
+      } as unknown as UIMessage;
+      expect(autoTransformMessage(msg)).toBe(msg);
+    });
+
     it("transforms legacy string content to text part", () => {
       const result = autoTransformMessage({
         id: "legacy-1",

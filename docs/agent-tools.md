@@ -95,7 +95,43 @@ export class Assistant extends AIChatAgent<Env> {
 The generated tool calls `this.runAgentTool(ChildAgent, ...)`, streams
 `agent-tool-event` frames on the parent WebSocket, and returns the child
 summary to the parent model. If the run fails, aborts, or is interrupted, the
-tool returns a structured failure instead of an empty success value.
+tool returns a structured `AgentToolFailure` instead of an empty success value:
+
+```ts
+type AgentToolFailure = {
+  ok: false;
+  status: "error" | "aborted" | "interrupted";
+  error: string; // human-readable, safe to surface
+  retryable: boolean;
+  // Present only when `status` is "interrupted":
+  reason?: AgentToolInterruptedReason;
+  childStillRunning?: boolean;
+};
+
+type AgentToolInterruptedReason =
+  | "no-progress"
+  | "window-exceeded"
+  | "not-tailable"
+  | "inspect-timeout"
+  | "inspect-failed"
+  | "recovery-deadline";
+```
+
+`retryable` is `true` only for an `interrupted` run — the child was reset or
+superseded by a deploy or parent recovery and never reached a logical outcome,
+so re-dispatching the same call can succeed. A genuine `error` or an intentional
+`aborted` is `retryable: false`. This lets a parent prompt convention or an
+orchestration harness re-run a transient interruption rather than reporting it
+to the user as a final failure. `AgentToolFailure` is exported from `agents`.
+
+On an `interrupted` run, `reason` gives a machine-readable cause and
+`childStillRunning` reports whether the child was still working when the parent
+stopped waiting (`true`) or has since been torn down (`false`). Branch on these
+instead of parsing the `error` prose — for example, re-dispatch a `no-progress`
+interrupt (the child may still self-heal) but reconnect to or surface a
+`window-exceeded` one (the child was torn down). Both `reason` and
+`childStillRunning` are also mirrored onto the `agent-tool-event` wire frame and
+the `useAgentToolEvents()` run state.
 
 For `Think` children that do workflow-style work without user-facing assistant
 text, override `getAgentToolOutput()` and, if needed, `getAgentToolSummary()`.
@@ -212,3 +248,54 @@ await this.clearAgentToolRuns({ olderThan: Date.now() - 7 * 24 * 60 * 60_000 });
 
 If a retained run is still `starting` or `running`, cleanup cancels the child
 before deleting its facet.
+
+## Interrupted runs and recovery
+
+Agent-tool runs are retained in the parent. If the parent restarts (deploy,
+eviction) while a child run is still `starting` or `running`, the parent does
+not immediately abandon it. Startup recovery re-attaches to the live child and
+tails its stream to the child's real terminal result: the child is a sub-agent
+with its own `chatRecovery`, so it self-heals its interrupted turn while the
+parent forwards its output and collects the final outcome. A completed child is
+finalized in the parent without re-running already-finished work.
+
+The re-attach wait is **progress-keyed**, not a fixed wall clock. Two static
+`options` tune it:
+
+| Option                                 | Default          | Behavior                                                                                                                                                                                                        |
+| -------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agentToolReattachNoProgressTimeoutMs` | `120000` (2 min) | How long the parent waits with **no** forward progress before giving up. Resets on every forwarded chunk, so a streaming child is followed through to terminal.                                                 |
+| `agentToolReattachMaxWindowMs`         | `Infinity`       | Optional hard wall-clock ceiling on a single re-attach. Uncapped by default (mirrors chat recovery's `maxRecoveryWork`), so a healthy, long-running child is never cut off. Set a finite value to impose a cap. |
+
+Give-up outcomes map to the `AgentToolFailure` fields:
+
+- A child that goes **silent** for a full no-progress window is sealed
+  `reason: "no-progress"`, `childStillRunning: true`. This seal is **soft** —
+  the child is left running, so re-dispatching the same `runId` can re-attach
+  and collect it if it self-heals.
+- If you set a finite `agentToolReattachMaxWindowMs` and it fires, the run is
+  sealed `reason: "window-exceeded"`, `childStillRunning: false`, and the child
+  is **torn down** (it has had its full window and is treated as exhausted).
+- A child that cannot be tailed or inspected, or that exceeds the overall
+  recovery deadline, is sealed with the matching `reason` so the parent tool
+  call returns a structured failure instead of hanging indefinitely.
+
+A genuinely hung child can never block recovery forever: the no-progress budget
+bounds a silent child, and a content-runaway is bounded uniformly (live and
+recovery) by the child's own `chatRecovery` `maxRecoveryWork` /
+`shouldKeepRecovering`, not by a parent-only timer.
+
+Monitor parent reconciliation through the `agentTool` observability channel:
+
+```ts
+import { subscribe } from "agents/observability";
+
+const unsubscribe = subscribe("agentTool", (event) => {
+  if (event.type === "agent_tool:recovery:row") {
+    console.log("Recovered agent-tool row", event.payload);
+  }
+});
+```
+
+Raw `diagnostics_channel` subscribers should use the channel name
+`agents:agent_tool`.

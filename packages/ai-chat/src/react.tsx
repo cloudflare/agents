@@ -620,6 +620,16 @@ export function useAgentChat<
    */
   isStreaming: boolean;
   /**
+   * `true` while a durable chat turn is being recovered (interrupted by a
+   * deploy/eviction or a stream-stall watchdog abort and now resuming, #1620).
+   * Distinct from `isStreaming` — a recovering turn isn't producing tokens yet,
+   * so a client can show a "recovering…" hint instead of looking frozen. Most
+   * UIs treat `isStreaming || isRecovering` as "busy". Driven by the server's
+   * `CF_AGENT_CHAT_RECOVERING` frames (also replayed on connect for
+   * `@cloudflare/think`); cleared automatically on the next stream or terminal.
+   */
+  isRecovering: boolean;
+  /**
    * `true` when the current `status`/`isServerStreaming` activity is
    * driven by a server-pushed tool continuation (i.e. the server is
    * auto-continuing the conversation after `addToolOutput` or
@@ -1368,6 +1378,7 @@ export function useAgentChat<
     markInitialMessagesSeeded();
     setMessages([]);
     setClientToolResults(new Map());
+    setPendingOnToolCallIds(new Set());
     resetToolContinuation();
     processedToolCalls.current.clear();
     localResponseMessageIdsRef.current.clear();
@@ -1420,6 +1431,18 @@ export function useAgentChat<
 
   const pendingConfirmationsRef = useRef(pendingConfirmations);
   pendingConfirmationsRef.current = pendingConfirmations;
+  const [pendingOnToolCallIds, setPendingOnToolCallIds] = useState<Set<string>>(
+    () => new Set()
+  );
+
+  const finishOnToolCall = useCallback((toolCallId: string) => {
+    setPendingOnToolCallIds((prev) => {
+      if (!prev.has(toolCallId)) return prev;
+      const next = new Set(prev);
+      next.delete(toolCallId);
+      return next;
+    });
+  }, []);
 
   // ── DEPRECATED: automatic tool resolution effect ────────────────────
   // This entire useEffect is deprecated. Use onToolCall instead.
@@ -1641,6 +1664,14 @@ export function useAgentChat<
         // Mark as processed to prevent re-triggering
         processedToolCalls.current.add(toolCallId);
 
+        // track pending `onToolCall` calls to derive streaming state
+        setPendingOnToolCallIds((prev) => {
+          if (prev.has(toolCallId)) return prev;
+          const next = new Set(prev);
+          next.add(toolCallId);
+          return next;
+        });
+
         // Create addToolOutput function for this specific tool call
         const addToolOutput = (opts: AddToolOutputOptions) => {
           sendToolOutputToServer(
@@ -1664,21 +1695,31 @@ export function useAgentChat<
 
         // Call the onToolCall callback
         // The callback is responsible for calling addToolOutput when ready
-        currentOnToolCall({
-          toolCall: {
-            toolCallId,
-            toolName,
-            input: part.input
-          },
-          addToolOutput
+        let result: ReturnType<OnToolCallCallback>;
+        try {
+          result = currentOnToolCall({
+            toolCall: { toolCallId, toolName, input: part.input },
+            addToolOutput
+          });
+        } catch (error) {
+          finishOnToolCall(toolCallId);
+          throw error;
+        }
+        void Promise.resolve(result).finally(() => {
+          finishOnToolCall(toolCallId);
         });
       }
     }
-  }, [chatMessages, sendToolOutputToServer, addToolResult]);
+  }, [chatMessages, sendToolOutputToServer, addToolResult, finishOnToolCall]);
 
   const streamStateRef = useRef<BroadcastStreamState>({ status: "idle" });
 
   const [isServerStreaming, setIsServerStreaming] = useState(false);
+  // #1620: a durable chat turn is being recovered (interrupted by a
+  // deploy/eviction or a stream-stall watchdog abort and now resuming). Driven
+  // by the server's `CF_AGENT_CHAT_RECOVERING` frames; surfaced as a "working,
+  // not frozen" hint distinct from active streaming.
+  const [isRecovering, setIsRecovering] = useState(false);
 
   useEffect(() => {
     const localResponseIds = localResponseMessageIdsRef.current;
@@ -1704,8 +1745,17 @@ export function useAgentChat<
             type: "clear"
           }).state;
           setIsServerStreaming(false);
+          setIsRecovering(false);
           // Shared local-state reset — see `resetLocalChatState`.
           resetLocalChatState();
+          break;
+
+        case MessageType.CF_AGENT_CHAT_RECOVERING:
+          // Durable recovery progress hint (#1620): show "recovering…" while a
+          // turn is being resumed. Cleared by the server's `recovering: false`
+          // frame on any terminal outcome (and locally on stream-resume /
+          // terminal response / clear below, for a snappy handoff).
+          setIsRecovering(Boolean(data.recovering));
           break;
 
         case MessageType.CF_AGENT_CHAT_MESSAGES:
@@ -1815,6 +1865,9 @@ export function useAgentChat<
           }).state;
           customTransport.observeServerTurn(data.id);
           setIsServerStreaming(true);
+          // The recovered turn is now streaming live to us — it's no longer
+          // "recovering", it's producing the answer (#1620).
+          setIsRecovering(false);
           agentRef.current.send(
             JSON.stringify({
               type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
@@ -1922,6 +1975,8 @@ export function useAgentChat<
           }
           if (data.done) {
             customTransport.handleServerTurnCompleted(data.id);
+            // A terminal turn outcome resolves any in-progress recovery (#1620).
+            setIsRecovering(false);
           }
           const completedObservedToolContinuation =
             data.done &&
@@ -1968,6 +2023,7 @@ export function useAgentChat<
       agent.removeEventListener("message", onAgentMessage);
       streamStateRef.current = { status: "idle" };
       setIsServerStreaming(false);
+      setIsRecovering(false);
       protectedStreamingAssistantRef.current = null;
       localResponseIds.clear();
     };
@@ -2188,10 +2244,10 @@ export function useAgentChat<
   // execute, which drops `status` back to "ready" while the client's
   // async `onToolCall` handler is still running. Without this signal,
   // consumers see a blank "nothing happening" window for the full
-  // duration of `tool.execute()` — often a `fetch` taking seconds.
+  // duration of the client-side work — often a `fetch` taking seconds.
   //
-  // We scope this to tool calls that have an actual handler:
-  //   - `onToolCall` is provided (new, supported path), OR
+  // We scope this to tool calls that have actual client-side work in flight:
+  //   - an `onToolCall` callback promise is still pending, OR
   //   - a matching entry in the deprecated `tools` option has `execute`.
   // Tools waiting on explicit user confirmation are excluded — nothing
   // is happening until the user acts, so the "busy" indicator would be
@@ -2204,8 +2260,7 @@ export function useAgentChat<
   const lastAssistantMessage =
     messagesWithToolResults[messagesWithToolResults.length - 1];
   const hasPendingClientToolCalls = (() => {
-    const hasOnToolCall = !!onToolCall;
-    if (!hasOnToolCall && !tools) return false;
+    if (pendingOnToolCallIds.size === 0 && !tools) return false;
     if (!lastAssistantMessage || lastAssistantMessage.role !== "assistant") {
       return false;
     }
@@ -2214,7 +2269,8 @@ export function useAgentChat<
       if (part.state !== "input-available") continue;
       const toolName = getToolName(part);
       if (toolsRequiringConfirmation.includes(toolName)) continue;
-      if (hasOnToolCall || tools?.[toolName]?.execute) return true;
+      if (pendingOnToolCallIds.has(part.toolCallId)) return true;
+      if (tools?.[toolName]?.execute) return true;
     }
     return false;
   })();
@@ -2228,6 +2284,14 @@ export function useAgentChat<
     messages: messagesWithToolResults,
     isServerStreaming: effectiveIsServerStreaming,
     isStreaming,
+    /**
+     * True while a durable chat turn is being recovered (interrupted by a
+     * deploy/eviction or a stream-stall watchdog abort and now resuming, #1620).
+     * Distinct from `isStreaming` — a recovering turn isn't producing tokens
+     * yet. Render a "recovering…" hint; most UIs treat `isStreaming ||
+     * isRecovering` as "busy". Cleared automatically on the next stream/terminal.
+     */
+    isRecovering,
     isToolContinuation,
     sendMessage: sendMessageWithStreamingProtection,
     stop: stopWithToolContinuationAbort,

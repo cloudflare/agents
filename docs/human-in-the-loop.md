@@ -352,6 +352,12 @@ This sends a `tool_result` to the LLM with your custom error text, so it can res
 
 See the complete example: [guides/human-in-the-loop/](../guides/human-in-the-loop/)
 
+### Surviving restarts while waiting for a human
+
+A Durable Object can be evicted at any time (a deploy, an inactivity timeout, a resource limit), including while a turn is paused on an approval prompt or a client-side tool call. When [`chatRecovery`](./chat-agents.md#stream-recovery) is enabled (the default for `Think`), the SDK recognizes that such a turn is _waiting on the human_, not stuck, and does **not** seal it: the no-progress window, attempt cap, `maxRecoveryWork`, and `shouldKeepRecovering` are all suspended while the interaction is pending. Recovery parks the turn instead of failing it, and the user's eventual approval or `tool_result` resumes the conversation through the normal continuation path. A user who takes minutes to respond to a prompt that was interrupted by a deploy therefore does not see a spurious "session interrupted" error.
+
+This protection applies to interactions only the client can resolve — `approval-requested` parts and `input-available` parts for client-side tools (those without a server `execute`). A server tool whose `execute()` was killed mid-flight is a genuine orphan and recovers through the normal transcript-repair path instead.
+
 ## Client-Side Tool Execution with `onToolCall`
 
 For tools that need browser APIs (geolocation, camera, clipboard) or user interaction, define the tool on the server without an `execute` function and handle it on the client with `onToolCall`:

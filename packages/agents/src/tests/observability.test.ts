@@ -243,6 +243,117 @@ describe("channel routing", () => {
     unsub();
   });
 
+  it("should route chat recovery events to the chat channel", () => {
+    const received: ObservabilityEvent[] = [];
+    const unsub = subscribe("chat", (event) => received.push(event));
+
+    genericObservability.emit({
+      type: "chat:recovery:attempt",
+      agent: "test-agent",
+      name: "inst-1",
+      payload: {
+        incidentId: "incident-1",
+        requestId: "req-1",
+        attempt: 1,
+        maxAttempts: 3,
+        recoveryKind: "retry"
+      },
+      timestamp: Date.now()
+    });
+
+    genericObservability.emit({
+      type: "chat:recovery:exhausted",
+      agent: "test-agent",
+      name: "inst-1",
+      payload: {
+        incidentId: "incident-1",
+        requestId: "req-1",
+        attempt: 3,
+        maxAttempts: 3,
+        recoveryKind: "retry",
+        reason: "max_attempts_exceeded"
+      },
+      timestamp: Date.now()
+    });
+
+    expect(received.map((event) => event.type)).toEqual([
+      "chat:recovery:attempt",
+      "chat:recovery:exhausted"
+    ]);
+
+    unsub();
+  });
+
+  it("should route transcript repair events to the transcript channel", () => {
+    const received: ObservabilityEvent[] = [];
+    const chatEvents: ObservabilityEvent[] = [];
+    const unsubChat = subscribe("chat", (event) => chatEvents.push(event));
+    const unsub = subscribe("transcript", (event) => received.push(event));
+
+    genericObservability.emit({
+      type: "chat:transcript:repaired",
+      agent: "test-agent",
+      name: "inst-1",
+      payload: {
+        requestId: "req-1",
+        removedToolCalls: 1,
+        normalizedInputs: 0,
+        toolCallIds: ["tool-1"]
+      },
+      timestamp: Date.now()
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0].type).toBe("chat:transcript:repaired");
+    expect(chatEvents).toHaveLength(0);
+
+    unsubChat();
+    unsub();
+  });
+
+  it("should route fiber:* and agent_tool:* to dedicated channels", () => {
+    const fiberEvents: ObservabilityEvent[] = [];
+    const agentToolEvents: ObservabilityEvent[] = [];
+    const unsubFiber = subscribe("fiber", (event) => fiberEvents.push(event));
+    const unsubAgentTool = subscribe("agentTool", (event) =>
+      agentToolEvents.push(event)
+    );
+
+    genericObservability.emit({
+      type: "fiber:recovery:failed",
+      agent: "test-agent",
+      name: "inst-1",
+      payload: {
+        fiberId: "fiber-1",
+        fiberName: "run",
+        error: "boom",
+        reason: "handler_error"
+      },
+      timestamp: Date.now()
+    });
+
+    genericObservability.emit({
+      type: "agent_tool:recovery:row",
+      agent: "test-agent",
+      name: "inst-1",
+      payload: {
+        runId: "run-1",
+        agentType: "HelperAgent",
+        status: "interrupted",
+        reason: "stale_running_row"
+      },
+      timestamp: Date.now()
+    });
+
+    expect(fiberEvents).toHaveLength(1);
+    expect(fiberEvents[0].type).toBe("fiber:recovery:failed");
+    expect(agentToolEvents).toHaveLength(1);
+    expect(agentToolEvents[0].type).toBe("agent_tool:recovery:row");
+
+    unsubFiber();
+    unsubAgentTool();
+  });
+
   it("should route email:* to the email channel", () => {
     const received: ObservabilityEvent[] = [];
     const unsub = subscribe("email", (event) => received.push(event));

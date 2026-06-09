@@ -15,9 +15,9 @@ const NEXT_CLEANUP_AT_KEY = "next_cleanup_at";
 const CLEANUP_SCHEDULE_ID_KEY = "cleanup_schedule_id";
 
 export class ChatSdkStateAgent extends Agent {
-  onStart(): void {
+  async onStart(): Promise<void> {
     this.migrate();
-    void this.scheduleNextCleanup();
+    await this.scheduleNextCleanup();
   }
 
   subscribe(threadId: string): void {

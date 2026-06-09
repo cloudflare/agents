@@ -86,6 +86,22 @@ export type SaveMessagesResult = {
  * stream is detected after DO restart.
  */
 export type ChatRecoveryContext = {
+  /** Stable identifier for this recovery incident. */
+  incidentId: string;
+  /**
+   * Stable request ID for the whole continuation chain (the recovery "root").
+   * Unlike `requestId` — which changes on every chained continuation — this is
+   * constant for the lifetime of the incident, so it's the right key for
+   * per-incident budget tracking or fresh-incident detection without
+   * re-deriving identity from message IDs.
+   */
+  recoveryRootRequestId: string;
+  /** Attempt number for this recovery incident, starting at 1. */
+  attempt: number;
+  /** Maximum attempts before the framework terminalizes recovery. */
+  maxAttempts: number;
+  /** Whether this recovery is retrying an unanswered user turn or continuing a partial assistant turn. */
+  recoveryKind: "retry" | "continue";
   /** Stream ID from the interrupted stream. */
   streamId: string;
   /** Request ID from the interrupted stream. */
@@ -118,6 +134,143 @@ export type ChatRecoveryOptions = {
   persist?: boolean;
   /** Schedule a continuation via `continueLastTurn()`. Default: true. */
   continue?: boolean;
+};
+
+/**
+ * Context passed when framework-owned chat recovery exhausts its retry budget.
+ *
+ * Carries enough to render/persist a user-facing terminal banner without
+ * re-deriving anything: the `terminalMessage` that was shown, the
+ * `recoveryRootRequestId` (stable incident identity), and the partial the turn
+ * produced before it was given up on.
+ */
+export type ChatRecoveryExhaustedContext = Pick<
+  ChatRecoveryContext,
+  | "incidentId"
+  | "requestId"
+  | "recoveryRootRequestId"
+  | "attempt"
+  | "maxAttempts"
+  | "recoveryKind"
+  | "streamId"
+  | "createdAt"
+  | "partialText"
+  | "partialParts"
+> & {
+  /**
+   * Why recovery stopped. One of:
+   * - `max_attempts_exceeded` — the per-incident attempt budget was spent.
+   * - `no_progress_timeout` — no forward progress within the no-progress window.
+   * - `work_budget_exceeded` — the turn kept producing content but exceeded the
+   *   configured `maxRecoveryWork` runaway-loop budget.
+   * - `recovery_aborted` — the caller's `shouldKeepRecovering` hook returned `false`.
+   * - `stable_timeout` — a recovery attempt kept timing out waiting for the
+   *   isolate to reach stable state until the budget drained (extreme churn).
+   * - `max_recovery_window_exceeded` — DEPRECATED. The old absolute incident-age
+   *   ceiling. No longer emitted (a progressing turn is no longer bounded by
+   *   wall-clock); retained only for back-compat with persisted incidents.
+   *
+   * Treat this as an open string: new reasons may be added.
+   */
+  reason: string;
+  /** The terminal message shown to the user (from the `chatRecovery` config). */
+  terminalMessage: string;
+};
+
+/**
+ * Context passed to the `shouldKeepRecovering` recovery predicate on each
+ * attempt. Lets an integrator impose a runaway-loop guard expressed as their
+ * own budget (steps / tool-calls / tokens / cost) rather than wall-clock
+ * duration. `ctx.work` is the SDK's coarse progress signal; map it (or your own
+ * accounting) onto whatever budget you enforce.
+ */
+export type ChatRecoveryProgressContext = {
+  incidentId: string;
+  requestId: string;
+  recoveryRootRequestId: string;
+  attempt: number;
+  maxAttempts: number;
+  recoveryKind: "retry" | "continue";
+  /**
+   * Recovery work units produced since this incident began — a durable,
+   * monotonic, reconnect-immune count of produced content/tool segments (not
+   * tokens). The signal that distinguishes a healthy long turn from a runaway
+   * loop.
+   */
+  work: number;
+  /** Wall-clock ms since the incident's first interruption. */
+  ageMs: number;
+};
+
+/**
+ * Configuration for durable chat recovery. `true` uses these defaults:
+ * `maxAttempts: 10`, `stableTimeoutMs: 10_000`, `noProgressTimeoutMs: 300_000`
+ * (5 min), `maxRecoveryWork: Infinity`, and a generic terminal message.
+ *
+ * **Apply this as a class field or in the constructor — never assign it in
+ * `onStart()`.** On every wake the SDK evaluates recovery budgets (and may seal
+ * an interrupted turn, firing `onExhausted`) BEFORE your `onStart()` body runs.
+ * A config produced inside `onStart()` is therefore read as the built-in
+ * defaults at the moment recovery decides, so your budgets / `shouldKeepRecovering`
+ * / `onExhausted` silently never apply to the recovery that matters. The SDK
+ * logs a one-time warning if it detects `chatRecovery` being assigned during
+ * `onStart()`.
+ */
+export type ChatRecoveryConfig =
+  | boolean
+  | {
+      maxAttempts?: number;
+      stableTimeoutMs?: number;
+      terminalMessage?: string;
+      /**
+       * How long an incident may go WITHOUT forward progress before it is
+       * sealed with `reason="no_progress_timeout"`. This is the primary
+       * stuck-turn bound. It **resets on every progress-bearing attempt**, so a
+       * turn that keeps producing content survives unbounded interruption while
+       * a genuinely idle turn is sealed within the window. Defaults to 5 min.
+       */
+      noProgressTimeoutMs?: number;
+      /**
+       * Runaway-loop guard. Maximum recovery WORK — produced content/tool units
+       * since the incident began — before a still-progressing turn is sealed
+       * with `reason="work_budget_exceeded"`. Defaults to `Infinity` (no cap):
+       * the SDK never terminates a progressing turn on its own. Set a finite
+       * value (or use `shouldKeepRecovering`) to bound a loop that keeps
+       * emitting content but never converges.
+       */
+      maxRecoveryWork?: number;
+      /**
+       * Caller policy consulted on each recovery attempt from the second
+       * onward — it is NOT called on the first detection (the attempt that
+       * opens the incident), and not at all once a hard bound (no-progress
+       * timeout, attempt cap, or `maxRecoveryWork`) has already sealed the
+       * incident. Return `false` to stop recovery with
+       * `reason="recovery_aborted"`; return `true` (or omit the hook) to keep
+       * recovering. A throwing hook is logged and treated as "keep recovering"
+       * so a buggy predicate cannot wedge a turn.
+       *
+       * This is the hook point for a token/cost/step budget, but note
+       * `ctx.work` is a coarse count of produced content/tool segments, not
+       * tokens — track real token/cost yourself (keyed by
+       * `ctx.recoveryRootRequestId`) and consult it here.
+       */
+      shouldKeepRecovering?(
+        ctx: ChatRecoveryProgressContext
+      ): boolean | Promise<boolean>;
+      onExhausted?(ctx: ChatRecoveryExhaustedContext): void | Promise<void>;
+    };
+
+export type ResolvedChatRecoveryConfig = {
+  enabled: boolean;
+  maxAttempts: number;
+  stableTimeoutMs: number;
+  terminalMessage: string;
+  noProgressTimeoutMs: number;
+  maxRecoveryWork: number;
+  shouldKeepRecovering?: (
+    ctx: ChatRecoveryProgressContext
+  ) => boolean | Promise<boolean>;
+  onExhausted?: (ctx: ChatRecoveryExhaustedContext) => void | Promise<void>;
 };
 
 /**

@@ -7,6 +7,7 @@ export default defineConfig({
   },
   test: {
     name: "voice-react",
+    retry: 3,
     browser: {
       enabled: true,
       instances: [

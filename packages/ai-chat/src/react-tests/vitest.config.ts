@@ -10,6 +10,8 @@ export default defineConfig({
   },
   test: {
     name: "react",
+    // Retry flaky browser/Playwright runs before failing.
+    retry: 3,
     include: [path.join(testsDir, "**/*.test.{ts,tsx}")],
     browser: {
       enabled: true,

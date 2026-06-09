@@ -1,14 +1,59 @@
 import { Agent, routeAgentRequest } from "agents";
+import type { RetryOptions, Schedule } from "agents";
 import {
   ChatSdkStateAdapter,
+  ChatSdkStateAgent,
   defaultKeyShard,
   defaultThreadShard
 } from "agents/chat-sdk";
 import { Message } from "chat";
 import appWorker, { ChatIngressAgent, ConversationAgent } from "../index";
-import { shardTelegramStateKey } from "../provider/telegram";
+import { shardTelegramStateKey } from "@cloudflare/think/messengers/telegram";
 
 export { ChatSdkStateAgent } from "agents/chat-sdk";
+
+export class TestChatSdkStateAgent extends ChatSdkStateAgent {
+  override async schedule<T = string>(
+    when: Date | string | number,
+    callback: keyof this,
+    payload?: T,
+    _options?: { retry?: RetryOptions; idempotent?: boolean }
+  ): Promise<Schedule<T>> {
+    if (callback !== "cleanupExpired") {
+      return super.schedule(when, callback, payload, _options);
+    }
+
+    const base = {
+      id: crypto.randomUUID(),
+      callback: String(callback),
+      payload: payload as T
+    };
+
+    if (when instanceof Date) {
+      return {
+        ...base,
+        type: "scheduled",
+        time: Math.floor(when.getTime() / 1000)
+      };
+    }
+
+    if (typeof when === "string") {
+      return {
+        ...base,
+        type: "cron",
+        time: Math.floor(Date.now() / 1000),
+        cron: when
+      };
+    }
+
+    return {
+      ...base,
+      type: "delayed",
+      time: Math.floor(Date.now() / 1000) + when,
+      delayInSeconds: when
+    };
+  }
+}
 
 interface TestLockResult {
   first: boolean;
@@ -167,7 +212,8 @@ export class TestHostAgent extends Agent {
 
   private async createState(): Promise<ChatSdkStateAdapter> {
     const state = new ChatSdkStateAdapter({
-      parent: this
+      parent: this,
+      agent: TestChatSdkStateAgent
     });
     await state.connect();
     return state;

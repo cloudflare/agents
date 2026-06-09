@@ -13,9 +13,9 @@
     "agents": "*"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260519.1",
-    "@types/node": "^25.9.0",
+    "@cloudflare/workers-types": "^4.20260604.1",
+    "@types/node": "^25.9.1",
     "typescript": "^6.0.3",
-    "wrangler": "^4.93.0"
+    "wrangler": "^4.97.0"
   }
 }

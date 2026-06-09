@@ -34,7 +34,11 @@
  */
 
 import { WorkflowEntrypoint } from "cloudflare:workers";
-import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
+import type {
+  WorkflowEvent,
+  WorkflowStep,
+  WorkflowStepEvent
+} from "cloudflare:workers";
 import { getAgentByName, type Agent } from "./index";
 import type {
   AgentWorkflowParams,
@@ -69,7 +73,7 @@ export class AgentWorkflow<
    * The Agent stub - initialized before run() is called.
    * Use this.agent to access the Agent's RPC methods.
    */
-  private _agent!: DurableObjectStub<AgentType>;
+  private _agent?: DurableObjectStub<AgentType>;
 
   /**
    * Workflow instance ID
@@ -132,37 +136,35 @@ export class AgentWorkflow<
           );
           this.__agentInitCalled = true;
 
-          // Pass cleaned event and wrapped step to user's implementation
-          const cleanedEvent = {
-            ...event,
-            payload: userParams as Params
-          } as WorkflowEvent<Params>;
-
-          const wrappedStep = this.extendStep(
-            this._wrapStep(step),
-            cleanedEvent
-          );
-
           try {
-            return await originalRun.call(this, cleanedEvent, wrappedStep);
-          } catch (err) {
-            await this._autoReportError(err);
-            throw err;
+            // Pass cleaned event and wrapped step to user's implementation
+            const cleanedEvent = {
+              ...event,
+              payload: userParams as Params
+            } as WorkflowEvent<Params>;
+
+            const wrappedStep = this.extendStep(
+              this._wrapStep(step),
+              cleanedEvent
+            );
+
+            return await this._runWithErrorReporting(
+              originalRun,
+              cleanedEvent,
+              wrappedStep
+            );
+          } finally {
+            this._disposeAgent();
           }
         }
 
         // If already initialized (e.g., called via super.run()),
-        // just call the original with the event as-is
-        try {
-          return await originalRun.call(
-            this,
-            event as WorkflowEvent<Params>,
-            step as AgentWorkflowStep
-          );
-        } catch (err) {
-          await this._autoReportError(err);
-          throw err;
-        }
+        // just call the original with the event as-is.
+        return await this._runWithErrorReporting(
+          originalRun,
+          event as WorkflowEvent<Params>,
+          step as AgentWorkflowStep
+        );
       };
 
       wrappedPrototypes.add(proto);
@@ -188,6 +190,7 @@ export class AgentWorkflow<
 
     this._workflowId = instanceId;
     this._workflowName = workflowName;
+    this._errorReported = false;
 
     // Get the Agent namespace from env
     const namespace = (this.env as Record<string, unknown>)[
@@ -205,6 +208,35 @@ export class AgentWorkflow<
       namespace,
       agentName
     );
+  }
+
+  /**
+   * Call user workflow code and report unhandled errors to the Agent.
+   */
+  private async _runWithErrorReporting(
+    originalRun: (
+      event: WorkflowEvent<Params>,
+      step: AgentWorkflowStep
+    ) => Promise<unknown>,
+    event: WorkflowEvent<Params>,
+    step: AgentWorkflowStep
+  ): Promise<unknown> {
+    try {
+      return await originalRun.call(this, event, step);
+    } catch (err) {
+      await this._autoReportError(err);
+      throw err;
+    }
+  }
+
+  /**
+   * Dispose the Agent stub owned by this workflow run.
+   */
+  private _disposeAgent(): void {
+    const agent = this._agent;
+    this._agent = undefined;
+    this.__agentInitCalled = false;
+    disposeIfPresent(agent);
   }
 
   /**
@@ -425,27 +457,49 @@ export class AgentWorkflow<
 
     // Wait for the approval event
     // Note: Call reportProgress() before this method if you want to update progress
-    const event = await step.waitForEvent(stepName, {
+    const event = (await step.waitForEvent(stepName, {
       type: eventType,
       timeout
-    });
-
-    // Cast the payload to our expected type
-    const payload = event.payload as {
+    })) as WorkflowStepEvent<{
       approved: boolean;
       reason?: string;
       metadata?: T;
-    };
+    }>;
 
-    // Check if rejected
-    if (!payload.approved) {
-      const reason = payload.reason;
-      await step.reportError(reason ?? "Workflow rejected");
-      throw new WorkflowRejectedError(reason, this._workflowId);
+    try {
+      const payload = event.payload;
+
+      // Check if rejected
+      if (!payload.approved) {
+        const reason = payload.reason;
+        await step.reportError(reason ?? "Workflow rejected");
+        throw new WorkflowRejectedError(reason, this._workflowId);
+      }
+
+      // Return the approval metadata as the result
+      return payload.metadata as T;
+    } finally {
+      disposeIfPresent(event);
     }
+  }
+}
 
-    // Return the approval metadata as the result
-    return payload.metadata as T;
+type DisposableResource = {
+  [Symbol.dispose](): void;
+};
+
+function isDisposableResource(value: unknown): value is DisposableResource {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    Symbol.dispose in value &&
+    typeof value[Symbol.dispose] === "function"
+  );
+}
+
+function disposeIfPresent(value: unknown): void {
+  if (isDisposableResource(value)) {
+    value[Symbol.dispose]();
   }
 }
 

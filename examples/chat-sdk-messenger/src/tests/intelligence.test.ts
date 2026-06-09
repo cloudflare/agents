@@ -19,12 +19,12 @@ import {
 import {
   TextStreamCallback,
   textDeltaFromStreamChunk
-} from "../intelligence/stream-callback";
+} from "@cloudflare/think/messengers";
 import {
-  isExpectedFinalEditNoop,
-  isIgnorableDeliveryError,
+  isExpectedTelegramFinalEditNoop as isExpectedFinalEditNoop,
+  isTelegramIgnorableDeliveryError as isIgnorableDeliveryError,
   splitTelegramMessageText
-} from "../provider/telegram";
+} from "@cloudflare/think/messengers/telegram";
 
 function createMessage(
   text: string,

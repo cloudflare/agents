@@ -59,6 +59,23 @@ export class TestWorkspaceAgent extends Agent {
     }
   }
 
+  async concurrentWriteToMissingParent(): Promise<{
+    first: string | null;
+    second: string | null;
+    parentType: string | null;
+  }> {
+    await Promise.all([
+      this.workspace.writeFile("/race/first.txt", "first"),
+      this.workspace.writeFile("/race/second.txt", "second")
+    ]);
+    const parent = await this.workspace.stat("/race");
+    return {
+      first: await this.workspace.readFile("/race/first.txt"),
+      second: await this.workspace.readFile("/race/second.txt"),
+      parentType: parent?.type ?? null
+    };
+  }
+
   async del(path: string): Promise<boolean | { error: string }> {
     try {
       return await this.workspace.deleteFile(path);
@@ -262,6 +279,16 @@ export class TestWorkspaceAgent extends Agent {
     opts?: { recursive?: boolean }
   ): Promise<void> {
     await this.wsWithEvents.mkdir(path, opts);
+  }
+
+  async concurrentWriteToMissingParentWithEvents(): Promise<
+    WorkspaceChangeEvent[]
+  > {
+    await Promise.all([
+      this.wsWithEvents.writeFile("/race-events/first.txt", "first"),
+      this.wsWithEvents.writeFile("/race-events/second.txt", "second")
+    ]);
+    return this.changeLog;
   }
 
   async rmWithEvents(

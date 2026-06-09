@@ -80,6 +80,53 @@ describe("createWorker e2e (build + load + fetch)", () => {
     expect(await response.text()).toBe("Hello, world!");
   });
 
+  it("resolves exact virtual module aliases", async () => {
+    const response = await buildAndFetch({
+      files: {
+        "src/index.ts": [
+          'import fsDefault, { readFileSync as read } from "node:fs";',
+          'import * as fsNamespace from "fs";',
+          'import fsPromises, { readFile } from "node:fs/promises";',
+          'import { value } from "./helper";',
+          "export default {",
+          "  async fetch() {",
+          "    const result = [",
+          '      read("/message.txt", "utf8"),',
+          '      fsDefault.readFileSync("/message.txt", "utf8"),',
+          '      fsNamespace.readFileSync("/message.txt", "utf8"),',
+          '      await readFile("/message.txt", "utf8"),',
+          '      await fsPromises.readFile("/message.txt", "utf8"),',
+          "      value",
+          "    ].join('|');",
+          "    return new Response(result);",
+          "  }",
+          "};"
+        ].join("\n"),
+        "src/helper.ts": [
+          'import { readFileSync } from "node:fs";',
+          'export const value = readFileSync("/helper.txt", "utf8");'
+        ].join("\n")
+      },
+      virtualModules: {
+        "node:fs": [
+          "const files = {",
+          '  "/message.txt": "hello",',
+          '  "/helper.txt": "helper"',
+          "};",
+          "export function readFileSync(path) { return files[path]; }",
+          "export async function readFile(path) { return files[path]; }",
+          "export const promises = { readFile };",
+          "export default { readFileSync, promises };"
+        ].join("\n"),
+        fs: 'export * from "node:fs"; export { default } from "node:fs";',
+        "node:fs/promises":
+          'export { readFile, promises as default } from "node:fs";'
+      }
+    });
+
+    expect(await response.text()).toBe("hello|hello|hello|hello|hello|helper");
+  });
+
   it("respects explicit entryPoint option", async () => {
     const response = await buildAndFetch({
       files: {
@@ -436,7 +483,10 @@ describe("createWorker advanced bundler options", () => {
       // None of these can apply in transform-only mode.
       define: { __X__: "1" },
       jsx: "automatic",
-      conditions: ["workerd"]
+      conditions: ["workerd"],
+      virtualModules: {
+        "virtual:test": "export const value = 1;"
+      }
     });
 
     expect(result.warnings).toBeDefined();
@@ -447,6 +497,7 @@ describe("createWorker advanced bundler options", () => {
     expect(message).toContain("define");
     expect(message).toContain("jsx");
     expect(message).toContain("conditions");
+    expect(message).toContain("virtualModules");
   });
 
   it("does NOT warn when bundle: false is used without bundler-only options", async () => {

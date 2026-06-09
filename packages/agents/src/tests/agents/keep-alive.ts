@@ -44,4 +44,14 @@ export class TestKeepAliveAgent extends Agent {
     `;
     return result[0].count;
   }
+
+  async getCurrentAlarm(): Promise<number | null> {
+    return this.ctx.storage.getAlarm();
+  }
+
+  async scheduleFarFutureTask(delaySeconds: number): Promise<void> {
+    await this.schedule(delaySeconds, "noop");
+  }
+
+  noop(): void {}
 }

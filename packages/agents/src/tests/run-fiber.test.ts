@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
+import { subscribe, type ObservabilityEvent } from "../observability";
 import type { FiberInspection, FiberRecoveryContext } from "..";
 import type { TestRunFiberAgent } from "./agents/run-fiber";
 
@@ -228,6 +229,7 @@ describe("runFiber", () => {
       expect(recovered[0].id).toBe("fiber-1");
       expect(recovered[0].name).toBe("research");
       expect(recovered[0].snapshot).toBeNull();
+      expect(recovered[0].recoveryReason).toBe("interrupted");
       expect(typeof recovered[0].createdAt).toBe("number");
       expect(recovered[0].createdAt).toBeGreaterThanOrEqual(before);
       expect(recovered[0].createdAt).toBeLessThanOrEqual(Date.now());
@@ -317,6 +319,62 @@ describe("runFiber", () => {
       const recovered =
         (await agent.getRecoveredFibers()) as unknown as FiberRecoveryContext[];
       expect(recovered.length).toBe(1);
+    });
+
+    it("retains a fresh unmanaged row when onFiberRecovered throws (retryable)", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "recovery-retain-throw"
+      );
+
+      await agent.insertInterruptedFiber(
+        "fiber-throw-fresh",
+        "unmanaged-recovery-throws"
+      );
+      await agent.triggerRecoveryCheck();
+
+      // Failed recovery on a fresh unmanaged row is retained so a later scan
+      // can retry it.
+      const count = (await agent.getRunningFiberCount()) as unknown as number;
+      expect(count).toBe(1);
+    });
+
+    it("evicts an aged unmanaged row whose recovery keeps throwing", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "recovery-evict-aged"
+      );
+
+      const skipped: Array<{ fiberId: string; reason: string }> = [];
+      const unsubscribe = subscribe("fiber", (event) => {
+        if (event.type === "fiber:recovery:skipped") {
+          skipped.push({
+            fiberId: event.payload.fiberId,
+            reason: event.payload.reason
+          });
+        }
+      });
+
+      try {
+        // Older than the 24h default max age.
+        await agent.insertAgedInterruptedFiber(
+          "fiber-throw-aged",
+          "unmanaged-recovery-throws",
+          25 * 60 * 60 * 1000
+        );
+        await agent.triggerRecoveryCheck();
+      } finally {
+        unsubscribe();
+      }
+
+      const count = (await agent.getRunningFiberCount()) as unknown as number;
+      expect(count).toBe(0);
+      expect(
+        skipped.some(
+          (s) =>
+            s.fiberId === "fiber-throw-aged" && s.reason === "max_age_exceeded"
+        )
+      ).toBe(true);
     });
   });
 
@@ -834,7 +892,7 @@ describe("runFiber", () => {
       });
     });
 
-    it("should keep managed fibers interrupted when recovery throws", async () => {
+    it("should mark managed fibers as errors when recovery throws", async () => {
       const agent = await freshManagedAgent("managed-recovery-throws");
 
       await agent.insertInterruptedManagedFiber(
@@ -847,9 +905,42 @@ describe("runFiber", () => {
       await expect(
         agent.inspectManagedFiber("managed-throws")
       ).resolves.toMatchObject({
-        status: "interrupted",
+        status: "error",
         error: "Recovery failed",
         snapshot: { step: 1 }
+      });
+    });
+
+    it("should emit fiber recovery events when recovery fails", async () => {
+      const events: ObservabilityEvent[] = [];
+      const unsubscribe = subscribe("fiber", (event) => events.push(event));
+      const agent = await freshManagedAgent("managed-recovery-events");
+
+      await agent.insertInterruptedManagedFiber(
+        "managed-events",
+        "managed-recovery-throws",
+        { step: 1 }
+      );
+      await agent.triggerRecoveryCheck();
+      unsubscribe();
+
+      expect(events.map((event) => event.type)).toEqual(
+        expect.arrayContaining([
+          "fiber:recovery:detected",
+          "fiber:recovery:attempt",
+          "fiber:recovery:failed"
+        ])
+      );
+      const failed = events.find(
+        (event) => event.type === "fiber:recovery:failed"
+      );
+      expect(failed).toMatchObject({
+        payload: {
+          fiberId: "managed-events",
+          fiberName: "managed-recovery-throws",
+          error: "Recovery failed",
+          reason: "handler_error"
+        }
       });
     });
   });

@@ -78,6 +78,10 @@
         "name": "TestWorkflowAgent"
       },
       {
+        "class_name": "TestAgentToolReplayAgent",
+        "name": "TestAgentToolReplayAgent"
+      },
+      {
         "class_name": "TestAddMcpServerAgent",
         "name": "TestAddMcpServerAgent"
       },
@@ -254,6 +258,7 @@
       }
     ]
   },
+  "worker_loaders": [{ "binding": "LOADER" }],
   "workflows": [
     {
       "name": "test-processing-workflow",
@@ -307,6 +312,7 @@
         "TestOnStartScheduleNoWarnAgent",
         "TestOnStartScheduleExplicitFalseAgent",
         "TestWorkflowAgent",
+        "TestAgentToolReplayAgent",
         "TestAddMcpServerAgent",
         "TestRpcMcpClientAgent",
         "TestHttpMcpDedupAgent",

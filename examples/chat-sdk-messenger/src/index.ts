@@ -6,6 +6,10 @@ import type {
   FiberRecoveryResult,
   SubAgentStub
 } from "agents";
+import {
+  TextStreamCallback,
+  ThinkMessengerStateAgent
+} from "@cloudflare/think/messengers";
 import { createChatSdkState } from "agents/chat-sdk";
 import { Chat } from "chat";
 import type { Message, Thread } from "chat";
@@ -39,7 +43,6 @@ import {
   shouldRouteToAi,
   toThinkUserMessage
 } from "./intelligence/messages";
-import { TextStreamCallback } from "./intelligence/stream-callback";
 import {
   ASK_AGENT_ACTION_ID,
   DEMO_LOOKUP,
@@ -49,16 +52,15 @@ import {
   postMenu
 } from "./menu";
 import {
-  TELEGRAM_STREAM_SOFT_LIMIT,
-  WEBHOOK_PATH,
-  isExpectedFinalEditNoop,
-  setupTelegramWebhook,
+  isExpectedTelegramFinalEditNoop as isExpectedFinalEditNoop,
   shardTelegramStateKey,
-  splitTelegramMessageText
-} from "./provider/telegram";
+  splitTelegramMessageText,
+  TELEGRAM_STREAM_SOFT_LIMIT
+} from "@cloudflare/think/messengers/telegram";
+import { WEBHOOK_PATH, setupTelegramWebhook } from "./provider/telegram";
 
 export { ConversationAgent } from "./intelligence/conversation-agent";
-export { ChatSdkStateAgent } from "agents/chat-sdk";
+export { ThinkMessengerStateAgent };
 
 export type {
   AdminConversation,
@@ -109,6 +111,9 @@ export class ChatIngressAgent extends Agent {
     if (!this.env.TELEGRAM_BOT_TOKEN) {
       throw new Error("TELEGRAM_BOT_TOKEN is required");
     }
+    if (!this.env.TELEGRAM_WEBHOOK_SECRET_TOKEN) {
+      throw new Error("TELEGRAM_WEBHOOK_SECRET_TOKEN is required");
+    }
 
     const userName =
       this.env.TELEGRAM_BOT_USERNAME ?? "cloudflare_chat_sdk_bot";
@@ -123,6 +128,7 @@ export class ChatIngressAgent extends Agent {
       userName,
       adapters: { telegram },
       state: createChatSdkState({
+        agent: ThinkMessengerStateAgent,
         keyShard: (key) => shardTelegramStateKey(key, this.shardThread),
         shardKey: this.shardThread
       }),

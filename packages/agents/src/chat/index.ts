@@ -1,6 +1,7 @@
 export {
   applyChunkToParts,
   isReplayChunk,
+  normalizeToolInput,
   type MessageParts,
   type MessagePart,
   type StreamChunkData
@@ -37,9 +38,12 @@ export {
 
 export { ResumableStream, type SqlTaggedTemplate } from "./resumable-stream";
 
+export { MAX_BOUND_PARAMS, buildInClauseStrings } from "./sql-batch";
+
 export {
   createToolsFromClientSchemas,
-  type ClientToolSchema
+  type ClientToolSchema,
+  type ClientToolExecutor
 } from "./client-tools";
 
 export { CHAT_MESSAGE_TYPES } from "./protocol";
@@ -65,6 +69,7 @@ export { AbortRegistry } from "./abort-registry";
 export {
   applyToolUpdate,
   toolResultUpdate,
+  crossMessageToolResultUpdate,
   toolApprovalUpdate,
   type ToolPartUpdate
 } from "./tool-state";
@@ -86,8 +91,12 @@ export {
 
 export type {
   ChatResponseResult,
+  ChatRecoveryConfig,
   ChatRecoveryContext,
+  ChatRecoveryExhaustedContext,
+  ChatRecoveryProgressContext,
   ChatRecoveryOptions,
+  ResolvedChatRecoveryConfig,
   MessageConcurrency,
   SaveMessagesOptions,
   SaveMessagesResult

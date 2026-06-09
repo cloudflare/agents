@@ -7,8 +7,45 @@
  * through the integration tests.
  */
 import { describe, expect, it } from "vitest";
-import { AgentWorkflow } from "../workflows";
+import { AgentWorkflow, WorkflowRejectedError } from "../workflows";
 import type { AgentWorkflowEvent, AgentWorkflowStep } from "../workflows";
+
+type DisposableAgentStub = {
+  fetch(): Promise<Response>;
+  [Symbol.dispose](): void;
+};
+
+type DisposableWorkflow = {
+  _agent?: DisposableAgentStub;
+  __agentInitCalled: boolean;
+  _disposeAgent(): void;
+  readonly agent: DisposableAgentStub;
+};
+
+type ApprovalWorkflow = {
+  waitForApproval<T>(
+    step: AgentWorkflowStep,
+    options?: { stepName?: string; timeout?: string; eventType?: string }
+  ): Promise<T>;
+};
+
+function createDisposableWorkflow(onDispose: () => void): DisposableWorkflow {
+  const stub: DisposableAgentStub = {
+    fetch: async () => new Response("ok"),
+    [Symbol.dispose]: onDispose
+  };
+
+  return Object.assign(Object.create(AgentWorkflow.prototype), {
+    _agent: stub,
+    __agentInitCalled: true
+  }) as DisposableWorkflow;
+}
+
+function createApprovalWorkflow(): ApprovalWorkflow {
+  return Object.assign(Object.create(AgentWorkflow.prototype), {
+    _workflowId: "workflow-id"
+  }) as ApprovalWorkflow;
+}
 
 describe("AgentWorkflow prototype wrapping", () => {
   describe("static prototype analysis", () => {
@@ -142,6 +179,91 @@ describe("AgentWorkflow prototype wrapping", () => {
 
       expect(extended).toBe(step);
       expect(extended.customPrompt).toBe(true);
+    });
+  });
+
+  describe("agent stub lifecycle", () => {
+    it("has cleanup that disposes and clears the initialized agent stub", () => {
+      let disposeCount = 0;
+      const workflow = createDisposableWorkflow(() => {
+        disposeCount++;
+      });
+
+      expect(typeof workflow._disposeAgent).toBe("function");
+
+      workflow._disposeAgent();
+
+      expect(disposeCount).toBe(1);
+      expect(() => workflow.agent).toThrow("Agent not initialized");
+    });
+
+    it("makes cleanup idempotent when called after the stub was cleared", () => {
+      let disposeCount = 0;
+      const workflow = createDisposableWorkflow(() => {
+        disposeCount++;
+      });
+
+      expect(typeof workflow._disposeAgent).toBe("function");
+
+      workflow._disposeAgent();
+      workflow._disposeAgent();
+
+      expect(disposeCount).toBe(1);
+      expect(() => workflow.agent).toThrow("Agent not initialized");
+    });
+  });
+
+  describe("approval event lifecycle", () => {
+    it("disposes the waitForApproval event after reading approval metadata", async () => {
+      let disposeCount = 0;
+      const waitEvent = {
+        payload: {
+          approved: true,
+          metadata: { answer: "approved" }
+        },
+        [Symbol.dispose]: () => {
+          disposeCount++;
+        }
+      };
+      const step = {
+        waitForEvent: async () => waitEvent,
+        reportError: async () => {
+          throw new Error("reportError should not be called");
+        }
+      } as unknown as AgentWorkflowStep;
+
+      const workflow = createApprovalWorkflow();
+      await expect(workflow.waitForApproval(step)).resolves.toEqual({
+        answer: "approved"
+      });
+      expect(disposeCount).toBe(1);
+    });
+
+    it("disposes the waitForApproval event after reporting rejection", async () => {
+      let disposeCount = 0;
+      const reportErrors: string[] = [];
+      const waitEvent = {
+        payload: {
+          approved: false,
+          reason: "not safe"
+        },
+        [Symbol.dispose]: () => {
+          disposeCount++;
+        }
+      };
+      const step = {
+        waitForEvent: async () => waitEvent,
+        reportError: async (error: string | Error) => {
+          reportErrors.push(error instanceof Error ? error.message : error);
+        }
+      } as unknown as AgentWorkflowStep;
+
+      const workflow = createApprovalWorkflow();
+      await expect(workflow.waitForApproval(step)).rejects.toBeInstanceOf(
+        WorkflowRejectedError
+      );
+      expect(reportErrors).toEqual(["not safe"]);
+      expect(disposeCount).toBe(1);
     });
   });
 

@@ -146,6 +146,7 @@ type FiberRecoveryContext = {
   metadata?: Record<string, unknown> | null;
   snapshot: unknown | null;
   createdAt: number;
+  recoveryReason: "interrupted";
 };
 ```
 
@@ -346,7 +347,7 @@ runFiber("work", fn)
   ├─ For each orphaned row:
   │    ├─ Parse snapshot from JSON
   │    ├─ Call onFiberRecovered(ctx)
-  │    └─ DELETE the row
+  │    └─ DELETE the row after successful recovery
   └─ If onFiberRecovered calls runFiber() again → new row, normal execution
 ```
 
@@ -459,9 +460,9 @@ class ResearchAgent extends Agent {
 Key points:
 
 - **The original lambda is gone.** On recovery, you only have the `name` and `snapshot`. The lambda cannot be serialized — recovery logic must be in the hook.
-- **The row is deleted after the hook runs.** If you want to continue the work, call `runFiber()` again inside the hook — this creates a new row.
+- **The row is deleted after the hook returns successfully.** If you want to continue the work, call `runFiber()` again inside the hook — this creates a new row.
 - **You control what recovery means.** Retry from the beginning, resume from a checkpoint, skip and notify the user, or do nothing. The framework does not impose a strategy.
-- **If the hook throws, the row is still deleted.** You do not get a second chance at recovery. If your recovery logic can fail, catch errors and handle them (e.g., schedule a retry, log, or re-create the fiber).
+- **If the hook throws, the row is kept (up to a bound).** A later startup or alarm scan will try recovery again, which protects against transient storage or scheduling failures. Catch application-level errors yourself when you want to mark the work terminal instead of retrying — a hook that always throws is retried on every scan until the row exceeds `fiberRecoveryMaxAgeMs` (default 24h), after which it is discarded with a `fiber:recovery:skipped` (`reason: "max_age_exceeded"`) event.
 
 ### Chat recovery
 
@@ -510,12 +511,13 @@ Checkpoint the current fiber's state. Writes synchronously to SQLite. Each call 
 
 ### `onFiberRecovered(ctx)`
 
-Called once per orphaned fiber row on agent restart. Override to implement recovery. The row is deleted after this hook returns.
+Called once per orphaned fiber row on agent restart. Override to implement recovery. The row is deleted after this hook returns successfully; if recovery throws, the row is left for a later scan so transient failures do not lose the recovery handle.
 
 - **`ctx.id`** — unique fiber ID
 - **`ctx.name`** — the name passed to `runFiber()`
 - **`ctx.snapshot`** — the last `stash()` data, or `null` if `stash()` was never called
 - **`ctx.createdAt`** — epoch milliseconds when `runFiber` started. Compare against `Date.now()` to gate stale recoveries (e.g. skip work that has been orphaned too long to replay safely)
+- **`ctx.recoveryReason`** — why recovery is running. Currently always `"interrupted"` for eviction or restart recovery.
 
 ### `keepAlive()`
 

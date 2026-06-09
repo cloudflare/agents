@@ -1,9 +1,50 @@
 import type { UIMessage } from "ai";
+import { normalizeToolInput } from "agents/chat";
 
 /**
  * AI SDK v5 Migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
  * Using exact types from the official AI SDK documentation
  */
+
+/**
+ * Heal tool parts whose persisted `input` is not a provider-acceptable object.
+ *
+ * The write boundary (`applyChunkToParts`) now coerces malformed input to `{}`,
+ * but sessions corrupted before that guard shipped still carry a `null`,
+ * `undefined`, `""`, array, or stringified-JSON `input` in storage. Because
+ * the Anthropic Messages API rejects a `tool_use` block whose `input` is not an
+ * object, such a session 400s on every later turn and stays wedged across
+ * reconnects/redeploys/evictions. Repairing on load (where there's no
+ * framework-side `convertToModelMessages` to hook) unwedges them without
+ * per-DO storage surgery. Only malformed inputs are touched; a healthy message
+ * is returned by reference so the persistence cache stays a no-op.
+ *
+ * An absent `input` key is treated as `undefined` (→ `{}`): a JSON round-trip of
+ * `input: undefined` drops the key entirely (e.g. a tool call interrupted at the
+ * `tool-input-start` stage), so the missing-key case must coerce too. Mirrors
+ * the read-side repair in `@cloudflare/think`.
+ */
+function normalizeToolPartInputs(message: UIMessage): UIMessage {
+  const parts = message.parts;
+  const isMalformedToolPart = (part: unknown): boolean => {
+    const record = part as Record<string, unknown>;
+    const type = typeof record.type === "string" ? record.type : "";
+    if (!(type.startsWith("tool-") || type === "dynamic-tool")) return false;
+    return normalizeToolInput(record.input).changed;
+  };
+
+  if (!parts.some(isMalformedToolPart)) return message;
+
+  const nextParts = parts.map((part) => {
+    if (!isMalformedToolPart(part)) return part;
+    const record = part as Record<string, unknown>;
+    return {
+      ...record,
+      input: normalizeToolInput(record.input).input
+    } as UIMessage["parts"][number];
+  });
+  return { ...message, parts: nextParts };
+}
 
 /**
  * One-shot deprecation warnings (warns once per key per session).
@@ -184,7 +225,7 @@ export function autoTransformMessage(
 ): UIMessage {
   // Already in v5 format
   if (isUIMessage(message)) {
-    return message;
+    return normalizeToolPartInputs(message);
   }
 
   const parts: TransformMessagePart[] = [];
@@ -268,14 +309,14 @@ export function autoTransformMessage(
     });
   }
 
-  return {
+  return normalizeToolPartInputs({
     id: message.id || `msg-${index}`,
     role:
       message.role === "data"
         ? "system"
         : (message.role as "user" | "assistant" | "system") || "user",
     parts: parts as UIMessage["parts"]
-  };
+  });
 }
 
 /**

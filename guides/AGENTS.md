@@ -38,7 +38,7 @@ A guide README should walk a reader through the application, explaining both wha
 1. **What this guide teaches** — the pattern or concept, with context (link to prior art, research, etc.)
 2. **Architecture overview** — how the pieces fit together, what components are involved
 3. **Code walkthrough** — key sections of code with explanations, not just the full source dumped in
-4. **How to run it** — setup, env vars, `npm run dev`
+4. **How to run it** — setup, env vars, `pnpm run dev`
 5. **Best practices** — pitfalls, recommendations, what to do in production
 
 Keep it narrative. The reader should be able to follow the README top-to-bottom and understand the pattern without reading every line of source code.

@@ -143,7 +143,7 @@ The agent is a Durable Object, so it needs a binding and a SQLite migration in `
 The [`examples/`](examples) directory has 30+ self-contained demos. A non-exhaustive tour:
 
 - **Showcase** — [`playground/`](examples/playground) is the kitchen-sink app: state, callable methods, scheduling, chat, tools, MCP, workflows, email, voice — all in one UI
-- **Chat & assistants** — [`assistant/`](examples/assistant), [`agents-as-tools/`](examples/agents-as-tools), [`workspace-chat/`](examples/workspace-chat), [`resumable-stream-chat/`](examples/resumable-stream-chat), [`structured-input/`](examples/structured-input), [`dynamic-tools/`](examples/dynamic-tools), [`multi-ai-chat/`](examples/multi-ai-chat)
+- **Chat & assistants** — [`assistant/`](examples/assistant), [`agents-as-tools/`](examples/agents-as-tools), [`agent-skills/`](examples/agent-skills), [`workspace-chat/`](examples/workspace-chat), [`resumable-stream-chat/`](examples/resumable-stream-chat), [`structured-input/`](examples/structured-input), [`dynamic-tools/`](examples/dynamic-tools), [`multi-ai-chat/`](examples/multi-ai-chat), [`context-overflow-recovery/`](examples/context-overflow-recovery)
 - **MCP** — [`mcp/`](examples/mcp), [`mcp-client/`](examples/mcp-client), [`mcp-server/`](examples/mcp-server), [`mcp-worker/`](examples/mcp-worker), [`mcp-worker-authenticated/`](examples/mcp-worker-authenticated), [`mcp-elicitation/`](examples/mcp-elicitation), [`mcp-rpc-transport/`](examples/mcp-rpc-transport), [`webmcp/`](examples/webmcp)
 - **Code Mode & sandboxes** — [`codemode/`](examples/codemode), [`codemode-mcp/`](examples/codemode-mcp), [`codemode-mcp-openapi/`](examples/codemode-mcp-openapi), [`dynamic-workers/`](examples/dynamic-workers), [`dynamic-workers-playground/`](examples/dynamic-workers-playground), [`worker-bundler-playground/`](examples/worker-bundler-playground)
 - **Voice** — [`voice-agent/`](examples/voice-agent), [`voice-input/`](examples/voice-input), [`elevenlabs-starter/`](examples/elevenlabs-starter)
@@ -191,22 +191,22 @@ npm start
 
 ## Development
 
-Node 24+ required. npm workspaces with [Nx](https://nx.dev) for task orchestration, caching, and affected detection.
+Node 24+ required. pnpm workspaces with [Nx](https://nx.dev) for task orchestration, caching, and affected detection.
 
 ```sh
-npm install                  # install all workspaces
-npm run build                # build all packages (Nx, cached, dependency-ordered)
-npm run check                # sherif + export checks + oxfmt + oxlint + typecheck
-npm run test                 # vitest + vitest-pool-workers (Workers runtime)
-npm run test:react           # Playwright-based React hook tests
-npx nx affected -t build     # build only what changed
-npx nx affected -t test      # test only what changed
+pnpm install                 # install all workspaces
+pnpm run build               # build all packages (Nx, cached, dependency-ordered)
+pnpm run check               # sherif + export checks + oxfmt + oxlint + typecheck
+pnpm run test                # vitest + vitest-pool-workers (Workers runtime)
+pnpm run test:react          # Playwright-based React hook tests
+pnpm exec nx affected -t build # build only what changed
+pnpm exec nx affected -t test  # test only what changed
 ```
 
 Changes to `packages/` need a changeset:
 
 ```sh
-npx changeset
+pnpm exec changeset
 ```
 
 See [`AGENTS.md`](AGENTS.md) for deeper contributor guidance.

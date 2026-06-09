@@ -79,7 +79,7 @@ import {
   type AuthUser
 } from "./auth-client";
 import { useChats } from "./use-chats";
-import type { ChatSummary } from "./server";
+import type { ChatSummary } from "../agents/assistant/types";
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected";
 
@@ -231,12 +231,15 @@ function Chat({
     agent: "AssistantDirectory",
     basePath: "chat",
     sub: [{ agent: "MyAssistant", name: chatId }],
-    onOpen: useCallback(() => setConnectionStatus("connected"), []),
-    onClose: useCallback(() => setConnectionStatus("disconnected"), []),
-    onError: useCallback(
-      (error: Event) => console.error("WebSocket error:", error),
-      []
-    )
+    onOpen: useCallback(() => {
+      setConnectionStatus("connected");
+    }, []),
+    onClose: useCallback(() => {
+      setConnectionStatus("disconnected");
+    }, []),
+    onError: useCallback((error: Event) => {
+      console.error("WebSocket error:", error);
+    }, [])
   });
 
   useEffect(() => {

@@ -378,17 +378,21 @@ onChatRecovery(ctx: ChatRecoveryContext): ChatRecoveryOptions | void
 
 ### ChatRecoveryContext
 
-| Field             | Type                       | Description                                          |
-| ----------------- | -------------------------- | ---------------------------------------------------- |
-| `streamId`        | `string`                   | The stream ID of the interrupted turn                |
-| `requestId`       | `string`                   | The request ID of the interrupted turn               |
-| `partialText`     | `string`                   | Text generated before the interruption               |
-| `partialParts`    | `MessagePart[]`            | Parts accumulated before the interruption            |
-| `recoveryData`    | `unknown \| null`          | Data from `this.stash()` during the turn             |
-| `messages`        | `UIMessage[]`              | Current conversation history                         |
-| `lastBody`        | `Record<string, unknown>?` | Body from the interrupted turn                       |
-| `lastClientTools` | `ClientToolSchema[]?`      | Client tools from the interrupted turn               |
-| `createdAt`       | `number`                   | Epoch milliseconds when the underlying fiber started |
+| Field             | Type                       | Description                                                                            |
+| ----------------- | -------------------------- | -------------------------------------------------------------------------------------- |
+| `incidentId`      | `string`                   | Stable ID for this recovery incident                                                   |
+| `attempt`         | `number`                   | Current attempt number for this incident, starting at 1                                |
+| `maxAttempts`     | `number`                   | Configured attempt cap before terminal exhaustion                                      |
+| `recoveryKind`    | `"retry" \| "continue"`    | Whether recovery retries an unanswered user turn or continues a partial assistant turn |
+| `streamId`        | `string`                   | The stream ID of the interrupted turn                                                  |
+| `requestId`       | `string`                   | The request ID of the interrupted turn                                                 |
+| `partialText`     | `string`                   | Text generated before the interruption                                                 |
+| `partialParts`    | `MessagePart[]`            | Parts accumulated before the interruption                                              |
+| `recoveryData`    | `unknown \| null`          | Data from `this.stash()` during the turn                                               |
+| `messages`        | `UIMessage[]`              | Current conversation history                                                           |
+| `lastBody`        | `Record<string, unknown>?` | Body from the interrupted turn                                                         |
+| `lastClientTools` | `ClientToolSchema[]?`      | Client tools from the interrupted turn                                                 |
+| `createdAt`       | `number`                   | Epoch milliseconds when the underlying fiber started                                   |
 
 ### ChatRecoveryOptions
 
@@ -442,6 +446,43 @@ onChatRecovery(ctx: ChatRecoveryContext): ChatRecoveryOptions {
   return {};
 }
 ```
+
+### Recovery budgets and limits
+
+Instead of `chatRecovery = true`, assign an object to tune how long recovery is allowed to run and when it is given up on. A turn that keeps making forward progress is never terminated by the framework on its own — duration is not a bound. Recovery is only sealed by one of the limits below.
+
+```typescript
+export class MyAgent extends Think<Env> {
+  chatRecovery = {
+    maxAttempts: 10,
+    noProgressTimeoutMs: 5 * 60 * 1000,
+    maxRecoveryWork: Infinity,
+    terminalMessage: "The assistant was interrupted and could not recover.",
+    // Consulted from the second recovery attempt onward. Return false to stop.
+    // Called as `config.shouldKeepRecovering(ctx)`, so it is NOT bound to the
+    // agent instance — track real token/cost spend in your own store keyed by
+    // `ctx.recoveryRootRequestId`.
+    async shouldKeepRecovering(ctx) {
+      return (await getSpendForTurn(ctx.recoveryRootRequestId)) < MAX_SPEND;
+    },
+    async onExhausted(ctx) {
+      console.warn("Recovery exhausted", ctx.incidentId, ctx.reason);
+    }
+  };
+}
+```
+
+| Field                  | Default           | Description                                                                                                                                                                         |
+| ---------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `maxAttempts`          | `10`              | Attempt cap. Resets on forward progress, so it catches a tight no-progress alarm loop, not a healthy long turn.                                                                     |
+| `stableTimeoutMs`      | `10_000`          | How long an attempt waits for the isolate to reach stable state before rescheduling.                                                                                                |
+| `noProgressTimeoutMs`  | `300_000` (5 min) | Primary stuck-turn bound: max time without forward progress before sealing. **Resets on every progress-bearing attempt.**                                                           |
+| `maxRecoveryWork`      | `Infinity`        | Runaway-loop guard: max produced content/tool units since the incident opened before a still-progressing turn is sealed. No cap by default.                                         |
+| `shouldKeepRecovering` | —                 | Caller policy consulted from the second attempt onward. Return `false` to stop recovery. The hook point for a token/cost budget (`ctx.work` is a coarse segment count, not tokens). |
+| `terminalMessage`      | generic message   | Message shown to the user when recovery is given up on.                                                                                                                             |
+| `onExhausted`          | —                 | Called once when recovery is given up on. Inspect `ctx.reason`.                                                                                                                     |
+
+`ctx.reason` on the exhausted hook is one of: `no_progress_timeout` (stuck), `max_attempts_exceeded` (no-progress alarm loop), `work_budget_exceeded` (runaway), `recovery_aborted` (your `shouldKeepRecovering` returned `false`), or `stable_timeout` (extreme churn). See [`chat-agents.md`](../chat-agents.md#stream-recovery) for the full shared reference — Think and `@cloudflare/ai-chat` use the same recovery configuration.
 
 ---
 

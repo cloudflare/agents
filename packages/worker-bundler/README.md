@@ -128,6 +128,7 @@ Bundles source files into a Worker.
 | `define`                                                 | `Record<string, string>`                   | `{}`                           | Constant replacements applied at bundle time                                                                                                                       |
 | `loader`                                                 | `Record<string, BundlerLoader>`            | `{}`                           | Per-extension loader overrides (e.g. `{ ".svg": "text", ".wasm": "binary" }`). See [Advanced bundler options](#advanced-bundler-options) for the supported set.    |
 | `conditions`                                             | `string[]`                                 | esbuild default                | Package export conditions to honour during resolution                                                                                                              |
+| `virtualModules`                                         | `Record<string, string>`                   | `{}`                           | Exact import-specifier aliases backed by generated JavaScript module source. See [Advanced bundler options](#advanced-bundler-options).                            |
 | `__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired` | `unknown[]`                                | `[]`                           | Escape hatch: extra esbuild plugins, run before the internal virtual-fs plugin. Not covered by semver — see [Advanced bundler options](#advanced-bundler-options). |
 
 Returns:
@@ -163,6 +164,7 @@ Builds a full-stack app: server Worker + client bundle + static assets.
 | `define`                                                 | `Record<string, string>`                   | `{}`            | Constant replacements applied at bundle time (both server and client)                                                                        |
 | `loader`                                                 | `Record<string, BundlerLoader>`            | `{}`            | Per-extension loader overrides (e.g. `{ ".svg": "text" }`). See [Advanced bundler options](#advanced-bundler-options) for the supported set. |
 | `conditions`                                             | `string[]`                                 | esbuild default | Package export conditions to honour during resolution                                                                                        |
+| `virtualModules`                                         | `Record<string, string>`                   | `{}`            | Exact import-specifier aliases backed by generated JavaScript module source                                                                  |
 | `__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired` | `unknown[]`                                | `[]`            | Escape hatch: extra esbuild plugins. See [Advanced bundler options](#advanced-bundler-options).                                              |
 
 Returns everything from `createWorker` plus:
@@ -570,6 +572,43 @@ await createWorker({
   conditions: ["workerd", "worker", "browser"]
 });
 ```
+
+### `virtualModules`
+
+Alias exact import specifiers to generated JavaScript modules. This is useful
+when a host framework wants to provide virtual runtime modules without exposing
+esbuild plugin details to callers.
+
+```ts
+const { mainModule, modules } = await createWorker({
+  files: {
+    "src/index.ts": `
+      import { readFileSync } from "node:fs";
+
+      export default {
+        fetch() {
+          return new Response(readFileSync("/message.txt", "utf8"));
+        }
+      };
+    `
+  },
+  virtualModules: {
+    "node:fs": `
+      const files = { "/message.txt": "hello from a virtual module" };
+      export function readFileSync(path) {
+        return files[path];
+      }
+      export default { readFileSync };
+    `,
+    fs: `export * from "node:fs"; export { default } from "node:fs";`
+  }
+});
+```
+
+`virtualModules` keys are exact specifier matches. If you want both `"fs"` and
+`"node:fs"` to work, provide both aliases. The generated source is bundled with
+the rest of the Worker, so it can be imported by the entry point or by transitive
+dependencies.
 
 ### `__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired`
 

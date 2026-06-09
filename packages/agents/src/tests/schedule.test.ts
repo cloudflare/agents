@@ -1009,4 +1009,72 @@ describe("schedule operations", () => {
       await agentStub.cancelScheduleById(ids[0]);
     });
   });
+
+  describe("one-shot defer on a superseded-isolate error", () => {
+    // A one-shot alarm whose callback throws because the isolate was replaced
+    // by a deploy must be PRESERVED (re-thrown so alarm() rejects), so the
+    // platform re-runs it on the new code — not swallowed + deleted, which
+    // would orphan the work (e.g. a queued submission's drain alarm).
+    it('preserves the row + rejects alarm for "reset because its code was updated" (deploy bounce)', async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "defer-code-update-reset"
+      );
+      const { threw, remaining } = await agentStub.runOneShotThrowingForTest(
+        "Durable Object reset because its code was updated."
+      );
+      expect(threw).toBe(true);
+      expect(remaining).toBe(1);
+    });
+
+    it('preserves the row + rejects alarm for "This script has been upgraded" (superseded script)', async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "defer-script-upgraded"
+      );
+      const { threw, remaining } = await agentStub.runOneShotThrowingForTest(
+        "This script has been upgraded. Please send a new request to connect to the new version."
+      );
+      expect(threw).toBe(true);
+      expect(remaining).toBe(1);
+    });
+
+    it("swallows + deletes the row for an ordinary (non-supersede) error", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "swallow-ordinary-error"
+      );
+      const { threw, remaining } = await agentStub.runOneShotThrowingForTest(
+        "some ordinary application error"
+      );
+      expect(threw).toBe(false);
+      expect(remaining).toBe(0);
+    });
+
+    it('does NOT defer "Network connection lost." (not an isolate replacement)', async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "no-defer-connection-lost"
+      );
+      const { threw, remaining } = await agentStub.runOneShotThrowingForTest(
+        "Network connection lost."
+      );
+      expect(threw).toBe(false);
+      expect(remaining).toBe(0);
+    });
+
+    it("does NOT treat an ordinary error that merely mentions an upgraded script as a supersede", async () => {
+      // Guards the tightened matcher: only the verbatim platform phrase ("this
+      // script has been upgraded") defers; a lookalike app error is swallowed.
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "no-defer-lookalike"
+      );
+      const { threw, remaining } = await agentStub.runOneShotThrowingForTest(
+        "Your subscription script has been upgraded to the new plan."
+      );
+      expect(threw).toBe(false);
+      expect(remaining).toBe(0);
+    });
+  });
 });

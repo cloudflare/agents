@@ -61,6 +61,9 @@ The important pieces are:
   not a synthetic event viewer.
 - **Retention and cleanup.** Runs are retained for refresh replay until the user
   clears the chat, which calls the framework cleanup API.
+- **Parent recovery.** If the parent restarts while child runs are still marked
+  active, framework recovery reconciles them and marks unrecoverable rows
+  `interrupted` instead of leaving the tool call stuck.
 
 ## Server
 
