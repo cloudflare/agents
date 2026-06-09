@@ -442,117 +442,27 @@ export interface CompactOptions {
 
   /**
    * Strictly message-scoped token counter: returns tokens for exactly the
-   * messages passed (a tokenizer). Used directly by the per-message tail
-   * walk with no shape detection. Prefer this over `tokenCounter` when you
-   * know your counter's scope. Wins over `tokenCounter` if both are set.
-   */
-  countTokens?: CompactTokenCounter;
-
-  /**
-   * Optional counter for tail-budget decisions when the scope is unknown.
-   * Use `countTokens` instead when you have a tokenizer; otherwise the
-   * Workers-safe heuristic is used (calibrated by `CompactContext`'s
-   * usage-derived `contextTokens` when available).
-   *
-   * Both counter shapes work: a message-scoped counter (returns tokens for
-   * exactly the messages passed) is used per-message, with any fixed per-call
-   * overhead (chat-template priming, a baked-in system prompt) detected and
-   * subtracted; a whole-prompt / usage-style counter (e.g.
-   * `() => usage.inputTokens`, ignoring its arguments) is detected
-   * automatically and used to calibrate the built-in heuristic to the
-   * model's scale. See `resolveTailCounter`.
+   * messages passed (i.e. a tokenizer). The tail walk calls it once per
+   * message. Do NOT pass a whole-prompt total here (e.g.
+   * `() => usage.inputTokens`) — attach usage metadata to assistant messages
+   * or set a counter on `compactAfter()` instead; those flow in as
+   * `CompactContext.contextTokens` and calibrate the built-in heuristic.
    */
   tokenCounter?: CompactTokenCounter;
 }
 
 /**
- * Minimum growth between the empty probe and the full-history probe —
- * as a fraction of the heuristic estimate for that history — for a counter
- * to be treated as message-scoped. Real tokenizers land near (usually above)
- * the chars/4 heuristic, so 0.5 sits far from both shapes: a counter that
- * registers its input grows by ~1× the heuristic; a usage-style counter that
- * ignores its input grows by ~0×.
+ * Calibrate the Workers-safe heuristic to the model's token scale (#1593).
+ *
+ * `contextTokens` is the Session's authoritative whole-prompt size — from a
+ * `compactAfter()` counter or usage metadata on assistant messages. The
+ * heuristic under-counts tool-heavy histories, so a `tailTokenBudget`
+ * expressed in model tokens would otherwise protect far too much tail (often
+ * everything, making compaction a silent no-op). Scaling each per-message
+ * estimate by `contextTokens / heuristic(history)` keeps the walk's
+ * distribution while making the budget mean "model tokens".
  */
-const MESSAGE_SCOPED_MIN_GROWTH = 0.5;
-
-/**
- * Make any user counter safe for the per-message tail-budget walk (#1593).
- *
- * Counters come in two shapes:
- * - message-scoped (tokenizer-style): tokens of exactly the messages passed.
- *   Used per-message by the walk — possibly with a fixed per-call overhead
- *   (chat-template priming, a baked-in system prompt) subtracted.
- * - whole-prompt / usage-style: a model-reported total that ignores the
- *   messages passed, e.g. `() => usage.inputTokens`. Calling it per message
- *   would return the same huge value every time, degrading `tailTokenBudget`
- *   to `minTailMessages`.
- *
- * Detection is a two-point probe — classification depends on whether the
- * counter *responds to its input*, never on an absolute token threshold:
- *
- * 1. `base = counter([])`. A throw means the counter reads its input, so it
- *    is message-scoped by construction; `base <= 0` means it counts exactly
- *    what it is given. Both are used per-message as-is.
- * 2. Otherwise `total = counter(history)`. If the counter grew by at least
- *    half the heuristic's estimate of the history, it counts its input and
- *    `base` is fixed per-call overhead — use it per-message minus `base`, so
- *    the walk doesn't pay the overhead once per message. If it stayed flat,
- *    it is whole-prompt scoped — scale the Workers-safe heuristic by
- *    `total / heuristic(history)`, so per-message estimates carry the model's
- *    scale and `tailTokenBudget` keeps meaning "model tokens".
- *
- * The flat path costs O(1) counter calls per compaction instead of O(n),
- * which matters for async/remote counters (e.g. a `count_tokens` API). Any
- * probe failure (throw, NaN, ≤0) falls back to the unwrapped counter.
- */
-async function resolveTailCounter(
-  counter: CompactTokenCounter,
-  messages: SessionMessage[]
-): Promise<CompactTokenCounter> {
-  let base: number;
-  try {
-    base = await counter([]);
-  } catch {
-    // Reads its input — message-scoped by construction.
-    return counter;
-  }
-  if (!Number.isFinite(base) || base <= 0) {
-    // Counts exactly what it is given — message-scoped.
-    return counter;
-  }
-
-  // base > 0: either fixed per-call overhead or a whole-prompt total.
-  // A second probe over the full history tells the two apart.
-  let total: number;
-  try {
-    total = await counter(messages);
-  } catch {
-    return counter;
-  }
-  const heuristicTotal = estimateMessageTokens(messages);
-  if (!Number.isFinite(total) || total <= 0 || heuristicTotal <= 0) {
-    return counter;
-  }
-
-  if (total - base >= heuristicTotal * MESSAGE_SCOPED_MIN_GROWTH) {
-    // Message-scoped with fixed overhead: keep its per-message accuracy but
-    // don't charge the overhead to every message in the walk.
-    return async (msgs) => Math.max(0, (await counter(msgs)) - base);
-  }
-
-  // Whole-prompt/usage-style: flat with respect to its input. Calibrate the
-  // heuristic to the model's scale using its authoritative total.
-  const scale = total / heuristicTotal;
-  return (msgs) => estimateMessageTokens(msgs) * scale;
-}
-
-/**
- * Zero-config calibration: when the Session derived a whole-prompt total from
- * usage metadata on assistant messages (`CompactContext.contextTokens`),
- * scale the heuristic to the model's token scale — same as the calibration
- * path of `resolveTailCounter`, with no counter configured at all.
- */
-function usageCalibratedCounter(
+function calibratedHeuristic(
   contextTokens: number | undefined,
   messages: SessionMessage[]
 ): CompactTokenCounter | undefined {
@@ -607,30 +517,14 @@ export function createCompactFunction(opts: CompactOptions) {
       return null;
     }
 
-    // Prefer an explicit counter; otherwise adapt the Session's counter (flowed
-    // via CompactContext) so a single `tokenCounter` on `compactAfter` drives
-    // the boundary cut too — without it, a fire counter + the default heuristic
-    // under-counting a tool-heavy history makes compaction fire every turn but
-    // never shorten anything. The session counter is whole-prompt shaped; for
-    // the tail walk we feed it message subsets with empty system/context.
-    const sessionCounter = context?.tokenCounter;
-    const rawCounter: CompactTokenCounter | undefined =
-      opts.tokenCounter ??
-      (sessionCounter
-        ? (msgs) =>
-            sessionCounter({
-              messages: msgs,
-              systemPrompt: "",
-              contextBlocks: []
-            })
-        : undefined);
-    // Priority: explicit message-scoped counter > shape-detected counter >
-    // usage-metadata calibration (zero config) > raw heuristic.
+    // Per-message accounting for the tail walk: an explicit message-scoped
+    // counter wins; otherwise the heuristic, calibrated to the model's scale
+    // when the Session knows the real context size. The Session's counter is
+    // whole-prompt shaped and is never called per-message — its total arrives
+    // pre-computed as `context.contextTokens`.
     const tailCounter =
-      opts.countTokens ??
-      (rawCounter
-        ? await resolveTailCounter(rawCounter, messages)
-        : usageCalibratedCounter(context?.contextTokens, messages));
+      opts.tokenCounter ??
+      calibratedHeuristic(context?.contextTokens, messages);
 
     // 1. Find compression boundaries
     let compressStart = protectHead;

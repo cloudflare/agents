@@ -59,20 +59,17 @@ export interface CompactAfterOptions {
 /**
  * Context the Session passes to the registered compaction function. Lets the
  * same authoritative token accounting drive BOTH the "should we compact?"
- * (`compactAfter`) and "what should we compact?" (boundary) decisions, so a
- * consumer that wires a `tokenCounter` once doesn't hit the failure mode where
- * compaction fires every turn but silently no-ops because the boundary logic
- * used a different (under-counting) estimate.
+ * (`compactAfter`) and "what should we compact?" (boundary) decisions, so the
+ * two never disagree — compaction can't fire every turn yet silently no-op
+ * because the boundary logic used a different (under-counting) estimate.
  */
 export interface CompactContext {
-  /** The Session's token counter (from `compactAfter`/options), if configured. */
-  tokenCounter?: SessionTokenCounter;
-
   /**
-   * Best-known size of the current context in model tokens, derived from
-   * usage metadata on assistant messages (last reported usage plus the
-   * heuristic for any trailing messages). Lets the boundary walk calibrate
-   * the built-in heuristic to the model's scale with zero configuration.
+   * Best-known size of the current context in model tokens — from the
+   * `compactAfter()` counter if configured, otherwise from usage metadata on
+   * assistant messages (last reported usage plus the heuristic for newer
+   * messages). Undefined when only the heuristic is available. The boundary
+   * walk uses it to calibrate the built-in heuristic to the model's scale.
    */
   contextTokens?: number;
 }
