@@ -300,6 +300,14 @@ function buildConnectorBindings(
         await runtime.recordResult(executionId, decision.seq, result);
         return result;
       } catch (err) {
+        // Log the original error (with its stack) on the host: returning a
+        // marker keeps the RPC call from rejecting, but a genuine failure still
+        // deserves a host-side trace for debugging. The message also reaches the
+        // model and the audit trail via the run's "error" outcome.
+        console.error(
+          `codemode: ${desc.name}.${method} failed (execution ${executionId})`,
+          err
+        );
         return {
           [CONTROL_KEY]: "error",
           message: err instanceof Error ? err.message : String(err)
