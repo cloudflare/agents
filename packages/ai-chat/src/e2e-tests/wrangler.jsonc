@@ -20,6 +20,14 @@
       {
         "name": "ChatWorkBudgetExhaustAgent",
         "class_name": "ChatWorkBudgetExhaustAgent"
+      },
+      {
+        "name": "ChatNoContinueAgent",
+        "class_name": "ChatNoContinueAgent"
+      },
+      {
+        "name": "ChatNoPersistNoContinueAgent",
+        "class_name": "ChatNoPersistNoContinueAgent"
       }
     ]
   },
@@ -38,6 +46,13 @@
     {
       "tag": "v3",
       "new_sqlite_classes": ["ChatWorkBudgetExhaustAgent"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": [
+        "ChatNoContinueAgent",
+        "ChatNoPersistNoContinueAgent"
+      ]
     }
   ]
 }

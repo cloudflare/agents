@@ -23,6 +23,8 @@ type Env = {
   ChatNoProgressExhaustAgent: DurableObjectNamespace<ChatNoProgressExhaustAgent>;
   ChatAbortedExhaustAgent: DurableObjectNamespace<ChatAbortedExhaustAgent>;
   ChatWorkBudgetExhaustAgent: DurableObjectNamespace<ChatWorkBudgetExhaustAgent>;
+  ChatNoContinueAgent: DurableObjectNamespace<ChatNoContinueAgent>;
+  ChatNoPersistNoContinueAgent: DurableObjectNamespace<ChatNoPersistNoContinueAgent>;
 };
 
 const EXHAUSTED_LOG_KEY = "test:exhausted-log";
@@ -199,6 +201,7 @@ type RecoveryContextLogEntry = {
 };
 
 const RECOVERY_CONTEXTS_KEY = "test:recovery-contexts";
+const ONCHATMESSAGE_COUNT_KEY = "test:onchatmessage-count";
 
 function makeSSEStream(
   chunks: Array<{ type: string; [k: string]: unknown }>,
@@ -232,6 +235,12 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     _onFinish: unknown,
     _options?: OnChatMessageOptions
   ) {
+    // Count invocations so a test can distinguish "persisted the partial but
+    // did NOT re-run" (continue:false → 1) from a continuation (→ 2).
+    const count =
+      (await this.ctx.storage.get<number>(ONCHATMESSAGE_COUNT_KEY)) ?? 0;
+    await this.ctx.storage.put(ONCHATMESSAGE_COUNT_KEY, count + 1);
+
     // Stream many small deltas at 500ms each so the turn takes long enough to be
     // interrupted by SIGKILL. The chunk count matters for recovery semantics:
     // ResumableStream flushes to SQLite in batches of CHUNK_BUFFER_SIZE (10), so
@@ -308,6 +317,51 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       SELECT COUNT(*) as count FROM cf_agents_runs
     `;
     return rows[0].count > 0;
+  }
+
+  @callable()
+  async getChatMessageInvocations(): Promise<number> {
+    return (await this.ctx.storage.get<number>(ONCHATMESSAGE_COUNT_KEY)) ?? 0;
+  }
+
+  @callable()
+  getAssistantText(): string {
+    const assistant = this.messages.filter(
+      (m: ChatMessage) => m.role === "assistant"
+    );
+    return assistant
+      .flatMap((m) =>
+        m.parts
+          .filter((p): p is { type: "text"; text: string } => p.type === "text")
+          .map((p) => p.text)
+      )
+      .join("");
+  }
+}
+
+/**
+ * Recovery returns `{ continue: false }`: the interrupted partial is persisted
+ * as a durable assistant message, but the turn is NOT re-run.
+ */
+export class ChatNoContinueAgent extends ChatRecoveryTestAgent {
+  override async onChatRecovery(
+    ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    await super.onChatRecovery(ctx);
+    return { continue: false };
+  }
+}
+
+/**
+ * Recovery returns `{ persist: false, continue: false }`: a plain-text partial
+ * (no settled tool results) is dropped and the turn is not re-run.
+ */
+export class ChatNoPersistNoContinueAgent extends ChatRecoveryTestAgent {
+  override async onChatRecovery(
+    ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    await super.onChatRecovery(ctx);
+    return { persist: false, continue: false };
   }
 }
 
