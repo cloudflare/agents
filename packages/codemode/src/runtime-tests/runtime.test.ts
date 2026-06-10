@@ -48,6 +48,14 @@ interface Host {
     disposed: Array<{ executionId: string; status: string }>;
   }>;
   enableShaping(): Promise<void>;
+  raceRejectDuringApprovedExecute(): Promise<{
+    decisionKind: string;
+    duringExecute?: string;
+    rejected: boolean;
+    statusAfterReject?: string;
+    stateAfterReject?: string;
+    stateFinal?: string;
+  }>;
 }
 
 const testEnv = env as unknown as {
@@ -283,6 +291,22 @@ describe("codemode durable runtime (e2e)", () => {
     const resumed = (await h.approve(first.executionId)) as ProxyToolOutput;
     expect(resumed.status).toBe("completed");
     expect((await h.sideEffects()).created).toHaveLength(1);
+  });
+
+  it("a reject racing an approved action's execution no-ops (no revert mid-run)", async () => {
+    const h = host();
+    const r = await h.raceRejectDuringApprovedExecute();
+
+    // The approved call is decided for execution and marked "executing" before
+    // decide() returns, closing the window a concurrent reject could exploit.
+    expect(r.decisionKind).toBe("execute");
+    expect(r.duringExecute).toBe("executing");
+    // The racing reject sees "executing", so it no-ops and leaves the run alone.
+    expect(r.rejected).toBe(false);
+    expect(r.statusAfterReject).toBe("running");
+    expect(r.stateAfterReject).toBe("executing");
+    // The action records normally — it was applied, not reverted.
+    expect(r.stateFinal).toBe("applied");
   });
 
   it("a throwing connector tool ends the run as error without rejecting across RPC", async () => {

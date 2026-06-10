@@ -287,11 +287,24 @@ export class CodemodeRuntime extends DurableObject {
         return { kind: "replay", result: existing.result };
       }
       if (existing.state === "pending") {
-        // Approved since the last run — execute for real now.
+        // Approved since the last run. Transition pending → executing and
+        // persist BEFORE returning, so a concurrent reject() (e.g. a second UI
+        // tab) sees "executing" and no-ops instead of reverting an action that
+        // is already running on the host. Without this write the entry would
+        // stay "pending" for the whole execution window — symmetric with the
+        // fresh-call path below.
+        existing.state = "executing";
+        state.updatedAt = Date.now();
+        await this.ctx.storage.put(execKey(state.id), state);
         return { kind: "execute", seq };
       }
-      // "executing" (a crash between decide and recordResult left it
-      // incomplete) or "reverted" — fall through and re-execute.
+      if (existing.state === "executing") {
+        // Decided to run on a previous pass but crashed before recordResult
+        // landed — re-execute. Do NOT re-pause even for an approval action: it
+        // was already approved when it first reached "executing".
+        return { kind: "execute", seq };
+      }
+      // "reverted" — fall through and re-execute as a fresh call.
     }
 
     const entry: ToolLogEntry = {

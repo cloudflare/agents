@@ -15,7 +15,11 @@ import {
 } from "../connectors";
 import { DynamicWorkerExecutor } from "../executor";
 import { createCodemodeRuntime } from "../runtime-handle";
-import type { ProxyToolInput, ProxyToolOutput } from "../proxy-tool";
+import {
+  getCodemodeRuntime,
+  type ProxyToolInput,
+  type ProxyToolOutput
+} from "../proxy-tool";
 
 // Re-export the facet class so the runtime can spawn it (and so vitest's
 // pool-workers can resolve a facet-compatible class value).
@@ -184,6 +188,48 @@ export class CodemodeTestHost extends DurableObject<Env> {
   lifecycle() {
     const c = this.#items();
     return { opened: c.opened, disposed: c.disposed };
+  }
+
+  /**
+   * Drive the facet directly to reproduce the approve→execute→reject race at the
+   * decision boundary: once an approved action is decided for execution it must
+   * be "executing" (not "pending"), so a concurrent reject() no-ops rather than
+   * reverting an action already running on the host.
+   */
+  async raceRejectDuringApprovedExecute() {
+    const facet = getCodemodeRuntime(this.ctx, [this.#items()]);
+    const id = await facet.begin("async () => {}");
+    const args = { title: "race" };
+
+    // First pass: the approval-gated call pauses.
+    await facet.decide(id, 0, "items", "create_item", args, true);
+    // Approve → resume returns the run to "running".
+    await facet.resume(id);
+    // Replay reaches the approved call: it must transition to "executing".
+    const decision = await facet.decide(
+      id,
+      0,
+      "items",
+      "create_item",
+      args,
+      true
+    );
+    const duringExecute = (await facet.getExecution(id))?.log[0]?.state;
+    // A concurrent reject lands during execution: must no-op.
+    const rejected = await facet.reject(0, id);
+    const afterReject = await facet.getExecution(id);
+    // Execution finishes and records its result.
+    await facet.recordResult(id, 0, { id: 1 });
+    const final = await facet.getExecution(id);
+
+    return {
+      decisionKind: decision.kind,
+      duringExecute,
+      rejected,
+      statusAfterReject: afterReject?.status,
+      stateAfterReject: afterReject?.log[0]?.state,
+      stateFinal: final?.log[0]?.state
+    };
   }
 }
 
