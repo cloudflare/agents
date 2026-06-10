@@ -551,6 +551,16 @@ describe("Multiple providers (namespaces)", () => {
 
     expect(result.error).toContain("reserved");
   });
+
+  it("rejects a provider named __connectors (would shadow the RPC bindings)", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute("async () => 1", [
+      { name: "__connectors", fns: {} }
+    ]);
+
+    expect(result.error).toContain("reserved");
+  });
 });
 
 describe("provider prelude", () => {

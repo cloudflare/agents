@@ -318,6 +318,7 @@ export class DynamicWorkerExecutor implements Executor {
     // Validate provider names.
     const RESERVED_NAMES = new Set([
       "__dispatchers",
+      "__connectors",
       "__logs",
       "__CODEMODE_BINARY_TAG",
       "__bytesToBase64",
@@ -356,12 +357,12 @@ export class DynamicWorkerExecutor implements Executor {
     const connectors = options?.connectors ?? [];
     const connectorNames = new Set(connectors.map((c) => c.name));
 
-    // Validate connector names don't clash with provider names or reserved names.
+    // Validate connector names don't clash with provider names or reserved
+    // names. RESERVED_NAMES includes the `evaluate(__dispatchers, __connectors)`
+    // parameters, so a connector/provider can't shadow the RPC bindings its own
+    // generated proxy reads from (`__connectors.<name>.callTool(...)`).
     for (const connector of connectors) {
-      if (
-        RESERVED_NAMES.has(connector.name) ||
-        connector.name === "__connectors"
-      ) {
+      if (RESERVED_NAMES.has(connector.name)) {
         return {
           result: undefined,
           error: `Connector name "${connector.name}" is reserved`
