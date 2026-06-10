@@ -11,6 +11,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents`                     | `src/index.ts`               | Agent base class, routing, connections, RPC, state, scheduling, SQL          |
 | `agents/client`              | `src/client.ts`              | Browser/Node WebSocket client (`AgentClient`) via partysocket                |
 | `agents/react`               | `src/react.tsx`              | `useAgent` React hook, state sync, RPC from components                       |
+| `agents/assistant`           | `src/assistant.ts`           | `Assistant` alias for the opinionated `@cloudflare/think` chat/session agent |
 | `agents/chat`                | `src/chat/index.ts`          | Shared chat primitives used by `@cloudflare/ai-chat` and `@cloudflare/think` |
 | `agents/mcp`                 | `src/mcp/index.ts`           | `McpAgent` base class for building MCP servers                               |
 | `agents/mcp/client`          | `src/mcp/client.ts`          | MCP client manager (connect to remote MCP servers from an Agent)             |

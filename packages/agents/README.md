@@ -234,23 +234,23 @@ segments, subject to the platform's current facet nesting limits.
 
 ### Agent Tools
 
-Run chat-capable sub-agents as tools from a parent chat agent. Think agents and
-`AIChatAgent` subclasses are supported. The child keeps its own messages, tools,
-SQLite storage, and resumable stream, while the parent broadcasts
+Run chat-capable sub-agents as tools from a parent chat agent. Assistant/Think
+agents and `AIChatAgent` subclasses are supported. The child keeps its own
+messages, tools, SQLite storage, and resumable stream, while the parent broadcasts
 `agent-tool-event` frames so the UI can render the child timeline inline.
 
 ```typescript
-import { Think } from "@cloudflare/think";
+import { Assistant } from "agents/assistant";
 import { agentTool } from "agents/agent-tools";
 import { z } from "zod";
 
-export class Researcher extends Think<Env> {
+export class Researcher extends Assistant<Env> {
   getSystemPrompt() {
     return "Research the requested topic and end with a concise summary.";
   }
 }
 
-export class Assistant extends Think<Env> {
+export class Support extends Assistant<Env> {
   getTools() {
     return {
       research: agentTool(Researcher, {
@@ -389,6 +389,25 @@ See [Workflows](../../docs/workflows.md) and [Human in the Loop](../../docs/huma
 ## AI Chat Integration
 
 For AI-powered chat experiences with persistent conversations, streaming responses, and tool support, see [`@cloudflare/ai-chat`](../ai-chat/README.md).
+
+For the opinionated assistant framework with the full agentic loop, Session
+storage, workspace tools, sub-agent RPC, and durable chat recovery, import
+`Assistant` from `agents/assistant`. This is an additive alias for
+`@cloudflare/think`'s `Think` base class, so existing `@cloudflare/think`
+imports continue to work.
+
+```typescript
+import { Assistant } from "agents/assistant";
+import { createWorkersAI } from "workers-ai-provider";
+
+export class Support extends Assistant<Env> {
+  getModel() {
+    return createWorkersAI({ binding: this.env.AI })(
+      "@cf/moonshotai/kimi-k2.6"
+    );
+  }
+}
+```
 
 ```typescript
 import { AIChatAgent } from "@cloudflare/ai-chat";

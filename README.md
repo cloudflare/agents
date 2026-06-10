@@ -129,7 +129,7 @@ The agent is a Durable Object, so it needs a binding and a SQLite migration in `
 | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | [`agents`](packages/agents)                             | Core SDK — `Agent` class, routing, state, scheduling, MCP, email, workflows, x402, browser agents |
 | [`@cloudflare/ai-chat`](packages/ai-chat)               | Higher-level AI chat — persistent messages, resumable streaming, tool execution                   |
-| [`@cloudflare/think`](packages/think)                   | Opinionated chat agent base — agentic loop, stream resumption, client tools, workspace tools      |
+| [`@cloudflare/think`](packages/think)                   | Opinionated chat agent base, also available as `Assistant` from `agents/assistant`                |
 | [`@cloudflare/codemode`](packages/codemode)             | LLMs write executable code that calls your tools, instead of one tool call at a time              |
 | [`@cloudflare/shell`](packages/shell)                   | Sandboxed JS execution + virtual filesystem (`Workspace`) for agents                              |
 | [`@cloudflare/voice`](packages/voice)                   | Voice pipeline — STT, TTS, VAD, streaming, SFU utilities                                          |
