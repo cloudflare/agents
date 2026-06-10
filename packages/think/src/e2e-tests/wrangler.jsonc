@@ -72,6 +72,10 @@
       {
         "name": "ThinkMessengerRecoveryE2EAgent",
         "class_name": "ThinkMessengerRecoveryE2EAgent"
+      },
+      {
+        "name": "ThinkWorkflowRecoveryE2EAgent",
+        "class_name": "ThinkWorkflowRecoveryE2EAgent"
       }
     ]
   },
@@ -133,6 +137,10 @@
     {
       "tag": "v11",
       "new_sqlite_classes": ["ThinkMessengerRecoveryE2EAgent"]
+    },
+    {
+      "tag": "v12",
+      "new_sqlite_classes": ["ThinkWorkflowRecoveryE2EAgent"]
     }
   ],
   "r2_buckets": [

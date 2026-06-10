@@ -53,6 +53,7 @@ type Env = {
   ThinkContextOverflowE2EAgent: DurableObjectNamespace<ThinkContextOverflowE2EAgent>;
   ThinkSubmissionRecoveryE2EAgent: DurableObjectNamespace<ThinkSubmissionRecoveryE2EAgent>;
   ThinkMessengerRecoveryE2EAgent: DurableObjectNamespace<ThinkMessengerRecoveryE2EAgent>;
+  ThinkWorkflowRecoveryE2EAgent: DurableObjectNamespace<ThinkWorkflowRecoveryE2EAgent>;
   TestStructuredAgent: DurableObjectNamespace<TestStructuredAgent>;
   STEP_PROMPT_WORKFLOW: Workflow;
   AI: Ai;
@@ -1946,6 +1947,136 @@ export class ThinkMessengerRecoveryE2EAgent extends Think<Env> {
     return this.sql<{ content: string }>`
       SELECT content FROM messenger_posts ORDER BY seq ASC
     `.map((row) => row.content);
+  }
+
+  @callable()
+  async hasFiberRows(): Promise<boolean> {
+    const rows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    return (rows[0]?.c ?? 0) > 0;
+  }
+}
+
+// ── Workflow-turn recovery + notification drain replay ──────────────
+//
+// A `ThinkWorkflow` `step.prompt` creates a durable submission (the "workflow
+// turn") with workflow-prompt metadata, then waits for the completion event the
+// submission delivers through the workflow-notification drain. This exercises:
+//  - the happy path: a deterministic mock structured turn completes, the
+//    notification is drained, and the workflow resumes + completes
+//  - recovery: the workflow turn interrupted mid-stream is recovered on restart
+//    and the workflow-notification drain replays the result
+//
+// The model is a deterministic mock that ends the structured turn by calling the
+// synthetic `think_final_answer` tool (no user tools → that exact name) with a
+// schema-shaped greeting. It streams the tool input in slow deltas so a SIGKILL
+// can land mid-turn.
+
+const WORKFLOW_GREETING = "hello from a recovered workflow turn";
+
+function createStructuredGreetingModel(chunkDelayMs: number): LanguageModel {
+  const input = JSON.stringify({ greeting: WORKFLOW_GREETING });
+  // Split the JSON into a handful of pieces so the tool-input streams over a
+  // window (keeps the stream active + gives a mid-turn kill window).
+  const pieces: string[] = [];
+  const size = Math.max(1, Math.ceil(input.length / 10));
+  for (let i = 0; i < input.length; i += size) {
+    pieces.push(input.slice(i, i + size));
+  }
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-structured-greeting",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream() {
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          const id = "fa";
+          controller.enqueue({
+            type: "tool-input-start",
+            id,
+            toolName: "think_final_answer"
+          });
+          for (const piece of pieces) {
+            await new Promise((r) => setTimeout(r, chunkDelayMs));
+            controller.enqueue({ type: "tool-input-delta", id, delta: piece });
+          }
+          controller.enqueue({ type: "tool-input-end", id });
+          controller.enqueue({
+            type: "tool-call",
+            toolCallId: id,
+            toolName: "think_final_answer",
+            input
+          });
+          controller.enqueue({
+            type: "finish",
+            finishReason: v3FinishReason("tool-calls"),
+            usage: v3Usage(10, 5)
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+export class ThinkWorkflowRecoveryE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override chatRecovery = true;
+  override maxSteps = 4;
+
+  override getModel(): LanguageModel {
+    return createStructuredGreetingModel(500);
+  }
+
+  override getSystemPrompt(): string {
+    return "Workflow-turn recovery e2e agent.";
+  }
+
+  override async onChatRecovery(): Promise<ChatRecoveryOptions> {
+    return { continue: true };
+  }
+
+  @callable()
+  async startGreetingWorkflow(): Promise<string> {
+    return this.runWorkflow("STEP_PROMPT_WORKFLOW", {
+      prompt: "Greet the user.",
+      mode: "greeting"
+    });
+  }
+
+  @callable()
+  async getWorkflow(
+    id: string
+  ): Promise<{ status: string; output: unknown; error: string | null }> {
+    const status = await this.getWorkflowStatus("STEP_PROMPT_WORKFLOW", id);
+    return {
+      status: status.status,
+      output: status.output ?? null,
+      error: status.error ? JSON.stringify(status.error) : null
+    };
+  }
+
+  @callable()
+  async getNotificationStats(): Promise<{ total: number; delivered: number }> {
+    this
+      .sql`CREATE TABLE IF NOT EXISTS cf_think_workflow_notifications (notification_id TEXT PRIMARY KEY, submission_id TEXT, workflow_name TEXT, workflow_id TEXT, event_type TEXT, payload_json TEXT, attempts INTEGER, last_error TEXT, created_at INTEGER, updated_at INTEGER, delivered_at INTEGER)`;
+    const total =
+      this.sql<{ c: number }>`
+        SELECT COUNT(*) as c FROM cf_think_workflow_notifications
+      `[0]?.c ?? 0;
+    const delivered =
+      this.sql<{ c: number }>`
+        SELECT COUNT(*) as c FROM cf_think_workflow_notifications
+        WHERE delivered_at IS NOT NULL
+      `[0]?.c ?? 0;
+    return { total, delivered };
   }
 
   @callable()
