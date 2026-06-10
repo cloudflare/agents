@@ -28,9 +28,10 @@ export type {
 const BINARY_TAG = "__codemode_binary_v1__";
 
 // Control protocol between a connector binding (host) and the sandbox proxy.
-// A binding returns `{ [CONNECTOR_CONTROL_KEY]: "pause" | "diverge", ... }`
-// instead of throwing across RPC; the generated proxy throws locally. Keep in
-// sync with proxy-tool.ts (CONTROL_KEY / PAUSE_SENTINEL).
+// A binding returns `{ [CONNECTOR_CONTROL_KEY]: "pause" }` (awaiting approval /
+// diverged) or `{ [CONNECTOR_CONTROL_KEY]: "error", message }` (the call threw
+// on the host) instead of throwing across RPC; the generated proxy re-throws
+// locally. Keep in sync with proxy-tool.ts (CONTROL_KEY / PAUSE_SENTINEL).
 const CONNECTOR_CONTROL_KEY = "__codemode_control__";
 const PAUSE_SENTINEL_LITERAL = "__CODEMODE_PAUSE__";
 
@@ -416,8 +417,9 @@ export class DynamicWorkerExecutor implements Executor {
     // call arguments but NOT as Worker `env` config values.
     //
     // A binding never throws across RPC (that would leave an unhandled remote
-    // rejection); instead it may return a "pause" control marker which we turn
-    // into a local throw here, where the sandbox's own try/catch handles it.
+    // rejection); instead it returns a control marker — "pause" (awaiting
+    // approval) or "error" (the host call threw) — which we turn into a local
+    // throw here, where the sandbox's own try/catch handles it.
     const connectorProxyInits = connectors.map(
       (c) =>
         `    const ${c.name} = new Proxy({}, {\n` +
@@ -425,7 +427,10 @@ export class DynamicWorkerExecutor implements Executor {
         `        if (typeof toolName !== "string") return undefined;\n` +
         `        return async (...args) => {\n` +
         `          const __r = await __connectors.${c.name}.callTool(toolName, args[0]);\n` +
-        `          if (__r && typeof __r === "object" && __r.${CONNECTOR_CONTROL_KEY} === "pause") throw new Error("${PAUSE_SENTINEL_LITERAL}");\n` +
+        `          if (__r && typeof __r === "object") {\n` +
+        `            if (__r.${CONNECTOR_CONTROL_KEY} === "pause") throw new Error("${PAUSE_SENTINEL_LITERAL}");\n` +
+        `            if (__r.${CONNECTOR_CONTROL_KEY} === "error") throw new Error(String(__r.message));\n` +
+        `          }\n` +
         `          return __r;\n` +
         `        };\n` +
         `      }\n` +

@@ -285,6 +285,23 @@ describe("codemode durable runtime (e2e)", () => {
     expect((await h.sideEffects()).created).toHaveLength(1);
   });
 
+  it("a throwing connector tool ends the run as error without rejecting across RPC", async () => {
+    const h = host();
+    // boom() throws on the host. The binding must surface that as an error
+    // marker (not an RPC rejection), so the run ends "error" with the message
+    // and — crucially — the test completes without an unhandled rejection.
+    const out = (await h.run(
+      `async () => { await items.boom(); return "unreachable"; }`
+    )) as ProxyToolOutput;
+
+    expect(out.status).toBe("error");
+    if (out.status === "error") {
+      expect(out.error).toMatch(/connector boom/);
+    }
+    const exec = (await h.executions()).find((e) => e.id === out.executionId);
+    expect(exec?.status).toBe("error");
+  });
+
   it("runs two executions concurrently without clobbering each other", async () => {
     const h = host();
     const [a, b] = (await Promise.all([

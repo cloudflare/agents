@@ -160,9 +160,10 @@ const STEP_PRELUDE = String.raw`
       return value;
     };`;
 
-// Connector bindings return a control marker rather than throwing across RPC.
-// The sandbox connector proxy (see executor.ts CONNECTOR_CONTROL_KEY) detects
-// it and throws locally. Keep these two in sync.
+// Connector bindings return a control marker — `{ [CONTROL_KEY]: "pause" }` or
+// `{ [CONTROL_KEY]: "error", message }` — rather than throwing across RPC. The
+// sandbox connector proxy (see executor.ts CONNECTOR_CONTROL_KEY) detects it and
+// throws locally. Keep these two in sync.
 const CONTROL_KEY = "__codemode_control__";
 
 // ---------------------------------------------------------------------------
@@ -267,30 +268,43 @@ function buildConnectorBindings(
   return setup.descriptions.map((desc) => ({
     name: desc.name,
     binding: new ConnectorCallTarget(async (method, args) => {
-      const seq = cursor.next();
-      const requiresApproval =
-        setup.annotations[`${desc.name}.${method}`]?.requiresApproval ?? false;
-      const decision = await runtime.decide(
-        executionId,
-        seq,
-        desc.name,
-        method,
-        args,
-        requiresApproval
-      );
+      // The RpcTarget method must ALWAYS resolve — never reject. A rejection
+      // across the sandbox→host RPC boundary is tracked as an unhandled
+      // rejection on the host even though the sandbox awaits it. So every
+      // outcome, including a genuine error, is returned as a value: a result, a
+      // pause marker, or an error marker. The sandbox proxy turns the pause/
+      // error markers into a local throw, which the run's own try/catch handles
+      // (and which surfaces as an "error" execution exactly as a raw throw did).
+      try {
+        const seq = cursor.next();
+        const requiresApproval =
+          setup.annotations[`${desc.name}.${method}`]?.requiresApproval ??
+          false;
+        const decision = await runtime.decide(
+          executionId,
+          seq,
+          desc.name,
+          method,
+          args,
+          requiresApproval
+        );
 
-      // Control signals are returned (not thrown) so the RpcTarget method
-      // always resolves — throwing across the sandbox→host RPC boundary leaves
-      // a rejection tracked as unhandled. The sandbox proxy turns the pause
-      // marker into a local throw, which the sandbox's own try/catch handles.
-      if (decision.kind === "replay") return decision.result;
-      if (decision.kind === "pause") return { [CONTROL_KEY]: "pause" };
+        if (decision.kind === "replay") return decision.result;
+        if (decision.kind === "pause") return { [CONTROL_KEY]: "pause" };
 
-      const connector = setup.connectorsByName.get(desc.name);
-      if (!connector) throw new Error(`Unknown connector: ${desc.name}`);
-      const result = await connector.executeTool(method, args, { executionId });
-      await runtime.recordResult(executionId, decision.seq, result);
-      return result;
+        const connector = setup.connectorsByName.get(desc.name);
+        if (!connector) throw new Error(`Unknown connector: ${desc.name}`);
+        const result = await connector.executeTool(method, args, {
+          executionId
+        });
+        await runtime.recordResult(executionId, decision.seq, result);
+        return result;
+      } catch (err) {
+        return {
+          [CONTROL_KEY]: "error",
+          message: err instanceof Error ? err.message : String(err)
+        };
+      }
     })
   }));
 }

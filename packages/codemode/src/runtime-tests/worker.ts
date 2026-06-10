@@ -74,6 +74,15 @@ class ItemsConnector extends CodemodeConnector<Env> {
           this.deleted.push(result);
         }
       },
+      boom: {
+        // Always throws — exercises the host→sandbox error path: the binding
+        // must return an error marker (never reject across RPC) so the run ends
+        // "error" without leaving an unhandled rejection on the host.
+        description: "Always throws.",
+        execute: () => {
+          throw new Error("connector boom");
+        }
+      },
       add_note: {
         // No approval, but reversible — rollback must still undo it.
         description: "Add a note immediately (no approval).",
