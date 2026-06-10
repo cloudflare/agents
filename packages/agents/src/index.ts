@@ -1237,7 +1237,15 @@ export interface AgentStaticOptions {
   /**
    * Maximum age in milliseconds of an unmanaged interrupted-fiber row before
    * recovery stops retrying a repeatedly-throwing `onFiberRecovered()` hook
-   * and discards the row. Set to `0` to retain rows indefinitely.
+   * and discards the row (emitting `fiber:recovery:skipped` with reason
+   * `max_age_exceeded`). Defaults to 24h.
+   *
+   * Set to `0` to retain rows indefinitely. NOTE: with `0`, a hook that keeps
+   * throwing is retried forever — the recovery alarm backs off exponentially
+   * (capped at 5 minutes) so it is not a busy-loop, but the Durable Object
+   * stays warm (never idle-evicts) for as long as the un-recoverable row
+   * exists. Prefer a finite age unless you intend to inspect/clear such rows
+   * yourself.
    */
   fiberRecoveryMaxAgeMs?: number;
   /**
