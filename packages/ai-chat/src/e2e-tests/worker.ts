@@ -44,7 +44,11 @@ function makeSSEStream(
       }
       await new Promise((r) => setTimeout(r, delayMs));
       const chunk = chunks[index++];
-      controller.enqueue(encoder.encode(`0:${JSON.stringify(chunk)}\n`));
+      // AIChatAgent parses the AI SDK UI-message data-stream protocol, i.e.
+      // `data: {json}` SSE frames (it skips anything not prefixed `data: `).
+      // The legacy `0:{json}` framing was silently dropped, so no chunk was
+      // ever persisted — which is why recovery only ever saw an empty partial.
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
     }
   });
 }
@@ -57,21 +61,23 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     _onFinish: unknown,
     _options?: OnChatMessageOptions
   ) {
-    const chunks = [
+    // Stream many small deltas at 500ms each so the turn takes long enough to be
+    // interrupted by SIGKILL. The chunk count matters for recovery semantics:
+    // ResumableStream flushes to SQLite in batches of CHUNK_BUFFER_SIZE (10), so
+    // an interruption BEFORE that threshold leaves an empty (unflushed) partial
+    // — the RETRY path (test kills at ~3s, ~6 chunks) — while an interruption
+    // AFTER it leaves a non-empty partial — the CONTINUE path (test kills at
+    // ~6s, ~12 chunks).
+    const chunks: Array<{ type: string; [k: string]: unknown }> = [
       { type: "start", messageId: `asst-${Date.now()}` },
-      { type: "text-start" },
-      { type: "text-delta", delta: "Hello " },
-      { type: "text-delta", delta: "world, " },
-      { type: "text-delta", delta: "this " },
-      { type: "text-delta", delta: "is " },
-      { type: "text-delta", delta: "a " },
-      { type: "text-delta", delta: "slow " },
-      { type: "text-delta", delta: "response." },
-      { type: "text-end" },
-      { type: "finish" }
+      { type: "text-start" }
     ];
+    for (let i = 0; i < 20; i++) {
+      chunks.push({ type: "text-delta", delta: `chunk${i + 1} ` });
+    }
+    chunks.push({ type: "text-end" }, { type: "finish" });
 
-    return new Response(makeSSEStream(chunks, 1000), {
+    return new Response(makeSSEStream(chunks, 500), {
       headers: { "Content-Type": "text/event-stream" }
     });
   }
