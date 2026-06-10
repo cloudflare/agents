@@ -2052,7 +2052,7 @@ export class ThinkWorkflowRecoveryE2EAgent extends Think<Env> {
   }
 
   @callable()
-  async getWorkflow(
+  async inspectWorkflowRun(
     id: string
   ): Promise<{ status: string; output: unknown; error: string | null }> {
     const status = await this.getWorkflowStatus("STEP_PROMPT_WORKFLOW", id);

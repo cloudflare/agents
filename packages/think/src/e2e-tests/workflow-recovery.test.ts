@@ -268,7 +268,8 @@ describe("Think workflow-turn recovery e2e", () => {
 
     const view = await pollUntil(
       "workflow status (happy)",
-      () => callAgent(agent, "getWorkflow", [id]) as Promise<WorkflowView>,
+      () =>
+        callAgent(agent, "inspectWorkflowRun", [id]) as Promise<WorkflowView>,
       (v) =>
         v.status === "complete" ||
         v.status === "errored" ||
@@ -323,7 +324,8 @@ describe("Think workflow-turn recovery e2e", () => {
     // guarantee that holds today.
     const view = await pollUntil(
       "workflow status (recovery)",
-      () => callAgent(agent, "getWorkflow", [id]) as Promise<WorkflowView>,
+      () =>
+        callAgent(agent, "inspectWorkflowRun", [id]) as Promise<WorkflowView>,
       (v) =>
         v.status === "complete" ||
         v.status === "errored" ||
