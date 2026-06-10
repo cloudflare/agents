@@ -28,6 +28,10 @@
       {
         "name": "ChatNoPersistNoContinueAgent",
         "class_name": "ChatNoPersistNoContinueAgent"
+      },
+      {
+        "name": "ChatBufferCleanupAgent",
+        "class_name": "ChatBufferCleanupAgent"
       }
     ]
   },
@@ -53,6 +57,10 @@
         "ChatNoContinueAgent",
         "ChatNoPersistNoContinueAgent"
       ]
+    },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": ["ChatBufferCleanupAgent"]
     }
   ]
 }
