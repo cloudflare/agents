@@ -380,6 +380,41 @@ describe("codemode durable runtime (e2e)", () => {
     if (reuse.status === "completed") expect(reuse.result).toBe("ran:world");
   });
 
+  it("re-runs a snippet saved from fenced or statement-style code", async () => {
+    const h = host();
+
+    // Markdown-fenced model output: valid at run time (the executor normalizes
+    // it) but the raw fenced text is what gets stored on the snippet.
+    const fenced = "```ts\nasync () => { return 42; }\n```";
+    const a = (await h.run(fenced)) as ProxyToolOutput;
+    expect(a.status).toBe("completed");
+    if (a.status !== "completed") return;
+    expect(a.result).toBe(42);
+    await h.saveSnippet("answer", "returns the answer", a.executionId);
+
+    // A statement block (no arrow wrapper, top-level return) — also only valid
+    // after normalization.
+    const block = `const list = await items.list_items();\nreturn list.length;`;
+    const b = (await h.run(block)) as ProxyToolOutput;
+    expect(b.status).toBe("completed");
+    if (b.status !== "completed") return;
+    await h.saveSnippet("count", "counts items", b.executionId);
+
+    // Re-running each snippet must normalize the stored raw code before
+    // embedding it as an expression — otherwise the wrapper is a syntax error.
+    const viaAnswer = (await h.run(
+      `async () => await codemode.run("answer")`
+    )) as ProxyToolOutput;
+    expect(viaAnswer.status).toBe("completed");
+    if (viaAnswer.status === "completed") expect(viaAnswer.result).toBe(42);
+
+    const viaCount = (await h.run(
+      `async () => await codemode.run("count")`
+    )) as ProxyToolOutput;
+    expect(viaCount.status).toBe("completed");
+    if (viaCount.status === "completed") expect(viaCount.result).toBe(0);
+  });
+
   it("deletes an execution from the audit trail", async () => {
     const h = host();
     await h.run(`async () => 1`);

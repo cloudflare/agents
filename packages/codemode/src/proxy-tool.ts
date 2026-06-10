@@ -23,6 +23,7 @@ import { tool, type Tool } from "ai";
 import { z } from "zod";
 import type { Executor, ResolvedProvider, ConnectorBinding } from "./executor";
 import { runCode } from "./run-code";
+import { normalizeCode } from "./normalize";
 import type { CodemodeConnector, ConnectorDescription } from "./connectors";
 import type { ExecutionEndStatus, ToolAnnotations } from "./connectors";
 import { searchConnectors, describeTarget } from "./connectors";
@@ -356,8 +357,15 @@ function createPlatformProvider(
         // Snippets are saved execution code, so they may use the codemode
         // SDK (e.g. codemode.step) — run them with this same provider, which
         // shares the cursor so the snippet's calls continue this run's log.
+        //
+        // The stored snippet is the model's raw code, which may carry markdown
+        // fences or be a statement block — embedding it directly as an
+        // expression would be a syntax error. Normalize it to a valid arrow
+        // expression first (the same transform the executor applies to a fresh
+        // run); `runCode` then normalizes the outer wrapper as usual.
+        const snippetExpr = normalizeCode(snippet.code);
         const result = await runCode({
-          code: `async () => {\n  const snippet = (${snippet.code});\n  return await snippet(${JSON.stringify(args[1])});\n}`,
+          code: `async () => {\n  const snippet = (${snippetExpr});\n  return await snippet(${JSON.stringify(args[1])});\n}`,
           executor,
           providers: [provider],
           connectors: bindings
