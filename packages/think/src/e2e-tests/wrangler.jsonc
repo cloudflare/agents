@@ -64,6 +64,10 @@
       {
         "name": "ThinkContextOverflowE2EAgent",
         "class_name": "ThinkContextOverflowE2EAgent"
+      },
+      {
+        "name": "ThinkSubmissionRecoveryE2EAgent",
+        "class_name": "ThinkSubmissionRecoveryE2EAgent"
       }
     ]
   },
@@ -117,6 +121,10 @@
     {
       "tag": "v9",
       "new_sqlite_classes": ["ThinkContextOverflowE2EAgent"]
+    },
+    {
+      "tag": "v10",
+      "new_sqlite_classes": ["ThinkSubmissionRecoveryE2EAgent"]
     }
   ],
   "r2_buckets": [

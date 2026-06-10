@@ -23,6 +23,7 @@ import type {
   ChatRecoveryContext,
   ChatRecoveryOptions,
   StreamCallback,
+  ThinkSubmissionInspection,
   TurnConfig,
   TurnContext
 } from "../think";
@@ -40,6 +41,7 @@ type Env = {
   ThinkSlowChildE2EAgent: DurableObjectNamespace<ThinkSlowChildE2EAgent>;
   ThinkSlowChildParentE2EAgent: DurableObjectNamespace<ThinkSlowChildParentE2EAgent>;
   ThinkContextOverflowE2EAgent: DurableObjectNamespace<ThinkContextOverflowE2EAgent>;
+  ThinkSubmissionRecoveryE2EAgent: DurableObjectNamespace<ThinkSubmissionRecoveryE2EAgent>;
   TestStructuredAgent: DurableObjectNamespace<TestStructuredAgent>;
   STEP_PROMPT_WORKFLOW: Workflow;
   AI: Ai;
@@ -1636,6 +1638,131 @@ export class ThinkContextOverflowE2EAgent extends Think<Env> {
   @callable()
   override async getMessages(): Promise<UIMessage[]> {
     return this.messages;
+  }
+}
+
+// ── Submission recovery on start ────────────────────────────────────
+//
+// Exercises `_recoverSubmissionsOnStart`, which runs as part of the DO start
+// sequence and reconciles `running` durable submissions left behind by an
+// eviction. Three transitions are covered:
+//   - messages NOT applied → re-enqueue as `pending`
+//   - messages applied but the turn is NOT recoverable → `error`
+//   - messages applied AND the chat turn is recoverable → left running, the
+//     scheduled continuation drives it to `completed`
+//
+// The not-applied / applied-but-not-recoverable cases are seeded deterministically
+// via SQL (no kill-timing race), then a real process restart triggers recovery.
+// The recoverable case uses a genuine in-flight submission + mid-stream SIGKILL.
+
+const SUBMISSION_STATUS_LOG_KEY = "test:submission-status-log";
+
+export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override chatRecovery = true;
+
+  override getModel(): LanguageModel {
+    return createSlowE2EMockModel();
+  }
+
+  override getSystemPrompt(): string {
+    return "Submission recovery e2e agent.";
+  }
+
+  // Continue an interrupted turn so a recoverable submission can complete.
+  override async onChatRecovery(): Promise<ChatRecoveryOptions> {
+    return { continue: true };
+  }
+
+  // Record every submission status transition so a test can assert the
+  // recovery transition even if a later drain advances the row again.
+  override async onSubmissionStatus(
+    submission: ThinkSubmissionInspection
+  ): Promise<void> {
+    const log =
+      (await this.ctx.storage.get<string[]>(SUBMISSION_STATUS_LOG_KEY)) ?? [];
+    log.push(`${submission.submissionId}:${submission.status}`);
+    await this.ctx.storage.put(SUBMISSION_STATUS_LOG_KEY, log);
+  }
+
+  @callable()
+  async startSubmission(submissionId: string, text: string): Promise<string> {
+    const result = await this.submitMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text }]
+        }
+      ],
+      { submissionId }
+    );
+    return result.submissionId;
+  }
+
+  /**
+   * Seed a `running` submission row directly (no model turn), simulating a
+   * submission left mid-flight by an eviction. `applied: false` leaves
+   * `messages_applied_at` NULL with a message id absent from history (the
+   * not-applied → pending path); `applied: true` marks messages applied with no
+   * recoverable fiber/continuation (the applied → error path).
+   */
+  @callable()
+  async seedRunningSubmission(
+    submissionId: string,
+    requestId: string,
+    applied: boolean
+  ): Promise<void> {
+    // Ensure the submissions table exists (inspect goes through the ensure path).
+    await this.inspectSubmission(submissionId);
+    const now = Date.now();
+    const messagesJson = JSON.stringify([
+      {
+        id: `seed-${submissionId}`,
+        role: "user",
+        parts: [{ type: "text", text: "seeded submission" }]
+      }
+    ]);
+    this.sql`
+      INSERT INTO cf_think_submissions (
+        submission_id, idempotency_key, request_id, stream_id, status,
+        messages_json, metadata_json, error_message, created_at,
+        messages_applied_at, started_at, completed_at
+      )
+      VALUES (
+        ${submissionId}, NULL, ${requestId}, NULL, 'running',
+        ${messagesJson}, NULL, NULL, ${now},
+        ${applied ? now : null}, ${now}, NULL
+      )
+    `;
+  }
+
+  @callable()
+  async getSubmission(
+    submissionId: string
+  ): Promise<{ status: string; error: string | null } | null> {
+    const row = await this.inspectSubmission(submissionId);
+    return row ? { status: row.status, error: row.error ?? null } : null;
+  }
+
+  @callable()
+  async getStatusLog(): Promise<string[]> {
+    return (
+      (await this.ctx.storage.get<string[]>(SUBMISSION_STATUS_LOG_KEY)) ?? []
+    );
+  }
+
+  @callable()
+  async getMessageCount(): Promise<number> {
+    return this.messages.length;
+  }
+
+  @callable()
+  async hasFiberRows(): Promise<boolean> {
+    const rows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    return (rows[0]?.c ?? 0) > 0;
   }
 }
 
