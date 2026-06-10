@@ -9,7 +9,9 @@
  */
 import {
   AIChatAgent,
+  type ChatRecoveryConfig,
   type ChatRecoveryContext,
+  type ChatRecoveryExhaustedContext,
   type ChatRecoveryOptions,
   type OnChatMessageOptions
 } from "@cloudflare/ai-chat";
@@ -18,7 +20,176 @@ import type { UIMessage as ChatMessage } from "ai";
 
 type Env = {
   ChatRecoveryTestAgent: DurableObjectNamespace<ChatRecoveryTestAgent>;
+  ChatNoProgressExhaustAgent: DurableObjectNamespace<ChatNoProgressExhaustAgent>;
+  ChatAbortedExhaustAgent: DurableObjectNamespace<ChatAbortedExhaustAgent>;
+  ChatWorkBudgetExhaustAgent: DurableObjectNamespace<ChatWorkBudgetExhaustAgent>;
 };
+
+const EXHAUSTED_LOG_KEY = "test:exhausted-log";
+
+type ExhaustedLogEntry = {
+  reason: string;
+  terminalMessage: string;
+  attempt: number;
+};
+
+/**
+ * Shared base for recovery-budget exhaustion e2e agents.
+ *
+ * `onChatMessage` returns a stream that emits nothing and never closes: the
+ * turn is therefore always in-flight (a SIGKILL interrupts it and triggers
+ * fiber recovery) and makes ZERO recovery progress (the progress marker is only
+ * bumped by produced content). That lets the test drive recovery budgets
+ * DETERMINISTICALLY via process kills, instead of racing real streamed content
+ * that would reset the no-progress clock. Each subclass sets a `chatRecovery`
+ * config that exhausts via a specific reason; `onExhausted` records it.
+ */
+abstract class ExhaustionBaseAgent extends AIChatAgent<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+
+  override async onChatMessage(
+    _onFinish: unknown,
+    _options?: OnChatMessageOptions
+  ): Promise<Response> {
+    const stream = new ReadableStream<Uint8Array>({
+      start() {
+        // Hang forever: never enqueue, never close. Keeps the turn in-flight
+        // and produces no recovery progress.
+      }
+    });
+    return new Response(stream, {
+      headers: { "Content-Type": "text/event-stream" }
+    });
+  }
+
+  protected async _recordExhausted(
+    ctx: ChatRecoveryExhaustedContext
+  ): Promise<void> {
+    const log =
+      (await this.ctx.storage.get<ExhaustedLogEntry[]>(EXHAUSTED_LOG_KEY)) ??
+      [];
+    log.push({
+      reason: ctx.reason,
+      terminalMessage: ctx.terminalMessage,
+      attempt: ctx.attempt
+    });
+    await this.ctx.storage.put(EXHAUSTED_LOG_KEY, log);
+  }
+
+  @callable()
+  async getExhaustedLog(): Promise<ExhaustedLogEntry[]> {
+    return (
+      (await this.ctx.storage.get<ExhaustedLogEntry[]>(EXHAUSTED_LOG_KEY)) ?? []
+    );
+  }
+
+  @callable()
+  hasFiberRows(): boolean {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_runs
+    `;
+    return rows[0].count > 0;
+  }
+
+  @callable()
+  getMessageCount(): number {
+    return this.messages.length;
+  }
+
+  /**
+   * Read the durable terminal record (#1645) the framework persists when a turn
+   * is sealed, so the test can assert the user-facing banner survives for a
+   * client that reconnects after recovery gave up. Keyed by the framework's
+   * internal storage key.
+   */
+  @callable()
+  async getTerminalRecord(): Promise<{
+    requestId: string;
+    body: string;
+  } | null> {
+    return (
+      (await this.ctx.storage.get<{ requestId: string; body: string }>(
+        "cf:chat:last-terminal"
+      )) ?? null
+    );
+  }
+}
+
+/**
+ * Exhausts recovery via `no_progress_timeout`: a tiny no-progress window means
+ * the SECOND interruption of a turn that produced nothing seals the incident.
+ */
+export class ChatNoProgressExhaustAgent extends ExhaustionBaseAgent {
+  override chatRecovery: ChatRecoveryConfig = {
+    noProgressTimeoutMs: 2_000,
+    terminalMessage: "TERMINAL-NO-PROGRESS",
+    onExhausted: (ctx) => this._recordExhausted(ctx)
+  };
+}
+
+/**
+ * Exhausts recovery via `recovery_aborted`: a huge no-progress window keeps the
+ * other budgets from firing, and `shouldKeepRecovering` returns false from the
+ * second attempt onward.
+ */
+export class ChatAbortedExhaustAgent extends ExhaustionBaseAgent {
+  override chatRecovery: ChatRecoveryConfig = {
+    noProgressTimeoutMs: 3_600_000,
+    terminalMessage: "TERMINAL-ABORTED",
+    shouldKeepRecovering: () => false,
+    onExhausted: (ctx) => this._recordExhausted(ctx)
+  };
+}
+
+/**
+ * Exhausts recovery via `work_budget_exceeded`: `maxRecoveryWork: 0` seals the
+ * incident as soon as the turn produces ANY recovery work. Unlike the base
+ * agent, this one emits enough chunks to bump the durable progress/work meter
+ * (a `text-start` past the flush threshold) BEFORE hanging, so each detection
+ * sees work accrue beyond the baseline.
+ */
+export class ChatWorkBudgetExhaustAgent extends ExhaustionBaseAgent {
+  override chatRecovery: ChatRecoveryConfig = {
+    maxRecoveryWork: 0,
+    noProgressTimeoutMs: 3_600_000,
+    terminalMessage: "TERMINAL-WORK",
+    onExhausted: (ctx) => this._recordExhausted(ctx)
+  };
+
+  override async onChatMessage(
+    _onFinish: unknown,
+    _options?: OnChatMessageOptions
+  ): Promise<Response> {
+    // Emit a single `text-start` then hang. `text-start` bumps the durable
+    // recovery work/progress meter at production time (independent of flush),
+    // so each interruption banks one unit of work. Staying below the 10-chunk
+    // flush threshold keeps the recoverable partial empty (the retry path),
+    // which avoids the continuation suppression that would swallow a re-emitted
+    // text-start on the continue path.
+    const chunks: Array<{ type: string; [k: string]: unknown }> = [
+      { type: "start", messageId: `asst-${Date.now()}` },
+      { type: "text-start" }
+    ];
+    const encoder = new TextEncoder();
+    let index = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (index < chunks.length) {
+          await new Promise((r) => setTimeout(r, 100));
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(chunks[index++])}\n\n`)
+          );
+          return;
+        }
+        // Progress banked: hang so the turn stays in-flight and interruptible.
+        await new Promise(() => {});
+      }
+    });
+    return new Response(stream, {
+      headers: { "Content-Type": "text/event-stream" }
+    });
+  }
+}
 
 type RecoveryContextLogEntry = {
   streamId: string;
