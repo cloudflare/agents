@@ -13,9 +13,13 @@ import type { WorkflowEvent } from "cloudflare:workers";
 import { tool } from "ai";
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { z } from "zod";
-import { Think, Workspace } from "../think";
+import { Session } from "agents/experimental/memory/session";
+import type { ObservabilityEvent } from "agents/observability";
+import { Think, Workspace, defaultContextOverflowClassifier } from "../think";
 import { ThinkWorkflow, type ThinkWorkflowStep } from "../workflows";
 import type {
+  ChatErrorClassification,
+  ChatErrorContext,
   ChatRecoveryContext,
   ChatRecoveryOptions,
   StreamCallback,
@@ -35,6 +39,7 @@ type Env = {
   ThinkAgentToolNaturalParentE2EAgent: DurableObjectNamespace<ThinkAgentToolNaturalParentE2EAgent>;
   ThinkSlowChildE2EAgent: DurableObjectNamespace<ThinkSlowChildE2EAgent>;
   ThinkSlowChildParentE2EAgent: DurableObjectNamespace<ThinkSlowChildParentE2EAgent>;
+  ThinkContextOverflowE2EAgent: DurableObjectNamespace<ThinkContextOverflowE2EAgent>;
   TestStructuredAgent: DurableObjectNamespace<TestStructuredAgent>;
   STEP_PROMPT_WORKFLOW: Workflow;
   AI: Ai;
@@ -1328,6 +1333,309 @@ export class StepPromptWorkflow extends ThinkWorkflow<TestStructuredAgent> {
       prompt,
       output: GREETING_SCHEMA
     });
+  }
+}
+
+// ── Context-overflow compaction recovery (in-process; no kills) ──────
+//
+// Exercises Think's opt-in `contextOverflow` recovery end-to-end inside the
+// real Workers runtime (no process kills needed): a mock model surfaces an
+// in-stream provider context-overflow error, and Think's reactive backstop
+// compacts + retries (or, when exhausted, surfaces the overflow terminally).
+// The proactive path keys off model-reported usage crossing a headroom budget.
+
+/**
+ * Deterministic context-overflow model. The inference-call counter lives on the
+ * agent instance (passed in via `nextCall`), so the FIRST inference can overflow
+ * and the scheduled reactive retry (a LATER inference) can succeed — without
+ * relying on prompt contents. In `exhaust` mode every inference overflows, so
+ * the reactive retry budget is spent and the turn terminalizes.
+ */
+function createContextOverflowModel(
+  nextCall: () => number,
+  mode: "recover" | "exhaust"
+): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-context-overflow",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream() {
+      const overflow = mode === "exhaust" || nextCall() === 1;
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (overflow) {
+            // A realistic overflow: the model streams a little text, THEN the
+            // provider rejects the now-too-long prompt. The AI SDK surfaces the
+            // rejection as an in-stream error part (not a throw), which Think's
+            // overflow seam recognizes via `classifyChatError`.
+            controller.enqueue({ type: "text-start", id: "t-partial" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-partial",
+              delta: "partial answer before overflow"
+            });
+            controller.enqueue({ type: "text-end", id: "t-partial" });
+            controller.enqueue({
+              type: "error",
+              error: new Error(
+                "AI_APICallError: prompt is too long: 213450 tokens > 200000 maximum"
+              )
+            });
+            controller.close();
+            return;
+          }
+          controller.enqueue({ type: "text-start", id: "t-ok" });
+          controller.enqueue({
+            type: "text-delta",
+            id: "t-ok",
+            delta: "recovered after compaction"
+          });
+          controller.enqueue({ type: "text-end", id: "t-ok" });
+          controller.enqueue({
+            type: "finish",
+            finishReason: v3FinishReason("stop"),
+            usage: v3Usage(20, 10)
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+/**
+ * Proactive-guard model: step 1 emits an `echo` tool call reporting high input
+ * usage; the proactive guard reads that usage before step 2 and compacts in
+ * place (heading off the overflow). Step 2 then streams a normal answer.
+ */
+function createProactiveUsageModel(): LanguageModel {
+  let callCount = 0;
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-proactive-usage",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream() {
+      callCount++;
+      const step = callCount;
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (step === 1) {
+            const id = "tc-echo";
+            const input = JSON.stringify({ message: "ping" });
+            controller.enqueue({
+              type: "tool-input-start",
+              id,
+              toolName: "echo"
+            });
+            controller.enqueue({ type: "tool-input-delta", id, delta: input });
+            controller.enqueue({ type: "tool-input-end", id });
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: id,
+              toolName: "echo",
+              input
+            });
+            // Report high input usage so the proactive guard trips before step 2.
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("tool-calls"),
+              usage: v3Usage(10, 5)
+            });
+          } else {
+            controller.enqueue({ type: "text-start", id: "t-ok" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-ok",
+              delta: "answered with headroom to spare"
+            });
+            controller.enqueue({ type: "text-end", id: "t-ok" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("stop"),
+              usage: v3Usage(20, 10)
+            });
+          }
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+type OverflowMode = "recover" | "exhaust" | "proactive";
+
+type OverflowChatOutcome = {
+  done: boolean;
+  error: string | null;
+  compactionCount: number;
+  compactionReasons: string[];
+  modelCalls: number;
+  assistantMessages: number;
+  finalText: string;
+  errorClassification: string | null;
+};
+
+/** In-process StreamCallback: collects the terminal outcome of a chat turn. */
+class CollectingChatCallback implements StreamCallback {
+  doneCalled = false;
+  errorMessage: string | null = null;
+  onStart(): void {}
+  onEvent(): void {}
+  onDone(): void {
+    this.doneCalled = true;
+  }
+  onError(error: string): void {
+    this.errorMessage = error;
+  }
+}
+
+/**
+ * Context-overflow recovery e2e agent. A single configurable agent covers the
+ * reactive recover/exhaust paths and the proactive guard. `contextOverflow` and
+ * the active model are selected per-run via `runOverflowChat`, so each test case
+ * targets a fresh DO instance with its own behavior.
+ */
+export class ThinkContextOverflowE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override maxSteps = 4;
+  private _inferenceCount = 0;
+  private _mode: OverflowMode = "recover";
+  private _compactionCount = 0;
+  private _compactionReasons: string[] = [];
+  private _modelCalls = 0;
+  private _errorClassification: string | null = null;
+
+  override getModel(): LanguageModel {
+    this._modelCalls++;
+    if (this._mode === "proactive") return createProactiveUsageModel();
+    return createContextOverflowModel(
+      () => ++this._inferenceCount,
+      this._mode === "exhaust" ? "exhaust" : "recover"
+    );
+  }
+
+  override getSystemPrompt(): string {
+    return "You are a context-overflow recovery e2e agent.";
+  }
+
+  override getTools(): ToolSet {
+    if (this._mode !== "proactive") return {};
+    return {
+      echo: tool({
+        description: "Echo a message back.",
+        inputSchema: z.object({ message: z.string() }),
+        execute: async ({ message }: { message: string }) => `pong: ${message}`
+      })
+    };
+  }
+
+  // Think ships no provider-specific matching; delegate to the exported default
+  // classifier so the in-stream "prompt is too long" error is recognized.
+  override classifyChatError(
+    error: unknown,
+    _ctx?: ChatErrorContext
+  ): ChatErrorClassification | void {
+    return defaultContextOverflowClassifier(error);
+  }
+
+  override onChatError(error: unknown, ctx?: ChatErrorContext): unknown {
+    this._errorClassification = ctx?.classification ?? null;
+    return super.onChatError(error, ctx);
+  }
+
+  override _emit(
+    type: ObservabilityEvent["type"],
+    payload: Record<string, unknown> = {}
+  ): void {
+    if (type === "chat:context:compacted") {
+      this._compactionCount++;
+      const reason = payload.reason;
+      if (typeof reason === "string") this._compactionReasons.push(reason);
+    }
+    super._emit(type, payload);
+  }
+
+  override configureSession(session: Session): Session {
+    // Collapse the first message so a non-empty tail always survives — enough to
+    // prove compaction shortened history and the reactive retry can proceed.
+    return session.onCompaction(async (messages) => {
+      if (messages.length < 2) return null;
+      return {
+        summary: "compacted-summary",
+        fromMessageId: messages[0].id,
+        toMessageId: messages[0].id
+      };
+    });
+  }
+
+  @callable()
+  async runOverflowChat(
+    message: string,
+    mode: OverflowMode
+  ): Promise<OverflowChatOutcome> {
+    this._mode = mode;
+    this._inferenceCount = 0;
+    this._compactionCount = 0;
+    this._compactionReasons = [];
+    this._modelCalls = 0;
+    this._errorClassification = null;
+
+    this.contextOverflow =
+      mode === "proactive"
+        ? { proactive: { maxInputTokens: 10 } }
+        : { reactive: true };
+
+    // Seed a prior turn so the compaction range always leaves a usable tail.
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text: "earlier question" }]
+    });
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [{ type: "text", text: "earlier answer" }]
+    });
+
+    const cb = new CollectingChatCallback();
+    await this.chat(message, cb);
+
+    const assistant = this.messages.filter((m) => m.role === "assistant");
+    const final = assistant[assistant.length - 1];
+    const finalText = final
+      ? final.parts
+          .filter((p): p is { type: "text"; text: string } => p.type === "text")
+          .map((p) => p.text)
+          .join("")
+      : "";
+
+    return {
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      compactionCount: this._compactionCount,
+      compactionReasons: this._compactionReasons,
+      modelCalls: this._modelCalls,
+      assistantMessages: assistant.length,
+      finalText,
+      errorClassification: this._errorClassification
+    };
+  }
+
+  @callable()
+  override async getMessages(): Promise<UIMessage[]> {
+    return this.messages;
   }
 }
 

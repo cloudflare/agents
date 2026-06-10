@@ -60,6 +60,10 @@
       {
         "name": "TestStructuredAgent",
         "class_name": "TestStructuredAgent"
+      },
+      {
+        "name": "ThinkContextOverflowE2EAgent",
+        "class_name": "ThinkContextOverflowE2EAgent"
       }
     ]
   },
@@ -109,6 +113,10 @@
     {
       "tag": "v8",
       "new_sqlite_classes": ["TestStructuredAgent"]
+    },
+    {
+      "tag": "v9",
+      "new_sqlite_classes": ["ThinkContextOverflowE2EAgent"]
     }
   ],
   "r2_buckets": [
