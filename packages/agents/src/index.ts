@@ -907,6 +907,18 @@ export type AddRpcMcpServerOptions = {
 const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
 const DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS = 2_000;
 const DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 5_000;
+// Ceiling for the exponential backoff applied to the runFiber-recovery
+// follow-up alarm. A scan that makes NO forward progress (every pending orphan
+// row's recovery hook threw) but still has work pending backs off so a poison
+// fiber — or a `fiberRecoveryMaxAgeMs: 0` "retain forever" row whose hook keeps
+// throwing — does not wake the DO every `keepAliveIntervalMs` indefinitely (the
+// perpetual-heartbeat hazard #1707 guards against). A scan that DID make
+// progress (recovered ≥1 row, including a scan-deadline yield that drained
+// some) resets the backoff so legitimate multi-pass draining stays prompt.
+const FIBER_RECOVERY_MAX_BACKOFF_MS = 5 * 60_000;
+// Cap the doubling exponent so `base * 2 ** n` never overflows before the
+// `FIBER_RECOVERY_MAX_BACKOFF_MS` clamp applies.
+const FIBER_RECOVERY_BACKOFF_MAX_EXP = 20;
 // Re-attaching to a still-running child agent-tool run (parent recovery /
 // duplicate-runId re-issue) tails it to its REAL terminal result instead of
 // abandoning it as `interrupted` and re-running already-completed child work
@@ -1495,6 +1507,13 @@ export class Agent<
   private _managedFiberTerminalWaiters = new Map<string, Set<() => void>>();
   /** @internal Prevents re-entrant recovery from overlapping alarm ticks. */
   private _runFiberRecoveryInProgress = false;
+  /**
+   * @internal Consecutive runFiber-recovery scans that made NO forward progress
+   * while work was still pending. Drives the exponential backoff of the
+   * recovery follow-up alarm so a repeatedly-throwing recovery hook does not
+   * busy-loop the DO. Reset to 0 whenever a scan recovers anything.
+   */
+  private _recoveryNoProgressScans = 0;
   /** @internal Single-flight background recovery for parent agent-tool rows. */
   private _agentToolRunRecoveryPromise: Promise<void> | undefined;
 
@@ -5353,6 +5372,10 @@ export class Agent<
     const scanStartedAt = Date.now();
     const scanDeadlineMs = this._resolvedOptions.fiberRecoveryScanDeadlineMs;
     const fiberRecoveryMaxAgeMs = this._resolvedOptions.fiberRecoveryMaxAgeMs;
+    // Forward progress this scan = at least one fiber was resolved (orphan row
+    // deleted via recovery/age-out/managed-terminal, or a ledger-only managed
+    // fiber finalized). Drives the recovery-alarm backoff in `_scheduleNextAlarm`.
+    let madeProgress = false;
 
     try {
       const rows = this.sql<{
@@ -5398,6 +5421,7 @@ export class Agent<
         if (managedRow) {
           if (this._isTerminalFiberStatus(managedRow.status)) {
             this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
+            madeProgress = true;
             this._notifyManagedFiberTerminal(row.id);
             continue;
           }
@@ -5434,6 +5458,7 @@ export class Agent<
             });
           }
           this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
+          madeProgress = true;
         }
         if (managedRow) {
           this._notifyManagedFiberTerminal(row.id);
@@ -5499,10 +5524,24 @@ export class Agent<
         });
 
         await this._runFiberRecoveryHook(ctx, row);
+        // A ledger-only fiber is finalized this pass regardless of hook outcome
+        // (its ledger row is marked terminal and waiters are notified), so it
+        // will not be pending next scan — that is forward progress.
+        madeProgress = true;
         this._notifyManagedFiberTerminal(row.fiber_id);
       }
     } finally {
       this._runFiberRecoveryInProgress = false;
+      // Update the recovery-alarm backoff streak: reset on any forward progress,
+      // otherwise grow it only while work is still pending (a repeatedly-failing
+      // poison hook). `_scheduleNextAlarm` reads this to space out retries.
+      if (madeProgress) {
+        this._recoveryNoProgressScans = 0;
+      } else {
+        this._recoveryNoProgressScans = this._hasPendingFiberRecovery()
+          ? this._recoveryNoProgressScans + 1
+          : 0;
+      }
     }
   }
 
@@ -5963,9 +6002,24 @@ export class Agent<
     // crosses `fiberRecoveryScanDeadlineMs`, and a repeatedly-throwing
     // unmanaged recovery hook keeps its row until it ages out. Without a
     // follow-up alarm those leftovers would starve, since the orphans hold no
-    // keepAlive ref. Arm one so recovery resumes on the next tick.
+    // keepAlive ref. Arm one so recovery resumes.
+    //
+    // The delay backs off exponentially while scans make no forward progress
+    // (a poison hook that keeps throwing, or a `fiberRecoveryMaxAgeMs: 0`
+    // retain-forever row) so the DO is not woken every `keepAliveIntervalMs`
+    // indefinitely. A scan that recovers anything resets the streak (see
+    // `_checkRunFibers`), so legitimate multi-pass draining stays prompt.
     if (this._hasPendingFiberRecovery()) {
-      const recoveryMs = nowMs + this._resolvedOptions.keepAliveIntervalMs;
+      const base = this._resolvedOptions.keepAliveIntervalMs;
+      const exp = Math.min(
+        this._recoveryNoProgressScans,
+        FIBER_RECOVERY_BACKOFF_MAX_EXP
+      );
+      const recoveryDelayMs = Math.min(
+        FIBER_RECOVERY_MAX_BACKOFF_MS,
+        base * 2 ** exp
+      );
+      const recoveryMs = nowMs + recoveryDelayMs;
       nextTimeMs =
         nextTimeMs === null ? recoveryMs : Math.min(nextTimeMs, recoveryMs);
     }

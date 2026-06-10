@@ -22,6 +22,9 @@ type Env = {
   PoisonRowAgent: DurableObjectNamespace<PoisonRowAgent>;
   ScanDeadlineAgent: DurableObjectNamespace<ScanDeadlineAgent>;
   ConcurrentFiberAgent: DurableObjectNamespace<ConcurrentFiberAgent>;
+  PoisonBackoffAgent: DurableObjectNamespace<PoisonBackoffAgent>;
+  FacetRecoveryParent: DurableObjectNamespace<FacetRecoveryParent>;
+  FacetRecoveryChild: DurableObjectNamespace<FacetRecoveryChild>;
 };
 
 function fiberSleep(ms: number): Promise<void> {
@@ -460,6 +463,15 @@ abstract class RecoveryRecorderAgent extends Agent<Record<string, unknown>> {
     `;
     return rows[0]?.count ?? 0;
   }
+
+  protected _hookTimestamps(): number[] {
+    this._ensureRecoveryLog();
+    const rows = this.sql<{ created_at: number }>`
+      SELECT created_at FROM test_recovery_log
+      WHERE kind = 'hook' ORDER BY seq ASC
+    `;
+    return rows.map((r) => r.created_at);
+  }
 }
 
 // ── PoisonRowAgent (test 1: poison-row aging → max_age_exceeded) ───────
@@ -638,6 +650,131 @@ export class ConcurrentFiberAgent extends RecoveryRecorderAgent {
     idempotencyKey: string
   ): Promise<FiberInspection | null> {
     return this.inspectFiberByKey(idempotencyKey);
+  }
+}
+
+// ── PoisonBackoffAgent (recovery-alarm backoff cadence) ───────────────
+//
+// `fiberRecoveryMaxAgeMs: 0` retains the orphan FOREVER, and the recovery hook
+// always throws, so the row is never recovered and never aged out. The
+// recovery follow-up alarm must back off exponentially (rather than firing
+// every keepAliveIntervalMs) — exposed by recording each hook-attempt timestamp
+// so the test can assert the inter-retry gaps grow while the row is retained.
+
+export class PoisonBackoffAgent extends RecoveryRecorderAgent {
+  static options = {
+    keepAliveIntervalMs: 2_000,
+    // Retain forever: the row is never aged out, so the only thing bounding the
+    // retry storm is the alarm backoff.
+    fiberRecoveryMaxAgeMs: 0
+  };
+
+  override async onFiberRecovered(
+    ctx: RunFiberRecoveryContext
+  ): Promise<void | FiberRecoveryResult> {
+    this._recordRecoveryEvent("hook", ctx.id, ctx.name, null);
+    throw new Error(`poison recovery for ${ctx.name} (${ctx.id})`);
+  }
+
+  @callable()
+  startPoisonFiber(totalSteps: number): string {
+    void this.runFiber("poisonBackoffSteps", async (ctx) => {
+      const completedSteps: number[] = [];
+      for (let i = 0; i < totalSteps; i++) {
+        await fiberSleep(1000);
+        completedSteps.push(i);
+        ctx.stash({ completedSteps: [...completedSteps], totalSteps });
+      }
+    }).catch(console.error);
+    return "started";
+  }
+
+  @callable()
+  getBackoffStatus(): {
+    runCount: number;
+    hookCount: number;
+    hookTimestamps: number[];
+  } {
+    return {
+      runCount: this._runRowCount(),
+      hookCount: this._hookCount(),
+      hookTimestamps: this._hookTimestamps()
+    };
+  }
+}
+
+// ── Facet (sub-agent) multi-pass recovery ─────────────────────────────
+//
+// A facet child runs MANY orphaned fibers with a tiny scan deadline, so its
+// recovery cannot drain in one pass. The root parent owns the physical alarm
+// and re-drives the child's recovery across passes (the facet-run lease is
+// retained while the child still has rows). Covers the gap that the root-DO
+// tests don't exercise the facet recovery path under multi-pass churn.
+
+export class FacetRecoveryChild extends RecoveryRecorderAgent {
+  static options = {
+    keepAliveIntervalMs: 2_000,
+    fiberRecoveryScanDeadlineMs: 75
+  };
+
+  override async onFiberRecovered(
+    ctx: RunFiberRecoveryContext
+  ): Promise<void | FiberRecoveryResult> {
+    await fiberSleep(25);
+    this._recordRecoveryEvent("hook", ctx.id, ctx.name, null);
+  }
+
+  startManyFibers(count: number, stepCount: number): string {
+    for (let n = 0; n < count; n++) {
+      void this.runFiber(`facetFiber-${n}`, async (ctx) => {
+        const completedSteps: number[] = [];
+        for (let i = 0; i < stepCount; i++) {
+          await fiberSleep(1000);
+          completedSteps.push(i);
+          ctx.stash({ completedSteps: [...completedSteps], index: n });
+        }
+      }).catch(console.error);
+    }
+    return "started";
+  }
+
+  getScanStatus(): {
+    runCount: number;
+    hookCount: number;
+    distinctRecovered: number;
+    scanDeadlineExceededCount: number;
+  } {
+    return {
+      runCount: this._runRowCount(),
+      hookCount: this._hookCount(),
+      distinctRecovered: this._distinctHookFiberCount(),
+      scanDeadlineExceededCount: this._skipReasonCount("scan_deadline_exceeded")
+    };
+  }
+}
+
+export class FacetRecoveryParent extends Agent<Record<string, unknown>> {
+  static options = { keepAliveIntervalMs: 2_000 };
+
+  @callable()
+  async startChildManyFibers(
+    childName: string,
+    count: number,
+    stepCount: number
+  ): Promise<string> {
+    const child = await this.subAgent(FacetRecoveryChild, childName);
+    return child.startManyFibers(count, stepCount);
+  }
+
+  @callable()
+  async getChildScanStatus(childName: string): Promise<{
+    runCount: number;
+    hookCount: number;
+    distinctRecovered: number;
+    scanDeadlineExceededCount: number;
+  }> {
+    const child = await this.subAgent(FacetRecoveryChild, childName);
+    return child.getScanStatus();
   }
 }
 

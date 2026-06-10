@@ -30,6 +30,20 @@
       {
         "name": "ConcurrentFiberAgent",
         "class_name": "ConcurrentFiberAgent"
+      },
+      {
+        "name": "PoisonBackoffAgent",
+        "class_name": "PoisonBackoffAgent"
+      },
+      {
+        "name": "FacetRecoveryParent",
+        "class_name": "FacetRecoveryParent"
+      },
+      // Test-harness-only binding (facet child): registered for ctx.exports,
+      // not migrated as its own SQLite class (mirrors SubAgentFiberChild).
+      {
+        "name": "FacetRecoveryChild",
+        "class_name": "FacetRecoveryChild"
       }
     ]
   },
@@ -45,6 +59,10 @@
         "ScanDeadlineAgent",
         "ConcurrentFiberAgent"
       ]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["PoisonBackoffAgent", "FacetRecoveryParent"]
     }
   ]
 }
