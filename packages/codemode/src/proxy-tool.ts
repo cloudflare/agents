@@ -9,22 +9,36 @@
  * Inside the sandbox:
  *   - Connector SDKs as globals: `<connector>.<method>(...)`
  *   - Platform SDK: `codemode.search/describe/step/run`
+ *
+ * ## Sequencing
+ *
+ * The host (this module) owns the replay cursor: a per-run counter allocates a
+ * `seq` for every connector call and every `codemode.step` in the order they
+ * happen, and threads `executionId` + `seq` to the facet. The facet keeps no
+ * in-memory cursor, so runs are safe across hibernation and can run
+ * concurrently without clobbering one another.
  */
+import { RpcTarget } from "cloudflare:workers";
 import { tool, type Tool } from "ai";
 import { z } from "zod";
 import type { Executor, ResolvedProvider, ConnectorBinding } from "./executor";
 import { runCode } from "./run-code";
 import type { CodemodeConnector, ConnectorDescription } from "./connectors";
+import type { ToolAnnotations } from "./connectors";
 import { searchConnectors, describeTarget } from "./connectors";
 import {
   CodemodeRuntime,
   STEP_CONNECTOR,
-  type AnnotationMap,
   type PendingAction,
   type ToolDecision,
   type ToolLogEntry,
   type ExecutionState
 } from "./runtime";
+import type { Snippet, SaveSnippetOptions } from "./snippet";
+import type { CodeOutput } from "./shared";
+
+// Connector annotations, flattened to "connector.method" → annotation.
+type AnnotationMap = Record<string, ToolAnnotations>;
 
 /**
  * The RPC surface of the CodemodeRuntime facet, as the proxy tool uses it.
@@ -35,30 +49,41 @@ import {
  * break `decision.kind` narrowing. This interface keeps the domain types intact.
  */
 interface RuntimeStub {
-  configure(annotations: AnnotationMap): Promise<void>;
-  begin(code: string): Promise<string>;
-  resume(id?: string): Promise<ExecutionState | null>;
+  begin(code: string, maxExecutions?: number): Promise<string>;
+  resume(id: string): Promise<ExecutionState | null>;
   decide(
+    executionId: string,
+    seq: number,
     connector: string,
     method: string,
-    args: unknown
+    args: unknown,
+    requiresApproval: boolean
   ): Promise<ToolDecision>;
-  recordResult(seq: number, result: unknown): Promise<void>;
-  complete(result: unknown, logs?: string[]): Promise<void>;
-  fail(error: string, logs?: string[]): Promise<void>;
-  listPending(): Promise<PendingAction[]>;
-  reject(seq: number): Promise<void>;
-  actionsToRevert(): Promise<ToolLogEntry[]>;
-  markReverted(seq: number): Promise<void>;
-  getExecution(id?: string): Promise<ExecutionState | null>;
-  listExecutions(): Promise<ExecutionState[]>;
-  saveSnippet(name: string, options?: SaveSnippetOptions): Promise<Snippet>;
+  recordResult(
+    executionId: string,
+    seq: number,
+    result: unknown
+  ): Promise<void>;
+  complete(
+    executionId: string,
+    result: unknown,
+    logs?: string[]
+  ): Promise<void>;
+  fail(executionId: string, error: string, logs?: string[]): Promise<void>;
+  listPending(executionId?: string): Promise<PendingAction[]>;
+  reject(seq: number, executionId: string): Promise<void>;
+  actionsToRevert(executionId: string): Promise<ToolLogEntry[]>;
+  markReverted(seq: number, executionId: string): Promise<void>;
+  markRolledBack(executionId: string): Promise<void>;
+  getExecution(id: string): Promise<ExecutionState | null>;
+  listExecutions(limit?: number): Promise<ExecutionState[]>;
+  deleteExecution(id: string): Promise<boolean>;
+  pruneExecutions(keep?: number): Promise<number>;
+  saveSnippet(name: string, options: SaveSnippetOptions): Promise<Snippet>;
   getSnippet(name: string): Promise<Snippet | null>;
   listSnippets(): Promise<Snippet[]>;
   deleteSnippet(name: string): Promise<boolean>;
 }
-import type { Snippet, SaveSnippetOptions } from "./snippet";
-import type { CodeOutput } from "./shared";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -67,11 +92,26 @@ import type { CodeOutput } from "./shared";
 export type ProxyToolInput = { code: string };
 
 export type ProxyToolOutput =
-  | { status: "completed"; result: unknown; logs?: string[] }
+  | {
+      status: "completed";
+      executionId: string;
+      result: unknown;
+      logs?: string[];
+    }
   | {
       status: "paused";
       executionId: string;
       pending: PendingAction[];
+    }
+  // Execution errors (a thrown sandbox error or a replay divergence) are
+  // returned, not thrown: the model sees the failure as a tool result it can
+  // reason about, and the agent loop isn't broken by an exception. The failure
+  // is also recorded on the execution (status "error") for the audit trail.
+  | {
+      status: "error";
+      executionId: string;
+      error: string;
+      logs?: string[];
     };
 
 export type CreateProxyToolOptions = {
@@ -79,6 +119,8 @@ export type CreateProxyToolOptions = {
   connectors: CodemodeConnector[];
   executor: Executor;
   description?: string;
+  /** Terminal executions retained per runtime. Defaults to 50. */
+  maxExecutions?: number;
 };
 
 // ---------------------------------------------------------------------------
@@ -86,6 +128,10 @@ export type CreateProxyToolOptions = {
 // ---------------------------------------------------------------------------
 
 const proxySchema = z.object({ code: z.string() });
+
+// Sandbox-side marker thrown to abort the run on a pause. The proxy tool
+// detects the pause via the facet's recorded state, not this message.
+const PAUSE_SENTINEL = "__CODEMODE_PAUSE__";
 
 // Sandbox-side definition of `codemode.step(name, fn)`. Assigned as an own
 // property on the codemode namespace so it shadows the dispatch proxy. It
@@ -96,14 +142,48 @@ const STEP_PRELUDE = String.raw`
     codemode.step = async (name, fn) => {
       const decision = await codemode.__stepDecide(name);
       if (decision.kind === "replay") return decision.result;
+      // Anything other than "execute" (i.e. a pause from divergence) aborts
+      // the run; the reason is recorded on the execution.
+      if (decision.kind !== "execute") throw new Error("${PAUSE_SENTINEL}");
       const value = await fn();
       await codemode.__stepRecord(decision.seq, value);
       return value;
     };`;
 
-// Thrown inside a connector binding when the runtime decides to pause.
-// Aborts the sandbox run; the proxy tool detects the pause via runtime state.
-const PAUSE_SENTINEL = "__CODEMODE_PAUSE__";
+// Connector bindings return a control marker rather than throwing across RPC.
+// The sandbox connector proxy (see executor.ts CONNECTOR_CONTROL_KEY) detects
+// it and throws locally. Keep these two in sync.
+const CONTROL_KEY = "__codemode_control__";
+
+// ---------------------------------------------------------------------------
+// Host-side replay cursor — allocates seq per call/step, in order.
+// ---------------------------------------------------------------------------
+
+type Cursor = { next(): number };
+
+function createCursor(): Cursor {
+  let n = 0;
+  return { next: () => n++ };
+}
+
+// ---------------------------------------------------------------------------
+// Connector binding — an RpcTarget the sandbox calls via Workers RPC.
+//
+// Live RPC references can only be serialized as RPC call arguments (not via
+// Worker env), and a plain object with a function property can't be cloned at
+// all — so the binding MUST be an RpcTarget passed as an evaluate() argument.
+// ---------------------------------------------------------------------------
+
+class ConnectorCallTarget extends RpcTarget {
+  #handle: (method: string, args: unknown) => Promise<unknown>;
+  constructor(handle: (method: string, args: unknown) => Promise<unknown>) {
+    super();
+    this.#handle = handle;
+  }
+  callTool(method: string, args: unknown): Promise<unknown> {
+    return this.#handle(method, args);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Setup — connectors + runtime facet
@@ -141,28 +221,38 @@ async function loadSetup(connectors: CodemodeConnector[]): Promise<Setup> {
 
 function buildConnectorBindings(
   setup: Setup,
-  runtime: RuntimeStub
+  runtime: RuntimeStub,
+  executionId: string,
+  cursor: Cursor
 ): ConnectorBinding[] {
   return setup.descriptions.map((desc) => ({
     name: desc.name,
-    binding: {
-      callTool: async (method: string, args: unknown): Promise<unknown> => {
-        const decision = await runtime.decide(desc.name, method, args);
+    binding: new ConnectorCallTarget(async (method, args) => {
+      const seq = cursor.next();
+      const requiresApproval =
+        setup.annotations[`${desc.name}.${method}`]?.requiresApproval ?? false;
+      const decision = await runtime.decide(
+        executionId,
+        seq,
+        desc.name,
+        method,
+        args,
+        requiresApproval
+      );
 
-        if (decision.kind === "replay") {
-          return decision.result;
-        }
-        if (decision.kind === "pause") {
-          throw new Error(PAUSE_SENTINEL);
-        }
-        // execute
-        const connector = setup.connectorsByName.get(desc.name);
-        if (!connector) throw new Error(`Unknown connector: ${desc.name}`);
-        const result = await connector.executeTool(method, args);
-        await runtime.recordResult(decision.seq, result);
-        return result;
-      }
-    }
+      // Control signals are returned (not thrown) so the RpcTarget method
+      // always resolves — throwing across the sandbox→host RPC boundary leaves
+      // a rejection tracked as unhandled. The sandbox proxy turns the pause
+      // marker into a local throw, which the sandbox's own try/catch handles.
+      if (decision.kind === "replay") return decision.result;
+      if (decision.kind === "pause") return { [CONTROL_KEY]: "pause" };
+
+      const connector = setup.connectorsByName.get(desc.name);
+      if (!connector) throw new Error(`Unknown connector: ${desc.name}`);
+      const result = await connector.executeTool(method, args);
+      await runtime.recordResult(executionId, decision.seq, result);
+      return result;
+    })
   }));
 }
 
@@ -174,7 +264,9 @@ function createPlatformProvider(
   setup: Setup,
   bindings: ConnectorBinding[],
   runtime: RuntimeStub,
-  executor: Executor
+  executor: Executor,
+  executionId: string,
+  cursor: Cursor
 ): ResolvedProvider {
   const { descriptions } = setup;
   const provider: ResolvedProvider = {
@@ -201,7 +293,8 @@ function createPlatformProvider(
         const snippet = await runtime.getSnippet(String(args[0]));
         if (!snippet) return { error: `Snippet "${args[0]}" not found.` };
         // Snippets are saved execution code, so they may use the codemode
-        // SDK (e.g. codemode.step) — run them with this same provider.
+        // SDK (e.g. codemode.step) — run them with this same provider, which
+        // shares the cursor so the snippet's calls continue this run's log.
         const result = await runCode({
           code: `async () => {\n  const snippet = (${snippet.code});\n  return await snippet(${JSON.stringify(args[1])});\n}`,
           executor,
@@ -215,10 +308,17 @@ function createPlatformProvider(
       // can't cross the RPC boundary, so step decides + records here while the
       // sandbox runs the closure locally only when told to execute.
       __stepDecide: async (name: unknown) =>
-        runtime.decide(STEP_CONNECTOR, String(name), undefined),
+        runtime.decide(
+          executionId,
+          cursor.next(),
+          STEP_CONNECTOR,
+          String(name),
+          undefined,
+          false
+        ),
 
       __stepRecord: async (seq: unknown, value: unknown) => {
-        await runtime.recordResult(Number(seq), value);
+        await runtime.recordResult(executionId, Number(seq), value);
         return true;
       }
     }
@@ -276,17 +376,21 @@ function buildDescription(
 // ---------------------------------------------------------------------------
 
 async function runPass(
+  executionId: string,
   code: string,
   setup: Setup,
   runtime: RuntimeStub,
   executor: Executor
 ): Promise<ProxyToolOutput> {
-  const bindings = buildConnectorBindings(setup, runtime);
+  const cursor = createCursor();
+  const bindings = buildConnectorBindings(setup, runtime, executionId, cursor);
   const platformProvider = createPlatformProvider(
     setup,
     bindings,
     runtime,
-    executor
+    executor,
+    executionId,
+    cursor
   );
 
   let output: CodeOutput | undefined;
@@ -302,27 +406,35 @@ async function runPass(
     threw = err;
   }
 
-  // The facet status is the source of truth: a pause records itself there
-  // before aborting the run. The PAUSE_SENTINEL only stops the sandbox; it
-  // is never the deciding signal here.
-  const execution = await runtime.getExecution();
+  // The facet status is the source of truth: a pause (approval or divergence)
+  // records itself there before aborting the run. The PAUSE_SENTINEL only stops
+  // the sandbox; it is never the deciding signal here.
+  const execution = await runtime.getExecution(executionId);
   if (execution?.status === "paused") {
     return {
       status: "paused",
-      executionId: execution.id,
-      pending: await runtime.listPending()
+      executionId,
+      pending: await runtime.listPending(executionId)
+    };
+  }
+  if (execution?.status === "error") {
+    // A replay divergence, already recorded on the execution by the facet.
+    return {
+      status: "error",
+      executionId,
+      error: execution.error ?? "Codemode execution failed"
     };
   }
 
   if (threw) {
     const message = threw instanceof Error ? threw.message : String(threw);
-    await runtime.fail(message);
-    throw threw;
+    await runtime.fail(executionId, message);
+    return { status: "error", executionId, error: message };
   }
 
   const result = output?.result;
-  await runtime.complete(result, output?.logs);
-  return { status: "completed", result, logs: output?.logs };
+  await runtime.complete(executionId, result, output?.logs);
+  return { status: "completed", executionId, result, logs: output?.logs };
 }
 
 // ---------------------------------------------------------------------------
@@ -358,9 +470,8 @@ export function createProxyTool(
     inputSchema: proxySchema,
     execute: async ({ code }) => {
       const setup = await getSetup();
-      await runtime.configure(setup.annotations);
-      await runtime.begin(code);
-      return runPass(code, setup, runtime, options.executor);
+      const executionId = await runtime.begin(code, options.maxExecutions);
+      return runPass(executionId, code, setup, runtime, options.executor);
     }
   });
 }
@@ -384,13 +495,27 @@ function runtimeFacetName(connectors: CodemodeConnector[]): string {
   return `codemode:${names}`;
 }
 
+// `ctx.facets` / `ctx.exports` are facet-runtime additions not yet in the
+// public DurableObjectState types. The facet `class` must be the
+// binding-backed value from `ctx.exports` (a directly-imported class reference
+// is rejected by the runtime) — the consumer's worker must export the runtime
+// class under the name `CodemodeRuntime` (the Vite plugin does this for you).
+type FacetCapableCtx = DurableObjectState & {
+  facets: {
+    get<T>(name: string, init: () => { class: unknown; id?: unknown }): T;
+  };
+  exports?: Record<string, unknown>;
+};
+
 function getRuntime(
   ctx: DurableObjectState,
   connectors: CodemodeConnector[]
 ): RuntimeStub {
-  return ctx.facets.get<CodemodeRuntime>(runtimeFacetName(connectors), () => ({
-    class: CodemodeRuntime
-  })) as unknown as RuntimeStub;
+  const facetCtx = ctx as unknown as FacetCapableCtx;
+  const runtimeClass = facetCtx.exports?.CodemodeRuntime ?? CodemodeRuntime;
+  return facetCtx.facets.get<RuntimeStub>(runtimeFacetName(connectors), () => ({
+    class: runtimeClass
+  }));
 }
 
 /** Internal: the runtime handle uses this to reach the facet. Not public API. */
@@ -404,8 +529,9 @@ export type ResumeCodemodeOptions = {
   ctx: DurableObjectState;
   connectors: CodemodeConnector[];
   executor: Executor;
-  /** Execution id to resume. Omit to resume the current execution. */
-  executionId?: string;
+  /** Execution id to resume. */
+  executionId: string;
+  maxExecutions?: number;
 };
 
 /**
@@ -421,10 +547,17 @@ export async function resumeCodemode(
   const setup = await loadSetup(options.connectors);
 
   const execution = await runtime.resume(options.executionId);
-  if (!execution) throw new Error("No paused execution to resume.");
+  if (!execution) {
+    throw new Error(`No execution "${options.executionId}" to resume.`);
+  }
 
-  await runtime.configure(setup.annotations);
-  return runPass(execution.code, setup, runtime, options.executor);
+  return runPass(
+    execution.id,
+    execution.code,
+    setup,
+    runtime,
+    options.executor
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -435,8 +568,12 @@ export async function rejectCodemode(options: {
   ctx: DurableObjectState;
   connectors: CodemodeConnector[];
   seq: number;
+  executionId: string;
 }): Promise<void> {
-  await getRuntime(options.ctx, options.connectors).reject(options.seq);
+  await getRuntime(options.ctx, options.connectors).reject(
+    options.seq,
+    options.executionId
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -446,8 +583,11 @@ export async function rejectCodemode(options: {
 export async function pendingCodemode(options: {
   ctx: DurableObjectState;
   connectors: CodemodeConnector[];
+  executionId?: string;
 }): Promise<PendingAction[]> {
-  return getRuntime(options.ctx, options.connectors).listPending();
+  return getRuntime(options.ctx, options.connectors).listPending(
+    options.executionId
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -457,17 +597,50 @@ export async function pendingCodemode(options: {
 export async function rollbackCodemode(options: {
   ctx: DurableObjectState;
   connectors: CodemodeConnector[];
+  executionId: string;
 }): Promise<void> {
   const runtime = getRuntime(options.ctx, options.connectors);
 
   const byName = new Map(options.connectors.map((c) => [c.name(), c]));
-  const actions = await runtime.actionsToRevert();
+  const actions = await runtime.actionsToRevert(options.executionId);
 
+  // Attempt every revert, in reverse order, even if some fail — a failing
+  // compensation must not strand the actions after it as un-reverted. Failures
+  // are collected and surfaced after the whole pass rather than aborting it.
+  let reverted = 0;
+  const failures: string[] = [];
   for (const action of actions) {
     const connector = byName.get(action.connector);
-    if (connector?.revertAction) {
-      await connector.revertAction(action.method, action.args, action.result);
+    if (!connector) continue;
+    try {
+      // revertAction no-ops (returns false) for reads / tools without a revert.
+      const didRevert = await connector.revertAction(
+        action.method,
+        action.args,
+        action.result
+      );
+      if (didRevert) {
+        await runtime.markReverted(action.seq, options.executionId);
+        reverted++;
+      }
+    } catch (err) {
+      failures.push(
+        `${action.connector}.${action.method}: ` +
+          (err instanceof Error ? err.message : String(err))
+      );
     }
-    await runtime.markReverted(action.seq);
+  }
+
+  // Reflect the rollback in the execution status so the audit trail doesn't
+  // keep showing "completed" after the run's effects were undone.
+  if (reverted > 0) {
+    await runtime.markRolledBack(options.executionId);
+  }
+
+  if (failures.length > 0) {
+    throw new Error(
+      `Rollback reverted ${reverted} action(s) but ${failures.length} failed: ` +
+        failures.join("; ")
+    );
   }
 }

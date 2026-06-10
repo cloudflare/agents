@@ -20,12 +20,24 @@
  * and replayed thereafter, so replay correctness does not depend on the code
  * being incidentally deterministic.
  *
- * The facet owns only durable state: the log, pending actions, snippets.
- * The executor and connector stubs are transient — the proxy tool re-provides
- * them on each message (they can't survive hibernation anyway).
+ * ## Statelessness (concurrency + hibernation safety)
+ *
+ * The facet keeps **no per-run state in instance memory**. Every method that
+ * participates in a run is addressed by an explicit `executionId` and, where
+ * relevant, a `seq` allocated by the host (the proxy tool) — never an in-memory
+ * cursor. This means:
+ *
+ *   - Two executions can run concurrently without clobbering each other (each
+ *     run threads its own id + sequence; there is no shared "current cursor").
+ *   - The facet may hibernate mid-run between tool calls without losing its
+ *     place: the sequence lives on the host call stack and the log lives in
+ *     durable storage.
+ *
+ * The only durable state is per-execution: the log, pending actions, result,
+ * snippets. The executor and connector stubs are transient — the proxy tool
+ * re-provides them on each message (they can't survive hibernation anyway).
  */
 import { DurableObject } from "cloudflare:workers";
-import type { ToolAnnotations } from "./connectors/types";
 import type { Snippet, SaveSnippetOptions } from "./snippet";
 
 // ---------------------------------------------------------------------------
@@ -33,6 +45,7 @@ import type { Snippet, SaveSnippetOptions } from "./snippet";
 // ---------------------------------------------------------------------------
 
 export type ToolLogEntryState =
+  | "executing" // decided to execute; result not yet recorded (crash window)
   | "applied" // executed for real, result recorded
   | "pending" // awaiting approval — the run aborted here
   | "reverted"; // rolled back
@@ -52,7 +65,12 @@ export type ToolLogEntry = {
   state: ToolLogEntryState;
 };
 
-export type ExecutionStatus = "running" | "paused" | "completed" | "error";
+export type ExecutionStatus =
+  | "running"
+  | "paused"
+  | "completed"
+  | "error"
+  | "rolled_back";
 
 export type ExecutionState = {
   id: string;
@@ -62,6 +80,10 @@ export type ExecutionState = {
   result?: unknown;
   error?: string;
   logs?: string[];
+  /** Epoch ms the execution was created. */
+  createdAt: number;
+  /** Epoch ms of the last state change. */
+  updatedAt: number;
 };
 
 export type PendingAction = {
@@ -81,92 +103,172 @@ export type PendingAction = {
 export type ToolDecision =
   | { kind: "replay"; result: unknown }
   | { kind: "execute"; seq: number }
+  // "pause" tells the host to abort the sandbox run. The reason lives on the
+  // execution: status "paused" (awaiting approval) or "error" (replay
+  // divergence). Routing divergence through the execution record rather than a
+  // thrown sandbox error keeps it out of the cross-worker rejection path.
   | { kind: "pause"; seq: number };
 
-// Connector annotations, flattened to "connector.method" → annotation.
-export type AnnotationMap = Record<string, ToolAnnotations>;
+/** Default number of terminal executions to retain per runtime. */
+export const DEFAULT_MAX_EXECUTIONS = 50;
+
+/** Terminal statuses are eligible for retention pruning. */
+function isTerminal(status: ExecutionStatus): boolean {
+  return (
+    status === "completed" || status === "error" || status === "rolled_back"
+  );
+}
+
+/** Pending actions (awaiting approval) of one execution. */
+function pendingOf(state: ExecutionState): PendingAction[] {
+  return state.log
+    .filter((e) => e.state === "pending")
+    .map((e) => ({
+      executionId: state.id,
+      seq: e.seq,
+      connector: e.connector,
+      method: e.method,
+      args: e.args
+    }));
+}
+
+// ---------------------------------------------------------------------------
+// Stable serialization for replay-divergence comparison of args.
+// ---------------------------------------------------------------------------
+
+/**
+ * Deterministic JSON of a value: object keys sorted recursively, BigInt tagged.
+ * Used to compare a replayed call's args against the recorded args. Best-effort
+ * — returns `undefined` if the value can't be serialized (e.g. a cycle), in
+ * which case the caller skips the args check rather than reporting a false
+ * divergence.
+ */
+export function stableStringify(value: unknown): string | undefined {
+  try {
+    return JSON.stringify(value, (_key, val) => {
+      if (typeof val === "bigint") return `__bigint__:${val.toString()}`;
+      if (val && typeof val === "object" && !Array.isArray(val)) {
+        const record = val as Record<string, unknown>;
+        const sorted: Record<string, unknown> = {};
+        for (const key of Object.keys(record).sort()) sorted[key] = record[key];
+        return sorted;
+      }
+      return val;
+    });
+  } catch {
+    return undefined;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // CodemodeRuntime facet
 // ---------------------------------------------------------------------------
 
-const CURRENT_KEY = "execution:current";
 const execKey = (id: string) => `execution:${id}`;
 const snippetKey = (name: string) => `snippet:${name}`;
 
 export class CodemodeRuntime extends DurableObject {
-  #annotations: AnnotationMap = {};
-  #cursor = 0;
-
-  /**
-   * Configure annotations for the active connectors. Called by the proxy tool
-   * before each run. Annotations are keyed "connector.method".
-   */
-  configure(annotations: AnnotationMap): void {
-    this.#annotations = annotations;
-  }
-
   // -----------------------------------------------------------------------
   // Run lifecycle
+  //
+  // Every method targets an explicit `executionId`. There is deliberately no
+  // "current execution" pointer: it would be a single shared slot that the
+  // most recent run wins, which is racy the moment two runs are in flight.
+  // The host (proxy tool) holds the id for the run it is driving, and approval
+  // UIs get ids from `listPending()` / `listExecutions()`.
   // -----------------------------------------------------------------------
 
-  /** Begin a fresh execution and make it current. Returns the execution id. */
-  async begin(code: string): Promise<string> {
-    const id = `exec_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+  /**
+   * Begin a fresh execution. Returns the execution id. Prunes old terminal
+   * executions down to `maxExecutions` (newest kept).
+   */
+  async begin(
+    code: string,
+    maxExecutions = DEFAULT_MAX_EXECUTIONS
+  ): Promise<string> {
+    const now = Date.now();
+    const id = `exec_${now.toString().padStart(16, "0")}_${crypto.randomUUID()}`;
     const state: ExecutionState = {
       id,
       code,
       status: "running",
-      log: []
+      log: [],
+      createdAt: now,
+      updatedAt: now
     };
-    this.ctx.storage.put(execKey(id), state);
-    this.ctx.storage.put(CURRENT_KEY, id);
-    this.#cursor = 0;
+    await this.ctx.storage.put(execKey(id), state);
+    await this.#pruneTerminal(maxExecutions, id);
     return id;
   }
 
-  /**
-   * Resume an execution for a replay run. With no id, resumes the current one.
-   * Makes the chosen execution current and resets the replay cursor.
-   */
-  async resume(id?: string): Promise<ExecutionState | null> {
-    const targetId = id ?? (await this.#currentId());
-    if (!targetId) return null;
-    const state = await this.#get(targetId);
+  /** Resume an execution for a replay run. */
+  async resume(id: string): Promise<ExecutionState | null> {
+    const state = await this.#get(id);
     if (!state) return null;
     state.status = "running";
-    this.ctx.storage.put(execKey(targetId), state);
-    this.ctx.storage.put(CURRENT_KEY, targetId);
-    this.#cursor = 0;
+    state.updatedAt = Date.now();
+    await this.ctx.storage.put(execKey(id), state);
     return state;
   }
 
   /**
-   * Decide what to do with the next tool call or step. Advances the cursor.
+   * Decide what to do with the next tool call or step. The host allocates and
+   * passes `seq` (not an in-memory cursor), so this is safe across hibernation
+   * and concurrent executions.
    *
-   * Replay: a log entry at the cursor must match (divergence is a hard error).
-   * Applied → replay its result. Pending → it was just approved, execute it.
-   * Reverted → treat as a fresh call.
+   * If the execution is no longer "running" (already paused/terminal), every
+   * call gets a pause decision and nothing is recorded — so model code that
+   * swallows the pause sentinel can't drive further side effects.
    *
-   * New call: step or read → execute. Approval-required → record
-   * pending, pause.
+   * Replay: a log entry at `seq` must match connector + method + args
+   * (divergence is a hard error). Applied → replay its result. Pending → it was
+   * just approved, execute it. Executing (crashed mid-call) / reverted → treat
+   * as a fresh call.
+   *
+   * New call: step or read → execute (logged "executing" until recordResult).
+   * Approval-required → record pending, pause.
    */
   async decide(
+    executionId: string,
+    seq: number,
     connector: string,
     method: string,
-    args: unknown
+    args: unknown,
+    requiresApproval: boolean
   ): Promise<ToolDecision> {
-    const state = await this.#requireCurrent();
-    const seq = this.#cursor++;
+    const state = await this.#require(executionId);
+
+    // Once a run has paused (awaiting approval) or terminated (divergence,
+    // rejection), refuse to make any further progress: every subsequent
+    // call/step gets a pause decision and nothing new is recorded. The pause
+    // sentinel is a throwable Error, so model code *could* catch it and keep
+    // going — this guard makes that harmless (no further side effects, no log
+    // growth past the pause) rather than relying on the throw escaping.
+    if (state.status !== "running") {
+      return { kind: "pause", seq };
+    }
+
     const existing = state.log[seq];
 
     if (existing) {
       if (existing.connector !== connector || existing.method !== method) {
-        throw new Error(
-          `Codemode replay divergence at step ${seq}: expected ` +
-            `${existing.connector}.${existing.method}, got ${connector}.${method}. ` +
-            `Code must be deterministic up to tool calls and steps. ` +
-            `Wrap nondeterministic work in codemode.step(name, fn).`
+        return this.#diverge(
+          state,
+          seq,
+          `expected ${existing.connector}.${existing.method}, got ` +
+            `${connector}.${method}. Code must be deterministic up to tool ` +
+            `calls and steps. Wrap nondeterministic work in codemode.step(name, fn).`
+        );
+      }
+      const before = stableStringify(existing.args);
+      const after = stableStringify(args);
+      if (before !== undefined && after !== undefined && before !== after) {
+        return this.#diverge(
+          state,
+          seq,
+          `${connector}.${method} was called with different arguments than the ` +
+            `recorded run. Arguments must be deterministic across replays. Wrap ` +
+            `nondeterministic inputs in codemode.step(name, fn).`
         );
       }
       if (existing.state === "applied") {
@@ -176,11 +278,9 @@ export class CodemodeRuntime extends DurableObject {
         // Approved since the last run — execute for real now.
         return { kind: "execute", seq };
       }
-      // reverted — fall through to treat as a new call
+      // "executing" (a crash between decide and recordResult left it
+      // incomplete) or "reverted" — fall through and re-execute.
     }
-
-    const annotation = this.#annotations[`${connector}.${method}`];
-    const requiresApproval = annotation?.requiresApproval ?? false;
 
     const entry: ToolLogEntry = {
       seq,
@@ -188,75 +288,102 @@ export class CodemodeRuntime extends DurableObject {
       method,
       args,
       requiresApproval,
-      state: requiresApproval ? "pending" : "applied"
+      // Approval actions park as "pending". Everything else is "executing"
+      // until recordResult lands — NOT "applied", so a crash before the result
+      // is recorded re-executes on replay instead of replaying `undefined`.
+      state: requiresApproval ? "pending" : "executing"
     };
     state.log[seq] = entry;
+    state.updatedAt = Date.now();
 
     if (requiresApproval) {
       state.status = "paused";
-      this.ctx.storage.put(execKey(state.id), state);
+      await this.ctx.storage.put(execKey(state.id), state);
       return { kind: "pause", seq };
     }
-    this.ctx.storage.put(execKey(state.id), state);
+    await this.ctx.storage.put(execKey(state.id), state);
     return { kind: "execute", seq };
   }
 
   /** Record the real result of an executed call or step. */
-  async recordResult(seq: number, result: unknown): Promise<void> {
-    const state = await this.#requireCurrent();
+  async recordResult(
+    executionId: string,
+    seq: number,
+    result: unknown
+  ): Promise<void> {
+    const state = await this.#require(executionId);
     const entry = state.log[seq];
     if (!entry) throw new Error(`No log entry at step ${seq}`);
     entry.result = result;
     entry.state = "applied";
-    this.ctx.storage.put(execKey(state.id), state);
+    state.updatedAt = Date.now();
+    await this.ctx.storage.put(execKey(state.id), state);
   }
 
   /** Mark the run completed with a final result. */
-  async complete(result: unknown, logs?: string[]): Promise<void> {
-    const state = await this.#requireCurrent();
+  async complete(
+    executionId: string,
+    result: unknown,
+    logs?: string[]
+  ): Promise<void> {
+    const state = await this.#require(executionId);
     state.status = "completed";
     state.result = result;
     state.logs = logs;
-    this.ctx.storage.put(execKey(state.id), state);
+    state.updatedAt = Date.now();
+    await this.ctx.storage.put(execKey(state.id), state);
   }
 
   /** Mark the run errored. */
-  async fail(error: string, logs?: string[]): Promise<void> {
-    const state = await this.#requireCurrent();
+  async fail(
+    executionId: string,
+    error: string,
+    logs?: string[]
+  ): Promise<void> {
+    const state = await this.#require(executionId);
     state.status = "error";
     state.error = error;
     state.logs = logs;
-    this.ctx.storage.put(execKey(state.id), state);
+    state.updatedAt = Date.now();
+    await this.ctx.storage.put(execKey(state.id), state);
   }
 
   // -----------------------------------------------------------------------
   // Approvals
   // -----------------------------------------------------------------------
 
-  /** List pending actions awaiting approval in the current execution. */
-  async listPending(): Promise<PendingAction[]> {
-    const state = await this.#current();
-    if (!state) return [];
-    return state.log
-      .filter((e) => e.state === "pending")
-      .map((e) => ({
-        executionId: state.id,
-        seq: e.seq,
-        connector: e.connector,
-        method: e.method,
-        args: e.args
-      }));
+  /**
+   * List pending actions awaiting approval. With an `executionId`, scopes to
+   * that run; without one, aggregates across **all** executions (newest first)
+   * — so an approval UI sees every paused run, not just whichever happened to
+   * be started/resumed last. (Defaulting to a single "current" run would drop
+   * pending actions when multiple runs are in flight.)
+   */
+  async listPending(executionId?: string): Promise<PendingAction[]> {
+    if (executionId) {
+      const state = await this.#get(executionId);
+      return state ? pendingOf(state) : [];
+    }
+    const all = await this.listExecutions();
+    return all.flatMap(pendingOf);
   }
 
-  /** Reject a pending action. Ends the execution. */
-  async reject(seq: number): Promise<void> {
-    const state = await this.#requireCurrent();
+  /**
+   * Reject a pending action. Ends the execution with an error.
+   *
+   * Rejection does NOT undo actions already applied earlier in the same run —
+   * call `rollback()` for that. See docs/codemode/approvals.md.
+   */
+  async reject(seq: number, executionId: string): Promise<void> {
+    const state = await this.#get(executionId);
+    if (!state) return;
     const entry = state.log[seq];
     if (entry?.state === "pending") {
       entry.state = "reverted";
       state.status = "error";
       state.error = `Action ${entry.connector}.${entry.method} rejected by user`;
-      this.ctx.storage.put(execKey(state.id), state);
+      state.updatedAt = Date.now();
+      await this.ctx.storage.put(execKey(state.id), state);
     }
   }
 
@@ -264,45 +391,75 @@ export class CodemodeRuntime extends DurableObject {
   // Rollback — walk the log backward; the proxy tool calls revertAction.
   // -----------------------------------------------------------------------
 
-  /** Return applied actions (not reads/steps) in reverse order. */
-  async actionsToRevert(): Promise<ToolLogEntry[]> {
-    const state = await this.#current();
+  /**
+   * Return applied connector actions (not steps) in reverse order. Reads are
+   * included but are harmless — the host's revertAction no-ops when a tool has
+   * no `revert`, and only entries that actually reverted are marked.
+   */
+  async actionsToRevert(executionId: string): Promise<ToolLogEntry[]> {
+    const state = await this.#get(executionId);
     if (!state) return [];
     return state.log
-      .filter((e) => e.requiresApproval && e.state === "applied")
+      .filter((e) => e.state === "applied" && e.connector !== STEP_CONNECTOR)
       .reverse();
   }
 
   /** Mark an action reverted after the proxy tool has reverted it. */
-  async markReverted(seq: number): Promise<void> {
-    const state = await this.#requireCurrent();
+  async markReverted(seq: number, executionId: string): Promise<void> {
+    const state = await this.#get(executionId);
+    if (!state) return;
     const entry = state.log[seq];
     if (entry) {
       entry.state = "reverted";
-      this.ctx.storage.put(execKey(state.id), state);
+      state.updatedAt = Date.now();
+      await this.ctx.storage.put(execKey(state.id), state);
     }
   }
 
-  // -----------------------------------------------------------------------
-  // Inspection
-  // -----------------------------------------------------------------------
-
-  async getExecution(id?: string): Promise<ExecutionState | null> {
-    if (id) return this.#get(id);
-    return this.#current();
+  /**
+   * Mark a run as rolled back once the proxy tool has finished reverting its
+   * actions, so the execution status reflects the rollback (rather than staying
+   * "completed"/"error" with some entries quietly flipped to "reverted").
+   */
+  async markRolledBack(executionId: string): Promise<void> {
+    const state = await this.#get(executionId);
+    if (!state) return;
+    state.status = "rolled_back";
+    state.updatedAt = Date.now();
+    await this.ctx.storage.put(execKey(state.id), state);
   }
 
-  /** List all executions, newest first. The audit trail for developer UIs. */
-  async listExecutions(): Promise<ExecutionState[]> {
-    const map = await this.ctx.storage.list<ExecutionState | string>({
+  // -----------------------------------------------------------------------
+  // Inspection + retention
+  // -----------------------------------------------------------------------
+
+  async getExecution(id: string): Promise<ExecutionState | null> {
+    return this.#get(id);
+  }
+
+  /** List executions, newest first. Optionally cap the number returned. */
+  async listExecutions(limit?: number): Promise<ExecutionState[]> {
+    const map = await this.ctx.storage.list<ExecutionState>({
       prefix: "execution:"
     });
-    const executions: ExecutionState[] = [];
-    for (const [key, value] of map) {
-      if (key === CURRENT_KEY || typeof value === "string") continue;
-      executions.push(value);
-    }
-    return executions.sort((a, b) => b.id.localeCompare(a.id));
+    const executions = [...map.values()];
+    executions.sort(
+      (a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id)
+    );
+    return typeof limit === "number" ? executions.slice(0, limit) : executions;
+  }
+
+  /** Delete one execution. Returns whether it existed. */
+  async deleteExecution(id: string): Promise<boolean> {
+    return this.ctx.storage.delete(execKey(id));
+  }
+
+  /**
+   * Delete terminal (completed/error) executions, keeping the newest `keep`.
+   * Running/paused executions are never deleted. Returns the count removed.
+   */
+  async pruneExecutions(keep = DEFAULT_MAX_EXECUTIONS): Promise<number> {
+    return this.#pruneTerminal(keep);
   }
 
   // -----------------------------------------------------------------------
@@ -313,24 +470,25 @@ export class CodemodeRuntime extends DurableObject {
    * Promote an execution's code to a saved, addressable snippet. This is the
    * "save what ran" hook — the developer calls it (via runtime.saveSnippet)
    * after a script proves useful, so the model can re-run it later with
-   * `codemode.run(name)`.
+   * `codemode.run(name)`. The execution is named explicitly (its id comes from
+   * the tool's output or `listExecutions()`).
    */
   async saveSnippet(
     name: string,
-    options?: SaveSnippetOptions
+    options: SaveSnippetOptions
   ): Promise<Snippet> {
-    const state = options?.executionId
-      ? await this.#get(options.executionId)
-      : await this.#current();
-    if (!state) throw new Error("No execution to save a snippet from");
+    const state = await this.#get(options.executionId);
+    if (!state) {
+      throw new Error(`No execution "${options.executionId}" to save from`);
+    }
     const snippet: Snippet = {
       name,
-      description: options?.description ?? "",
+      description: options.description ?? "",
       code: state.code,
       savedAt: Date.now(),
-      inputSchema: options?.inputSchema
+      inputSchema: options.inputSchema
     };
-    this.ctx.storage.put(snippetKey(name), snippet);
+    await this.ctx.storage.put(snippetKey(name), snippet);
     return snippet;
   }
 
@@ -351,22 +509,46 @@ export class CodemodeRuntime extends DurableObject {
   // Internal
   // -----------------------------------------------------------------------
 
-  async #currentId(): Promise<string | null> {
-    return (await this.ctx.storage.get<string>(CURRENT_KEY)) ?? null;
+  /**
+   * Record a replay divergence as a terminal failure on the execution and tell
+   * the host to abort the sandbox. The host reads the failure from the
+   * execution record, so the divergence text never travels back through the
+   * sandbox's error channel (which would flag it as an unhandled remote
+   * rejection).
+   */
+  async #diverge(
+    state: ExecutionState,
+    seq: number,
+    detail: string
+  ): Promise<ToolDecision> {
+    state.status = "error";
+    state.error = `Codemode replay divergence at step ${seq}: ${detail}`;
+    state.updatedAt = Date.now();
+    await this.ctx.storage.put(execKey(state.id), state);
+    return { kind: "pause", seq };
+  }
+
+  async #pruneTerminal(keep: number, protectId?: string): Promise<number> {
+    const all = await this.listExecutions();
+    const terminal = all.filter(
+      (e) => isTerminal(e.status) && e.id !== protectId
+    );
+    if (terminal.length <= keep) return 0;
+    // listExecutions is newest-first; drop the oldest beyond `keep`.
+    const toDelete = terminal.slice(keep);
+    for (const e of toDelete) {
+      await this.ctx.storage.delete(execKey(e.id));
+    }
+    return toDelete.length;
   }
 
   async #get(id: string): Promise<ExecutionState | null> {
     return (await this.ctx.storage.get<ExecutionState>(execKey(id))) ?? null;
   }
 
-  async #current(): Promise<ExecutionState | null> {
-    const id = await this.#currentId();
-    return id ? this.#get(id) : null;
-  }
-
-  async #requireCurrent(): Promise<ExecutionState> {
-    const state = await this.#current();
-    if (!state) throw new Error("No current execution");
+  async #require(id: string): Promise<ExecutionState> {
+    const state = await this.#get(id);
+    if (!state) throw new Error(`No execution "${id}"`);
     return state;
   }
 }

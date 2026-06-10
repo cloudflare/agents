@@ -77,7 +77,7 @@
   },
   "scripts": {
     "build": "tsx ./scripts/build.ts",
-    "test": "vitest run && vitest run --config vitest.browser.config.ts",
+    "test": "vitest run && vitest run --config vitest.runtime.config.ts && vitest run --config vitest.browser.config.ts",
     "test:e2e": "playwright test --config e2e/playwright.config.ts",
     "test:watch": "vitest",
     "test:browser": "vitest run --config vitest.browser.config.ts"

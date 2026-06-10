@@ -29,6 +29,6 @@ export interface Snippet {
 export interface SaveSnippetOptions {
   description?: string;
   inputSchema?: unknown;
-  /** Execution to take the code from. Defaults to the current execution. */
-  executionId?: string;
+  /** Execution to take the code from (from the tool output or listExecutions). */
+  executionId: string;
 }

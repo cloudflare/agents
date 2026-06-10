@@ -18,6 +18,12 @@ export type CreateCodemodeRuntimeOptions = {
   ctx: DurableObjectState;
   connectors: CodemodeConnector[];
   executor: Executor;
+  /**
+   * How many terminal (completed/error) executions to retain per runtime.
+   * Older ones are pruned automatically when a new run begins. Running and
+   * paused executions are never pruned. Defaults to 50.
+   */
+  maxExecutions?: number;
 };
 
 export type CodemodeRuntimeToolOptions = {
@@ -25,25 +31,37 @@ export type CodemodeRuntimeToolOptions = {
 };
 
 export type CodemodeApproveOptions = {
-  executionId?: string;
+  /** Execution to approve and resume. Get it from `pending()` or the tool output. */
+  executionId: string;
 };
 
 export type CodemodeRejectOptions = {
   seq: number;
+  /** Execution to reject within. Get it from `pending()`. */
+  executionId: string;
+};
+
+export type CodemodeRollbackOptions = {
+  /** Execution to roll back. Get it from `executions()` or the tool output. */
+  executionId: string;
 };
 
 export interface CodemodeRuntimeHandle {
   tool(
     options?: CodemodeRuntimeToolOptions
   ): Tool<ProxyToolInput, ProxyToolOutput>;
-  approve(options?: CodemodeApproveOptions): Promise<ProxyToolOutput>;
+  approve(options: CodemodeApproveOptions): Promise<ProxyToolOutput>;
   reject(options: CodemodeRejectOptions): Promise<void>;
-  rollback(): Promise<void>;
-  pending(): Promise<PendingAction[]>;
-  /** All executions, newest first — the audit trail. */
-  executions(): Promise<ExecutionState[]>;
+  rollback(options: CodemodeRollbackOptions): Promise<void>;
+  pending(executionId?: string): Promise<PendingAction[]>;
+  /** All executions, newest first — the audit trail. Optionally capped. */
+  executions(limit?: number): Promise<ExecutionState[]>;
+  /** Delete a single execution from the audit trail. */
+  deleteExecution(id: string): Promise<boolean>;
+  /** Prune terminal executions, keeping the newest `keep`. */
+  pruneExecutions(keep?: number): Promise<number>;
   /** Promote an execution's script to a named, reusable snippet. */
-  saveSnippet(name: string, options?: SaveSnippetOptions): Promise<Snippet>;
+  saveSnippet(name: string, options: SaveSnippetOptions): Promise<Snippet>;
   snippets(): Promise<Snippet[]>;
   deleteSnippet(name: string): Promise<boolean>;
 }
@@ -68,16 +86,18 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
       ctx: this.#options.ctx,
       executor: this.#options.executor,
       connectors: this.#options.connectors,
-      description: options?.description
+      description: options?.description,
+      maxExecutions: this.#options.maxExecutions
     });
   }
 
-  approve(options?: CodemodeApproveOptions): Promise<ProxyToolOutput> {
+  approve(options: CodemodeApproveOptions): Promise<ProxyToolOutput> {
     return resumeCodemode({
       ctx: this.#options.ctx,
       executor: this.#options.executor,
       connectors: this.#options.connectors,
-      executionId: options?.executionId
+      executionId: options.executionId,
+      maxExecutions: this.#options.maxExecutions
     });
   }
 
@@ -85,29 +105,40 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
     return rejectCodemode({
       ctx: this.#options.ctx,
       connectors: this.#options.connectors,
-      seq: options.seq
+      seq: options.seq,
+      executionId: options.executionId
     });
   }
 
-  rollback(): Promise<void> {
+  rollback(options: CodemodeRollbackOptions): Promise<void> {
     return rollbackCodemode({
       ctx: this.#options.ctx,
-      connectors: this.#options.connectors
+      connectors: this.#options.connectors,
+      executionId: options.executionId
     });
   }
 
-  pending(): Promise<PendingAction[]> {
+  pending(executionId?: string): Promise<PendingAction[]> {
     return pendingCodemode({
       ctx: this.#options.ctx,
-      connectors: this.#options.connectors
+      connectors: this.#options.connectors,
+      executionId
     });
   }
 
-  executions(): Promise<ExecutionState[]> {
-    return this.#runtime().listExecutions();
+  executions(limit?: number): Promise<ExecutionState[]> {
+    return this.#runtime().listExecutions(limit);
   }
 
-  saveSnippet(name: string, options?: SaveSnippetOptions): Promise<Snippet> {
+  deleteExecution(id: string): Promise<boolean> {
+    return this.#runtime().deleteExecution(id);
+  }
+
+  pruneExecutions(keep?: number): Promise<number> {
+    return this.#runtime().pruneExecutions(keep);
+  }
+
+  saveSnippet(name: string, options: SaveSnippetOptions): Promise<Snippet> {
     return this.#runtime().saveSnippet(name, options);
   }
 

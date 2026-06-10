@@ -60,6 +60,24 @@ export abstract class CodemodeConnector<
   Env = unknown,
   Props = unknown
 > extends WorkerEntrypoint<Env, Props> {
+  /**
+   * Connectors are used in-process by the runtime (their `name()`, `describe()`,
+   * and `executeTool()` are called directly), so they're constructed with `new`
+   * — typically from inside an Agent / Durable Object.
+   *
+   * Inside a Durable Object `this.ctx` is a `DurableObjectState`, not an
+   * `ExecutionContext`. The base `WorkerEntrypoint` constructor only stores it,
+   * so we widen the parameter to accept either — pass `this.ctx` directly with
+   * no cast:
+   *
+   * ```ts
+   * const github = new GithubConnector(this.ctx, this.env, conn);
+   * ```
+   */
+  constructor(ctx: DurableObjectState | ExecutionContext, env: Env) {
+    super(ctx as ExecutionContext, env);
+  }
+
   abstract name(): string;
 
   protected instructions(): string | undefined {
@@ -136,13 +154,20 @@ export abstract class CodemodeConnector<
     return tool.execute(args);
   }
 
+  /**
+   * Revert an applied action. Returns whether a revert actually ran — reads and
+   * tools without a `revert` are a no-op and return `false`, so the runtime can
+   * mark only the entries it truly reverted.
+   */
   async revertAction(
     method: string,
     args: unknown,
     result: unknown
-  ): Promise<void> {
+  ): Promise<boolean> {
     const tool = (await this.resolvedTools())[method];
-    await tool?.revert?.(args, result);
+    if (!tool?.revert) return false;
+    await tool.revert(args, result);
+    return true;
   }
 
   async getTypeScriptTypes(): Promise<string> {

@@ -1,0 +1,24 @@
+{
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "enable_nodejs_tty_module",
+    "enable_nodejs_fs_module",
+    "enable_nodejs_http_modules",
+    "enable_nodejs_perf_hooks_module",
+    "enable_nodejs_v8_module",
+    "enable_nodejs_process_v2"
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "CodemodeTestHost", "name": "CodemodeTestHost" },
+      // Facet-only class. vitest-pool-workers needs it listed as a binding so
+      // a facet-compatible class value resolves; it stays out of
+      // new_sqlite_classes below (the host owns the SQLite store).
+      { "class_name": "CodemodeRuntime", "name": "CodemodeRuntime" }
+    ]
+  },
+  "migrations": [{ "new_sqlite_classes": ["CodemodeTestHost"], "tag": "v1" }],
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "main": "worker.ts"
+}

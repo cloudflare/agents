@@ -39,11 +39,12 @@ describe("createCodemodeRuntime", () => {
       id: "exec_1",
       code: "async () => 'approved'",
       status: "running" as const,
-      log: []
+      log: [],
+      createdAt: 1,
+      updatedAt: 1
     };
     const runtimeStub = {
       resume: vi.fn(async () => execution),
-      configure: vi.fn(async () => undefined),
       getExecution: vi.fn(async () => execution),
       complete: vi.fn(async () => undefined)
     };
@@ -58,13 +59,18 @@ describe("createCodemodeRuntime", () => {
 
     await expect(runtime.approve({ executionId: "exec_1" })).resolves.toEqual({
       status: "completed",
+      executionId: "exec_1",
       result: "approved",
       logs: undefined
     });
 
     expect(runtimeStub.resume).toHaveBeenCalledWith("exec_1");
     expect(executor.execute).toHaveBeenCalled();
-    expect(runtimeStub.complete).toHaveBeenCalledWith("approved", undefined);
+    expect(runtimeStub.complete).toHaveBeenCalledWith(
+      "exec_1",
+      "approved",
+      undefined
+    );
   });
 
   it("lists pending actions awaiting approval", async () => {

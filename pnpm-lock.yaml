@@ -787,8 +787,8 @@ importers:
         specifier: '*'
         version: link:../../packages/codemode
       '@cloudflare/kumo':
-        specifier: ^2.4.1
-        version: 2.4.1(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.16)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
+        specifier: ^2.5.1
+        version: 2.5.1(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
       '@modelcontextprotocol/sdk':
         specifier: '*'
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
@@ -800,7 +800,7 @@ importers:
         version: link:../../packages/agents
       ai:
         specifier: '*'
-        version: 6.0.196(zod@4.4.3)
+        version: 6.0.199(zod@4.4.3)
       nanoid:
         specifier: ^5.1.11
         version: 5.1.11
@@ -812,32 +812,32 @@ importers:
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
         specifier: '*'
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.196(zod@4.4.3))
+        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.199(zod@4.4.3))
       zod:
         specifier: '*'
         version: 4.4.3
     devDependencies:
       '@cloudflare/vite-plugin':
-        specifier: ^1.39.2
-        version: 1.39.2(vite@8.0.16(@types/node@25.9.1)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(workerd@1.20260601.1)(wrangler@4.97.0(@cloudflare/workers-types@4.20260604.1))
+        specifier: ^1.40.1
+        version: 1.40.1(vite@8.0.16(@types/node@25.9.2)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(workerd@1.20260609.1)(wrangler@4.99.0(@cloudflare/workers-types@4.20260609.1))
       '@cloudflare/workers-types':
-        specifier: ^4.20260604.1
-        version: 4.20260604.1
+        specifier: ^4.20260609.1
+        version: 4.20260609.1
       '@tailwindcss/vite':
         specifier: ^4
-        version: 4.3.0(vite@8.0.16(@types/node@25.9.1)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+        version: 4.3.0(vite@8.0.16(@types/node@25.9.2)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
       '@types/node':
-        specifier: ^25.9.1
-        version: 25.9.1
+        specifier: ^25.9.2
+        version: 25.9.2
       '@types/react':
-        specifier: ^19.2.16
-        version: 19.2.16
+        specifier: ^19.2.17
+        version: 19.2.17
       '@types/react-dom':
         specifier: ^19.2.3
-        version: 19.2.3(@types/react@19.2.16)
+        version: 19.2.3(@types/react@19.2.17)
       '@vitejs/plugin-react':
         specifier: ^6.0.2
-        version: 6.0.2(@rolldown/plugin-babel@0.2.3(@babel/core@7.29.7)(@babel/runtime@7.29.7)(rolldown@1.1.0)(vite@8.0.16(@types/node@25.9.1)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))(vite@8.0.16(@types/node@25.9.1)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+        version: 6.0.2(@rolldown/plugin-babel@0.2.3(@babel/core@7.29.7)(@babel/runtime@7.29.7)(rolldown@1.1.0)(vite@8.0.16(@types/node@25.9.2)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))(vite@8.0.16(@types/node@25.9.2)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
       tailwindcss:
         specifier: ^4.3.0
         version: 4.3.0
@@ -846,10 +846,10 @@ importers:
         version: 6.0.3
       vite:
         specifier: ^8.0.16
-        version: 8.0.16(@types/node@25.9.1)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
+        version: 8.0.16(@types/node@25.9.2)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
       wrangler:
-        specifier: ^4.97.0
-        version: 4.97.0(@cloudflare/workers-types@4.20260604.1)
+        specifier: ^4.99.0
+        version: 4.99.0(@cloudflare/workers-types@4.20260609.1)
 
   examples/codemode-mcp:
     dependencies:

@@ -153,12 +153,10 @@ github.search_issues({ query });
 
 ## OpenApiConnector
 
-Wraps an OpenAPI spec. The model is good at writing code, so the surface is data plus an authenticated capability. Override two methods:
+Wraps an OpenAPI spec. The base reads the spec **once, host-side** and derives one typed tool **per operation**, so the model calls operations directly — `stripe.CreatePaymentIntent({ amount, currency })` — discoverable through `codemode.search`/`describe` with real input types. Deriving on the host costs zero prompt tokens. Override two methods:
 
-- `spec()` returns the OpenAPI document into the sandbox (no prompt tokens).
+- `spec()` returns the OpenAPI document (used to derive operations).
 - `request()` performs an authenticated request.
-
-The model reads the spec, finds the operation it wants in code, and calls `request()`. There are no pre-baked per-operation methods.
 
 ```ts
 import {
@@ -171,7 +169,7 @@ export class StripeConnector extends OpenApiConnector<Env> {
     return "stripe";
   }
   protected instructions() {
-    return "Use for Stripe payments. Read stripe.spec() and call stripe.request(...).";
+    return "Use for Stripe payments. Call the per-operation tools directly.";
   }
   protected spec() {
     return stripeOpenApiSpec;
@@ -189,23 +187,25 @@ export class StripeConnector extends OpenApiConnector<Env> {
 
 | Method             | Purpose                                                                                         |
 | ------------------ | ----------------------------------------------------------------------------------------------- |
-| `spec()`           | Required. Return the OpenAPI spec document. May be async.                                       |
+| `spec()`           | Required. Return the OpenAPI spec document. May be async. Operations are derived from it.       |
 | `request(options)` | Required. Perform an authenticated request. Receives `{ path, method, params, body, headers }`. |
+| `exposeSpec()`     | Optional. Return `true` to also expose the raw `spec` document as a tool. Off by default.       |
+
+Each derived tool takes a single object: top-level keys are the operation's path/query/header parameters, plus a `body` key when the operation has a JSON request body. The base substitutes path params and hands `request()` a clean `{ path, method, params, body, headers }`. Local `$ref`s in the spec are inlined so the generated input types are usable. A low-level `request` tool is also exposed as an escape hatch for operations a derived tool can't reach.
 
 Sandbox sees:
 
 ```ts
-const spec = await stripe.spec();
-const op = Object.entries(spec.paths)
-  .flatMap(([path, methods]) =>
-    Object.entries(methods).map(([method, o]) => ({ path, method, ...o }))
-  )
-  .find((o) => o.operationId === "CreatePaymentIntent");
+// Path params are substituted; the body is a typed object.
+const intent = await stripe.CreatePaymentIntent({
+  amount: 2000,
+  currency: "usd"
+});
 
-const result = await stripe.request({
-  path: op.path,
-  method: op.method,
-  body: { amount: 2000, currency: "usd" }
+// Escape hatch, if needed:
+const raw = await stripe.request({
+  path: "/v1/charges",
+  method: "GET"
 });
 ```
 

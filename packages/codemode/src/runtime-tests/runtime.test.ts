@@ -1,0 +1,315 @@
+/**
+ * End-to-end tests for the durable codemode runtime, driven through a real
+ * Durable Object host + CodemodeRuntime facet + DynamicWorkerExecutor sandbox.
+ *
+ * These cover the behaviour the mock-based unit tests can't: the connector RPC
+ * binding, abort-and-replay across a real pause/approve cycle, rejection,
+ * rollback, replay divergence, step replay, concurrent executions, and
+ * execution retention.
+ */
+import { env } from "cloudflare:workers";
+import { describe, it, expect } from "vitest";
+import type { ProxyToolOutput } from "../proxy-tool";
+import type { ExecutionState, PendingAction } from "../runtime";
+import type { Snippet } from "../snippet";
+
+// The host's RPC methods, typed concretely. We don't lean on
+// `DurableObjectNamespace<CodemodeTestHost>` here: the Workers RPC stub mapping
+// collapses these structured return types to `never`, so we describe the slice
+// of the host surface the tests use directly. The runtime-tests also run under
+// their own wrangler config (see vitest.runtime.config.ts), so the binding
+// isn't in the package's generated `Env`.
+type SideEffects = {
+  created: Array<{ title: string }>;
+  deleted: unknown[];
+  notes: string[];
+};
+
+interface Host {
+  run(
+    code: string,
+    options?: { maxExecutions?: number }
+  ): Promise<ProxyToolOutput>;
+  approve(executionId: string): Promise<ProxyToolOutput>;
+  reject(seq: number, executionId: string): Promise<void>;
+  rollback(executionId: string): Promise<void>;
+  pending(executionId?: string): Promise<PendingAction[]>;
+  executions(): Promise<ExecutionState[]>;
+  deleteExecution(id: string): Promise<boolean>;
+  saveSnippet(
+    name: string,
+    description: string,
+    executionId: string
+  ): Promise<Snippet>;
+  snippets(): Promise<Snippet[]>;
+  sideEffects(): Promise<SideEffects>;
+}
+
+const testEnv = env as unknown as {
+  CodemodeTestHost: DurableObjectNamespace;
+};
+
+let counter = 0;
+function host(): Host {
+  // Fresh DO per test so executions/state never bleed across tests.
+  const name = `host-${Date.now()}-${counter++}`;
+  return testEnv.CodemodeTestHost.get(
+    testEnv.CodemodeTestHost.idFromName(name)
+  ) as unknown as Host;
+}
+
+describe("codemode durable runtime (e2e)", () => {
+  it("runs a read-only connector call to completion over real RPC", async () => {
+    const h = host();
+    const out = (await h.run(
+      `async () => await items.list_items()`
+    )) as ProxyToolOutput;
+
+    expect(out.status).toBe("completed");
+    if (out.status === "completed") expect(out.result).toEqual([]);
+  });
+
+  it("pauses on an approval-gated action, then resumes on approve", async () => {
+    const h = host();
+    const first = (await h.run(
+      `async () => await items.create_item({ title: "hello" })`
+    )) as ProxyToolOutput;
+
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+    expect(first.pending).toHaveLength(1);
+    expect(first.pending[0]).toMatchObject({
+      connector: "items",
+      method: "create_item",
+      args: { title: "hello" }
+    });
+
+    // Not applied yet.
+    expect((await h.sideEffects()).created).toEqual([]);
+
+    const resumed = (await h.approve(first.executionId)) as ProxyToolOutput;
+    expect(resumed.status).toBe("completed");
+    if (resumed.status === "completed") {
+      expect(resumed.result).toMatchObject({ id: 1, title: "hello" });
+    }
+    // Applied exactly once.
+    expect((await h.sideEffects()).created).toEqual([{ title: "hello" }]);
+  });
+
+  it("replays prior reads from the log instead of re-executing them", async () => {
+    const h = host();
+    // A read before the approval pause. On resume the read must NOT run again.
+    const code = `async () => {
+      const before = await items.list_items();
+      const created = await items.create_item({ title: "x" });
+      return { beforeCount: before.length, created };
+    }`;
+    const first = (await h.run(code)) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    const resumed = (await h.approve(first.executionId)) as ProxyToolOutput;
+    expect(resumed.status).toBe("completed");
+    if (resumed.status === "completed") {
+      // list_items replayed its original (empty) result, even though
+      // create_item has since mutated state.
+      expect(resumed.result).toMatchObject({ beforeCount: 0 });
+    }
+    expect((await h.sideEffects()).created).toEqual([{ title: "x" }]);
+  });
+
+  it("rejecting a pending action ends the execution without applying it", async () => {
+    const h = host();
+    const first = (await h.run(
+      `async () => await items.create_item({ title: "nope" })`
+    )) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    await h.reject(first.pending[0].seq, first.executionId);
+
+    expect((await h.sideEffects()).created).toEqual([]);
+    const execs = await h.executions();
+    const exec = execs.find((e) => e.id === first.executionId);
+    expect(exec?.status).toBe("error");
+  });
+
+  it("rolls back applied actions in reverse, including non-approval writes", async () => {
+    const h = host();
+    // add_note (no approval) runs immediately; create_item pauses.
+    const code = `async () => {
+      await items.add_note({ text: "first" });
+      return await items.create_item({ title: "second" });
+    }`;
+    const first = (await h.run(code)) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+    const resumed = (await h.approve(first.executionId)) as ProxyToolOutput;
+    expect(resumed.status).toBe("completed");
+
+    let fx = await h.sideEffects();
+    expect(fx.created).toEqual([{ title: "second" }]);
+    expect(fx.notes).toEqual(["first"]);
+
+    await h.rollback(first.executionId);
+
+    fx = await h.sideEffects();
+    // create_item reverted (its result pushed to deleted), note reverted.
+    expect(fx.deleted).toEqual([{ id: 1, title: "second" }]);
+    expect(fx.notes).toEqual(["__reverted__"]);
+
+    // The rollback is reflected in the execution status (not left "completed").
+    const execs = await h.executions();
+    expect(execs.find((e) => e.id === first.executionId)?.status).toBe(
+      "rolled_back"
+    );
+  });
+
+  it("does not apply anything when model code swallows the pause", async () => {
+    const h = host();
+    // The model wraps the approval-gated call in try/catch and keeps going,
+    // attempting a second write. The runtime's terminal-state guard must stop
+    // every further call, so nothing is applied and the run still pauses.
+    const code = `async () => {
+      try {
+        await items.create_item({ title: "one" });
+      } catch (e) {
+        // swallow the pause and try to do more
+      }
+      try {
+        await items.create_item({ title: "two" });
+      } catch (e) {}
+      return "done";
+    }`;
+    const out = (await h.run(code)) as ProxyToolOutput;
+
+    expect(out.status).toBe("paused");
+    if (out.status !== "paused") return;
+    // Only the first action is pending; the swallowed-and-retried call never
+    // got logged or applied.
+    expect(out.pending).toHaveLength(1);
+    expect(out.pending[0]).toMatchObject({ method: "create_item" });
+    expect((await h.sideEffects()).created).toEqual([]);
+  });
+
+  it("aggregates pending actions across concurrent paused executions", async () => {
+    const h = host();
+    const a = (await h.run(
+      `async () => await items.create_item({ title: "A" })`
+    )) as ProxyToolOutput;
+    const b = (await h.run(
+      `async () => await items.create_item({ title: "B" })`
+    )) as ProxyToolOutput;
+    expect(a.status).toBe("paused");
+    expect(b.status).toBe("paused");
+
+    // pending() with no executionId must surface BOTH paused runs, not just
+    // whichever was started last.
+    const pending = await h.pending();
+    expect(pending).toHaveLength(2);
+    const titles = pending
+      .map((p) => (p.args as { title: string }).title)
+      .sort();
+    expect(titles).toEqual(["A", "B"]);
+  });
+
+  it("detects replay divergence when approval-call args change across runs", async () => {
+    const h = host();
+    // Math.random() is NOT wrapped in a step, so the recorded args differ on
+    // resume → the runtime must refuse rather than silently apply stale args.
+    const code = `async () => await items.create_item({ title: "t" + Math.random() })`;
+    const first = (await h.run(code)) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    const resumed = (await h.approve(first.executionId)) as ProxyToolOutput;
+    expect(resumed.status).toBe("error");
+    if (resumed.status === "error") {
+      expect(resumed.error).toMatch(/divergence/i);
+    }
+    // Nothing applied.
+    expect((await h.sideEffects()).created).toEqual([]);
+  });
+
+  it("codemode.step makes nondeterministic work replay-safe", async () => {
+    const h = host();
+    // Same shape as the divergence test, but the random value is captured in a
+    // step, so it replays identically and the approval call's args match.
+    const code = `async () => {
+      const r = await codemode.step("rand", () => Math.random());
+      return await items.create_item({ title: "t" + r });
+    }`;
+    const first = (await h.run(code)) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    const resumed = (await h.approve(first.executionId)) as ProxyToolOutput;
+    expect(resumed.status).toBe("completed");
+    expect((await h.sideEffects()).created).toHaveLength(1);
+  });
+
+  it("runs two executions concurrently without clobbering each other", async () => {
+    const h = host();
+    const [a, b] = (await Promise.all([
+      h.run(`async () => { await items.list_items(); return "A"; }`),
+      h.run(`async () => { await items.list_items(); return "B"; }`)
+    ])) as ProxyToolOutput[];
+
+    expect(a.status).toBe("completed");
+    expect(b.status).toBe("completed");
+    const results = [a, b].map((o) =>
+      o.status === "completed" ? o.result : null
+    );
+    expect(results.sort()).toEqual(["A", "B"]);
+
+    const execs = await h.executions();
+    const completed = execs.filter((e) => e.status === "completed");
+    expect(completed.length).toBeGreaterThanOrEqual(2);
+    // Distinct execution ids.
+    expect(new Set(execs.map((e) => e.id)).size).toBe(execs.length);
+  });
+
+  it("retains only the newest terminal executions (auto-prune)", async () => {
+    const h = host();
+    for (let i = 0; i < 5; i++) {
+      const out = (await h.run(`async () => ${i}`, {
+        maxExecutions: 2
+      })) as ProxyToolOutput;
+      expect(out.status).toBe("completed");
+    }
+    const execs = await h.executions();
+    // At most `maxExecutions` terminal + the just-finished current.
+    expect(execs.length).toBeLessThanOrEqual(3);
+  });
+
+  it("saves a completed run as a snippet and re-runs it", async () => {
+    const h = host();
+    const out = (await h.run(
+      `async (input) => "ran:" + (input ?? "none")`
+    )) as ProxyToolOutput;
+    expect(out.status).toBe("completed");
+    if (out.status !== "completed") return;
+
+    // The completed output carries the execution id — no need to guess "newest".
+    await h.saveSnippet("greet", "says hi", out.executionId);
+    const snippets = await h.snippets();
+    expect(snippets.map((s) => s.name)).toContain("greet");
+
+    const reuse = (await h.run(
+      `async () => await codemode.run("greet", "world")`
+    )) as ProxyToolOutput;
+    expect(reuse.status).toBe("completed");
+    if (reuse.status === "completed") expect(reuse.result).toBe("ran:world");
+  });
+
+  it("deletes an execution from the audit trail", async () => {
+    const h = host();
+    await h.run(`async () => 1`);
+    const before = await h.executions();
+    expect(before.length).toBeGreaterThanOrEqual(1);
+    const id = before[0].id;
+    expect(await h.deleteExecution(id)).toBe(true);
+    const after = await h.executions();
+    expect(after.find((e) => e.id === id)).toBeUndefined();
+  });
+});

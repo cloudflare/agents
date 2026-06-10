@@ -285,7 +285,7 @@ github.search_issues({ query });
 
 ### `OpenApiConnector`
 
-Wraps an OpenAPI spec. The model is good at writing code, so the surface is data plus an authenticated capability. Override two methods: `spec()` returns the OpenAPI document into the sandbox (no prompt tokens), and `request()` performs an authenticated request. The model reads the spec, finds the operation it wants in code, and calls `request()`.
+Wraps an OpenAPI spec. The base reads the spec **once, host-side** and derives one typed tool **per operation**, so the model calls operations directly — `stripe.CreatePaymentIntent({ amount, currency })` — discoverable through `codemode.search`/`describe` with real input types (deriving on the host costs zero prompt tokens). Override two methods: `spec()` returns the OpenAPI document (operations are derived from it), and `request()` performs an authenticated request. A low-level `request` tool stays available as an escape hatch.
 
 ```ts
 // stripe.codemode.ts
@@ -299,7 +299,7 @@ export class StripeConnector extends OpenApiConnector<Env> {
     return "stripe";
   }
   protected instructions() {
-    return "Use for Stripe payments. Read stripe.spec() and call stripe.request(...).";
+    return "Use for Stripe payments. Call the per-operation tools directly.";
   }
   protected spec() {
     return stripeOpenApiSpec;
@@ -318,18 +318,14 @@ export class StripeConnector extends OpenApiConnector<Env> {
 Sandbox sees:
 
 ```ts
-const spec = await stripe.spec();
-const op = Object.entries(spec.paths)
-  .flatMap(([path, methods]) =>
-    Object.entries(methods).map(([method, o]) => ({ path, method, ...o }))
-  )
-  .find((o) => o.operationId === "CreatePaymentIntent");
-
-const intent = await stripe.request({
-  path: op.path,
-  method: op.method,
-  body: { amount: 2000, currency: "usd" }
+// Per-operation tool, derived from the spec (path params substituted for you).
+const intent = await stripe.CreatePaymentIntent({
+  amount: 2000,
+  currency: "usd"
 });
+
+// Escape hatch, if an operation isn't reachable via a derived tool:
+const raw = await stripe.request({ path: "/v1/charges", method: "GET" });
 ```
 
 ### `CodemodeConnector` (base class)
@@ -382,7 +378,7 @@ export class LinearConnector extends CodemodeConnector<Env> {
 
 The `tool(name, t)` decoration hook adjusts tools you didn't author inline (used with MCP/OpenAPI-derived tools). The RPC wire surface (`describe()`, `executeTool()`, `revertAction()`, `getTypeScriptTypes()`) is derived from the tools record — you don't implement it.
 
-The agent drives approvals through the runtime: `runtime.pending()`, `runtime.approve()`, `runtime.reject({ seq })`, `runtime.rollback()` (see [docs/codemode/approvals.md](../../docs/codemode/approvals.md)).
+The agent drives approvals through the runtime: `runtime.pending()`, `runtime.approve({ executionId })`, `runtime.reject({ seq, executionId })`, `runtime.rollback({ executionId })` (see [docs/codemode/approvals.md](../../docs/codemode/approvals.md)).
 
 ### Snippets
 

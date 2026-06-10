@@ -35,7 +35,8 @@ export {
   type CodemodeRuntimeHandle,
   type CodemodeRuntimeToolOptions,
   type CodemodeApproveOptions,
-  type CodemodeRejectOptions
+  type CodemodeRejectOptions,
+  type CodemodeRollbackOptions
 } from "./runtime-handle";
 
 export { type ProxyToolInput, type ProxyToolOutput } from "./proxy-tool";

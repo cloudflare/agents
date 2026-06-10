@@ -9,15 +9,21 @@ The model gets one tool (`codemode`) that executes TypeScript. Inside the sandbo
 const matches = await codemode.search("pull request");
 const docs = await codemode.describe("github.list_pull_requests");
 
-// call
+// call connector methods directly
 const prs = await github.list_pull_requests({
   owner: "cloudflare",
   repo: "agents"
 });
-const spec = await repoApi.spec();
-const repo = await repoApi.request({
-  path: "/repos/{owner}/{repo}",
-  params: { owner: "cloudflare", repo: "agents" }
+const repo = await repoApi.get_repository({
+  owner: "cloudflare",
+  repo: "agents"
+});
+
+// approval-gated write — the run pauses here until the user approves
+const issue = await github.create_issue({
+  owner: "cloudflare",
+  repo: "agents",
+  title: "Docs typo"
 });
 
 // run a saved snippet
@@ -47,14 +53,33 @@ export class GithubConnector extends McpConnector<Env> {
 }
 ```
 
-**`repoapi.codemode.ts`** — an OpenAPI connector that wraps a REST API:
+**`repoapi.codemode.ts`** — an OpenAPI connector that wraps a REST API. The
+base reads the spec once (host-side) and derives one typed tool per operation —
+`repoApi.get_repository(...)`, `repoApi.list_releases(...)` — so the model never
+has to read the raw spec or hand-build requests:
 
 ```ts
 export class RepoApiConnector extends OpenApiConnector<Env> {
   name() { return "repoApi"; }
-  protected spec() { return openapiSpec; }
-  protected async request(input) { ... }
+  protected spec() { return openapiSpec; }   // operations derived from this
+  protected async request(input) { ... }      // performs the authenticated call
 }
+```
+
+### Approvals
+
+A connector marks a tool as approval-gated (here `github.create_issue`, via the
+`tool()` hook). When the model calls it, the runtime records the action and
+pauses the run. The agent exposes callable methods (`pendingApprovals`,
+`approveExecution`, `rejectExecution`) that the UI wires to Approve / Reject
+buttons. Approving re-runs the stored code, replaying everything up to the
+approved action, runs it for real, and continues:
+
+```ts
+// host side (callable from the client)
+async pendingApprovals() { return this.#runtime().pending(); }
+async approveExecution(id: string) { return this.#runtime().approve({ executionId: id }); }
+async rejectExecution(id: string, seq: number) { await this.#runtime().reject({ seq, executionId: id }); }
 ```
 
 ### Snippets
@@ -102,5 +127,5 @@ npm run start -w @cloudflare/agents-codemode-connectors-demo
 Then try:
 
 - "List open pull requests for cloudflare/agents"
-- "Get repository metadata for cloudflare/agents"
-- "Give me an overview of cloudflare/agents"
+- "Get repository metadata and latest releases for cloudflare/agents"
+- "Open an issue titled 'Docs typo' on cloudflare/agents" — then Approve it in the panel

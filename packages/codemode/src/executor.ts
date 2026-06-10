@@ -27,6 +27,13 @@ export type {
 
 const BINARY_TAG = "__codemode_binary_v1__";
 
+// Control protocol between a connector binding (host) and the sandbox proxy.
+// A binding returns `{ [CONNECTOR_CONTROL_KEY]: "pause" | "diverge", ... }`
+// instead of throwing across RPC; the generated proxy throws locally. Keep in
+// sync with proxy-tool.ts (CONTROL_KEY / PAUSE_SENTINEL).
+const CONNECTOR_CONTROL_KEY = "__codemode_control__";
+const PAUSE_SENTINEL_LITERAL = "__CODEMODE_PAUSE__";
+
 type EncodedBinary = {
   [BINARY_TAG]: "Uint8Array" | "ArrayBuffer" | "ArrayBufferView";
   data: string;
@@ -402,14 +409,23 @@ export class DynamicWorkerExecutor implements Executor {
       .map((p) => p.prelude as string);
 
     // Generate Proxy globals for connector-backed namespaces.
-    // These call connector.callTool(method, args) via Workers RPC — no serialization layer.
+    // These call connector.callTool(method, args) via Workers RPC — no
+    // serialization layer. Connector bindings are passed as an argument to
+    // evaluate() (not via env): live RPC references can be serialized as RPC
+    // call arguments but NOT as Worker `env` config values.
+    //
+    // A binding never throws across RPC (that would leave an unhandled remote
+    // rejection); instead it may return a "pause" control marker which we turn
+    // into a local throw here, where the sandbox's own try/catch handles it.
     const connectorProxyInits = connectors.map(
       (c) =>
         `    const ${c.name} = new Proxy({}, {\n` +
         `      get: (_, toolName) => {\n` +
         `        if (typeof toolName !== "string") return undefined;\n` +
         `        return async (...args) => {\n` +
-        `          return this.env.__connectors.${c.name}.callTool(toolName, args[0]);\n` +
+        `          const __r = await __connectors.${c.name}.callTool(toolName, args[0]);\n` +
+        `          if (__r && typeof __r === "object" && __r.${CONNECTOR_CONTROL_KEY} === "pause") throw new Error("${PAUSE_SENTINEL_LITERAL}");\n` +
+        `          return __r;\n` +
         `        };\n` +
         `      }\n` +
         `    });`
@@ -419,7 +435,7 @@ export class DynamicWorkerExecutor implements Executor {
       'import { WorkerEntrypoint } from "cloudflare:workers";',
       "",
       "export default class CodeExecutor extends WorkerEntrypoint {",
-      "  async evaluate(__dispatchers = {}) {",
+      "  async evaluate(__dispatchers = {}, __connectors = {}) {",
       "    const __logs = [];",
       '    console.log = (...a) => { __logs.push(a.map(String).join(" ")); };',
       '    console.warn = (...a) => { __logs.push("[warn] " + a.map(String).join(" ")); };',
@@ -476,18 +492,20 @@ export class DynamicWorkerExecutor implements Executor {
       dispatchers[provider.name] = new ToolDispatcher(sanitizedFns);
     }
 
-    // Merge static bindings with connector bindings.
+    // Connector bindings are passed as an evaluate() argument (RPC), not via
+    // env — live RPC references can only be serialized for RPC calls.
     const connectorBindings: Record<string, unknown> = {};
     for (const connector of connectors) {
       connectorBindings[connector.name] = connector.binding;
     }
-    const env = {
-      ...this.#bindings,
-      ...(connectors.length > 0 ? { __connectors: connectorBindings } : {})
-    };
+    const env = { ...this.#bindings };
     const hasEnv = Object.keys(env).length > 0;
 
-    const worker = this.#loader.get(`codemode-${crypto.randomUUID()}`, () => ({
+    // `load()` (not `get(id, cb)`): every run produces a unique generated
+    // module, so there is nothing to cache by id — `get` with a random id would
+    // only churn the loader's isolate cache. `load()` is the one-shot path the
+    // Worker Loader API provides for exactly this (codemode-style) use.
+    const worker = this.#loader.load({
       compatibilityDate: "2025-06-01",
       compatibilityFlags: ["nodejs_compat"],
       mainModule: "executor.js",
@@ -497,16 +515,19 @@ export class DynamicWorkerExecutor implements Executor {
       },
       globalOutbound: this.#globalOutbound,
       env: hasEnv ? env : undefined
-    }));
+    });
 
     const entrypoint = worker.getEntrypoint() as unknown as {
-      evaluate(dispatchers: Record<string, ToolDispatcher>): Promise<{
+      evaluate(
+        dispatchers: Record<string, ToolDispatcher>,
+        connectors: Record<string, unknown>
+      ): Promise<{
         result: unknown;
         error?: string;
         logs?: string[];
       }>;
     };
-    const response = await entrypoint.evaluate(dispatchers);
+    const response = await entrypoint.evaluate(dispatchers, connectorBindings);
 
     if (response.error) {
       return { result: undefined, error: response.error, logs: response.logs };

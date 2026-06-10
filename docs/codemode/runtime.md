@@ -21,16 +21,17 @@ const runtime = createCodemodeRuntime({
 });
 ```
 
-| Handle method                                        | Purpose                                                              |
-| ---------------------------------------------------- | -------------------------------------------------------------------- |
-| `runtime.tool(options?)`                             | The single model-facing AI SDK tool, `codemode({ code })`            |
-| `runtime.pending()`                                  | List actions awaiting approval — drives approval UIs                 |
-| `runtime.approve({ executionId? })`                  | Approve the pending action and continue via replay                   |
-| `runtime.reject({ seq })`                            | Reject a pending action; ends the execution                          |
-| `runtime.rollback()`                                 | Revert applied actions in reverse order via each tool's `revert`     |
-| `runtime.executions()`                               | All executions, newest first — the audit trail for developer UIs     |
-| `runtime.saveSnippet(name, opts?)`                   | Promote an execution's script to a reusable [snippet](./snippets.md) |
-| `runtime.snippets()` / `runtime.deleteSnippet(name)` | List / remove saved snippets                                         |
+| Handle method                                        | Purpose                                                                           |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `runtime.tool(options?)`                             | The single model-facing AI SDK tool, `codemode({ code })`                         |
+| `runtime.pending(executionId?)`                      | Actions awaiting approval — drives approval UIs; no id aggregates all paused runs |
+| `runtime.approve({ executionId })`                   | Approve the pending action and continue via replay                                |
+| `runtime.reject({ seq, executionId })`               | Reject a pending action; ends the execution                                       |
+| `runtime.rollback({ executionId })`                  | Revert applied actions in reverse order via each tool's `revert`                  |
+| `runtime.executions(limit?)`                         | All executions, newest first — the audit trail for developer UIs                  |
+| `runtime.deleteExecution(id)` / `pruneExecutions(n)` | Drop one execution / keep only the newest N terminal ones                         |
+| `runtime.saveSnippet(name, opts?)`                   | Promote an execution's script to a reusable [snippet](./snippets.md)              |
+| `runtime.snippets()` / `runtime.deleteSnippet(name)` | List / remove saved snippets                                                      |
 
 ## The sandbox API (`codemode.*`)
 
@@ -104,14 +105,19 @@ The log is the replay spine. Everything — replay, rollback, audit — reads of
 
 ## Determinism requirement
 
-Replay only works if the code is **deterministic up to tool calls**. The Nth tool call on run 1 must be the Nth tool call on run 2. If the code branches on `Math.random()` or `Date.now()` in a way that changes which tools it calls, replay diverges and the runtime throws:
+Replay only works if the code is **deterministic up to tool calls**. The Nth tool call on run 1 must be the Nth tool call on run 2, with the same arguments. If the code branches on `Math.random()` or `Date.now()` in a way that changes which tools it calls — or passes nondeterministic values as arguments to an approval-gated action — replay diverges. The runtime detects this (the connector/method differs, or the stably-stringified arguments differ from the recorded call), records the execution as failed, and the tool returns an error result rather than throwing:
 
-```
-Codemode replay divergence at step 2: expected github.create_issue,
-got github.merge_pull_request. Code must be deterministic up to tool calls.
+```ts
+{
+  status: "error",
+  executionId: "exec_...",
+  error: "Codemode replay divergence at step 2: arguments changed since the original run. Wrap nondeterministic work in codemode.step()."
+}
 ```
 
-In practice, model-generated code is naturally deterministic — it fetches data, branches on the data (which is replayed identically), and calls tools. The constraint only bites if code uses nondeterministic sources to drive control flow.
+Returning the divergence as data (instead of throwing across the RPC boundary) keeps the agent loop intact and lets the model self-correct. To make nondeterministic work replay-safe, wrap it in `codemode.step(name, fn)` so the value is captured once and replayed identically.
+
+In practice, model-generated code is naturally deterministic — it fetches data, branches on the data (which is replayed identically), and calls tools. The constraint only bites if code uses nondeterministic sources to drive control flow or build action arguments.
 
 ## The tool-call log
 
@@ -123,13 +129,15 @@ type ToolLogEntry = {
   args: unknown;
   result?: unknown; // recorded for replay
   requiresApproval: boolean;
-  state: "applied" | "pending" | "reverted";
+  state: "executing" | "applied" | "pending" | "reverted";
 };
 ```
 
+A call is logged `executing` the moment the runtime decides to run it, and only flips to `applied` once its result is recorded. So a crash between those two points replays as a fresh execution (re-run) rather than replaying a missing result. Once a run pauses or terminates, every further call/step gets a pause decision and records nothing — model code that catches the pause and keeps going cannot apply extra effects.
+
 ## Rollback
 
-Rollback walks the log backward and calls each applied action's `revert`:
+Rollback walks the log backward and calls the `revert` of **every** applied action that has one — independent of `requiresApproval`. A non-approval write with a `revert` is still undone; an approval-gated action without a `revert` is not. `revert` (via `revertAction`) returns whether it actually reverted, and the runtime marks only those entries `reverted`:
 
 ```ts
 protected tool(name: string, t: ConnectorTool): ConnectorTool {
@@ -147,7 +155,25 @@ protected tool(name: string, t: ConnectorTool): ConnectorTool {
 }
 ```
 
-Tools without a `revert` are skipped (the user is told the action can't be auto-reverted). Reads are never reverted.
+Tools without a `revert` are skipped (the user is told the action can't be auto-reverted). Reads are never reverted. `reject()` does **not** roll back — it only ends a paused execution; call `rollback()` to undo actions already applied earlier in the run. Rollback attempts every revert even if one throws (failures are reported afterward rather than aborting the rest), and marks the execution `rolled_back` so the audit trail reflects that its effects were undone.
+
+## Retention
+
+The execution log is the audit trail, so it grows with every run. Terminal executions (completed or errored) are **auto-pruned** as new runs begin, keeping the newest `maxExecutions` (default 50). Running and paused executions are never pruned — an awaiting-approval run is always resumable.
+
+```ts
+const runtime = createCodemodeRuntime({
+  ctx,
+  executor,
+  connectors,
+  maxExecutions: 50 // cap on retained terminal executions
+});
+
+// Explicit controls
+await runtime.executions(20); // newest first, optionally limited
+await runtime.deleteExecution(id); // drop one (returns whether it existed)
+await runtime.pruneExecutions(10); // keep only the newest N terminal runs
+```
 
 ## Snippets
 
@@ -169,8 +195,8 @@ The runtime handle keeps the same `ctx`, `executor`, and `connectors` together, 
 const runtime = createCodemodeRuntime({ ctx, executor, connectors });
 await runtime.pending();
 await runtime.approve({ executionId });
-await runtime.reject({ seq });
-await runtime.rollback();
+await runtime.reject({ seq, executionId });
+await runtime.rollback({ executionId });
 ```
 
 ## Why a facet

@@ -7,13 +7,17 @@ import { streamText, convertToModelMessages, stepCountIs } from "ai";
 import { routeAgentRequest } from "agents";
 import {
   createCodemodeRuntime,
-  DynamicWorkerExecutor
+  DynamicWorkerExecutor,
+  type CodemodeRuntimeHandle,
+  type PendingAction,
+  type ExecutionState,
+  type Snippet
 } from "@cloudflare/codemode";
 import { GithubConnector } from "./github.codemode" with { type: "connectors" };
 import { RepoApiConnector } from "./repoapi.codemode" with { type: "connectors" };
 
 // ---------------------------------------------------------------------------
-// Demo MCP server
+// Demo MCP server — a couple of reads and one approval-gated write.
 // ---------------------------------------------------------------------------
 
 export class GitHubLikeMCP extends McpAgent<Env> {
@@ -68,6 +72,29 @@ export class GitHubLikeMCP extends McpAgent<Env> {
         ]
       })
     );
+
+    this.server.tool(
+      "create_issue",
+      "Create a new issue (write — requires approval).",
+      {
+        owner: z.string(),
+        repo: z.string(),
+        title: z.string(),
+        body: z.string().optional()
+      },
+      async ({ owner, repo, title }) => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              number: 103,
+              title,
+              url: `https://github.com/${owner}/${repo}/issues/103`
+            })
+          }
+        ]
+      })
+    );
   }
 }
 
@@ -80,51 +107,97 @@ export class Chat extends AIChatAgent<Env> {
     await this.addMcpServer("github", this.env.GitHubLikeMCP);
   }
 
-  async onChatMessage() {
-    const workersai = createWorkersAI({ binding: this.env.AI });
-    const executor = new DynamicWorkerExecutor({ loader: this.env.LOADER });
-
-    // Get MCP connection
+  /**
+   * Build the codemode runtime for this agent. Connectors are constructed
+   * in-process (note: no `ExecutionContext` cast — the connector base accepts
+   * `this.ctx`). The runtime is shared between the chat tool and the callable
+   * approval/snippet methods below because its facet identity is derived from
+   * the connector set.
+   */
+  #runtime(): CodemodeRuntimeHandle {
     const server = this.mcp.listServers().find((s) => s.name === "github");
     if (!server) throw new Error("GitHub MCP server is not registered.");
     const conn = this.mcp.mcpConnections[server.id];
     if (!conn) throw new Error("GitHub MCP connection is not available.");
 
-    // Create connectors. Connectors extend WorkerEntrypoint, whose constructor
-    // expects an ExecutionContext; inside a Durable Object we pass `this.ctx`.
-    const ctx = this.ctx as unknown as ExecutionContext;
-    const github = new GithubConnector(ctx, this.env, conn);
-    const repoApi = new RepoApiConnector(ctx, this.env);
+    const github = new GithubConnector(this.ctx, this.env, conn);
+    const repoApi = new RepoApiConnector(this.ctx, this.env);
 
-    const runtime = createCodemodeRuntime({
+    return createCodemodeRuntime({
       ctx: this.ctx,
-      executor,
+      executor: new DynamicWorkerExecutor({ loader: this.env.LOADER }),
       connectors: [github, repoApi]
     });
+  }
+
+  async onChatMessage() {
+    const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
       model: workersai("@cf/moonshotai/kimi-k2.6", {
         sessionAffinity: this.sessionAffinity
       }),
       system: [
-        "You are a helpful assistant.",
-        "Use the codemode tool to discover and call connector SDKs.",
-        "Inside code:",
-        '  - await codemode.search("query") to discover methods and saved snippets',
+        "You are a helpful assistant with a `codemode` tool that runs TypeScript.",
+        "Inside the sandbox:",
+        '  - await codemode.search("query") to discover connector methods and saved snippets',
         '  - await codemode.describe("connector.method") for TypeScript docs',
-        "  - await <connector>.<method>(args) to call methods directly",
+        "  - await <connector>.<method>(args) to call a method directly",
         '  - await codemode.run("name", input) to run a saved snippet',
+        "Connectors: `github` (pull requests, issues) and `repoApi` (repo metadata, releases).",
+        "Some actions (like github.create_issue) require approval — the run pauses and resumes after the user approves. Write code as if the call returns normally.",
         "",
         `The current date and time is ${new Date().toISOString()}.`
       ].join("\n"),
       messages: await convertToModelMessages(this.messages),
       tools: {
-        codemode: runtime.tool()
+        codemode: this.#runtime().tool()
       },
       stopWhen: stepCountIs(10)
     });
 
     return result.toUIMessageStreamResponse();
+  }
+
+  // ---- Callable methods for the approval / snippet UI -----------------------
+
+  /** Actions awaiting approval across paused executions. */
+  async pendingApprovals(): Promise<PendingAction[]> {
+    return this.#runtime().pending();
+  }
+
+  /** Approve a paused execution and resume it; returns the resumed outcome. */
+  async approveExecution(executionId: string) {
+    return this.#runtime().approve({ executionId });
+  }
+
+  /** Reject a pending action, ending the execution. */
+  async rejectExecution(executionId: string, seq: number): Promise<void> {
+    await this.#runtime().reject({ seq, executionId });
+  }
+
+  /** Roll back an execution's applied, reversible actions. */
+  async rollbackExecution(executionId: string): Promise<void> {
+    await this.#runtime().rollback({ executionId });
+  }
+
+  /** The audit trail, newest first. */
+  async executions(): Promise<ExecutionState[]> {
+    return this.#runtime().executions(20);
+  }
+
+  /** Promote a completed execution's script into a reusable snippet. */
+  async saveSnippet(
+    name: string,
+    description: string,
+    executionId: string
+  ): Promise<Snippet> {
+    return this.#runtime().saveSnippet(name, { description, executionId });
+  }
+
+  /** Saved snippets, surfaced to the model in search/describe. */
+  async snippets(): Promise<Snippet[]> {
+    return this.#runtime().snippets();
   }
 }
 

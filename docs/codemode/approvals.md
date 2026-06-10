@@ -52,10 +52,18 @@ The model writes code as if the call returns normally. It doesn't see a provisio
 
 ## Tool output
 
+Execution outcomes are returned, not thrown — a sandbox error or a replay divergence comes back as `{ status: "error" }` (and is recorded on the execution), so the agent loop is never broken by an exception:
+
 ```ts
 type ProxyToolOutput =
-  | { status: "completed"; result: unknown; logs?: string[] }
-  | { status: "paused"; executionId: string; pending: PendingAction[] };
+  | {
+      status: "completed";
+      executionId: string;
+      result: unknown;
+      logs?: string[];
+    }
+  | { status: "paused"; executionId: string; pending: PendingAction[] }
+  | { status: "error"; executionId: string; error: string; logs?: string[] };
 
 type PendingAction = {
   executionId: string;
@@ -73,18 +81,22 @@ The agent drives resolution through the runtime handle:
 ```ts
 const runtime = createCodemodeRuntime({ ctx: this.ctx, connectors, executor });
 
-// List actions awaiting approval, for approval UIs
+// List actions awaiting approval, for approval UIs. With no executionId this
+// aggregates across every paused run, so concurrent approvals all show up.
 await runtime.pending();
 
 // Approve the pending action(s) and continue
 await runtime.approve({ executionId });
 
-// Reject — ends the execution
-await runtime.reject({ seq });
+// Reject — ends the execution. Does NOT undo actions already applied earlier
+// in the same run; call rollback() for that.
+await runtime.reject({ seq, executionId });
 
 // Roll back applied actions in reverse order
-await runtime.rollback();
+await runtime.rollback({ executionId });
 ```
+
+Every lifecycle call targets an explicit `executionId` (there is no implicit "current run" — that would be racy when multiple runs are in flight). Get the id from `pending()`, from `executions()`, or from the tool's own output, which carries `executionId` on every outcome.
 
 Wire these to callable agent methods so the client UI can approve/reject:
 
@@ -96,7 +108,7 @@ export class Chat extends AIChatAgent<Env> {
   }
 
   @callable()
-  async approve(executionId?: string) {
+  async approve(executionId: string) {
     return this.codemodeRuntime().approve({ executionId });
   }
 }
@@ -104,31 +116,36 @@ export class Chat extends AIChatAgent<Env> {
 
 ## Rollback
 
-Rollback reverts applied actions by calling `revertAction` on each connector in reverse order:
+Rollback reverts **all** applied actions that have a `revert` — not only approval-gated ones — in reverse order. Define `revert` on the tool (or override `revertAction`); it returns whether a revert actually ran, and the runtime marks only those entries as reverted:
 
 ```ts
-class GithubConnector extends McpConnector<Env> {
-  async revertAction(method: string, args: unknown, result: unknown) {
-    if (method === "create_issue") {
-      const { number } = result as { number: number };
-      await this.closeIssue(number);
+protected tools() {
+  return {
+    create_issue: {
+      description: "Create a GitHub issue.",
+      requiresApproval: true,
+      execute: (args) => this.client.createIssue(args),
+      revert: (_args, result) => {
+        const { number } = result as { number: number };
+        return this.client.closeIssue(number);
+      }
     }
-  }
+  };
 }
 ```
 
-Connectors without `revertAction` are skipped. Reads are never reverted.
+Tools without a `revert` are skipped, as are reads. Rollback is independent of approval: a non-approval write with a `revert` is still undone.
 
 ## Comparison with Gatekeeper
 
-| Concept              | Gatekeeper                         | Codemode                              |
-| -------------------- | ---------------------------------- | ------------------------------------- |
-| Read classification  | `authorizeObservation()`           | unannotated (default)                 |
-| Write classification | `submitAction()`                   | `{ requiresApproval: true }`          |
-| Pending state        | Simulated in the session           | Logged; run aborts                    |
-| Continue             | Session simulates ahead            | Abort-and-replay                      |
-| Apply                | `applyAction(action)`              | `runtime.approve(...)` replays + runs |
-| Reject               | `rejectAction(action)`             | `runtime.reject({ seq })`             |
-| Revert               | `revertAction(action, revertInfo)` | `revertAction(method, args, result)`  |
+| Concept              | Gatekeeper                         | Codemode                                          |
+| -------------------- | ---------------------------------- | ------------------------------------------------- |
+| Read classification  | `authorizeObservation()`           | unannotated (default)                             |
+| Write classification | `submitAction()`                   | `{ requiresApproval: true }`                      |
+| Pending state        | Simulated in the session           | Logged; run aborts                                |
+| Continue             | Session simulates ahead            | Abort-and-replay                                  |
+| Apply                | `applyAction(action)`              | `runtime.approve({ executionId })` replays + runs |
+| Reject               | `rejectAction(action)`             | `runtime.reject({ seq, executionId })`            |
+| Revert               | `revertAction(action, revertInfo)` | `revertAction(method, args, result)`              |
 
 The key difference: Gatekeeper _simulates_ pending actions so code keeps running. Codemode _aborts and replays_ — simpler and fully durable, at the cost of re-running the code (cheap, since prior calls are served from the log).

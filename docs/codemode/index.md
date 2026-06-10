@@ -169,7 +169,7 @@ const prs = await codemode.run("open-prs", {
 });
 ```
 
-When the code hits an approval-required method (`github.create_issue`), the run pauses and the tool returns `{ status: "paused", executionId, pending }`. After `runtime.approve()`, the same code re-runs: completed calls replay from the durable log, the approved action executes for real, and the script continues — the model never writes pause/resume logic.
+When the code hits an approval-required method (`github.create_issue`), the run pauses and the tool returns `{ status: "paused", executionId, pending }`. After `runtime.approve({ executionId })`, the same code re-runs: completed calls replay from the durable log, the approved action executes for real, and the script continues — the model never writes pause/resume logic.
 
 ## How the code actually runs
 
