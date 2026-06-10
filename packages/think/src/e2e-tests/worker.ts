@@ -7,18 +7,33 @@ import { createWorkersAI } from "workers-ai-provider";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { Agent, callable, routeAgentRequest } from "agents";
+import type { FiberContext } from "agents";
 import { agentTool } from "agents/agent-tools";
+import type { Adapter } from "chat";
+import {
+  chatSdkMessenger,
+  defineMessengers,
+  messengerReplySnapshot,
+  MESSENGER_REPLY_FIBER_NAME,
+  type MessengerEvent,
+  type ThinkMessengers
+} from "../messengers";
 import { RpcTarget } from "cloudflare:workers";
 import type { WorkflowEvent } from "cloudflare:workers";
 import { tool } from "ai";
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { z } from "zod";
-import { Think, Workspace } from "../think";
+import { Session } from "agents/experimental/memory/session";
+import type { ObservabilityEvent } from "agents/observability";
+import { Think, Workspace, defaultContextOverflowClassifier } from "../think";
 import { ThinkWorkflow, type ThinkWorkflowStep } from "../workflows";
 import type {
+  ChatErrorClassification,
+  ChatErrorContext,
   ChatRecoveryContext,
   ChatRecoveryOptions,
   StreamCallback,
+  ThinkSubmissionInspection,
   TurnConfig,
   TurnContext
 } from "../think";
@@ -35,6 +50,10 @@ type Env = {
   ThinkAgentToolNaturalParentE2EAgent: DurableObjectNamespace<ThinkAgentToolNaturalParentE2EAgent>;
   ThinkSlowChildE2EAgent: DurableObjectNamespace<ThinkSlowChildE2EAgent>;
   ThinkSlowChildParentE2EAgent: DurableObjectNamespace<ThinkSlowChildParentE2EAgent>;
+  ThinkContextOverflowE2EAgent: DurableObjectNamespace<ThinkContextOverflowE2EAgent>;
+  ThinkSubmissionRecoveryE2EAgent: DurableObjectNamespace<ThinkSubmissionRecoveryE2EAgent>;
+  ThinkMessengerRecoveryE2EAgent: DurableObjectNamespace<ThinkMessengerRecoveryE2EAgent>;
+  ThinkWorkflowRecoveryE2EAgent: DurableObjectNamespace<ThinkWorkflowRecoveryE2EAgent>;
   TestStructuredAgent: DurableObjectNamespace<TestStructuredAgent>;
   STEP_PROMPT_WORKFLOW: Workflow;
   AI: Ai;
@@ -1328,6 +1347,744 @@ export class StepPromptWorkflow extends ThinkWorkflow<TestStructuredAgent> {
       prompt,
       output: GREETING_SCHEMA
     });
+  }
+}
+
+// ── Context-overflow compaction recovery (in-process; no kills) ──────
+//
+// Exercises Think's opt-in `contextOverflow` recovery end-to-end inside the
+// real Workers runtime (no process kills needed): a mock model surfaces an
+// in-stream provider context-overflow error, and Think's reactive backstop
+// compacts + retries (or, when exhausted, surfaces the overflow terminally).
+// The proactive path keys off model-reported usage crossing a headroom budget.
+
+/**
+ * Deterministic context-overflow model. The inference-call counter lives on the
+ * agent instance (passed in via `nextCall`), so the FIRST inference can overflow
+ * and the scheduled reactive retry (a LATER inference) can succeed — without
+ * relying on prompt contents. In `exhaust` mode every inference overflows, so
+ * the reactive retry budget is spent and the turn terminalizes.
+ */
+function createContextOverflowModel(
+  nextCall: () => number,
+  mode: "recover" | "exhaust"
+): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-context-overflow",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream() {
+      const overflow = mode === "exhaust" || nextCall() === 1;
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (overflow) {
+            // A realistic overflow: the model streams a little text, THEN the
+            // provider rejects the now-too-long prompt. The AI SDK surfaces the
+            // rejection as an in-stream error part (not a throw), which Think's
+            // overflow seam recognizes via `classifyChatError`.
+            controller.enqueue({ type: "text-start", id: "t-partial" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-partial",
+              delta: "partial answer before overflow"
+            });
+            controller.enqueue({ type: "text-end", id: "t-partial" });
+            controller.enqueue({
+              type: "error",
+              error: new Error(
+                "AI_APICallError: prompt is too long: 213450 tokens > 200000 maximum"
+              )
+            });
+            controller.close();
+            return;
+          }
+          controller.enqueue({ type: "text-start", id: "t-ok" });
+          controller.enqueue({
+            type: "text-delta",
+            id: "t-ok",
+            delta: "recovered after compaction"
+          });
+          controller.enqueue({ type: "text-end", id: "t-ok" });
+          controller.enqueue({
+            type: "finish",
+            finishReason: v3FinishReason("stop"),
+            usage: v3Usage(20, 10)
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+/**
+ * Proactive-guard model: step 1 emits an `echo` tool call reporting high input
+ * usage; the proactive guard reads that usage before step 2 and compacts in
+ * place (heading off the overflow). Step 2 then streams a normal answer.
+ */
+function createProactiveUsageModel(): LanguageModel {
+  let callCount = 0;
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-proactive-usage",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream() {
+      callCount++;
+      const step = callCount;
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (step === 1) {
+            const id = "tc-echo";
+            const input = JSON.stringify({ message: "ping" });
+            controller.enqueue({
+              type: "tool-input-start",
+              id,
+              toolName: "echo"
+            });
+            controller.enqueue({ type: "tool-input-delta", id, delta: input });
+            controller.enqueue({ type: "tool-input-end", id });
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: id,
+              toolName: "echo",
+              input
+            });
+            // Report high input usage so the proactive guard trips before step 2.
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("tool-calls"),
+              usage: v3Usage(10, 5)
+            });
+          } else {
+            controller.enqueue({ type: "text-start", id: "t-ok" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-ok",
+              delta: "answered with headroom to spare"
+            });
+            controller.enqueue({ type: "text-end", id: "t-ok" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("stop"),
+              usage: v3Usage(20, 10)
+            });
+          }
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+type OverflowMode = "recover" | "exhaust" | "proactive";
+
+type OverflowChatOutcome = {
+  done: boolean;
+  error: string | null;
+  compactionCount: number;
+  compactionReasons: string[];
+  modelCalls: number;
+  assistantMessages: number;
+  finalText: string;
+  errorClassification: string | null;
+};
+
+/** In-process StreamCallback: collects the terminal outcome of a chat turn. */
+class CollectingChatCallback implements StreamCallback {
+  doneCalled = false;
+  errorMessage: string | null = null;
+  onStart(): void {}
+  onEvent(): void {}
+  onDone(): void {
+    this.doneCalled = true;
+  }
+  onError(error: string): void {
+    this.errorMessage = error;
+  }
+}
+
+/**
+ * Context-overflow recovery e2e agent. A single configurable agent covers the
+ * reactive recover/exhaust paths and the proactive guard. `contextOverflow` and
+ * the active model are selected per-run via `runOverflowChat`, so each test case
+ * targets a fresh DO instance with its own behavior.
+ */
+export class ThinkContextOverflowE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override maxSteps = 4;
+  private _inferenceCount = 0;
+  private _mode: OverflowMode = "recover";
+  private _compactionCount = 0;
+  private _compactionReasons: string[] = [];
+  private _modelCalls = 0;
+  private _errorClassification: string | null = null;
+
+  override getModel(): LanguageModel {
+    this._modelCalls++;
+    if (this._mode === "proactive") return createProactiveUsageModel();
+    return createContextOverflowModel(
+      () => ++this._inferenceCount,
+      this._mode === "exhaust" ? "exhaust" : "recover"
+    );
+  }
+
+  override getSystemPrompt(): string {
+    return "You are a context-overflow recovery e2e agent.";
+  }
+
+  override getTools(): ToolSet {
+    if (this._mode !== "proactive") return {};
+    return {
+      echo: tool({
+        description: "Echo a message back.",
+        inputSchema: z.object({ message: z.string() }),
+        execute: async ({ message }: { message: string }) => `pong: ${message}`
+      })
+    };
+  }
+
+  // Think ships no provider-specific matching; delegate to the exported default
+  // classifier so the in-stream "prompt is too long" error is recognized.
+  override classifyChatError(
+    error: unknown,
+    _ctx?: ChatErrorContext
+  ): ChatErrorClassification | void {
+    return defaultContextOverflowClassifier(error);
+  }
+
+  override onChatError(error: unknown, ctx?: ChatErrorContext): unknown {
+    this._errorClassification = ctx?.classification ?? null;
+    return super.onChatError(error, ctx);
+  }
+
+  override _emit(
+    type: ObservabilityEvent["type"],
+    payload: Record<string, unknown> = {}
+  ): void {
+    if (type === "chat:context:compacted") {
+      this._compactionCount++;
+      const reason = payload.reason;
+      if (typeof reason === "string") this._compactionReasons.push(reason);
+    }
+    super._emit(type, payload);
+  }
+
+  override configureSession(session: Session): Session {
+    // Collapse the first message so a non-empty tail always survives — enough to
+    // prove compaction shortened history and the reactive retry can proceed.
+    return session.onCompaction(async (messages) => {
+      if (messages.length < 2) return null;
+      return {
+        summary: "compacted-summary",
+        fromMessageId: messages[0].id,
+        toMessageId: messages[0].id
+      };
+    });
+  }
+
+  @callable()
+  async runOverflowChat(
+    message: string,
+    mode: OverflowMode
+  ): Promise<OverflowChatOutcome> {
+    this._mode = mode;
+    this._inferenceCount = 0;
+    this._compactionCount = 0;
+    this._compactionReasons = [];
+    this._modelCalls = 0;
+    this._errorClassification = null;
+
+    this.contextOverflow =
+      mode === "proactive"
+        ? { proactive: { maxInputTokens: 10 } }
+        : { reactive: true };
+
+    // Seed a prior turn so the compaction range always leaves a usable tail.
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text: "earlier question" }]
+    });
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [{ type: "text", text: "earlier answer" }]
+    });
+
+    const cb = new CollectingChatCallback();
+    await this.chat(message, cb);
+
+    const assistant = this.messages.filter((m) => m.role === "assistant");
+    const final = assistant[assistant.length - 1];
+    const finalText = final
+      ? final.parts
+          .filter((p): p is { type: "text"; text: string } => p.type === "text")
+          .map((p) => p.text)
+          .join("")
+      : "";
+
+    return {
+      done: cb.doneCalled,
+      error: cb.errorMessage,
+      compactionCount: this._compactionCount,
+      compactionReasons: this._compactionReasons,
+      modelCalls: this._modelCalls,
+      assistantMessages: assistant.length,
+      finalText,
+      errorClassification: this._errorClassification
+    };
+  }
+
+  @callable()
+  override async getMessages(): Promise<UIMessage[]> {
+    return this.messages;
+  }
+}
+
+// ── Submission recovery on start ────────────────────────────────────
+//
+// Exercises `_recoverSubmissionsOnStart`, which runs as part of the DO start
+// sequence and reconciles `running` durable submissions left behind by an
+// eviction. Three transitions are covered:
+//   - messages NOT applied → re-enqueue as `pending`
+//   - messages applied but the turn is NOT recoverable → `error`
+//   - messages applied AND the chat turn is recoverable → left running, the
+//     scheduled continuation drives it to `completed`
+//
+// The not-applied / applied-but-not-recoverable cases are seeded deterministically
+// via SQL (no kill-timing race), then a real process restart triggers recovery.
+// The recoverable case uses a genuine in-flight submission + mid-stream SIGKILL.
+
+const SUBMISSION_STATUS_LOG_KEY = "test:submission-status-log";
+
+export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override chatRecovery = true;
+
+  override getModel(): LanguageModel {
+    return createSlowE2EMockModel();
+  }
+
+  override getSystemPrompt(): string {
+    return "Submission recovery e2e agent.";
+  }
+
+  // Continue an interrupted turn so a recoverable submission can complete.
+  override async onChatRecovery(): Promise<ChatRecoveryOptions> {
+    return { continue: true };
+  }
+
+  // Record every submission status transition so a test can assert the
+  // recovery transition even if a later drain advances the row again.
+  override async onSubmissionStatus(
+    submission: ThinkSubmissionInspection
+  ): Promise<void> {
+    const log =
+      (await this.ctx.storage.get<string[]>(SUBMISSION_STATUS_LOG_KEY)) ?? [];
+    log.push(`${submission.submissionId}:${submission.status}`);
+    await this.ctx.storage.put(SUBMISSION_STATUS_LOG_KEY, log);
+  }
+
+  @callable()
+  async startSubmission(submissionId: string, text: string): Promise<string> {
+    const result = await this.submitMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text }]
+        }
+      ],
+      { submissionId }
+    );
+    return result.submissionId;
+  }
+
+  /**
+   * Seed a `running` submission row directly (no model turn), simulating a
+   * submission left mid-flight by an eviction. `applied: false` leaves
+   * `messages_applied_at` NULL with a message id absent from history (the
+   * not-applied → pending path); `applied: true` marks messages applied with no
+   * recoverable fiber/continuation (the applied → error path).
+   */
+  @callable()
+  async seedRunningSubmission(
+    submissionId: string,
+    requestId: string,
+    applied: boolean
+  ): Promise<void> {
+    // Ensure the submissions table exists (inspect goes through the ensure path).
+    await this.inspectSubmission(submissionId);
+    const now = Date.now();
+    const messagesJson = JSON.stringify([
+      {
+        id: `seed-${submissionId}`,
+        role: "user",
+        parts: [{ type: "text", text: "seeded submission" }]
+      }
+    ]);
+    this.sql`
+      INSERT INTO cf_think_submissions (
+        submission_id, idempotency_key, request_id, stream_id, status,
+        messages_json, metadata_json, error_message, created_at,
+        messages_applied_at, started_at, completed_at
+      )
+      VALUES (
+        ${submissionId}, NULL, ${requestId}, NULL, 'running',
+        ${messagesJson}, NULL, NULL, ${now},
+        ${applied ? now : null}, ${now}, NULL
+      )
+    `;
+  }
+
+  @callable()
+  async getSubmission(
+    submissionId: string
+  ): Promise<{ status: string; error: string | null } | null> {
+    const row = await this.inspectSubmission(submissionId);
+    return row ? { status: row.status, error: row.error ?? null } : null;
+  }
+
+  @callable()
+  async getStatusLog(): Promise<string[]> {
+    return (
+      (await this.ctx.storage.get<string[]>(SUBMISSION_STATUS_LOG_KEY)) ?? []
+    );
+  }
+
+  @callable()
+  async getMessageCount(): Promise<number> {
+    return this.messages.length;
+  }
+
+  @callable()
+  async hasFiberRows(): Promise<boolean> {
+    const rows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    return (rows[0]?.c ?? 0) > 0;
+  }
+}
+
+// ── Messenger reply fiber recovery ──────────────────────────────────
+//
+// Exercises the MESSENGER_REPLY_FIBER_NAME recovery delegation: a messenger
+// reply fiber interrupted by an eviction is recovered on restart through
+// `_handleInternalFiberRecovery` → `ThinkMessengerRuntime.handleFiberRecovery`.
+//  - `accepted` snapshot → "answer" mode: the reply is resumed (the model turn
+//    re-runs and posts the answer to the thread).
+//  - `streaming` snapshot → "apologize" mode: an interrupted message is posted.
+//
+// The reply fiber is seeded by genuinely starting it (it stashes the target
+// stage and parks), then a real mid-fiber SIGKILL leaves the orphaned run row.
+// On restart, the boot fiber-recovery sweep drives the messenger recovery, which
+// posts through an in-memory fake `chat` adapter that records into agent SQL.
+
+const FAKE_MESSENGER_ID = "fake";
+const FAKE_THREAD_ID = "fake:thread";
+const FAKE_INTERRUPTED_TEXT = "Reply interrupted, please retry.";
+
+function makeMessengerReplyEvent(): MessengerEvent {
+  return {
+    capabilities: { canStream: true },
+    kind: "mention",
+    message: {
+      attachments: [],
+      author: {
+        fullName: "E2E User",
+        userId: "fake:user",
+        userName: "e2e"
+      },
+      id: "message-1",
+      isMention: true,
+      providerMessageId: "message-1",
+      text: "tell me a long messenger story"
+    },
+    messengerId: FAKE_MESSENGER_ID,
+    provider: "fake",
+    thread: {
+      id: FAKE_THREAD_ID,
+      isDirectMessage: false,
+      providerThreadId: FAKE_THREAD_ID,
+      title: "General"
+    }
+  };
+}
+
+function makeMessengerThreadSnapshot(): Record<string, unknown> {
+  return {
+    _type: "chat:Thread",
+    adapterName: "fake",
+    channelId: FAKE_THREAD_ID,
+    id: FAKE_THREAD_ID,
+    isDM: false
+  };
+}
+
+export class ThinkMessengerRecoveryE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  // The reply-fiber recovery is independent of chatRecovery; keep chatRecovery
+  // off so the answer-mode recovery turn does not spawn nested chat fibers.
+  override chatRecovery = false;
+
+  override getModel(): LanguageModel {
+    return createSlowE2EMockModel();
+  }
+
+  override getSystemPrompt(): string {
+    return "Messenger reply recovery e2e agent.";
+  }
+
+  override getMessengers(): ThinkMessengers {
+    return defineMessengers({
+      fake: chatSdkMessenger({
+        adapter: this._recordingAdapter(),
+        conversation: "self",
+        delivery: { interruptedResponseText: FAKE_INTERRUPTED_TEXT },
+        provider: "fake",
+        userName: "fake_bot",
+        verifyWebhook: false
+      })
+    });
+  }
+
+  private _ensurePostsTable(): void {
+    this
+      .sql`CREATE TABLE IF NOT EXISTS messenger_posts (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, content TEXT, at INTEGER)`;
+  }
+
+  private _recordPost(kind: string, message: unknown): void {
+    this._ensurePostsTable();
+    const content =
+      typeof message === "string" ? message : JSON.stringify(message);
+    this.sql`
+      INSERT INTO messenger_posts (kind, content, at)
+      VALUES (${kind}, ${content}, ${Date.now()})
+    `;
+  }
+
+  // In-memory `chat` adapter: records every posted/edited message into agent
+  // SQL so the recovery outcome is observable after a restart.
+  private _recordingAdapter(): Adapter {
+    return {
+      addReaction: () => Promise.resolve(),
+      channelIdFromThreadId: (threadId: string) => threadId,
+      decodeThreadId: (threadId: string) => threadId,
+      deleteMessage: () => Promise.resolve(),
+      editMessage: (
+        _threadId: string,
+        _messageId: string,
+        message: unknown
+      ) => {
+        this._recordPost("edit", message);
+        return Promise.resolve({
+          id: "edited",
+          raw: {},
+          threadId: FAKE_THREAD_ID
+        });
+      },
+      encodeThreadId: (threadId: string) => String(threadId),
+      fetchMessages: () => Promise.resolve({ messages: [] }),
+      fetchThread: (threadId: string) =>
+        Promise.resolve({
+          channelId: threadId,
+          id: threadId,
+          isDM: false,
+          metadata: {}
+        }),
+      handleWebhook: () => Promise.resolve(new Response("messenger")),
+      initialize: () => Promise.resolve(),
+      name: "fake",
+      parseMessage: () => {
+        throw new Error("parseMessage is not used by this e2e");
+      },
+      postMessage: (threadId: string, message: unknown) => {
+        this._recordPost("post", message);
+        return Promise.resolve({ id: "posted", raw: {}, threadId });
+      },
+      removeReaction: () => Promise.resolve(),
+      userName: "fake_bot"
+    } as unknown as Adapter;
+  }
+
+  @callable()
+  async startReplyFiber(mode: "answer" | "apologize"): Promise<string> {
+    const stage = mode === "answer" ? "accepted" : "streaming";
+    const event = makeMessengerReplyEvent();
+    const thread = makeMessengerThreadSnapshot();
+    const result = await this.startFiber(
+      MESSENGER_REPLY_FIBER_NAME,
+      async (fiber: FiberContext) => {
+        // Stash the target stage, then park so a SIGKILL captures exactly this
+        // stage (the real reply work is performed by recovery on restart).
+        fiber.stash(messengerReplySnapshot(stage, event, thread));
+        await new Promise((resolve) => setTimeout(resolve, 60_000));
+      },
+      {
+        idempotencyKey: `messenger:fake:${mode}`,
+        metadata: { messengerId: FAKE_MESSENGER_ID, threadId: FAKE_THREAD_ID },
+        waitForCompletion: false
+      }
+    );
+    return result.fiberId;
+  }
+
+  @callable()
+  async getPostedMessages(): Promise<string[]> {
+    this._ensurePostsTable();
+    return this.sql<{ content: string }>`
+      SELECT content FROM messenger_posts ORDER BY seq ASC
+    `.map((row) => row.content);
+  }
+
+  @callable()
+  async hasFiberRows(): Promise<boolean> {
+    const rows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    return (rows[0]?.c ?? 0) > 0;
+  }
+}
+
+// ── Workflow-turn recovery + notification drain replay ──────────────
+//
+// A `ThinkWorkflow` `step.prompt` creates a durable submission (the "workflow
+// turn") with workflow-prompt metadata, then waits for the completion event the
+// submission delivers through the workflow-notification drain. This exercises:
+//  - the happy path: a deterministic mock structured turn completes, the
+//    notification is drained, and the workflow resumes + completes
+//  - recovery: the workflow turn interrupted mid-stream is recovered on restart
+//    and the workflow-notification drain replays the result
+//
+// The model is a deterministic mock that ends the structured turn by calling the
+// synthetic `think_final_answer` tool (no user tools → that exact name) with a
+// schema-shaped greeting. It streams the tool input in slow deltas so a SIGKILL
+// can land mid-turn.
+
+const WORKFLOW_GREETING = "hello from a recovered workflow turn";
+
+function createStructuredGreetingModel(chunkDelayMs: number): LanguageModel {
+  const input = JSON.stringify({ greeting: WORKFLOW_GREETING });
+  // Split the JSON into a handful of pieces so the tool-input streams over a
+  // window (keeps the stream active + gives a mid-turn kill window).
+  const pieces: string[] = [];
+  const size = Math.max(1, Math.ceil(input.length / 10));
+  for (let i = 0; i < input.length; i += size) {
+    pieces.push(input.slice(i, i + size));
+  }
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-structured-greeting",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream() {
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          const id = "fa";
+          controller.enqueue({
+            type: "tool-input-start",
+            id,
+            toolName: "think_final_answer"
+          });
+          for (const piece of pieces) {
+            await new Promise((r) => setTimeout(r, chunkDelayMs));
+            controller.enqueue({ type: "tool-input-delta", id, delta: piece });
+          }
+          controller.enqueue({ type: "tool-input-end", id });
+          controller.enqueue({
+            type: "tool-call",
+            toolCallId: id,
+            toolName: "think_final_answer",
+            input
+          });
+          controller.enqueue({
+            type: "finish",
+            finishReason: v3FinishReason("tool-calls"),
+            usage: v3Usage(10, 5)
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+export class ThinkWorkflowRecoveryE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  override chatRecovery = true;
+  override maxSteps = 4;
+
+  override getModel(): LanguageModel {
+    return createStructuredGreetingModel(500);
+  }
+
+  override getSystemPrompt(): string {
+    return "Workflow-turn recovery e2e agent.";
+  }
+
+  override async onChatRecovery(): Promise<ChatRecoveryOptions> {
+    return { continue: true };
+  }
+
+  @callable()
+  async startGreetingWorkflow(): Promise<string> {
+    return this.runWorkflow("STEP_PROMPT_WORKFLOW", {
+      prompt: "Greet the user.",
+      mode: "greeting"
+    });
+  }
+
+  @callable()
+  async inspectWorkflowRun(
+    id: string
+  ): Promise<{ status: string; output: unknown; error: string | null }> {
+    const status = await this.getWorkflowStatus("STEP_PROMPT_WORKFLOW", id);
+    return {
+      status: status.status,
+      output: status.output ?? null,
+      error: status.error ? JSON.stringify(status.error) : null
+    };
+  }
+
+  @callable()
+  async getNotificationStats(): Promise<{ total: number; delivered: number }> {
+    this
+      .sql`CREATE TABLE IF NOT EXISTS cf_think_workflow_notifications (notification_id TEXT PRIMARY KEY, submission_id TEXT, workflow_name TEXT, workflow_id TEXT, event_type TEXT, payload_json TEXT, attempts INTEGER, last_error TEXT, created_at INTEGER, updated_at INTEGER, delivered_at INTEGER)`;
+    const total =
+      this.sql<{ c: number }>`
+        SELECT COUNT(*) as c FROM cf_think_workflow_notifications
+      `[0]?.c ?? 0;
+    const delivered =
+      this.sql<{ c: number }>`
+        SELECT COUNT(*) as c FROM cf_think_workflow_notifications
+        WHERE delivered_at IS NOT NULL
+      `[0]?.c ?? 0;
+    return { total, delivered };
+  }
+
+  @callable()
+  async hasFiberRows(): Promise<boolean> {
+    const rows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    return (rows[0]?.c ?? 0) > 0;
   }
 }
 

@@ -272,6 +272,119 @@ export function sendChatMessage(
   });
 }
 
+/**
+ * A persistent WebSocket client that stays connected and records every JSON
+ * frame it receives, grouped by `type`. Unlike {@link rpcCall} (which opens a
+ * socket per call and closes it), a collector remains open so it can observe
+ * server-initiated BROADCASTS — e.g. the live `cf_agent_chat_recovering` frame
+ * (#1620), which the server broadcasts on a transition and never replays on
+ * connect. It sends nothing itself, minimizing interference with recovery.
+ */
+export type FrameCollector = {
+  /** Resolves once the underlying socket is open. */
+  ready(): Promise<void>;
+  /** All frames of a given `type` received so far, in arrival order. */
+  framesOfType(type: string): Array<Record<string, unknown>>;
+  /** Total number of frames received (any type). */
+  count(): number;
+  /**
+   * Wait until a frame of `type` matching the optional predicate arrives (or
+   * one already has). Resolves with that frame, rejects on timeout.
+   */
+  waitForFrame(
+    type: string,
+    predicate?: (frame: Record<string, unknown>) => boolean,
+    timeoutMs?: number
+  ): Promise<Record<string, unknown>>;
+  close(): void;
+};
+
+export function createFrameCollector(agentUrl: string): FrameCollector {
+  const ws = new WebSocket(agentUrl);
+  const frames: Array<Record<string, unknown>> = [];
+  const waiters: Array<() => void> = [];
+  let opened = false;
+  const openWaiters: Array<() => void> = [];
+
+  ws.onopen = () => {
+    opened = true;
+    for (const resolve of openWaiters.splice(0)) resolve();
+  };
+
+  ws.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data as string) as Record<string, unknown>;
+      frames.push(msg);
+      for (const notify of waiters.splice(0)) notify();
+    } catch {
+      // Ignore non-JSON frames.
+    }
+  };
+
+  ws.onerror = () => {
+    // Surfaced via waitForFrame timeouts; the socket may legitimately drop
+    // during SIGKILL/restart churn.
+  };
+
+  function ready(): Promise<void> {
+    if (opened) return Promise.resolve();
+    return new Promise((resolve) => openWaiters.push(resolve));
+  }
+
+  function framesOfType(type: string): Array<Record<string, unknown>> {
+    return frames.filter((frame) => frame.type === type);
+  }
+
+  function waitForFrame(
+    type: string,
+    predicate?: (frame: Record<string, unknown>) => boolean,
+    timeoutMs = 30000
+  ): Promise<Record<string, unknown>> {
+    const match = () =>
+      frames.find(
+        (frame) => frame.type === type && (predicate ? predicate(frame) : true)
+      );
+
+    return new Promise((resolve, reject) => {
+      const existing = match();
+      if (existing) {
+        resolve(existing);
+        return;
+      }
+      const timeout = setTimeout(() => {
+        reject(new Error(`Timed out waiting for frame type=${type}`));
+      }, timeoutMs);
+
+      const check = () => {
+        const found = match();
+        if (found) {
+          clearTimeout(timeout);
+          resolve(found);
+        } else {
+          waiters.push(check);
+        }
+      };
+      waiters.push(check);
+    });
+  }
+
+  function close(): void {
+    try {
+      ws.close();
+    } catch {
+      // Already closed.
+    }
+  }
+
+  return {
+    ready,
+    framesOfType,
+    count: () => frames.length,
+    waitForFrame,
+    close
+  };
+}
+
 export async function pollUntil<T>(
   label: string,
   read: () => Promise<T>,

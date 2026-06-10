@@ -18,6 +18,18 @@
       {
         "name": "SubAgentFiberChild",
         "class_name": "SubAgentFiberChild"
+      },
+      {
+        "name": "PoisonRowAgent",
+        "class_name": "PoisonRowAgent"
+      },
+      {
+        "name": "ScanDeadlineAgent",
+        "class_name": "ScanDeadlineAgent"
+      },
+      {
+        "name": "ConcurrentFiberAgent",
+        "class_name": "ConcurrentFiberAgent"
       }
     ]
   },
@@ -25,6 +37,14 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["RunFiberTestAgent", "SubAgentFiberParent"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "PoisonRowAgent",
+        "ScanDeadlineAgent",
+        "ConcurrentFiberAgent"
+      ]
     }
   ]
 }

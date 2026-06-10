@@ -60,6 +60,22 @@
       {
         "name": "TestStructuredAgent",
         "class_name": "TestStructuredAgent"
+      },
+      {
+        "name": "ThinkContextOverflowE2EAgent",
+        "class_name": "ThinkContextOverflowE2EAgent"
+      },
+      {
+        "name": "ThinkSubmissionRecoveryE2EAgent",
+        "class_name": "ThinkSubmissionRecoveryE2EAgent"
+      },
+      {
+        "name": "ThinkMessengerRecoveryE2EAgent",
+        "class_name": "ThinkMessengerRecoveryE2EAgent"
+      },
+      {
+        "name": "ThinkWorkflowRecoveryE2EAgent",
+        "class_name": "ThinkWorkflowRecoveryE2EAgent"
       }
     ]
   },
@@ -109,6 +125,22 @@
     {
       "tag": "v8",
       "new_sqlite_classes": ["TestStructuredAgent"]
+    },
+    {
+      "tag": "v9",
+      "new_sqlite_classes": ["ThinkContextOverflowE2EAgent"]
+    },
+    {
+      "tag": "v10",
+      "new_sqlite_classes": ["ThinkSubmissionRecoveryE2EAgent"]
+    },
+    {
+      "tag": "v11",
+      "new_sqlite_classes": ["ThinkMessengerRecoveryE2EAgent"]
+    },
+    {
+      "tag": "v12",
+      "new_sqlite_classes": ["ThinkWorkflowRecoveryE2EAgent"]
     }
   ],
   "r2_buckets": [

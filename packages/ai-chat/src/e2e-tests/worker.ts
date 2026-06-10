@@ -25,6 +25,7 @@ type Env = {
   ChatWorkBudgetExhaustAgent: DurableObjectNamespace<ChatWorkBudgetExhaustAgent>;
   ChatNoContinueAgent: DurableObjectNamespace<ChatNoContinueAgent>;
   ChatNoPersistNoContinueAgent: DurableObjectNamespace<ChatNoPersistNoContinueAgent>;
+  ChatBufferCleanupAgent: DurableObjectNamespace<ChatBufferCleanupAgent>;
 };
 
 const EXHAUSTED_LOG_KEY = "test:exhausted-log";
@@ -336,6 +337,106 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
           .map((p) => p.text)
       )
       .join("");
+  }
+
+  /**
+   * Read the framework's durable "recovering…" flag (#1620), keyed by its
+   * internal storage key `cf:chat:recovering`. The flag is written when a
+   * recovery continuation is scheduled and deleted on the terminal outcome, so
+   * the e2e test can assert the active→cleared transition DETERMINISTICALLY —
+   * the live `cf_agent_chat_recovering` broadcast is NOT replayed on connect
+   * (only the terminal outcome is), so the durable flag is the reliable source
+   * of truth across the SIGKILL/restart boundary.
+   */
+  @callable()
+  async getRecoveringFlag(): Promise<{
+    requestId?: string;
+    at?: number;
+  } | null> {
+    return (
+      (await this.ctx.storage.get<{ requestId?: string; at?: number }>(
+        "cf:chat:recovering"
+      )) ?? null
+    );
+  }
+}
+
+/**
+ * #1706 stream-buffer cleanup agent. Streams a SHORT turn that completes
+ * quickly so a resumable-stream buffer (a `cf_ai_chat_stream_metadata` row plus
+ * its packed `cf_ai_chat_stream_chunks` rows) and a `_cleanupStreamBuffers`
+ * cleanup alarm both exist after a single turn. Exposes @callable inspectors so
+ * the test can drive a DETERMINISTIC sweep with an injected far-future "now"
+ * instead of waiting out the real 10-minute/1-hour retention windows.
+ */
+export class ChatBufferCleanupAgent extends AIChatAgent<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+
+  override async onChatMessage(
+    _onFinish: unknown,
+    _options?: OnChatMessageOptions
+  ): Promise<Response> {
+    // A handful of fast deltas: enough to flush a buffer row, quick enough to
+    // complete well within the test's polling window.
+    const chunks: Array<{ type: string; [k: string]: unknown }> = [
+      { type: "start", messageId: `asst-${Date.now()}` },
+      { type: "text-start" },
+      { type: "text-delta", delta: "hello " },
+      { type: "text-delta", delta: "world" },
+      { type: "text-end" },
+      { type: "finish" }
+    ];
+    return new Response(makeSSEStream(chunks, 50), {
+      headers: { "Content-Type": "text/event-stream" }
+    });
+  }
+
+  /** Number of resumable-stream buffer rows (one per stream). */
+  @callable()
+  bufferRowCount(): number {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_ai_chat_stream_metadata
+    `;
+    return rows[0].count;
+  }
+
+  /** Number of stored chunk (segment) rows across all streams. */
+  @callable()
+  chunkRowCount(): number {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_ai_chat_stream_chunks
+    `;
+    return rows[0].count;
+  }
+
+  /**
+   * Number of pending `_cleanupStreamBuffers` cleanup alarms in the framework's
+   * schedule table. Used to assert a single armed schedule and that re-arming
+   * is idempotent (a second completed turn must not stack a duplicate).
+   */
+  @callable()
+  cleanupScheduleCount(): number {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_schedules
+      WHERE callback = '_cleanupStreamBuffers'
+    `;
+    return rows[0].count;
+  }
+
+  /**
+   * Force a stream-buffer sweep with an injected "now" so the test does not
+   * have to wait out the real retention windows (10 min completed / 1 h
+   * abandoned). Delegates to the same `cleanup(now)` the cleanup alarm uses.
+   */
+  @callable()
+  forceSweep(nowMs: number): void {
+    this._resumableStream.cleanup(nowMs);
+  }
+
+  /** Whether any stream rows remain — what the alarm uses to decide re-arming. */
+  @callable()
+  hasReclaimableStreams(): boolean {
+    return this._resumableStream.hasReclaimableStreams();
   }
 }
 
