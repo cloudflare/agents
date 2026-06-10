@@ -3,14 +3,24 @@ import { useAgentChat } from "agents/ai-react";
 import { createRoot } from "react-dom/client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Surface, Text, PoweredByCloudflare } from "@cloudflare/kumo";
+import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
+import { isToolUIPart } from "ai";
 import {
   PaperPlaneRightIcon,
   TrashIcon,
-  WrenchIcon,
   CodeIcon,
   ShieldCheckIcon,
   MoonIcon,
-  SunIcon
+  SunIcon,
+  LightningIcon,
+  CheckCircleIcon,
+  WarningCircleIcon,
+  CircleNotchIcon,
+  PauseCircleIcon,
+  TerminalIcon,
+  BrainIcon,
+  CaretDownIcon
 } from "@phosphor-icons/react";
 import { nanoid } from "nanoid";
 import "./styles.css";
@@ -72,6 +82,243 @@ function ModeToggle() {
   );
 }
 
+// The codemode tool's output shape (ProxyToolOutput), as the UI consumes it.
+type CodemodeOutput = {
+  status?: "completed" | "paused" | "error";
+  executionId?: string;
+  result?: unknown;
+  logs?: string[];
+  error?: string;
+  pending?: Array<{ connector: string; method: string }>;
+};
+
+type ToolPart = {
+  type: string;
+  state?: string;
+  errorText?: string;
+  input?: { code?: string };
+  output?: CodemodeOutput;
+};
+
+// Surface the connector/platform calls the model made, so the collapsed header
+// is informative without expanding the code. (Example connectors are known.)
+const CONNECTOR_CALL = /\b(codemode|github|repoApi)\.(\w+)\s*\(/g;
+function extractCalls(src?: string): string[] {
+  if (!src) return [];
+  const found = new Set<string>();
+  for (const m of src.matchAll(CONNECTOR_CALL)) found.add(`${m[1]}.${m[2]}`);
+  return [...found];
+}
+
+function CodeBlock({ source }: { source: string }) {
+  return (
+    <Streamdown
+      className="sd-theme text-xs leading-relaxed"
+      plugins={{ code }}
+      controls={false}
+    >
+      {`\`\`\`ts\n${source}\n\`\`\``}
+    </Streamdown>
+  );
+}
+
+function SectionLabel({
+  icon,
+  children
+}: {
+  icon: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-1.5 mb-1">
+      {icon}
+      <Text size="xs" variant="secondary" bold>
+        {children}
+      </Text>
+    </div>
+  );
+}
+
+function ToolCard({ part }: { part: ToolPart }) {
+  const [expanded, setExpanded] = useState(true);
+  const calls = extractCalls(part.input?.code);
+  const status = part.output?.status;
+  const hasError =
+    part.state === "output-error" || status === "error" || !!part.errorText;
+  const isPaused = status === "paused";
+  const isDone = part.state === "output-available" && status === "completed";
+  const isRunning = !isDone && !hasError && !isPaused;
+  const errorText = part.errorText ?? part.output?.error;
+
+  return (
+    <Surface
+      className={`rounded-xl ring overflow-hidden ${
+        hasError ? "ring-kumo-danger" : "ring-kumo-line"
+      }`}
+    >
+      <button
+        type="button"
+        className="w-full flex items-center gap-2 px-3 py-2.5 cursor-pointer hover:bg-kumo-elevated transition-colors"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+      >
+        <LightningIcon size={14} className="text-kumo-accent shrink-0" />
+        <div className="flex items-center gap-1.5 flex-1 min-w-0">
+          <Text size="xs" bold>
+            codemode
+          </Text>
+          {calls.length > 0 && (
+            <>
+              <span className="text-kumo-inactive">&middot;</span>
+              <span className="font-mono text-xs text-kumo-secondary truncate">
+                {calls.join(", ")}
+              </span>
+            </>
+          )}
+        </div>
+        {isDone && <CheckCircleIcon size={14} className="text-green-500" />}
+        {isPaused && (
+          <PauseCircleIcon size={14} className="text-kumo-warning" />
+        )}
+        {hasError && <WarningCircleIcon size={14} className="text-red-500" />}
+        {isRunning && (
+          <CircleNotchIcon
+            size={14}
+            className="text-kumo-inactive animate-spin"
+          />
+        )}
+        <CaretDownIcon
+          size={12}
+          className={`text-kumo-inactive transition-transform ${
+            expanded ? "rotate-180" : ""
+          }`}
+        />
+      </button>
+
+      {expanded && (
+        <div className="px-3 pb-3 border-t border-kumo-line space-y-3 pt-2">
+          {part.input?.code && (
+            <div>
+              <SectionLabel
+                icon={<CodeIcon size={11} className="text-kumo-inactive" />}
+              >
+                Code
+              </SectionLabel>
+              <CodeBlock source={part.input.code} />
+            </div>
+          )}
+
+          {isPaused && (
+            <div className="flex items-start gap-2 rounded-lg bg-kumo-warning/10 p-2.5">
+              <PauseCircleIcon
+                size={14}
+                weight="bold"
+                className="text-kumo-warning shrink-0 mt-0.5"
+              />
+              <Text size="xs" variant="secondary">
+                Paused for approval — review the request in the panel above.
+              </Text>
+            </div>
+          )}
+
+          {part.output?.result !== undefined && (
+            <div>
+              <SectionLabel
+                icon={
+                  <CheckCircleIcon size={11} className="text-kumo-inactive" />
+                }
+              >
+                Result
+              </SectionLabel>
+              <pre className="font-mono text-xs text-kumo-default bg-green-500/5 border border-green-500/20 rounded p-2 overflow-x-auto whitespace-pre-wrap wrap-break-word">
+                {typeof part.output.result === "string"
+                  ? part.output.result
+                  : JSON.stringify(part.output.result, null, 2)}
+              </pre>
+            </div>
+          )}
+
+          {part.output?.logs?.length ? (
+            <div>
+              <SectionLabel
+                icon={<TerminalIcon size={11} className="text-kumo-inactive" />}
+              >
+                Console
+              </SectionLabel>
+              <pre className="font-mono text-xs text-kumo-subtle bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap wrap-break-word">
+                {part.output.logs.join("\n")}
+              </pre>
+            </div>
+          ) : null}
+
+          {errorText && (
+            <div>
+              <SectionLabel
+                icon={<WarningCircleIcon size={11} className="text-red-500" />}
+              >
+                Error
+              </SectionLabel>
+              <pre className="font-mono text-xs text-red-500 bg-red-500/5 border border-red-500/20 rounded p-2 overflow-x-auto whitespace-pre-wrap wrap-break-word">
+                {errorText}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </Surface>
+  );
+}
+
+function ReasoningBlock({
+  text,
+  streaming
+}: {
+  text: string;
+  streaming: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <Surface className="rounded-xl ring ring-kumo-line overflow-hidden">
+      <button
+        type="button"
+        className="w-full flex items-center gap-2 px-3 py-2.5 cursor-pointer hover:bg-kumo-elevated transition-colors"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+      >
+        <BrainIcon size={14} className="text-kumo-secondary shrink-0" />
+        <Text size="xs" bold>
+          Reasoning
+        </Text>
+        <div className="flex-1" />
+        {streaming && (
+          <CircleNotchIcon
+            size={14}
+            className="text-kumo-inactive animate-spin"
+          />
+        )}
+        <CaretDownIcon
+          size={12}
+          className={`text-kumo-inactive transition-transform ${
+            expanded ? "rotate-180" : ""
+          }`}
+        />
+      </button>
+      {expanded && (
+        <div className="px-3 pb-3 border-t border-kumo-line pt-2">
+          <Streamdown
+            className="sd-theme text-xs leading-relaxed text-kumo-secondary **:text-kumo-secondary"
+            plugins={{ code }}
+            controls={false}
+            isAnimating={streaming}
+          >
+            {text}
+          </Streamdown>
+        </div>
+      )}
+    </Surface>
+  );
+}
+
 function App() {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
@@ -94,6 +341,8 @@ function App() {
   const { messages, sendMessage, clearHistory, status } = useAgentChat({
     agent
   });
+
+  const isStreaming = status === "streaming";
 
   const refreshPending = useCallback(async () => {
     try {
@@ -276,46 +525,59 @@ function App() {
               </div>
             </div>
           ) : (
-            messages.map((message) => (
-              <div
-                key={message.id}
-                className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
-              >
-                <Surface
-                  className={`max-w-md px-4 py-2.5 rounded-xl ${
-                    message.role === "user"
-                      ? "bg-kumo-accent text-black"
-                      : "ring ring-kumo-line"
-                  }`}
+            messages.map((message) => {
+              const isUser = message.role === "user";
+              return (
+                <div
+                  key={message.id}
+                  className={isUser ? "flex justify-end" : "space-y-2"}
                 >
-                  {message.parts
-                    ?.filter((part) => part.type === "text")
-                    .map((part, i) => (
-                      <div
-                        key={`${part.type}-${i}`}
-                        className="whitespace-pre-wrap text-sm"
-                      >
-                        {part.text}
-                      </div>
-                    ))}
-                  {message.parts
-                    ?.filter((part) => part.type.startsWith("tool-"))
-                    .map((part, i) => (
-                      <div
-                        key={`tool-${i}`}
-                        className="mt-1 text-xs font-mono text-kumo-subtle"
-                      >
-                        <WrenchIcon
-                          size={12}
-                          className="inline mr-1"
-                          weight="bold"
+                  {message.parts?.map((part, i) => {
+                    if (part.type === "text") {
+                      return (
+                        <Surface
+                          key={`text-${i}`}
+                          className={`rounded-2xl ${
+                            isUser
+                              ? "max-w-[80%] rounded-br-md bg-kumo-contrast"
+                              : "rounded-bl-md ring ring-kumo-line"
+                          }`}
+                        >
+                          <Streamdown
+                            className={`sd-theme px-4 py-2.5 text-sm leading-relaxed ${
+                              isUser ? "**:text-kumo-inverse" : ""
+                            }`}
+                            plugins={{ code }}
+                            controls={false}
+                            isAnimating={isStreaming && !isUser}
+                          >
+                            {part.text}
+                          </Streamdown>
+                        </Surface>
+                      );
+                    }
+                    if (part.type === "reasoning") {
+                      return (
+                        <ReasoningBlock
+                          key={`reasoning-${i}`}
+                          text={part.text}
+                          streaming={part.state === "streaming"}
                         />
-                        codemode
-                      </div>
-                    ))}
-                </Surface>
-              </div>
-            ))
+                      );
+                    }
+                    if (isToolUIPart(part)) {
+                      return (
+                        <ToolCard
+                          key={`tool-${i}`}
+                          part={part as unknown as ToolPart}
+                        />
+                      );
+                    }
+                    return null;
+                  })}
+                </div>
+              );
+            })
           )}
           <div ref={messagesEndRef} />
         </div>
