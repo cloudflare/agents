@@ -9,7 +9,7 @@
     "types": "wrangler types --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/vite-plugin": "^1.39.2",
+    "@cloudflare/vite-plugin": "^1.40.1",
     "@vitejs/plugin-react": "^6.0.2",
     "chess.js": "^1.4.0",
     "react": "^19.2.7",
@@ -19,7 +19,7 @@
     "vite-plugin-singlefile": "^2.3.3"
   },
   "devDependencies": {
-    "@types/react": "^19.2.16",
+    "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3"
   }
 }

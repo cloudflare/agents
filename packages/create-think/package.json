@@ -37,12 +37,10 @@
   "publishConfig": {
     "access": "public"
   },
-  "dependencies": {
-    "tiged": "^2.12.7",
-    "yargs": "^18.0.0"
-  },
   "devDependencies": {
-    "@types/yargs": "^17.0.35"
+    "@types/yargs": "^17.0.35",
+    "tiged": "^2.12.8",
+    "yargs": "^18.0.0"
   },
   "scripts": {
     "build": "tsx ./scripts/build.ts",

@@ -34,11 +34,11 @@
     "yargs": "^18.0.0"
   },
   "devDependencies": {
-    "@ai-sdk/anthropic": "^3.0.81",
-    "@ai-sdk/openai": "^3.0.67",
+    "@ai-sdk/anthropic": "^3.0.82",
+    "@ai-sdk/openai": "^3.0.69",
     "@chat-adapter/telegram": "^4.30.0",
     "@types/yargs": "^17.0.35",
-    "ai": "^6.0.196",
+    "ai": "^6.0.199",
     "zod": "^4.4.3"
   },
   "peerDependencies": {

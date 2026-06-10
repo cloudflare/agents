@@ -15,6 +15,7 @@ patchedDependencies:
   vitest-browser-react@2.2.0: patches/vitest-browser-react+2.2.0.patch
 allowBuilds:
   "@mongodb-js/zstd": true
+  autoevals: set this to true or false
   better-sqlite3: true
   core-js-pure: true
   esbuild: true
@@ -25,3 +26,16 @@ allowBuilds:
 minimumReleaseAgeExclude:
   - "@cloudflare/*"
   - "@typescript/*"
+  - "@ai-sdk/anthropic@3.0.82"
+  - "@ai-sdk/gateway@3.0.127"
+  - "@ai-sdk/openai@3.0.69"
+  - "@ai-sdk/react@3.0.201"
+  - "@astrojs/cloudflare@13.7.0"
+  - "@elevenlabs/elevenlabs-js@2.52.0"
+  - ai@6.0.199
+  - astro@6.4.5
+  - autoevals@0.3.0
+  - hono@4.12.25
+  - miniflare@4.20260609.0
+  - workerd@1.20260609.1
+  - wrangler@4.99.0

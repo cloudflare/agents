@@ -499,8 +499,14 @@ describe("Think chat recovery e2e", () => {
     // Partial text should contain some chunks that streamed before the kill
     expect(status.contexts[0].partialText.length).toBeGreaterThan(0);
 
-    // Fiber rows should be cleaned up after recovery
-    const fiberRowsAfter = (await callAgent("hasFiberRows")) as boolean;
+    // Recovery schedules a continuation that re-runs the turn in a fresh fiber,
+    // so a fiber row legitimately exists *while* that turn streams. Poll until
+    // it settles rather than racing the in-flight continuation.
+    const fiberRowsAfter = await pollUntil(
+      "agent fiber cleanup",
+      () => callAgent("hasFiberRows") as Promise<boolean>,
+      (has) => has === false
+    );
     expect(fiberRowsAfter).toBe(false);
   });
 
@@ -524,7 +530,14 @@ describe("Think chat recovery e2e", () => {
     const status = await waitForAgentRecovery();
     expect(status.contexts[0].partialText.length).toBeGreaterThan(0);
 
-    const fiberRowsAfter = (await callAgent("hasFiberRows")) as boolean;
+    // Recovery schedules a continuation that re-runs the turn in a fresh fiber,
+    // so a fiber row legitimately exists *while* that turn streams. Poll until
+    // it settles rather than racing the in-flight continuation.
+    const fiberRowsAfter = await pollUntil(
+      "agent fiber cleanup",
+      () => callAgent("hasFiberRows") as Promise<boolean>,
+      (has) => has === false
+    );
     expect(fiberRowsAfter).toBe(false);
   });
 
@@ -586,9 +599,17 @@ describe("Think chat recovery e2e", () => {
     expect(status.recoveryCount).toBeGreaterThanOrEqual(1);
     expect(status.contexts[0].partialText.length).toBeGreaterThan(0);
 
-    const fiberRowsAfter = (await callHelperParent("helperHasFiberRows", [
-      HELPER_NAME
-    ])) as boolean;
+    // Recovery schedules a continuation that re-runs the turn in a fresh fiber,
+    // so a fiber row legitimately exists *while* that turn streams. Poll until
+    // it settles rather than racing the in-flight continuation.
+    const fiberRowsAfter = await pollUntil(
+      "helper fiber cleanup",
+      () =>
+        callHelperParent("helperHasFiberRows", [
+          HELPER_NAME
+        ]) as Promise<boolean>,
+      (has) => has === false
+    );
     expect(fiberRowsAfter).toBe(false);
   });
 

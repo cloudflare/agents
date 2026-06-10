@@ -339,16 +339,16 @@ const FRAMEWORK_DEPENDENCIES: Record<string, string> = {
 // untested major (e.g. a new `vite`/`ai`/`wrangler`). Kept in sync with the
 // starter by a test in `src/cli-tests/cli.test.ts`.
 export const THIRD_PARTY_DEPENDENCIES: Record<string, string> = {
-  ai: "^6.0.196",
+  ai: "^6.0.199",
   "workers-ai-provider": "^3.1.14"
 };
 
 export const THIRD_PARTY_DEV_DEPENDENCIES: Record<string, string> = {
-  "@cloudflare/vite-plugin": "^1.39.2",
-  "@cloudflare/workers-types": "^4.20260604.1",
+  "@cloudflare/vite-plugin": "^1.40.1",
+  "@cloudflare/workers-types": "^4.20260609.1",
   typescript: "^6.0.3",
   vite: "^8.0.16",
-  wrangler: "^4.97.0"
+  wrangler: "^4.99.0"
 };
 
 function packageJsonSource(projectName: string): string {

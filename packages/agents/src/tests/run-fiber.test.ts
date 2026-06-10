@@ -378,6 +378,119 @@ describe("runFiber", () => {
     });
   });
 
+  // ── Recovery follow-up alarm (re-arm + backoff) ───────────────
+  //
+  // Fast, deterministic coverage of the alarm-scheduling behavior that backs
+  // multi-pass fiber recovery. These drive `_checkRunFibers` + `_scheduleNextAlarm`
+  // directly (no process kill / timers) and inspect the physical alarm, so the
+  // starvation re-arm and the exponential backoff are guarded on every PR rather
+  // than only by the nightly e2e suite.
+
+  describe("recovery follow-up alarm", () => {
+    it("arms a follow-up alarm while a retained recovery row is pending", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "recovery-alarm-rearm"
+      );
+
+      // No keepAlive lease, no schedules, no facet runs: the ONLY reason to arm
+      // an alarm here is the pending (retained) recovery row. Before the
+      // starvation fix `_scheduleNextAlarm` left this null and the orphan
+      // starved.
+      await agent.insertInterruptedFiber(
+        "poison-1",
+        "unmanaged-recovery-throws"
+      );
+      const alarm = await agent.simulateAlarmCycle();
+
+      // Hook threw → row retained, and a follow-up alarm is armed for the retry.
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(1);
+      expect(alarm).not.toBeNull();
+      expect((alarm as number) - Date.now()).toBeGreaterThan(0);
+    });
+
+    it("backs off exponentially across consecutive no-progress scans", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "recovery-alarm-backoff"
+      );
+
+      await agent.insertInterruptedFiber(
+        "poison-2",
+        "unmanaged-recovery-throws"
+      );
+
+      const deltas: number[] = [];
+      for (let i = 0; i < 4; i++) {
+        const alarm = await agent.simulateAlarmCycle();
+        expect(alarm).not.toBeNull();
+        deltas.push((alarm as number) - Date.now());
+      }
+
+      // Each no-progress cycle roughly doubles the wait (2s base → ~4s, 8s, 16s,
+      // 32s), proving the alarm is NOT a flat keepAliveIntervalMs heartbeat.
+      expect(deltas[1]).toBeGreaterThan(deltas[0]);
+      expect(deltas[2]).toBeGreaterThan(deltas[1]);
+      expect(deltas[3]).toBeGreaterThan(deltas[2]);
+
+      // Still retained (never recovered, never aged out within the test) and the
+      // streak reflects the four no-progress scans.
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(1);
+      expect(
+        (await agent.getRecoveryNoProgressScans()) as unknown as number
+      ).toBe(4);
+    });
+
+    it("resets the backoff when a scan makes forward progress", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "recovery-alarm-reset"
+      );
+
+      // Accrue backoff with a poison row.
+      await agent.insertInterruptedFiber(
+        "poison-3",
+        "unmanaged-recovery-throws"
+      );
+      await agent.simulateAlarmCycle();
+      const beforeAlarm = await agent.simulateAlarmCycle();
+      const beforeDelta = (beforeAlarm as number) - Date.now();
+      expect(
+        (await agent.getRecoveryNoProgressScans()) as unknown as number
+      ).toBeGreaterThan(0);
+
+      // A recoverable row that succeeds is forward progress → streak resets, so
+      // the next armed wait drops back toward the base interval (the poison row
+      // remains pending, so an alarm is still armed — just not backed off).
+      await agent.insertInterruptedFiber("good-1", "research");
+      const afterAlarm = await agent.simulateAlarmCycle();
+      const afterDelta = (afterAlarm as number) - Date.now();
+
+      expect(
+        (await agent.getRecoveryNoProgressScans()) as unknown as number
+      ).toBe(0);
+      expect(afterDelta).toBeLessThan(beforeDelta);
+    });
+
+    it("arms no follow-up alarm once recovery has fully drained", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "recovery-alarm-drained"
+      );
+
+      // A single recoverable orphan: the scan recovers and deletes it, leaving
+      // nothing pending — so no recovery alarm is armed and the DO can idle.
+      await agent.insertInterruptedFiber("good-2", "research");
+      const alarm = await agent.simulateAlarmCycle();
+
+      expect((await agent.getRunningFiberCount()) as unknown as number).toBe(0);
+      expect(alarm).toBeNull();
+      expect(
+        (await agent.getRecoveryNoProgressScans()) as unknown as number
+      ).toBe(0);
+    });
+  });
+
   // ── Concurrent fibers ─────────────────────────────────────────
 
   describe("concurrency", () => {

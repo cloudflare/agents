@@ -40,16 +40,16 @@
     "yargs": "^18.0.0"
   },
   "devDependencies": {
-    "@ai-sdk/react": "^3.0.198",
-    "@tanstack/ai": "^0.27.0",
-    "@types/react": "^19.2.16",
+    "@ai-sdk/react": "^3.0.201",
+    "@tanstack/ai": "^0.28.0",
+    "@types/react": "^19.2.17",
     "@types/yargs": "^17.0.35",
     "@vitest/browser-playwright": "^4.1.8",
     "@x402/core": "^2.14.0",
     "@x402/evm": "^2.14.0",
-    "ai": "^6.0.196",
+    "ai": "^6.0.199",
     "chat": "^4.30.0",
-    "glob": "^11.1.0",
+    "glob": "^13.0.6",
     "react": "^19.2.7",
     "vitest-browser-react": "^2.2.0",
     "zod": "^4.4.3"

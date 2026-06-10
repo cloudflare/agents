@@ -12,11 +12,11 @@
     "@ai-sdk/provider": "^3.0.10",
     "@cloudflare/think": "*",
     "agents": "*",
-    "ai": "^6.0.196"
+    "ai": "^6.0.199"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260604.1",
+    "@cloudflare/workers-types": "^4.20260609.1",
     "typescript": "^6.0.3",
-    "wrangler": "^4.97.0"
+    "wrangler": "^4.99.0"
   }
 }

@@ -391,7 +391,61 @@ describe("chat recovery e2e", () => {
     expect(status.recoveryCount).toBeGreaterThanOrEqual(1);
     expect(status.messageCount).toBeGreaterThanOrEqual(1);
 
-    const fiberRowsAfter = (await callAgent("hasFiberRows")) as boolean;
+    // Recovery schedules a continuation/retry that re-runs the (slow) turn in a
+    // fresh fiber, so a fiber row legitimately exists *while* that turn streams.
+    // Poll until it settles rather than racing the in-flight continuation.
+    const fiberRowsAfter = await pollUntil(
+      "ai-chat fiber cleanup",
+      () => callAgent("hasFiberRows") as Promise<boolean>,
+      (has) => has === false
+    );
+    expect(fiberRowsAfter).toBe(false);
+  });
+
+  it("should continue an interrupted turn from a non-empty partial response", async () => {
+    wrangler = startWrangler();
+    await waitForReady();
+
+    await sendChatMessage("Tell me something interesting");
+
+    // Wait long enough for the slow mock model to stream a few chunks AND for
+    // ResumableStream to flush them to its durable buffer before the kill, so
+    // recovery sees a non-empty partial and takes the CONTINUE path (resume the
+    // same assistant message) rather than the empty-partial RETRY path. (test 1
+    // kills at 3s precisely to exercise the retry branch.)
+    await sleep(6000);
+
+    expect((await callAgent("hasFiberRows")) as boolean).toBe(true);
+
+    console.log("[test] Killing wrangler (SIGKILL)...");
+    await killProcess(wrangler);
+    wrangler = null;
+    await waitForPortFree();
+
+    console.log("[test] Restarting wrangler...");
+    wrangler = startWrangler();
+    await waitForReady();
+
+    const status = await waitForRecovery();
+    expect(status.recoveryCount).toBeGreaterThanOrEqual(1);
+    // A non-empty partial is what distinguishes the continue path from retry.
+    expect(status.contexts[0].partialText.length).toBeGreaterThan(0);
+
+    // The continuation resumes the SAME turn: once it settles there is exactly
+    // one assistant message (not a fresh re-run appended as a second one) and
+    // the fiber row is cleaned up.
+    const settled = await pollUntil(
+      "ai-chat continue settle",
+      () => callAgent("getRecoveryStatus") as Promise<RecoveryStatus>,
+      (s) => s.assistantMessages >= 1
+    );
+    expect(settled.assistantMessages).toBe(1);
+
+    const fiberRowsAfter = await pollUntil(
+      "ai-chat fiber cleanup",
+      () => callAgent("hasFiberRows") as Promise<boolean>,
+      (has) => has === false
+    );
     expect(fiberRowsAfter).toBe(false);
   });
 
@@ -415,7 +469,14 @@ describe("chat recovery e2e", () => {
     expect(status.recoveryCount).toBeGreaterThanOrEqual(1);
     expect(status.messageCount).toBeGreaterThanOrEqual(1);
 
-    const fiberRowsAfter = (await callAgent("hasFiberRows")) as boolean;
+    // Recovery schedules a continuation/retry that re-runs the (slow) turn in a
+    // fresh fiber, so a fiber row legitimately exists *while* that turn streams.
+    // Poll until it settles rather than racing the in-flight continuation.
+    const fiberRowsAfter = await pollUntil(
+      "ai-chat fiber cleanup",
+      () => callAgent("hasFiberRows") as Promise<boolean>,
+      (has) => has === false
+    );
     expect(fiberRowsAfter).toBe(false);
   });
 });

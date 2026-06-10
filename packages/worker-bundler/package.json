@@ -37,16 +37,16 @@
     "es-module-lexer": "^2.1.0",
     "esbuild-wasm": "0.28.0",
     "resolve.exports": "^2.0.3",
-    "semver": "^7.8.1",
+    "semver": "^7.8.3",
     "smol-toml": "^1.6.1",
     "sucrase": "^3.35.1",
     "typescript": "^6.0.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260604.1",
+    "@cloudflare/workers-types": "^4.20260609.1",
     "@types/semver": "^7.7.1",
     "esbuild": "^0.28.0",
-    "tsdown": "^0.22.1"
+    "tsdown": "^0.22.2"
   },
   "engines": {
     "node": ">=22"

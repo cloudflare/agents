@@ -8,6 +8,30 @@
       {
         "name": "ChatRecoveryTestAgent",
         "class_name": "ChatRecoveryTestAgent"
+      },
+      {
+        "name": "ChatNoProgressExhaustAgent",
+        "class_name": "ChatNoProgressExhaustAgent"
+      },
+      {
+        "name": "ChatAbortedExhaustAgent",
+        "class_name": "ChatAbortedExhaustAgent"
+      },
+      {
+        "name": "ChatWorkBudgetExhaustAgent",
+        "class_name": "ChatWorkBudgetExhaustAgent"
+      },
+      {
+        "name": "ChatNoContinueAgent",
+        "class_name": "ChatNoContinueAgent"
+      },
+      {
+        "name": "ChatNoPersistNoContinueAgent",
+        "class_name": "ChatNoPersistNoContinueAgent"
+      },
+      {
+        "name": "ChatBufferCleanupAgent",
+        "class_name": "ChatBufferCleanupAgent"
       }
     ]
   },
@@ -15,6 +39,28 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["ChatRecoveryTestAgent"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "ChatNoProgressExhaustAgent",
+        "ChatAbortedExhaustAgent"
+      ]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["ChatWorkBudgetExhaustAgent"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": [
+        "ChatNoContinueAgent",
+        "ChatNoPersistNoContinueAgent"
+      ]
+    },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": ["ChatBufferCleanupAgent"]
     }
   ]
 }

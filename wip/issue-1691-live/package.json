@@ -9,19 +9,19 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^3.0.81",
-    "@ai-sdk/openai": "^3.0.67",
+    "@ai-sdk/anthropic": "^3.0.82",
+    "@ai-sdk/openai": "^3.0.69",
     "@cloudflare/ai-chat": "*",
     "@cloudflare/think": "*",
     "agents": "*",
-    "ai": "^6.0.196",
+    "ai": "^6.0.199",
     "workers-ai-provider": "^3.1.14"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260604.1",
-    "@types/node": "^25.9.1",
+    "@cloudflare/workers-types": "^4.20260609.1",
+    "@types/node": "^25.9.2",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
-    "wrangler": "^4.97.0"
+    "wrangler": "^4.99.0"
   }
 }
