@@ -70,6 +70,7 @@ export type ExecutionStatus =
   | "paused"
   | "completed"
   | "error"
+  | "rejected"
   | "rolled_back";
 
 export type ExecutionState = {
@@ -115,7 +116,10 @@ export const DEFAULT_MAX_EXECUTIONS = 50;
 /** Terminal statuses are eligible for retention pruning. */
 function isTerminal(status: ExecutionStatus): boolean {
   return (
-    status === "completed" || status === "error" || status === "rolled_back"
+    status === "completed" ||
+    status === "error" ||
+    status === "rejected" ||
+    status === "rolled_back"
   );
 }
 
@@ -371,20 +375,24 @@ export class CodemodeRuntime extends DurableObject {
   /**
    * Reject a pending action. Ends the execution with an error.
    *
+   * Returns whether it actually terminated the run: `false` when the seq isn't
+   * pending (a stale/duplicate reject — e.g. the action was already handled by
+   * another tab), so the caller doesn't tear down a run that's still live.
+   *
    * Rejection does NOT undo actions already applied earlier in the same run —
    * call `rollback()` for that. See docs/codemode/approvals.md.
    */
-  async reject(seq: number, executionId: string): Promise<void> {
+  async reject(seq: number, executionId: string): Promise<boolean> {
     const state = await this.#get(executionId);
-    if (!state) return;
+    if (!state) return false;
     const entry = state.log[seq];
-    if (entry?.state === "pending") {
-      entry.state = "reverted";
-      state.status = "error";
-      state.error = `Action ${entry.connector}.${entry.method} rejected by user`;
-      state.updatedAt = Date.now();
-      await this.ctx.storage.put(execKey(state.id), state);
-    }
+    if (entry?.state !== "pending") return false;
+    entry.state = "reverted";
+    state.status = "rejected";
+    state.error = `Action ${entry.connector}.${entry.method} rejected by user`;
+    state.updatedAt = Date.now();
+    await this.ctx.storage.put(execKey(state.id), state);
+    return true;
   }
 
   // -----------------------------------------------------------------------

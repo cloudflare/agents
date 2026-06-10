@@ -19,6 +19,11 @@ export {
 } from "./json-schema-types";
 export { normalizeCode } from "./normalize";
 export { resolveProvider } from "./resolve";
+export {
+  truncateResponse,
+  truncateResult,
+  type TruncateOptions
+} from "./truncate";
 
 export {
   CodemodeRuntime,
@@ -39,7 +44,11 @@ export {
   type CodemodeRollbackOptions
 } from "./runtime-handle";
 
-export { type ProxyToolInput, type ProxyToolOutput } from "./proxy-tool";
+export {
+  type ProxyToolInput,
+  type ProxyToolOutput,
+  type TransformResult
+} from "./proxy-tool";
 export {
   CodemodeConnector,
   McpConnector,
@@ -49,7 +58,9 @@ export {
   type McpConnectionLike,
   type OpenApiRequestOptions,
   type ConnectorDescription,
+  type ExecutionEndStatus,
   type ToolAnnotations,
+  type ToolExecuteContext,
   type SearchResult,
   type SearchOutput,
   type DescribeOutput

@@ -24,7 +24,7 @@ import { z } from "zod";
 import type { Executor, ResolvedProvider, ConnectorBinding } from "./executor";
 import { runCode } from "./run-code";
 import type { CodemodeConnector, ConnectorDescription } from "./connectors";
-import type { ToolAnnotations } from "./connectors";
+import type { ExecutionEndStatus, ToolAnnotations } from "./connectors";
 import { searchConnectors, describeTarget } from "./connectors";
 import {
   CodemodeRuntime,
@@ -71,7 +71,7 @@ interface RuntimeStub {
   ): Promise<void>;
   fail(executionId: string, error: string, logs?: string[]): Promise<void>;
   listPending(executionId?: string): Promise<PendingAction[]>;
-  reject(seq: number, executionId: string): Promise<void>;
+  reject(seq: number, executionId: string): Promise<boolean>;
   actionsToRevert(executionId: string): Promise<ToolLogEntry[]>;
   markReverted(seq: number, executionId: string): Promise<void>;
   markRolledBack(executionId: string): Promise<void>;
@@ -114,6 +114,14 @@ export type ProxyToolOutput =
       logs?: string[];
     };
 
+/**
+ * Shape the final result before it is returned to the model. Runs on a
+ * completed run only (not on pause/error), after the raw result is recorded on
+ * the execution — so the audit trail keeps the full value while the model sees
+ * the transformed one. A common use is `truncateResult` to cap response size.
+ */
+export type TransformResult = (result: unknown) => unknown | Promise<unknown>;
+
 export type CreateProxyToolOptions = {
   ctx: DurableObjectState;
   connectors: CodemodeConnector[];
@@ -121,6 +129,8 @@ export type CreateProxyToolOptions = {
   description?: string;
   /** Terminal executions retained per runtime. Defaults to 50. */
   maxExecutions?: number;
+  /** Optionally reshape the model-facing result (e.g. truncate). */
+  transformResult?: TransformResult;
 };
 
 // ---------------------------------------------------------------------------
@@ -216,6 +226,35 @@ async function loadSetup(connectors: CodemodeConnector[]): Promise<Setup> {
 }
 
 // ---------------------------------------------------------------------------
+// Execution teardown — fire the connector lifecycle hook on a terminal status
+// ---------------------------------------------------------------------------
+
+/**
+ * Notify every connector that an execution reached a terminal state so it can
+ * dispose any per-execution resource (e.g. a browser session). Deliberately
+ * *not* called on pause — a paused run may resume later. Hook rejections are
+ * swallowed: teardown must never turn a finished run into a failure.
+ *
+ * Fires for every connector regardless of whether it took part in the run —
+ * connectors that own no per-execution state default to a no-op.
+ */
+async function disposeConnectors(
+  connectors: Iterable<CodemodeConnector>,
+  executionId: string,
+  status: ExecutionEndStatus
+): Promise<void> {
+  await Promise.all(
+    [...connectors].map(async (connector) => {
+      try {
+        await connector.disposeExecution(executionId, status);
+      } catch {
+        // Intentionally ignored — see doc comment.
+      }
+    })
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Connector bindings — every call routes through the runtime for a decision
 // ---------------------------------------------------------------------------
 
@@ -249,7 +288,7 @@ function buildConnectorBindings(
 
       const connector = setup.connectorsByName.get(desc.name);
       if (!connector) throw new Error(`Unknown connector: ${desc.name}`);
-      const result = await connector.executeTool(method, args);
+      const result = await connector.executeTool(method, args, { executionId });
       await runtime.recordResult(executionId, decision.seq, result);
       return result;
     })
@@ -380,7 +419,8 @@ async function runPass(
   code: string,
   setup: Setup,
   runtime: RuntimeStub,
-  executor: Executor
+  executor: Executor,
+  transformResult?: TransformResult
 ): Promise<ProxyToolOutput> {
   const cursor = createCursor();
   const bindings = buildConnectorBindings(setup, runtime, executionId, cursor);
@@ -409,8 +449,11 @@ async function runPass(
   // The facet status is the source of truth: a pause (approval or divergence)
   // records itself there before aborting the run. The PAUSE_SENTINEL only stops
   // the sandbox; it is never the deciding signal here.
+  const connectors = [...setup.connectorsByName.values()];
+
   const execution = await runtime.getExecution(executionId);
   if (execution?.status === "paused") {
+    // Not terminal — the run may resume, so connector resources stay open.
     return {
       status: "paused",
       executionId,
@@ -419,6 +462,7 @@ async function runPass(
   }
   if (execution?.status === "error") {
     // A replay divergence, already recorded on the execution by the facet.
+    await disposeConnectors(connectors, executionId, "error");
     return {
       status: "error",
       executionId,
@@ -429,12 +473,41 @@ async function runPass(
   if (threw) {
     const message = threw instanceof Error ? threw.message : String(threw);
     await runtime.fail(executionId, message);
+    await disposeConnectors(connectors, executionId, "error");
     return { status: "error", executionId, error: message };
   }
 
   const result = output?.result;
   await runtime.complete(executionId, result, output?.logs);
-  return { status: "completed", executionId, result, logs: output?.logs };
+  await disposeConnectors(connectors, executionId, "completed");
+  return {
+    status: "completed",
+    executionId,
+    result: await applyTransform(transformResult, result),
+    logs: output?.logs
+  };
+}
+
+/**
+ * Apply the result transform, defending against a buggy transform: the run has
+ * already completed and its resources are disposed, so a throwing transform
+ * must not turn a successful run into a thrown tool error. Fall back to the raw
+ * result (and warn) instead.
+ */
+async function applyTransform(
+  transformResult: TransformResult | undefined,
+  result: unknown
+): Promise<unknown> {
+  if (!transformResult) return result;
+  try {
+    return await transformResult(result);
+  } catch (err) {
+    console.warn(
+      "codemode: transformResult threw; returning the raw result.",
+      err
+    );
+    return result;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -471,7 +544,14 @@ export function createProxyTool(
     execute: async ({ code }) => {
       const setup = await getSetup();
       const executionId = await runtime.begin(code, options.maxExecutions);
-      return runPass(executionId, code, setup, runtime, options.executor);
+      return runPass(
+        executionId,
+        code,
+        setup,
+        runtime,
+        options.executor,
+        options.transformResult
+      );
     }
   });
 }
@@ -532,6 +612,8 @@ export type ResumeCodemodeOptions = {
   /** Execution id to resume. */
   executionId: string;
   maxExecutions?: number;
+  /** Optionally reshape the model-facing result (e.g. truncate). */
+  transformResult?: TransformResult;
 };
 
 /**
@@ -556,7 +638,8 @@ export async function resumeCodemode(
     execution.code,
     setup,
     runtime,
-    options.executor
+    options.executor,
+    options.transformResult
   );
 }
 
@@ -570,10 +653,20 @@ export async function rejectCodemode(options: {
   seq: number;
   executionId: string;
 }): Promise<void> {
-  await getRuntime(options.ctx, options.connectors).reject(
+  const terminated = await getRuntime(options.ctx, options.connectors).reject(
     options.seq,
     options.executionId
   );
+  // Only dispose if the reject actually ended the run. A stale/duplicate reject
+  // (seq no longer pending) is a no-op, and the run may still be live and
+  // resumable — tearing its resources down would break the next resume.
+  if (terminated) {
+    await disposeConnectors(
+      options.connectors,
+      options.executionId,
+      "rejected"
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -617,7 +710,8 @@ export async function rollbackCodemode(options: {
       const didRevert = await connector.revertAction(
         action.method,
         action.args,
-        action.result
+        action.result,
+        { executionId: options.executionId }
       );
       if (didRevert) {
         await runtime.markReverted(action.seq, options.executionId);
@@ -635,6 +729,12 @@ export async function rollbackCodemode(options: {
   // keep showing "completed" after the run's effects were undone.
   if (reverted > 0) {
     await runtime.markRolledBack(options.executionId);
+    // Rolling back is terminal — dispose per-execution connector resources.
+    await disposeConnectors(
+      options.connectors,
+      options.executionId,
+      "rolled_back"
+    );
   }
 
   if (failures.length > 0) {

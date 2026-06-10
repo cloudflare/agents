@@ -10,6 +10,38 @@ export type ToolAnnotations = {
 };
 
 // ---------------------------------------------------------------------------
+// Execution lifecycle — context for per-execution resources.
+// ---------------------------------------------------------------------------
+
+/**
+ * Passed to a tool's `execute`/`revert` so a connector knows which codemode
+ * execution the call belongs to. The id is stable across a run's pause/resume
+ * passes, so it's the right key for a per-execution resource (e.g. a browser
+ * session) that must survive a pause.
+ */
+export type ToolExecuteContext = {
+  /** The codemode execution this call belongs to. Stable across pause/resume. */
+  executionId: string;
+};
+
+/**
+ * Terminal outcome of a codemode execution, passed to
+ * `CodemodeConnector.disposeExecution`. These mirror the terminal subset of the
+ * runtime's `ExecutionStatus`; a `paused` run is *not* terminal — it may resume
+ * later — so it is deliberately absent here.
+ *
+ * - `completed`   — the run finished and returned a result.
+ * - `error`       — the run threw or hit a replay divergence.
+ * - `rejected`    — a pending action was rejected by the user.
+ * - `rolled_back` — the run's applied effects were reverted.
+ */
+export type ExecutionEndStatus =
+  | "completed"
+  | "error"
+  | "rejected"
+  | "rolled_back";
+
+// ---------------------------------------------------------------------------
 // Connector description — returned by describe() RPC.
 // ---------------------------------------------------------------------------
 

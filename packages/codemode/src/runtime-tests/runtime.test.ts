@@ -43,6 +43,11 @@ interface Host {
   ): Promise<Snippet>;
   snippets(): Promise<Snippet[]>;
   sideEffects(): Promise<SideEffects>;
+  lifecycle(): Promise<{
+    opened: string[];
+    disposed: Array<{ executionId: string; status: string }>;
+  }>;
+  enableShaping(): Promise<void>;
 }
 
 const testEnv = env as unknown as {
@@ -131,7 +136,7 @@ describe("codemode durable runtime (e2e)", () => {
     expect((await h.sideEffects()).created).toEqual([]);
     const execs = await h.executions();
     const exec = execs.find((e) => e.id === first.executionId);
-    expect(exec?.status).toBe("error");
+    expect(exec?.status).toBe("rejected");
   });
 
   it("rolls back applied actions in reverse, including non-approval writes", async () => {
@@ -311,5 +316,152 @@ describe("codemode durable runtime (e2e)", () => {
     expect(await h.deleteExecution(id)).toBe(true);
     const after = await h.executions();
     expect(after.find((e) => e.id === id)).toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // Per-execution connector lifecycle (acquire/dispose across pause/resume)
+  // -------------------------------------------------------------------------
+
+  it("threads the executionId into a tool's execute context", async () => {
+    const h = host();
+    const out = (await h.run(
+      `async () => await items.session_id()`
+    )) as ProxyToolOutput;
+
+    expect(out.status).toBe("completed");
+    if (out.status !== "completed") return;
+    // The id the tool saw equals the run's execution id.
+    expect(out.result).toEqual({ executionId: out.executionId });
+    expect((await h.lifecycle()).opened).toContain(out.executionId);
+  });
+
+  it("disposes connectors once when a run completes", async () => {
+    const h = host();
+    const out = (await h.run(
+      `async () => await items.session_id()`
+    )) as ProxyToolOutput;
+    expect(out.status).toBe("completed");
+    if (out.status !== "completed") return;
+
+    const { disposed } = await h.lifecycle();
+    expect(disposed).toEqual([
+      { executionId: out.executionId, status: "completed" }
+    ]);
+  });
+
+  it("does not dispose while paused, then disposes on approve", async () => {
+    const h = host();
+    const first = (await h.run(
+      `async () => await items.create_item({ title: "hello" })`
+    )) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    // Paused is not terminal — the resource must stay open for the resume.
+    expect((await h.lifecycle()).disposed).toEqual([]);
+
+    const resumed = (await h.approve(first.executionId)) as ProxyToolOutput;
+    expect(resumed.status).toBe("completed");
+
+    // Disposed exactly once, on the terminal (completed) transition.
+    expect((await h.lifecycle()).disposed).toEqual([
+      { executionId: first.executionId, status: "completed" }
+    ]);
+  });
+
+  it("disposes with 'rejected' when a pending action is rejected", async () => {
+    const h = host();
+    const first = (await h.run(
+      `async () => await items.create_item({ title: "nope" })`
+    )) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    expect((await h.lifecycle()).disposed).toEqual([]);
+
+    await h.reject(first.pending[0].seq, first.executionId);
+
+    expect((await h.lifecycle()).disposed).toEqual([
+      { executionId: first.executionId, status: "rejected" }
+    ]);
+  });
+
+  it("does not dispose on a stale reject that doesn't terminate the run", async () => {
+    const h = host();
+    const first = (await h.run(
+      `async () => await items.create_item({ title: "stale" })`
+    )) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    // A seq that isn't pending (no such entry) — reject is a no-op, so the run
+    // stays paused/resumable and its resources must NOT be torn down.
+    await h.reject(999, first.executionId);
+    expect((await h.lifecycle()).disposed).toEqual([]);
+
+    // The run is still live: approving it completes normally.
+    const resumed = (await h.approve(first.executionId)) as ProxyToolOutput;
+    expect(resumed.status).toBe("completed");
+    expect((await h.lifecycle()).disposed).toEqual([
+      { executionId: first.executionId, status: "completed" }
+    ]);
+  });
+
+  it("disposes with 'rolled_back' after a rollback reverts effects", async () => {
+    const h = host();
+    const out = (await h.run(
+      `async () => await items.add_note({ text: "hi" })`
+    )) as ProxyToolOutput;
+    expect(out.status).toBe("completed");
+    if (out.status !== "completed") return;
+
+    // Completed first, so dispose fired once with "completed".
+    expect((await h.lifecycle()).disposed).toEqual([
+      { executionId: out.executionId, status: "completed" }
+    ]);
+
+    await h.rollback(out.executionId);
+
+    // Rollback is a second terminal transition — dispose fires again.
+    expect((await h.lifecycle()).disposed).toEqual([
+      { executionId: out.executionId, status: "completed" },
+      { executionId: out.executionId, status: "rolled_back" }
+    ]);
+  });
+
+  // -------------------------------------------------------------------------
+  // transformResult — reshape the model-facing result (run + resume)
+  // -------------------------------------------------------------------------
+
+  it("applies transformResult to the result on both run and resume", async () => {
+    const h = host();
+    await h.enableShaping();
+
+    // Initial run: a completed read is shaped.
+    const read = (await h.run(
+      `async () => await items.list_items()`
+    )) as ProxyToolOutput;
+    expect(read.status).toBe("completed");
+    if (read.status === "completed") {
+      expect(read.result).toEqual({ shaped: [] });
+    }
+
+    // Resume after approval: the result is shaped on the resume pass too.
+    const first = (await h.run(
+      `async () => await items.create_item({ title: "z" })`
+    )) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    const resumed = (await h.approve(first.executionId)) as ProxyToolOutput;
+    expect(resumed.status).toBe("completed");
+    if (resumed.status === "completed") {
+      expect(resumed.result).toEqual({ shaped: { id: 1, title: "z" } });
+    }
+
+    // The raw (unshaped) result is preserved on the execution audit trail.
+    const execs = await h.executions();
+    const rec = execs.find((e) => e.id === first.executionId);
+    expect(rec?.result).toEqual({ id: 1, title: "z" });
   });
 });

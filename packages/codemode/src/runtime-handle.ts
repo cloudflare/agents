@@ -9,7 +9,8 @@ import {
   resumeCodemode,
   rollbackCodemode,
   type ProxyToolInput,
-  type ProxyToolOutput
+  type ProxyToolOutput,
+  type TransformResult
 } from "./proxy-tool";
 import type { ExecutionState, PendingAction } from "./runtime";
 import type { SaveSnippetOptions, Snippet } from "./snippet";
@@ -24,6 +25,13 @@ export type CreateCodemodeRuntimeOptions = {
    * paused executions are never pruned. Defaults to 50.
    */
   maxExecutions?: number;
+  /**
+   * Optionally reshape the model-facing result of a completed run before it is
+   * returned — e.g. `(r) => truncateResult(r)` to cap response size. The raw
+   * result is still recorded on the execution, so the audit trail is intact.
+   * Applies to both the initial run and a resume after approval.
+   */
+  transformResult?: TransformResult;
 };
 
 export type CodemodeRuntimeToolOptions = {
@@ -87,7 +95,8 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
       executor: this.#options.executor,
       connectors: this.#options.connectors,
       description: options?.description,
-      maxExecutions: this.#options.maxExecutions
+      maxExecutions: this.#options.maxExecutions,
+      transformResult: this.#options.transformResult
     });
   }
 
@@ -97,7 +106,8 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
       executor: this.#options.executor,
       connectors: this.#options.connectors,
       executionId: options.executionId,
-      maxExecutions: this.#options.maxExecutions
+      maxExecutions: this.#options.maxExecutions,
+      transformResult: this.#options.transformResult
     });
   }
 

@@ -4,7 +4,12 @@ import {
   generateTypesFromJsonSchema,
   type JsonSchemaToolDescriptors
 } from "../json-schema-types";
-import type { ConnectorDescription, ToolAnnotations } from "./types";
+import type {
+  ConnectorDescription,
+  ExecutionEndStatus,
+  ToolAnnotations,
+  ToolExecuteContext
+} from "./types";
 
 /**
  * A single connector tool — everything about it in one place: docs, schema,
@@ -20,9 +25,16 @@ export type ConnectorTool = {
   outputSchema?: JSONSchema7;
   /** Pause for user approval before executing. Omit to execute immediately. */
   requiresApproval?: boolean;
-  execute: (args: unknown) => Promise<unknown> | unknown;
+  execute: (
+    args: unknown,
+    ctx?: ToolExecuteContext
+  ) => Promise<unknown> | unknown;
   /** Optional compensation for rollback: undo an applied call. */
-  revert?: (args: unknown, result: unknown) => Promise<void> | void;
+  revert?: (
+    args: unknown,
+    result: unknown,
+    ctx?: ToolExecuteContext
+  ) => Promise<void> | void;
 };
 
 export type ConnectorTools = Record<string, ConnectorTool>;
@@ -148,10 +160,14 @@ export abstract class CodemodeConnector<
     };
   }
 
-  async executeTool(method: string, args: unknown): Promise<unknown> {
+  async executeTool(
+    method: string,
+    args: unknown,
+    ctx?: ToolExecuteContext
+  ): Promise<unknown> {
     const tool = (await this.resolvedTools())[method];
     if (!tool) throw new Error(`Tool "${method}" not found on ${this.name()}`);
-    return tool.execute(args);
+    return tool.execute(args, ctx);
   }
 
   /**
@@ -162,13 +178,44 @@ export abstract class CodemodeConnector<
   async revertAction(
     method: string,
     args: unknown,
-    result: unknown
+    result: unknown,
+    ctx?: ToolExecuteContext
   ): Promise<boolean> {
     const tool = (await this.resolvedTools())[method];
     if (!tool?.revert) return false;
-    await tool.revert(args, result);
+    await tool.revert(args, result, ctx);
     return true;
   }
+
+  /**
+   * Called once when a codemode execution reaches a terminal state — completed,
+   * errored, rejected, or rolled back — and will not resume. Override to tear
+   * down any per-execution resource this connector opened for that run, keyed
+   * by `executionId` (e.g. close a browser/CDP session).
+   *
+   * It is deliberately *not* called when a run pauses for approval: a paused
+   * run may resume later, possibly in a fresh Worker invocation, so a resource
+   * scoped to the whole run must outlive a pause. This hook is the single point
+   * where teardown is safe.
+   *
+   * Contract for implementers:
+   * - Be idempotent. It may fire more than once for the same execution (a
+   *   completed run that is later rolled back) and a no-op is expected the
+   *   second time.
+   * - Don't rely on instance memory. It may run on a different connector
+   *   instance than the one that opened the resource (the host can reconstruct
+   *   connectors per request, and the opening pass may have hibernated), so
+   *   read what you need from durable storage keyed by `executionId`.
+   * - Don't throw. Teardown failures must not turn a finished run into a
+   *   failure; the runtime ignores rejections from this hook.
+   *
+   * The default is a no-op, so connectors that own no per-execution state
+   * don't implement it.
+   */
+  async disposeExecution(
+    _executionId: string,
+    _status: ExecutionEndStatus
+  ): Promise<void> {}
 
   async getTypeScriptTypes(): Promise<string> {
     const { descriptors } = await this.describe();

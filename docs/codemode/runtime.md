@@ -119,6 +119,8 @@ Returning the divergence as data (instead of throwing across the RPC boundary) k
 
 In practice, model-generated code is naturally deterministic — it fetches data, branches on the data (which is replayed identically), and calls tools. The constraint only bites if code uses nondeterministic sources to drive control flow or build action arguments.
 
+**Issue tool calls sequentially.** The replay cursor assigns each call its sequence number when the call reaches the host, so `await a(); await b();` is stable across runs but `await Promise.all([a(), b()])` is not — the two calls can arrive in either order. On a run that never pauses this is harmless, but if such a run later pauses and resumes, the reordered calls trip divergence detection. Await connector calls one at a time in any run that might pause for approval.
+
 ## The tool-call log
 
 ```ts
@@ -155,7 +157,9 @@ protected tool(name: string, t: ConnectorTool): ConnectorTool {
 }
 ```
 
-Tools without a `revert` are skipped (the user is told the action can't be auto-reverted). Reads are never reverted. `reject()` does **not** roll back — it only ends a paused execution; call `rollback()` to undo actions already applied earlier in the run. Rollback attempts every revert even if one throws (failures are reported afterward rather than aborting the rest), and marks the execution `rolled_back` so the audit trail reflects that its effects were undone.
+Tools without a `revert` are skipped (the user is told the action can't be auto-reverted). Reads are never reverted. `reject()` does **not** roll back — it only ends a paused execution (marking it `rejected`); call `rollback()` to undo actions already applied earlier in the run. Rollback attempts every revert even if one throws (failures are reported afterward rather than aborting the rest), and marks the execution `rolled_back` so the audit trail reflects that its effects were undone.
+
+A terminal execution is one of `completed`, `error` (a thrown sandbox error or replay divergence), `rejected`, or `rolled_back`. These are exactly the statuses a connector's [`disposeExecution`](./connectors.md#per-execution-resources) hook fires for; `running` and `paused` are not terminal.
 
 ## Retention
 
@@ -174,6 +178,26 @@ await runtime.executions(20); // newest first, optionally limited
 await runtime.deleteExecution(id); // drop one (returns whether it existed)
 await runtime.pruneExecutions(10); // keep only the newest N terminal runs
 ```
+
+## Shaping results
+
+A run's final result can be large enough to crowd the model's context. Pass `transformResult` to reshape the **model-facing** result of a completed run — most often to truncate it. It runs after the raw result is recorded, so the audit trail (`runtime.executions()`) keeps the full value while the model sees the shaped one. It applies on both the initial run and a resume after approval.
+
+```ts
+import { createCodemodeRuntime, truncateResult } from "@cloudflare/codemode";
+
+const runtime = createCodemodeRuntime({
+  ctx,
+  executor,
+  connectors,
+  // Cap response size; small structured results pass through unchanged.
+  transformResult: (result) => truncateResult(result)
+});
+```
+
+`truncateResult(value, options?)` returns the value unchanged when its serialized size is within budget, and a truncated string (with a marker noting the original size) when it isn't. `truncateResponse(text, options?)` is the string-only variant. Both take `{ maxChars?, maxTokens? }` (default ~6000 tokens).
+
+`transformResult` shapes only the final returned value — individual connector results inside the run are unaffected, so the model's own code still sees full data to reason over.
 
 ## Snippets
 

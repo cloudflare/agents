@@ -9,7 +9,9 @@ export { searchConnectors } from "./search";
 export { describeTarget } from "./describe";
 export type {
   ConnectorDescription,
+  ExecutionEndStatus,
   ToolAnnotations,
+  ToolExecuteContext,
   SearchResult,
   SearchOutput,
   DescribeOutput

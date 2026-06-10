@@ -8,7 +8,11 @@
  * unit tests can't see).
  */
 import { DurableObject } from "cloudflare:workers";
-import { CodemodeConnector, type ConnectorTools } from "../connectors";
+import {
+  CodemodeConnector,
+  type ConnectorTools,
+  type ExecutionEndStatus
+} from "../connectors";
 import { DynamicWorkerExecutor } from "../executor";
 import { createCodemodeRuntime } from "../runtime-handle";
 import type { ProxyToolInput, ProxyToolOutput } from "../proxy-tool";
@@ -31,6 +35,11 @@ class ItemsConnector extends CodemodeConnector<Env> {
   created: Array<{ title: string }> = [];
   deleted: unknown[] = [];
   notes: string[] = [];
+  // Per-execution lifecycle tracking — proves the executionId-scoped resource
+  // contract: opened once per run on first use, disposed once on a terminal
+  // status (never on pause).
+  opened: string[] = [];
+  disposed: Array<{ executionId: string; status: ExecutionEndStatus }> = [];
 
   name() {
     return "items";
@@ -41,6 +50,17 @@ class ItemsConnector extends CodemodeConnector<Env> {
       list_items: {
         description: "List all items.",
         execute: () => [...this.created]
+      },
+      session_id: {
+        // Reads the execution context — opens a per-execution "session".
+        description: "Return the current execution id.",
+        execute: (_args, ctx) => {
+          const executionId = ctx?.executionId ?? "";
+          if (executionId && !this.opened.includes(executionId)) {
+            this.opened.push(executionId);
+          }
+          return { executionId };
+        }
       },
       create_item: {
         description: "Create an item. Requires approval.",
@@ -69,12 +89,22 @@ class ItemsConnector extends CodemodeConnector<Env> {
       }
     };
   }
+
+  override async disposeExecution(
+    executionId: string,
+    status: ExecutionEndStatus
+  ): Promise<void> {
+    this.disposed.push({ executionId, status });
+  }
 }
 
 type RunOptions = { maxExecutions?: number };
 
 export class CodemodeTestHost extends DurableObject<Env> {
   #connector?: ItemsConnector;
+  // When set, the runtime wraps every completed result so tests can assert the
+  // transformResult hook fires on both the initial run and a resume.
+  #shape = false;
 
   #items() {
     this.#connector ??= new ItemsConnector(this.ctx, this.env);
@@ -87,8 +117,13 @@ export class CodemodeTestHost extends DurableObject<Env> {
       ctx: this.ctx,
       executor,
       connectors: [this.#items()],
-      maxExecutions: options?.maxExecutions
+      maxExecutions: options?.maxExecutions,
+      transformResult: this.#shape ? (r) => ({ shaped: r }) : undefined
     });
+  }
+
+  enableShaping() {
+    this.#shape = true;
   }
 
   async run(code: string, options?: RunOptions): Promise<ProxyToolOutput> {
@@ -135,6 +170,11 @@ export class CodemodeTestHost extends DurableObject<Env> {
   sideEffects() {
     const c = this.#items();
     return { created: c.created, deleted: c.deleted, notes: c.notes };
+  }
+
+  lifecycle() {
+    const c = this.#items();
+    return { opened: c.opened, disposed: c.disposed };
   }
 }
 

@@ -60,15 +60,26 @@ export class MyConnector extends CodemodeConnector<Env> {
 ### Each tool
 
 ```ts
+type ToolExecuteContext = { executionId: string };
+
 type ConnectorTool = {
   description?: string;
   inputSchema?: JSONSchema7; // defaults to an open object
   outputSchema?: JSONSchema7;
   requiresApproval?: boolean; // omit to execute immediately
-  execute: (args: unknown) => Promise<unknown> | unknown;
-  revert?: (args: unknown, result: unknown) => Promise<void> | void;
+  execute: (
+    args: unknown,
+    ctx?: ToolExecuteContext
+  ) => Promise<unknown> | unknown;
+  revert?: (
+    args: unknown,
+    result: unknown,
+    ctx?: ToolExecuteContext
+  ) => Promise<void> | void;
 };
 ```
+
+`execute`/`revert` receive an optional `ctx` carrying the `executionId` of the run they belong to. The id is stable across a run's pause/resume passes, so it's the key to use for any resource scoped to the whole execution (see [Per-execution resources](#per-execution-resources)).
 
 `requiresApproval: true` pauses the run for [approval](./approvals.md). `revert` enables [rollback](./runtime.md#rollback). Everything else executes immediately and is recorded in the durable log.
 
@@ -91,8 +102,62 @@ The proxy tool talks to connectors over Workers RPC. The base class derives this
 
 - `describe()` — name, instructions, descriptors, annotations
 - `getTypeScriptTypes()` — TypeScript declarations for describe
-- `executeTool(method, args)` — dispatch to the tool's `execute`
-- `revertAction(method, args, result)` — dispatch to the tool's `revert`
+- `executeTool(method, args, ctx?)` — dispatch to the tool's `execute`
+- `revertAction(method, args, result, ctx?)` — dispatch to the tool's `revert`
+
+## Per-execution resources
+
+Some connectors own a resource that must live for the lifetime of one run — a browser/CDP session, a database transaction, a temp workspace. Two pieces of the contract make this work:
+
+1. **`execute(args, ctx)`** receives the `executionId`. Use it to lazily acquire (or reconnect to) the resource on first use, keyed by that id. Because the id is stable across pause/resume, the resource is addressable even after a run pauses for approval and resumes in a later Worker invocation. `ctx` is typed optional (so AI SDK toolsets stay shape-compatible), so read it as `ctx?.executionId` — the runtime always provides it on a real call.
+2. **`disposeExecution(executionId, status)`** is called when the run reaches a **terminal** state, so you can tear the resource down.
+
+```ts
+export class BrowserConnector extends CodemodeConnector<Env> {
+  name() {
+    return "browser";
+  }
+
+  protected tools() {
+    return {
+      navigate: {
+        description: "Open a URL in the run's browser session.",
+        execute: async ({ url }, ctx) => {
+          const session = await this.sessionFor(ctx?.executionId);
+          return session.goto(url);
+        }
+      }
+    };
+  }
+
+  // Fires on completed / error / rejected / rolled_back — never on pause.
+  override async disposeExecution(
+    executionId: string,
+    _status: ExecutionEndStatus
+  ) {
+    await this.closeSessionFor(executionId);
+  }
+}
+```
+
+`disposeExecution` is deliberately **not** called when a run pauses for approval — a paused run may resume, so a resource scoped to the whole run must survive the pause. It fires for **every** connector in the runtime on each terminal transition, not just the ones a run used, so a connector that opened nothing should find nothing to close. `status` is one of:
+
+| `ExecutionEndStatus` | When                                      |
+| -------------------- | ----------------------------------------- |
+| `completed`          | the run finished and returned a result    |
+| `error`              | the run threw or hit a replay divergence  |
+| `rejected`           | a pending action was rejected by the user |
+| `rolled_back`        | the run's applied effects were reverted   |
+
+Implementation rules (the default is a no-op, so connectors with no per-run state skip it):
+
+- **Idempotent.** It fires on each terminal transition, so it can run more than once for one execution — a `completed` run that is later rolled back disposes twice. The second call should no-op.
+- **No instance memory.** It may run on a different connector instance than the one that opened the resource (the host can reconstruct connectors per request, and the opening pass may have hibernated). Read what you need from durable storage keyed by `executionId`.
+- **Never throws.** Teardown failures must not turn a finished run into a failure; the runtime ignores rejections from this hook.
+
+> To abandon a paused run and release its resources, [`reject`](./approvals.md) the pending action — that's a terminal transition and fires `disposeExecution`. (`rollback` only fires it when it actually reverts an effect; a paused, read-only run isn't terminated by rollback.)
+
+> **AI SDK toolsets:** when `tools()` returns an AI SDK `ToolSet`, codemode passes `{ executionId }` as the tool's second `execute` argument — the slot the AI SDK uses for its own call options. Inside codemode those options aren't otherwise populated, but a tool authored against the AI SDK's `toolCallId`/`messages` won't receive them here.
 
 ## McpConnector
 
