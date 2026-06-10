@@ -260,6 +260,12 @@ describe("codemode durable runtime (e2e)", () => {
     }
     // Nothing applied.
     expect((await h.sideEffects()).created).toEqual([]);
+
+    // The diverged run ended as "error" but its log still carries the original
+    // "pending" entry. That entry is NOT actionable (approve is a no-op now), so
+    // it must not surface in the approval queue — neither aggregated nor scoped.
+    expect(await h.pending()).toEqual([]);
+    expect(await h.pending(first.executionId)).toEqual([]);
   });
 
   it("codemode.step makes nondeterministic work replay-safe", async () => {

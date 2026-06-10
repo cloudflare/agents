@@ -366,18 +366,23 @@ export class CodemodeRuntime extends DurableObject {
 
   /**
    * List pending actions awaiting approval. With an `executionId`, scopes to
-   * that run; without one, aggregates across **all** executions (newest first)
-   * — so an approval UI sees every paused run, not just whichever happened to
-   * be started/resumed last. (Defaulting to a single "current" run would drop
-   * pending actions when multiple runs are in flight.)
+   * that run; without one, aggregates across every **paused** run (newest
+   * first) — so an approval UI sees every awaiting-approval run, not just
+   * whichever happened to be started/resumed last. (Defaulting to a single
+   * "current" run would drop pending actions when multiple runs are in flight.)
+   *
+   * Only **paused** runs are considered: a non-paused run can retain a stale
+   * "pending" log entry (e.g. a resume diverged before reaching it, ending the
+   * run as `error` while the later entry stays `pending`). Such an entry isn't
+   * actionable — approving it is a no-op — so it must not clutter the queue.
    */
   async listPending(executionId?: string): Promise<PendingAction[]> {
     if (executionId) {
       const state = await this.#get(executionId);
-      return state ? pendingOf(state) : [];
+      return state?.status === "paused" ? pendingOf(state) : [];
     }
     const all = await this.listExecutions();
-    return all.flatMap(pendingOf);
+    return all.filter((e) => e.status === "paused").flatMap(pendingOf);
   }
 
   /**
