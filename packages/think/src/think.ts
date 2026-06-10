@@ -2020,7 +2020,26 @@ export class Think<
     return this._cachedMessages;
   }
 
-  /** Read the durable message path from session storage. */
+  /**
+   * Read the durable message path from session storage.
+   *
+   * Intentionally UNBUDGETED — unlike the cache refresh in `_syncMessages`,
+   * which routes through `session.getRecentHistory(hydrationByteBudget)`, this
+   * returns the full active path. Callers (message reconciliation, tool-update
+   * application) must see every message: reconciliation diffs incoming client
+   * messages against the complete server transcript, and a tool result can
+   * target any message on the path, so a windowed read would drop rows and
+   * corrupt the result.
+   *
+   * These full reads are not the unbounded boot-time hydration that bricked the
+   * DO in #1710: they run during a live turn (never in `onStart`), so an
+   * `SQLITE_NOMEM` here surfaces as a recoverable turn-level error rather than a
+   * partyserver init-reset/alarm-retry loop. They also inherit step 1's
+   * mitigation — `session.getHistory()` now fetches content in bounded chunks
+   * (`messagesByPathIds`) instead of carrying blobs through the recursive CTE
+   * and its `ORDER BY` sorter — and background media eviction shrinks the stored
+   * footprint over time, so the steady-state read size converges down.
+   */
   private async _readMessagesFromStorage(): Promise<UIMessage[]> {
     return (await this.session.getHistory()) as UIMessage[];
   }
