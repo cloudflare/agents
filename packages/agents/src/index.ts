@@ -5867,6 +5867,35 @@ export class Agent<
     );
   }
 
+  /**
+   * Whether any runFiber recovery work is still outstanding: orphaned
+   * `cf_agents_runs` rows left by a dead process (excluding fibers currently
+   * executing in memory, which already hold a keepAlive ref) or managed
+   * ledger fibers stuck in a non-terminal state with no live run row.
+   *
+   * Used by `_scheduleNextAlarm` to arm a follow-up alarm so multi-pass
+   * recovery (e.g. after a scan-deadline yield, or while retrying a throwing
+   * recovery hook) resumes instead of starving.
+   * @internal
+   */
+  private _hasPendingFiberRecovery(): boolean {
+    const runRows = this.sql<{ id: string }>`
+      SELECT id FROM cf_agents_runs
+    `;
+    for (const row of runRows) {
+      if (!this._runFiberActiveFibers.has(row.id)) return true;
+    }
+
+    const ledgerOnly = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count
+      FROM cf_agents_fibers f
+      LEFT JOIN cf_agents_runs r ON r.id = f.fiber_id
+      WHERE f.status IN ('pending', 'running')
+        AND r.id IS NULL
+    `;
+    return (ledgerOnly[0]?.count ?? 0) > 0;
+  }
+
   private async _scheduleNextAlarm() {
     const nowMs = Date.now();
     const nowSeconds = Math.floor(nowMs / 1000);
@@ -5926,6 +5955,19 @@ export class Agent<
       const keepAliveMs = nowMs + this._resolvedOptions.keepAliveIntervalMs;
       nextTimeMs =
         nextTimeMs === null ? keepAliveMs : Math.min(nextTimeMs, keepAliveMs);
+    }
+
+    // Fibers left behind by a dead process (orphaned `cf_agents_runs` rows or
+    // interrupted/pending managed ledger rows) are recovered by the alarm-
+    // driven scan. A single scan can leave work behind — it yields once it
+    // crosses `fiberRecoveryScanDeadlineMs`, and a repeatedly-throwing
+    // unmanaged recovery hook keeps its row until it ages out. Without a
+    // follow-up alarm those leftovers would starve, since the orphans hold no
+    // keepAlive ref. Arm one so recovery resumes on the next tick.
+    if (this._hasPendingFiberRecovery()) {
+      const recoveryMs = nowMs + this._resolvedOptions.keepAliveIntervalMs;
+      nextTimeMs =
+        nextTimeMs === null ? recoveryMs : Math.min(nextTimeMs, recoveryMs);
     }
 
     const facetRuns = this.sql<{ count: number }>`
