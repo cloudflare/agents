@@ -68,6 +68,10 @@
       {
         "name": "ThinkSubmissionRecoveryE2EAgent",
         "class_name": "ThinkSubmissionRecoveryE2EAgent"
+      },
+      {
+        "name": "ThinkMessengerRecoveryE2EAgent",
+        "class_name": "ThinkMessengerRecoveryE2EAgent"
       }
     ]
   },
@@ -125,6 +129,10 @@
     {
       "tag": "v10",
       "new_sqlite_classes": ["ThinkSubmissionRecoveryE2EAgent"]
+    },
+    {
+      "tag": "v11",
+      "new_sqlite_classes": ["ThinkMessengerRecoveryE2EAgent"]
     }
   ],
   "r2_buckets": [

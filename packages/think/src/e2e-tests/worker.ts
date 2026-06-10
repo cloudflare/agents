@@ -7,7 +7,17 @@ import { createWorkersAI } from "workers-ai-provider";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { Agent, callable, routeAgentRequest } from "agents";
+import type { FiberContext } from "agents";
 import { agentTool } from "agents/agent-tools";
+import type { Adapter } from "chat";
+import {
+  chatSdkMessenger,
+  defineMessengers,
+  messengerReplySnapshot,
+  MESSENGER_REPLY_FIBER_NAME,
+  type MessengerEvent,
+  type ThinkMessengers
+} from "../messengers";
 import { RpcTarget } from "cloudflare:workers";
 import type { WorkflowEvent } from "cloudflare:workers";
 import { tool } from "ai";
@@ -42,6 +52,7 @@ type Env = {
   ThinkSlowChildParentE2EAgent: DurableObjectNamespace<ThinkSlowChildParentE2EAgent>;
   ThinkContextOverflowE2EAgent: DurableObjectNamespace<ThinkContextOverflowE2EAgent>;
   ThinkSubmissionRecoveryE2EAgent: DurableObjectNamespace<ThinkSubmissionRecoveryE2EAgent>;
+  ThinkMessengerRecoveryE2EAgent: DurableObjectNamespace<ThinkMessengerRecoveryE2EAgent>;
   TestStructuredAgent: DurableObjectNamespace<TestStructuredAgent>;
   STEP_PROMPT_WORKFLOW: Workflow;
   AI: Ai;
@@ -1755,6 +1766,186 @@ export class ThinkSubmissionRecoveryE2EAgent extends Think<Env> {
   @callable()
   async getMessageCount(): Promise<number> {
     return this.messages.length;
+  }
+
+  @callable()
+  async hasFiberRows(): Promise<boolean> {
+    const rows = this.sql<{ c: number }>`
+      SELECT COUNT(*) as c FROM cf_agents_runs
+    `;
+    return (rows[0]?.c ?? 0) > 0;
+  }
+}
+
+// ── Messenger reply fiber recovery ──────────────────────────────────
+//
+// Exercises the MESSENGER_REPLY_FIBER_NAME recovery delegation: a messenger
+// reply fiber interrupted by an eviction is recovered on restart through
+// `_handleInternalFiberRecovery` → `ThinkMessengerRuntime.handleFiberRecovery`.
+//  - `accepted` snapshot → "answer" mode: the reply is resumed (the model turn
+//    re-runs and posts the answer to the thread).
+//  - `streaming` snapshot → "apologize" mode: an interrupted message is posted.
+//
+// The reply fiber is seeded by genuinely starting it (it stashes the target
+// stage and parks), then a real mid-fiber SIGKILL leaves the orphaned run row.
+// On restart, the boot fiber-recovery sweep drives the messenger recovery, which
+// posts through an in-memory fake `chat` adapter that records into agent SQL.
+
+const FAKE_MESSENGER_ID = "fake";
+const FAKE_THREAD_ID = "fake:thread";
+const FAKE_INTERRUPTED_TEXT = "Reply interrupted, please retry.";
+
+function makeMessengerReplyEvent(): MessengerEvent {
+  return {
+    capabilities: { canStream: true },
+    kind: "mention",
+    message: {
+      attachments: [],
+      author: {
+        fullName: "E2E User",
+        userId: "fake:user",
+        userName: "e2e"
+      },
+      id: "message-1",
+      isMention: true,
+      providerMessageId: "message-1",
+      text: "tell me a long messenger story"
+    },
+    messengerId: FAKE_MESSENGER_ID,
+    provider: "fake",
+    thread: {
+      id: FAKE_THREAD_ID,
+      isDirectMessage: false,
+      providerThreadId: FAKE_THREAD_ID,
+      title: "General"
+    }
+  };
+}
+
+function makeMessengerThreadSnapshot(): Record<string, unknown> {
+  return {
+    _type: "chat:Thread",
+    adapterName: "fake",
+    channelId: FAKE_THREAD_ID,
+    id: FAKE_THREAD_ID,
+    isDM: false
+  };
+}
+
+export class ThinkMessengerRecoveryE2EAgent extends Think<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+  // The reply-fiber recovery is independent of chatRecovery; keep chatRecovery
+  // off so the answer-mode recovery turn does not spawn nested chat fibers.
+  override chatRecovery = false;
+
+  override getModel(): LanguageModel {
+    return createSlowE2EMockModel();
+  }
+
+  override getSystemPrompt(): string {
+    return "Messenger reply recovery e2e agent.";
+  }
+
+  override getMessengers(): ThinkMessengers {
+    return defineMessengers({
+      fake: chatSdkMessenger({
+        adapter: this._recordingAdapter(),
+        conversation: "self",
+        delivery: { interruptedResponseText: FAKE_INTERRUPTED_TEXT },
+        provider: "fake",
+        userName: "fake_bot",
+        verifyWebhook: false
+      })
+    });
+  }
+
+  private _ensurePostsTable(): void {
+    this
+      .sql`CREATE TABLE IF NOT EXISTS messenger_posts (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, content TEXT, at INTEGER)`;
+  }
+
+  private _recordPost(kind: string, message: unknown): void {
+    this._ensurePostsTable();
+    const content =
+      typeof message === "string" ? message : JSON.stringify(message);
+    this.sql`
+      INSERT INTO messenger_posts (kind, content, at)
+      VALUES (${kind}, ${content}, ${Date.now()})
+    `;
+  }
+
+  // In-memory `chat` adapter: records every posted/edited message into agent
+  // SQL so the recovery outcome is observable after a restart.
+  private _recordingAdapter(): Adapter {
+    return {
+      addReaction: () => Promise.resolve(),
+      channelIdFromThreadId: (threadId: string) => threadId,
+      decodeThreadId: (threadId: string) => threadId,
+      deleteMessage: () => Promise.resolve(),
+      editMessage: (
+        _threadId: string,
+        _messageId: string,
+        message: unknown
+      ) => {
+        this._recordPost("edit", message);
+        return Promise.resolve({
+          id: "edited",
+          raw: {},
+          threadId: FAKE_THREAD_ID
+        });
+      },
+      encodeThreadId: (threadId: string) => String(threadId),
+      fetchMessages: () => Promise.resolve({ messages: [] }),
+      fetchThread: (threadId: string) =>
+        Promise.resolve({
+          channelId: threadId,
+          id: threadId,
+          isDM: false,
+          metadata: {}
+        }),
+      handleWebhook: () => Promise.resolve(new Response("messenger")),
+      initialize: () => Promise.resolve(),
+      name: "fake",
+      parseMessage: () => {
+        throw new Error("parseMessage is not used by this e2e");
+      },
+      postMessage: (threadId: string, message: unknown) => {
+        this._recordPost("post", message);
+        return Promise.resolve({ id: "posted", raw: {}, threadId });
+      },
+      removeReaction: () => Promise.resolve(),
+      userName: "fake_bot"
+    } as unknown as Adapter;
+  }
+
+  @callable()
+  async startReplyFiber(mode: "answer" | "apologize"): Promise<string> {
+    const stage = mode === "answer" ? "accepted" : "streaming";
+    const event = makeMessengerReplyEvent();
+    const thread = makeMessengerThreadSnapshot();
+    const result = await this.startFiber(
+      MESSENGER_REPLY_FIBER_NAME,
+      async (fiber: FiberContext) => {
+        // Stash the target stage, then park so a SIGKILL captures exactly this
+        // stage (the real reply work is performed by recovery on restart).
+        fiber.stash(messengerReplySnapshot(stage, event, thread));
+        await new Promise((resolve) => setTimeout(resolve, 60_000));
+      },
+      {
+        idempotencyKey: `messenger:fake:${mode}`,
+        metadata: { messengerId: FAKE_MESSENGER_ID, threadId: FAKE_THREAD_ID },
+        waitForCompletion: false
+      }
+    );
+    return result.fiberId;
+  }
+
+  @callable()
+  async getPostedMessages(): Promise<string[]> {
+    this._ensurePostsTable();
+    return this.sql<{ content: string }>`
+      SELECT content FROM messenger_posts ORDER BY seq ASC
+    `.map((row) => row.content);
   }
 
   @callable()
