@@ -98,6 +98,8 @@ await runtime.rollback({ executionId });
 
 Every lifecycle call targets an explicit `executionId` (there is no implicit "current run" — that would be racy when multiple runs are in flight). Get the id from `pending()`, from `executions()`, or from the tool's own output, which carries `executionId` on every outcome.
 
+`approve()` is a **safe no-op on a run that is no longer paused.** Approval UIs are racy: the run may have completed, been rejected, or been rolled back — in another tab, by another operator, or by a concurrent turn — between the moment the queue was rendered and the moment someone clicks. In that case `approve()` does not revive the run (which would re-offer a rejected action or re-apply rolled-back effects); it returns `{ status: "error", executionId, error: "...is not paused..." }` and changes nothing. Treat that outcome as "this run already moved on, refresh the queue," not as an execution failure. Only a `paused` run can be resumed.
+
 Wire these to callable agent methods so the client UI can approve/reject:
 
 ```ts

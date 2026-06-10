@@ -205,10 +205,18 @@ export class CodemodeRuntime extends DurableObject {
     return id;
   }
 
-  /** Resume an execution for a replay run. */
+  /**
+   * Resume an execution for a replay run. Only a `paused` run can be resumed:
+   * reviving a terminal run (completed/error/rejected/rolled_back) would
+   * re-offer a rejected action for approval or re-apply rolled-back side
+   * effects, and restarting an already-`running` run would race. Returns `null`
+   * (no state change) when the run is missing or not paused — the caller turns
+   * that into a clear error.
+   */
   async resume(id: string): Promise<ExecutionState | null> {
     const state = await this.#get(id);
     if (!state) return null;
+    if (state.status !== "paused") return null;
     state.status = "running";
     state.updatedAt = Date.now();
     await this.ctx.storage.put(execKey(id), state);

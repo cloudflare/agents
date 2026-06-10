@@ -630,7 +630,17 @@ export async function resumeCodemode(
 
   const execution = await runtime.resume(options.executionId);
   if (!execution) {
-    throw new Error(`No execution "${options.executionId}" to resume.`);
+    // resume() returns null both when the run is missing and when it isn't
+    // paused. Distinguish the two so a caller can't silently revive a terminal
+    // run (which would re-offer rejected actions or re-apply rolled-back work).
+    // Surface this as an error *outcome* (not a throw) to match the divergence/
+    // pause paths — the agent loop stays unbroken and nothing is re-executed.
+    const existing = await runtime.getExecution(options.executionId);
+    const error = existing
+      ? `Execution "${options.executionId}" is not paused (status: ` +
+        `${existing.status}); only a paused run can be approved.`
+      : `No execution "${options.executionId}" to resume.`;
+    return { status: "error", executionId: options.executionId, error };
   }
 
   return runPass(

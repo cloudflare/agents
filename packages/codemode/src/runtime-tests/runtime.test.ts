@@ -139,6 +139,32 @@ describe("codemode durable runtime (e2e)", () => {
     expect(exec?.status).toBe("rejected");
   });
 
+  it("refuses to approve a terminal run, never re-offering a rejected action", async () => {
+    const h = host();
+    const first = (await h.run(
+      `async () => await items.create_item({ title: "nope" })`
+    )) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    await h.reject(first.pending[0].seq, first.executionId);
+
+    // Approving a now-rejected run must NOT revive it (which would re-offer the
+    // rejected action for approval or re-run its code). It returns an error
+    // outcome and leaves the run terminal.
+    const resumed = (await h.approve(first.executionId)) as ProxyToolOutput;
+    expect(resumed.status).toBe("error");
+    if (resumed.status === "error") {
+      expect(resumed.error).toMatch(/not paused/);
+    }
+
+    // No new pending action was created and no side effect leaked through.
+    expect((await h.pending()).length).toBe(0);
+    expect((await h.sideEffects()).created).toEqual([]);
+    const exec = (await h.executions()).find((e) => e.id === first.executionId);
+    expect(exec?.status).toBe("rejected");
+  });
+
   it("rolls back applied actions in reverse, including non-approval writes", async () => {
     const h = host();
     // add_note (no approval) runs immediately; create_item pauses.

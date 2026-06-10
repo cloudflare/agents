@@ -76,20 +76,25 @@ buttons. Approving re-runs the stored code, replaying everything up to the
 approved action, runs it for real, and continues:
 
 ```ts
-// host side (callable from the client)
-async pendingApprovals() { return this.#runtime().pending(); }
-async approveExecution(id: string) { return this.#runtime().approve({ executionId: id }); }
-async rejectExecution(id: string, seq: number) { await this.#runtime().reject({ seq, executionId: id }); }
+// host side (callable from the client — the @callable() decorator is required
+// for agent.call() to reach these methods)
+@callable() async pendingApprovals() { return this.#runtime().pending(); }
+@callable() async approveExecution(id: string) { return this.#runtime().approve({ executionId: id }); }
+@callable() async rejectExecution(id: string, seq: number) { await this.#runtime().reject({ seq, executionId: id }); }
 ```
+
+Approving a run that is no longer paused (it completed, was rejected, or rolled back in another tab or a concurrent turn) is a safe no-op — it returns an error outcome and revives nothing, so a stale UI just refreshes the queue.
 
 ### Snippets
 
 Once a script works, the developer can promote it to a reusable snippet (e.g. from a `@callable` wired to a UI button), and the model runs it again later:
 
 ```ts
-// host side
+// host side — executionId names the run whose code is promoted (from the tool
+// output or runtime.executions())
 await runtime.saveSnippet("repo-overview", {
-  description: "Fetch repo metadata, open PRs, and latest releases."
+  description: "Fetch repo metadata, open PRs, and latest releases.",
+  executionId
 });
 
 // sandbox side (the model)

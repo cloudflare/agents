@@ -4,7 +4,7 @@ import { z } from "zod";
 import { AIChatAgent } from "@cloudflare/ai-chat";
 import { createWorkersAI } from "workers-ai-provider";
 import { streamText, convertToModelMessages, stepCountIs } from "ai";
-import { routeAgentRequest } from "agents";
+import { routeAgentRequest, callable } from "agents";
 import {
   createCodemodeRuntime,
   DynamicWorkerExecutor,
@@ -162,31 +162,37 @@ export class Chat extends AIChatAgent<Env> {
   // ---- Callable methods for the approval / snippet UI -----------------------
 
   /** Actions awaiting approval across paused executions. */
+  @callable()
   async pendingApprovals(): Promise<PendingAction[]> {
     return this.#runtime().pending();
   }
 
   /** Approve a paused execution and resume it; returns the resumed outcome. */
+  @callable()
   async approveExecution(executionId: string) {
     return this.#runtime().approve({ executionId });
   }
 
   /** Reject a pending action, ending the execution. */
+  @callable()
   async rejectExecution(executionId: string, seq: number): Promise<void> {
     await this.#runtime().reject({ seq, executionId });
   }
 
   /** Roll back an execution's applied, reversible actions. */
+  @callable()
   async rollbackExecution(executionId: string): Promise<void> {
     await this.#runtime().rollback({ executionId });
   }
 
   /** The audit trail, newest first. */
+  @callable()
   async executions(): Promise<ExecutionState[]> {
     return this.#runtime().executions(20);
   }
 
   /** Promote a completed execution's script into a reusable snippet. */
+  @callable()
   async saveSnippet(
     name: string,
     description: string,
@@ -196,6 +202,7 @@ export class Chat extends AIChatAgent<Env> {
   }
 
   /** Saved snippets, surfaced to the model in search/describe. */
+  @callable()
   async snippets(): Promise<Snippet[]> {
     return this.#runtime().snippets();
   }
