@@ -34,8 +34,8 @@ If Browser Rendering expires a session while a pause waits for a human, the resu
 
 ### Cleanup backstops
 
-- `connector.sweep()` releases expired `cdp:reuse:*` sessions and stale `cdp:exec:*` entries (crashed or expired executions) — call it from a scheduled task.
-- `runtime.expirePaused()` (codemode) handles the orderly case: stale never-approved pauses are rejected and `disposeExecution` reclaims their sessions.
+- `runtime.expirePaused()` (codemode) handles the orderly case: stale never-approved pauses (and runs stuck `running` after a host crash) are expired and `disposeExecution` reclaims their sessions.
+- `connector.sweep()` is the crash backstop — call it from a scheduled task. Shared `cdp:reuse:*` entries are swept after `maxIdleMs` (default 10 min). Per-execution `cdp:exec:*` entries use a much longer window (`maxExecIdleMs`, default 24h — at least the runtime's paused TTL) and are touched on use, so an active or paused-awaiting-approval run is never swept out from under the runtime. A swept exec entry leaves a `closedAt` tombstone so a later resume fails with a clear "expired or was swept" error instead of silently continuing in a fresh browser.
 
 ## Key Decisions
 
@@ -54,4 +54,4 @@ If Browser Rendering expires a session while a pause waits for a human, the resu
 
 ## Verification
 
-Unit tests (`browser-connector.test.ts`, `session-manager.test.ts`) cover executionId keying, `disposeExecution` idempotency, `onPassEnd` socket release, sweep over both keyspaces, and the expired-session error. End-to-end tests (`src/browser-tests/`, run via `pnpm run test:browser` — spawns real `wrangler dev` with `browser` + `LOADER` bindings and Chromium) cover one-shot dispose-on-terminal, dynamic promotion surviving terminal, reuse + sweep, survive-a-pause (session intact across approve), the sequential-calls divergence guard, and a concurrent-socket probe.
+Unit tests (`browser-connector.test.ts`) cover executionId keying, `disposeExecution` idempotency, `onPassEnd` socket release, sweep over both keyspaces (including exec tombstones, touch-on-use, and the loud resume failure after a sweep), concurrent connect dedupe, and the expired-session error. End-to-end tests (`src/browser-tests/`, run via `pnpm run test:browser` — spawns real `wrangler dev` with `browser` + `LOADER` bindings and Chromium) cover one-shot dispose-on-terminal, dynamic promotion surviving terminal, reuse + sweep, survive-a-pause (session intact across approve), the sequential-calls divergence guard, and a concurrent-socket probe.

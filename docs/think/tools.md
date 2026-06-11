@@ -163,6 +163,8 @@ getTools(): ToolSet {
 
 When `needsApproval` returns `true`, the tool call is sent to the client for approval. The conversation pauses until the client responds with `CF_AGENT_TOOL_APPROVAL`. See [Client Tools](./client-tools.md) for the approval flow.
 
+> Inside the [Code Execution Tool](#code-execution-tool)'s sandbox, `needsApproval` behaves differently: it maps to the codemode runtime's durable pause/approve/resume flow, and a function-valued `needsApproval` always requires approval (see [Approvals](#approvals-human-in-the-loop)).
+
 ### Per-turn Tool Overrides
 
 The `beforeTurn` hook can restrict or add tools for a specific turn:
@@ -267,9 +269,9 @@ Each missing piece fails with an error naming the step.
 
 Inside the sandbox the model sees typed namespaces plus the platform SDK:
 
-- `tools.*` — your AI SDK tools (object args, validated against their schemas)
+- `tools.*` — your AI SDK tools (object args, validated against their schemas). Only tools with an `execute` function are exposed — client-side tools can't run in the sandbox.
 - `state.*` — the workspace filesystem (`state.readFile({ path })`, `state.glob({ pattern })`, `state.planEdits(...)`, …)
-- `cdp.*` — the browser, when a Browser Rendering binding is configured
+- `cdp.*` — the browser, when a Browser Rendering binding is configured. The execute tool defaults to `session: { mode: "dynamic" }`: sessions are per-execution unless the model promotes one with `cdp.startSession()`.
 - `codemode.search` / `codemode.describe` / `codemode.step` / `codemode.run` — discovery, side-effect boundaries, and saved snippets
 
 Pass overrides for anything beyond the defaults — e.g. custom `tools.*` alongside the agent-derived state:
@@ -294,7 +296,7 @@ createExecuteTool({
 
 ### Approvals (human-in-the-loop)
 
-An AI SDK tool with `needsApproval` doesn't run immediately inside the sandbox — calling it **pauses the run durably**. The pause comes back as a normal tool output (`{ status: "paused", executionId, pending }`), the model tells the user what it needs, and the turn ends. Think ships built-in callables to resolve it:
+An AI SDK tool with `needsApproval` doesn't run immediately inside the sandbox — calling it **pauses the run durably**. The pause comes back as a normal tool output (`{ status: "paused", executionId, pending }`), the model tells the user what it needs, and the turn ends. Note this differs from the client-side approval flow for plain `getTools()` tools: inside the sandbox a function-valued `needsApproval` can't be evaluated against the call's arguments ahead of time, so it conservatively **always** requires approval. Think ships built-in callables to resolve it:
 
 - `approveExecution(executionId)` — resumes the run where it stopped (already-done work is replayed, not re-executed); the outcome replaces the paused output in the transcript and the chat auto-continues.
 - `rejectExecution(executionId, reason?)` — ends the run with `{ status: "rejected", reason }` so the model can adapt.

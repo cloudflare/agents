@@ -154,12 +154,12 @@ class MyAssistant extends Think<Env> {
 
   getTools() {
     return {
-      execute: createExecuteTool({
-        tools: createWorkspaceTools(this.workspace),
-        // state.* in the sandbox also hits the shared workspace,
-        // because SharedWorkspace satisfies WorkspaceFsLike.
-        state: createWorkspaceStateBackend(this.workspace),
-        loader: this.env.LOADER
+      // The agent one-liner: ctx/loader from the agent, and state.* in the
+      // sandbox hits the shared workspace because SharedWorkspace satisfies
+      // WorkspaceFsLike. tools.* adds the workspace tools (and any
+      // needsApproval tools pause durably for the approval card).
+      execute: createExecuteTool(this, {
+        tools: createWorkspaceTools(this.workspace)
       })
       // ...
     };
