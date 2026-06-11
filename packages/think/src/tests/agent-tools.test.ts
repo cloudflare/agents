@@ -50,6 +50,11 @@ type ThinkAgentToolTestStub = {
 
 type ThinkAgentToolParentStub = DurableObjectStub & {
   runThinkChild(input: string, runId?: string): Promise<RunAgentToolResult>;
+  runThinkChildWithInjectedUnrelatedError(
+    input: string,
+    injectAfterMs: number,
+    runId?: string
+  ): Promise<RunAgentToolResult>;
   reconcileCompletedThinkChildForTest(
     input: string,
     runId?: string
@@ -298,6 +303,28 @@ describe("Think agent tools", () => {
       status: "completed",
       summary: "Hello from the assistant!"
     });
+  });
+
+  it("does not contaminate a run's terminal status with an unrelated turn's error frame (#1575)", async () => {
+    const parent = await freshParent();
+    const runId = crypto.randomUUID();
+
+    // While the tailed child run streams, an error frame from an UNRELATED
+    // turn (a request id that belongs to no run) is broadcast on the child.
+    // Before #1575 the error was stamped onto every active forwarder's run
+    // and this healthy run finalized as `error`.
+    const result = await parent.runThinkChildWithInjectedUnrelatedError(
+      "stay healthy probe",
+      20,
+      runId
+    );
+
+    expect(result).toMatchObject({
+      runId,
+      agentType: "ThinkTestAgent",
+      status: "completed"
+    });
+    expect(result.error).toBeUndefined();
   });
 
   it("recovers completed Think child runs into terminal parent rows", async () => {

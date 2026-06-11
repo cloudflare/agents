@@ -509,21 +509,79 @@ export class ResumableStream {
     connection: Connection,
     requestId: string
   ): boolean {
+    const stream = this._latestStreamForRequest(requestId, "completed");
+    if (!stream) return false;
+
+    if (!this._replayStoredChunks(connection, stream.id, requestId)) {
+      return false;
+    }
+
+    return sendIfOpen(
+      connection,
+      JSON.stringify({
+        body: "",
+        done: true,
+        id: requestId,
+        type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+        replay: true
+      })
+    );
+  }
+
+  /**
+   * Replay the stored chunks of an errored stream for a request, WITHOUT a
+   * terminal frame — the caller follows up with the `done: true, error: true`
+   * frame carrying the durable terminal record's error text, mirroring what a
+   * live client observed (content chunks, then the error). Without this, a
+   * client that missed broadcast frames while disconnected has no other
+   * channel to the pre-error partial content: the server does not push
+   * messages on connect, and {@link replayCompletedChunksByRequestId} only
+   * serves `completed` streams (#1575).
+   *
+   * Returns true if an errored stream existed for the request (whether or not
+   * it had chunks); the caller should then send its terminal frame. A send
+   * failure mid-replay returns false so the caller can skip the terminal
+   * frame — the connection is gone and the next reconnect retries.
+   */
+  replayErroredChunksByRequestId(
+    connection: Connection,
+    requestId: string
+  ): boolean {
+    const stream = this._latestStreamForRequest(requestId, "error");
+    if (!stream) return true;
+
+    return this._replayStoredChunks(connection, stream.id, requestId);
+  }
+
+  /** Latest stream row for a request with the given terminal status. */
+  private _latestStreamForRequest(
+    requestId: string,
+    status: "completed" | "error"
+  ): StreamMetadata | undefined {
     this.flushBuffer();
 
     const streams = this.sql<StreamMetadata>`
       select * from cf_ai_chat_stream_metadata
       where request_id = ${requestId}
-      and status = 'completed'
+      and status = ${status}
       order by created_at desc
       limit 1
     `;
-    const stream = streams[0];
-    if (!stream) return false;
+    return streams[0];
+  }
 
+  /**
+   * Send a finished stream's stored chunks to a connection as replay frames.
+   * Returns false if the connection closed mid-replay.
+   */
+  private _replayStoredChunks(
+    connection: Connection,
+    streamId: string,
+    requestId: string
+  ): boolean {
     const chunks = this.sql<StreamChunk>`
       select * from cf_ai_chat_stream_chunks
-      where stream_id = ${stream.id}
+      where stream_id = ${streamId}
       order by chunk_index asc
     `;
 
@@ -546,16 +604,7 @@ export class ResumableStream {
       }
     }
 
-    return sendIfOpen(
-      connection,
-      JSON.stringify({
-        body: "",
-        done: true,
-        id: requestId,
-        type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
-        replay: true
-      })
-    );
+    return true;
   }
 
   // ── Restore / cleanup ──────────────────────────────────────────────

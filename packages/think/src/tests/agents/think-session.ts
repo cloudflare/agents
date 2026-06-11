@@ -508,6 +508,23 @@ export class ThinkTestAgent extends Think {
     return error;
   }
 
+  /**
+   * #1575: broadcast a chat error frame whose request id belongs to no
+   * agent-tool run, simulating an unrelated turn failing on this agent
+   * while a run is being tailed.
+   */
+  broadcastUnrelatedErrorForTest(requestId: string): void {
+    this.broadcast(
+      JSON.stringify({
+        type: "cf_agent_use_chat_response",
+        id: requestId,
+        error: true,
+        done: false,
+        body: "unrelated turn failure"
+      })
+    );
+  }
+
   private _beforeTurnLog: Array<{
     system: string;
     toolNames: string[];
@@ -1843,6 +1860,35 @@ export class ThinkAgentToolParent extends Agent {
       input,
       inputPreview: input
     });
+  }
+
+  /**
+   * #1575: run a Think child while injecting a chat error frame from an
+   * UNRELATED turn (a request id that belongs to no agent-tool run) into the
+   * child's broadcast stream mid-run. The run's terminal status must not be
+   * contaminated by it.
+   */
+  async runThinkChildWithInjectedUnrelatedError(
+    input: string,
+    injectAfterMs: number,
+    runId = crypto.randomUUID()
+  ): Promise<RunAgentToolResult> {
+    this.events = [];
+    this.finishes = [];
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    const timer = setTimeout(() => {
+      void child.broadcastUnrelatedErrorForTest(`unrelated-turn-${runId}`);
+    }, injectAfterMs);
+    try {
+      return await this.runAgentTool(ThinkTestAgent, {
+        runId,
+        parentToolCallId: "think-tool-call",
+        input,
+        inputPreview: input
+      });
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**

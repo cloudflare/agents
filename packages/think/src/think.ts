@@ -2239,6 +2239,15 @@ export class Think<
   private _agentToolLastErrors = new Map<string, string>();
   private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
   private _agentToolLiveSequences = new Map<string, number>();
+  /**
+   * Request id → run id for in-flight agent-tool turns (null = resolved as
+   * not an agent-tool turn, cached so unrelated turns don't re-query SQLite
+   * per frame). Drives frame attribution in {@link broadcast}: a frame
+   * belongs to a run iff it carries that run's turn request id, so an error
+   * in an unrelated turn or a concurrent run can never leak into another
+   * run's state (#1575).
+   */
+  private _agentToolRunsByRequestId = new Map<string, string | null>();
   private _submissionTableEnsured = false;
   private _workflowNotificationTableEnsured = false;
   private _declaredScheduledTasksTableEnsured = false;
@@ -2252,27 +2261,47 @@ export class Think<
     msg: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): void {
-    if (this._agentToolForwarders.size > 0 && typeof msg === "string") {
+    // Inspect frames while any agent-tool run is in flight (live sequences
+    // exist for the run's whole lifecycle), not only while a tailer is
+    // attached — error capture must not depend on tailer timing (#1575).
+    if (
+      (this._agentToolForwarders.size > 0 ||
+        this._agentToolLiveSequences.size > 0) &&
+      typeof msg === "string"
+    ) {
       try {
         const parsed = JSON.parse(msg) as {
           type?: unknown;
           body?: unknown;
           error?: unknown;
+          id?: unknown;
         };
-        if (parsed.type === MSG_CHAT_RESPONSE) {
-          if (parsed.error === true && typeof parsed.body === "string") {
-            for (const runId of this._agentToolForwarders.keys()) {
+        if (
+          parsed.type === MSG_CHAT_RESPONSE &&
+          typeof parsed.id === "string"
+        ) {
+          // A frame belongs to a run iff it carries that run's turn request
+          // id. Frames from unrelated turns (a user-driven turn on this
+          // agent, or another run's turn) resolve to a different — or no —
+          // run and are left alone, so concurrent runs cannot
+          // cross-contaminate each other's progress or error state (#1575).
+          const runId = this._agentToolRunForRequest(parsed.id);
+          if (runId !== null) {
+            if (parsed.error === true && typeof parsed.body === "string") {
               this._agentToolLastErrors.set(runId, parsed.body);
-            }
-          } else if (
-            typeof parsed.body === "string" &&
-            parsed.body.length > 0
-          ) {
-            for (const [runId, forwarders] of this._agentToolForwarders) {
+            } else if (
+              typeof parsed.body === "string" &&
+              parsed.body.length > 0
+            ) {
+              // Advance the live sequence even with no tailer attached so a
+              // tailer registering mid-run resumes at the right offset.
               const sequence = this._agentToolLiveSequences.get(runId) ?? 0;
               this._agentToolLiveSequences.set(runId, sequence + 1);
               const chunk = { sequence, body: parsed.body };
-              for (const forward of forwarders) forward(chunk);
+              const forwarders = this._agentToolForwarders.get(runId);
+              if (forwarders) {
+                for (const forward of forwarders) forward(chunk);
+              }
             }
           }
         }
@@ -2281,6 +2310,26 @@ export class Think<
       }
     }
     super.broadcast(msg, without);
+  }
+
+  /**
+   * Resolve the agent-tool run whose turn owns a request id, or null when the
+   * request is not an agent-tool turn. Falls back to the persisted child-run
+   * row (whose `request_id` is written when the run's turn is bound, see
+   * `startAgentToolRun`) so attribution survives a DO restart mid-run; either
+   * outcome is cached.
+   */
+  private _agentToolRunForRequest(requestId: string): string | null {
+    const cached = this._agentToolRunsByRequestId.get(requestId);
+    if (cached !== undefined) return cached;
+    const rows = this.sql<{ run_id: string }>`
+      SELECT run_id FROM cf_agent_tool_child_runs
+      WHERE request_id = ${requestId} AND completed_at IS NULL
+      LIMIT 1
+    `;
+    const runId = rows[0]?.run_id ?? null;
+    this._agentToolRunsByRequestId.set(requestId, runId);
+    return runId;
   }
 
   override async alarm(): Promise<void> {
@@ -4418,7 +4467,20 @@ export class Think<
           SET status = 'running'
           WHERE run_id = ${options.runId} AND status = 'starting'
         `;
-        const result = await this.saveMessages(
+        // Bind the run to its turn's request id BEFORE the turn starts —
+        // in memory for live frame attribution in `broadcast`, and on the
+        // child-run row so attribution survives a DO restart mid-run
+        // (#1575). `saveMessages` would generate the id internally, so call
+        // the inner turn runner with a pre-generated one instead.
+        const requestId = crypto.randomUUID();
+        this._agentToolRunsByRequestId.set(requestId, options.runId);
+        this.sql`
+          UPDATE cf_agent_tool_child_runs
+          SET request_id = ${requestId}
+          WHERE run_id = ${options.runId}
+        `;
+        const result = await this._runProgrammaticMessagesTurn(
+          requestId,
           [this.formatAgentToolInput(input)],
           {
             signal: controller.signal
@@ -4471,6 +4533,11 @@ export class Think<
         this._agentToolAbortControllers.delete(options.runId);
         this._agentToolForwarders.delete(options.runId);
         this._agentToolLiveSequences.delete(options.runId);
+        for (const [reqId, runId] of this._agentToolRunsByRequestId) {
+          if (runId === options.runId) {
+            this._agentToolRunsByRequestId.delete(reqId);
+          }
+        }
         this._agentToolLastErrors.delete(options.runId);
         this._agentToolPreTurnAssistantIds.delete(options.runId);
         for (const close of this._agentToolClosers.get(options.runId) ?? []) {
@@ -10969,6 +11036,19 @@ export class Think<
   ): Promise<boolean> {
     const pending = await this._pendingChatTerminal();
     if (!pending || pending.requestId !== requestId) return false;
+    // Replay any partial content the errored stream produced before the
+    // error, so the reconnecting client observes the same sequence a live
+    // client did — content chunks, then the terminal error (#1575). If the
+    // connection drops mid-replay, skip the terminal frame; the record is
+    // retained, so the next reconnect retries the whole sequence.
+    if (
+      !this._resumableStream.replayErroredChunksByRequestId(
+        connection,
+        pending.requestId
+      )
+    ) {
+      return true;
+    }
     sendIfOpen(
       connection,
       JSON.stringify({

@@ -511,7 +511,15 @@ export class AIChatAgent<
   private _agentToolLastErrors = new Map<string, string>();
   private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
   private _agentToolLiveSequences = new Map<string, number>();
-  private _agentToolActiveRunId: string | null = null;
+  /**
+   * Request id → run id for in-flight agent-tool turns (null = resolved as
+   * not an agent-tool turn, cached so unrelated turns don't re-query SQLite
+   * per frame). Drives frame attribution in {@link broadcast}: a frame
+   * belongs to a run iff it carries that run's turn request id, so an error
+   * in a user-driven turn or a concurrent run can never leak into another
+   * run's state (#1575).
+   */
+  private _agentToolRunsByRequestId = new Map<string, string | null>();
 
   /**
    * Client tool schemas from the most recent chat request.
@@ -654,42 +662,47 @@ export class AIChatAgent<
     msg: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): void {
-    if (this._agentToolForwarders.size > 0 && typeof msg === "string") {
+    // Inspect frames while any agent-tool run is in flight (live sequences
+    // exist for the run's whole lifecycle), not only while a tailer is
+    // attached — error capture must not depend on tailer timing (#1575).
+    if (
+      (this._agentToolForwarders.size > 0 ||
+        this._agentToolLiveSequences.size > 0) &&
+      typeof msg === "string"
+    ) {
       try {
         const parsed = JSON.parse(msg) as {
           type?: unknown;
           body?: unknown;
           error?: unknown;
+          id?: unknown;
         };
-        if (parsed.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
-          if (parsed.error === true && typeof parsed.body === "string") {
-            const runIds =
-              this._agentToolActiveRunId !== null
-                ? [this._agentToolActiveRunId]
-                : [...this._agentToolForwarders.keys()];
-            for (const runId of runIds) {
+        if (
+          parsed.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          typeof parsed.id === "string"
+        ) {
+          // A frame belongs to a run iff it carries that run's turn request
+          // id. Frames from unrelated turns (a user-driven turn on this
+          // agent, or another run's turn) resolve to a different — or no —
+          // run and are left alone, so concurrent runs cannot
+          // cross-contaminate each other's progress or error state (#1575).
+          const runId = this._agentToolRunForRequest(parsed.id);
+          if (runId !== null) {
+            if (parsed.error === true && typeof parsed.body === "string") {
               this._agentToolLastErrors.set(runId, parsed.body);
-            }
-          } else if (
-            typeof parsed.body === "string" &&
-            parsed.body.length > 0
-          ) {
-            const entries =
-              this._agentToolActiveRunId !== null
-                ? [
-                    [
-                      this._agentToolActiveRunId,
-                      this._agentToolForwarders.get(
-                        this._agentToolActiveRunId
-                      ) ?? new Set<(chunk: AgentToolStoredChunk) => void>()
-                    ] as const
-                  ]
-                : [...this._agentToolForwarders.entries()];
-            for (const [runId, forwarders] of entries) {
+            } else if (
+              typeof parsed.body === "string" &&
+              parsed.body.length > 0
+            ) {
+              // Advance the live sequence even with no tailer attached so a
+              // tailer registering mid-run resumes at the right offset.
               const sequence = this._agentToolLiveSequences.get(runId) ?? 0;
               this._agentToolLiveSequences.set(runId, sequence + 1);
               const chunk = { sequence, body: parsed.body };
-              for (const forward of forwarders) forward(chunk);
+              const forwarders = this._agentToolForwarders.get(runId);
+              if (forwarders) {
+                for (const forward of forwarders) forward(chunk);
+              }
             }
           }
         }
@@ -698,6 +711,25 @@ export class AIChatAgent<
       }
     }
     super.broadcast(msg, without);
+  }
+
+  /**
+   * Resolve the agent-tool run whose turn owns a request id, or null when the
+   * request is not an agent-tool turn. Falls back to the persisted run row
+   * (written when the turn starts, see `_registerAgentToolTurn`) so
+   * attribution survives a DO restart mid-run; either outcome is cached.
+   */
+  private _agentToolRunForRequest(requestId: string): string | null {
+    const cached = this._agentToolRunsByRequestId.get(requestId);
+    if (cached !== undefined) return cached;
+    const rows = this.sql<{ run_id: string }>`
+      select run_id from cf_ai_chat_agent_tool_runs
+      where request_id = ${requestId} and status = 'running'
+      limit 1
+    `;
+    const runId = rows?.[0]?.run_id ?? null;
+    this._agentToolRunsByRequestId.set(requestId, runId);
+    return runId;
   }
 
   constructor(ctx: AgentContext, env: Env) {
@@ -2802,6 +2834,25 @@ export class AIChatAgent<
     }
   }
 
+  /**
+   * Bind the child turn that is about to stream to its agent-tool run, at
+   * the moment the turn's request id is first knowable (inside the turn,
+   * before any frame is broadcast). The in-memory mapping drives frame
+   * attribution in {@link broadcast}; the run row's `request_id` is
+   * persisted here rather than at terminal so attribution also survives a
+   * DO restart mid-run (#1575).
+   */
+  private _registerAgentToolTurn(runId: string): void {
+    const requestId = this._turnQueue.activeRequestId;
+    if (requestId === null) return;
+    this._agentToolRunsByRequestId.set(requestId, runId);
+    this.sql`
+      update cf_ai_chat_agent_tool_runs
+      set request_id = ${requestId}
+      where run_id = ${runId}
+    `;
+  }
+
   async startAgentToolRun(
     input: unknown,
     options: { runId: string; signal?: AbortSignal }
@@ -2846,7 +2897,7 @@ export class AIChatAgent<
         this._setRequestContext(undefined, { agentToolInput: input });
         const result = await this.saveMessages(
           async (messages) => {
-            this._agentToolActiveRunId = options.runId;
+            this._registerAgentToolTurn(options.runId);
             return [
               ...messages,
               this.formatAgentToolInput(input, { runId: options.runId })
@@ -2936,8 +2987,10 @@ export class AIChatAgent<
         options.signal?.removeEventListener("abort", abortFromParent);
         this._agentToolAbortControllers.delete(options.runId);
         this._agentToolLiveSequences.delete(options.runId);
-        if (this._agentToolActiveRunId === options.runId) {
-          this._agentToolActiveRunId = null;
+        for (const [reqId, runId] of this._agentToolRunsByRequestId) {
+          if (runId === options.runId) {
+            this._agentToolRunsByRequestId.delete(reqId);
+          }
         }
         this._agentToolLastErrors.delete(options.runId);
         this._agentToolPreTurnAssistantIds.delete(options.runId);
@@ -4061,6 +4114,19 @@ export class AIChatAgent<
   ): Promise<boolean> {
     const pending = await this._pendingChatTerminal();
     if (!pending || pending.requestId !== requestId) return false;
+    // Replay any partial content the errored stream produced before the
+    // error, so the reconnecting client observes the same sequence a live
+    // client did — content chunks, then the terminal error (#1575). If the
+    // connection drops mid-replay, skip the terminal frame; the record is
+    // retained, so the next reconnect retries the whole sequence.
+    if (
+      !this._resumableStream.replayErroredChunksByRequestId(
+        connection,
+        pending.requestId
+      )
+    ) {
+      return true;
+    }
     sendIfOpen(
       connection,
       JSON.stringify({

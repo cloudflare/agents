@@ -884,6 +884,8 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
           chunkCount?: number;
           chunkDelayMs?: number;
           streamError?: string;
+          /** Emit this many text-delta chunks before the in-band error (#1575). */
+          errorAfterChunks?: number;
           throwError?: boolean;
         }
       | undefined;
@@ -893,6 +895,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     const chunkCount = body?.chunkCount ?? 20;
     const chunkDelayMs = body?.chunkDelayMs ?? 50;
     const streamError = body?.streamError;
+    const errorAfterChunks = body?.errorAfterChunks ?? 0;
     const throwError = body?.throwError ?? false;
     const abortSignal = useAbortSignal ? options?.abortSignal : undefined;
 
@@ -904,6 +907,27 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     const stream = new ReadableStream({
       async pull(controller) {
         if (format === "sse" && streamError) {
+          // Optionally stream real content first so the in-band error
+          // arrives mid-message — the #1575 partial-content scenario.
+          if (errorAfterChunks > 0) {
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({ type: "text-start", id: "t-err" })}\n\n`
+              )
+            );
+            for (let i = 0; i < errorAfterChunks; i++) {
+              await new Promise((r) => setTimeout(r, chunkDelayMs));
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: "text-delta",
+                    id: "t-err",
+                    delta: `partial-${i} `
+                  })}\n\n`
+                )
+              );
+            }
+          }
           const chunk = JSON.stringify({
             type: "error",
             errorText: streamError
@@ -2688,6 +2712,23 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     return this.messages;
   }
 
+  /**
+   * #1575: broadcast a chat error frame whose request id belongs to no
+   * agent-tool run, simulating an unrelated turn failing on this agent
+   * while a run is being tailed.
+   */
+  broadcastUnrelatedErrorForTest(requestId: string): void {
+    this.broadcast(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        id: requestId,
+        error: true,
+        done: false,
+        body: "unrelated turn failure"
+      })
+    );
+  }
+
   private _readChildRunStatusForTest(runId: string): string | null {
     const rows = this.sql<{ status: string }>`
       SELECT status FROM cf_ai_chat_agent_tool_runs WHERE run_id = ${runId}
@@ -2901,6 +2942,49 @@ export class AIChatAgentToolParent extends Agent<Env> {
 
   getFinishesForTest(): AgentToolFinishForTest[] {
     return this.finishes;
+  }
+
+  /**
+   * #1575: run a child while injecting a chat error frame from an UNRELATED
+   * turn (a request id that belongs to no agent-tool run) into the child's
+   * broadcast stream mid-run. The run's terminal status must not be
+   * contaminated by it.
+   */
+  async runChildWithInjectedUnrelatedError(
+    input: AgentToolInput,
+    injectAfterMs: number,
+    runId = crypto.randomUUID()
+  ): Promise<RunAgentToolResult> {
+    this.events = [];
+    this.finishes = [];
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    const timer = setTimeout(() => {
+      void child.broadcastUnrelatedErrorForTest(`unrelated-turn-${runId}`);
+    }, injectAfterMs);
+    try {
+      return await this.runAgentTool(AIChatAgentToolChild, {
+        runId,
+        parentToolCallId: "test-tool-call",
+        input,
+        inputPreview: input.prompt
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * #1575: start a child run directly — no tailer/forwarder is ever
+   * attached — and wait for its terminal inspection. Terminal status must
+   * come from the child turn's own result, not from tailing side effects.
+   */
+  async startChildWithoutTailForTest(
+    input: AgentToolInput,
+    runId = crypto.randomUUID()
+  ): Promise<AgentToolRunInspection> {
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    await child.startAgentToolRun(input, { runId });
+    return this.waitForTerminalInspectionForTest(child, runId);
   }
 
   private insertRecoverableParentRunForTest(
