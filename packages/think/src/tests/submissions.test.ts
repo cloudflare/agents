@@ -46,6 +46,21 @@ type ThinkSubmissionTestStub = {
       metadata?: Record<string, unknown>;
     }
   ): Promise<SubmitMessagesResult>;
+  cancelQueuedRunningSubmissionBeforeSlotForTest(options?: {
+    submissionId?: string;
+    metadata?: Record<string, unknown>;
+    messageTexts?: string[];
+  }): Promise<{
+    submission: ThinkSubmissionInspection | null;
+    messages: Array<{ id: string; role: string; parts?: unknown[] }>;
+    responses: Array<{ status: string; requestId: string }>;
+    submissionLog: ThinkSubmissionInspection[];
+    workflowEvents: Array<{
+      workflowName: string;
+      workflowId: string;
+      event: { type: string; payload?: unknown };
+    }>;
+  }>;
   testSubmitMessagesError(
     text: string,
     options?: {
@@ -184,6 +199,24 @@ async function waitForWorkflowEvent(
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error("Workflow event was not delivered");
+}
+
+function textParts(messages: Array<{ parts?: unknown[] }>): string[] {
+  return messages.flatMap((message) =>
+    (message.parts ?? []).flatMap((part) => {
+      if (
+        part !== null &&
+        typeof part === "object" &&
+        "type" in part &&
+        "text" in part &&
+        part.type === "text" &&
+        typeof part.text === "string"
+      ) {
+        return [part.text];
+      }
+      return [];
+    })
+  );
 }
 
 describe("Think durable submissions", () => {
@@ -444,6 +477,96 @@ describe("Think durable submissions", () => {
     await expect(
       agent.inspectSubmissionForTest(accepted.submissionId)
     ).resolves.toMatchObject({ status: "aborted" });
+  });
+
+  it("does not append a running submission cancelled before its queued turn slot", async () => {
+    const agent = await freshAgent();
+
+    const result = await agent.cancelQueuedRunningSubmissionBeforeSlotForTest({
+      submissionId: "sub-queued-running-cancel"
+    });
+
+    expect(result.submission).toMatchObject({
+      status: "aborted",
+      error: "cancelled before queue slot"
+    });
+    expect(textParts(result.messages)).toContain("active turn");
+    expect(textParts(result.messages)).not.toContain("queued then cancelled");
+    expect(
+      result.messages.filter((message) => message.role === "user")
+    ).toHaveLength(1);
+    expect(
+      result.responses.map((response) => response.requestId)
+    ).not.toContain("sub-queued-running-cancel");
+    expect(result.submissionLog.map((submission) => submission.status)).toEqual(
+      expect.arrayContaining(["pending", "running", "aborted"])
+    );
+  });
+
+  it("does not partially append multi-message submissions cancelled before their queued turn slot", async () => {
+    const agent = await freshAgent();
+
+    const result = await agent.cancelQueuedRunningSubmissionBeforeSlotForTest({
+      submissionId: "sub-queued-running-multi-cancel",
+      messageTexts: [
+        "queued cancelled first",
+        "queued cancelled second",
+        "queued cancelled third"
+      ]
+    });
+
+    const persistedTexts = textParts(result.messages);
+    expect(result.submission).toMatchObject({
+      status: "aborted",
+      error: "cancelled before queue slot"
+    });
+    expect(persistedTexts).toContain("active turn");
+    expect(persistedTexts).not.toContain("queued cancelled first");
+    expect(persistedTexts).not.toContain("queued cancelled second");
+    expect(persistedTexts).not.toContain("queued cancelled third");
+    expect(
+      result.messages.filter((message) => message.role === "user")
+    ).toHaveLength(1);
+  });
+
+  it("emits an aborted workflow notification without appending a queued cancelled prompt", async () => {
+    const agent = await freshAgent();
+
+    const result = await agent.cancelQueuedRunningSubmissionBeforeSlotForTest({
+      submissionId: "sub-queued-workflow-cancel",
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-queued-cancel",
+            stepName: "draft-report",
+            eventType: "think-prompt-queued-cancel"
+          },
+          output: { schema: { type: "object" } },
+          fingerprint: "queued-cancel"
+        }
+      }
+    });
+
+    expect(result.submission).toMatchObject({
+      status: "aborted",
+      error: "cancelled before queue slot"
+    });
+    expect(textParts(result.messages)).not.toContain("queued then cancelled");
+    expect(result.workflowEvents).toContainEqual(
+      expect.objectContaining({
+        workflowName: "TEST_WORKFLOW",
+        workflowId: "workflow-queued-cancel",
+        event: {
+          type: "think-prompt-queued-cancel",
+          payload: {
+            submissionId: "sub-queued-workflow-cancel",
+            status: "aborted",
+            error: "cancelled before queue slot"
+          }
+        }
+      })
+    );
   });
 
   it("aborts a pending submission without running it", async () => {

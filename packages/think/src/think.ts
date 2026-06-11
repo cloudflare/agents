@@ -6118,6 +6118,8 @@ export class Think<
           captureProgrammaticStreamError: true,
           captureOutput: Boolean(workflowPrompt?.output),
           workflowPrompt: workflowPrompt ?? undefined,
+          shouldApplyMessages: () =>
+            this._readSubmission(row.submission_id)?.status === "running",
           onMessagesApplied: () => {
             this.sql`
               UPDATE cf_think_submissions
@@ -6153,17 +6155,13 @@ export class Think<
           WHERE submission_id = ${row.submission_id}
             AND status = 'running'
         `;
-        this._insertWorkflowNotification(
-          {
-            ...this._inspectionFromSubmissionRow(claimed),
-            requestId: result.requestId,
-            status: finalStatus,
-            error:
-              finalStatus === "error" ? (errorMessage ?? undefined) : undefined,
-            completedAt
-          },
-          output
-        );
+        const finalized = this._readSubmission(row.submission_id);
+        if (finalized && this._isTerminalSubmissionStatus(finalized.status)) {
+          this._insertWorkflowNotification(
+            this._inspectionFromSubmissionRow(finalized),
+            output
+          );
+        }
       });
     } catch (error) {
       const errorMessage =
@@ -6178,12 +6176,12 @@ export class Think<
           WHERE submission_id = ${row.submission_id}
             AND status = 'running'
         `;
-        this._insertWorkflowNotification({
-          ...this._inspectionFromSubmissionRow(claimed),
-          status: "error",
-          error: errorMessage,
-          completedAt
-        });
+        const finalized = this._readSubmission(row.submission_id);
+        if (finalized && this._isTerminalSubmissionStatus(finalized.status)) {
+          this._insertWorkflowNotification(
+            this._inspectionFromSubmissionRow(finalized)
+          );
+        }
       });
     } finally {
       this._programmaticStreamErrors.delete(requestId);
@@ -6458,6 +6456,7 @@ export class Think<
       captureOutput?: boolean;
       body?: Record<string, unknown>;
       workflowPrompt?: ThinkWorkflowPromptContext;
+      shouldApplyMessages?: () => boolean | Promise<boolean>;
     }
   ): Promise<ProgrammaticMessagesResult> {
     const clientTools = this._lastClientTools;
@@ -6470,6 +6469,19 @@ export class Think<
 
     await this.keepAliveWhile(async () => {
       await this._turnQueue.enqueue(requestId, async () => {
+        if (this._turnQueue.generation !== epoch) {
+          status = "skipped";
+          return;
+        }
+
+        if (
+          options?.shouldApplyMessages &&
+          !(await options.shouldApplyMessages())
+        ) {
+          status = "aborted";
+          return;
+        }
+
         const resolved =
           typeof messages === "function"
             ? await messages(this.messages)
@@ -6477,6 +6489,14 @@ export class Think<
 
         if (this._turnQueue.generation !== epoch) {
           status = "skipped";
+          return;
+        }
+
+        if (
+          options?.shouldApplyMessages &&
+          !(await options.shouldApplyMessages())
+        ) {
+          status = "aborted";
           return;
         }
 

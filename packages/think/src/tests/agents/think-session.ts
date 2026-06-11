@@ -3518,6 +3518,107 @@ export class ThinkProgrammaticTestAgent extends Think {
     );
   }
 
+  private async _waitForSubmissionForTest(
+    submissionId: string,
+    predicate: (submission: ThinkSubmissionInspection) => boolean
+  ): Promise<ThinkSubmissionInspection> {
+    for (let attempt = 0; attempt < 80; attempt++) {
+      const submission = await this.inspectSubmission(submissionId);
+      if (submission && predicate(submission)) return submission;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    const submission = await this.inspectSubmission(submissionId);
+    if (!submission) {
+      throw new Error(`Submission ${submissionId} was not found`);
+    }
+    return submission;
+  }
+
+  async cancelQueuedRunningSubmissionBeforeSlotForTest(options?: {
+    submissionId?: string;
+    metadata?: Record<string, unknown>;
+    messageTexts?: string[];
+  }): Promise<{
+    submission: ThinkSubmissionInspection | null;
+    messages: UIMessage[];
+    responses: ChatResponseResult[];
+    submissionLog: ThinkSubmissionInspection[];
+    workflowEvents: Array<{
+      workflowName: string;
+      workflowId: string;
+      event: { type: string; payload?: unknown };
+    }>;
+  }> {
+    const previousDelayedChunks = this._delayedChunks;
+    this._delayedChunks = {
+      chunks: ["active ", "turn ", "still ", "running"],
+      delayMs: 50
+    };
+
+    const activeCallback = new TestCollectingCallback();
+    const activeTurn = this.chat("active turn", activeCallback);
+    try {
+      let activeTurnStarted = false;
+      for (let attempt = 0; attempt < 80; attempt++) {
+        const activeUserMessage = (await this.getMessages()).find(
+          (message) =>
+            message.role === "user" &&
+            message.parts.some(
+              (part) => part.type === "text" && part.text === "active turn"
+            )
+        );
+        if (activeUserMessage) {
+          activeTurnStarted = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      if (!activeTurnStarted) {
+        throw new Error("Active turn did not start before queued submission");
+      }
+
+      const submissionId = options?.submissionId ?? "sub-queued-running-cancel";
+      const messageTexts = options?.messageTexts ?? ["queued then cancelled"];
+      await this.submitMessages(
+        messageTexts.map((text, index) => ({
+          id: `${submissionId}-message-${index}`,
+          role: "user" as const,
+          parts: [{ type: "text" as const, text }]
+        })),
+        {
+          submissionId,
+          metadata: options?.metadata
+        }
+      );
+
+      await this._waitForSubmissionForTest(
+        submissionId,
+        (submission) => submission.status === "running"
+      );
+      await this.cancelSubmission(submissionId, "cancelled before queue slot");
+
+      await activeTurn;
+      await (
+        this as unknown as {
+          _turnQueue: { waitForIdle: () => Promise<void> };
+        }
+      )._turnQueue.waitForIdle();
+      await this.drainWorkflowNotificationsForTest();
+
+      return {
+        submission: await this.inspectSubmission(submissionId),
+        messages: await this.getMessages(),
+        responses: this._responseLog,
+        submissionLog: this._submissionLog,
+        workflowEvents: this._workflowEventLog
+      };
+    } finally {
+      this._delayedChunks = previousDelayedChunks;
+      await activeTurn.catch(() => {});
+    }
+  }
+
   async testSubmitMessagesError(
     text: string,
     options?: {
