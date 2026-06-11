@@ -33,7 +33,9 @@ import type {
 import { searchConnectors, describeTarget } from "./connectors";
 import {
   CodemodeRuntime,
+  MAX_DURABLE_VALUE_BYTES,
   STEP_CONNECTOR,
+  tooLargeMessage,
   type BeginOptions,
   type PendingAction,
   type ToolDecision,
@@ -255,7 +257,7 @@ async function loadSetup(connectors: CodemodeConnector[]): Promise<Setup> {
  * Fires for every connector regardless of whether it took part in the run —
  * connectors that own no per-execution state default to a no-op.
  */
-async function disposeConnectors(
+export async function disposeConnectors(
   connectors: Iterable<CodemodeConnector>,
   executionId: string,
   status: ExecutionEndStatus
@@ -291,6 +293,31 @@ async function notifyPassEnd(
       }
     })
   );
+}
+
+/**
+ * Reject reserved and duplicate connector namespaces up front. Duplicates
+ * would silently shadow each other in the sandbox (last one wins).
+ */
+export function validateConnectorNames(
+  connectors: Iterable<CodemodeConnector>
+): void {
+  const seen = new Set<string>();
+  for (const connector of connectors) {
+    const name = connector.name();
+    if (name === "codemode") {
+      throw new Error(
+        'Connector name "codemode" is reserved for the codemode platform SDK.'
+      );
+    }
+    if (seen.has(name)) {
+      throw new Error(
+        `Duplicate connector name "${name}" — each connector needs a unique ` +
+          `namespace (pass a distinct \`name\` option).`
+      );
+    }
+    seen.add(name);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -628,14 +655,7 @@ export function createProxyTool(
   options: CreateProxyToolOptions
 ): Tool<ProxyToolInput, ProxyToolOutput> {
   const connectors = options.connectors;
-
-  for (const connector of connectors) {
-    if (connector.name() === "codemode") {
-      throw new Error(
-        'Connector name "codemode" is reserved for the codemode platform SDK.'
-      );
-    }
-  }
+  validateConnectorNames(connectors);
 
   // Spawn the runtime facet on the agent DO, keyed by the runtime name. The
   // connector set is data, not identity: each execution/snippet records the
@@ -653,6 +673,16 @@ export function createProxyTool(
     description: buildDescription(connectors, options.description),
     inputSchema: proxySchema,
     execute: async ({ code }) => {
+      // Validate size host-side (the facet's own guard would surface as a
+      // cross-worker unhandled rejection) and return a model-actionable
+      // tool result instead of breaking the agent loop.
+      if (code.length > MAX_DURABLE_VALUE_BYTES) {
+        return {
+          status: "error",
+          executionId: "",
+          error: tooLargeMessage("The execution code", code.length)
+        };
+      }
       const setup = await getSetup();
       const executionId = await runtime.begin(code, {
         maxExecutions: options.maxExecutions,

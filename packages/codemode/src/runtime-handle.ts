@@ -3,12 +3,14 @@ import type { CodemodeConnector } from "./connectors";
 import type { Executor } from "./executor";
 import {
   createProxyTool,
+  disposeConnectors,
   expireCodemode,
   getCodemodeRuntime,
   pendingCodemode,
   rejectCodemode,
   resumeCodemode,
   rollbackCodemode,
+  validateConnectorNames,
   type ProxyToolInput,
   type ProxyToolOutput,
   type TransformResult
@@ -66,8 +68,8 @@ export type CodemodeRollbackOptions = {
 
 export type CodemodeExpireOptions = {
   /**
-   * Expire paused (awaiting-approval) runs whose last state change is older
-   * than this. Defaults to 24 hours.
+   * Expire non-terminal runs whose last state change is older than this.
+   * Defaults to 24 hours.
    */
   maxAgeMs?: number;
 };
@@ -81,14 +83,18 @@ export interface CodemodeRuntimeHandle {
   rollback(options: CodemodeRollbackOptions): Promise<void>;
   pending(executionId?: string): Promise<PendingAction[]>;
   /**
-   * Expire paused runs nobody approved (paused runs are never auto-pruned),
-   * marking them rejected and disposing per-execution connector resources.
-   * Call from a recurring alarm/scheduled task. Returns the expired ids.
+   * Expire stale non-terminal runs (neither is ever auto-pruned), disposing
+   * per-execution connector resources: paused runs nobody approved are marked
+   * rejected; running runs whose host died mid-pass are marked error. Call
+   * from a recurring alarm/scheduled task. Returns the expired ids.
    */
   expirePaused(options?: CodemodeExpireOptions): Promise<string[]>;
   /** All executions, newest first — the audit trail. Optionally capped. */
   executions(limit?: number): Promise<ExecutionState[]>;
-  /** Delete a single execution from the audit trail. */
+  /**
+   * Delete a single execution from the audit trail. Deleting a non-terminal
+   * execution also disposes its per-execution connector resources.
+   */
   deleteExecution(id: string): Promise<boolean>;
   /** Prune terminal executions, keeping the newest `keep`. */
   pruneExecutions(keep?: number): Promise<number>;
@@ -108,6 +114,7 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
   #options: CreateCodemodeRuntimeOptions;
 
   constructor(options: CreateCodemodeRuntimeOptions) {
+    validateConnectorNames(options.connectors);
     this.#options = options;
   }
 
@@ -177,8 +184,20 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
     return this.#runtime().listExecutions(limit);
   }
 
-  deleteExecution(id: string): Promise<boolean> {
-    return this.#runtime().deleteExecution(id);
+  async deleteExecution(id: string): Promise<boolean> {
+    const runtime = this.#runtime();
+    // A non-terminal execution still owns per-execution connector resources
+    // (e.g. a browser session) that `disposeExecution` would normally release
+    // on its terminal transition — deleting the record must not leak them.
+    const state = await runtime.getExecution(id);
+    const deleted = await runtime.deleteExecution(id);
+    if (
+      deleted &&
+      (state?.status === "paused" || state?.status === "running")
+    ) {
+      await disposeConnectors(this.#options.connectors, id, "rejected");
+    }
+    return deleted;
   }
 
   pruneExecutions(keep?: number): Promise<number> {

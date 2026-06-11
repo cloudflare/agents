@@ -33,6 +33,7 @@ export interface ToolSetConnectorOptions {
 
 export class ToolSetConnector extends CodemodeConnector {
   #options: ToolSetConnectorOptions;
+  #warnedSkipped = false;
 
   constructor(
     ctx: DurableObjectState | ExecutionContext,
@@ -40,6 +41,33 @@ export class ToolSetConnector extends CodemodeConnector {
   ) {
     super(ctx, {});
     this.#options = options;
+  }
+
+  /**
+   * Only tools with an `execute` function can run inside the sandbox.
+   * Execute-less tools (client-side / provider-executed) are excluded from
+   * both the runtime bindings and the generated types — advertising a method
+   * the sandbox can't call would send the model down a dead end.
+   */
+  #executableTools(): ToolSet {
+    const executable: ToolSet = {};
+    const skipped: string[] = [];
+    for (const [toolName, t] of Object.entries(this.#options.tools)) {
+      if ("execute" in t && typeof t.execute === "function") {
+        executable[toolName] = t;
+      } else {
+        skipped.push(toolName);
+      }
+    }
+    if (skipped.length > 0 && !this.#warnedSkipped) {
+      this.#warnedSkipped = true;
+      console.warn(
+        `[codemode] ToolSetConnector "${this.name()}" skipped tools without ` +
+          `an execute function (client-side or provider-executed): ` +
+          `${skipped.join(", ")}. They are not callable from sandboxed code.`
+      );
+    }
+    return executable;
   }
 
   override name(): string {
@@ -53,12 +81,8 @@ export class ToolSetConnector extends CodemodeConnector {
   protected override tools(): ConnectorTools {
     const out: ConnectorTools = {};
     const sources = new Map<string, string>();
-    for (const [toolName, t] of Object.entries(this.#options.tools)) {
-      const execute =
-        "execute" in t
-          ? (t.execute as (args: unknown) => Promise<unknown>)
-          : undefined;
-      if (!execute) continue;
+    for (const [toolName, t] of Object.entries(this.#executableTools())) {
+      const execute = t.execute as (args: unknown) => Promise<unknown>;
 
       const name = sanitizeToolName(toolName);
       const existing = sources.get(name);
@@ -105,10 +129,12 @@ export class ToolSetConnector extends CodemodeConnector {
   /**
    * Generate the sandbox type block from the original AI SDK schemas (Zod or
    * `jsonSchema()` wrappers) rather than the converted JSON Schema, preserving
-   * field descriptions as `@param` lines.
+   * field descriptions as `@param` lines. Restricted to the same executable
+   * subset that `tools()` exposes, so the types never advertise a method the
+   * sandbox can't call.
    */
   override async getTypeScriptTypes(): Promise<string> {
-    return generateTypes(this.#options.tools, this.name());
+    return generateTypes(this.#executableTools(), this.name());
   }
 }
 

@@ -60,7 +60,8 @@ export type ToolLogEntryState =
   | "executing" // decided to execute; result not yet recorded (crash window)
   | "applied" // executed for real, result recorded
   | "pending" // awaiting approval — the run aborted here
-  | "reverted"; // rolled back
+  | "reverted" // rolled back
+  | "error"; // failed the run (e.g. unrecordable result); side effects may have run
 
 /** Connector name used for `codemode.step(name, fn)` log entries. */
 export const STEP_CONNECTOR = "__step";
@@ -155,7 +156,7 @@ export const MAX_DURABLE_VALUE_BYTES = 1_000_000;
 export const DEFAULT_PAUSED_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Model-actionable error for a value too large to record durably. */
-function tooLargeMessage(what: string, size: number): string {
+export function tooLargeMessage(what: string, size: number): string {
   return (
     `${what} is too large to record durably (${size} bytes > ` +
     `${MAX_DURABLE_VALUE_BYTES} byte limit). Write large data to a file or ` +
@@ -352,6 +353,9 @@ export class CodemodeRuntime extends DurableObject<unknown> {
    * can verify they are still configured.
    */
   async begin(code: string, options?: BeginOptions): Promise<string> {
+    if (code.length > MAX_DURABLE_VALUE_BYTES) {
+      throw new Error(tooLargeMessage("The execution code", code.length));
+    }
     const now = Date.now();
     const id = `exec_${now.toString().padStart(16, "0")}_${crypto.randomUUID()}`;
     this.ctx.storage.sql.exec(
@@ -676,36 +680,54 @@ export class CodemodeRuntime extends DurableObject<unknown> {
   }
 
   /**
-   * Expire paused (awaiting-approval) runs whose last state change is older
-   * than `maxAgeMs`, marking them rejected. A never-answered approval would
-   * otherwise live forever — paused runs are deliberately exempt from
-   * retention pruning. Returns the expired execution ids so the host can fire
-   * the connectors' `disposeExecution` for each.
+   * Expire non-terminal runs whose last state change is older than
+   * `maxAgeMs`:
+   *
+   * - `paused` (awaiting approval) runs are marked **rejected**. A
+   *   never-answered approval would otherwise live forever — paused runs are
+   *   deliberately exempt from retention pruning.
+   * - `running` runs are marked **error**. A run only stays `running` with a
+   *   stale `updated_at` when the host died mid-pass (every decide/record
+   *   touches the row), and such a run can never be resumed — without expiry
+   *   it would be unreclaimable and exempt from pruning forever.
+   *
+   * Returns the expired execution ids so the host can fire the connectors'
+   * `disposeExecution` for each. Each status flip is conditional on the
+   * status it observed, so an id is only returned (and disposed) when this
+   * call actually terminated the run.
    */
   async expirePaused(maxAgeMs = DEFAULT_PAUSED_TTL_MS): Promise<string[]> {
     const cutoff = Date.now() - maxAgeMs;
     const rows = this.ctx.storage.sql
-      .exec<{ id: string }>(
-        `SELECT id FROM cm_executions WHERE status = 'paused' AND updated_at < ?`,
+      .exec<{ id: string; status: string }>(
+        `SELECT id, status FROM cm_executions
+          WHERE status IN ('paused', 'running') AND updated_at < ?`,
         cutoff
       )
       .toArray();
     const now = Date.now();
-    for (const { id } of rows) {
+    const expired: string[] = [];
+    for (const { id, status } of rows) {
+      const updated = this.ctx.storage.sql.exec(
+        `UPDATE cm_executions SET status = ?, error = ?, updated_at = ?
+          WHERE id = ? AND status = ?`,
+        status === "paused" ? "rejected" : "error",
+        status === "paused"
+          ? "Expired awaiting approval"
+          : "Expired while running — the host never completed the pass",
+        now,
+        id,
+        status
+      );
+      if (updated.rowsWritten === 0) continue;
       this.ctx.storage.sql.exec(
         `UPDATE cm_log SET state = 'reverted'
           WHERE execution_id = ? AND state = 'pending'`,
         id
       );
-      this.ctx.storage.sql.exec(
-        `UPDATE cm_executions SET status = 'rejected', error = ?, updated_at = ?
-          WHERE id = ?`,
-        "Expired awaiting approval",
-        now,
-        id
-      );
+      expired.push(id);
     }
-    return rows.map((r) => r.id);
+    return expired;
   }
 
   // -----------------------------------------------------------------------
@@ -826,7 +848,9 @@ export class CodemodeRuntime extends DurableObject<unknown> {
       snippet.description,
       snippet.code,
       snippet.savedAt,
-      stringifyForStorage(snippet.inputSchema) ?? null,
+      // Snippet code is implicitly bounded (it is an execution's code, which
+      // `begin` caps); the schema is the only unbounded input here.
+      toStored("The snippet input schema", snippet.inputSchema),
       row.connectors
     );
     return snippet;
@@ -875,6 +899,16 @@ export class CodemodeRuntime extends DurableObject<unknown> {
   }
 
   #fail(executionId: string, seq: number, error: string): ToolDecision {
+    // Mark the triggering log entry too (when one exists): an entry left
+    // "executing"/"pending" under an errored execution misreads as a crash
+    // window in the audit trail. Side effects may already have run, which is
+    // exactly what the "error" state records.
+    this.ctx.storage.sql.exec(
+      `UPDATE cm_log SET state = 'error'
+        WHERE execution_id = ? AND seq = ? AND state IN ('executing', 'pending')`,
+      executionId,
+      seq
+    );
     this.ctx.storage.sql.exec(
       `UPDATE cm_executions SET status = 'error', error = ?, updated_at = ?
         WHERE id = ?`,

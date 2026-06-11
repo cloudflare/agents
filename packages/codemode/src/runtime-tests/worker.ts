@@ -230,6 +230,14 @@ export class CodemodeTestHost extends DurableObject<Env> {
     return this.#runtime().deleteExecution(id);
   }
 
+  /**
+   * Begin an execution directly on the facet and "die" without running a
+   * pass — leaves the row stuck in `running`, like a host crash mid-pass.
+   */
+  beginOnly(code: string): Promise<string> {
+    return getCodemodeRuntime(this.ctx).begin(code);
+  }
+
   saveSnippet(name: string, description: string, executionId: string) {
     return this.#runtime().saveSnippet(name, { description, executionId });
   }

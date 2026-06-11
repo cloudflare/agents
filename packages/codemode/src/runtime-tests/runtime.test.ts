@@ -39,6 +39,7 @@ interface Host {
   pending(executionId?: string): Promise<PendingAction[]>;
   executions(name?: string): Promise<ExecutionState[]>;
   deleteExecution(id: string): Promise<boolean>;
+  beginOnly(code: string): Promise<string>;
   saveSnippet(
     name: string,
     description: string,
@@ -692,6 +693,51 @@ describe("codemode durable runtime (e2e)", () => {
     // The expired run cannot be revived.
     const revived = (await h.approve(first.executionId)) as ProxyToolOutput;
     expect(revived.status).toBe("error");
+  });
+
+  it("expires a stale running run left behind by a dead host", async () => {
+    const h = host();
+    const id = await h.beginOnly(`async () => 1`);
+
+    // A fresh running run is not touched.
+    expect(await h.expirePaused(60_000)).toEqual([]);
+
+    expect(await h.expirePaused(0)).toEqual([id]);
+    const exec = (await h.executions()).find((e) => e.id === id);
+    expect(exec?.status).toBe("error");
+    expect(exec?.error).toMatch(/Expired while running/);
+
+    // The flip is conditional on the observed status — a second sweep no-ops.
+    expect(await h.expirePaused(0)).toEqual([]);
+  });
+
+  it("deleting a non-terminal execution disposes its connector resources", async () => {
+    const h = host();
+    const first = (await h.run(
+      `async () => await items.create_item({ title: "delete-me" })`
+    )) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    expect((await h.lifecycle()).disposed).toEqual([]);
+    expect(await h.deleteExecution(first.executionId)).toBe(true);
+
+    // The paused run's resources (e.g. a browser session) were not leaked.
+    expect((await h.lifecycle()).disposed).toEqual([
+      { executionId: first.executionId, status: "rejected" }
+    ]);
+  });
+
+  it("rejects oversized execution code with a model-actionable error", async () => {
+    const h = host();
+    const out = (await h.run(
+      `async () => { /* ${"x".repeat(1_000_001)} */ return 1; }`
+    )) as ProxyToolOutput;
+    expect(out.status).toBe("error");
+    if (out.status !== "error") return;
+    expect(out.error).toMatch(/too large to record durably/);
+    // Nothing was recorded for it.
+    expect((await h.executions()).length).toBe(0);
   });
 
   // -------------------------------------------------------------------------
