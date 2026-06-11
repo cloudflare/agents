@@ -1362,6 +1362,16 @@ export class AIChatAgent<
   /**
    * Notify a connection about an active stream that can be resumed.
    * The client should respond with CF_AGENT_STREAM_RESUME_ACK to receive chunks.
+   *
+   * A connection can legitimately be notified more than once for the same
+   * request — proactively from onConnect AND in response to its
+   * CF_AGENT_STREAM_RESUME_REQUEST (#1733). This is intentional and must NOT
+   * be deduped here: an explicit resume request always deserves a response
+   * (the client's reconnectToStream would otherwise hang until its safety
+   * timeout, with no replay), and the proactive notify is required for
+   * clients that never send a resume request. The notify itself is a single
+   * tiny frame; clients are responsible for deduping the ACK so the full
+   * chunk buffer is not replayed twice.
    * @param connection - The WebSocket connection to notify
    */
   private _notifyStreamResuming(connection: Connection) {
@@ -1401,7 +1411,7 @@ export class AIChatAgent<
   /** @internal Delegate to _resumableStream */
   protected _startStream(
     requestId: string,
-    options: { messageId?: string } = {}
+    options: { messageId?: string; continuation?: boolean } = {}
   ): string {
     const streamId = this._resumableStream.start(requestId, options);
     if (this._continuation.pending?.requestId === requestId) {
@@ -6308,7 +6318,15 @@ export class AIChatAgent<
         // continuation this is the cloned last-assistant id, so recovery merges
         // into it; for a new turn it is a fresh id, so recovery keeps it
         // distinct.
-        const streamId = this._startStream(id, { messageId: message.id });
+        // The continuation flag is persisted in stream metadata so replayed
+        // frames carry `continuation: true` exactly like the live broadcast
+        // frames below (#1733) — a reconnecting client needs it to append to
+        // the existing assistant message instead of rebuilding it from
+        // scratch and dropping the pre-continuation parts.
+        const streamId = this._startStream(id, {
+          messageId: message.id,
+          continuation
+        });
 
         const reader = response.body.getReader();
 

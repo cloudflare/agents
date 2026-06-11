@@ -906,6 +906,17 @@ export function useAgentChat<
   const localRequestIdsRef = useRef<Set<string>>(new Set());
   const pendingReplayResumeRequestIdsRef = useRef<Set<string>>(new Set());
   const replayHydratedAssistantMessageIdsRef = useRef<Set<string>>(new Set());
+  /**
+   * Request ids this socket already ACKed via the fallback resume path.
+   * The server sends CF_AGENT_STREAM_RESUMING for the same request from
+   * both onConnect and its CF_AGENT_STREAM_RESUME_REQUEST handler (#1733).
+   * The transport-handled path dedupes the second notify via
+   * localRequestIdsRef, but the fallback path used to ACK both — triggering
+   * a second full-buffer replay that duplicated streamed parts. Entries are
+   * dropped when the turn completes; the whole set resets when the socket
+   * closes, since a new connection legitimately needs a fresh ACK+replay.
+   */
+  const fallbackAckedResumeRequestIdsRef = useRef<Set<string>>(new Set());
 
   // WebSocket-based transport that speaks the CF_AGENT protocol natively.
   // Replaces the old aiFetch + DefaultChatTransport indirection.
@@ -1383,6 +1394,7 @@ export function useAgentChat<
     processedToolCalls.current.clear();
     localResponseMessageIdsRef.current.clear();
     pendingReplayResumeRequestIdsRef.current.clear();
+    fallbackAckedResumeRequestIdsRef.current.clear();
     replayHydratedAssistantMessageIdsRef.current.clear();
     protectedStreamingAssistantRef.current = null;
   }, [markInitialMessagesSeeded, setMessages, resetToolContinuation]);
@@ -1832,6 +1844,13 @@ export function useAgentChat<
           if (!resume && !customTransport.isAwaitingResume()) {
             if (!isEarlyToolContinuation) return;
           }
+          // Duplicate offer for a stream this socket already ACKed via the
+          // fallback path (#1733): the server notifies from both onConnect
+          // and the RESUME_REQUEST handler. Re-ACKing would trigger a second
+          // full-buffer replay; drop it. (A stale duplicate must also not be
+          // handed to a waiting transport resolver — e.g. a tool-continuation
+          // handshake expecting a NEW request id would misattach to it.)
+          if (fallbackAckedResumeRequestIdsRef.current.has(data.id)) return;
           if (!resumingToolContinuationRef.current) {
             pendingReplayResumeRequestIdsRef.current.add(data.id);
           }
@@ -1868,6 +1887,9 @@ export function useAgentChat<
           // The recovered turn is now streaming live to us — it's no longer
           // "recovering", it's producing the answer (#1620).
           setIsRecovering(false);
+          // Remember the ACK so a duplicate STREAM_RESUMING for the same
+          // request on this socket doesn't trigger a second replay (#1733).
+          fallbackAckedResumeRequestIdsRef.current.add(data.id);
           agentRef.current.send(
             JSON.stringify({
               type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
@@ -1890,9 +1912,18 @@ export function useAgentChat<
                   typeof chunkData.messageId === "string"
                 ) {
                   localResponseIds.set(data.id, chunkData.messageId);
+                  // EVERY replayed `start` rebuilds the message from chunk 0,
+                  // so the matching trailing assistant must be reset each
+                  // time — not only while the resume request id is still
+                  // pending (#1733: a second replay otherwise stacks a
+                  // duplicate text part). Continuation replays are excluded:
+                  // they append to the existing assistant message, and
+                  // wiping it would drop the pre-continuation parts.
                   if (
                     data.replay &&
-                    pendingReplayResumeRequestIdsRef.current.has(data.id)
+                    !data.continuation &&
+                    !resumingToolContinuationRef.current &&
+                    observedToolContinuationRequestIdRef.current !== data.id
                   ) {
                     pendingReplayResumeRequestIdsRef.current.delete(data.id);
                     resetMatchingHydratedAssistantForReplay(
@@ -1920,6 +1951,7 @@ export function useAgentChat<
               restoreProtectedStreamingAssistant(localResponseIds.get(data.id));
               localResponseIds.delete(data.id);
               localRequestIdsRef.current.delete(data.id);
+              fallbackAckedResumeRequestIdsRef.current.delete(data.id);
             }
             return;
           }
@@ -1935,9 +1967,18 @@ export function useAgentChat<
           if (data.body?.trim()) {
             try {
               chunkData = JSON.parse(data.body);
+              // Reset on EVERY replayed `start` (not only while the resume
+              // request id is pending): replay rebuilds from chunk 0, so a
+              // second replay whose `start` skipped the reset would stack a
+              // duplicate text part on the frozen first one (#1733).
+              // Continuation replays are excluded — they append to the
+              // existing assistant message, and wiping it would drop the
+              // pre-continuation parts.
               if (
                 data.replay &&
-                pendingReplayResumeRequestIdsRef.current.has(data.id) &&
+                !data.continuation &&
+                !resumingToolContinuationRef.current &&
+                observedToolContinuationRequestIdRef.current !== data.id &&
                 typeof (chunkData as Record<string, unknown>).messageId ===
                   "string" &&
                 (chunkData as Record<string, unknown>).type === "start"
@@ -1975,6 +2016,7 @@ export function useAgentChat<
           }
           if (data.done) {
             customTransport.handleServerTurnCompleted(data.id);
+            fallbackAckedResumeRequestIdsRef.current.delete(data.id);
             // A terminal turn outcome resolves any in-progress recovery (#1620).
             setIsRecovering(false);
           }
@@ -2012,7 +2054,15 @@ export function useAgentChat<
       }
     }
 
+    // A closed socket invalidates the per-socket resume-ACK dedupe: after a
+    // reconnect the server sees a brand-new connection and must be ACKed
+    // (and replay) again, so the previous entries must not suppress it.
+    function onAgentClose() {
+      fallbackAckedResumeRequestIdsRef.current.clear();
+    }
+
     agent.addEventListener("message", onAgentMessage);
+    agent.addEventListener("close", onAgentClose);
 
     // Stream resume is now primarily handled by the transport's
     // reconnectToStream (which sends CF_AGENT_STREAM_RESUME_REQUEST).
@@ -2021,6 +2071,8 @@ export function useAgentChat<
 
     return () => {
       agent.removeEventListener("message", onAgentMessage);
+      agent.removeEventListener("close", onAgentClose);
+      fallbackAckedResumeRequestIdsRef.current.clear();
       streamStateRef.current = { status: "idle" };
       setIsServerStreaming(false);
       setIsRecovering(false);

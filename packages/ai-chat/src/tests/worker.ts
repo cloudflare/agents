@@ -559,8 +559,11 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   // Resumable streaming test helpers
 
-  testStartStream(requestId: string): string {
-    return this._startStream(requestId);
+  testStartStream(
+    requestId: string,
+    options?: { messageId?: string; continuation?: boolean }
+  ): string {
+    return this._startStream(requestId, options);
   }
 
   async testStoreStreamChunk(streamId: string, body: string): Promise<void> {
