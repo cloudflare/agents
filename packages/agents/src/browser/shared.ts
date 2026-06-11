@@ -1,6 +1,7 @@
 import type { ResolvedProvider } from "@cloudflare/codemode";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
-import { CdpSession, connectBrowser, connectUrl } from "./cdp-session";
+import { CdpSession, connectUrl } from "./cdp-session";
+import { connectBrowser } from "./browser-run";
 import { truncateResponse } from "./truncate";
 
 export interface BrowserToolsOptions {
