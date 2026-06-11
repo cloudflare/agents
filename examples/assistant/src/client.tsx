@@ -32,6 +32,8 @@ import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { isToolUIPart, getToolName } from "ai";
 import type { UIMessage } from "ai";
+import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 import type { MCPServersState } from "agents";
 import {
   Banner,
@@ -1177,15 +1179,16 @@ function Chat({
                     return (
                       <div key={partIndex} className="flex justify-start">
                         <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed">
-                          <div className="whitespace-pre-wrap min-h-[1.25em]">
-                            {part.text ||
-                              (part.state === "streaming" ? "\u00a0" : null)}
-                            {isLastAssistant &&
-                              isLastTextPart &&
-                              isStreaming && (
-                                <span className="inline-block w-0.5 h-[1em] bg-kumo-brand ml-0.5 align-text-bottom animate-blink-cursor" />
-                              )}
-                          </div>
+                          <Streamdown
+                            className="sd-theme min-h-[1.25em]"
+                            plugins={{ code }}
+                            controls={false}
+                            isAnimating={
+                              isLastAssistant && isLastTextPart && isStreaming
+                            }
+                          >
+                            {part.text}
+                          </Streamdown>
                         </div>
                       </div>
                     );

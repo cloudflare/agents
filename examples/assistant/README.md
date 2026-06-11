@@ -46,6 +46,7 @@ the sub-agent routing primitive from `agents`.
 - **Durable chat recovery** — Think's default `chatRecovery` wraps turns in fibers for eviction recovery, with bounded retry/exhaustion behavior
 - **Declarative scheduled work** — the directory is a `Think` accumulator that declares a daily-summary task via `getScheduledTasks()` (a deterministic handler), reconciled by Think on startup; it fans out to the most recently active chat
 - **Regeneration with branch navigation** — v1/v2/v3 response versions via `getBranches`
+- **Streaming markdown rendering** — assistant replies render through [streamdown](https://streamdown.ai) with syntax-highlighted code blocks (`@streamdown/code`)
 - **Stream resumption** — page refresh replays the active stream (built into Think)
 - **useAgentChat** — Think speaks the same CF_AGENT protocol as AIChatAgent
 - **GitHub OAuth** — users sign in with GitHub; the Worker owns all DO naming, so each user gets their own directory + isolated chats
