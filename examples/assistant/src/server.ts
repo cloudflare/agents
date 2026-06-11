@@ -18,8 +18,9 @@ import type { GitHubUser } from "./auth";
 import type { AssistantDirectory } from "../agents/assistant/agent";
 
 /**
- * Local-dev escape hatch: set `DEV_USER=yourname` in `.env` to skip GitHub
- * OAuth entirely and act as that user. Never set this in production.
+ * Local-dev escape hatch: set `DEV_USER=yourname` in `.env.local` (gitignored)
+ * to skip GitHub OAuth entirely and act as that user. Defaults to "" (disabled)
+ * via `vars` in wrangler.jsonc. Never set this in production.
  */
 function getDevUser(env: Env): GitHubUser | null {
   if (!env.DEV_USER) return null;

@@ -29,9 +29,12 @@
       "tag": "v1"
     }
   ],
-  "secrets": {
-    // DEV_USER is an optional local-dev escape hatch (see src/server.ts):
-    // set it in .env to skip GitHub OAuth and act as that user.
-    "required": ["GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "DEV_USER"]
+  "vars": {
+    // Optional local-dev escape hatch (see src/server.ts): set DEV_USER in
+    // .env.local to skip GitHub OAuth and act as that user. Blank = disabled.
+    // NOTE: no `secrets.required` allowlist here — it would stop optional
+    // entries like DEV_USER from being read out of .env/.env.local. The
+    // server throws a clear error when the GitHub secrets are missing.
+    "DEV_USER": ""
   }
 }
