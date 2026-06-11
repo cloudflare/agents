@@ -933,6 +933,12 @@ export type AddRpcMcpServerOptions = {
 const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
 const DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS = 2_000;
 const DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 5_000;
+// Durable marker that this agent is condemned: written before teardown begins
+// (and by `_cf_scheduleDestroy`, which defers teardown to an alarm invocation
+// with its own execution budget, #1625). The final `deleteAll()` in `destroy()`
+// removes it, so "marker present" always means an unfinished teardown that the
+// next wake must complete instead of resuming normal work.
+const DESTROY_PENDING_KEY = "cf_agents_destroy_pending";
 // Ceiling for the exponential backoff applied to the runFiber-recovery
 // follow-up alarm. A scan that makes NO forward progress (every pending orphan
 // row's recovery hook threw) but still has work pending backs off so a poison
@@ -5958,6 +5964,14 @@ export class Agent<
   }
 
   private async _scheduleNextAlarm() {
+    // A pending destroy (#1625) owns the alarm: keep it armed immediately so
+    // teardown lands, and never let the "no work pending" branch below
+    // delete it out from under `_cf_scheduleDestroy`.
+    if (await this._hasPendingDestroy()) {
+      await this.ctx.storage.setAlarm(Date.now());
+      return;
+    }
+
     const nowMs = Date.now();
     const nowSeconds = Math.floor(nowMs / 1000);
     const hungCutoffSeconds =
@@ -6087,6 +6101,18 @@ export class Agent<
    * See {@link https://developers.cloudflare.com/agents/api-reference/schedule-tasks/}
    */
   async alarm() {
+    // A pending destroy (#1625) pre-empts everything — including
+    // `super.alarm()`'s onStart, which would re-initialize user state on a
+    // condemned agent. This is both the landing point for the deferred
+    // teardown scheduled by `_cf_scheduleDestroy` (which arms an immediate
+    // alarm precisely so teardown runs here, with this invocation's full
+    // execution budget) and the convergence point for a destroy that a
+    // previous invocation started but couldn't finish.
+    if (await this._hasPendingDestroy()) {
+      await this.destroy();
+      return;
+    }
+
     // Ensure PartyServer initialization (name resolution, onStart) runs
     // before processing any scheduled tasks.
     await super.alarm();
@@ -9438,6 +9464,15 @@ export class Agent<
       return;
     }
 
+    // Persist the teardown decision FIRST, so a destroy that gets cut short
+    // (e.g. the runtime cancelling a request-scoped `waitUntil` it was riding
+    // on, #1625) is finished by the next wake — see the `alarm()` preamble —
+    // instead of leaving a half-deleted agent whose tables get silently
+    // recreated by the constructor. The marker is removed by the
+    // `deleteAll()` below, which is also why it is a KV record rather than a
+    // SQL row: it must outlive `_dropInternalTablesForDestroy`.
+    await this.ctx.storage.put(DESTROY_PENDING_KEY, true);
+
     this._dropInternalTablesForDestroy();
 
     // delete all alarms
@@ -9456,6 +9491,46 @@ export class Agent<
     }, 0);
 
     this._emit("destroy");
+  }
+
+  /**
+   * @internal Defer this agent's destruction to its own alarm invocation
+   * instead of running it inline (#1625).
+   *
+   * `destroy()` is a multi-step I/O sequence (drop tables, delete alarm,
+   * delete all storage, dispose connections). Running it on the `waitUntil`
+   * of a request whose client has already disconnected — the MCP
+   * Streamable-HTTP session-DELETE path — gives it little to no
+   * post-invocation grace, so the runtime routinely cancels it mid-flight.
+   * This method instead performs two fast storage writes (a durable
+   * "condemned" marker and an immediate alarm) that the caller can await
+   * before responding; the alarm then fires as a fresh invocation with its
+   * own full execution budget and runs `destroy()` there. If even that
+   * invocation is interrupted, the marker survives and the next wake
+   * finishes teardown — see the `alarm()` preamble.
+   *
+   * Unlike `destroy()`, this method does not abort the isolate, so RPC
+   * callers don't need to swallow an abort error.
+   */
+  async _cf_scheduleDestroy(): Promise<void> {
+    if (this._isFacet) {
+      // Facet teardown is coordinated by the root (`ctx.facets.delete`
+      // wipes the facet's storage in one step), not by a multi-step local
+      // sequence, so there is nothing to defer.
+      await this.destroy();
+      return;
+    }
+    await this.ctx.storage.put(DESTROY_PENDING_KEY, true);
+    await this.ctx.storage.setAlarm(Date.now());
+  }
+
+  /**
+   * Whether a (deferred or interrupted) destroy is pending. Reads the
+   * durable marker directly — the in-memory `_isFacet` flag may not be
+   * hydrated yet at the call sites, but facets never write the marker.
+   */
+  private async _hasPendingDestroy(): Promise<boolean> {
+    return (await this.ctx.storage.get<boolean>(DESTROY_PENDING_KEY)) === true;
   }
 
   /** @internal Drop every internal Agents SDK table during top-level destroy. */
