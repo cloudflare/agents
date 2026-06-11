@@ -19,7 +19,8 @@ export interface BrowserSessionLock {
 export interface BrowserSessionStore {
   /**
    * Acquire an exclusive lock for this session key. The lock must serialize
-   * all managers using the same key and is held for the full browser lease.
+   * all holders using the same key. Held only around storage reads/writes —
+   * never across Browser Rendering network calls.
    */
   acquireLock(key: string): MaybePromise<BrowserSessionLock>;
   get(key: string): MaybePromise<StoredBrowserSession | undefined>;

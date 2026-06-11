@@ -430,6 +430,9 @@ export class BrowserConnector extends CodemodeConnector {
     const store = this.#options.store;
     const execKey = this.#execKey(executionId);
     const lock = await store.acquireLock(execKey);
+    // Decide and update storage under the lock; the Browser Rendering delete
+    // happens after release (locks wrap storage only).
+    let toClose: StoredBrowserSession | undefined;
     try {
       const stored = await store.get(execKey);
       if (!stored) return;
@@ -441,18 +444,22 @@ export class BrowserConnector extends CodemodeConnector {
       }
 
       if (!promoted && stored.closedAt === undefined) {
-        try {
-          await deleteBrowserSession(this.#options.browser, stored.sessionId);
-        } catch (error) {
-          console.warn(
-            `[agents/browser] Failed to delete Browser Run session ${stored.sessionId} for execution ${executionId}`,
-            error
-          );
-        }
+        toClose = stored;
       }
       await store.delete(execKey);
     } finally {
       await lock.release();
+    }
+
+    if (toClose) {
+      try {
+        await deleteBrowserSession(this.#options.browser, toClose.sessionId);
+      } catch (error) {
+        console.warn(
+          `[agents/browser] Failed to delete Browser Run session ${toClose.sessionId} for execution ${executionId}`,
+          error
+        );
+      }
     }
   }
 
@@ -711,7 +718,6 @@ export class BrowserConnector extends CodemodeConnector {
   async #resolveSession(executionId: string): Promise<StoredBrowserSession> {
     const browser = this.#options.browser;
     if (!browser) throw new Error("BrowserConnector has no browser binding");
-    const store = this.#options.store;
     const mode = this.#mode();
     const execKey = this.#execKey(executionId);
 
@@ -747,60 +753,100 @@ export class BrowserConnector extends CodemodeConnector {
       }
     }
 
-    // Create a fresh per-execution session under the lock, so two concurrent
-    // tool calls for the same execution don't double-create.
-    const lock = await store.acquireLock(execKey);
-    try {
-      const raced = await store.get(execKey);
-      if (raced) return raced;
-      const info = await createBrowserSession(browser, {
-        keepAliveMs: this.#options.session?.keepAliveMs
-      });
-      const now = Date.now();
-      const stored = {
-        sessionId: info.sessionId,
-        createdAt: now,
-        updatedAt: now
-      };
-      await store.set(execKey, stored);
-      return stored;
-    } finally {
-      await lock.release();
-    }
+    // Create a fresh per-execution session. The Browser Rendering call
+    // happens outside the store lock; the lock only guards the commit, so
+    // two concurrent tool calls for the same execution don't double-create
+    // (the loser's session is deleted).
+    return this.#createAndCommit(execKey);
   }
 
-  /** Get the stored session under `key`, validating and creating as needed. */
+  /**
+   * Get the stored session under `key`, validating and creating as needed.
+   *
+   * Network calls (the liveness probe, session creation) happen OUTSIDE the
+   * store lock — locks wrap storage only, so a hung Browser Rendering call
+   * can't serialize every other operation on this key. The lock is
+   * re-acquired to commit, with a sessionId re-check to detect a concurrent
+   * swap; on a swap the new entry is re-validated from the top.
+   */
   async #ensureStoredSession(key: string): Promise<StoredBrowserSession> {
     const browser = this.#options.browser;
     if (!browser) throw new Error("BrowserConnector has no browser binding");
     const store = this.#store;
 
-    const lock = await store.acquireLock(key);
-    try {
+    for (let attempt = 0; attempt < 3; attempt++) {
       const existing = await store.get(key);
-      if (existing) {
-        if (await this.#isAlive(existing)) {
-          const refreshed = { ...existing, updatedAt: Date.now() };
+      if (!existing) return this.#createAndCommit(key);
+
+      const alive = await this.#isAlive(existing);
+      const lock = await store.acquireLock(key);
+      try {
+        const current = await store.get(key);
+        if (current?.sessionId !== existing.sessionId) {
+          // Entry was swapped while we probed — validate the new one.
+          continue;
+        }
+        if (alive) {
+          const refreshed = { ...current, updatedAt: Date.now() };
           await store.set(key, refreshed);
           return refreshed;
         }
         await store.delete(key);
+      } finally {
+        await lock.release();
       }
+      // Dead entry deleted — the next iteration creates a fresh session.
+    }
+    throw new Error(
+      `Browser session entry ${key} kept changing concurrently — retry`
+    );
+  }
 
-      const info = await createBrowserSession(browser, {
-        keepAliveMs: this.#options.session?.keepAliveMs
-      });
-      const now = Date.now();
-      const stored = {
-        sessionId: info.sessionId,
-        createdAt: now,
-        updatedAt: now
-      };
-      await store.set(key, stored);
-      return stored;
+  /**
+   * Create a Browser Run session (outside any lock) and commit it under
+   * `key`. If a concurrent caller committed first, their entry wins and the
+   * redundant session is deleted best-effort.
+   */
+  async #createAndCommit(key: string): Promise<StoredBrowserSession> {
+    const browser = this.#options.browser;
+    if (!browser) throw new Error("BrowserConnector has no browser binding");
+    const store = this.#store;
+
+    const info = await createBrowserSession(browser, {
+      keepAliveMs: this.#options.session?.keepAliveMs
+    });
+    const now = Date.now();
+    const stored: StoredBrowserSession = {
+      sessionId: info.sessionId,
+      createdAt: now,
+      updatedAt: now
+    };
+
+    const lock = await store.acquireLock(key);
+    let winner: StoredBrowserSession | undefined;
+    try {
+      const raced = await store.get(key);
+      if (raced) {
+        winner = raced;
+      } else {
+        await store.set(key, stored);
+      }
     } finally {
       await lock.release();
     }
+
+    if (winner) {
+      try {
+        await deleteBrowserSession(browser, stored.sessionId);
+      } catch (error) {
+        console.warn(
+          `[agents/browser] Failed to delete redundant Browser Run session ${stored.sessionId}`,
+          error
+        );
+      }
+      return winner;
+    }
+    return stored;
   }
 
   async #isAlive(stored: StoredBrowserSession): Promise<boolean> {

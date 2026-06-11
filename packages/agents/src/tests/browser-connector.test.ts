@@ -8,6 +8,8 @@ import type {
 
 class MemorySessionStore implements BrowserSessionStore {
   sessions = new Map<string, StoredBrowserSession>();
+  /** Keys whose lock is currently held — for asserting locks never span network calls. */
+  heldKeys = new Set<string>();
   #queues = new Map<string, Promise<void>>();
 
   async acquireLock(key: string): Promise<BrowserSessionLock> {
@@ -23,11 +25,13 @@ class MemorySessionStore implements BrowserSessionStore {
       )
     );
     await previous;
+    this.heldKeys.add(key);
     let released = false;
     return {
       release: () => {
         if (released) return;
         released = true;
+        this.heldKeys.delete(key);
         release();
       }
     };
@@ -379,6 +383,77 @@ describe("BrowserConnector", () => {
       sessionId?: string;
     };
     expect(dom.sessionId).toBe("raw-cdp-id");
+  });
+
+  it("never holds the session-store lock across Browser Rendering calls", async () => {
+    const { browser } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const lockedDuringFetch: string[] = [];
+    const wrapped = {
+      fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+        lockedDuringFetch.push(...store.heldKeys);
+        return browser.fetch(input, init);
+      },
+      connect: browser.connect
+    } satisfies Fetcher;
+
+    const connector = new BrowserConnector(fakeCtx, {
+      browser: wrapped,
+      store,
+      session: { mode: "reuse", key: "main" }
+    });
+
+    // Create path (no stored session yet), then validate path (existing
+    // session probed for liveness), then terminal disposal.
+    await connector.executeTool(
+      "send",
+      { method: "Browser.getVersion" },
+      { executionId: "exec-a" }
+    );
+    await connector.onPassEnd("exec-a", "paused");
+    await connector.executeTool(
+      "send",
+      { method: "Browser.getVersion" },
+      { executionId: "exec-a" }
+    );
+    await connector.disposeExecution("exec-a", "completed");
+
+    expect(lockedDuringFetch).toEqual([]);
+  });
+
+  it("deletes the redundant session when concurrent creates race for one key", async () => {
+    const { browser, requests } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const sharedOptions = {
+      browser,
+      store,
+      session: { mode: "reuse", key: "main" } as const
+    };
+    // Two connectors sharing one store race to create the shared session.
+    const c1 = new BrowserConnector(fakeCtx, sharedOptions);
+    const c2 = new BrowserConnector(fakeCtx, sharedOptions);
+
+    await Promise.all([
+      c1.executeTool(
+        "send",
+        { method: "Browser.getVersion" },
+        { executionId: "exec-a" }
+      ),
+      c2.executeTool(
+        "send",
+        { method: "Browser.getVersion" },
+        { executionId: "exec-b" }
+      )
+    ]);
+
+    // Both created a session, one commit won, the loser's was deleted.
+    const creates = requests.filter((r) => r.method === "POST" && !r.upgrade);
+    const deletes = requests.filter((r) => r.method === "DELETE");
+    expect(creates.length).toBe(2);
+    expect(deletes.length).toBe(1);
+    expect(store.sessions.size).toBe(1);
+    const winner = [...store.sessions.values()][0];
+    expect(deletes[0].url).not.toContain(winner.sessionId);
   });
 
   it("explains the attachToTarget fix when a page-scoped send lacks a sessionId", async () => {
