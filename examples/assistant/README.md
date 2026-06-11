@@ -82,6 +82,11 @@ npm start
 Open the app, click **Sign in with GitHub**, approve the OAuth flow, and you
 will land in the Think assistant scoped to your GitHub login.
 
+> [!TIP]
+> For local development you can skip the OAuth flow entirely: set
+> `DEV_USER=yourname` in `.env` and the Worker will act as that user without
+> talking to GitHub. Never set `DEV_USER` in production.
+
 To manually exercise client stream resumption, ask for a long response and
 refresh the page mid-stream. To exercise Durable Object eviction recovery,
 compare this app with `experimental/forever-chat`, which includes dedicated

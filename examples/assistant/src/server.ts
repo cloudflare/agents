@@ -14,7 +14,17 @@ import {
   handleGitHubLogin,
   handleLogout
 } from "./auth";
+import type { GitHubUser } from "./auth";
 import type { AssistantDirectory } from "../agents/assistant/agent";
+
+/**
+ * Local-dev escape hatch: set `DEV_USER=yourname` in `.env` to skip GitHub
+ * OAuth entirely and act as that user. Never set this in production.
+ */
+function getDevUser(env: Env): GitHubUser | null {
+  if (!env.DEV_USER) return null;
+  return { id: 0, login: env.DEV_USER, name: env.DEV_USER, avatarUrl: "" };
+}
 
 type ThinkAppContext = {
   router: {
@@ -58,7 +68,8 @@ export default {
       }
 
       if (url.pathname === "/auth/me") {
-        const user = await getGitHubUserFromRequest(request);
+        const user =
+          getDevUser(env) ?? (await getGitHubUserFromRequest(request));
         if (!user) {
           return createUnauthorizedResponse(request);
         }
@@ -71,7 +82,8 @@ export default {
       // `MyAssistant` facet) is handled by the directory's built-in
       // `Agent.fetch()` + sub-routing logic.
       if (url.pathname === "/chat" || url.pathname.startsWith("/chat/")) {
-        const user = await getGitHubUserFromRequest(request);
+        const user =
+          getDevUser(env) ?? (await getGitHubUserFromRequest(request));
         if (!user) {
           return createUnauthorizedResponse(request);
         }

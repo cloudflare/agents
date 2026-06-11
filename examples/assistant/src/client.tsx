@@ -63,6 +63,7 @@ import {
   SunIcon,
   InfoIcon,
   ArrowsClockwiseIcon,
+  CopyIcon,
   CaretLeftIcon,
   CaretRightIcon,
   FolderOpenIcon,
@@ -170,6 +171,102 @@ function shouldShowStreamedTextPart(part: {
   state?: "streaming" | "done";
 }): boolean {
   return part.text.length > 0 || part.state === "streaming";
+}
+
+function formatJsonBlock(value: unknown): string {
+  let text: string;
+  try {
+    text = JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    text = String(value);
+  }
+  return `\`\`\`json\n${text}\n\`\`\``;
+}
+
+/**
+ * Serialize the visible chat into plain markdown so a transcript can be
+ * pasted anywhere (issues, chats, docs) with user/assistant/tool turns and
+ * reasoning clearly annotated.
+ */
+function formatTranscript(messages: UIMessage[], chatTitle: string): string {
+  const lines: string[] = [`# ${chatTitle}`, ""];
+
+  for (const message of messages) {
+    if (message.role === "user") {
+      lines.push("## User", "", getMessageText(message), "");
+      continue;
+    }
+
+    if (message.role !== "assistant") continue;
+    lines.push("## Assistant", "");
+
+    for (const part of message.parts) {
+      if (part.type === "text") {
+        if (part.text.trim()) lines.push(part.text.trim(), "");
+        continue;
+      }
+
+      if (part.type === "reasoning") {
+        if (!part.text.trim()) continue;
+        lines.push(
+          "<details><summary>Reasoning</summary>",
+          "",
+          part.text.trim(),
+          "",
+          "</details>",
+          ""
+        );
+        continue;
+      }
+
+      if (isToolUIPart(part)) {
+        const toolName = getToolName(part);
+        lines.push(`### Tool: \`${toolName}\``, "");
+        if (part.input != null) {
+          lines.push("**Input**", "", formatJsonBlock(part.input), "");
+        }
+        if (part.state === "output-available") {
+          lines.push("**Output**", "", formatJsonBlock(part.output), "");
+        } else if (part.state === "output-error") {
+          lines.push("**Error**", "", "```", part.errorText ?? "", "```", "");
+        } else if (part.state === "approval-requested") {
+          lines.push("_Waiting for approval._", "");
+        } else {
+          lines.push(`_State: ${part.state}_`, "");
+        }
+      }
+    }
+  }
+
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+function CopyTranscriptButton({
+  messages,
+  chatTitle
+}: {
+  messages: UIMessage[];
+  chatTitle: string;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  const copy = useCallback(async () => {
+    await navigator.clipboard.writeText(formatTranscript(messages, chatTitle));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }, [messages, chatTitle]);
+
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      shape="square"
+      aria-label="Copy transcript as markdown"
+      icon={copied ? <CheckCircleIcon size={12} /> : <CopyIcon size={12} />}
+      disabled={messages.length === 0}
+      onClick={copy}
+    />
+  );
 }
 
 function Chat({
@@ -559,6 +656,7 @@ function Chat({
               icon={<TrashIcon size={12} />}
               onClick={onRequestDelete}
             />
+            <CopyTranscriptButton messages={messages} chatTitle={chatTitle} />
           </div>
           <div className="flex items-center gap-3">
             <ConnectionIndicator status={connectionStatus} />

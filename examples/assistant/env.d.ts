@@ -11,6 +11,8 @@ declare namespace Cloudflare {
     AI: Ai;
     GITHUB_CLIENT_ID: string;
     GITHUB_CLIENT_SECRET: string;
+    /** Optional local-dev escape hatch — see `getDevUser` in src/server.ts. */
+    DEV_USER?: string;
   }
 }
 

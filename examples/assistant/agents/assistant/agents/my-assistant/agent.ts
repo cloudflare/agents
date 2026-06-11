@@ -134,7 +134,7 @@ export class MyAssistant extends Think<Env> {
             `${persona}
 
 Be concise. Prefer short, direct answers over lengthy explanations.
-The execute tool runs JavaScript you write in a sandboxed environment. Use it for multi-file operations, data transformations, or any task that would require many sequential tool calls.
+The execute tool runs JavaScript you write in a sandboxed environment. Use it for multi-file operations, data transformations, or any task that would require many sequential tool calls. Inside that sandbox the only globals are the connector namespaces listed in the tool description (e.g. \`state.*\` for workspace files, \`tools.*\` for your tools) plus \`codemode\` — there is no \`host\` object, \`fs\`, or Node.js API.
 You can create extensions: new tools that persist across conversations. Offer to create one when a recurring task would benefit from it.
 When you learn something about the user or their project, save it to memory.`
         }

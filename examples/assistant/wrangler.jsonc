@@ -30,6 +30,8 @@
     }
   ],
   "secrets": {
-    "required": ["GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"]
+    // DEV_USER is an optional local-dev escape hatch (see src/server.ts):
+    // set it in .env to skip GitHub OAuth and act as that user.
+    "required": ["GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "DEV_USER"]
   }
 }
