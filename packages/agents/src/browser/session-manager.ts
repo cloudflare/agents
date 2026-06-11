@@ -7,6 +7,7 @@ import {
   deleteBrowserSession,
   listBrowserTargets,
   BrowserRenderingError,
+  type BrowserBinding,
   type BrowserSessionInfo
 } from "./browser-run";
 
@@ -20,7 +21,7 @@ type MaybePromise<T> = T | Promise<T>;
 export type BrowserConnectionOptions =
   | {
       /** Browser Rendering binding (Fetcher) — used in production */
-      browser: Fetcher;
+      browser: BrowserBinding;
       cdpUrl?: never;
       cdpHeaders?: never;
       /** Optional browser session lifecycle. Defaults to one fresh session per execution. */
@@ -250,7 +251,7 @@ class OneShotBrowserSessionManager implements BrowserSessionManager {
 
 class ReusableBrowserSessionManager implements BrowserSessionManager {
   constructor(
-    private readonly browser: Fetcher,
+    private readonly browser: BrowserBinding,
     private readonly options: BrowserManagerOptions,
     private readonly sessionOptions:
       | ReusableBrowserSessionOptions
@@ -441,7 +442,7 @@ class DynamicBrowserSessionManager implements BrowserSessionManager {
   #reusable: ReusableBrowserSessionManager;
 
   constructor(
-    browser: Fetcher,
+    browser: BrowserBinding,
     options: BrowserManagerOptions,
     sessionOptions: DynamicBrowserSessionOptions
   ) {

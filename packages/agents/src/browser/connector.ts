@@ -12,6 +12,7 @@ import {
   deleteBrowserSession,
   listBrowserTargets,
   BrowserRenderingError,
+  type BrowserBinding,
   type BrowserSessionInfo
 } from "./browser-run";
 import { loadCdpSpec, type SearchableCdpSpec } from "./spec";
@@ -41,7 +42,7 @@ export interface BrowserConnectorSessionOptions {
 export type BrowserConnectorOptions = (
   | {
       /** Browser Rendering binding (Fetcher) — used in production. */
-      browser: Fetcher;
+      browser: BrowserBinding;
       /**
        * Durable store for Browser Run session ids. Required with the binding:
        * a session must survive a pause (approval) and resume on a fresh
@@ -94,7 +95,23 @@ interface CachedSocket {
   session: CdpSession;
   /** Browser Run session id the socket is attached to (undefined for cdpUrl). */
   browserSessionId?: string;
+  /**
+   * Live CDP session id per attach handle, valid for this socket only.
+   * Rebuilt lazily after a reconnect (sockets are per-pass).
+   */
+  attached: Map<string, string>;
 }
+
+/**
+ * `cdp.attachToTarget` returns a stable handle (`target:<targetId>`) instead
+ * of the raw CDP session id. Raw ids are connection-scoped: a run that pauses
+ * for approval resumes on a fresh WebSocket where the old id is invalid, and
+ * the durable replay log would otherwise pin the stale value. The handle is a
+ * pure function of the target, so replayed code computes identical arguments,
+ * and `send` resolves it to a live session id on the current socket —
+ * re-attaching lazily after a reconnect.
+ */
+const ATTACH_HANDLE_PREFIX = "target:";
 
 /**
  * Codemode connector exposing a live browser over the Chrome DevTools
@@ -168,7 +185,7 @@ export class BrowserConnector extends CodemodeConnector {
     const tools: ConnectorTools = {
       send: {
         description:
-          "Send a CDP command and return its result. Page-scoped commands require a sessionId from attachToTarget.",
+          "Send a CDP command and return its result. Page-scoped commands require a sessionId — pass the handle returned by attachToTarget.",
         inputSchema: {
           type: "object",
           properties: {
@@ -183,7 +200,7 @@ export class BrowserConnector extends CodemodeConnector {
             sessionId: {
               type: "string",
               description:
-                "Target session id from attachToTarget, for page-scoped commands"
+                "Session handle from attachToTarget, for page-scoped commands"
             },
             timeoutMs: {
               type: "number",
@@ -199,14 +216,22 @@ export class BrowserConnector extends CodemodeConnector {
             sessionId?: string;
             timeoutMs?: number;
           };
-          const socket = await this.#socket(this.#executionId(ctx));
-          return socket.send(method, params, { sessionId, timeoutMs });
+          const executionId = this.#executionId(ctx);
+          const socket = await this.#socket(executionId);
+          const resolved = await this.#resolveSessionHandle(
+            executionId,
+            sessionId
+          );
+          return socket.send(method, params, {
+            sessionId: resolved,
+            timeoutMs
+          });
         }
       },
 
       attachToTarget: {
         description:
-          "Attach to a target (tab) and return the sessionId to use for page-scoped commands.",
+          "Attach to a target (tab) and return a stable session handle to pass as sessionId in page-scoped send calls. The handle stays valid across pauses/resumes.",
         inputSchema: {
           type: "object",
           properties: {
@@ -223,8 +248,9 @@ export class BrowserConnector extends CodemodeConnector {
             targetId: string;
             timeoutMs?: number;
           };
-          const socket = await this.#socket(this.#executionId(ctx));
-          return socket.attachToTarget(targetId, { timeoutMs });
+          const executionId = this.#executionId(ctx);
+          await this.#attach(executionId, targetId, timeoutMs);
+          return `${ATTACH_HANDLE_PREFIX}${targetId}`;
         }
       },
 
@@ -483,6 +509,36 @@ export class BrowserConnector extends CodemodeConnector {
     cached.session.disconnect();
   }
 
+  /** Attach the current socket to a target, caching the live CDP session id. */
+  async #attach(
+    executionId: string,
+    targetId: string,
+    timeoutMs?: number
+  ): Promise<string> {
+    const socket = await this.#socket(executionId);
+    const cached = this.#sockets.get(executionId);
+    const handle = `${ATTACH_HANDLE_PREFIX}${targetId}`;
+    const existing = cached?.attached.get(handle);
+    if (existing) return existing;
+    const live = await socket.attachToTarget(targetId, { timeoutMs });
+    cached?.attached.set(handle, live);
+    return live;
+  }
+
+  /**
+   * Resolve a model-facing session handle to the live CDP session id on the
+   * current socket, re-attaching lazily after a reconnect. Raw CDP session
+   * ids (from manual Target.attachToTarget sends) pass through untouched.
+   */
+  async #resolveSessionHandle(
+    executionId: string,
+    sessionId?: string
+  ): Promise<string | undefined> {
+    if (!sessionId?.startsWith(ATTACH_HANDLE_PREFIX)) return sessionId;
+    const targetId = sessionId.slice(ATTACH_HANDLE_PREFIX.length);
+    return this.#attach(executionId, targetId);
+  }
+
   /** Get or open the CDP socket for an execution. */
   async #socket(executionId: string): Promise<CdpSession> {
     if (this.#options.cdpUrl) {
@@ -492,7 +548,7 @@ export class BrowserConnector extends CodemodeConnector {
         timeoutMs: this.#options.timeout,
         headers: this.#options.cdpHeaders
       });
-      this.#sockets.set(executionId, { session });
+      this.#sockets.set(executionId, { session, attached: new Map() });
       return session;
     }
 
@@ -512,7 +568,8 @@ export class BrowserConnector extends CodemodeConnector {
     );
     this.#sockets.set(executionId, {
       session,
-      browserSessionId: stored.sessionId
+      browserSessionId: stored.sessionId,
+      attached: new Map()
     });
     return session;
   }

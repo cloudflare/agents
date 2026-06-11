@@ -152,6 +152,19 @@ pnpm run test:x402     # or: vitest --project x402
 
 Focused tests for the x402 payment / auth integration.
 
+### Browser connector e2e tests (`src/browser-tests/`)
+
+```bash
+pnpm run test:browser   # or: vitest run --config src/browser-tests/vitest.config.ts
+```
+
+Spawns a real `wrangler dev` (local Browser Rendering simulator + worker
+loader) and exercises the `BrowserConnector` end to end: CDP spec queries,
+`browser_execute` runs, and session lifecycle modes (one-shot, dynamic
+promotion, reuse + sweep, survive-a-pause, multi-socket probe). Kept out of
+the default `test` target so CI's `nx affected -t test` doesn't require
+Chromium — run it locally when touching `src/browser/`.
+
 ### Chat primitive tests (`src/chat/__tests__/`)
 
 ```bash

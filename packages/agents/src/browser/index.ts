@@ -12,6 +12,7 @@ export {
   deleteBrowserSession,
   listBrowserTargets,
   BrowserRenderingError,
+  type BrowserBinding,
   type BrowserSessionInfo,
   type BrowserTargetInfo,
   type ConnectBrowserOptions
@@ -52,10 +53,7 @@ export {
   type BrowserConnectorSweepResult
 } from "./connector";
 
-export {
-  type BrowserToolsOptions,
-  type ToolResult,
-  createBrowserToolHandlers,
-  SEARCH_DESCRIPTION,
-  EXECUTE_DESCRIPTION
-} from "./shared";
+// Re-exported so browser-tool consumers can satisfy the facet wiring with
+// `export { CodemodeRuntime } from "agents/browser";` in their worker entry
+// without adding a direct @cloudflare/codemode dependency.
+export { CodemodeRuntime } from "@cloudflare/codemode";

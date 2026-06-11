@@ -8,6 +8,8 @@
  * bindings, but per-binding keys avoid surprising cross-binding cache reads.
  */
 
+import type { BrowserBinding } from "./browser-run";
+
 interface RawCdpCommand {
   name: string;
   description?: string;
@@ -44,7 +46,7 @@ export interface SearchableCdpSpec {
 
 export interface CdpSpecSource {
   /** Browser Rendering binding (Fetcher) — used in production */
-  browser?: Fetcher;
+  browser?: BrowserBinding;
   /** CDP base URL override (e.g. http://localhost:9222) */
   cdpUrl?: string;
   /** Headers to send with CDP URL discovery requests */
@@ -60,7 +62,7 @@ interface SpecCacheEntry {
 }
 
 const urlSpecCache = new Map<string, SpecCacheEntry>();
-const bindingSpecCache = new WeakMap<Fetcher, SpecCacheEntry>();
+const bindingSpecCache = new WeakMap<BrowserBinding, SpecCacheEntry>();
 
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -142,7 +144,7 @@ async function fetchCdpSpecFromUrl(
 }
 
 async function fetchCdpSpecFromBrowser(
-  browser: Fetcher
+  browser: BrowserBinding
 ): Promise<SearchableCdpSpec> {
   return getCachedSpec(bindingSpecCache, browser, async () => {
     const createResponse = await browser.fetch(

@@ -68,15 +68,18 @@ class FakeCdpSocket {
     this.#listeners.set(type, list);
   }
 
+  static nextCdpSession = 0;
+
   send(data: string): void {
     const message = JSON.parse(data) as { id: number; method: string };
     this.sent.push(message);
     queueMicrotask(() => {
+      const result =
+        message.method === "Target.attachToTarget"
+          ? { sessionId: `cdp-session-${++FakeCdpSocket.nextCdpSession}` }
+          : { echo: message.method };
       this.#emit("message", {
-        data: JSON.stringify({
-          id: message.id,
-          result: { echo: message.method }
-        })
+        data: JSON.stringify({ id: message.id, result })
       });
     });
   }
@@ -288,6 +291,62 @@ describe("BrowserConnector", () => {
         (request) => request.upgrade && request.url.includes("session-1")
       )
     ).toBe(true);
+  });
+
+  it("returns a stable attach handle and re-attaches after a reconnect", async () => {
+    const { browser, sockets } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const connector = new BrowserConnector(fakeCtx, { browser, store });
+
+    const handle = (await connector.executeTool(
+      "attachToTarget",
+      { targetId: "target-1" },
+      { executionId: "exec-a" }
+    )) as string;
+    expect(handle).toBe("target:target-1");
+
+    await connector.executeTool(
+      "send",
+      { method: "Page.enable", sessionId: handle },
+      { executionId: "exec-a" }
+    );
+    const firstSocket = sockets[0];
+    expect(
+      firstSocket.sent.some((m) => m.method === "Target.attachToTarget")
+    ).toBe(true);
+    const pageEnable = firstSocket.sent.find(
+      (m) => m.method === "Page.enable"
+    ) as { sessionId?: string };
+    expect(pageEnable.sessionId).toMatch(/^cdp-session-/);
+
+    // Pass ends — socket dropped. The handle must keep working on the next
+    // pass by re-attaching on the fresh socket.
+    await connector.onPassEnd("exec-a", "paused");
+    await connector.executeTool(
+      "send",
+      { method: "Runtime.evaluate", sessionId: handle },
+      { executionId: "exec-a" }
+    );
+    const secondSocket = sockets[1];
+    expect(
+      secondSocket.sent.some((m) => m.method === "Target.attachToTarget")
+    ).toBe(true);
+    const evaluate = secondSocket.sent.find(
+      (m) => m.method === "Runtime.evaluate"
+    ) as { sessionId?: string };
+    expect(evaluate.sessionId).toMatch(/^cdp-session-/);
+    expect(evaluate.sessionId).not.toBe(pageEnable.sessionId);
+
+    // Raw CDP session ids pass through untouched.
+    await connector.executeTool(
+      "send",
+      { method: "DOM.enable", sessionId: "raw-cdp-id" },
+      { executionId: "exec-a" }
+    );
+    const dom = secondSocket.sent.find((m) => m.method === "DOM.enable") as {
+      sessionId?: string;
+    };
+    expect(dom.sessionId).toBe("raw-cdp-id");
   });
 
   it("fails with a clear error when the session expired across a pause", async () => {

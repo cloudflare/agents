@@ -37,7 +37,7 @@ Recent Wrangler releases run the Browser Rendering binding locally, so no separa
 ## Try it
 
 - "Open https://example.com and tell me the page title" -- uses the browser binding and CDP tools
-- "Search the CDP spec for screenshot commands" -- exercises `browser_search`
+- "Search the CDP spec for screenshot commands" -- exercises `cdp.spec()` inside `browser_execute`
 - "Take a screenshot of https://example.com" -- exercises `browser_execute` and renders the image inline
 - "What's the weather in London?" -- server-side tool, executes automatically
 - "What timezone am I in?" -- client-side tool, browser provides the result
