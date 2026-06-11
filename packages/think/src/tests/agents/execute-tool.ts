@@ -22,6 +22,7 @@ type ExecuteOutput = {
   executionId?: string;
   result?: string | number | boolean | null;
   error?: string;
+  pending?: Array<{ connector: string; method: string }>;
 };
 
 async function invoke(

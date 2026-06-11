@@ -187,13 +187,6 @@ function optionsFromAgent(agent: ExecuteToolAgent): CreateExecuteToolOptions {
     LOADER?: WorkerLoader;
     BROWSER?: BrowserBinding;
   };
-  if (!env.LOADER) {
-    throw new Error(
-      "createExecuteTool(agent) requires a WorkerLoader binding named LOADER — " +
-        'add `"worker_loaders": [{ "binding": "LOADER" }]` to wrangler.jsonc, ' +
-        "or call createExecuteTool({ ctx, loader, ... }) with explicit options."
-    );
-  }
   const ctx = (agent as unknown as { ctx?: DurableObjectState }).ctx;
   if (!ctx) {
     throw new Error(
@@ -221,12 +214,21 @@ function optionsFromAgent(agent: ExecuteToolAgent): CreateExecuteToolOptions {
  * reach it.
  */
 export function createExecuteRuntime(
-  source: CreateExecuteToolOptions | ExecuteToolAgent
+  source: CreateExecuteToolOptions | ExecuteToolAgent,
+  overrides?: Partial<Omit<CreateExecuteToolOptions, "ctx">>
 ): ExecuteRuntime {
   const agent = isAgent(source) ? source : undefined;
   const options: CreateExecuteToolOptions = isAgent(source)
-    ? optionsFromAgent(source)
-    : source;
+    ? { ...optionsFromAgent(source), ...overrides }
+    : { ...source, ...overrides };
+
+  if (agent && !options.executor && !options.loader) {
+    throw new Error(
+      "createExecuteTool(agent) requires a WorkerLoader binding named LOADER — " +
+        'add `"worker_loaders": [{ "binding": "LOADER" }]` to wrangler.jsonc, ' +
+        "or call createExecuteTool({ ctx, loader, ... }) with explicit options."
+    );
+  }
 
   let executor: Executor;
   if (options.executor) {
@@ -285,10 +287,57 @@ export function createExecuteRuntime(
     agent.codemode = runtime;
   }
 
+  const baseTool = runtime.tool({ description: options.description });
+  const baseExecute = baseTool.execute;
+  const tool: Tool = baseExecute
+    ? ({
+        ...baseTool,
+        // Paused outputs land in the transcript (and the model context) as a
+        // normal tool result; a gated call's raw args (e.g. a writeFile
+        // payload) can be huge. Truncate them in the model-facing payload —
+        // the runtime facet keeps the full args for the actual resume, and
+        // the host can fetch detail via `pendingExecutions`.
+        execute: async (input: unknown, callOptions: unknown) =>
+          truncatePausedExecutionOutput(
+            await (baseExecute as (i: unknown, o: unknown) => Promise<unknown>)(
+              input,
+              callOptions
+            )
+          )
+      } as Tool)
+    : baseTool;
+
   return {
     runtime,
     connectors,
-    tool: runtime.tool({ description: options.description })
+    tool
+  };
+}
+
+/** Character budget for a pending action's args in the transcript. */
+const PENDING_ARGS_MAX_CHARS = 2_000;
+
+/**
+ * Truncate the `pending[].args` of a paused execution output for transcript /
+ * model consumption. The full args stay on the runtime facet (used by the
+ * actual resume); only the model-facing copy is bounded. Non-paused outputs
+ * pass through unchanged.
+ */
+export function truncatePausedExecutionOutput(output: unknown): unknown {
+  if (typeof output !== "object" || output === null) return output;
+  const o = output as { status?: unknown; pending?: unknown };
+  if (o.status !== "paused" || !Array.isArray(o.pending)) return output;
+  return {
+    ...o,
+    pending: o.pending.map((action) => {
+      if (typeof action !== "object" || action === null) return action;
+      const a = action as { args?: unknown };
+      if (!("args" in a)) return action;
+      return {
+        ...a,
+        args: truncateResult(a.args, { maxChars: PENDING_ARGS_MAX_CHARS })
+      };
+    })
   };
 }
 
@@ -321,6 +370,11 @@ export function createExecuteRuntime(
  * }
  * ```
  *
+ * @example Agent defaults plus overrides (e.g. custom tools.*)
+ * ```ts
+ * execute: createExecuteTool(this, { tools: myDomainTools })
+ * ```
+ *
  * @example Explicit options
  * ```ts
  * execute: createExecuteTool({
@@ -336,7 +390,8 @@ export function createExecuteRuntime(
  * (approvals, audit, snippets) and the connector set.
  */
 export function createExecuteTool(
-  source: CreateExecuteToolOptions | ExecuteToolAgent
+  source: CreateExecuteToolOptions | ExecuteToolAgent,
+  overrides?: Partial<Omit<CreateExecuteToolOptions, "ctx">>
 ): Tool {
-  return createExecuteRuntime(source).tool;
+  return createExecuteRuntime(source, overrides).tool;
 }

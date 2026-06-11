@@ -139,6 +139,31 @@ function getMessageText(message: UIMessage): string {
     .join("");
 }
 
+/**
+ * A paused durable execution surfaced as a normal tool output: the execute
+ * tool returned `{ status: "paused", executionId, pending }` because a
+ * gated call inside the sandbox needs human approval. Approving resumes the
+ * run where it stopped; rejecting ends it with a reason the model can see.
+ */
+function asPausedExecution(output: unknown): {
+  executionId: string;
+  pending: Array<{ connector?: string; method?: string; args?: unknown }>;
+} | null {
+  if (typeof output !== "object" || output === null) return null;
+  const o = output as Record<string, unknown>;
+  if (o.status !== "paused" || typeof o.executionId !== "string") return null;
+  return {
+    executionId: o.executionId,
+    pending: Array.isArray(o.pending)
+      ? (o.pending as Array<{
+          connector?: string;
+          method?: string;
+          args?: unknown;
+        }>)
+      : []
+  };
+}
+
 /** Text and reasoning parts use `state: streaming` with empty `text` until the first delta. */
 function shouldShowStreamedTextPart(part: {
   text: string;
@@ -217,6 +242,13 @@ function Chat({
     modelTier: "fast" | "capable";
     persona: string;
   } | null>(null);
+
+  // Execution ids with an approve/reject in flight — disables the card's
+  // buttons until the runtime answers (the updated tool output then arrives
+  // over the socket and re-renders the card away).
+  const [resolvingExecutions, setResolvingExecutions] = useState<Set<string>>(
+    () => new Set()
+  );
 
   const agent = useAgent({
     // This chat lives as a facet of the user's AssistantDirectory. The
@@ -297,6 +329,31 @@ function Chat({
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [showConfigPanel]);
+
+  const resolveExecution = useCallback(
+    async (executionId: string, action: "approve" | "reject") => {
+      setResolvingExecutions((prev) => new Set(prev).add(executionId));
+      try {
+        // The callable replaces the paused tool output in the transcript and
+        // auto-continues the chat; the updated message arrives over the
+        // socket. A stale card (expired / approved elsewhere) resolves to a
+        // graceful error output the same way.
+        await agent.call(
+          action === "approve" ? "approveExecution" : "rejectExecution",
+          [executionId]
+        );
+      } catch (error) {
+        console.error(`Failed to ${action} execution:`, error);
+      } finally {
+        setResolvingExecutions((prev) => {
+          const next = new Set(prev);
+          next.delete(executionId);
+          return next;
+        });
+      }
+    },
+    [agent]
+  );
 
   const refreshWorkspaceFiles = useCallback(async () => {
     try {
@@ -1063,6 +1120,74 @@ function Chat({
                   const toolName = getToolName(part);
 
                   if (part.state === "output-available") {
+                    const pausedExecution = asPausedExecution(part.output);
+                    if (pausedExecution) {
+                      const resolving = resolvingExecutions.has(
+                        pausedExecution.executionId
+                      );
+                      return (
+                        <div
+                          key={part.toolCallId}
+                          className="flex justify-start"
+                        >
+                          <Surface className="max-w-[85%] px-4 py-3 rounded-xl ring-2 ring-kumo-warning">
+                            <div className="flex items-center gap-2 mb-2">
+                              <GearIcon
+                                size={14}
+                                className="text-kumo-warning"
+                              />
+                              <Text size="sm" bold>
+                                Approval needed: {toolName} paused
+                              </Text>
+                            </div>
+                            <div className="font-mono mb-3 space-y-1">
+                              {pausedExecution.pending.map((action, i) => (
+                                <div key={i}>
+                                  <Text size="xs" variant="secondary" bold>
+                                    {action.connector}.{action.method}
+                                  </Text>
+                                  {action.args != null && (
+                                    <pre className="text-xs text-kumo-subtle whitespace-pre-wrap">
+                                      {JSON.stringify(action.args, null, 2)}
+                                    </pre>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                            <div className="flex gap-2">
+                              <Button
+                                variant="primary"
+                                size="sm"
+                                disabled={resolving}
+                                icon={<CheckCircleIcon size={14} />}
+                                onClick={() =>
+                                  resolveExecution(
+                                    pausedExecution.executionId,
+                                    "approve"
+                                  )
+                                }
+                              >
+                                Approve &amp; resume
+                              </Button>
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                disabled={resolving}
+                                icon={<XCircleIcon size={14} />}
+                                onClick={() =>
+                                  resolveExecution(
+                                    pausedExecution.executionId,
+                                    "reject"
+                                  )
+                                }
+                              >
+                                Reject
+                              </Button>
+                            </div>
+                          </Surface>
+                        </div>
+                      );
+                    }
                     return (
                       <div key={part.toolCallId} className="flex justify-start">
                         <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">

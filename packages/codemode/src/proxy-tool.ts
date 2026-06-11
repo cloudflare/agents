@@ -475,6 +475,7 @@ function buildDescription(
     '- `codemode.describe("connector.method")` returns TypeScript type declarations.',
     "- `codemode.step(name, fn)` wraps side-effectful or nondeterministic work (raw fetch, random, time) so it runs once and is replayed on resume. Use it for anything that isn't a connector call.",
     "- Some methods require approval. The run pauses until the user approves, then resumes automatically. Write code as if the call returns normally.",
+    '- A result with `status: "paused"` means the run is awaiting human approval. Tell the user what is pending and wait — do NOT re-issue the code; the run resumes on its own once approved.',
     "- All code outside connector calls and `codemode.step` must be deterministic so resume can replay it.",
     "- Connector SDKs are available as globals named after each connector.",
     "- Do not use `fetch` — use connector SDKs.",

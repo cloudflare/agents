@@ -111,6 +111,10 @@
         "class_name": "ThinkExecuteToolAgent",
         "name": "ThinkExecuteToolAgent"
       },
+      {
+        "class_name": "ThinkExecuteHitlAgent",
+        "name": "ThinkExecuteHitlAgent"
+      },
       // Facet-only class. vitest-pool-workers needs it listed as a binding so
       // a facet-compatible class value resolves; it stays out of
       // new_sqlite_classes below (the host agent owns the SQLite store).
@@ -149,7 +153,8 @@
         "StuckThinkAgentToolChild",
         "ThinkExtensionHookAgent",
         "ThinkMessengerRouteTestAgent",
-        "ThinkExecuteToolAgent"
+        "ThinkExecuteToolAgent",
+        "ThinkExecuteHitlAgent"
       ],
       "tag": "v1"
     }

@@ -7,10 +7,7 @@ import {
   defaultContextOverflowClassifier
 } from "@cloudflare/think";
 import bundledSkills from "agents:skills";
-import {
-  createWorkspaceStateBackend,
-  type WorkspaceFsLike
-} from "@cloudflare/shell";
+import type { WorkspaceFsLike } from "@cloudflare/shell";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { createExtensionTools } from "@cloudflare/think/tools/extensions";
@@ -171,16 +168,33 @@ When you learn something about the user or their project, save it to memory.`
       : {};
 
     return {
-      execute: createExecuteTool({
-        ctx: this.ctx,
-        tools: createWorkspaceTools(this.workspace),
-        // `state.*` inside the sandbox is backed by the SHARED workspace
-        // too — `createWorkspaceStateBackend` accepts our `SharedWorkspace`
-        // proxy because it satisfies the `WorkspaceFsLike` interface from
-        // `@cloudflare/shell`. That means `state.planEdits`/`applyEdits`
-        // in chat B sees and mutates the same files chat A just wrote.
-        state: createWorkspaceStateBackend(this.workspace),
-        loader: this.env.LOADER
+      // Agent one-liner with overrides: the executor comes from
+      // `env.LOADER`, `cdp.*` from `env.BROWSER` (if bound), and `state.*`
+      // inside the sandbox is backed by the SHARED workspace — the
+      // `SharedWorkspace` proxy satisfies `WorkspaceFsLike`, so
+      // `state.planEdits`/`applyEdits` in chat B sees and mutates the same
+      // files chat A just wrote. This also assigns `this.codemode`, which
+      // powers the built-in `approveExecution` / `rejectExecution` /
+      // `pendingExecutions` callables behind the approval card.
+      execute: createExecuteTool(this, {
+        tools: {
+          ...createWorkspaceTools(this.workspace),
+          // Approval-gated sandbox tool: calling it pauses the run durably
+          // and renders the approval card in the client. Approving resumes
+          // the run exactly where it stopped.
+          sendAnnouncement: tool({
+            description:
+              "Send an announcement to the team channel. Requires human approval before it goes out.",
+            inputSchema: z.object({
+              message: z.string().describe("The announcement text")
+            }),
+            needsApproval: true,
+            execute: async ({ message }) => ({
+              sent: true,
+              message
+            })
+          })
+        }
       }),
 
       ...extensionTools,

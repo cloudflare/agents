@@ -30,6 +30,7 @@ export {
   StuckThinkAgentToolChild,
   ThinkExtensionHookAgent,
   ThinkExecuteToolAgent,
+  ThinkExecuteHitlAgent,
   ThinkMessengerRouteTestAgent
 } from "./agents";
 
@@ -58,6 +59,7 @@ import type {
   StuckThinkAgentToolChild,
   ThinkExtensionHookAgent,
   ThinkExecuteToolAgent,
+  ThinkExecuteHitlAgent,
   ThinkMessengerRouteTestAgent
 } from "./agents";
 
@@ -87,6 +89,7 @@ export type Env = {
   ThinkExtensionHookAgent: DurableObjectNamespace<ThinkExtensionHookAgent>;
   ThinkMessengerRouteTestAgent: DurableObjectNamespace<ThinkMessengerRouteTestAgent>;
   ThinkExecuteToolAgent: DurableObjectNamespace<ThinkExecuteToolAgent>;
+  ThinkExecuteHitlAgent: DurableObjectNamespace<ThinkExecuteHitlAgent>;
   LOADER: WorkerLoader;
 };
 

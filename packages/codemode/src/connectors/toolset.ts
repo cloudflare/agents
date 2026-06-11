@@ -2,11 +2,12 @@
  * ToolSetConnector — adapt an AI SDK `ToolSet` to the connector model.
  *
  * Each tool in the set becomes one connector tool under a single namespace
- * (default `"tools"`). Tools with `needsApproval` are stripped, matching the
- * historical `filterTools` behavior of the non-runtime code tool: an AI SDK
- * approval has no resume path inside the sandbox. Mark approval-gated work
- * with `requiresApproval` on a hand-written connector tool instead, which
- * gets the runtime's durable pause/approve/resume flow.
+ * (default `"tools"`). Tools with `needsApproval` map to `requiresApproval`:
+ * calling one pauses the run durably until the host approves
+ * (`runtime.approve()`), then the run resumes where it stopped — the
+ * runtime's pause/approve/resume flow, not the AI SDK's per-call approval.
+ * A function-valued `needsApproval` cannot be evaluated against sandbox
+ * arguments ahead of time, so it conservatively always requires approval.
  *
  * Lives in the `/ai` entry because schema handling (`asSchema`) needs the
  * `ai` peer dependency.
@@ -14,7 +15,6 @@
 import { asSchema } from "ai";
 import type { ToolSet } from "ai";
 import type { JSONSchema7 } from "json-schema";
-import { filterTools } from "../resolve";
 import { generateTypes } from "../tool-types";
 import { sanitizeToolName } from "../utils";
 import { CodemodeConnector, type ConnectorTools } from "./base";
@@ -33,7 +33,6 @@ export interface ToolSetConnectorOptions {
 
 export class ToolSetConnector extends CodemodeConnector {
   #options: ToolSetConnectorOptions;
-  #filtered: ToolSet;
 
   constructor(
     ctx: DurableObjectState | ExecutionContext,
@@ -41,7 +40,6 @@ export class ToolSetConnector extends CodemodeConnector {
   ) {
     super(ctx, {});
     this.#options = options;
-    this.#filtered = filterTools(options.tools) as ToolSet;
   }
 
   override name(): string {
@@ -55,7 +53,7 @@ export class ToolSetConnector extends CodemodeConnector {
   protected override tools(): ConnectorTools {
     const out: ConnectorTools = {};
     const sources = new Map<string, string>();
-    for (const [toolName, t] of Object.entries(this.#filtered)) {
+    for (const [toolName, t] of Object.entries(this.#options.tools)) {
       const execute =
         "execute" in t
           ? (t.execute as (args: unknown) => Promise<unknown>)
@@ -81,9 +79,17 @@ export class ToolSetConnector extends CodemodeConnector {
           ? asSchema(rawSchema as Parameters<typeof asSchema>[0])
           : undefined;
 
+      // boolean `false` means no approval; `true` or a function (which can't
+      // be pre-evaluated against sandbox args) gates the call behind the
+      // runtime's durable pause/approve/resume flow.
+      const needsApproval = (t as { needsApproval?: unknown }).needsApproval;
+      const requiresApproval =
+        needsApproval !== undefined && needsApproval !== false;
+
       out[name] = {
         description: t.description,
         inputSchema: schema?.jsonSchema as JSONSchema7 | undefined,
+        ...(requiresApproval ? { requiresApproval: true } : {}),
         execute: schema?.validate
           ? async (args: unknown) => {
               const result = await schema.validate!(args);
@@ -102,7 +108,7 @@ export class ToolSetConnector extends CodemodeConnector {
    * field descriptions as `@param` lines.
    */
   override async getTypeScriptTypes(): Promise<string> {
-    return generateTypes(this.#filtered, this.name());
+    return generateTypes(this.#options.tools, this.name());
   }
 }
 

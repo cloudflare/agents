@@ -41,20 +41,22 @@ describe("execute tool on the codemode runtime", () => {
     expect(out.result).toBe("bye");
   });
 
-  it("strips needsApproval AI SDK tools from the sandbox", async () => {
+  it("maps needsApproval AI SDK tools to requiresApproval — the call pauses durably", async () => {
     const agent = await freshAgent();
 
-    // Not advertised in the sandbox type surface…
+    // Advertised in the sandbox type surface like any other tool…
     const types = await agent.toolsConnectorTypes();
     expect(types).toContain("add");
-    expect(types).not.toContain("launchMissiles");
+    expect(types).toContain("launchMissiles");
 
-    // …and not callable from the sandbox.
+    // …and calling it pauses the run for approval instead of executing.
     const out = await agent.runExecute(
       `async () => await tools.launchMissiles({})`
     );
-    expect(out.status).toBe("error");
-    expect(out.error).toMatch(/launchMissiles/);
+    expect(out.status).toBe("paused");
+    expect(out.executionId).toBeTruthy();
+    expect(out.pending?.[0]?.connector).toBe("tools");
+    expect(out.pending?.[0]?.method).toBe("launchMissiles");
   });
 
   it("surfaces sandbox errors as error outcomes with an executionId", async () => {
