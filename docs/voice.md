@@ -269,7 +269,8 @@ Pass options to `withVoice()` as the second argument:
 ```typescript
 const VoiceAgent = withVoice(Agent, {
   historyLimit: 20, // Max messages loaded for context (default: 20)
-  audioFormat: "mp3", // Audio format sent to client (default: "mp3")
+  audioFormat: "mp3", // Default audio format sent to client (default: "mp3")
+  audioSampleRate: 16000, // Sample rate advertised in audio_config (default: 16000)
   maxMessageCount: 1000 // Max messages in SQLite (default: 1000)
 });
 ```
@@ -437,7 +438,67 @@ client.disconnect();
 | ----------------- | ------------------ | ----------------------------------------------------- |
 | `transport`       | `VoiceTransport`   | Custom transport (default: WebSocket via PartySocket) |
 | `audioInput`      | `VoiceAudioInput`  | Custom mic capture (default: built-in AudioWorklet)   |
-| `preferredFormat` | `VoiceAudioFormat` | Hint for server audio format (advisory only)          |
+| `preferredFormat` | `VoiceAudioFormat` | Requested server audio format (see negotiation below) |
+
+## Client API: `HeadlessVoiceClient`
+
+For non-browser clients — another Worker, a Durable Object, Node, Bun, Deno,
+or a test runner. Unlike `VoiceClient`, it has **no browser dependencies**: no
+`getUserMedia`, no `AudioContext`. It speaks the raw wire protocol over a
+WebSocket you provide and does no audio capture or playback. You feed it raw
+PCM (16 kHz mono 16-bit LE) and it hands back the agent's audio frames in the
+negotiated format. Wiring those to a device, a phone leg, or a test fixture is
+your job.
+
+```typescript
+import { HeadlessVoiceClient } from "@cloudflare/voice/headless";
+
+// Connect to an agent from another Worker (Worker-to-Worker over WebSocket).
+const res = await env.AGENT.fetch(
+  new Request("https://agent/agents/my-agent/room", {
+    headers: { Upgrade: "websocket" }
+  })
+);
+const socket = res.webSocket!;
+socket.accept();
+
+const client = new HeadlessVoiceClient({ socket, preferredFormat: "pcm16" });
+
+const config = await client.startCall(); // { format: "pcm16", sampleRate: 16000 }
+await client.streamPcm(pcm16Mono); // feed raw PCM
+const reply = await client.waitForTranscript("assistant");
+const audio = await client.nextAudio(); // agent's TTS, as config.format
+client.endCall();
+```
+
+Key methods: `startCall()`, `streamPcm(pcm, { frameBytes?, delayMs? })`,
+`sendAudio(frame)`, `sendText(text)`, `interrupt()`, `endCall()`, `close()`,
+and the awaitable `waitForStatus(status)`, `waitForTranscript(role?)`,
+`waitForMessage(predicate)`, and `nextAudio()`. State is also exposed
+synchronously on `status`, `audioConfig`, `protocolVersion`, `transcripts`,
+and `messages`.
+
+### Audio format negotiation
+
+A client requests a format via `start_call.preferred_format`; the agent replies
+with `audio_config` carrying the chosen `format` and `sampleRate`. The server
+does **not** transcode — the format is a label telling the client how to decode
+the bytes your `tts` provider emits. Override `negotiateAudioFormat()` to clamp
+to what your TTS can actually produce, and read `getConnectionAudioFormat(connection)`
+in `synthesize`/`beforeSynthesize` to emit the matching format. This lets a
+browser client on `mp3` and a headless client on `pcm16` share one agent.
+
+```typescript
+class MyAgent extends VoiceAgent<Env> {
+  negotiateAudioFormat(preferred: VoiceAudioFormat | undefined) {
+    // This agent's TTS can emit raw PCM or MP3, nothing else.
+    return preferred === "pcm16" ? "pcm16" : "mp3";
+  }
+}
+```
+
+Configure the advertised sample rate (important for raw `pcm16`, which carries
+no header) with the `audioSampleRate` option (default `16000`).
 
 ## Providers
 

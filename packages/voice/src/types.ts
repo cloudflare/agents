@@ -21,8 +21,23 @@ export type VoiceStatus = "idle" | "listening" | "thinking" | "speaking";
 
 // --- Audio format ---
 
+/** All audio formats the voice protocol knows how to label. */
+export const VOICE_AUDIO_FORMATS = ["mp3", "pcm16", "wav", "opus"] as const;
+
 /** Audio format the server uses for binary audio payloads. */
-export type VoiceAudioFormat = "mp3" | "pcm16" | "wav" | "opus";
+export type VoiceAudioFormat = (typeof VOICE_AUDIO_FORMATS)[number];
+
+/**
+ * Type guard for an untrusted audio-format value off the wire.
+ * `start_call.preferred_format` arrives as an arbitrary string from the
+ * client, so validate it before treating it as a `VoiceAudioFormat`.
+ */
+export function isVoiceAudioFormat(value: unknown): value is VoiceAudioFormat {
+  return (
+    typeof value === "string" &&
+    (VOICE_AUDIO_FORMATS as readonly string[]).includes(value)
+  );
+}
 
 // --- Conversation message role ---
 

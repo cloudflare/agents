@@ -34,6 +34,11 @@
       "import": "./dist/voice-client.js",
       "require": "./dist/voice-client.js"
     },
+    "./headless": {
+      "types": "./dist/headless-client.d.ts",
+      "import": "./dist/headless-client.js",
+      "require": "./dist/headless-client.js"
+    },
     "./react": {
       "types": "./dist/voice-react.d.ts",
       "import": "./dist/voice-react.js",

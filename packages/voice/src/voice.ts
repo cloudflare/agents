@@ -28,7 +28,7 @@
 import type { Agent, Connection, WSMessage } from "agents";
 import { SentenceChunker } from "./sentence-chunker";
 import { iterateText, type TextSource } from "./text-stream";
-import { VOICE_PROTOCOL_VERSION } from "./types";
+import { VOICE_PROTOCOL_VERSION, isVoiceAudioFormat } from "./types";
 import type {
   VoiceRole,
   VoiceAudioFormat,
@@ -41,8 +41,12 @@ import { AudioConnectionManager, sendVoiceJSON } from "./audio-pipeline";
 // Re-export SentenceChunker for direct use
 export { SentenceChunker } from "./sentence-chunker";
 
-// Re-export protocol version constant
-export { VOICE_PROTOCOL_VERSION } from "./types";
+// Re-export protocol version constant and audio-format helpers
+export {
+  VOICE_PROTOCOL_VERSION,
+  VOICE_AUDIO_FORMATS,
+  isVoiceAudioFormat
+} from "./types";
 
 // Re-export shared types
 export type {
@@ -109,8 +113,18 @@ export interface VoiceTurnContext {
 export interface VoiceAgentOptions {
   /** Max conversation history messages loaded for context. @default 20 */
   historyLimit?: number;
-  /** Audio format used for binary audio payloads sent to the client. @default "mp3" */
+  /**
+   * Default audio format used for binary audio payloads sent to the client.
+   * A client may request a different format via `start_call.preferred_format`;
+   * see `negotiateAudioFormat()`. @default "mp3"
+   */
   audioFormat?: VoiceAudioFormat;
+  /**
+   * Sample rate (Hz) advertised to the client in `audio_config`. Required by
+   * headless/raw clients that receive `pcm16` (raw PCM carries no header).
+   * @default 16000
+   */
+  audioSampleRate?: number;
   /** Max conversation messages to keep in SQLite. Oldest are pruned. @default 1000 */
   maxMessageCount?: number;
 }
@@ -119,6 +133,7 @@ export interface VoiceAgentOptions {
 
 const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_MAX_MESSAGE_COUNT = 1000;
+const DEFAULT_AUDIO_SAMPLE_RATE = 16000;
 
 // --- Mixin ---
 
@@ -135,6 +150,11 @@ export interface VoiceAgentMixinMembers {
   tts?: (TTSProvider & Partial<StreamingTTSProvider>) | undefined;
   onTurn(transcript: string, context: VoiceTurnContext): Promise<TextSource>;
   createTranscriber(connection: Connection): Transcriber | null;
+  negotiateAudioFormat(
+    preferred: VoiceAudioFormat | undefined,
+    connection: Connection
+  ): VoiceAudioFormat;
+  getConnectionAudioFormat(connection: Connection): VoiceAudioFormat;
   beforeCallStart(connection: Connection): boolean | Promise<boolean>;
   onCallStart(connection: Connection): void | Promise<void>;
   onCallEnd(connection: Connection): void | Promise<void>;
@@ -219,6 +239,10 @@ export function withVoice<TBase extends AgentLike>(
     // keepAlive dispose functions per connection (prevents DO eviction during calls)
     #keepAliveDispose = new Map<string, () => void>();
 
+    // Negotiated audio format per connection (set at start_call). Lets a
+    // browser client on mp3 and a headless client on pcm16 share one agent.
+    #audioFormatByConnection = new Map<string, VoiceAudioFormat>();
+
     // Voice protocol message types handled internally
     static #VOICE_MESSAGES = new Set([
       "hello",
@@ -275,6 +299,7 @@ export function withVoice<TBase extends AgentLike>(
       (this as any).onClose = (connection: Connection, ...rest: unknown[]) => {
         this.#releaseKeepAlive(connection.id);
         this.#cm.cleanup(connection.id);
+        this.#audioFormatByConnection.delete(connection.id);
         return _onClose?.(connection, ...rest);
       };
 
@@ -351,6 +376,39 @@ export function withVoice<TBase extends AgentLike>(
      */
     createTranscriber(_connection: Connection): Transcriber | null {
       return null;
+    }
+
+    /**
+     * Choose the audio format for a connection given the client's request.
+     *
+     * Called once per `start_call` with the validated `preferred_format`
+     * (or `undefined` if the client sent none / an unknown value). The
+     * default honors any valid request and otherwise falls back to the
+     * configured `audioFormat`.
+     *
+     * The server does NOT transcode — the format is a label telling the
+     * client how to decode the bytes your `tts` provider emits. Override
+     * this to clamp to the formats your TTS can actually produce, e.g.
+     * `return preferred === "pcm16" ? "pcm16" : "mp3"`.
+     */
+    negotiateAudioFormat(
+      preferred: VoiceAudioFormat | undefined,
+      _connection: Connection
+    ): VoiceAudioFormat {
+      return preferred ?? (opt("audioFormat", "mp3") as VoiceAudioFormat);
+    }
+
+    /**
+     * The audio format negotiated for a connection's current call, or the
+     * configured default if no call is active. Read this in `synthesize`
+     * overrides or `beforeSynthesize`/`afterSynthesize` hooks to emit audio
+     * in the format the client expects.
+     */
+    getConnectionAudioFormat(connection: Connection): VoiceAudioFormat {
+      return (
+        this.#audioFormatByConnection.get(connection.id) ??
+        (opt("audioFormat", "mp3") as VoiceAudioFormat)
+      );
     }
 
     beforeCallStart(_connection: Connection): boolean | Promise<boolean> {
@@ -507,7 +565,7 @@ export function withVoice<TBase extends AgentLike>(
 
     // --- Internal: call lifecycle ---
 
-    async #handleStartCall(connection: Connection, _preferredFormat?: string) {
+    async #handleStartCall(connection: Connection, preferredFormat?: string) {
       if (this.#cm.isInCall(connection.id)) return;
 
       // Mark as in-call before any await to prevent duplicate start_call
@@ -537,10 +595,15 @@ export function withVoice<TBase extends AgentLike>(
       const dispose = await this.keepAlive();
       this.#keepAliveDispose.set(connection.id, dispose);
 
-      const configuredFormat = opt("audioFormat", "mp3") as VoiceAudioFormat;
+      const requested = isVoiceAudioFormat(preferredFormat)
+        ? preferredFormat
+        : undefined;
+      const format = this.negotiateAudioFormat(requested, connection);
+      this.#audioFormatByConnection.set(connection.id, format);
       this.#sendJSON(connection, {
         type: "audio_config",
-        format: configuredFormat
+        format,
+        sampleRate: opt("audioSampleRate", DEFAULT_AUDIO_SAMPLE_RATE)
       });
 
       this.#cm.startTranscriberSession(connection.id, provider, {
@@ -577,6 +640,7 @@ export function withVoice<TBase extends AgentLike>(
     #handleEndCall(connection: Connection) {
       this.#cm.cleanup(connection.id);
       this.#releaseKeepAlive(connection.id);
+      this.#audioFormatByConnection.delete(connection.id);
       this.#sendJSON(connection, { type: "status", status: "idle" });
       this.onCallEnd(connection);
     }
