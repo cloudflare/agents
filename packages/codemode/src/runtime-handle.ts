@@ -3,6 +3,7 @@ import type { CodemodeConnector } from "./connectors";
 import type { Executor } from "./executor";
 import {
   createProxyTool,
+  expireCodemode,
   getCodemodeRuntime,
   pendingCodemode,
   rejectCodemode,
@@ -20,9 +21,18 @@ export type CreateCodemodeRuntimeOptions = {
   connectors: CodemodeConnector[];
   executor: Executor;
   /**
+   * Runtime name — the durable identity of this runtime's facet (its
+   * executions and snippets). Defaults to `"default"`. Use distinct names for
+   * runtimes that should keep separate histories. Adding or removing
+   * connectors does NOT change the identity: each execution/snippet records
+   * the connector names it needs, and resuming/re-running verifies they are
+   * still configured.
+   */
+  name?: string;
+  /**
    * How many terminal (completed/error) executions to retain per runtime.
    * Older ones are pruned automatically when a new run begins. Running and
-   * paused executions are never pruned. Defaults to 50.
+   * paused executions are never pruned (see `expirePaused`). Defaults to 50.
    */
   maxExecutions?: number;
   /**
@@ -54,6 +64,14 @@ export type CodemodeRollbackOptions = {
   executionId: string;
 };
 
+export type CodemodeExpireOptions = {
+  /**
+   * Expire paused (awaiting-approval) runs whose last state change is older
+   * than this. Defaults to 24 hours.
+   */
+  maxAgeMs?: number;
+};
+
 export interface CodemodeRuntimeHandle {
   tool(
     options?: CodemodeRuntimeToolOptions
@@ -62,6 +80,12 @@ export interface CodemodeRuntimeHandle {
   reject(options: CodemodeRejectOptions): Promise<void>;
   rollback(options: CodemodeRollbackOptions): Promise<void>;
   pending(executionId?: string): Promise<PendingAction[]>;
+  /**
+   * Expire paused runs nobody approved (paused runs are never auto-pruned),
+   * marking them rejected and disposing per-execution connector resources.
+   * Call from a recurring alarm/scheduled task. Returns the expired ids.
+   */
+  expirePaused(options?: CodemodeExpireOptions): Promise<string[]>;
   /** All executions, newest first — the audit trail. Optionally capped. */
   executions(limit?: number): Promise<ExecutionState[]>;
   /** Delete a single execution from the audit trail. */
@@ -94,6 +118,7 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
       ctx: this.#options.ctx,
       executor: this.#options.executor,
       connectors: this.#options.connectors,
+      name: this.#options.name,
       description: options?.description,
       maxExecutions: this.#options.maxExecutions,
       transformResult: this.#options.transformResult
@@ -105,6 +130,7 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
       ctx: this.#options.ctx,
       executor: this.#options.executor,
       connectors: this.#options.connectors,
+      name: this.#options.name,
       executionId: options.executionId,
       maxExecutions: this.#options.maxExecutions,
       transformResult: this.#options.transformResult
@@ -115,6 +141,7 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
     return rejectCodemode({
       ctx: this.#options.ctx,
       connectors: this.#options.connectors,
+      name: this.#options.name,
       seq: options.seq,
       executionId: options.executionId
     });
@@ -124,6 +151,7 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
     return rollbackCodemode({
       ctx: this.#options.ctx,
       connectors: this.#options.connectors,
+      name: this.#options.name,
       executionId: options.executionId
     });
   }
@@ -131,8 +159,17 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
   pending(executionId?: string): Promise<PendingAction[]> {
     return pendingCodemode({
       ctx: this.#options.ctx,
-      connectors: this.#options.connectors,
+      name: this.#options.name,
       executionId
+    });
+  }
+
+  expirePaused(options?: CodemodeExpireOptions): Promise<string[]> {
+    return expireCodemode({
+      ctx: this.#options.ctx,
+      connectors: this.#options.connectors,
+      name: this.#options.name,
+      maxAgeMs: options?.maxAgeMs
     });
   }
 
@@ -161,6 +198,6 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
   }
 
   #runtime() {
-    return getCodemodeRuntime(this.#options.ctx, this.#options.connectors);
+    return getCodemodeRuntime(this.#options.ctx, this.#options.name);
   }
 }

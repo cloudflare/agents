@@ -7,6 +7,14 @@ import type { JsonSchemaToolDescriptors } from "../json-schema-types";
 export type ToolAnnotations = {
   /** Requires user approval before executing. Unannotated methods execute immediately. */
   requiresApproval?: boolean;
+  /**
+   * Replay policy for the durable log. `"reexecute"` marks the call ephemeral:
+   * its result is never stored, and a replay re-executes the call instead of
+   * replaying a recorded result. Only valid for idempotent reads — the call
+   * runs again on every resume pass. Keeps large read results (file contents,
+   * directory listings) out of the durable log. Defaults to `"log"`.
+   */
+  replay?: "log" | "reexecute";
 };
 
 // ---------------------------------------------------------------------------
@@ -40,6 +48,16 @@ export type ExecutionEndStatus =
   | "error"
   | "rejected"
   | "rolled_back";
+
+/**
+ * Outcome of a single execution *pass*, passed to
+ * `CodemodeConnector.onPassEnd`. Unlike `ExecutionEndStatus` this includes
+ * `"paused"`: a pass that ends awaiting approval is not terminal (the
+ * execution may resume later), but the pass itself is over — per-pass
+ * resources (an open socket, a lease) should be released even though
+ * per-execution resources (a session) must survive.
+ */
+export type PassEndStatus = ExecutionEndStatus | "paused";
 
 // ---------------------------------------------------------------------------
 // Connector description — returned by describe() RPC.

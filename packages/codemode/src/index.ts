@@ -27,6 +27,9 @@ export {
 
 export {
   CodemodeRuntime,
+  DEFAULT_MAX_EXECUTIONS,
+  DEFAULT_PAUSED_TTL_MS,
+  MAX_DURABLE_VALUE_BYTES,
   type ToolLogEntry,
   type ToolDecision,
   type ExecutionState,
@@ -41,7 +44,8 @@ export {
   type CodemodeRuntimeToolOptions,
   type CodemodeApproveOptions,
   type CodemodeRejectOptions,
-  type CodemodeRollbackOptions
+  type CodemodeRollbackOptions,
+  type CodemodeExpireOptions
 } from "./runtime-handle";
 
 export {
@@ -59,6 +63,7 @@ export {
   type OpenApiRequestOptions,
   type ConnectorDescription,
   type ExecutionEndStatus,
+  type PassEndStatus,
   type ToolAnnotations,
   type ToolExecuteContext,
   type SearchResult,

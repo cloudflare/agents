@@ -240,6 +240,17 @@ describe("DynamicWorkerExecutor", () => {
     );
   });
 
+  it("should return a clear error for provider names that shadow harness globals", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    for (const name of ["Promise", "setTimeout", "Error", "console"]) {
+      const result = await executor.execute("async () => 42", [
+        { name, fns: {} }
+      ]);
+      expect(result.error).toBe(`Provider name "${name}" is reserved`);
+    }
+  });
+
   it("should return error when code throws", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 

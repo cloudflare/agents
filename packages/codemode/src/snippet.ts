@@ -23,6 +23,12 @@ export interface Snippet {
   savedAt: number;
   /** Optional JSON Schema for the input passed to codemode.run(name, input). */
   inputSchema?: unknown;
+  /**
+   * Connector names the source execution ran with. Recorded so a later
+   * `codemode.run` can verify the required connectors are still configured on
+   * the runtime, with a clear error when one is missing.
+   */
+  connectors?: string[];
 }
 
 /** Options when promoting an execution's script to a saved snippet. */
