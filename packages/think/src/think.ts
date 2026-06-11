@@ -8478,20 +8478,49 @@ export class Think<
   /**
    * Replace a paused execute-tool output in the transcript with the
    * execution's new outcome and kick the auto-continuation so the model sees
-   * it. No-ops (returns false) when no paused part carries `executionId` —
-   * e.g. the output was already replaced from another tab.
+   * it.
+   *
+   * When no paused part carries `executionId` — the output was already
+   * replaced from another tab, or compaction summarized the part away — the
+   * runtime has still durably applied the approval/rejection, so the outcome
+   * must not be dropped: it is appended as a system note instead, and the
+   * continuation still fires so the model can act on it.
    */
   private async _applyExecutionOutcome(
     executionId: string,
     output: unknown
   ): Promise<boolean> {
     const toolCallId = this._findPausedExecutionToolCall(executionId);
-    if (!toolCallId) return false;
-    await this._enqueueInteractionApply(() =>
-      this._applyToolUpdateToMessages(
-        pausedExecutionUpdate(toolCallId, executionId, output)
-      )
-    );
+    if (!toolCallId) {
+      // Already resolved in place (e.g. approved from another tab)? Then the
+      // transcript has the outcome and nothing more is needed.
+      if (this._findExecutionToolCall(executionId) != null) return false;
+      let summary: string;
+      try {
+        summary = JSON.stringify(output)?.slice(0, 4_000) ?? String(output);
+      } catch {
+        summary = String(output);
+      }
+      await this._appendMessageToHistory({
+        id: `exec-outcome-${executionId}-${crypto.randomUUID()}`,
+        role: "system",
+        parts: [
+          {
+            type: "text",
+            text:
+              `[execute tool] The paused execution "${executionId}" was ` +
+              `resolved, but its tool call is no longer in the transcript ` +
+              `(it may have been compacted). Outcome: ${summary}`
+          }
+        ]
+      } as UIMessage);
+    } else {
+      await this._enqueueInteractionApply(() =>
+        this._applyToolUpdateToMessages(
+          pausedExecutionUpdate(toolCallId, executionId, output)
+        )
+      );
+    }
     // Continue on the approving connection when there is one (WS callable),
     // else any open connection (DO-stub approval with clients attached).
     const { connection } = getCurrentAgent();
@@ -8514,6 +8543,20 @@ export class Think<
    * turn streams), then the persisted transcript, newest message first.
    */
   private _findPausedExecutionToolCall(executionId: string): string | null {
+    return this._findExecutionToolCall(executionId, true);
+  }
+
+  /**
+   * Find the tool part carrying `executionId` in its output. With
+   * `pausedOnly`, only a still-paused output matches — used to locate the
+   * part an approval outcome should replace. Without it, any settled output
+   * matches — used to distinguish "already resolved elsewhere" from "the
+   * part is gone from the transcript" (e.g. compacted away).
+   */
+  private _findExecutionToolCall(
+    executionId: string,
+    pausedOnly = false
+  ): string | null {
     const matches = (part: Record<string, unknown>): boolean => {
       if (part.state !== "output-available") return false;
       if (typeof part.toolCallId !== "string") return false;
@@ -8524,7 +8567,7 @@ export class Think<
       return (
         output != null &&
         typeof output === "object" &&
-        output.status === "paused" &&
+        (!pausedOnly || output.status === "paused") &&
         output.executionId === executionId
       );
     };

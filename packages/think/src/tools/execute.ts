@@ -43,9 +43,12 @@ export interface CreateExecuteToolOptions {
 
   /**
    * AI SDK tools exposed inside the sandbox as `tools.*`. Tools with
-   * `needsApproval` are stripped — wrap approval-gated work in a connector
-   * tool with `requiresApproval` instead, which gets the runtime's durable
-   * pause/approve/resume flow.
+   * `needsApproval` get the runtime's durable pause/approve/resume flow:
+   * calling one pauses the execution until `approveExecution` /
+   * `rejectExecution`. A function-valued `needsApproval` can't be evaluated
+   * against sandbox arguments ahead of time, so it conservatively always
+   * requires approval. Tools without an `execute` function (client-side /
+   * provider-executed) are skipped — the sandbox can't call them.
    */
   tools?: ToolSet;
 
@@ -146,7 +149,12 @@ export interface ExecuteRuntime {
 function isAgent(
   source: CreateExecuteToolOptions | ExecuteToolAgent
 ): source is ExecuteToolAgent {
-  return "env" in source;
+  // An options bag has no `env`, but guard against a hand-built object that
+  // happens to carry one (e.g. spread from a worker handler): an explicit
+  // `executor`/`loader` key marks it as options — agents never have those.
+  // (Other option keys like `state`/`browser` can legitimately exist on agent
+  // subclasses, so they can't discriminate.)
+  return "env" in source && !("executor" in source) && !("loader" in source);
 }
 
 // The agent one-liner derives state from the workspace, which requires the

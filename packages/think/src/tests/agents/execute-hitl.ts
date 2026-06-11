@@ -225,6 +225,37 @@ export class ThinkExecuteHitlAgent extends Think {
     return "";
   }
 
+  /**
+   * Simulate compaction summarizing the execute tool part away: strip every
+   * `tool-execute` part from the transcript.
+   */
+  async stripExecutePartsForTest(): Promise<void> {
+    for (const message of this.messages) {
+      if (message.role !== "assistant") continue;
+      const parts = message.parts as Array<Record<string, unknown>>;
+      if (!parts.some((p) => p.type === "tool-execute")) continue;
+      const remaining = parts.filter((p) => p.type !== "tool-execute");
+      await this.updateMessageInHistory({
+        ...message,
+        parts: (remaining.length > 0
+          ? remaining
+          : [{ type: "text", text: "(summarized)" }]) as UIMessage["parts"]
+      } as UIMessage);
+    }
+  }
+
+  /** Text of system messages (the orphaned-outcome fallback notes). */
+  async systemNoteTexts(): Promise<string[]> {
+    return this.messages
+      .filter((m) => m.role === "system")
+      .map((m) =>
+        (m as UIMessage).parts
+          .filter((p) => p.type === "text")
+          .map((p) => (p as { text: string }).text)
+          .join("")
+      );
+  }
+
   /** Expire all paused runs immediately (stage 1 `expirePaused`). */
   async expirePausedForTest(): Promise<string[]> {
     if (!this.codemode) throw new Error("no codemode runtime");

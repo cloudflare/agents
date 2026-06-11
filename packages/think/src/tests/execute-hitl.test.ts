@@ -306,6 +306,31 @@ describe("Think HITL — approve/reject paused executions", () => {
     ws.close();
   });
 
+  it("an approval whose paused part was compacted away records a system note", async () => {
+    const room = crypto.randomUUID();
+    const { agent, ws, executionId } = await runTurnToPause(room);
+
+    // Simulate compaction summarizing the paused tool part away.
+    await agent.stripExecutePartsForTest();
+    expect(await agent.executeParts()).toEqual([]);
+
+    const outcome = (await callRpc(ws, "approveExecution", [
+      executionId
+    ])) as PausedOutput;
+    expect(outcome.status).toBe("completed");
+    // The runtime still applied the approval — the gated tool ran…
+    expect(await agent.gatedCallCount()).toBe(1);
+
+    // …and the outcome was not dropped: it landed as a system note.
+    await waitUntil(async () =>
+      (await agent.systemNoteTexts()).some(
+        (text) => text.includes(executionId) && text.includes("completed")
+      )
+    );
+
+    ws.close();
+  });
+
   it("approveExecution works after the in-memory handle is lost (DO restart path)", async () => {
     const room = crypto.randomUUID();
     const { agent, ws, executionId } = await runTurnToPause(room);
