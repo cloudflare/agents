@@ -457,6 +457,31 @@ rm /remove.txt`)) as {
     expect(removed.error).toContain("File not found");
   });
 
+  it("does not persist synthetic shell paths (/bin, /usr, …) to the workspace", async () => {
+    const agent = await freshAgent("bash-no-builtin-sync");
+
+    // Running any script makes just-bash materialize its builtins under /bin
+    // and /usr/bin inside the sandbox; none of that may leak into the
+    // workspace or the changedFiles report.
+    const result = (await agent.toolBash('ls / && echo "ok" > /ok.txt')) as {
+      exitCode: number;
+      changedFiles: {
+        created: string[];
+        directoriesCreated: string[];
+      };
+    };
+
+    expect(result.exitCode).toBe(0);
+    expect(result.changedFiles.created).toEqual(["/ok.txt"]);
+    expect(result.changedFiles.directoriesCreated).toEqual([]);
+
+    const listed = (await agent.toolList("/")) as { entries: string[] };
+    expect(listed.entries).not.toContain("bin/");
+    expect(listed.entries).not.toContain("usr/");
+    expect(listed.entries).not.toContain("dev/");
+    expect(listed.entries).not.toContain("proc/");
+  });
+
   it("returns non-zero bash exits with output", async () => {
     const agent = await freshAgent("bash-nonzero");
 

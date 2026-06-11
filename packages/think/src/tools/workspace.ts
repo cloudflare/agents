@@ -1137,7 +1137,11 @@ const DEFAULT_BASH_MAX_WORKSPACE_FILES = 1_000;
 const DEFAULT_BASH_MAX_WORKSPACE_FILE_BYTES = 1_000_000;
 const DEFAULT_BASH_MAX_OUTPUT_BYTES = 64_000;
 const BASH_READDIR_PAGE_SIZE = 1_000;
-const BASH_EXCLUDED_SYNC_PREFIXES = ["/dev/", "/proc/", "/sys/"];
+// Synthetic paths the bash sandbox creates for itself (shell builtins under
+// /bin and /usr/bin, pseudo-filesystems, scratch space). New files here must
+// never be persisted to the workspace — only pre-existing workspace files
+// under these roots keep syncing.
+const BASH_EXCLUDED_SYNC_ROOTS = ["/bin", "/usr", "/dev", "/proc", "/sys"];
 
 type BashToolInput = {
   script: string;
@@ -1166,13 +1170,17 @@ export function createBashTool(options: BashToolOptions) {
     description:
       "Run a Bash script against the workspace. Use for shell-style workflows " +
       "that combine multiple file operations. The script runs in a sandboxed " +
-      "virtual filesystem mounted from the workspace; changed files are written back.",
+      "virtual filesystem with the workspace mounted at `/` (also the default " +
+      "working directory) — there is no `/workspace` or `/home`; use absolute " +
+      "paths like `/notes.txt`. Changed files are written back to the workspace.",
     inputSchema: z.object({
       script: z.string().describe("Bash script to run"),
       cwd: z
         .string()
         .optional()
-        .describe("Working directory for the script. Defaults to /")
+        .describe(
+          "Working directory for the script. Defaults to / (the workspace root)"
+        )
     }),
     execute: async ({ script, cwd }: BashToolInput) => {
       const timeout = options.timeout ?? DEFAULT_BASH_TIMEOUT_MS;
@@ -1492,8 +1500,10 @@ function shouldSyncBashPath(
   if (path === "/") return false;
   if (initialFiles.has(path)) return true;
   if (protectedPaths.has(path)) return true;
-  if (path.startsWith("/tmp/")) return false;
-  return !BASH_EXCLUDED_SYNC_PREFIXES.some((prefix) => path.startsWith(prefix));
+  if (path === "/tmp" || path.startsWith("/tmp/")) return false;
+  return !BASH_EXCLUDED_SYNC_ROOTS.some(
+    (root) => path === root || path.startsWith(`${root}/`)
+  );
 }
 
 function hasProtectedDescendant(

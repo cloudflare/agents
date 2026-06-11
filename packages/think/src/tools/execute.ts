@@ -116,8 +116,9 @@ export interface CreateExecuteToolOptions {
   globalOutbound?: Fetcher | null;
 
   /**
-   * Custom tool description. Use `{{types}}` as a placeholder for the
-   * auto-generated TypeScript type definitions of the available namespaces.
+   * Custom tool description. Replaces the generated default entirely — the
+   * default explains the codemode workflow and lists each configured
+   * namespace (`tools.*`, `state.*`, `cdp.*`) with a usage hint.
    */
   description?: string;
 
@@ -295,7 +296,10 @@ export function createExecuteRuntime(
     agent.codemode = runtime;
   }
 
-  const baseTool = runtime.tool({ description: options.description });
+  const baseTool = runtime.tool({
+    description: options.description,
+    connectorHints: connectorHints(options)
+  });
   const baseExecute = baseTool.execute;
   const tool: Tool = baseExecute
     ? ({
@@ -320,6 +324,40 @@ export function createExecuteRuntime(
     connectors,
     tool
   };
+}
+
+/**
+ * One-line usage hints for the namespaces createExecuteTool itself wires up,
+ * rendered into the default tool description. Models otherwise tend to guess
+ * a filesystem API (`host.*`, `fs.*`) instead of discovering `state.*` /
+ * `tools.*` via `codemode.search`.
+ */
+function connectorHints(
+  options: CreateExecuteToolOptions
+): Record<string, string> {
+  const hints: Record<string, string> = {};
+  if (options.tools) {
+    const names = Object.entries(options.tools)
+      .filter(([, t]) => typeof t.execute === "function")
+      .map(([name]) => name);
+    if (names.length > 0) {
+      hints.tools =
+        `your host tools as async functions — e.g. \`await tools.${names[0]}({ ... })\`. ` +
+        `Available: ${names.join(", ")}`;
+    }
+  }
+  if (options.state) {
+    hints.state =
+      "the workspace filesystem. Every method takes ONE object argument: " +
+      "`state.readFile({ path })`, `state.writeFile({ path, content })`, " +
+      "`state.readdir({ path })`, `state.glob({ pattern })`, …";
+  }
+  if (options.browser) {
+    hints.cdp =
+      "a live browser over the Chrome DevTools Protocol — " +
+      "`cdp.send({ method, params })`, `cdp.attachToTarget(...)`, `cdp.spec(...)`";
+  }
+  return hints;
 }
 
 /** Character budget for a pending action's args in the transcript. */
