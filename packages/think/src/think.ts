@@ -1773,6 +1773,15 @@ export class Think<
   workspace!: WorkspaceLike;
 
   /**
+   * The codemode runtime behind the execute tool, when one has been created
+   * via `createExecuteRuntime(this)` / `createExecuteTool(this)` (from
+   * `@cloudflare/think/tools/execute`). Gives callables and lifecycle hooks
+   * access to approvals (`approve`/`reject`/`pending`), the audit trail
+   * (`executions`), `expirePaused`, and snippets.
+   */
+  codemode?: import("@cloudflare/codemode").CodemodeRuntimeHandle;
+
+  /**
    * Include the default workspace Bash tool. Enabled by default so models can
    * run shell-style multi-file workflows against the workspace. Set to `false`
    * to omit it from the built-in workspace tools.

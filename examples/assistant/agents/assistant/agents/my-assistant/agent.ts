@@ -172,6 +172,7 @@ When you learn something about the user or their project, save it to memory.`
 
     return {
       execute: createExecuteTool({
+        ctx: this.ctx,
         tools: createWorkspaceTools(this.workspace),
         // `state.*` inside the sandbox is backed by the SHARED workspace
         // too — `createWorkspaceStateBackend` accepts our `SharedWorkspace`

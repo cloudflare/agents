@@ -1,6 +1,10 @@
 import { camelCaseToKebabCase, routeAgentRequest } from "agents";
 import type { ThinkFrameworkManifest } from "./framework/manifest";
 
+// Re-exported so framework-generated worker entries can expose the codemode
+// runtime facet class without depending on @cloudflare/codemode directly.
+export { CodemodeRuntime } from "@cloudflare/codemode";
+
 export interface ThinkWorkerEntry {
   fetch(
     request: Request,

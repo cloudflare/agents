@@ -11,3 +11,8 @@ export {
   type ToolDescriptor,
   type ToolDescriptors
 } from "./tool-types";
+export {
+  ToolSetConnector,
+  toolSetConnector,
+  type ToolSetConnectorOptions
+} from "./connectors/toolset";

@@ -76,6 +76,10 @@ export function generateThinkEntry(manifest: ThinkFrameworkManifest): string {
 
   return [
     `export * from "virtual:think/agents";`,
+    // The codemode runtime facet class must be exported from the worker
+    // entry so tools built on createCodemodeRuntime (execute, browser) can
+    // spawn it via ctx.exports.
+    `export { CodemodeRuntime } from "@cloudflare/think/server-entry";`,
     `import { thinkRouter } from "virtual:think/router";`,
     appImport,
     "",

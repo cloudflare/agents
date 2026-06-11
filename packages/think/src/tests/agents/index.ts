@@ -22,6 +22,7 @@ export {
   ThinkAgentToolParent,
   StuckThinkAgentToolChild
 } from "./think-session";
+export { ThinkExecuteToolAgent } from "./execute-tool";
 export { ThinkFiberTestAgent } from "./fiber";
 export { ThinkClientToolsAgent } from "./client-tools";
 export { ThinkExtensionHookAgent } from "./extension-hooks";
