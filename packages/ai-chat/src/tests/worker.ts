@@ -1697,6 +1697,16 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
    */
   _supersededThrows = 0;
 
+  /**
+   * Simulate the recovery continuation alarm firing inside a deploy-reset
+   * window where SQL ops fail with the `SqlError`-wrapped transient
+   * (`SQL query failed: <message>`, original error only in `cause`) rather
+   * than the verbatim reset message (#1730). Unlike the supersede simulation
+   * this shape keeps its in-process retries — the row must still be deferred
+   * (not consumed) once they exhaust.
+   */
+  _simulateTransientErrorMessage: string | null = null;
+
   override async _chatRecoveryContinue(
     ...args: Parameters<AIChatAgent<Env>["_chatRecoveryContinue"]>
   ): Promise<void> {
@@ -1704,11 +1714,22 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       this._supersededThrows += 1;
       throw new Error("Durable Object reset because its code was updated.");
     }
+    if (this._simulateTransientErrorMessage) {
+      this._supersededThrows += 1;
+      throw new Error(
+        `SQL query failed: ${this._simulateTransientErrorMessage}`,
+        { cause: new Error(this._simulateTransientErrorMessage) }
+      );
+    }
     return super._chatRecoveryContinue(...args);
   }
 
   setSimulateSupersededIsolateForTest(value: boolean): void {
     this._simulateSupersededIsolate = value;
+  }
+
+  setSimulateTransientErrorForTest(message: string | null): void {
+    this._simulateTransientErrorMessage = message;
   }
 
   getSupersededThrowsForTest(): number {
@@ -1915,6 +1936,119 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       prefix: "cf:chat-recovery:incident:"
     });
     return [...entries.values()];
+  }
+
+  /**
+   * #1730 layer 3: drive the stable-timeout give-up
+   * (`_exhaustRecoveryAfterStableTimeout`) while the durable terminal write
+   * (`_recordChatTerminal`, #1645) rejects with a platform transient — the
+   * exact window a give-up tends to run in. The FIRST give-up must re-throw
+   * (so `Agent._executeScheduleCallback` preserves the one-shot row) and must
+   * NOT seal the incident `exhausted` (a half-seal would make the deferred
+   * re-run a no-op and drop the durable terminal record). The SECOND give-up
+   * (the deferred re-run on a healthy isolate) must terminalize fully.
+   */
+  async testStableTimeoutSealTransientDefer(input: {
+    transientMessage: string;
+    terminalMessage: string;
+  }): Promise<{
+    firstThrew: boolean;
+    incidentStatusAfterFirst: string | undefined;
+    secondThrew: boolean;
+    incidentStatusAfterSecond: string | undefined;
+    terminalBroadcast: string | undefined;
+    exhaustedReasons: string[];
+  }> {
+    const captured: ChatRecoveryExhaustedContext[] = [];
+    this.chatRecovery = {
+      maxAttempts: 5,
+      terminalMessage: input.terminalMessage,
+      onExhausted: (ctx) => {
+        captured.push(ctx);
+      }
+    };
+
+    const requestId = `seal-transient-${crypto.randomUUID()}`;
+    const begun = await this.beginIncidentForTest({
+      requestId,
+      recoveryRootRequestId: requestId,
+      latestUserMessageId: null,
+      recoveryKind: "continue"
+    });
+
+    let terminalBroadcast: string | undefined;
+    const self = this as unknown as {
+      _broadcastChatMessage(
+        msg: { body?: string; error?: boolean; done?: boolean },
+        exclude?: string[]
+      ): void;
+      _recordChatTerminal(requestId: string, body: string): Promise<void>;
+      _exhaustRecoveryAfterStableTimeout(
+        callback: string,
+        data: unknown
+      ): Promise<void>;
+    };
+    const realBroadcast = self._broadcastChatMessage.bind(this);
+    self._broadcastChatMessage = (m, exclude) => {
+      if (m.error && m.done) terminalBroadcast = m.body;
+      realBroadcast(m, exclude);
+    };
+    const realRecordTerminal = self._recordChatTerminal.bind(this);
+    let failTerminalWriteOnce = true;
+    self._recordChatTerminal = async (reqId, body) => {
+      if (failTerminalWriteOnce) {
+        failTerminalWriteOnce = false;
+        throw new Error(`SQL query failed: ${input.transientMessage}`, {
+          cause: new Error(input.transientMessage)
+        });
+      }
+      await realRecordTerminal(reqId, body);
+    };
+
+    const data = {
+      incidentId: begun.incidentId,
+      originalRequestId: requestId
+    };
+    const readIncidentStatus = async (): Promise<string | undefined> => {
+      const incidents = await this.ctx.storage.list<{ status: string }>({
+        prefix: "cf:chat-recovery:incident:"
+      });
+      return [...incidents.values()][0]?.status;
+    };
+
+    let firstThrew = false;
+    try {
+      await self._exhaustRecoveryAfterStableTimeout(
+        "_chatRecoveryContinue",
+        data
+      );
+    } catch {
+      firstThrew = true;
+    }
+    const incidentStatusAfterFirst = await readIncidentStatus();
+
+    let secondThrew = false;
+    try {
+      await self._exhaustRecoveryAfterStableTimeout(
+        "_chatRecoveryContinue",
+        data
+      );
+    } catch {
+      secondThrew = true;
+    } finally {
+      self._broadcastChatMessage = realBroadcast;
+      self._recordChatTerminal = realRecordTerminal;
+    }
+    const incidentStatusAfterSecond = await readIncidentStatus();
+
+    return {
+      firstThrew,
+      incidentStatusAfterFirst,
+      secondThrew,
+      incidentStatusAfterSecond,
+      terminalBroadcast,
+      exhaustedReasons: captured.map((c) => c.reason)
+    };
   }
 
   private _forceStableTimeout = false;

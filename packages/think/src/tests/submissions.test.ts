@@ -74,6 +74,10 @@ type ThinkSubmissionTestStub = {
   resetTurnStateForTest(): Promise<void>;
   recoverChatFiberForTest(requestId: string): Promise<void>;
   continueRecoveredChatForTest(requestId: string): Promise<void>;
+  continueRecoveredChatCatchingForTest(
+    requestId: string
+  ): Promise<string | null>;
+  failNextRecoveredContinueForTest(message: string): Promise<void>;
   cancelDuringRecoveredContinuationForTest(
     requestId: string,
     delayMs: number
@@ -958,6 +962,52 @@ describe("Think durable submissions", () => {
       status: "aborted",
       error: "stop"
     });
+  });
+
+  it("defers a recovered continuation on a platform transient and completes it on the re-run (#1730)", async () => {
+    const agent = await freshAgent();
+    await agent.setDelayedChunkResponse(["seed"], 1);
+    const seed = await agent.testSubmitMessages("seed conversation", {
+      submissionId: "sub-transient-defer-seed"
+    });
+    await waitForSubmission(
+      agent,
+      seed.submissionId,
+      (submission) => submission.status === "completed"
+    );
+
+    await agent.setDelayedChunkResponse(["recovered ", "answer"], 1);
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-transient-defer",
+      requestId: "sub-transient-defer",
+      status: "running",
+      messagesAppliedAt: Date.now()
+    });
+
+    // First continuation lands in a deploy-reset window: storage throws the
+    // `SqlError: SQL query failed: Network connection lost.` shape. The
+    // callback must RE-THROW (so `Agent._executeScheduleCallback` preserves
+    // the one-shot row for the platform to re-run) instead of terminalizing
+    // through a give-up that needs the storage that's down.
+    await agent.failNextRecoveredContinueForTest("Network connection lost.");
+    await expect(
+      agent.continueRecoveredChatCatchingForTest("sub-transient-defer")
+    ).resolves.toMatch(/Network connection lost/);
+
+    // The submission must STILL be running — marking it terminal on the defer
+    // path would make the re-run skip with `submission_not_running` and the
+    // turn would never resume (the self-defeating defer).
+    await expect(
+      agent.inspectSubmissionForTest("sub-transient-defer")
+    ).resolves.toMatchObject({ status: "running" });
+
+    // The deferred re-run (the preserved one-shot row firing on a healthy
+    // isolate): the continuation streams normally and completes the
+    // submission end-to-end.
+    await agent.continueRecoveredChatForTest("sub-transient-defer");
+    await expect(
+      agent.inspectSubmissionForTest("sub-transient-defer")
+    ).resolves.toMatchObject({ status: "completed" });
   });
 
   it("preserves stream error text from recovered continuations", async () => {

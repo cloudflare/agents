@@ -122,6 +122,7 @@ import {
   Agent,
   callable,
   getCurrentAgent,
+  isPlatformTransientError,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
 } from "agents";
 
@@ -9952,31 +9953,35 @@ export class Think<
    * completed the recovered submission as `error`, which bypassed
    * `_exhaustChatRecovery` entirely — so an app relying on `onExhausted` for the
    * terminal banner regressed to an eternal spinner when recovery gave up under
-   * extreme churn. The error path matters just as much: a non-reset throw in a
-   * recovery callback is SWALLOWED by `Agent._executeScheduleCallback` (only a
-   * code-update reset is re-thrown to preserve the one-shot row), so without
-   * routing it here the alarm row is deleted with no terminal UX at all — the
-   * half-finished message wedges silently. Shared by `_chatRecoveryRetry` and
-   * `_chatRecoveryContinue`.
+   * extreme churn. The error path matters just as much: a non-transient throw
+   * in a recovery callback is SWALLOWED by `Agent._executeScheduleCallback`
+   * (only a platform transient is re-thrown to preserve the one-shot row), so
+   * without routing it here the alarm row is deleted with no terminal UX at
+   * all — the half-finished message wedges silently. Shared by
+   * `_chatRecoveryRetry` and `_chatRecoveryContinue`.
    *
    * Exactly-once terminalization is defended by two independent guards:
    *  1. The `stored?.status === "exhausted"` re-entry guard below — once an
    *     incident is sealed, a duplicate stale alarm (or retried callback)
-   *     returns before re-firing. The sealed incident is re-persisted even when
-   *     the record was found missing, so a swept record is re-armed for the
-   *     guard on the next alarm.
+   *     returns before re-firing. The seal is persisted only AFTER the
+   *     terminal writes in `_exhaustChatRecovery` succeed (see the ordering
+   *     note at the call below), so a give-up interrupted by a platform
+   *     transient re-runs in full instead of being half-sealed.
    *  2. The durable-submission paths additionally short-circuit earlier at the
    *     `submission_not_running` check (the submission is already `error` after
    *     the first give-up). This is the ONLY guard `@cloudflare/ai-chat` lacks
    *     (no submission layer), so guard #1 carries it there.
    *
-   * Two residual at-least-once edges, both deliberately accepted as "deliver a
+   * Residual at-least-once edges, all deliberately accepted as "deliver a
    * second banner" ≫ "silently drop the turn":
    *  • No `incidentId` at all in the payload (only reachable via a direct/test
    *    invocation — every production scheduler carries one): the synthesized
    *    incident can't be persisted (no key), so guard #1 can't arm.
    *  • The record is swept AGAIN between two alarms (guard #1 re-persists on the
    *    first, so this needs a second independent sweep) — vanishingly unlikely.
+   *  • A platform transient interrupts `_exhaustChatRecovery` after the banner
+   *    broadcast — the deferred re-run re-fires `onExhausted` + the banner
+   *    (the terminal writes themselves are idempotent).
    */
   private async _exhaustRecoveryGiveUp(
     callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
@@ -10041,9 +10046,40 @@ export class Think<
           reason
         };
 
+    const streamId = this._resolveRecoveryStreamId(
+      incident.recoveryRootRequestId ?? incident.requestId
+    );
+    const partial = streamId
+      ? this._getPartialStreamText(streamId)
+      : { text: "", parts: [] as MessagePart[] };
+
+    // Terminalize BEFORE sealing the incident. The terminal writes inside
+    // `_exhaustChatRecovery` (`_recordTerminalChatStatus`,
+    // `_markRecoveredSubmissionInterrupted`) hit storage and can reject with a
+    // platform transient in exactly the window a give-up tends to run in
+    // (#1730: deploy reset / storage outage). Letting that throw propagate is
+    // deliberate: the recovery callback's caller (`Agent._executeScheduleCallback`)
+    // defers the one-shot row on a platform transient, so the WHOLE give-up
+    // re-runs on a healthy isolate instead of half-sealing. Sealing first
+    // would arm the re-entry guard above and turn that re-run into a no-op —
+    // dropping the durable terminal record and the submission's terminal
+    // state. The re-run is idempotent: `_recordTerminalChatStatus` overwrites
+    // the same key and `_markRecoveredSubmissionInterrupted` is gated on
+    // `status = 'running'`; `onExhausted` + the banner may fire again — the
+    // documented at-least-once edge ("deliver a second banner" ≫ "silently
+    // drop the turn").
+    await this._exhaustChatRecovery(
+      incident,
+      config,
+      partial,
+      streamId,
+      incident.firstSeenAt
+    );
+
     // Persist the sealed incident (retained for inspection / TTL sweep) so the
     // re-entry guard above sees `exhausted` if a duplicate stale alarm fires.
-    // Best-effort: a failed persist must not block terminalization below.
+    // Best-effort: terminalization already fully succeeded, so a failed seal
+    // write costs at most a re-delivered banner on a duplicate alarm.
     if (incidentKey) {
       try {
         await this.ctx.storage.put(incidentKey, incident);
@@ -10054,21 +10090,6 @@ export class Think<
         );
       }
     }
-
-    const streamId = this._resolveRecoveryStreamId(
-      incident.recoveryRootRequestId ?? incident.requestId
-    );
-    const partial = streamId
-      ? this._getPartialStreamText(streamId)
-      : { text: "", parts: [] as MessagePart[] };
-
-    await this._exhaustChatRecovery(
-      incident,
-      config,
-      partial,
-      streamId,
-      incident.firstSeenAt
-    );
   }
 
   /**
@@ -10084,76 +10105,60 @@ export class Think<
   }
 
   /**
-   * Whether an error is a transient "superseded isolate" failure — a deploy /
-   * code update replaced the isolate mid-invocation. Mirrors the base `Agent`
-   * check (`isDurableObjectCodeUpdateReset`) and MUST stay in lockstep with it:
-   * the base `_executeScheduleCallback` re-throws this class for a one-shot row
-   * (preserving it so the platform re-runs on the new code), so a recovery
-   * callback must also re-throw — NOT terminalize — since recovery will re-run
-   * and succeed on the fresh isolate. The matched family (kept identical to the
-   * base):
-   *   - "Durable Object reset because its code was updated." (deploy bounce)
-   *   - "This script has been upgraded. Please send a new request to connect to
-   *     the new version." (a stub/connection to a superseded script)
-   * "Network connection lost." is intentionally excluded (a connection error,
-   * not an isolate replacement — see the base helper's note). The match stays
-   * close to the verbatim platform strings so an ordinary error mentioning
-   * those words isn't misclassified as a supersede.
-   */
-  private _isDeployCodeUpdateReset(error: unknown): boolean {
-    const message =
-      error instanceof Error
-        ? error.message
-        : typeof error === "string"
-          ? error
-          : "";
-    return /reset because its code was updated|this script has been upgraded/i.test(
-      message
-    );
-  }
-
-  /**
    * Handle an error thrown by `_chatRecoveryContinue` / `_chatRecoveryRetry`
    * after the incident was opened.
    *
-   * - A deploy code-update reset is re-thrown (after marking the incident
-   *   `failed` for observability) so `Agent._executeScheduleCallback` preserves
-   *   the one-shot alarm row and the platform re-runs recovery on the fresh
-   *   isolate — the turn can still recover, so it must NOT terminalize.
-   * - Any OTHER error is terminalized through the give-up path
+   * - A platform transient (`isPlatformTransientError` from `agents` — a
+   *   deploy code-update reset / script supersede, a `retryable`-flagged
+   *   platform error, or "Network connection lost.", looking through wrappers
+   *   like `SqlError` via the `cause` chain) is re-thrown (after best-effort
+   *   marking the incident `failed` for observability) so
+   *   `Agent._executeScheduleCallback` preserves the one-shot alarm row and
+   *   the platform re-runs recovery once it is healthy again — the turn can
+   *   still recover, so it must NOT terminalize. Terminalizing here was the
+   *   #1730 freeze: the give-up's own seal needs the very storage that is
+   *   down, so it throws too, burns the in-process retry budget inside the
+   *   same reset window, and the row is consumed milliseconds before storage
+   *   recovers. The submission is deliberately left `running` — the deferred
+   *   re-run reads it via `_readRunningSubmissionByRequestId`, so marking it
+   *   terminal here would turn the preserved row into a guaranteed
+   *   `submission_not_running` no-op skip (a self-defeating defer).
+   * - Any OTHER (application) error is terminalized through the give-up path
    *   (`onExhausted` + the `terminalMessage` banner) and NOT re-thrown. This is
    *   the fix for the silent-seal failure mode: `_executeScheduleCallback`
-   *   swallows a non-reset throw and then `alarm()` deletes the one-shot row, so
-   *   without terminalizing here the half-finished turn is dropped with no
-   *   terminal event and no banner (the user stares at a frozen message until
-   *   they send something new).
+   *   swallows a non-transient throw and then `alarm()` deletes the one-shot
+   *   row, so without terminalizing here the half-finished turn is dropped
+   *   with no terminal event and no banner (the user stares at a frozen
+   *   message until they send something new).
    */
   private async _handleRecoveryCallbackError(
     callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
     error: unknown
   ): Promise<void> {
-    if (this._isDeployCodeUpdateReset(error)) {
+    if (isPlatformTransientError(error)) {
       const message = error instanceof Error ? error.message : String(error);
-      await this._updateChatRecoveryIncident(
-        data?.incidentId,
-        "failed",
-        message
-      );
-      if (data?.recoveredRequestId) {
-        await this._completeRecoveredSubmission(
-          data.recoveredRequestId,
-          "error",
-          null,
+      try {
+        await this._updateChatRecoveryIncident(
+          data?.incidentId,
+          "failed",
           message
+        );
+      } catch (bookkeepingError) {
+        // Best-effort observability only — in the exact window this branch
+        // fires (deploy reset / storage outage) the incident write itself can
+        // reject; that must not replace the deferral with its own error.
+        console.error(
+          "[Think] failed to mark recovery incident failed before deferring",
+          bookkeepingError
         );
       }
       throw error;
     }
     // Preserve the underlying error for operators — the give-up path records
     // only the `recovery_error` category on the incident / `onExhausted` ctx,
-    // so without this log the actual cause (e.g. a transient storage reject)
-    // would be lost. Mirrors `Agent._executeScheduleCallback`'s own logging.
+    // so without this log the actual cause would be lost. Mirrors
+    // `Agent._executeScheduleCallback`'s own logging.
     console.error(
       `[Think] ${callback} threw during recovery; terminalizing instead of leaving the turn wedged`,
       error

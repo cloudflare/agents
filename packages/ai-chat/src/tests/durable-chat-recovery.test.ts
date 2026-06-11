@@ -45,7 +45,19 @@ interface ChatRecoveryTestStub {
   getRunFiberCountForTest(): Promise<number>;
   runAlarmForTest(): Promise<void>;
   setSimulateSupersededIsolateForTest(value: boolean): Promise<void>;
+  setSimulateTransientErrorForTest(message: string | null): Promise<void>;
   getSupersededThrowsForTest(): Promise<number>;
+  testStableTimeoutSealTransientDefer(input: {
+    transientMessage: string;
+    terminalMessage: string;
+  }): Promise<{
+    firstThrew: boolean;
+    incidentStatusAfterFirst: string | undefined;
+    secondThrew: boolean;
+    incidentStatusAfterSecond: string | undefined;
+    terminalBroadcast: string | undefined;
+    exhaustedReasons: string[];
+  }>;
   setChatRecoveryConfigForTest(config: {
     maxAttempts?: number;
     terminalMessage?: string;
@@ -769,6 +781,75 @@ describe("onChatRecovery", () => {
 
     // Stop simulating so any platform-retried alarm can complete cleanly.
     await agentStub.setSimulateSupersededIsolateForTest(false);
+  });
+
+  it("recovers when the continuation alarm exhausts its retries on a storage transient (#1730)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    // Simulate the OTHER deploy-reset-window shape: SQL ops fail with
+    // `SqlError: SQL query failed: Network connection lost.` (wrapped, no
+    // `retryable` flag, no reset phrasing). Unlike the supersede this keeps
+    // its in-process retries — but a reset window outlasts the retry schedule
+    // by design, so every attempt fails and (pre-fix) the budget exhaustion
+    // swallowed the error, letting `alarm()` delete the one-shot row
+    // milliseconds before storage recovered.
+    await agentStub.setSimulateTransientErrorForTest(
+      "Network connection lost."
+    );
+
+    await agentStub.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-transient"
+    );
+    await agentStub.triggerFiberRecovery();
+    expect(await agentStub.getRunFiberCountForTest()).toBe(0);
+
+    await agentStub.runAlarmForTest();
+    // The in-process retries actually ran (this is not the immediate-defer
+    // supersede path) ...
+    expect(await agentStub.getSupersededThrowsForTest()).toBeGreaterThanOrEqual(
+      2
+    );
+
+    // ... and on exhaustion the platform transient must DEFER the row, not
+    // consume it: the turn stays resumable for the healthy window that
+    // follows the deploy.
+    const pendingContinuations = await agentStub.getScheduleCountForCallback(
+      "_chatRecoveryContinue"
+    );
+    const pendingFibers = await agentStub.getRunFiberCountForTest();
+    expect(pendingContinuations + pendingFibers).toBeGreaterThanOrEqual(1);
+
+    await agentStub.setSimulateTransientErrorForTest(null);
+  });
+
+  it("defers a give-up whose terminal write hits a platform transient instead of half-sealing, then seals fully on the re-run (#1730)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    const terminalMessage = "The assistant was interrupted. Please try again.";
+
+    const result = await agentStub.testStableTimeoutSealTransientDefer({
+      transientMessage: "Network connection lost.",
+      terminalMessage
+    });
+
+    // First give-up: the durable terminal write (#1645) rejects mid-deploy →
+    // the transient propagates (so the base scheduler preserves the one-shot
+    // row) and the incident is NOT sealed — sealing first would turn the
+    // deferred re-run into a no-op and drop the terminal record.
+    expect(result.firstThrew).toBe(true);
+    expect(result.incidentStatusAfterFirst).not.toBe("exhausted");
+    // Second give-up (the deferred re-run on a healthy isolate): terminalizes
+    // fully — banner delivered, incident sealed, no re-throw.
+    expect(result.secondThrew).toBe(false);
+    expect(result.incidentStatusAfterSecond).toBe("exhausted");
+    expect(result.terminalBroadcast).toBe(terminalMessage);
+    // `onExhausted` fired on both passes — the documented at-least-once edge
+    // ("deliver a second banner" ≫ "silently drop the turn").
+    expect(result.exhaustedReasons).toEqual([
+      "stable_timeout",
+      "stable_timeout"
+    ]);
   });
 
   it("shares one attempt budget when an incident flips between retry and continue", async () => {
