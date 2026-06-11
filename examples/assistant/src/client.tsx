@@ -167,6 +167,144 @@ function asPausedExecution(output: unknown): {
   };
 }
 
+type PendingActionPreview = {
+  connector?: string;
+  method?: string;
+  args?: unknown;
+};
+
+/**
+ * Approval card for a paused execution. The transcript's `pending` is a
+ * truncated preview (args are bounded so they don't blow up model context) —
+ * the FULL args live on the codemode runtime. A human must see what they're
+ * approving, so this card fetches the authoritative pending actions via the
+ * `pendingExecutions` callable on mount and keeps Approve disabled until
+ * that fetch settles.
+ */
+function PausedExecutionCard({
+  agent,
+  executionId,
+  toolName,
+  preview,
+  resolving,
+  onResolve
+}: {
+  agent: {
+    ready: Promise<void>;
+    call: (
+      method: string,
+      args?: unknown[],
+      options?: { timeout?: number }
+    ) => Promise<unknown>;
+  };
+  executionId: string;
+  toolName: string;
+  preview: PendingActionPreview[];
+  resolving: boolean;
+  onResolve: (executionId: string, action: "approve" | "reject") => void;
+}) {
+  const [full, setFull] = useState<
+    | { state: "loading" }
+    | { state: "loaded"; actions: PendingActionPreview[] }
+    | { state: "unavailable" }
+  >({ state: "loading" });
+
+  useEffect(() => {
+    let cancelled = false;
+    // Wait for the socket to be identified before calling: an RPC issued
+    // during the initial connect/reconnect churn can have its response
+    // dropped, leaving the promise pending forever. Retry once with a
+    // timeout for the same reason.
+    (async () => {
+      await agent.ready;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (cancelled) return;
+        try {
+          const actions = await agent.call("pendingExecutions", [executionId], {
+            timeout: 10_000
+          });
+          if (cancelled) return;
+          // An empty list means the execution is no longer pending (resolved
+          // elsewhere, expired, or swept) — the card is stale.
+          setFull(
+            Array.isArray(actions) && actions.length > 0
+              ? { state: "loaded", actions: actions as PendingActionPreview[] }
+              : { state: "unavailable" }
+          );
+          return;
+        } catch {
+          // Connection churn — retry once after it settles.
+          await agent.ready;
+        }
+      }
+      if (!cancelled) setFull({ state: "unavailable" });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [agent, executionId]);
+
+  const actions = full.state === "loaded" ? full.actions : preview;
+
+  return (
+    <Surface className="max-w-[85%] px-4 py-3 rounded-xl ring-2 ring-kumo-warning">
+      <div className="flex items-center gap-2 mb-2">
+        <GearIcon size={14} className="text-kumo-warning" />
+        <Text size="sm" bold>
+          Approval needed: {toolName} paused
+        </Text>
+      </div>
+      <div className="font-mono mb-3 space-y-1">
+        {actions.map((action, i) => (
+          <div key={i}>
+            <Text size="xs" variant="secondary" bold>
+              {action.connector}.{action.method}
+            </Text>
+            {action.args != null && (
+              <pre className="text-xs text-kumo-subtle whitespace-pre-wrap max-h-60 overflow-auto">
+                {JSON.stringify(action.args, null, 2)}
+              </pre>
+            )}
+          </div>
+        ))}
+      </div>
+      {full.state === "loading" && (
+        <Text size="xs" variant="secondary">
+          Verifying full arguments…
+        </Text>
+      )}
+      {full.state === "unavailable" && (
+        <div className="mb-2">
+          <Text size="xs" variant="error">
+            Couldn't load the full arguments — this card may be stale, and the
+            preview above may be truncated.
+          </Text>
+        </div>
+      )}
+      <div className="flex gap-2">
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={resolving || full.state === "loading"}
+          icon={<CheckCircleIcon size={14} />}
+          onClick={() => onResolve(executionId, "approve")}
+        >
+          Approve &amp; resume
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={resolving}
+          icon={<XCircleIcon size={14} />}
+          onClick={() => onResolve(executionId, "reject")}
+        >
+          Reject
+        </Button>
+      </div>
+    </Surface>
+  );
+}
+
 /** Text and reasoning parts use `state: streaming` with empty `text` until the first delta. */
 function shouldShowStreamedTextPart(part: {
   text: string;
@@ -1223,69 +1361,21 @@ function Chat({
                   if (part.state === "output-available") {
                     const pausedExecution = asPausedExecution(part.output);
                     if (pausedExecution) {
-                      const resolving = resolvingExecutions.has(
-                        pausedExecution.executionId
-                      );
                       return (
                         <div
                           key={part.toolCallId}
                           className="flex justify-start"
                         >
-                          <Surface className="max-w-[85%] px-4 py-3 rounded-xl ring-2 ring-kumo-warning">
-                            <div className="flex items-center gap-2 mb-2">
-                              <GearIcon
-                                size={14}
-                                className="text-kumo-warning"
-                              />
-                              <Text size="sm" bold>
-                                Approval needed: {toolName} paused
-                              </Text>
-                            </div>
-                            <div className="font-mono mb-3 space-y-1">
-                              {pausedExecution.pending.map((action, i) => (
-                                <div key={i}>
-                                  <Text size="xs" variant="secondary" bold>
-                                    {action.connector}.{action.method}
-                                  </Text>
-                                  {action.args != null && (
-                                    <pre className="text-xs text-kumo-subtle whitespace-pre-wrap">
-                                      {JSON.stringify(action.args, null, 2)}
-                                    </pre>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                            <div className="flex gap-2">
-                              <Button
-                                variant="primary"
-                                size="sm"
-                                disabled={resolving}
-                                icon={<CheckCircleIcon size={14} />}
-                                onClick={() =>
-                                  resolveExecution(
-                                    pausedExecution.executionId,
-                                    "approve"
-                                  )
-                                }
-                              >
-                                Approve &amp; resume
-                              </Button>
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                disabled={resolving}
-                                icon={<XCircleIcon size={14} />}
-                                onClick={() =>
-                                  resolveExecution(
-                                    pausedExecution.executionId,
-                                    "reject"
-                                  )
-                                }
-                              >
-                                Reject
-                              </Button>
-                            </div>
-                          </Surface>
+                          <PausedExecutionCard
+                            agent={agent}
+                            executionId={pausedExecution.executionId}
+                            toolName={toolName}
+                            preview={pausedExecution.pending}
+                            resolving={resolvingExecutions.has(
+                              pausedExecution.executionId
+                            )}
+                            onResolve={resolveExecution}
+                          />
                         </div>
                       );
                     }

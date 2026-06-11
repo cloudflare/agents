@@ -302,6 +302,8 @@ An AI SDK tool with `needsApproval` doesn't run immediately inside the sandbox �
 - `rejectExecution(executionId, reason?)` — ends the run with `{ status: "rejected", reason }` so the model can adapt.
 - `pendingExecutions()` — pending actions (with full args) for rendering approval UI.
 
+> **Render approval cards from `pendingExecutions()`, not the transcript.** The `pending` array in the paused tool output is a _truncated preview_ — args are bounded (~2 KB each) so they don't blow up model context, but the full args (up to 1 MB) are what actually execute on approve. A human approving a gated call must see the authoritative args, so fetch them via `pendingExecutions(executionId)` before enabling the Approve button. `examples/assistant`'s `PausedExecutionCard` shows the pattern.
+
 See `examples/assistant` for a working approval card, and `design/think-execute-hitl.md` for the design.
 
 ### The runtime handle
