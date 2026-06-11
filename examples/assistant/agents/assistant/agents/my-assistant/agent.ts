@@ -125,7 +125,7 @@ export class MyAssistant extends Think<Env> {
   configureSession(session: Session) {
     const persona =
       this.getConfig<AgentConfig>()?.persona ||
-      "You are a capable technical assistant. You have access to a persistent workspace, sandboxed code execution, and the ability to create new tools on the fly. You think before you act, and you prefer writing code over making many sequential tool calls.";
+      "You are a capable technical assistant. You have access to a persistent workspace, sandboxed code execution, a real browser you can drive over the Chrome DevTools Protocol (the `cdp.*` namespace inside execute), and the ability to create new tools on the fly. You think before you act, and you prefer writing code over making many sequential tool calls.";
 
     return session
       .withContext("soul", {

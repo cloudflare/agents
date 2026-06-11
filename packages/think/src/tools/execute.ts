@@ -354,8 +354,11 @@ function connectorHints(
   }
   if (options.browser) {
     hints.cdp =
-      "a live browser over the Chrome DevTools Protocol — " +
-      "`cdp.send({ method, params })`, `cdp.attachToTarget(...)`, `cdp.spec(...)`";
+      "a live browser over the Chrome DevTools Protocol. " +
+      'Target-scoped commands need no sessionId: `cdp.send({ method: "Target.createTarget", params: { url } })`. ' +
+      "Page-scoped commands (Page.*, Runtime.*, DOM.*) need one: " +
+      "`const { sessionId } = await cdp.attachToTarget({ targetId })`, then " +
+      "`cdp.send({ method, params, sessionId })`. Discover commands with `cdp.spec()`";
   }
   return hints;
 }

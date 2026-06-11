@@ -93,7 +93,7 @@ async () => {
     method: "Target.createTarget",
     params: { url: "https://example.com" }
   });
-  const sessionId = await cdp.attachToTarget({ targetId });
+  const { sessionId } = await cdp.attachToTarget({ targetId });
   const { root } = await cdp.send({ method: "DOM.getDocument", sessionId });
   const { outerHTML } = await cdp.send({
     method: "DOM.getOuterHTML",
@@ -208,24 +208,24 @@ await runtime.expirePaused(); // reject stale never-approved pauses, freeing the
 
 - LLM-generated code runs in a Worker sandbox; the CDP WebSocket and the browser session stay in the host worker.
 - Every `cdp.*` call is recorded in the runtime's durable log. If a run pauses (approval) or the sandbox aborts, resuming replays the log and continues — which is why connector calls must be sequential and deterministic (wrap nondeterministic non-connector work in `codemode.step`).
-- `cdp.attachToTarget` returns a **stable session handle** (not a raw CDP session id), so handles stay valid across pause/resume reconnects.
+- `cdp.attachToTarget` returns `{ sessionId }` where the id is a **stable session handle** (not a raw CDP session id), so handles stay valid across pause/resume reconnects.
 - The protocol spec is fetched from the live browser, normalized, and cached per binding.
 
 ## CDP connector API
 
 Inside `browser_execute`, the `cdp` namespace provides (all methods take one object argument):
 
-| Method                                                  | Description                                                                      |
-| ------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `cdp.send({ method, params?, sessionId?, timeoutMs? })` | Send a CDP command and wait for the response                                     |
-| `cdp.attachToTarget({ targetId, timeoutMs? })`          | Attach to a target; returns a stable session handle for page-scoped `send` calls |
-| `cdp.spec()`                                            | The searchable, normalized CDP protocol spec                                     |
-| `cdp.getDebugLog({ limit? })`                           | Recent CDP traffic (sends, receives, warnings) for this execution's connection   |
-| `cdp.clearDebugLog()`                                   | Clear the debug log buffer                                                       |
-| `cdp.startSession()` _(reuse/dynamic)_                  | Promote/ensure the shared session; returns its info                              |
-| `cdp.sessionInfo()` _(reuse/dynamic)_                   | Shared session info, or `null`                                                   |
-| `cdp.closeSession()` _(reuse/dynamic)_                  | Close the shared session                                                         |
-| `cdp.resetSession()` _(reuse/dynamic)_                  | Close and replace the shared session                                             |
+| Method                                                  | Description                                                                    |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `cdp.send({ method, params?, sessionId?, timeoutMs? })` | Send a CDP command and wait for the response                                   |
+| `cdp.attachToTarget({ targetId, timeoutMs? })`          | Attach to a target; returns `{ sessionId }` for page-scoped `send` calls       |
+| `cdp.spec()`                                            | The searchable, normalized CDP protocol spec                                   |
+| `cdp.getDebugLog({ limit? })`                           | Recent CDP traffic (sends, receives, warnings) for this execution's connection |
+| `cdp.clearDebugLog()`                                   | Clear the debug log buffer                                                     |
+| `cdp.startSession()` _(reuse/dynamic)_                  | Promote/ensure the shared session; returns its info                            |
+| `cdp.sessionInfo()` _(reuse/dynamic)_                   | Shared session info, or `null`                                                 |
+| `cdp.closeSession()` _(reuse/dynamic)_                  | Close the shared session                                                       |
+| `cdp.resetSession()` _(reuse/dynamic)_                  | Close and replace the shared session                                           |
 
 ## Configuration
 

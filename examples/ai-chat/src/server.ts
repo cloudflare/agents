@@ -87,8 +87,8 @@ export class ChatAgent extends AIChatAgent {
         "run calculations, and use a browser to inspect web pages via Chrome DevTools Protocol. " +
         "The browser_execute tool runs TypeScript with a cdp connector: " +
         "for page-scoped commands, create a target with cdp.send({ method: 'Target.createTarget', ... }), " +
-        "attach with cdp.attachToTarget({ targetId }), and pass the returned handle as sessionId " +
-        "to Page, Runtime, and DOM commands. " +
+        "attach with const { sessionId } = await cdp.attachToTarget({ targetId }), and pass " +
+        "that sessionId to Page, Runtime, and DOM commands. " +
         "For calculations with large numbers (over 1000), you need user approval first.",
       // Prune old tool calls and reasoning to save tokens on long conversations
       messages: pruneMessages({

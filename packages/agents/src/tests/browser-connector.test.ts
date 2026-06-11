@@ -59,6 +59,11 @@ class FakeCdpSocket {
   closeCount = 0;
   sent: Array<Record<string, unknown>> = [];
   #listeners = new Map<string, Array<(event: unknown) => void>>();
+  #errorMethods: Set<string>;
+
+  constructor(errorMethods: Set<string> = new Set()) {
+    this.#errorMethods = errorMethods;
+  }
 
   accept(): void {}
 
@@ -74,6 +79,18 @@ class FakeCdpSocket {
     const message = JSON.parse(data) as { id: number; method: string };
     this.sent.push(message);
     queueMicrotask(() => {
+      if (this.#errorMethods.has(message.method)) {
+        this.#emit("message", {
+          data: JSON.stringify({
+            id: message.id,
+            error: {
+              code: -32601,
+              message: `'${message.method}' wasn't found`
+            }
+          })
+        });
+        return;
+      }
       const result =
         message.method === "Target.attachToTarget"
           ? { sessionId: `cdp-session-${++FakeCdpSocket.nextCdpSession}` }
@@ -102,7 +119,10 @@ interface BrowserRequest {
   upgrade: boolean;
 }
 
-function createFakeBrowser(options?: { listStatuses?: number[] }) {
+function createFakeBrowser(options?: {
+  listStatuses?: number[];
+  cdpErrors?: Set<string>;
+}) {
   const requests: BrowserRequest[] = [];
   const sockets: FakeCdpSocket[] = [];
   let created = 0;
@@ -117,7 +137,7 @@ function createFakeBrowser(options?: { listStatuses?: number[] }) {
       requests.push({ url, method, upgrade });
 
       if (upgrade) {
-        const socket = new FakeCdpSocket();
+        const socket = new FakeCdpSocket(options?.cdpErrors);
         sockets.push(socket);
         const sessionId =
           url.match(/\/browser\/(session-[^/?]+)/)?.[1] ?? "session-upgraded";
@@ -131,6 +151,18 @@ function createFakeBrowser(options?: { listStatuses?: number[] }) {
       if (method === "POST") {
         created++;
         return Response.json({ sessionId: `session-${created}` });
+      }
+
+      if (url.endsWith("/json/protocol")) {
+        return Response.json({
+          domains: [
+            {
+              domain: "Page",
+              commands: [{ name: "navigate" }, { name: "enable" }],
+              events: [{ name: "loadEventFired" }]
+            }
+          ]
+        });
       }
 
       if (url.endsWith("/json/list")) {
@@ -298,11 +330,11 @@ describe("BrowserConnector", () => {
     const store = new MemorySessionStore();
     const connector = new BrowserConnector(fakeCtx, { browser, store });
 
-    const handle = (await connector.executeTool(
+    const { sessionId: handle } = (await connector.executeTool(
       "attachToTarget",
       { targetId: "target-1" },
       { executionId: "exec-a" }
-    )) as string;
+    )) as { sessionId: string };
     expect(handle).toBe("target:target-1");
 
     await connector.executeTool(
@@ -347,6 +379,40 @@ describe("BrowserConnector", () => {
       sessionId?: string;
     };
     expect(dom.sessionId).toBe("raw-cdp-id");
+  });
+
+  it("explains the attachToTarget fix when a page-scoped send lacks a sessionId", async () => {
+    const { browser } = createFakeBrowser({
+      cdpErrors: new Set(["Page.enable"])
+    });
+    const store = new MemorySessionStore();
+    const connector = new BrowserConnector(fakeCtx, { browser, store });
+
+    await expect(
+      connector.executeTool(
+        "send",
+        { method: "Page.enable" },
+        { executionId: "exec-a" }
+      )
+    ).rejects.toThrow(
+      "Page-scoped commands need a sessionId: const { sessionId } = await cdp.attachToTarget({ targetId })"
+    );
+  });
+
+  it("explains that CDP events cannot be sent as commands", async () => {
+    const { browser } = createFakeBrowser({
+      cdpErrors: new Set(["Page.loadEventFired"])
+    });
+    const store = new MemorySessionStore();
+    const connector = new BrowserConnector(fakeCtx, { browser, store });
+
+    await expect(
+      connector.executeTool(
+        "send",
+        { method: "Page.loadEventFired", sessionId: "raw-cdp-id" },
+        { executionId: "exec-a" }
+      )
+    ).rejects.toThrow("is a CDP *event*, not a command");
   });
 
   it("fails with a clear error when the session expired across a pause", async () => {

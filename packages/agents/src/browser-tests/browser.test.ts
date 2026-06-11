@@ -253,7 +253,7 @@ describe("browser connector e2e", () => {
             method: "Target.createTarget",
             params: { url: "about:blank" }
           });
-          const sessionId = await cdp.attachToTarget({ targetId });
+          const { sessionId } = await cdp.attachToTarget({ targetId });
           await cdp.send({ method: "Runtime.enable", sessionId });
           await cdp.send({
             method: "Page.navigate",
@@ -330,7 +330,7 @@ describe("browser connector e2e", () => {
             method: "Target.createTarget",
             params: { url: "about:blank" }
           });
-          const sessionId = await cdp.attachToTarget({ targetId });
+          const { sessionId } = await cdp.attachToTarget({ targetId });
           await cdp.send({ method: "Runtime.enable", sessionId });
           await cdp.send({
             method: "Runtime.evaluate",
@@ -391,7 +391,7 @@ describe("browser connector e2e", () => {
       ])) as RunOutput;
       expect(resumed.status).toBe("error");
       expect(resumed.error).toContain(
-        "expired while this execution was paused"
+        "expired or was swept while this execution was paused"
       );
 
       const after = (await callAgent("storedSessions")) as StoredSessions;
@@ -405,7 +405,7 @@ describe("browser connector e2e", () => {
             method: "Target.createTarget",
             params: { url: "about:blank" }
           });
-          const sessionId = await cdp.attachToTarget({ targetId });
+          const { sessionId } = await cdp.attachToTarget({ targetId });
           await cdp.send({ method: "Runtime.enable", sessionId });
           await cdp.send({
             method: "Runtime.evaluate",
@@ -434,7 +434,7 @@ describe("browser connector e2e", () => {
       // the tab state from the first run.
       const second = await run(
         `async () => {
-          const sessionId = await cdp.attachToTarget({ targetId: ${JSON.stringify(
+          const { sessionId } = await cdp.attachToTarget({ targetId: ${JSON.stringify(
             targetId
           )} });
           const { result } = await cdp.send({
@@ -476,7 +476,7 @@ describe("browser connector e2e", () => {
             method: "Target.createTarget",
             params: { url: "about:blank" }
           });
-          const sessionId = await cdp.attachToTarget({ targetId });
+          const { sessionId } = await cdp.attachToTarget({ targetId });
           await cdp.send({ method: "Runtime.enable", sessionId });
           await cdp.send({
             method: "Runtime.evaluate",
@@ -494,7 +494,7 @@ describe("browser connector e2e", () => {
 
       const verify = await run(
         `async () => {
-          const sessionId = await cdp.attachToTarget({ targetId: ${JSON.stringify(
+          const { sessionId } = await cdp.attachToTarget({ targetId: ${JSON.stringify(
             info.targetId
           )} });
           const { result } = await cdp.send({

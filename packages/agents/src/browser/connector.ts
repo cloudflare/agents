@@ -127,8 +127,10 @@ interface CachedSocket {
 }
 
 /**
- * `cdp.attachToTarget` returns a stable handle (`target:<targetId>`) instead
- * of the raw CDP session id. Raw ids are connection-scoped: a run that pauses
+ * `cdp.attachToTarget` returns `{ sessionId: "target:<targetId>" }` — a stable
+ * handle instead of the raw CDP session id. (The object shape mirrors the real
+ * `Target.attachToTarget` response, which is what models reach for.) Raw ids
+ * are connection-scoped: a run that pauses
  * for approval resumes on a fresh WebSocket where the old id is invalid, and
  * the durable replay log would otherwise pin the stale value. The handle is a
  * pure function of the target, so replayed code computes identical arguments,
@@ -185,7 +187,7 @@ export class BrowserConnector extends CodemodeConnector {
     const mode = this.#mode();
     const lines = [
       "Issue CDP calls sequentially — never in parallel (no Promise.all): call order is recorded for durable replay.",
-      "Browser-/Target-scoped commands (Target.createTarget, Target.getTargets) need no sessionId. Page-scoped commands (Page.navigate, Runtime.evaluate) require a sessionId from cdp.attachToTarget({ targetId }).",
+      "Browser-/Target-scoped commands (Target.createTarget, Target.getTargets) need no sessionId. Page-scoped commands (Page.navigate, Runtime.evaluate) require one: `const { sessionId } = await cdp.attachToTarget({ targetId });` then pass it to every page-scoped send.",
       "Write large outputs (screenshots, page dumps) to a file or workspace immediately and pass around small references — large return values fail to record.",
       "Use cdp.spec() to discover commands, events, and types when unsure.",
       "If a command fails or times out, check cdp.getDebugLog() for recent protocol traffic."
@@ -247,16 +249,45 @@ export class BrowserConnector extends CodemodeConnector {
             executionId,
             sessionId
           );
-          return socket.send(method, params, {
-            sessionId: resolved,
-            timeoutMs
-          });
+          try {
+            return await socket.send(method, params, {
+              sessionId: resolved,
+              timeoutMs
+            });
+          } catch (err) {
+            // "Method wasn't found" is almost always one of two model
+            // mistakes. Teach the fix instead of leaving a bare protocol
+            // error: either the method is actually an event (events can't be
+            // sent), or a page-scoped command went to the browser-level
+            // session because no sessionId was passed.
+            if (
+              err instanceof Error &&
+              /-32601|wasn't found/.test(err.message)
+            ) {
+              if (await this.#isSpecEvent(method)) {
+                throw new Error(
+                  `${err.message}. '${method}' is a CDP *event*, not a ` +
+                    `command — it cannot be called via cdp.send. To wait for ` +
+                    `page state, poll instead (e.g. Runtime.evaluate of ` +
+                    `document.readyState until "complete").`
+                );
+              }
+              if (!sessionId) {
+                throw new Error(
+                  `${err.message}. Page-scoped commands need a sessionId: ` +
+                    `const { sessionId } = await cdp.attachToTarget({ targetId }); ` +
+                    `then pass sessionId to cdp.send.`
+                );
+              }
+            }
+            throw err;
+          }
         }
       },
 
       attachToTarget: {
         description:
-          "Attach to a target (tab) and return a stable session handle to pass as sessionId in page-scoped send calls. The handle stays valid across pauses/resumes.",
+          "Attach to a target (tab) and return { sessionId } — a stable session handle to pass as sessionId in page-scoped send calls. The handle stays valid across pauses/resumes.",
         inputSchema: {
           type: "object",
           properties: {
@@ -268,6 +299,17 @@ export class BrowserConnector extends CodemodeConnector {
           },
           required: ["targetId"]
         },
+        outputSchema: {
+          type: "object",
+          properties: {
+            sessionId: {
+              type: "string",
+              description:
+                "Stable session handle for page-scoped send calls (valid across pauses/resumes)"
+            }
+          },
+          required: ["sessionId"]
+        },
         execute: async (args, ctx) => {
           const { targetId, timeoutMs } = args as {
             targetId: string;
@@ -275,7 +317,7 @@ export class BrowserConnector extends CodemodeConnector {
           };
           const executionId = this.#executionId(ctx);
           await this.#attach(executionId, targetId, timeoutMs);
-          return `${ATTACH_HANDLE_PREFIX}${targetId}`;
+          return { sessionId: `${ATTACH_HANDLE_PREFIX}${targetId}` };
         }
       },
 
@@ -577,6 +619,23 @@ export class BrowserConnector extends CodemodeConnector {
    * current socket, re-attaching lazily after a reconnect. Raw CDP session
    * ids (from manual Target.attachToTarget sends) pass through untouched.
    */
+  /**
+   * True when `method` is a CDP *event* (e.g. `Page.loadEventFired`) rather
+   * than a command. Used only on the `send` failure path to produce a better
+   * error; any spec-loading failure just means no extra hint.
+   */
+  async #isSpecEvent(method: string): Promise<boolean> {
+    try {
+      const spec = await loadCdpSpec(this.#options);
+      const domain = method.split(".")[0];
+      return spec.domains.some(
+        (d) => d.name === domain && d.events.some((e) => e.event === method)
+      );
+    } catch {
+      return false;
+    }
+  }
+
   async #resolveSessionHandle(
     executionId: string,
     sessionId?: string

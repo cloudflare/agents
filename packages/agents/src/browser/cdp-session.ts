@@ -110,7 +110,11 @@ export class CdpSession {
     options: CdpAttachOptions = {}
   ): Promise<string> {
     if (typeof targetId !== "string" || !targetId) {
-      throw new Error("attachToTarget requires a targetId");
+      throw new Error(
+        "attachToTarget requires a targetId — list open tabs with " +
+          "send('Target.getTargets') or create one with " +
+          "send('Target.createTarget', { url })"
+      );
     }
 
     const result = (await this.send(

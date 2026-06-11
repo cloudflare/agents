@@ -9,6 +9,7 @@ declare namespace Cloudflare {
   interface Env {
     LOADER: WorkerLoader;
     AI: Ai;
+    BROWSER: Fetcher;
     GITHUB_CLIENT_ID: string;
     GITHUB_CLIENT_SECRET: string;
     /**
