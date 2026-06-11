@@ -47,6 +47,21 @@ const EXPECTED_SCHEMA_DDL = [
           started_at INTEGER,
           completed_at INTEGER
         )`,
+  // The two host-capability tables (core/host.ts) are managed by the
+  // namespaced registerMigrations() ledger, not the legacy versioned
+  // schema — adding them here does NOT require a CURRENT_SCHEMA_VERSION
+  // bump.
+  `CREATE TABLE cf_agents_host_migrations (
+        namespace TEXT NOT NULL,
+        id TEXT NOT NULL,
+        applied_at INTEGER NOT NULL,
+        PRIMARY KEY (namespace, id)
+      )`,
+  `CREATE TABLE cf_agents_host_timers (
+              key TEXT PRIMARY KEY NOT NULL,
+              fire_at INTEGER NOT NULL,
+              payload TEXT
+            )`,
   `CREATE TABLE cf_agents_mcp_servers (
             id TEXT PRIMARY KEY NOT NULL,
             name TEXT NOT NULL,

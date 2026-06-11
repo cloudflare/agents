@@ -9,10 +9,12 @@ export type TestState = {
 };
 
 export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
-  // Capture the DEFAULT_STATE sentinel reference for cache reset in tests.
-  // Child field initializers run after super(), at which point _state is DEFAULT_STATE.
-  // @ts-expect-error - accessing private field for testing
-  private _stateSentinel: TestState = this._state;
+  // Drop the synced-state capability (and its in-memory cache) so the next
+  // `state` access re-reads from the DB, as if in a fresh DO life.
+  private _resetStateCacheForTest() {
+    // @ts-expect-error - accessing private field for testing
+    this._syncedStateCap = undefined;
+  }
 
   initialState: TestState = {
     count: 0,
@@ -88,8 +90,7 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
   // Access state and check if it recovered to initialState
   getStateAfterCorruption(): TestState {
     // Reset the in-memory cache so the getter re-reads from DB
-    // @ts-expect-error - accessing private field for testing
-    this._state = this._stateSentinel;
+    this._resetStateCacheForTest();
     // This should trigger the try-catch and fallback to initialState
     return this.state;
   }
@@ -182,9 +183,8 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
       "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_row_id', ?)",
       value
     );
-    // Reset in-memory cache to sentinel so getter re-reads from DB
-    // @ts-expect-error - accessing private field for testing
-    this._state = this._stateSentinel;
+    // Reset in-memory cache so getter re-reads from DB
+    this._resetStateCacheForTest();
   }
 
   // Simulate orphaned wasChanged: legacy DO crashed during corruption recovery,
@@ -196,16 +196,18 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
     this.ctx.storage.sql.exec(
       `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_was_changed', 'true')`
     );
-    // @ts-expect-error - accessing private field for testing
-    this._state = this._stateSentinel;
+    this._resetStateCacheForTest();
   }
 }
 
 // Test Agent without initialState to test undefined behavior
 export class TestStateAgentNoInitial extends Agent {
-  // Capture the DEFAULT_STATE sentinel reference for cache reset in tests.
-  // @ts-expect-error - accessing private field for testing
-  private _stateSentinel: unknown = this._state;
+  // Drop the synced-state capability (and its in-memory cache) so the next
+  // `state` access re-reads from the DB, as if in a fresh DO life.
+  private _resetStateCacheForTest() {
+    // @ts-expect-error - accessing private field for testing
+    this._syncedStateCap = undefined;
+  }
 
   // No initialState defined - should return undefined
 
@@ -253,8 +255,7 @@ export class TestStateAgentNoInitial extends Agent {
 
   // Reset in-memory cache and read from DB
   getStateAfterCorruption() {
-    // @ts-expect-error - accessing private field for testing
-    this._state = this._stateSentinel;
+    this._resetStateCacheForTest();
     return this.state;
   }
 
@@ -264,9 +265,8 @@ export class TestStateAgentNoInitial extends Agent {
       "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_row_id', ?)",
       value
     );
-    // Reset in-memory cache to sentinel so getter re-reads from DB
-    // @ts-expect-error - accessing private field for testing
-    this._state = this._stateSentinel;
+    // Reset in-memory cache so getter re-reads from DB
+    this._resetStateCacheForTest();
   }
 
   // Simulate orphaned wasChanged: legacy DO crashed during corruption recovery,
@@ -278,8 +278,7 @@ export class TestStateAgentNoInitial extends Agent {
     this.ctx.storage.sql.exec(
       `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_was_changed', 'true')`
     );
-    // @ts-expect-error - accessing private field for testing
-    this._state = this._stateSentinel;
+    this._resetStateCacheForTest();
   }
 
   // Simulate legacy state row without wasChanged: old SDK version that only wrote
@@ -292,8 +291,7 @@ export class TestStateAgentNoInitial extends Agent {
       "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_row_id', ?)",
       value
     );
-    // @ts-expect-error - accessing private field for testing
-    this._state = this._stateSentinel;
+    this._resetStateCacheForTest();
   }
 
   // Reset schema version to 0 (simulates a pre-versioning DO)

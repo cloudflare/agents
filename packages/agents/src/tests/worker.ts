@@ -43,6 +43,7 @@ export {
   TestRetryAgent,
   TestRetryDefaultsAgent,
   TestKeepAliveAgent,
+  TestHostCapabilitiesAgent,
   TestMigrationAgent,
   TestSessionAgent,
   TestSessionAgentWithContext,
@@ -121,6 +122,7 @@ import type {
   TestRetryAgent,
   TestRetryDefaultsAgent,
   TestKeepAliveAgent,
+  TestHostCapabilitiesAgent,
   TestMigrationAgent,
   TestSessionAgent,
   TestSessionAgentWithContext,
@@ -173,6 +175,7 @@ export type Env = {
   TestRetryDefaultsAgent: DurableObjectNamespace<TestRetryDefaultsAgent>;
   TestRunFiberAgent: DurableObjectNamespace<TestRunFiberAgent>;
   TestKeepAliveAgent: DurableObjectNamespace<TestKeepAliveAgent>;
+  TestHostCapabilitiesAgent: DurableObjectNamespace<TestHostCapabilitiesAgent>;
   TestMigrationAgent: DurableObjectNamespace<TestMigrationAgent>;
   TestSessionAgent: DurableObjectNamespace<TestSessionAgent>;
   TestSessionAgentWithContext: DurableObjectNamespace<TestSessionAgentWithContext>;

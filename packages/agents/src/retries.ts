@@ -157,3 +157,31 @@ export function isErrorRetryable(err: unknown): boolean {
     !msg.includes("Durable Object is overloaded")
   );
 }
+
+/**
+ * Parse the raw `retry_options` TEXT column from a SQLite row into a
+ * typed `RetryOptions` object, or `undefined` if not set.
+ */
+export function parseRetryOptions(
+  row: Record<string, unknown>
+): RetryOptions | undefined {
+  const raw = row.retry_options;
+  if (typeof raw !== "string") return undefined;
+  return JSON.parse(raw) as RetryOptions;
+}
+
+/**
+ * Resolve per-task retry options against class-level defaults for use
+ * with `tryN`. This is the shared retry-execution path used by both
+ * queue flush and schedule alarm handlers.
+ */
+export function resolveRetryConfig(
+  taskRetry: RetryOptions | undefined,
+  defaults: Required<RetryOptions>
+): { maxAttempts: number; baseDelayMs: number; maxDelayMs: number } {
+  return {
+    maxAttempts: taskRetry?.maxAttempts ?? defaults.maxAttempts,
+    baseDelayMs: taskRetry?.baseDelayMs ?? defaults.baseDelayMs,
+    maxDelayMs: taskRetry?.maxDelayMs ?? defaults.maxDelayMs
+  };
+}

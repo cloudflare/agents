@@ -157,6 +157,10 @@
         "name": "TestKeepAliveAgent"
       },
       {
+        "class_name": "TestHostCapabilitiesAgent",
+        "name": "TestHostCapabilitiesAgent"
+      },
+      {
         "class_name": "TestSessionAgent",
         "name": "TestSessionAgent"
       },
@@ -330,6 +334,7 @@
         "TestRetryDefaultsAgent",
         "TestRunFiberAgent",
         "TestKeepAliveAgent",
+        "TestHostCapabilitiesAgent",
         "TestSessionAgent",
         "TestSessionAgentWithContext",
         "TestSearchAgent",

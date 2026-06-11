@@ -39,6 +39,7 @@ export { TestChatSdkStateHostAgent, ChatSdkStateAgent } from "./chat-sdk";
 export { TestRaceAgent } from "./race";
 export { TestRetryAgent, TestRetryDefaultsAgent } from "./retry";
 export { TestKeepAliveAgent } from "./keep-alive";
+export { TestHostCapabilitiesAgent } from "./host-capabilities";
 export { TestMigrationAgent } from "./migration";
 export {
   TestSessionAgent,
