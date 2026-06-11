@@ -365,7 +365,7 @@ describe("BrowserConnector", () => {
         { method: "Browser.getVersion" },
         { executionId: "exec-a" }
       )
-    ).rejects.toThrow("expired while this execution was paused");
+    ).rejects.toThrow("expired or was swept while this execution was paused");
     expect(store.sessions.has("cdp:exec:exec-a")).toBe(false);
   });
 
@@ -487,20 +487,23 @@ describe("BrowserConnector", () => {
     const { browser, requests } = createFakeBrowser();
     const store = new MemorySessionStore();
     const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
     store.set("cdp:reuse:default", {
       sessionId: "session-shared",
       createdAt: now - 3_600_000,
       updatedAt: now - 3_600_000
     });
+    // Exec entries use the much longer 24h default — an hour-old paused run
+    // must NOT be swept, only one idle past the paused TTL.
     store.set("cdp:exec:exec-stale", {
       sessionId: "session-stale",
+      createdAt: now - dayMs - 3_600_000,
+      updatedAt: now - dayMs - 3_600_000
+    });
+    store.set("cdp:exec:exec-paused", {
+      sessionId: "session-paused",
       createdAt: now - 3_600_000,
       updatedAt: now - 3_600_000
-    });
-    store.set("cdp:exec:exec-fresh", {
-      sessionId: "session-fresh",
-      createdAt: now,
-      updatedAt: now
     });
     const connector = new BrowserConnector(fakeCtx, {
       browser,
@@ -511,12 +514,104 @@ describe("BrowserConnector", () => {
     const result = await connector.sweep();
     const sweptKeys = result.swept.map((entry) => entry.key).sort();
     expect(sweptKeys).toEqual(["cdp:exec:exec-stale", "cdp:reuse:default"]);
-    expect(store.sessions.has("cdp:exec:exec-fresh")).toBe(true);
+    expect(store.sessions.has("cdp:exec:exec-paused")).toBe(true);
     expect(deletesFor(requests, "session-shared")).toHaveLength(1);
     expect(deletesFor(requests, "session-stale")).toHaveLength(1);
-    expect(deletesFor(requests, "session-fresh")).toHaveLength(0);
+    expect(deletesFor(requests, "session-paused")).toHaveLength(0);
 
+    // The swept exec entry stays behind as a tombstone (so a resume fails
+    // loudly) and is not re-swept.
+    expect(store.sessions.get("cdp:exec:exec-stale")?.closedAt).toBeDefined();
     expect((await connector.sweep()).swept).toEqual([]);
+
+    // An aged tombstone is eventually deleted without another session DELETE.
+    store.set("cdp:exec:exec-stale", {
+      ...store.sessions.get("cdp:exec:exec-stale")!,
+      closedAt: now - dayMs - 1
+    });
+    expect((await connector.sweep()).swept).toEqual([]);
+    expect(store.sessions.has("cdp:exec:exec-stale")).toBe(false);
+    expect(deletesFor(requests, "session-stale")).toHaveLength(1);
+  });
+
+  it("fails loudly when resuming an execution whose session was swept", async () => {
+    const { browser } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const connector = new BrowserConnector(fakeCtx, { browser, store });
+
+    await connector.executeTool(
+      "send",
+      { method: "Browser.getVersion" },
+      { executionId: "exec-a" }
+    );
+    await connector.onPassEnd("exec-a", "paused");
+
+    // Age the entry past the exec threshold, then sweep.
+    const stored = store.sessions.get("cdp:exec:exec-a")!;
+    store.set("cdp:exec:exec-a", {
+      ...stored,
+      updatedAt: Date.now() - 25 * 60 * 60 * 1000
+    });
+    const result = await connector.sweep();
+    expect(result.swept.map((entry) => entry.key)).toEqual(["cdp:exec:exec-a"]);
+
+    // The resume does NOT silently get a fresh browser — it fails clearly.
+    await expect(
+      connector.executeTool(
+        "send",
+        { method: "Target.getTargets" },
+        { executionId: "exec-a" }
+      )
+    ).rejects.toThrow("expired or was swept");
+    expect(store.sessions.has("cdp:exec:exec-a")).toBe(false);
+  });
+
+  it("touches the exec entry on use so active runs stay out of sweep range", async () => {
+    const { browser } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const connector = new BrowserConnector(fakeCtx, { browser, store });
+
+    await connector.executeTool(
+      "send",
+      { method: "Browser.getVersion" },
+      { executionId: "exec-a" }
+    );
+    // Simulate a long-running execution whose entry has gone stale.
+    const stored = store.sessions.get("cdp:exec:exec-a")!;
+    store.set("cdp:exec:exec-a", {
+      ...stored,
+      updatedAt: Date.now() - 2 * 60 * 60 * 1000
+    });
+
+    await connector.executeTool(
+      "send",
+      { method: "Target.getTargets" },
+      { executionId: "exec-a" }
+    );
+    const touched = store.sessions.get("cdp:exec:exec-a")!;
+    expect(Date.now() - touched.updatedAt).toBeLessThan(60_000);
+  });
+
+  it("dedupes concurrent socket connects for the same execution", async () => {
+    const { browser, requests } = createFakeBrowser();
+    const store = new MemorySessionStore();
+    const connector = new BrowserConnector(fakeCtx, { browser, store });
+
+    await Promise.all([
+      connector.executeTool(
+        "send",
+        { method: "Browser.getVersion" },
+        { executionId: "exec-a" }
+      ),
+      connector.executeTool(
+        "send",
+        { method: "Target.getTargets" },
+        { executionId: "exec-a" }
+      )
+    ]);
+
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(1);
+    expect(requests.filter((r) => r.upgrade)).toHaveLength(1);
   });
 
   it("reports and closes the shared session via host-side helpers", async () => {

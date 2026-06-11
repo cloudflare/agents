@@ -19,24 +19,11 @@ export {
 } from "./browser-run";
 
 export {
-  createBrowserSessionManager,
   DEFAULT_SWEEP_IDLE_MS,
   DurableBrowserSessionStore,
-  hasDynamicBrowserSession,
-  hasReusableBrowserSession,
-  type BrowserConnectionOptions,
-  type BrowserLease,
-  type BrowserManagerOptions,
   type BrowserSessionLock,
-  type BrowserSessionManager,
-  type BrowserSessionOptions,
   type BrowserSessionStore,
-  type DynamicBrowserSessionOptions,
-  type ReusableBrowserSessionOptions,
-  type StoredBrowserSession,
-  type StoredBrowserSessionOptions,
-  type SweepOptions,
-  type SweepResult
+  type StoredBrowserSession
 } from "./session-manager";
 
 export {
@@ -47,6 +34,7 @@ export {
 
 export {
   BrowserConnector,
+  DEFAULT_EXEC_SWEEP_IDLE_MS,
   type BrowserConnectorOptions,
   type BrowserConnectorSessionOptions,
   type BrowserConnectorSweepOptions,

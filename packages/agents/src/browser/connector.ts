@@ -73,10 +73,19 @@ export type BrowserConnectorOptions = (
 
 export interface BrowserConnectorSweepOptions {
   /**
-   * Close stored sessions idle for at least this many milliseconds.
-   * Defaults to the connector's `keepAliveMs`, or {@link DEFAULT_SWEEP_IDLE_MS}.
+   * Close the shared (reuse/promoted) session when idle for at least this
+   * many milliseconds. Defaults to the connector's `keepAliveMs`, or
+   * {@link DEFAULT_SWEEP_IDLE_MS}.
    */
   maxIdleMs?: number;
+  /**
+   * Close *per-execution* sessions when idle for at least this many
+   * milliseconds. Defaults to {@link DEFAULT_EXEC_SWEEP_IDLE_MS} (24h) —
+   * deliberately at least as long as the codemode runtime's default paused
+   * TTL, so a run awaiting approval is normally expired (and disposed) by
+   * `expirePaused` before the sweep backstop ever touches its browser.
+   */
+  maxExecIdleMs?: number;
 }
 
 export interface BrowserConnectorSweepResult {
@@ -86,6 +95,21 @@ export interface BrowserConnectorSweepResult {
 
 const EXEC_KEY_PREFIX = "cdp:exec:";
 const REUSE_KEY_PREFIX = "cdp:reuse:";
+
+/**
+ * Default idle window before {@link BrowserConnector.sweep} reclaims a
+ * per-execution session. Matches the codemode runtime's default paused TTL
+ * (24h): an execution paused for approval keeps its browser until the run
+ * itself is expired.
+ */
+export const DEFAULT_EXEC_SWEEP_IDLE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Minimum interval between `updatedAt` bumps on a per-execution store entry.
+ * Touching on every CDP call would write-amplify; once a minute is enough to
+ * keep an active or recently-resumed execution out of sweep range.
+ */
+const EXEC_TOUCH_INTERVAL_MS = 60 * 1000;
 
 function isMissingBrowserSession(error: unknown): boolean {
   return error instanceof BrowserRenderingError && error.status === 404;
@@ -133,6 +157,7 @@ const ATTACH_HANDLE_PREFIX = "target:";
 export class BrowserConnector extends CodemodeConnector {
   #options: BrowserConnectorOptions;
   #sockets = new Map<string, CachedSocket>();
+  #connecting = new Map<string, Promise<CdpSession>>();
 
   constructor(
     ctx: DurableObjectState | ExecutionContext,
@@ -373,7 +398,7 @@ export class BrowserConnector extends CodemodeConnector {
         promoted = shared?.sessionId === stored.sessionId;
       }
 
-      if (!promoted) {
+      if (!promoted && stored.closedAt === undefined) {
         try {
           await deleteBrowserSession(this.#options.browser, stored.sessionId);
         } catch (error) {
@@ -431,9 +456,16 @@ export class BrowserConnector extends CodemodeConnector {
 
   /**
    * Close stored sessions (shared and per-execution) idle past the threshold.
-   * Per-execution entries normally die with `disposeExecution`; the sweep is
-   * the backstop for crashed hosts and abandoned paused runs. Call it from a
-   * recurring alarm/scheduled task.
+   * Per-execution entries normally die with `disposeExecution` (or the
+   * codemode runtime's `expirePaused`); the sweep is the backstop for crashed
+   * hosts. Call it from a recurring alarm/scheduled task.
+   *
+   * Active executions bump their entry's `updatedAt` on use, so only runs
+   * idle past `maxExecIdleMs` (default 24h) are reclaimed. A swept
+   * per-execution entry is kept as a tombstone (`closedAt`) rather than
+   * deleted, so a later resume fails with a clear "session expired" error
+   * instead of silently continuing in a fresh browser; tombstones are
+   * deleted once they age past the threshold again.
    */
   async sweep(
     options?: BrowserConnectorSweepOptions
@@ -444,6 +476,7 @@ export class BrowserConnector extends CodemodeConnector {
       options?.maxIdleMs ??
       this.#options.session?.keepAliveMs ??
       DEFAULT_SWEEP_IDLE_MS;
+    const maxExecIdleMs = options?.maxExecIdleMs ?? DEFAULT_EXEC_SWEEP_IDLE_MS;
 
     const keys = new Set<string>([this.#reuseKey()]);
     if (store.list) {
@@ -454,12 +487,26 @@ export class BrowserConnector extends CodemodeConnector {
 
     const swept: Array<{ key: string; sessionId: string }> = [];
     for (const key of keys) {
+      const isExec = key.startsWith(EXEC_KEY_PREFIX);
+      const idleMs = isExec ? maxExecIdleMs : maxIdleMs;
       const lock = await store.acquireLock(key);
       let toClose: StoredBrowserSession | undefined;
       try {
         const stored = await store.get(key);
-        if (!stored || Date.now() - stored.updatedAt < maxIdleMs) continue;
-        await store.delete(key);
+        if (!stored) continue;
+        const now = Date.now();
+        if (stored.closedAt !== undefined) {
+          // Tombstone from a previous sweep — its session is already gone.
+          // Drop it once it has aged past the threshold again.
+          if (now - stored.closedAt >= idleMs) await store.delete(key);
+          continue;
+        }
+        if (now - stored.updatedAt < idleMs) continue;
+        if (isExec) {
+          await store.set(key, { ...stored, closedAt: now });
+        } else {
+          await store.delete(key);
+        }
         toClose = stored;
       } finally {
         await lock.release();
@@ -539,8 +586,25 @@ export class BrowserConnector extends CodemodeConnector {
     return this.#attach(executionId, targetId);
   }
 
-  /** Get or open the CDP socket for an execution. */
-  async #socket(executionId: string): Promise<CdpSession> {
+  /**
+   * Get or open the CDP socket for an execution. Concurrent calls for the
+   * same execution (model code that ignores the "sequential calls" rule and
+   * uses Promise.all) share one in-flight connect instead of racing and
+   * leaking the loser's WebSocket.
+   */
+  #socket(executionId: string): Promise<CdpSession> {
+    const inFlight = this.#connecting.get(executionId);
+    if (inFlight) return inFlight;
+    const promise = this.#socketInner(executionId).finally(() => {
+      if (this.#connecting.get(executionId) === promise) {
+        this.#connecting.delete(executionId);
+      }
+    });
+    this.#connecting.set(executionId, promise);
+    return promise;
+  }
+
+  async #socketInner(executionId: string): Promise<CdpSession> {
     if (this.#options.cdpUrl) {
       const cached = this.#sockets.get(executionId);
       if (cached) return cached.session;
@@ -599,12 +663,17 @@ export class BrowserConnector extends CodemodeConnector {
     // one-shot / dynamic: a session this execution already opened wins.
     const existing = await this.#readStored(execKey);
     if (existing) {
-      if (await this.#isAlive(existing)) {
+      if (existing.closedAt === undefined && (await this.#isAlive(existing))) {
+        // Keep the entry fresh so the sweep backstop never reclaims an
+        // active (or recently resumed) execution's session.
+        if (Date.now() - existing.updatedAt >= EXEC_TOUCH_INTERVAL_MS) {
+          await this.#touchStored(execKey, existing);
+        }
         return existing;
       }
       await this.#deleteStoredEntry(execKey, existing.sessionId);
       throw new Error(
-        `Browser session ${existing.sessionId} expired while this execution was paused — the run cannot continue. Start a new execution.`
+        `Browser session ${existing.sessionId} expired or was swept while this execution was paused — the run cannot continue. Start a new execution.`
       );
     }
 
@@ -702,7 +771,7 @@ export class BrowserConnector extends CodemodeConnector {
     if (this.#mode() === "dynamic") {
       // Promote this execution's session into the shared slot, if it has one.
       const exec = await this.#readStored(this.#execKey(executionId));
-      if (exec) {
+      if (exec && exec.closedAt === undefined) {
         const lock = await store.acquireLock(reuseKey);
         let replaced: StoredBrowserSession | undefined;
         try {
