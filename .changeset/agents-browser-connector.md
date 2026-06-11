@@ -1,0 +1,15 @@
+---
+"agents": minor
+---
+
+Rebuild `agents/browser` on the codemode connector runtime (experimental).
+
+The browser tool surface is now a single durable tool, **`browser_execute`**: the model writes sandboxed code against a `cdp` connector (`cdp.send`, `cdp.attachToTarget`, `cdp.spec`, `cdp.getDebugLog`, …) instead of picking from several flat tools. Executions are recorded on a `CodemodeRuntime` Durable Object facet with abort-and-replay, so a run can pause for approval and resume with its browser session, tabs, and cookies intact.
+
+- **`BrowserConnector`** — a `CodemodeConnector` (name `cdp`) that owns CDP sockets keyed by execution id. Sockets are released at the end of every execution pass (`onPassEnd`); browser sessions are torn down on terminal status (`disposeExecution`) — never on pause.
+- **Session modes** — `one-shot` (default, fresh session per execution), `reuse` (named shared session), and `dynamic` (starts one-shot; the model can promote with `cdp.startSession()` after e.g. logging in). Shared sessions are tracked in durable storage and survive hibernation; `connector.sweep()` reclaims expired ones from a scheduled task.
+- **Stable attach handles** — `cdp.attachToTarget` returns a handle bound to the target (not a raw CDP session id), so handles recorded before a pause still work after the resume reconnects.
+- **`createBrowserTools({ ctx, browser, loader, session? })`** (AI SDK and TanStack AI variants) now requires the hosting Durable Object's `ctx` and returns `{ browser_execute }`; `createBrowserRuntime` additionally exposes the runtime handle and connector for host-side wiring (approvals, `sessionInfo`/`closeSession`/`sweep`). The previous `browser_search`/flat-tool surface and `createBrowserProvider` are removed.
+- Worker entries must export the facet class: `export { CodemodeRuntime } from "agents/browser"`.
+
+`agents/chat` gains `pausedExecutionUpdate`, a tool-part update that replaces a paused execution's output in the transcript with its resolved outcome (completed / rejected / paused again) — the transcript-side half of human-in-the-loop approvals for durable executions.
