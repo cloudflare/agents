@@ -145,6 +145,14 @@ export type CreateProxyToolOptions = {
    */
   name?: string;
   description?: string;
+  /**
+   * One-line hints rendered next to each connector in the default tool
+   * description (keyed by connector name). Use them to tell the model what a
+   * namespace is for — e.g. `{ state: "the workspace filesystem" }` — without
+   * it having to run a `codemode.search` discovery pass first. Ignored when a
+   * custom `description` is given.
+   */
+  connectorHints?: Record<string, string>;
   /** Terminal executions retained per runtime. Defaults to 50. */
   maxExecutions?: number;
   /** Optionally reshape the model-facing result (e.g. truncate). */
@@ -481,11 +489,20 @@ function createPlatformProvider(
 
 function buildDescription(
   connectors: CodemodeConnector[],
-  customDescription?: string
+  customDescription?: string,
+  connectorHints?: Record<string, string>
 ): string {
   if (customDescription) return customDescription;
 
-  const namespaces = connectors.map((c) => `- \`${c.name()}\``).join("\n");
+  const namespaces = connectors
+    .map((c) => {
+      const name = c.name();
+      const hint = connectorHints?.[name];
+      return hint ? `- \`${name}\` — ${hint}` : `- \`${name}\``;
+    })
+    .join("\n");
+
+  const names = connectors.map((c) => `\`${c.name()}\``).join(", ");
 
   const lines = [
     "Execute TypeScript in a sandbox with access to connector SDKs.",
@@ -498,13 +515,13 @@ function buildDescription(
     "",
     "## Rules",
     "",
-    "- `codemode.search(query)` returns ranked matches across connector methods and saved snippets.",
+    `- The ONLY globals are ${names} and \`codemode\` (plus standard JavaScript). There is no \`host\`, \`fs\`, \`require\`, \`process\`, or Node.js API — all I/O goes through the connectors below.`,
+    "- Never guess method names. If you have not used a connector in this conversation, run a discovery pass first: `codemode.search(query)` returns ranked matches across connector methods and saved snippets.",
     '- `codemode.describe("connector.method")` returns TypeScript type declarations.',
     "- `codemode.step(name, fn)` wraps side-effectful or nondeterministic work (raw fetch, random, time) so it runs once and is replayed on resume. Use it for anything that isn't a connector call.",
     "- Some methods require approval. The run pauses until the user approves, then resumes automatically. Write code as if the call returns normally.",
     '- A result with `status: "paused"` means the run is awaiting human approval. Tell the user what is pending and wait — do NOT re-issue the code; the run resumes on its own once approved.',
     "- All code outside connector calls and `codemode.step` must be deterministic so resume can replay it.",
-    "- Connector SDKs are available as globals named after each connector.",
     "- Do not use `fetch` — use connector SDKs.",
     "",
     "## Snippets",
@@ -601,7 +618,8 @@ async function runPass(
     }
 
     if (threw) {
-      const message = threw instanceof Error ? threw.message : String(threw);
+      const raw = threw instanceof Error ? threw.message : String(threw);
+      const message = withGlobalsHint(raw, setup);
       await runtime.fail(executionId, message);
       await endPass("error");
       return { status: "error", executionId, error: message };
@@ -623,6 +641,17 @@ async function runPass(
       await endPass("error");
     }
   }
+}
+
+/**
+ * A sandbox `ReferenceError` usually means the model invented a global (e.g.
+ * `host.writeFile(...)`). Append the real globals so the retry is informed
+ * instead of another guess.
+ */
+function withGlobalsHint(message: string, setup: Setup): string {
+  if (!/\bis not defined\b/.test(message)) return message;
+  const names = [...setup.connectorsByName.keys(), "codemode"].join(", ");
+  return `${message} (the only globals available in the sandbox are: ${names})`;
 }
 
 /**
@@ -670,7 +699,11 @@ export function createProxyTool(
   }
 
   return tool({
-    description: buildDescription(connectors, options.description),
+    description: buildDescription(
+      connectors,
+      options.description,
+      options.connectorHints
+    ),
     inputSchema: proxySchema,
     execute: async ({ code }) => {
       // Validate size host-side (the facet's own guard would surface as a

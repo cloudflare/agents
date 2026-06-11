@@ -238,6 +238,11 @@ export class CodemodeTestHost extends DurableObject<Env> {
     return getCodemodeRuntime(this.ctx).begin(code);
   }
 
+  /** The model-facing description of the execute tool. */
+  toolDescription(connectorHints?: Record<string, string>): string {
+    return this.#runtime().tool({ connectorHints }).description ?? "";
+  }
+
   saveSnippet(name: string, description: string, executionId: string) {
     return this.#runtime().saveSnippet(name, { description, executionId });
   }

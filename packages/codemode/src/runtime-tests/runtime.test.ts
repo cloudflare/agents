@@ -40,6 +40,7 @@ interface Host {
   executions(name?: string): Promise<ExecutionState[]>;
   deleteExecution(id: string): Promise<boolean>;
   beginOnly(code: string): Promise<string>;
+  toolDescription(connectorHints?: Record<string, string>): Promise<string>;
   saveSnippet(
     name: string,
     description: string,
@@ -85,6 +86,33 @@ describe("codemode durable runtime (e2e)", () => {
 
     expect(out.status).toBe("completed");
     if (out.status === "completed") expect(out.result).toEqual([]);
+  });
+
+  it("names the connector globals (and renders hints) in the tool description", async () => {
+    const h = host();
+
+    const plain = await h.toolDescription();
+    expect(plain).toContain("The ONLY globals are `items` and `codemode`");
+    expect(plain).toContain("- `items`");
+
+    const hinted = await h.toolDescription({
+      items: "manage the item store"
+    });
+    expect(hinted).toContain("- `items` — manage the item store");
+  });
+
+  it("appends the available globals to a sandbox ReferenceError", async () => {
+    const h = host();
+    const out = (await h.run(
+      `async () => await host.writeFile({ path: "/a.txt" })`
+    )) as ProxyToolOutput;
+
+    expect(out.status).toBe("error");
+    if (out.status !== "error") return;
+    expect(out.error).toContain("host is not defined");
+    expect(out.error).toContain(
+      "the only globals available in the sandbox are: items, codemode"
+    );
   });
 
   it("pauses on an approval-gated action, then resumes on approve", async () => {

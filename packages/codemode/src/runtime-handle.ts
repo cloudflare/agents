@@ -48,6 +48,12 @@ export type CreateCodemodeRuntimeOptions = {
 
 export type CodemodeRuntimeToolOptions = {
   description?: string;
+  /**
+   * One-line hints rendered next to each connector in the default tool
+   * description (keyed by connector name). Ignored when a custom
+   * `description` is given.
+   */
+  connectorHints?: Record<string, string>;
 };
 
 export type CodemodeApproveOptions = {
@@ -127,6 +133,7 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
       connectors: this.#options.connectors,
       name: this.#options.name,
       description: options?.description,
+      connectorHints: options?.connectorHints,
       maxExecutions: this.#options.maxExecutions,
       transformResult: this.#options.transformResult
     });
