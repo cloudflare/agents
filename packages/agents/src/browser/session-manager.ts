@@ -61,6 +61,12 @@ export interface BrowserSessionStore {
   get(key: string): MaybePromise<StoredBrowserSession | undefined>;
   set(key: string, session: StoredBrowserSession): MaybePromise<void>;
   delete(key: string): MaybePromise<void>;
+  /**
+   * List stored sessions by key prefix. Optional — used by sweeps to find
+   * orphaned per-execution sessions; without it only the shared session key
+   * is swept.
+   */
+  list?(prefix: string): MaybePromise<Map<string, StoredBrowserSession>>;
 }
 
 export class DurableBrowserSessionStore implements BrowserSessionStore {
@@ -112,6 +118,18 @@ export class DurableBrowserSessionStore implements BrowserSessionStore {
 
   async delete(key: string): Promise<void> {
     await this.storage.delete(this.#storageKey(key));
+  }
+
+  async list(prefix: string): Promise<Map<string, StoredBrowserSession>> {
+    const storagePrefix = this.#storageKey(prefix);
+    const entries = await this.storage.list<StoredBrowserSession>({
+      prefix: storagePrefix
+    });
+    const result = new Map<string, StoredBrowserSession>();
+    for (const [storageKey, value] of entries) {
+      result.set(storageKey.slice("browser-session:".length), value);
+    }
+    return result;
   }
 
   #storageKey(key: string): string {

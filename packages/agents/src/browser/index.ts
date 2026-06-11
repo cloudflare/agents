@@ -39,6 +39,20 @@ export {
 } from "./session-manager";
 
 export {
+  loadCdpSpec,
+  type CdpSpecSource,
+  type SearchableCdpSpec
+} from "./spec";
+
+export {
+  BrowserConnector,
+  type BrowserConnectorOptions,
+  type BrowserConnectorSessionOptions,
+  type BrowserConnectorSweepOptions,
+  type BrowserConnectorSweepResult
+} from "./connector";
+
+export {
   type BrowserToolsOptions,
   type ToolResult,
   createBrowserToolHandlers,

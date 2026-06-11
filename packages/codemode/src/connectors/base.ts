@@ -189,7 +189,10 @@ export abstract class CodemodeConnector<
   ): Promise<unknown> {
     const tool = (await this.resolvedTools())[method];
     if (!tool) throw new Error(`Tool "${method}" not found on ${this.name()}`);
-    return tool.execute(args, ctx);
+    // `return await` (not `return`) so a synchronously-rejected promise gets
+    // its handler attached in the same tick — workerd otherwise reports a
+    // false-positive unhandled rejection during promise adoption.
+    return await tool.execute(args, ctx);
   }
 
   /**
