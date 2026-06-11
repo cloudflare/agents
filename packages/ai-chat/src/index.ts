@@ -2844,7 +2844,16 @@ export class AIChatAgent<
    */
   private _registerAgentToolTurn(runId: string): void {
     const requestId = this._turnQueue.activeRequestId;
-    if (requestId === null) return;
+    if (requestId === null) {
+      // Invariant: this runs inside the turn's enqueued fn, so the turn
+      // queue's active request id is set. If it ever isn't, the run can't be
+      // bound to its frames and its error/progress capture silently degrades
+      // (#1575) — surface it rather than fail quietly.
+      console.warn(
+        `[AIChatAgent] agent-tool run ${runId} has no active request id at turn start; frame attribution will be skipped`
+      );
+      return;
+    }
     this._agentToolRunsByRequestId.set(requestId, runId);
     this.sql`
       update cf_ai_chat_agent_tool_runs
@@ -2987,9 +2996,17 @@ export class AIChatAgent<
         options.signal?.removeEventListener("abort", abortFromParent);
         this._agentToolAbortControllers.delete(options.runId);
         this._agentToolLiveSequences.delete(options.runId);
-        for (const [reqId, runId] of this._agentToolRunsByRequestId) {
-          if (runId === options.runId) {
-            this._agentToolRunsByRequestId.delete(reqId);
+        // Drop this run's request-id mappings. When no runs remain in flight
+        // clear the whole map, so negatively-cached (null) entries for
+        // unrelated turns can't accumulate for the DO's lifetime — the map is
+        // only consulted while a run is active (#1575).
+        if (this._agentToolAbortControllers.size === 0) {
+          this._agentToolRunsByRequestId.clear();
+        } else {
+          for (const [reqId, runId] of this._agentToolRunsByRequestId) {
+            if (runId === options.runId) {
+              this._agentToolRunsByRequestId.delete(reqId);
+            }
           }
         }
         this._agentToolLastErrors.delete(options.runId);

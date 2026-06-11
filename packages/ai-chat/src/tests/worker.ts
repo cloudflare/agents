@@ -1205,6 +1205,36 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     return [...this._chatResponseResults];
   }
 
+  /**
+   * #1575: drive `ResumableStream.replayErroredChunksByRequestId` against a
+   * controllable connection so the return-value contract is testable in
+   * isolation: `failAfter` sends succeed, then the connection simulates a
+   * post-close send (the only error `sendIfOpen` swallows). Returns the
+   * method's boolean and how many frames actually went out.
+   */
+  replayErroredChunksByRequestIdForTest(
+    requestId: string,
+    failAfter: number
+  ): { returned: boolean; sent: number } {
+    let sent = 0;
+    const fakeConnection = {
+      send(_message: string) {
+        if (sent >= failAfter) {
+          throw new TypeError("WebSocket send() after close");
+        }
+        sent++;
+      }
+    };
+    const rs = this["_resumableStream"];
+    const returned = rs.replayErroredChunksByRequestId(
+      fakeConnection as unknown as Parameters<
+        typeof rs.replayErroredChunksByRequestId
+      >[0],
+      requestId
+    );
+    return { returned, sent };
+  }
+
   async persistToolCallMessage(
     messageId: string,
     toolCallId: string,
@@ -2729,6 +2759,41 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     );
   }
 
+  /**
+   * #1575: number of live request-id → run-id cache entries. Used to assert
+   * the negative cache (null entries for unrelated turns) does not leak past
+   * a run's lifetime.
+   */
+  agentToolRunsByRequestIdSizeForTest(): number {
+    // Bracket access: the field is private on the base AIChatAgent, and this
+    // test-only subclass deliberately peeks at it without widening the
+    // published API.
+    return this["_agentToolRunsByRequestId"].size;
+  }
+
+  /**
+   * #1575: simulate a DO restart mid-run — the in-memory request-id map is
+   * empty (wiped by the restart), but the run row persisted its `request_id`
+   * at turn start. `_agentToolRunForRequest` must still attribute a frame to
+   * the run via the SQL fallback, and an unknown request resolves to null.
+   */
+  resolveAgentToolRunAfterRestartForTest(
+    runId: string,
+    requestId: string
+  ): { running: string | null; unknown: string | null } {
+    this.sql`
+      insert into cf_ai_chat_agent_tool_runs
+        (run_id, request_id, status, input_json, started_at)
+      values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
+    `;
+    // Cold in-memory map, as after a restart.
+    this["_agentToolRunsByRequestId"].clear();
+    return {
+      running: this["_agentToolRunForRequest"](requestId),
+      unknown: this["_agentToolRunForRequest"]("no-such-request")
+    };
+  }
+
   private _readChildRunStatusForTest(runId: string): string | null {
     const rows = this.sql<{ status: string }>`
       SELECT status FROM cf_ai_chat_agent_tool_runs WHERE run_id = ${runId}
@@ -2971,6 +3036,27 @@ export class AIChatAgentToolParent extends Agent<Env> {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * #1575: read the child's live request-id cache size after a run, to assert
+   * negatively-cached entries for unrelated turns were swept on completion.
+   */
+  async childAgentToolRunsMapSizeForTest(runId: string): Promise<number> {
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    return child.agentToolRunsByRequestIdSizeForTest();
+  }
+
+  /**
+   * #1575: resolve a run via the child's request-id SQL fallback after the
+   * in-memory map is cleared (post-restart attribution).
+   */
+  async childResolveAfterRestartForTest(
+    runId: string,
+    requestId: string
+  ): Promise<{ running: string | null; unknown: string | null }> {
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    return child.resolveAgentToolRunAfterRestartForTest(runId, requestId);
   }
 
   /**

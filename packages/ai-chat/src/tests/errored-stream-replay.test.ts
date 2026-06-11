@@ -232,4 +232,55 @@ describe("Errored stream replay (#1575)", () => {
     );
     expect(terminal?.body).toBe("early in-band boom");
   });
+
+  it("returns the documented contract from replayErroredChunksByRequestId (#1575)", async () => {
+    const room = crypto.randomUUID();
+    const path = `/agents/slow-stream-agent/${room}`;
+
+    // Produce a real errored stream with buffered partial content.
+    const { ws } = await connectChatWS(path);
+    const frames = collectFrames(ws);
+    sendChatRequest(ws, "req-drop", {
+      format: "sse",
+      streamError: "boom",
+      errorAfterChunks: 3,
+      chunkDelayMs: 10
+    });
+    await waitFor(() =>
+      frames.some(
+        (f) =>
+          f.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE && f.done === true
+      )
+    );
+    ws.close(1000);
+
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+    await waitFor(
+      async () =>
+        ((await agentStub.getChatResponseResults()) as ChatResponseResult[])
+          .length === 1
+    );
+
+    // No errored stream for the request → nothing to replay, but the caller
+    // should still proceed to send its terminal frame (returns true, sent 0).
+    expect(
+      await agentStub.replayErroredChunksByRequestIdForTest("no-such-req", 999)
+    ).toEqual({ returned: true, sent: 0 });
+
+    // All buffered chunks replay successfully → returns true.
+    const full = await agentStub.replayErroredChunksByRequestIdForTest(
+      "req-drop",
+      999
+    );
+    expect(full.returned).toBe(true);
+    expect(full.sent).toBeGreaterThan(1);
+
+    // Connection drops mid-replay → returns false and stops early, so the
+    // caller skips the terminal frame and the next reconnect retries.
+    const dropped = await agentStub.replayErroredChunksByRequestIdForTest(
+      "req-drop",
+      1
+    );
+    expect(dropped).toEqual({ returned: false, sent: 1 });
+  });
 });

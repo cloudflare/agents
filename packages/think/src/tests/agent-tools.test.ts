@@ -37,6 +37,10 @@ type ThinkAgentToolTestStub = {
     path: "continue" | "retry",
     withAssistantTurn: boolean
   ): Promise<{ before: string | null; after: string | null }>;
+  resolveAgentToolRunAfterRestartForTest(
+    runId: string,
+    requestId: string
+  ): Promise<{ running: string | null; unknown: string | null }>;
   getDefaultReattachBudgetsForTest(): Promise<{
     noProgressTimeoutMs: number;
     maxWindowIsFinite: boolean;
@@ -55,6 +59,16 @@ type ThinkAgentToolParentStub = DurableObjectStub & {
     injectAfterMs: number,
     runId?: string
   ): Promise<RunAgentToolResult>;
+  runThinkChildWithInBandError(
+    input: string,
+    errorText: string,
+    runId?: string
+  ): Promise<RunAgentToolResult>;
+  startThinkChildWithoutTailForTest(
+    input: string,
+    errorText: string,
+    runId?: string
+  ): Promise<NonNullable<AgentToolInspection>>;
   reconcileCompletedThinkChildForTest(
     input: string,
     runId?: string
@@ -325,6 +339,54 @@ describe("Think agent tools", () => {
       status: "completed"
     });
     expect(result.error).toBeUndefined();
+  });
+
+  it("marks an in-band stream error as error with no tailer attached (#1575)", async () => {
+    const parent = await freshParent();
+    const runId = crypto.randomUUID();
+
+    // The run is started directly and never tailed — terminal status must
+    // come from the child turn's own result, not forwarding side effects.
+    const inspection = await parent.startThinkChildWithoutTailForTest(
+      "fail untailed",
+      "untailed failure",
+      runId
+    );
+
+    expect(inspection.status).toBe("error");
+    expect(inspection.error).toContain("untailed failure");
+  });
+
+  it("keeps concurrent Think child runs' error state isolated (#1575)", async () => {
+    const parent = await freshParent();
+    const runA = crypto.randomUUID();
+    const runB = crypto.randomUUID();
+
+    const [a, b] = await Promise.all([
+      parent.runThinkChildWithInBandError("failing run", "run A failed", runA),
+      parent.runThinkChild("healthy run", runB)
+    ]);
+
+    expect(a).toMatchObject({ runId: runA, status: "error" });
+    expect(a.error).toContain("run A failed");
+    expect(b).toMatchObject({ runId: runB, status: "completed" });
+    expect(b.error).toBeUndefined();
+  });
+
+  it("attributes frames via the persisted request id after a DO restart (#1575)", async () => {
+    const agent = await freshAgent();
+    const runId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+
+    // The child-run row persisted request_id at turn start; after a restart
+    // the in-memory map is empty, so attribution must fall back to SQL.
+    const resolved = await agent.resolveAgentToolRunAfterRestartForTest(
+      runId,
+      requestId
+    );
+
+    expect(resolved.running).toBe(runId);
+    expect(resolved.unknown).toBeNull();
   });
 
   it("recovers completed Think child runs into terminal parent rows", async () => {

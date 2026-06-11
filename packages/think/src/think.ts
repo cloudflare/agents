@@ -4533,9 +4533,17 @@ export class Think<
         this._agentToolAbortControllers.delete(options.runId);
         this._agentToolForwarders.delete(options.runId);
         this._agentToolLiveSequences.delete(options.runId);
-        for (const [reqId, runId] of this._agentToolRunsByRequestId) {
-          if (runId === options.runId) {
-            this._agentToolRunsByRequestId.delete(reqId);
+        // Drop this run's request-id mappings. When no runs remain in flight
+        // clear the whole map, so negatively-cached (null) entries for
+        // unrelated turns can't accumulate for the DO's lifetime — the map is
+        // only consulted while a run is active (#1575).
+        if (this._agentToolAbortControllers.size === 0) {
+          this._agentToolRunsByRequestId.clear();
+        } else {
+          for (const [reqId, runId] of this._agentToolRunsByRequestId) {
+            if (runId === options.runId) {
+              this._agentToolRunsByRequestId.delete(reqId);
+            }
           }
         }
         this._agentToolLastErrors.delete(options.runId);

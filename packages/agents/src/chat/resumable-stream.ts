@@ -538,10 +538,11 @@ export class ResumableStream {
    * messages on connect, and {@link replayCompletedChunksByRequestId} only
    * serves `completed` streams (#1575).
    *
-   * Returns true if an errored stream existed for the request (whether or not
-   * it had chunks); the caller should then send its terminal frame. A send
-   * failure mid-replay returns false so the caller can skip the terminal
-   * frame — the connection is gone and the next reconnect retries.
+   * Returns true when the caller should proceed to send its terminal frame:
+   * either no errored stream existed (nothing to replay) or its chunks were
+   * replayed successfully. Returns false only when a send failed mid-replay,
+   * signalling the caller to skip the terminal frame — the connection is gone
+   * and the next reconnect retries the whole sequence.
    */
   replayErroredChunksByRequestId(
     connection: Connection,
