@@ -210,7 +210,7 @@ export class CodemodeTestHost extends DurableObject<Env> {
     return this.#runtime().expirePaused({ maxAgeMs });
   }
 
-  reject(seq: number, executionId: string): Promise<void> {
+  reject(seq: number, executionId: string): Promise<boolean> {
     return this.#runtime().reject({ seq, executionId });
   }
 

@@ -21,18 +21,18 @@ const runtime = createCodemodeRuntime({
 });
 ```
 
-| Handle method                                        | Purpose                                                                           |
-| ---------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `runtime.tool(options?)`                             | The single model-facing AI SDK tool, `codemode({ code })`                         |
-| `runtime.pending(executionId?)`                      | Actions awaiting approval — drives approval UIs; no id aggregates all paused runs |
-| `runtime.approve({ executionId })`                   | Approve the pending action and continue via replay                                |
-| `runtime.reject({ seq, executionId })`               | Reject a pending action; ends the execution                                       |
-| `runtime.rollback({ executionId })`                  | Revert applied actions in reverse order via each tool's `revert`                  |
-| `runtime.expirePaused({ maxAgeMs? })`                | Expire stale awaiting-approval runs and reclaim their resources                   |
-| `runtime.executions(limit?)`                         | All executions, newest first — the audit trail for developer UIs                  |
-| `runtime.deleteExecution(id)` / `pruneExecutions(n)` | Drop one execution / keep only the newest N terminal ones                         |
-| `runtime.saveSnippet(name, opts?)`                   | Promote an execution's script to a reusable [snippet](./snippets.md)              |
-| `runtime.snippets()` / `runtime.deleteSnippet(name)` | List / remove saved snippets                                                      |
+| Handle method                                        | Purpose                                                                                                                                    |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `runtime.tool(options?)`                             | The single model-facing AI SDK tool, `codemode({ code })`                                                                                  |
+| `runtime.pending(executionId?)`                      | Actions awaiting approval — drives approval UIs; no id aggregates all paused runs                                                          |
+| `runtime.approve({ executionId })`                   | Approve the pending action and continue via replay                                                                                         |
+| `runtime.reject({ seq, executionId })`               | Reject a pending action; ends the execution. Returns `false` if it was a no-op (action no longer pending — approved or rejected elsewhere) |
+| `runtime.rollback({ executionId })`                  | Revert applied actions in reverse order via each tool's `revert`                                                                           |
+| `runtime.expirePaused({ maxAgeMs? })`                | Expire stale awaiting-approval runs and reclaim their resources                                                                            |
+| `runtime.executions(limit?)`                         | All executions, newest first — the audit trail for developer UIs                                                                           |
+| `runtime.deleteExecution(id)` / `pruneExecutions(n)` | Drop one execution / keep only the newest N terminal ones                                                                                  |
+| `runtime.saveSnippet(name, opts?)`                   | Promote an execution's script to a reusable [snippet](./snippets.md)                                                                       |
+| `runtime.snippets()` / `runtime.deleteSnippet(name)` | List / remove saved snippets                                                                                                               |
 
 ## The sandbox API (`codemode.*`)
 

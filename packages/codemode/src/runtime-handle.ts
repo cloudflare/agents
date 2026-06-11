@@ -85,7 +85,13 @@ export interface CodemodeRuntimeHandle {
     options?: CodemodeRuntimeToolOptions
   ): Tool<ProxyToolInput, ProxyToolOutput>;
   approve(options: CodemodeApproveOptions): Promise<ProxyToolOutput>;
-  reject(options: CodemodeRejectOptions): Promise<void>;
+  /**
+   * Reject a pending action, ending the run. Returns whether the reject
+   * actually terminated it — `false` when the action was no longer pending
+   * (approved or rejected from elsewhere, or expired), in which case the run
+   * was NOT rejected and the action may have executed.
+   */
+  reject(options: CodemodeRejectOptions): Promise<boolean>;
   rollback(options: CodemodeRollbackOptions): Promise<void>;
   pending(executionId?: string): Promise<PendingAction[]>;
   /**
@@ -151,7 +157,7 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
     });
   }
 
-  reject(options: CodemodeRejectOptions): Promise<void> {
+  reject(options: CodemodeRejectOptions): Promise<boolean> {
     return rejectCodemode({
       ctx: this.#options.ctx,
       connectors: this.#options.connectors,

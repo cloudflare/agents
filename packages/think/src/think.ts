@@ -8465,7 +8465,23 @@ export class Think<
         error: `Execution "${executionId}" is no longer pending.`
       };
     }
-    await runtime.reject({ executionId, seq: pending[0].seq });
+    // `reject` reports whether it actually terminated the run. A `false`
+    // means the action was resolved between our `pending()` check and the
+    // reject (approve/reject interleave across facet RPC awaits — input
+    // gates only cover storage). Writing "rejected" then would clobber a
+    // paused part whose real outcome (e.g. an in-flight approval) is still
+    // coming, so surface an error instead.
+    const terminated = await runtime.reject({
+      executionId,
+      seq: pending[0].seq
+    });
+    if (!terminated) {
+      return {
+        status: "error",
+        executionId,
+        error: `Execution "${executionId}" is no longer pending — it was approved or rejected elsewhere.`
+      };
+    }
     const output = {
       status: "rejected",
       executionId,

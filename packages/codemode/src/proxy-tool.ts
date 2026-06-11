@@ -867,13 +867,20 @@ export async function resumeCodemode(
 // Reject — reject a pending action, ending the execution
 // ---------------------------------------------------------------------------
 
+/**
+ * Returns whether the reject actually terminated the run — `false` when the
+ * seq was no longer pending (already approved, rejected elsewhere, or
+ * expired). Callers MUST check this before reporting the run as rejected:
+ * approve and reject can interleave across the facet RPC await, and a no-op
+ * reject means the action may have executed.
+ */
 export async function rejectCodemode(options: {
   ctx: DurableObjectState;
   connectors: CodemodeConnector[];
   name?: string;
   seq: number;
   executionId: string;
-}): Promise<void> {
+}): Promise<boolean> {
   const terminated = await getRuntime(options.ctx, options.name).reject(
     options.seq,
     options.executionId
@@ -888,6 +895,7 @@ export async function rejectCodemode(options: {
       "rejected"
     );
   }
+  return terminated;
 }
 
 // ---------------------------------------------------------------------------

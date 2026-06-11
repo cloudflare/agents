@@ -34,7 +34,7 @@ interface Host {
   approveWithoutItems(executionId: string): Promise<ProxyToolOutput>;
   runSnippetWithoutItems(snippet: string): Promise<ProxyToolOutput>;
   expirePaused(maxAgeMs?: number): Promise<string[]>;
-  reject(seq: number, executionId: string): Promise<void>;
+  reject(seq: number, executionId: string): Promise<boolean>;
   rollback(executionId: string): Promise<void>;
   pending(executionId?: string): Promise<PendingAction[]>;
   executions(name?: string): Promise<ExecutionState[]>;
@@ -172,7 +172,7 @@ describe("codemode durable runtime (e2e)", () => {
     expect(first.status).toBe("paused");
     if (first.status !== "paused") return;
 
-    await h.reject(first.pending[0].seq, first.executionId);
+    expect(await h.reject(first.pending[0].seq, first.executionId)).toBe(true);
 
     expect((await h.sideEffects()).created).toEqual([]);
     const execs = await h.executions();
@@ -536,8 +536,10 @@ describe("codemode durable runtime (e2e)", () => {
     if (first.status !== "paused") return;
 
     // A seq that isn't pending (no such entry) — reject is a no-op, so the run
-    // stays paused/resumable and its resources must NOT be torn down.
-    await h.reject(999, first.executionId);
+    // stays paused/resumable and its resources must NOT be torn down. The
+    // no-op is reported to the caller so it doesn't claim the run was
+    // rejected.
+    expect(await h.reject(999, first.executionId)).toBe(false);
     expect((await h.lifecycle()).disposed).toEqual([]);
 
     // The run is still live: approving it completes normally.

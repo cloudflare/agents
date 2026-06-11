@@ -282,6 +282,36 @@ describe("Think HITL — approve/reject paused executions", () => {
     ws.close();
   });
 
+  it("reject after approve is graceful: returns an error, never marks the run rejected", async () => {
+    const room = crypto.randomUUID();
+    const { agent, ws, executionId } = await runTurnToPause(room);
+
+    const approved = (await callRpc(ws, "approveExecution", [
+      executionId
+    ])) as PausedOutput;
+    expect(approved.status).toBe("completed");
+    await waitUntil(async () => {
+      const parts = await agent.executeParts();
+      return (parts[0].output as PausedOutput).status === "completed";
+    });
+
+    // A stale reject (e.g. from a second tab) must not claim the run was
+    // rejected — the gated action already executed.
+    const rejected = (await callRpc(ws, "rejectExecution", [
+      executionId,
+      "changed my mind"
+    ])) as { status: string; error?: string };
+    expect(rejected.status).toBe("error");
+    expect(rejected.error).toMatch(/no longer pending/);
+
+    // The completed output is untouched.
+    const parts = await agent.executeParts();
+    expect((parts[0].output as PausedOutput).status).toBe("completed");
+    expect(await agent.gatedCallCount()).toBe(1);
+
+    ws.close();
+  });
+
   it("approve after expiry returns a graceful error and reconciles the transcript", async () => {
     const room = crypto.randomUUID();
     const { agent, ws, executionId } = await runTurnToPause(room);
