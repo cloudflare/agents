@@ -1844,13 +1844,6 @@ export function useAgentChat<
           if (!resume && !customTransport.isAwaitingResume()) {
             if (!isEarlyToolContinuation) return;
           }
-          // Duplicate offer for a stream this socket already ACKed via the
-          // fallback path (#1733): the server notifies from both onConnect
-          // and the RESUME_REQUEST handler. Re-ACKing would trigger a second
-          // full-buffer replay; drop it. (A stale duplicate must also not be
-          // handed to a waiting transport resolver — e.g. a tool-continuation
-          // handshake expecting a NEW request id would misattach to it.)
-          if (fallbackAckedResumeRequestIdsRef.current.has(data.id)) return;
           if (!resumingToolContinuationRef.current) {
             pendingReplayResumeRequestIdsRef.current.add(data.id);
           }
@@ -1858,7 +1851,11 @@ export function useAgentChat<
           // This is called synchronously — no addEventListener race.
           // The transport sends ACK, adds to activeRequestIds, and
           // creates the ReadableStream that feeds into useChat's pipeline
-          // (which correctly sets status to "streaming").
+          // (which correctly sets status to "streaming"). This runs BEFORE
+          // the fallback-ACK dedupe below so a fallback-observed stream can
+          // still become transport-owned via a later resumeStream() — the
+          // transport's replay is isolated from the broadcast accumulator
+          // by localRequestIdsRef, so it cannot duplicate parts.
           if (customTransport.handleStreamResuming(data)) {
             return;
           }
@@ -1867,6 +1864,12 @@ export function useAgentChat<
           // RESUME_REQUEST handler — the second one must not trigger
           // a duplicate ACK / replay).
           if (localRequestIdsRef.current.has(data.id)) return;
+          // Duplicate offer for a stream this socket already ACKed via the
+          // fallback path (#1733): the server notifies from both onConnect
+          // and the RESUME_REQUEST handler. With nobody waiting on the
+          // handshake, re-ACKing would only trigger a second full-buffer
+          // replay into the same accumulator; drop it.
+          if (fallbackAckedResumeRequestIdsRef.current.has(data.id)) return;
           if (isEarlyToolContinuation) {
             pendingToolContinuationRef.current = false;
             observedToolContinuationRequestIdRef.current = data.id;

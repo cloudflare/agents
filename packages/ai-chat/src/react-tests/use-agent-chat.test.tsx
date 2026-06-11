@@ -4388,6 +4388,87 @@ describe("useAgentChat isServerStreaming / isStreaming (issue #1226)", () => {
     expect(ackCount("req-dup")).toBe(2);
   });
 
+  it("still hands a repeated offer to a waiting transport resolver after a fallback ACK (handoff)", async () => {
+    // A fallback-observed stream must still be able to become
+    // transport-owned: when resumeStream() is waiting on the handshake, a
+    // repeated STREAM_RESUMING for the already-ACKed id goes to the
+    // transport (which ACKs again — its replay is isolated from the
+    // broadcast accumulator), instead of being dropped by the #1733 dedupe.
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "fallback-then-transport-handoff",
+      url: "ws://localhost:3000/agents/chat/fallback-then-transport-handoff?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[]
+      });
+      chatInstance = chat;
+      return (
+        <div data-testid="isServerStreaming">
+          {String(chat.isServerStreaming)}
+        </div>
+      );
+    };
+
+    await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await act(async () => {
+      dispatch(target, { type: "cf_agent_stream_resume_none" });
+      await sleep(10);
+    });
+
+    const ackCount = (id: string) =>
+      sentMessages.filter((m) => {
+        try {
+          const parsed = JSON.parse(m);
+          return (
+            parsed.type === "cf_agent_stream_resume_ack" && parsed.id === id
+          );
+        } catch {
+          return false;
+        }
+      }).length;
+
+    // Fallback-observe the stream (first ACK).
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "req-handoff"
+      });
+      await sleep(10);
+    });
+    expect(ackCount("req-handoff")).toBe(1);
+
+    // While the transport is awaiting the handshake, the repeated offer is
+    // handed to it rather than deduped — second ACK comes from the
+    // transport resolver.
+    await act(async () => {
+      void chatInstance!.resumeStream();
+      await sleep(10);
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "req-handoff"
+      });
+      await sleep(10);
+    });
+    expect(ackCount("req-handoff")).toBe(2);
+  });
+
   it("does not duplicate text parts when the stream buffer is replayed twice (#1733)", async () => {
     // Simulates a server (or ordering) that replays the full chunk buffer
     // twice for the same request. Every replayed `start` must rebuild the
