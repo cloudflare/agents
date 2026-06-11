@@ -58,6 +58,24 @@ interface ChatRecoveryTestStub {
     terminalBroadcast: string | undefined;
     exhaustedReasons: string[];
   }>;
+  testStableTimeoutIncidentReadBestEffort(input: {
+    transientMessage: string;
+    terminalMessage: string;
+  }): Promise<{
+    threw: boolean;
+    terminalBroadcast: string | undefined;
+    exhaustedReasons: string[];
+    incidentStatus: string | undefined;
+  }>;
+  testStableTimeoutSealWriteBestEffort(input: {
+    transientMessage: string;
+    terminalMessage: string;
+  }): Promise<{
+    threw: boolean;
+    terminalBroadcast: string | undefined;
+    exhaustedReasons: string[];
+    incidentStatus: string | undefined;
+  }>;
   setChatRecoveryConfigForTest(config: {
     maxAttempts?: number;
     terminalMessage?: string;
@@ -850,6 +868,45 @@ describe("onChatRecovery", () => {
       "stable_timeout",
       "stable_timeout"
     ]);
+  });
+
+  it("still terminalizes if the ai-chat incident read fails during give-up bookkeeping", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    const terminalMessage = "The assistant was interrupted. Please try again.";
+
+    const result = await agentStub.testStableTimeoutIncidentReadBestEffort({
+      transientMessage: "Network connection lost.",
+      terminalMessage
+    });
+
+    // The incident read only backs the duplicate-alarm guard. If storage
+    // rejects here, ai-chat should synthesize an incident and still deliver the
+    // terminal UX (matching Think's `_exhaustRecoveryGiveUp`).
+    expect(result.threw).toBe(false);
+    expect(result.terminalBroadcast).toBe(terminalMessage);
+    expect(result.exhaustedReasons).toEqual(["stable_timeout"]);
+    expect(result.incidentStatus).toBe("exhausted");
+  });
+
+  it("does not defer/replay ai-chat give-up when the post-terminal incident seal write fails", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    const terminalMessage = "The assistant was interrupted. Please try again.";
+
+    const result = await agentStub.testStableTimeoutSealWriteBestEffort({
+      transientMessage: "Network connection lost.",
+      terminalMessage
+    });
+
+    // `_exhaustChatRecovery` already persisted the durable terminal record and
+    // delivered the banner. The incident seal is best-effort bookkeeping, so a
+    // transient here must not propagate to `_executeScheduleCallback` and
+    // re-deliver the whole give-up unnecessarily.
+    expect(result.threw).toBe(false);
+    expect(result.terminalBroadcast).toBe(terminalMessage);
+    expect(result.exhaustedReasons).toEqual(["stable_timeout"]);
+    expect(result.incidentStatus).not.toBe("exhausted");
   });
 
   it("shares one attempt budget when an incident flips between retry and continue", async () => {
