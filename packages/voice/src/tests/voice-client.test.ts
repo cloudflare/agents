@@ -39,11 +39,13 @@ class FakeAudioBufferSourceNode {
   onended: (() => void) | null = null;
   stopped = false;
   started = false;
+  startedAt: number | null = null;
 
   connect(): void {}
 
-  start(): void {
+  start(when?: number): void {
     this.started = true;
+    this.startedAt = when ?? null;
   }
 
   stop(): void {
@@ -55,7 +57,9 @@ class FakeAudioBufferSourceNode {
 
 class FakeAudioContext {
   state: AudioContextState = "running";
+  currentTime = 0;
   source: FakeAudioBufferSourceNode | null = null;
+  sources: FakeAudioBufferSourceNode[] = [];
   deferDecode = false;
   pendingDecode: (() => void) | null = null;
   destination = {};
@@ -65,14 +69,27 @@ class FakeAudioContext {
   async close(): Promise<void> {}
 
   async decodeAudioData(_audioData: ArrayBuffer): Promise<AudioBuffer> {
-    if (!this.deferDecode) return {} as AudioBuffer;
+    const decoded = { duration: 0.5 } as AudioBuffer;
+    if (!this.deferDecode) return decoded;
     return new Promise((resolve) => {
-      this.pendingDecode = () => resolve({} as AudioBuffer);
+      this.pendingDecode = () => resolve(decoded);
     });
+  }
+
+  createBuffer(
+    _channels: number,
+    length: number,
+    sampleRate: number
+  ): AudioBuffer {
+    return {
+      duration: length / sampleRate,
+      getChannelData: () => new Float32Array(length)
+    } as unknown as AudioBuffer;
   }
 
   createBufferSource(): AudioBufferSourceNode {
     this.source = new FakeAudioBufferSourceNode();
+    this.sources.push(this.source);
     return this.source as unknown as AudioBufferSourceNode;
   }
 }
@@ -103,27 +120,39 @@ async function waitForSource(): Promise<FakeAudioBufferSourceNode> {
   throw new Error("expected audio source to be created");
 }
 
-describe("VoiceClient playback interrupt", () => {
-  beforeEach(() => {
-    originalAudioContext = globalThis.AudioContext;
-    audioContext = new FakeAudioContext();
-    Object.defineProperty(globalThis, "AudioContext", {
-      configurable: true,
-      value: class {
-        constructor() {
-          return audioContext;
-        }
+async function waitForSourceCount(
+  count: number
+): Promise<FakeAudioBufferSourceNode[]> {
+  for (let i = 0; i < 20; i++) {
+    if (audioContext.sources.length >= count) return audioContext.sources;
+    await Promise.resolve();
+  }
+  throw new Error(
+    `expected ${count} audio sources, got ${audioContext.sources.length}`
+  );
+}
+
+beforeEach(() => {
+  originalAudioContext = globalThis.AudioContext;
+  audioContext = new FakeAudioContext();
+  Object.defineProperty(globalThis, "AudioContext", {
+    configurable: true,
+    value: class {
+      constructor() {
+        return audioContext;
       }
-    });
+    }
   });
+});
 
-  afterEach(() => {
-    Object.defineProperty(globalThis, "AudioContext", {
-      configurable: true,
-      value: originalAudioContext
-    });
+afterEach(() => {
+  Object.defineProperty(globalThis, "AudioContext", {
+    configurable: true,
+    value: originalAudioContext
   });
+});
 
+describe("VoiceClient playback interrupt", () => {
   it("stops active playback when the server sends playback_interrupt", async () => {
     const transport = new MockTransport();
     const client = new VoiceClient({ agent: "test-agent", transport });
@@ -234,5 +263,90 @@ describe("VoiceClient playback interrupt", () => {
     await Promise.resolve();
 
     expect(audioContext.source).toBeNull();
+  });
+});
+
+describe("VoiceClient gapless playback", () => {
+  // 1600 samples of 16-bit PCM = 0.1s at 16kHz
+  function pcm16Chunk(): ArrayBuffer {
+    return new ArrayBuffer(1600 * 2);
+  }
+
+  function startPcm16Call(): { transport: MockTransport; client: VoiceClient } {
+    const transport = new MockTransport();
+    const client = new VoiceClient({ agent: "test-agent", transport });
+    client.connect();
+    transport.receive(
+      JSON.stringify({ type: "audio_config", format: "pcm16" })
+    );
+    return { transport, client };
+  }
+
+  it("schedules consecutive chunks back-to-back instead of waiting for ended", async () => {
+    const { transport } = startPcm16Call();
+    audioContext.currentTime = 5;
+
+    transport.receive(pcm16Chunk());
+    transport.receive(pcm16Chunk());
+    const sources = await waitForSourceCount(2);
+
+    // The second chunk is scheduled while the first is still playing,
+    // starting exactly where the first ends on the audio clock.
+    expect(sources[0].startedAt).toBe(5);
+    expect(sources[0].stopped).toBe(false);
+    expect(sources[1].startedAt).toBeCloseTo(5.1, 10);
+  });
+
+  it("starts at the current time when playback has fallen behind the cursor", async () => {
+    const { transport } = startPcm16Call();
+    audioContext.currentTime = 5;
+    transport.receive(pcm16Chunk());
+    await waitForSourceCount(1);
+
+    audioContext.currentTime = 7; // well past the first chunk's end
+    transport.receive(pcm16Chunk());
+    const sources = await waitForSourceCount(2);
+
+    expect(sources[1].startedAt).toBe(7);
+  });
+
+  it("stops every scheduled chunk on playback_interrupt", async () => {
+    const { transport } = startPcm16Call();
+    transport.receive(pcm16Chunk());
+    transport.receive(pcm16Chunk());
+    transport.receive(pcm16Chunk());
+    const sources = await waitForSourceCount(3);
+
+    transport.receive(JSON.stringify({ type: "playback_interrupt" }));
+
+    expect(sources.every((source) => source.stopped)).toBe(true);
+  });
+
+  it("still treats playback as active after the queue drains, so a user transcript interrupts the scheduled tail", async () => {
+    const { transport } = startPcm16Call();
+    transport.receive(pcm16Chunk());
+    transport.receive(pcm16Chunk());
+    const sources = await waitForSourceCount(2);
+
+    transport.receive(
+      JSON.stringify({ type: "transcript", role: "user", text: "hold on" })
+    );
+
+    expect(sources.every((source) => source.stopped)).toBe(true);
+  });
+
+  it("resets the playback cursor when a call ends", async () => {
+    const { transport, client } = startPcm16Call();
+    audioContext.currentTime = 5;
+    transport.receive(pcm16Chunk());
+    await waitForSourceCount(1);
+
+    client.endCall();
+    audioContext.currentTime = 2;
+    transport.receive(pcm16Chunk());
+    const sources = await waitForSourceCount(2);
+
+    // Without the reset this would start at the stale 5.1 cursor.
+    expect(sources[1].startedAt).toBe(2);
   });
 });

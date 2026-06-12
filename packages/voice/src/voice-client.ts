@@ -275,7 +275,9 @@ export class VoiceClient {
   #isSpeaking = false;
   #playbackQueue: ArrayBuffer[] = [];
   #isPlaying = false;
-  #activeSource: AudioBufferSourceNode | null = null;
+  #isScheduling = false;
+  #scheduledSources = new Set<AudioBufferSourceNode>();
+  #playbackCursor = 0;
   #playbackGeneration = 0;
   #interruptChunkCount = 0;
 
@@ -725,25 +727,34 @@ export class VoiceClient {
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(ctx.destination);
-      if (generation !== this.#playbackGeneration) return;
-      this.#activeSource = source;
+      this.#scheduledSources.add(source);
+      source.onended = () => {
+        this.#scheduledSources.delete(source);
+        if (
+          generation === this.#playbackGeneration &&
+          !this.#isScheduling &&
+          this.#scheduledSources.size === 0 &&
+          this.#playbackQueue.length === 0
+        ) {
+          this.#isPlaying = false;
+        }
+      };
 
-      return new Promise<void>((resolve) => {
-        source.onended = () => {
-          if (this.#activeSource === source) {
-            this.#activeSource = null;
-          }
-          resolve();
-        };
-        source.start();
-      });
+      // Schedule on the audio clock, butted against the previous chunk.
+      // Starting at currentTime only after the previous chunk's `ended`
+      // event leaves a few ms of silence at every chunk seam, audible as
+      // a periodic click during agent speech.
+      const startAt = Math.max(ctx.currentTime, this.#playbackCursor);
+      this.#playbackCursor = startAt + audioBuffer.duration;
+      source.start(startAt);
     } catch (err) {
       console.error("[VoiceClient] Audio playback error:", err);
     }
   }
 
   async #processPlaybackQueue(): Promise<void> {
-    if (this.#isPlaying || this.#playbackQueue.length === 0) return;
+    if (this.#isScheduling || this.#playbackQueue.length === 0) return;
+    this.#isScheduling = true;
     this.#isPlaying = true;
     const generation = this.#playbackGeneration;
 
@@ -756,15 +767,18 @@ export class VoiceClient {
     }
 
     if (generation === this.#playbackGeneration) {
-      this.#isPlaying = false;
+      this.#isScheduling = false;
+      if (this.#scheduledSources.size === 0) {
+        this.#isPlaying = false;
+      }
     }
   }
 
   #stopPlayback(): void {
-    const source = this.#activeSource;
     this.#playbackGeneration++;
-    this.#activeSource = null;
-    if (source) {
+    const sources = [...this.#scheduledSources];
+    this.#scheduledSources.clear();
+    for (const source of sources) {
       try {
         source.stop();
       } catch {
@@ -773,6 +787,8 @@ export class VoiceClient {
     }
     this.#playbackQueue = [];
     this.#isPlaying = false;
+    this.#isScheduling = false;
+    this.#playbackCursor = 0;
   }
 
   // --- Mic capture ---
