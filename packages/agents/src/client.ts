@@ -69,7 +69,22 @@ export type AgentClientOptions<State = unknown> = Omit<
    * { agent: "MyAgent", name: "room", path: "settings" }
    */
   path?: string;
+  /**
+   * Default timeout (in milliseconds) applied to non-streaming `call()`s
+   * that don't pass an explicit `timeout`. Defaults to 30 000 ms.
+   * Set to `0` to disable. Streaming calls never get a default timeout.
+   */
+  defaultCallTimeout?: number;
 };
+
+/**
+ * Default timeout (in milliseconds) applied to non-streaming RPC calls
+ * that don't pass an explicit `timeout`. Acts as a backstop so calls
+ * whose response is lost (e.g. the connection drops mid-flight) reject
+ * instead of hanging forever. Override per client via
+ * `defaultCallTimeout`, or per call via `timeout` (0 disables).
+ */
+export const DEFAULT_CALL_TIMEOUT_MS = 30_000;
 
 /**
  * Options for streaming RPC calls
@@ -267,6 +282,14 @@ export class AgentClient<
       resolve: (value: unknown) => void;
       reject: (error: Error) => void;
       stream?: StreamOptions;
+      /**
+       * Whether the request was actually transmitted to the server.
+       * Requests issued while disconnected sit in PartySocket's internal
+       * buffer (transmitted: false) and are flushed on the next open —
+       * they survive a transient close instead of being rejected, since
+       * the server never saw them and re-delivery can't double-execute.
+       */
+      transmitted: boolean;
     }
   >();
   private _readyPromise!: Promise<void>;
@@ -378,7 +401,13 @@ export class AgentClient<
         if (parsedMessage.type === MessageType.RPC) {
           const response = parsedMessage as RPCResponse;
           const pending = this._pendingCalls.get(response.id);
-          if (!pending) return;
+          if (!pending) {
+            console.warn(
+              `[AgentClient] Discarded an RPC response with no matching pending call (id "${response.id}"). ` +
+                "The call likely timed out or was rejected when its connection closed before the response arrived."
+            );
+            return;
+          }
 
           if (!response.success) {
             pending.reject(new Error(response.error));
@@ -405,14 +434,32 @@ export class AgentClient<
       }
     });
 
+    // PartySocket flushes its internal message buffer right before
+    // dispatching "open" — anything queued has now been transmitted.
+    this.addEventListener("open", () => {
+      for (const pending of this._pendingCalls.values()) {
+        pending.transmitted = true;
+      }
+    });
+
     // Clean up pending calls and reset ready state when connection closes
     this.addEventListener("close", () => {
       // Reset ready state for next connection
       this.identified = false;
       this._resetReady();
 
-      // Reject any remaining pending calls (e.g., from unexpected disconnect)
-      this._rejectPendingCalls("Connection closed");
+      if (this.shouldReconnect) {
+        // Transient disconnect: reject calls whose request was already
+        // transmitted — their response can never arrive. Buffered calls
+        // stay pending; PartySocket re-sends them on reconnect.
+        this._rejectPendingCalls("Connection closed", {
+          onlyTransmitted: true
+        });
+      } else {
+        // Permanent close (close() called or retries exhausted): nothing
+        // will ever flush the buffer, so reject everything.
+        this._rejectPendingCalls("Connection closed");
+      }
     });
 
     this.call = this._callImpl.bind(this) as AgentClientCall<AgentT>;
@@ -422,15 +469,21 @@ export class AgentClient<
   }
 
   /**
-   * Reject all pending RPC calls with the given reason.
+   * Reject pending RPC calls with the given reason.
+   * With `onlyTransmitted`, calls still sitting in the send buffer are
+   * kept pending (they'll be flushed on reconnect).
    */
-  private _rejectPendingCalls(reason: string) {
+  private _rejectPendingCalls(
+    reason: string,
+    { onlyTransmitted = false }: { onlyTransmitted?: boolean } = {}
+  ) {
     const error = new Error(reason);
-    for (const pending of this._pendingCalls.values()) {
+    for (const [id, pending] of this._pendingCalls) {
+      if (onlyTransmitted && !pending.transmitted) continue;
+      this._pendingCalls.delete(id);
       pending.reject(error);
       pending.stream?.onError?.(reason);
     }
-    this._pendingCalls.clear();
   }
 
   setState(state: State) {
@@ -480,15 +533,24 @@ export class AgentClient<
         ? undefined
         : (options as CallOptions | undefined)?.timeout;
 
-      // Set up timeout if specified
-      if (timeout) {
+      // Apply the default timeout as a backstop for non-streaming calls
+      // so a lost response rejects instead of hanging forever. An
+      // explicit `timeout` (including 0 = disabled) always wins.
+      const effectiveTimeout =
+        timeout !== undefined
+          ? timeout
+          : streamOptions
+            ? undefined
+            : (this.options.defaultCallTimeout ?? DEFAULT_CALL_TIMEOUT_MS);
+
+      if (effectiveTimeout) {
         timeoutId = setTimeout(() => {
           const pending = this._pendingCalls.get(id);
           this._pendingCalls.delete(id);
-          const errorMessage = `RPC call to ${method} timed out after ${timeout}ms`;
+          const errorMessage = `RPC call to ${method} timed out after ${effectiveTimeout}ms`;
           pending?.stream?.onError?.(errorMessage);
           reject(new Error(errorMessage));
-        }, timeout);
+        }, effectiveTimeout);
       }
 
       this._pendingCalls.set(id, {
@@ -500,7 +562,11 @@ export class AgentClient<
           if (timeoutId) clearTimeout(timeoutId);
           resolve(value);
         },
-        stream: streamOptions
+        stream: streamOptions,
+        // If the socket is open, send() below transmits synchronously;
+        // otherwise the request is buffered until the next open event
+        // (the "open" listener then marks it transmitted).
+        transmitted: this.readyState === this.OPEN
       });
 
       const request: RPCRequest = {

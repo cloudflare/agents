@@ -27,6 +27,13 @@ export class TestCallableAgent extends Agent<
     throw new Error(message);
   }
 
+  // Method that never responds — for client-side timeout tests
+  @callable()
+  async hang(): Promise<string> {
+    await new Promise(() => {});
+    return "unreachable";
+  }
+
   // Void return type
   @callable()
   voidMethod(): void {
