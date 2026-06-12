@@ -1,5 +1,5 @@
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName, type RPCRequest, type RPCResponse } from "../index";
 import { MessageType } from "../types";
 
@@ -185,6 +185,30 @@ describe("@callable decorator", () => {
       expect(response.done).toBe(true);
 
       ws.close();
+    });
+
+    it("should ignore RPC error responses after the client disconnects", async () => {
+      const room = `callable-close-before-error-${crypto.randomUUID()}`;
+      const { ws } = await connectWS(`/agents/test-callable-agent/${room}`);
+      const consoleError = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+      try {
+        await skipInitialMessages(ws);
+
+        const request: RPCRequest = {
+          type: MessageType.RPC,
+          id: createId(),
+          method: "delayedThrow",
+          args: [25]
+        };
+        ws.send(JSON.stringify(request));
+        ws.close();
+
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      } finally {
+        consoleError.mockRestore();
+      }
     });
 
     it("should handle void return type", async () => {

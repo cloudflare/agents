@@ -207,6 +207,26 @@ export type RPCResponse = {
     }
 );
 
+function isClosedWebSocketSendError(error: unknown): boolean {
+  return (
+    error instanceof TypeError &&
+    error.message.includes("WebSocket send() after close")
+  );
+}
+
+function sendRpcResponseIfOpen(
+  connection: Connection,
+  response: RPCResponse
+): boolean {
+  try {
+    connection.send(JSON.stringify(response));
+    return true;
+  } catch (error) {
+    if (isClosedWebSocketSendError(error)) return false;
+    throw error;
+  }
+}
+
 /**
  * Type guard for RPC request messages
  */
@@ -2186,7 +2206,7 @@ export class Agent<
                 success: true,
                 type: MessageType.RPC
               };
-              connection.send(JSON.stringify(response));
+              sendRpcResponseIfOpen(connection, response);
             } catch (e) {
               // Send error response
               const response: RPCResponse = {
@@ -2196,7 +2216,7 @@ export class Agent<
                 success: false,
                 type: MessageType.RPC
               };
-              connection.send(JSON.stringify(response));
+              sendRpcResponseIfOpen(connection, response);
               console.error("RPC error:", e);
               this._emit("rpc:error", {
                 method: parsed.method,
@@ -11405,8 +11425,7 @@ export class StreamingResponse {
       success: true,
       type: MessageType.RPC
     };
-    this._connection.send(JSON.stringify(response));
-    return true;
+    return sendRpcResponseIfOpen(this._connection, response);
   }
 
   /**
@@ -11426,8 +11445,7 @@ export class StreamingResponse {
       success: true,
       type: MessageType.RPC
     };
-    this._connection.send(JSON.stringify(response));
-    return true;
+    return sendRpcResponseIfOpen(this._connection, response);
   }
 
   /**
@@ -11446,7 +11464,6 @@ export class StreamingResponse {
       success: false,
       type: MessageType.RPC
     };
-    this._connection.send(JSON.stringify(response));
-    return true;
+    return sendRpcResponseIfOpen(this._connection, response);
   }
 }
