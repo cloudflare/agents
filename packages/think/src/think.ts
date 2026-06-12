@@ -175,6 +175,20 @@ import {
   resolveMediaEvictionConfig,
   type MediaEvictionConfig
 } from "./media-eviction";
+
+/**
+ * The recent-message span the model sees at FULL fidelity each turn —
+ * `truncateOlderMessages`' default `keepRecent` (see `_assembleModelMessages`).
+ *
+ * Both memory bounds are anchored to this window (#1710):
+ * - budgeted hydration never shrinks `this.messages` below it (the floor
+ *   passed to `session.getRecentHistory`), so windowing cannot starve the
+ *   model's context;
+ * - media eviction never rewrites messages inside it (the
+ *   `keepRecentMessages` clamp), so content the model still replays at full
+ *   fidelity is never replaced with markers.
+ */
+const MODEL_RECENT_WINDOW = 4;
 import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "./tools/workspace";
 import { truncatePausedExecutionOutput } from "./tools/execute";
@@ -1751,12 +1765,15 @@ export class Think<
    * `SQLITE_NOMEM`, permanently bricking the DO (#1710).
    *
    * When the stored path exceeds the budget, only the most recent messages
-   * that fit are hydrated (always at least the latest message), a
+   * that fit are hydrated — never fewer than the recent window the model
+   * sees at full fidelity (the `truncateOlderMessages` default of 4), even
+   * when those messages alone exceed the budget — a
    * `chat:hydration:windowed` observability event is emitted, and
    * `this.messages` exposes the bounded window. Durable storage is never
    * truncated by this — `session.getHistory()` still reads the full path.
-   * The model-facing context is unaffected in practice: older content is
-   * already truncated at read time before each turn.
+   * The model-facing context is unaffected: older content is already
+   * truncated at read time before each turn, and the hydration floor
+   * guarantees the full-fidelity span is always present.
    *
    * The default (24MB) leaves headroom for the ~2-3x amplification between
    * stored JSON and parsed in-memory messages. Set to
@@ -1781,9 +1798,18 @@ export class Think<
    *
    * By default evicted values are preserved as workspace files under
    * `/attachments/evicted/` (same Durable Object storage, but outside the
-   * hydration path) and the in-message marker records the file path. Set
-   * `externalizeToWorkspace: false` to drop the bytes instead, or `false`
-   * to disable eviction entirely.
+   * hydration path) and the in-message marker records the file path.
+   * Pass a {@link MediaEvictionConfig} with `externalizeToWorkspace: false`
+   * to drop the bytes instead of preserving them. Set this field to
+   * `false` to disable eviction entirely.
+   *
+   * `keepRecentMessages` is clamped to at least the recent window the model
+   * replays at full fidelity (4 messages), so eviction can never rewrite
+   * content the model still sees.
+   *
+   * Requires a SessionProvider that implements `getHistoryRowStats`
+   * (the default DO SQLite provider does); otherwise eviction is a no-op
+   * and a warning is logged once.
    *
    * @default true
    */
@@ -1826,6 +1852,16 @@ export class Think<
    * DO and drive an unbounded alarm-retry loop (#1710).
    */
   protected _onStartDegradations: OnStartDegradation[] = [];
+
+  /**
+   * Internal onStart steps that failed on this wake and were skipped so the
+   * agent could still come up (see {@link OnStartDegradation}). Empty when
+   * boot was clean. Lets hosts and operators surface degraded boots —
+   * e.g. via a health RPC — without subclassing.
+   */
+  getOnStartDegradations(): ReadonlyArray<OnStartDegradation> {
+    return [...this._onStartDegradations];
+  }
 
   private _activeMessengerContext?: MessengerContext;
 
@@ -1931,12 +1967,12 @@ export class Think<
       // assistant_compactions, assistant_config, etc.) so that subsequent
       // config reads work.
       //
-      // This hydrates the FULL persisted transcript on every wake. On
-      // oversized sessions (typically inline base64 media in old tool
-      // results) the read can fail with SQLITE_NOMEM — that failure must not
-      // escape onStart, or the DO is bricked (#1710). Degrade to an empty
-      // in-memory view; persisted history is untouched and the next
-      // safe-boundary `_syncMessages()` retries the full read.
+      // Hydration is bounded by `hydrationByteBudget` (a byte-budgeted
+      // recent window on oversized transcripts), but even the budgeted read
+      // can fail — and that failure must not escape onStart, or the DO is
+      // bricked (#1710). Degrade to an empty in-memory view; persisted
+      // history is untouched and the next safe-boundary `_syncMessages()`
+      // retries.
       this._onStartDegradations = [];
       const hydrated = await this._runBestEffortOnStartStep(
         "transcript-hydration",
@@ -2317,18 +2353,32 @@ export class Think<
     }, 0);
   }
 
+  private _warnedEvictionUnsupported = false;
+
   /**
    * Evict oversized inline media from aged stored messages (#1710).
    *
    * Memory-bounded by design: row sizes come from `getHistoryRowStats()`
    * (no content loaded), only rows large enough to contain an evictable
-   * part are parsed, and they are processed one at a time. Evicted values
-   * are written to the workspace BEFORE the row is rewritten, so a failed
-   * pass never loses data. Best-effort: failures are logged and the next
-   * pass retries.
+   * part are parsed, and they are processed one at a time via
+   * `session.internal_rewriteMessage` — the maintenance write path that
+   * skips the full-history token-estimate broadcast a public
+   * `updateMessage` performs per row. Evicted values are written to the
+   * workspace BEFORE the row is rewritten, so a failed pass never loses
+   * data. Best-effort: failures are logged and the next pass retries.
+   *
+   * The aged cutoff is `keepRecentMessages` clamped to at least
+   * `MODEL_RECENT_WINDOW`: messages the model still replays at full
+   * fidelity each turn are never rewritten, regardless of configuration.
+   *
+   * When a pass stops at `maxRowsPerPass` with eligible rows remaining,
+   * another pass is scheduled automatically so a large backlog drains
+   * without waiting for new appends. Termination is guaranteed: every
+   * rewritten row drops below `minPartBytes` and is skipped by later
+   * passes, so the eligible set strictly shrinks.
    *
    * Returns the pass totals, or `null` when eviction is disabled, already
-   * running, or the provider cannot enumerate row sizes.
+   * running, or the provider cannot enumerate row sizes (warned once).
    */
   protected async _evictAgedMediaBestEffort(): Promise<{
     messages: number;
@@ -2340,13 +2390,25 @@ export class Think<
     const config = resolveMediaEvictionConfig(this.mediaEviction);
     if (!config) return null;
     this._mediaEvictionRunning = true;
+    let backlogRemains = false;
     try {
       const stats = await this.session.getHistoryRowStats();
-      if (!stats) return null;
-      const aged = stats.slice(
-        0,
-        Math.max(0, stats.length - config.keepRecentMessages)
+      if (!stats) {
+        if (!this._warnedEvictionUnsupported) {
+          this._warnedEvictionUnsupported = true;
+          console.warn(
+            "[Think] mediaEviction is enabled but the configured " +
+              "SessionProvider does not implement getHistoryRowStats; " +
+              "media eviction is a no-op for this agent."
+          );
+        }
+        return null;
+      }
+      const keepRecent = Math.max(
+        config.keepRecentMessages,
+        MODEL_RECENT_WINDOW
       );
+      const aged = stats.slice(0, Math.max(0, stats.length - keepRecent));
 
       let processed = 0;
       const totals = { messages: 0, parts: 0, bytes: 0, externalizedBytes: 0 };
@@ -2355,7 +2417,10 @@ export class Think<
         // evictable value — skip without parsing. Rewritten rows shrink
         // below the threshold, so later passes skip them here too.
         if (row.bytes < config.minPartBytes) continue;
-        if (processed >= config.maxRowsPerPass) break;
+        if (processed >= config.maxRowsPerPass) {
+          backlogRemains = true;
+          break;
+        }
         processed++;
 
         const message = (await this.session.getMessage(
@@ -2375,7 +2440,9 @@ export class Think<
           await this.workspace.writeFile(blob.path, blob.data);
           totals.externalizedBytes += blob.data.length;
         }
-        await this.session.updateMessage(sanitizeMessage(result.message));
+        await this.session.internal_rewriteMessage(
+          sanitizeMessage(result.message)
+        );
         totals.messages++;
         totals.parts += result.parts;
         totals.bytes += result.bytes;
@@ -2393,6 +2460,7 @@ export class Think<
       return null;
     } finally {
       this._mediaEvictionRunning = false;
+      if (backlogRemains) this._scheduleMediaEvictionPass();
     }
   }
 
@@ -2416,19 +2484,37 @@ export class Think<
   private _warnedHydrationWindowed = false;
 
   /**
+   * Snapshot of the last `chat:hydration:windowed` emit, used to emit on
+   * CHANGE rather than on every safe-boundary sync — a chronically
+   * oversized session syncs many times per turn and would otherwise spam
+   * identical events.
+   */
+  private _lastWindowedEmit: {
+    totalContentBytes: number;
+    hydratedMessages: number;
+  } | null = null;
+
+  /**
    * Refresh the live cache from durable storage at a safe boundary.
    *
    * Bounded by `hydrationByteBudget`: oversized transcripts hydrate as a
-   * recent window instead of exhausting the isolate's memory (#1710).
+   * recent window instead of exhausting the isolate's memory (#1710). The
+   * window never shrinks below `MODEL_RECENT_WINDOW` messages, so budgeted
+   * hydration cannot starve the model-facing context assembly (which keeps
+   * that many recent messages at full fidelity).
    */
   private async _syncMessages(): Promise<UIMessage[]> {
     const budget = this.hydrationByteBudget;
     if (!Number.isFinite(budget) || budget <= 0) {
       this._lastHydration = null;
+      this._lastWindowedEmit = null;
       return this._replaceCachedMessages(await this._readMessagesFromStorage());
     }
 
-    const recent = await this.session.getRecentHistory(budget);
+    const recent = await this.session.getRecentHistory(
+      budget,
+      MODEL_RECENT_WINDOW
+    );
     this._lastHydration = {
       truncated: recent.truncated,
       totalContentBytes: recent.totalContentBytes,
@@ -2445,11 +2531,23 @@ export class Think<
             "session (or enable media eviction) to shrink it."
         );
       }
-      this._emit("chat:hydration:windowed", {
-        totalContentBytes: recent.totalContentBytes,
-        budgetBytes: budget,
-        hydratedMessages: recent.messages.length
-      });
+      const changed =
+        this._lastWindowedEmit === null ||
+        this._lastWindowedEmit.totalContentBytes !== recent.totalContentBytes ||
+        this._lastWindowedEmit.hydratedMessages !== recent.messages.length;
+      if (changed) {
+        this._lastWindowedEmit = {
+          totalContentBytes: recent.totalContentBytes,
+          hydratedMessages: recent.messages.length
+        };
+        this._emit("chat:hydration:windowed", {
+          totalContentBytes: recent.totalContentBytes,
+          budgetBytes: budget,
+          hydratedMessages: recent.messages.length
+        });
+      }
+    } else {
+      this._lastWindowedEmit = null;
     }
     return this._replaceCachedMessages(recent.messages as UIMessage[]);
   }

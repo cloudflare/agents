@@ -557,6 +557,17 @@ export class ContextBlocks {
   }
 
   /**
+   * Check whether any CONFIGURED provider is skill-capable, without
+   * requiring `load()` to have run. Used by Session to decide whether the
+   * init-time loaded-skill restore scan is needed at all.
+   */
+  hasSkillCapableConfigs(): boolean {
+    return this.configs.some(
+      (c) => c.provider !== undefined && isSkillProvider(c.provider)
+    );
+  }
+
+  /**
    * Get skill block labels.
    */
   getSkillLabels(): string[] {

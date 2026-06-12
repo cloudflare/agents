@@ -27,8 +27,10 @@ import type { UIMessage } from "ai";
 export interface MediaEvictionConfig {
   /**
    * Messages at the tail of the active path that are never evicted.
-   * Keep this above the read-time truncation window (default 4) so the
-   * model never loses content it would otherwise still see.
+   * Think clamps this to at least the read-time truncation window
+   * (4 messages — the recent span the model replays at full fidelity),
+   * so a misconfigured low value can never strip content the model
+   * still sees.
    * @default 8
    */
   keepRecentMessages?: number;

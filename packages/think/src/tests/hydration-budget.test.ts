@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { getServerByName } from "partyserver";
 import { describe, expect, it, vi } from "vitest";
 import type { UIMessage } from "ai";
+import { subscribe } from "agents/observability";
 import type {
   OnStartDegradationForTest,
   TestChatResult
@@ -30,6 +31,8 @@ type WindowedHydrationStub = {
   getCachedMessageIdsForTest(): Promise<string[]>;
   getFullHistoryIdsForTest(): Promise<string[]>;
   getOnStartDegradationsForTest(): Promise<OnStartDegradationForTest[]>;
+  getPublicDegradationsForTest(): Promise<OnStartDegradationForTest[]>;
+  resyncForTest(): Promise<number>;
   testChat(message: string): Promise<TestChatResult>;
 };
 
@@ -44,6 +47,7 @@ type MediaEvictionStub = {
   } | null>;
   getStoredMessageForTest(id: string): Promise<UIMessage | null>;
   readWorkspaceFileForTest(path: string): Promise<string | null>;
+  getSessionStatusBroadcastsForTest(): Promise<number>;
 };
 
 function uniqueName(prefix: string): string {
@@ -65,7 +69,10 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     expect(info!.truncated).toBe(true);
     // ~300KB stored vs 64KB budget.
     expect(info!.totalContentBytes).toBeGreaterThan(250_000);
-    expect(info!.hydratedMessages).toBeGreaterThanOrEqual(1);
+    // The window floor: never fewer than the read-time truncation span the
+    // model sees at full fidelity (4 messages), even though 4 × 30KB
+    // overshoots the 64KB budget — windowing must not starve the model.
+    expect(info!.hydratedMessages).toBeGreaterThanOrEqual(4);
     expect(info!.hydratedMessages).toBeLessThan(10);
 
     // The in-memory view is the SUFFIX of the seeded chain, ending at the
@@ -81,6 +88,59 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     );
     const full = await agent.getFullHistoryIdsForTest();
     expect(full).toEqual(Array.from({ length: 10 }, (_, i) => `seed-${i}`));
+  });
+
+  it("emits chat:hydration:windowed on change, not on every sync", async () => {
+    const events: Array<{
+      type: string;
+      payload: { hydratedMessages?: number; budgetBytes?: number };
+    }> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:hydration:windowed") {
+        events.push(
+          event as unknown as {
+            type: string;
+            payload: { hydratedMessages?: number; budgetBytes?: number };
+          }
+        );
+      }
+    });
+
+    try {
+      const agent = (await getServerByName(
+        env.ThinkWindowedHydrationAgent,
+        uniqueName("seeded-windowed-events")
+      )) as unknown as WindowedHydrationStub;
+
+      // Boot hydration windowed the transcript → exactly one event.
+      const info = await agent.getHydrationInfoForTest();
+      expect(info!.truncated).toBe(true);
+      expect(events).toHaveLength(1);
+      expect(events[0].payload).toMatchObject({
+        budgetBytes: 64 * 1024,
+        hydratedMessages: info!.hydratedMessages
+      });
+
+      // Re-syncing an unchanged oversized transcript must NOT re-emit —
+      // a chronically oversized session syncs many times per turn and
+      // would otherwise spam identical events.
+      await agent.resyncForTest();
+      await agent.resyncForTest();
+      expect(events).toHaveLength(1);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("exposes degraded onStart steps via the public accessor", async () => {
+    const agent = (await getServerByName(
+      env.ThinkWindowedHydrationAgent,
+      uniqueName("seeded-windowed-accessor")
+    )) as unknown as WindowedHydrationStub;
+
+    // Windowed hydration is the success path — no degradations — and the
+    // public accessor agrees with the protected field.
+    expect(await agent.getPublicDegradationsForTest()).toEqual([]);
   });
 
   it("a small transcript hydrates fully (not truncated)", async () => {
@@ -175,6 +235,109 @@ describe("mediaEviction — aged media leaves the stored transcript (#1710)", ()
       "/attachments/evicted/m1-0.txt"
     );
     expect(toolBlob).toBe("B".repeat(12_000));
+  });
+
+  it("rewrites rows via the silent maintenance path (no per-row status broadcast) and emits chat:media:evicted", async () => {
+    const evictedEvents: Array<{
+      type: string;
+      payload: { messages?: number; parts?: number; bytes?: number };
+    }> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:media:evicted") {
+        evictedEvents.push(
+          event as unknown as {
+            type: string;
+            payload: { messages?: number; parts?: number; bytes?: number };
+          }
+        );
+      }
+    });
+
+    try {
+      const agent = (await getServerByName(
+        env.ThinkMediaEvictionAgent,
+        uniqueName("evict-silent")
+      )) as unknown as MediaEvictionStub;
+
+      await agent.seedMediaHistoryForTest();
+      await agent.setMediaEvictionForTest({
+        keepRecentMessages: 2,
+        minPartBytes: 10_000
+      });
+
+      const before = await agent.getSessionStatusBroadcastsForTest();
+      const totals = await agent.runEvictionForTest();
+      expect(totals!.messages).toBe(2);
+      // Each rewritten row must NOT go through the public updateMessage
+      // side effects: a status broadcast per row also runs a FULL-history
+      // token estimate, reintroducing the memory pressure the eviction
+      // pass exists to remove.
+      const after = await agent.getSessionStatusBroadcastsForTest();
+      expect(after).toBe(before);
+
+      // The pass reports what it did exactly once.
+      expect(evictedEvents).toHaveLength(1);
+      expect(evictedEvents[0].payload).toMatchObject({
+        messages: 2,
+        parts: 2
+      });
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("clamps keepRecentMessages to the model's full-fidelity window", async () => {
+    const agent = (await getServerByName(
+      env.ThinkMediaEvictionAgent,
+      uniqueName("evict-clamp")
+    )) as unknown as MediaEvictionStub;
+
+    // 6 seeded messages; keepRecentMessages: 0 would age ALL of them, but
+    // the clamp protects the last 4 (the span the model replays at full
+    // fidelity each turn) — only m0/m1 are evictable.
+    await agent.seedMediaHistoryForTest();
+    await agent.setMediaEvictionForTest({
+      keepRecentMessages: 0,
+      minPartBytes: 10_000
+    });
+
+    const totals = await agent.runEvictionForTest();
+    expect(totals!.messages).toBe(2);
+
+    for (const id of ["m2", "m3", "m4", "m5"]) {
+      const msg = await agent.getStoredMessageForTest(id);
+      const text = (msg!.parts[0] as { text: string }).text;
+      expect(text).not.toContain("[evicted");
+    }
+  });
+
+  it("chains passes automatically when maxRowsPerPass leaves a backlog", async () => {
+    const agent = (await getServerByName(
+      env.ThinkMediaEvictionAgent,
+      uniqueName("evict-chain")
+    )) as unknown as MediaEvictionStub;
+
+    await agent.seedMediaHistoryForTest();
+    await agent.setMediaEvictionForTest({
+      keepRecentMessages: 2,
+      minPartBytes: 10_000,
+      maxRowsPerPass: 1
+    });
+
+    // First pass stops at the cap with one oversized row remaining…
+    const first = await agent.runEvictionForTest();
+    expect(first!.messages).toBe(1);
+
+    // …and schedules a follow-up pass itself — the backlog drains without
+    // waiting for new appends.
+    await vi.waitFor(
+      async () => {
+        const m1 = await agent.getStoredMessageForTest("m1");
+        const toolPart = m1!.parts[0] as { output: { data: string } };
+        expect(toolPart.output.data).toContain("[evicted");
+      },
+      { timeout: 10_000, interval: 250 }
+    );
   });
 
   it("a second pass is a cheap no-op (rewritten rows skip the size gate)", async () => {

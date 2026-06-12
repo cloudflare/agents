@@ -27,12 +27,27 @@ interface SessionAgentStub {
   ): Promise<Array<{ id: string; role: string; content: string }>>;
   appendLinearChainForTest(count: number, prefix?: string): Promise<void>;
   corruptMessageForTest(id: string): Promise<void>;
-  getRecentHistory(maxContentBytes: number): Promise<{
+  appendLargeChainForTest(
+    count: number,
+    charsPerMessage: number,
+    prefix?: string
+  ): Promise<void>;
+  getHistoryTextLengthsForTest(): Promise<
+    Array<{ id: string; textLength: number }>
+  >;
+  getRecentHistory(
+    maxContentBytes: number,
+    minRecentMessages?: number
+  ): Promise<{
     messages: UIMessage[];
     truncated: boolean;
     totalContentBytes: number;
   }>;
-  getHistoryRowStats(): Promise<Array<{ id: string; bytes: number }> | null>;
+  getHistoryRowStats(): Promise<Array<{
+    id: string;
+    role: string;
+    bytes: number;
+  }> | null>;
 }
 
 async function getAgent(name: string): Promise<SessionAgentStub> {
@@ -633,5 +648,72 @@ describe("AgentSessionProvider — byte-budgeted recent history (#1710)", () => 
       "m4",
       "m5"
     ]);
+  });
+
+  it("minRecentMessages floors the window even when those rows exceed the budget", async () => {
+    const agent = await getAgent(name);
+    // 10 × ~1KB messages; a 2KB budget alone fits at most 2.
+    for (let i = 0; i < 10; i++) {
+      await agent.appendMessage({
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: "x".repeat(1024) }]
+      });
+    }
+
+    const result = await agent.getRecentHistory(2 * 1024, 4);
+    expect(result.truncated).toBe(true);
+    expect(result.messages.map((m) => m.id)).toEqual(["m6", "m7", "m8", "m9"]);
+  });
+
+  it("minRecentMessages larger than the path returns the whole path untruncated", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(3);
+
+    const result = await agent.getRecentHistory(1, 10);
+    expect(result.truncated).toBe(false);
+    expect(result.messages.map((m) => m.id)).toEqual(["m0", "m1", "m2"]);
+  });
+
+  it("a corrupt row inside the window is skipped, not fatal", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(4);
+    await agent.corruptMessageForTest("m3");
+
+    // The window covers all rows; the corrupt LEAF row is dropped from the
+    // parsed result (documented contract: parse failures can shrink the
+    // window below the floor).
+    const result = await agent.getRecentHistory(10 * 1024 * 1024);
+    expect(result.truncated).toBe(false);
+    expect(result.messages.map((m) => m.id)).toEqual(["m0", "m1", "m2"]);
+    // The unparseable row still counts toward the stored size.
+    expect(result.totalContentBytes).toBeGreaterThan(0);
+  });
+
+  it("row stats carry the stored role for content-free filtering", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(4);
+
+    const stats = await agent.getHistoryRowStats();
+    expect(stats!.map((s) => ({ id: s.id, role: s.role }))).toEqual([
+      { id: "m0", role: "user" },
+      { id: "m1", role: "assistant" },
+      { id: "m2", role: "user" },
+      { id: "m3", role: "assistant" }
+    ]);
+  });
+
+  it("multi-megabyte paths round-trip across byte-bounded content chunks", async () => {
+    const agent = await getAgent(name);
+    // 4 × ~1.5MB rows ≈ 6MB total — crosses the 4MB per-chunk byte bound,
+    // so content hydration must split into multiple statements and
+    // reassemble in path order.
+    await agent.appendLargeChainForTest(4, 1_500_000);
+
+    const lengths = await agent.getHistoryTextLengthsForTest();
+    expect(lengths.map((l) => l.id)).toEqual(["big0", "big1", "big2", "big3"]);
+    for (const row of lengths) {
+      expect(row.textLength).toBeGreaterThanOrEqual(1_500_000);
+    }
   });
 });

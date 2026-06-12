@@ -5999,9 +5999,12 @@ export class ThinkOnStartHydrationFailureAgent extends Think {
       return originalHistory(leafId);
     };
     const originalRecent = session.getRecentHistory.bind(session);
-    session.getRecentHistory = async (maxContentBytes: number) => {
+    session.getRecentHistory = async (
+      maxContentBytes: number,
+      minRecentMessages?: number
+    ) => {
       failFirstRead();
-      return originalRecent(maxContentBytes);
+      return originalRecent(maxContentBytes, minRecentMessages);
     };
     return session;
   }
@@ -6098,6 +6101,19 @@ export class ThinkWindowedHydrationAgent extends Think {
     }));
   }
 
+  /** Public accessor surface — mirrors getOnStartDegradations() for RPC. */
+  async getPublicDegradationsForTest(): Promise<OnStartDegradationForTest[]> {
+    return this.getOnStartDegradations().map((d) => ({
+      step: d.step,
+      error: String(d.error)
+    }));
+  }
+
+  /** Re-run the safe-boundary cache refresh (exercises emit-on-change gating). */
+  async resyncForTest(): Promise<number> {
+    return (await this.syncMessagesFromStorage()).length;
+  }
+
   async testChat(message: string): Promise<TestChatResult> {
     const cb = new TestCollectingCallback();
     await this.chat(message, cb);
@@ -6132,9 +6148,41 @@ export class ThinkMediaEvictionAgent extends Think {
   }
 
   /**
+   * Frames broadcast by Session status updates (`cf_agent_session`) — the
+   * side effect of a PUBLIC `updateMessage`. Eviction rewrites rows via the
+   * silent maintenance path (`internal_rewriteMessage`), which must NOT add
+   * to this count (each status emit also runs a full-history token
+   * estimate, reintroducing the memory pressure eviction removes).
+   */
+  private _sessionStatusBroadcasts = 0;
+
+  override broadcast(
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    if (typeof message === "string") {
+      try {
+        const parsed = JSON.parse(message) as { type?: string };
+        if (parsed.type === "cf_agent_session") {
+          this._sessionStatusBroadcasts++;
+        }
+      } catch {
+        // non-JSON frame — not a session status broadcast
+      }
+    }
+    super.broadcast(message, without);
+  }
+
+  async getSessionStatusBroadcastsForTest(): Promise<number> {
+    return this._sessionStatusBroadcasts;
+  }
+
+  /**
    * Seed: 2 aged messages with oversized media (a data-URL file part and a
-   * tool output with a nested big string) + small filler so a
-   * `keepRecentMessages: 2` config leaves the media messages aged.
+   * tool output with a nested big string) + 4 small filler messages. The
+   * eviction cutoff clamps `keepRecentMessages` to the model's read-time
+   * window (4), so with 6 seeded messages the 2 media messages are aged
+   * and the 4 fillers are protected.
    */
   async seedMediaHistoryForTest(prefix = "m"): Promise<void> {
     await this.appendMessageToHistory({
@@ -6166,16 +6214,18 @@ export class ThinkMediaEvictionAgent extends Think {
         }
       ]
     } as unknown as UIMessage);
-    await this.appendMessageToHistory({
-      id: `${prefix}2`,
-      role: "user",
-      parts: [{ type: "text", text: "recent question" }]
-    } as UIMessage);
-    await this.appendMessageToHistory({
-      id: `${prefix}3`,
-      role: "assistant",
-      parts: [{ type: "text", text: "recent answer" }]
-    } as UIMessage);
+    for (let i = 2; i < 6; i++) {
+      await this.appendMessageToHistory({
+        id: `${prefix}${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [
+          {
+            type: "text",
+            text: i % 2 === 0 ? "recent question" : "recent answer"
+          }
+        ]
+      } as UIMessage);
+    }
   }
 
   async runEvictionForTest(): Promise<{

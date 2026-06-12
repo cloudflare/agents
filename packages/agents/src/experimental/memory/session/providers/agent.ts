@@ -23,15 +23,21 @@ export interface SqlProvider {
 }
 
 /**
- * Rows fetched per query when hydrating message content for a history path.
+ * Bounds for each content-hydration query on a history path.
  *
  * Message rows can be up to ~1.8MB each (see ROW_MAX_BYTES in agents/chat),
  * so content is fetched in bounded batches rather than one statement to keep
  * any per-statement buffering in the SQLite layer small. In workerd the
  * SQLite allocator shares the isolate's memory budget with the JS heap —
  * oversized transient result sets surface as SQLITE_NOMEM (#1710).
+ *
+ * Chunks are bounded by BOTH row count and cumulative stored bytes (sizes
+ * come from the path row stats, so no content is read to compute them).
+ * Without the byte bound, 50 near-cap rows could still materialize ~90MB
+ * in a single statement.
  */
 const HISTORY_CONTENT_CHUNK_SIZE = 50;
+const HISTORY_CONTENT_CHUNK_BYTES = 4 * 1024 * 1024;
 
 export class AgentSessionProvider implements SessionProvider {
   private agent: SqlProvider;
@@ -118,9 +124,7 @@ export class AgentSessionProvider implements SessionProvider {
 
     if (!leaf) return [];
 
-    const messages = this.messagesByPathIds(
-      this.pathRowStats(leaf.id).map((row) => row.id)
-    );
+    const messages = this.messagesByPathStats(this.pathRowStats(leaf.id));
     const compactions = this.getCompactions();
     if (compactions.length === 0) return messages;
     return this.applyCompactions(messages, compactions);
@@ -128,7 +132,8 @@ export class AgentSessionProvider implements SessionProvider {
 
   getRecentHistory(
     leafId: string | null | undefined,
-    maxContentBytes: number
+    maxContentBytes: number,
+    minRecentMessages = 1
   ): RecentHistoryResult {
     this.ensureTable();
 
@@ -141,17 +146,23 @@ export class AgentSessionProvider implements SessionProvider {
     const totalContentBytes = stats.reduce((sum, row) => sum + row.bytes, 0);
 
     // Take the longest suffix (most recent messages) that fits the budget.
-    // The leaf message is always included so the window is never empty.
+    // The window floor (`minRecentMessages`, ≥ 1) is honored even when those
+    // rows exceed the budget: rows are individually capped at write time, so
+    // the floor keeps memory bounded while guaranteeing hosts a minimum
+    // recent span (e.g. the model-facing truncation window).
+    const minRecent = Math.max(1, Math.floor(minRecentMessages));
     let start = stats.length - 1;
     let used = stats[start]?.bytes ?? 0;
-    while (start > 0 && used + stats[start - 1].bytes <= maxContentBytes) {
+    while (
+      start > 0 &&
+      (stats.length - start < minRecent ||
+        used + stats[start - 1].bytes <= maxContentBytes)
+    ) {
       start--;
       used += stats[start].bytes;
     }
 
-    const messages = this.messagesByPathIds(
-      stats.slice(start).map((row) => row.id)
-    );
+    const messages = this.messagesByPathStats(stats.slice(start));
     // Compactions whose anchors fall outside the window are skipped by
     // applyCompactions (no matching fromMessageId) — the window then shows
     // the raw recent messages, which is the intended degraded view.
@@ -365,17 +376,17 @@ export class AgentSessionProvider implements SessionProvider {
   }
 
   /**
-   * The active branch path as (id, content size) pairs, root → leaf.
+   * The active branch path as (id, role, content size) rows, root → leaf.
    *
    * Recurses over (id, parent_id) only. Carrying `content` through the
    * recursive queue AND the ORDER BY sorter materializes the entire
    * transcript several times over inside SQLite's allocator, which in
    * workerd shares the isolate's memory budget with the JS heap — large
    * media-heavy sessions then fail with SQLITE_NOMEM on wake (#1710).
-   * Content is fetched separately in bounded chunks (`messagesByPathIds`).
+   * Content is fetched separately in bounded chunks (`messagesByPathStats`).
    */
   private pathRowStats(leafId: string): HistoryRowStat[] {
-    return this.agent.sql<{ id: string; bytes: number }>`
+    return this.agent.sql<{ id: string; role: string; bytes: number }>`
       WITH RECURSIVE path(id, parent_id, depth) AS (
         SELECT id, parent_id, 0 FROM assistant_messages WHERE id = ${leafId}
         UNION ALL
@@ -383,36 +394,53 @@ export class AgentSessionProvider implements SessionProvider {
         JOIN path p ON m.id = p.parent_id
         WHERE m.session_id = ${this.sessionId} AND p.depth < 10000
       )
-      SELECT path.id AS id, LENGTH(CAST(am.content AS BLOB)) AS bytes
+      SELECT path.id AS id, am.role AS role, LENGTH(CAST(am.content AS BLOB)) AS bytes
       FROM path JOIN assistant_messages am ON am.id = path.id
       ORDER BY path.depth DESC
     `;
   }
 
   /**
-   * Fetch and parse message content for an ordered list of path ids.
+   * Fetch and parse message content for an ordered list of path rows.
    *
-   * Content is read in bounded chunks (no ORDER BY — SQLite streams rows
-   * without materializing the result set) and reassembled in path order.
-   * Rows that fail to parse are skipped, matching previous behavior.
+   * Content is read in chunks bounded by both row count and cumulative
+   * stored bytes (no ORDER BY — SQLite streams rows without materializing
+   * the result set) and reassembled in path order. Rows that fail to parse
+   * are skipped, matching previous behavior.
    */
-  private messagesByPathIds(ids: string[]): SessionMessage[] {
+  private messagesByPathStats(rows: HistoryRowStat[]): SessionMessage[] {
     const contentById = new Map<string, string>();
-    for (let i = 0; i < ids.length; i += HISTORY_CONTENT_CHUNK_SIZE) {
-      const chunk = ids.slice(i, i + HISTORY_CONTENT_CHUNK_SIZE);
-      const rows = this.agent.sql<{ id: string; content: string }>`
+    const fetchChunk = (ids: string[]) => {
+      const fetched = this.agent.sql<{ id: string; content: string }>`
         SELECT id, content FROM assistant_messages
         WHERE session_id = ${this.sessionId}
-          AND id IN (SELECT value FROM json_each(${JSON.stringify(chunk)}))
+          AND id IN (SELECT value FROM json_each(${JSON.stringify(ids)}))
       `;
-      for (const row of rows) {
+      for (const row of fetched) {
         contentById.set(row.id, row.content);
       }
+    };
+
+    let chunk: string[] = [];
+    let chunkBytes = 0;
+    for (const row of rows) {
+      if (
+        chunk.length > 0 &&
+        (chunk.length >= HISTORY_CONTENT_CHUNK_SIZE ||
+          chunkBytes + row.bytes > HISTORY_CONTENT_CHUNK_BYTES)
+      ) {
+        fetchChunk(chunk);
+        chunk = [];
+        chunkBytes = 0;
+      }
+      chunk.push(row.id);
+      chunkBytes += row.bytes;
     }
+    if (chunk.length > 0) fetchChunk(chunk);
 
     const result: SessionMessage[] = [];
-    for (const id of ids) {
-      const content = contentById.get(id);
+    for (const row of rows) {
+      const content = contentById.get(row.id);
       if (content === undefined) continue;
       const msg = this.parse(content);
       if (msg) result.push(msg);

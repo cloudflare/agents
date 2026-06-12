@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { getServerByName } from "partyserver";
 import { describe, expect, it } from "vitest";
+import { subscribe } from "agents/observability";
 import type {
   OnStartDegradationForTest,
   TestChatResult
@@ -50,6 +51,41 @@ describe("Think onStart degradation (#1710)", () => {
       expect(degradations[0].error).toContain(
         "simulated getScheduledTasks failure"
       );
+    });
+
+    it("emits a chat:onstart:degraded observability event", async () => {
+      const events: Array<{
+        type: string;
+        payload: { step?: string; error?: string };
+      }> = [];
+      const unsubscribe = subscribe("chat", (event) => {
+        if (event.type === "chat:onstart:degraded") {
+          events.push(
+            event as unknown as {
+              type: string;
+              payload: { step?: string; error?: string };
+            }
+          );
+        }
+      });
+
+      try {
+        const agent = (await getServerByName(
+          env.ThinkOnStartReconcileFailureAgent,
+          uniqueName("reconcile-fail-event")
+        )) as unknown as ReconcileFailureStub;
+        await agent.getOnStartDegradationsForTest();
+
+        expect(events).toHaveLength(1);
+        expect(events[0].payload).toMatchObject({
+          step: "scheduled-task-reconcile"
+        });
+        expect(events[0].payload.error).toContain(
+          "simulated getScheduledTasks failure"
+        );
+      } finally {
+        unsubscribe();
+      }
     });
 
     it("chat still works on the degraded agent", async () => {

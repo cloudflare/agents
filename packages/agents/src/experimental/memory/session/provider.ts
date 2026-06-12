@@ -23,9 +23,11 @@ export interface StoredCompaction {
   createdAt: string;
 }
 
-/** Per-row size info for the active branch path, root → leaf order. */
+/** Per-row info for the active branch path, root → leaf order. */
 export interface HistoryRowStat {
   id: string;
+  /** Stored message role (e.g. "user" / "assistant"). */
+  role: string;
   /** Serialized content size of the stored row in bytes. */
   bytes: number;
 }
@@ -34,8 +36,11 @@ export interface HistoryRowStat {
 export interface RecentHistoryResult {
   /**
    * The most recent messages on the active branch path whose summed stored
-   * content size fits `maxContentBytes` (always at least the leaf message),
-   * root → leaf order, with compaction overlays applied within the window.
+   * content size fits `maxContentBytes`, root → leaf order, with compaction
+   * overlays applied within the window. The window always covers at least
+   * the leaf row (and `minRecentMessages` rows when requested), but rows
+   * whose stored content fails to parse are skipped — so a corrupt leaf can
+   * yield fewer messages than the window covers.
    */
   messages: SessionMessage[];
   /** True when older messages were left out to satisfy the byte budget. */
@@ -75,10 +80,17 @@ export interface SessionProvider {
    * transcript, so wake-time memory scales with the budget rather than total
    * session history (#1710). Providers that don't implement it fall back to
    * a full `getHistory()` read in `Session.getRecentHistory()`.
+   *
+   * `minRecentMessages` (default 1) is a floor on the window size: the most
+   * recent N rows are always included even when they exceed the byte budget.
+   * Hosts use this to guarantee the window never shrinks below the recent
+   * span their model context assembly expects (rows are individually capped
+   * at write time, so the floor keeps memory bounded).
    */
   getRecentHistory?(
     leafId: string | null | undefined,
-    maxContentBytes: number
+    maxContentBytes: number,
+    minRecentMessages?: number
   ): RecentHistoryResult | Promise<RecentHistoryResult>;
 
   /**

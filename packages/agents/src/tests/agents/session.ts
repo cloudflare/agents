@@ -58,8 +58,8 @@ export class TestSessionAgent extends Agent {
     return this.session.getPathLength();
   }
 
-  async getRecentHistory(maxContentBytes: number) {
-    return this.session.getRecentHistory(maxContentBytes);
+  async getRecentHistory(maxContentBytes: number, minRecentMessages?: number) {
+    return this.session.getRecentHistory(maxContentBytes, minRecentMessages);
   }
 
   async getHistoryRowStats() {
@@ -110,6 +110,36 @@ export class TestSessionAgent extends Agent {
     const invalid = "{ this is not valid json";
     this
       .sql`UPDATE assistant_messages SET content = ${invalid} WHERE id = ${id}`;
+  }
+
+  /**
+   * Append `count` messages of ~`charsPerMessage` text each, server-side.
+   * Exercises the byte-bounded content-chunking path without pushing
+   * megabytes through the test RPC boundary.
+   */
+  async appendLargeChainForTest(
+    count: number,
+    charsPerMessage: number,
+    prefix = "big"
+  ): Promise<void> {
+    for (let i = 0; i < count; i++) {
+      await this.session.appendMessage({
+        id: `${prefix}${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `${i}:${"x".repeat(charsPerMessage)}` }]
+      });
+    }
+  }
+
+  /** Lengths only — keeps multi-MB payloads out of the RPC response. */
+  async getHistoryTextLengthsForTest(): Promise<
+    Array<{ id: string; textLength: number }>
+  > {
+    const history = await this.session.getHistory();
+    return history.map((m) => ({
+      id: m.id,
+      textLength: (m.parts[0] as { text: string }).text.length
+    }));
   }
 }
 
