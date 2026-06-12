@@ -3964,6 +3964,34 @@ importers:
         specifier: '*'
         version: link:../../packages/voice
 
+  wip/issue-1625-live:
+    dependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: 1.29.0
+        version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^4.20260612.1
+        version: 4.20260612.1
+      '@types/node':
+        specifier: ^25.9.3
+        version: 25.9.3
+      tsx:
+        specifier: ^4.22.4
+        version: 4.22.4
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      wrangler:
+        specifier: ^4.100.0
+        version: 4.100.0(@cloudflare/workers-types@4.20260612.1)
+
   wip/issue-1677-minimal:
     devDependencies:
       '@cloudflare/workers-types':

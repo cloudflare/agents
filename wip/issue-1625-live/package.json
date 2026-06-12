@@ -1,0 +1,26 @@
+{
+  "name": "@cloudflare/agents-issue-1625-live",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "repro": "tsx scripts/repro.ts",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "delete": "wrangler delete",
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "agents": "*",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260612.1",
+    "@types/node": "^25.9.3",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.100.0"
+  }
+}

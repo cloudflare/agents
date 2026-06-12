@@ -123,6 +123,40 @@ describe("deferred destroy (#1625)", () => {
     });
   });
 
+  it("_scheduleNextAlarm keeps the destroy alarm immediate even while a keepAlive lease is held", async () => {
+    const stub = await getAgentByName(
+      env.TestScheduleAgent,
+      crypto.randomUUID()
+    );
+    // With an active keepAlive ref (and no pending destroy), _scheduleNextAlarm
+    // would push the alarm out to now + keepAliveIntervalMs. The pending-destroy
+    // guard must win so teardown still lands immediately instead of waiting a
+    // full heartbeat — otherwise a keepAlive-holding agent delays its own
+    // condemnation by up to keepAliveIntervalMs each reschedule.
+    await runInDurableObject(stub, async (instance, ctx) => {
+      const agent = instance as unknown as {
+        _keepAliveRefs: number;
+        _scheduleNextAlarm(): Promise<void>;
+      };
+      agent._keepAliveRefs = 1;
+      await ctx.storage.put(DESTROY_PENDING_KEY, true);
+      await ctx.storage.setAlarm(Date.now() + 86_400_000);
+
+      const before = Date.now();
+      await agent._scheduleNextAlarm();
+      const alarm = await ctx.storage.getAlarm();
+      expect(alarm).not.toBeNull();
+      // Immediate (within a small window of `before`), NOT pushed out to the
+      // keepAlive horizon (default 30s).
+      expect(alarm! - before).toBeLessThan(5_000);
+
+      // Leave nothing pending behind for this DO.
+      agent._keepAliveRefs = 0;
+      await ctx.storage.delete(DESTROY_PENDING_KEY);
+      await ctx.storage.deleteAlarm();
+    });
+  });
+
   it("a direct destroy leaves no marker behind (clean completion)", async () => {
     const name = crypto.randomUUID();
     const stub = await getAgentByName(env.TestScheduleAgent, name);

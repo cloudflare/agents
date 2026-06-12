@@ -938,7 +938,25 @@ const DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 5_000;
 // with its own execution budget, #1625). The final `deleteAll()` in `destroy()`
 // removes it, so "marker present" always means an unfinished teardown that the
 // next wake must complete instead of resuming normal work.
+//
+// Scope: the marker is only consulted on alarm-driven paths (`alarm()` and
+// `_scheduleNextAlarm()`). It deliberately does NOT gate request entrypoints
+// (`onRequest`/`onMessage`/RPC) — a request that lands between scheduling and
+// the teardown alarm runs normally and `_ensureSchema()` recreates tables. For
+// the MCP session-DELETE use case this is benign: the session id is unique and
+// is never addressed again after DELETE, so no further request reaches a
+// condemned session DO before its teardown alarm fires.
 const DESTROY_PENDING_KEY = "cf_agents_destroy_pending";
+// Delay before the deferred-teardown alarm fires (#1625). `_cf_scheduleDestroy`
+// is awaited by an HTTP handler (the MCP session-DELETE) that then returns its
+// response. The teardown alarm runs `destroy()`, which ends in
+// `ctx.abort("destroyed")` — and an immediate (`Date.now()`) alarm fires and
+// aborts the isolate fast enough to race the still-in-flight RPC response,
+// surfacing to the caller as a 500 instead of the intended 204 (observed
+// against a real deployment; the local test runtime does not exhibit it). A
+// small delay lets the response flush before the abort. Teardown latency of a
+// second is irrelevant for an already-abandoned session.
+const DESTROY_ALARM_DELAY_MS = 1_000;
 // Ceiling for the exponential backoff applied to the runFiber-recovery
 // follow-up alarm. A scan that makes NO forward progress (every pending orphan
 // row's recovery hook threw) but still has work pending backs off so a poison
@@ -9513,15 +9531,29 @@ export class Agent<
    * callers don't need to swallow an abort error.
    */
   async _cf_scheduleDestroy(): Promise<void> {
+    // Hydrate facet state before deciding. `_isFacet` (and the `_parentPath`
+    // /`selfPath` the facet teardown path needs) is only populated by `onStart`
+    // /facet bootstrap, and `destroy()` below branches on the in-memory
+    // `_isFacet`. Without this, an RPC landing before init would see it as
+    // `false`, fall through to `destroy()`'s top-level path, and write the
+    // destroy marker on a facet — which the `alarm()`/`_scheduleNextAlarm()`
+    // guards forbid (only top-level agents write it; facet teardown is
+    // root-coordinated via `ctx.facets.delete`). Mirrors the other internal
+    // RPC entrypoints (`_workflow_*`). We must NOT push this into `destroy()`
+    // itself: the `alarm()` preamble calls `destroy()` precisely to avoid
+    // running `onStart` on a condemned agent.
+    await this.__unsafe_ensureInitialized();
     if (this._isFacet) {
-      // Facet teardown is coordinated by the root (`ctx.facets.delete`
-      // wipes the facet's storage in one step), not by a multi-step local
-      // sequence, so there is nothing to defer.
+      // Facet teardown is coordinated by the root (`ctx.facets.delete` wipes
+      // the facet's storage in one step), so there is nothing to defer.
       await this.destroy();
       return;
     }
     await this.ctx.storage.put(DESTROY_PENDING_KEY, true);
-    await this.ctx.storage.setAlarm(Date.now());
+    // Future, not immediate: see DESTROY_ALARM_DELAY_MS — an immediate alarm
+    // aborts the isolate fast enough to race this RPC's response back to the
+    // DELETE handler, turning the intended 204 into a 500.
+    await this.ctx.storage.setAlarm(Date.now() + DESTROY_ALARM_DELAY_MS);
   }
 
   /**
