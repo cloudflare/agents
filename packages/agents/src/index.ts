@@ -249,6 +249,7 @@ export type CallableMetadata = {
 };
 
 const callableMetadata = new WeakMap<Function, CallableMetadata>();
+const agentContextWrappedMethods = new WeakSet<Function>();
 
 /**
  * Error class for SQL execution failures, containing the query that failed
@@ -458,20 +459,52 @@ export type SubAgentStub<T extends Agent> = {
     : never;
 };
 
+type CallableDecorator = <This, Args extends unknown[], Return>(
+  target: (this: This, ...args: Args) => Return,
+  context: ClassMethodDecoratorContext
+) => (this: This, ...args: Args) => Return;
+
+function markCallable<T extends Function>(
+  target: T,
+  metadata: CallableMetadata
+): T {
+  if (!callableMetadata.has(target)) {
+    callableMetadata.set(target, metadata);
+  }
+
+  return target;
+}
+
 /**
- * Decorator that marks a method as callable by clients
+ * Marks a method as callable by clients.
+ * Use as a TC39 method decorator (`@callable()`) or as a function wrapper for
+ * class fields (`method = callable(fn, metadata)`).
  * @param metadata Optional metadata about the callable method
  */
-export function callable(metadata: CallableMetadata = {}) {
-  return function callableDecorator<This, Args extends unknown[], Return>(
-    target: (this: This, ...args: Args) => Return,
+export function callable(metadata?: CallableMetadata): CallableDecorator;
+export function callable<This, Args extends unknown[], Return>(
+  target: (this: This, ...args: Args) => Return,
+  metadata?: CallableMetadata
+): (this: This, ...args: Args) => Return;
+export function callable<This, Args extends unknown[], Return>(
+  metadataOrTarget:
+    | CallableMetadata
+    | ((this: This, ...args: Args) => Return) = {},
+  metadata: CallableMetadata = {}
+): CallableDecorator | ((this: This, ...args: Args) => Return) {
+  if (typeof metadataOrTarget === "function") {
+    return markCallable(metadataOrTarget, metadata);
+  }
+
+  return function callableDecorator<
+    ThisDecorator,
+    ArgsDecorator extends unknown[],
+    ReturnDecorator
+  >(
+    target: (this: ThisDecorator, ...args: ArgsDecorator) => ReturnDecorator,
     _context: ClassMethodDecoratorContext
   ) {
-    if (!callableMetadata.has(target)) {
-      callableMetadata.set(target, metadata);
-    }
-
-    return target;
+    return markCallable(target, metadataOrTarget);
   };
 }
 
@@ -1354,7 +1387,14 @@ function withAgentContext<T extends (...args: any[]) => any>(
   this: Agent<Cloudflare.Env, unknown>,
   ...args: Parameters<T>
 ) => ReturnType<T> {
-  return function (...args: Parameters<T>): ReturnType<T> {
+  if (agentContextWrappedMethods.has(method)) {
+    return method;
+  }
+
+  const wrapped = function (
+    this: Agent<Cloudflare.Env, unknown>,
+    ...args: Parameters<T>
+  ): ReturnType<T> {
     const { agent } = getCurrentAgent();
 
     if (agent === this) {
@@ -1375,6 +1415,9 @@ function withAgentContext<T extends (...args: any[]) => any>(
       }
     );
   };
+  agentContextWrappedMethods.add(wrapped);
+
+  return wrapped;
 }
 
 /**
@@ -2137,6 +2180,7 @@ export class Agent<
           if (isRPCRequest(parsed)) {
             try {
               const { id, method, args } = parsed;
+              this._ensureOwnCallableMethodsWrapped();
 
               // Check if method exists and is callable
               const methodFn = this[method as keyof this];
@@ -3127,6 +3171,46 @@ export class Agent<
     }
   }
 
+  private _wrapCallableMethod<T extends Function>(method: T): T {
+    if (agentContextWrappedMethods.has(method)) {
+      return method;
+    }
+
+    const metadata = callableMetadata.get(method);
+
+    /* oxlint-disable @typescript-eslint/no-explicit-any -- dynamic method wrapping requires any */
+    const wrappedFunction = withAgentContext(
+      method as unknown as (...args: any[]) => any
+    ) as unknown as T;
+    /* oxlint-enable @typescript-eslint/no-explicit-any */
+
+    if (metadata) {
+      callableMetadata.set(wrappedFunction, metadata);
+    }
+
+    return wrappedFunction;
+  }
+
+  private _ensureOwnCallableMethodsWrapped() {
+    for (const methodName of Object.getOwnPropertyNames(this)) {
+      const descriptor = Object.getOwnPropertyDescriptor(this, methodName);
+      if (
+        !descriptor ||
+        !!descriptor.get ||
+        typeof descriptor.value !== "function" ||
+        !callableMetadata.has(descriptor.value) ||
+        agentContextWrappedMethods.has(descriptor.value)
+      ) {
+        continue;
+      }
+
+      Object.defineProperty(this, methodName, {
+        ...descriptor,
+        value: this._wrapCallableMethod(descriptor.value as Function)
+      });
+    }
+  }
+
   /**
    * Automatically wrap custom methods with agent context
    * This ensures getCurrentAgent() works in all custom methods without decorators
@@ -3166,19 +3250,12 @@ export class Agent<
 
         // Now, methodName is confirmed to be a custom method/function
         // Wrap the custom method with context
-        /* oxlint-disable @typescript-eslint/no-explicit-any -- dynamic method wrapping requires any */
-        const wrappedFunction = withAgentContext(
-          this[methodName as keyof this] as (...args: any[]) => any
-        ) as any;
-        /* oxlint-enable @typescript-eslint/no-explicit-any */
-
-        // if the method is callable, copy the metadata from the original method
-        if (this._isCallable(methodName)) {
-          callableMetadata.set(
-            wrappedFunction,
-            callableMetadata.get(this[methodName as keyof this] as Function)!
-          );
-        }
+        const wrappedFunction = this._isCallable(methodName)
+          ? this._wrapCallableMethod(this[methodName as keyof this] as Function)
+          : withAgentContext(
+              /* oxlint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic method wrapping requires any */
+              this[methodName as keyof this] as (...args: any[]) => any
+            );
 
         // set the wrapped function on the prototype
         this.constructor.prototype[methodName as keyof this] = wrappedFunction;
@@ -9466,7 +9543,24 @@ export class Agent<
    * @returns A map of method names to their metadata
    */
   getCallableMethods(): Map<string, CallableMetadata> {
+    this._ensureOwnCallableMethodsWrapped();
     const result = new Map<string, CallableMetadata>();
+
+    for (const name of Object.getOwnPropertyNames(this)) {
+      const descriptor = Object.getOwnPropertyDescriptor(this, name);
+      if (
+        !descriptor ||
+        !!descriptor.get ||
+        typeof descriptor.value !== "function"
+      ) {
+        continue;
+      }
+
+      const meta = callableMetadata.get(descriptor.value as Function);
+      if (meta) {
+        result.set(name, meta);
+      }
+    }
 
     // Walk the entire prototype chain to find callable methods from parent classes
     let prototype = Object.getPrototypeOf(this);

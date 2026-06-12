@@ -1,5 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import { runInDurableObject } from "cloudflare:test";
 import { getAgentByName, type RPCRequest, type RPCResponse } from "../index";
 import { MessageType } from "../types";
 
@@ -225,6 +226,45 @@ describe("@callable decorator", () => {
 
       ws.close();
     });
+
+    it("should call function-form methods and return results", async () => {
+      const room = `callable-function-${crypto.randomUUID()}`;
+      const { ws } = await connectWS(`/agents/test-callable-agent/${room}`);
+      await skipInitialMessages(ws);
+
+      const addResponse = expectSuccess(
+        await callRPC(ws, "functionAdd", [8, 4])
+      );
+      expect(addResponse.result).toBe(12);
+
+      const asyncResponse = expectSuccess(
+        await callRPC(ws, "functionAsync", ["value"])
+      );
+      expect(asyncResponse.result).toBe("async:value");
+
+      ws.close();
+    });
+
+    it("should bind this and connection context for function-form methods", async () => {
+      const room = `callable-function-context-${crypto.randomUUID()}`;
+      const { ws } = await connectWS(`/agents/test-callable-agent/${room}`);
+      await skipInitialMessages(ws);
+
+      const stateResponse = expectSuccess(
+        await callRPC(ws, "functionUsesThis", [42])
+      );
+      expect(stateResponse.result).toBe(42);
+
+      const contextResponse = expectSuccess(
+        await callRPC(ws, "functionContext", [])
+      );
+      expect(contextResponse.result).toEqual({
+        hasAgent: true,
+        hasConnection: true
+      });
+
+      ws.close();
+    });
   });
 
   describe("error handling", () => {
@@ -349,6 +389,23 @@ describe("@callable decorator", () => {
       expect(chunks).toEqual(["chunk1"]);
       expect(error).toBe("First close");
       // Subsequent calls (end, send, error) should be no-ops, not throw
+
+      ws.close();
+    });
+
+    it("should stream from function-form methods", async () => {
+      const room = `callable-function-stream-${crypto.randomUUID()}`;
+      const { ws } = await connectWS(`/agents/test-callable-agent/${room}`);
+      await skipInitialMessages(ws);
+
+      const { chunks, final } = await callStreamingRPC(
+        ws,
+        "functionStream",
+        [3]
+      );
+
+      expect(chunks).toEqual(["function-0", "function-1", "function-2"]);
+      expect(final).toBe("function-complete");
 
       ws.close();
     });
@@ -566,6 +623,40 @@ describe("getCallableMethods prototype chain", () => {
 
     // Should NOT include non-callable methods
     expect(methodNames).not.toContain("nonCallableMethod");
+  });
+});
+
+describe("function-form callable methods", () => {
+  it("should discover function-form callables on agent instances", async () => {
+    const agentStub = await getAgentByName(
+      env.TestCallableAgent,
+      "function-form-discovery"
+    );
+
+    const result = await runInDurableObject(agentStub, (instance) => {
+      const methods = instance.getCallableMethods();
+      const context = instance.functionContext();
+      return {
+        context,
+        methods: Array.from(methods.entries()).map(([name, metadata]) => ({
+          name,
+          metadata
+        }))
+      };
+    });
+
+    expect(result.methods).toContainEqual({
+      name: "functionAdd",
+      metadata: { description: "Function property add" }
+    });
+    expect(result.methods).toContainEqual({
+      name: "functionStream",
+      metadata: {
+        description: "Function property stream",
+        streaming: true
+      }
+    });
+    expect(result.context).toEqual({ hasAgent: true, hasConnection: false });
   });
 });
 
