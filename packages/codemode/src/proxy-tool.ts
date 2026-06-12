@@ -44,6 +44,12 @@ import {
 } from "./runtime";
 import type { Snippet, SaveSnippetOptions } from "./snippet";
 import type { CodeOutput } from "./shared";
+import {
+  runCodeValidators,
+  runToolCallValidators,
+  toolCallValidatorNames,
+  type CodemodeValidator
+} from "./validation";
 
 // Connector annotations, flattened to "connector.method" → annotation.
 type AnnotationMap = Record<string, ToolAnnotations>;
@@ -157,6 +163,8 @@ export type CreateProxyToolOptions = {
   maxExecutions?: number;
   /** Optionally reshape the model-facing result (e.g. truncate). */
   transformResult?: TransformResult;
+  /** Host-side validators for generated code and concrete connector calls. */
+  validators?: readonly CodemodeValidator[];
 };
 
 // ---------------------------------------------------------------------------
@@ -336,7 +344,8 @@ function buildConnectorBindings(
   setup: Setup,
   runtime: RuntimeStub,
   executionId: string,
-  cursor: Cursor
+  cursor: Cursor,
+  validators?: readonly CodemodeValidator[]
 ): ConnectorBinding[] {
   return setup.descriptions.map((desc) => ({
     name: desc.name,
@@ -365,6 +374,22 @@ function buildConnectorBindings(
 
         if (decision.kind === "replay") return decision.result;
         if (decision.kind === "pause") return { [CONTROL_KEY]: "pause" };
+
+        const validationError = await runToolCallValidators(validators, {
+          executionId,
+          connector: desc.name,
+          method,
+          args,
+          inputSchema: desc.descriptors[method]?.inputSchema,
+          annotations: annotation
+        });
+        if (validationError) {
+          await runtime.fail(executionId, validationError);
+          return {
+            [CONTROL_KEY]: "error",
+            message: validationError
+          };
+        }
 
         const connector = setup.connectorsByName.get(desc.name);
         if (!connector) throw new Error(`Unknown connector: ${desc.name}`);
@@ -548,10 +573,17 @@ async function runPass(
   setup: Setup,
   runtime: RuntimeStub,
   executor: Executor,
-  transformResult?: TransformResult
+  transformResult?: TransformResult,
+  validators?: readonly CodemodeValidator[]
 ): Promise<ProxyToolOutput> {
   const cursor = createCursor();
-  const bindings = buildConnectorBindings(setup, runtime, executionId, cursor);
+  const bindings = buildConnectorBindings(
+    setup,
+    runtime,
+    executionId,
+    cursor,
+    validators
+  );
   const platformProvider = createPlatformProvider(
     setup,
     bindings,
@@ -717,9 +749,22 @@ export function createProxyTool(
         };
       }
       const setup = await getSetup();
+      const validationError = await runCodeValidators(options.validators, {
+        code,
+        normalizedCode: normalizeCode(code),
+        connectors: setup.descriptions
+      });
+      if (validationError) {
+        return {
+          status: "error",
+          executionId: "",
+          error: validationError
+        };
+      }
       const executionId = await runtime.begin(code, {
         maxExecutions: options.maxExecutions,
-        connectors: connectors.map((c) => c.name())
+        connectors: connectors.map((c) => c.name()),
+        validators: toolCallValidatorNames(options.validators)
       });
       return runPass(
         executionId,
@@ -727,7 +772,8 @@ export function createProxyTool(
         setup,
         runtime,
         options.executor,
-        options.transformResult
+        options.transformResult,
+        options.validators
       );
     }
   });
@@ -796,6 +842,8 @@ export type ResumeCodemodeOptions = {
   maxExecutions?: number;
   /** Optionally reshape the model-facing result (e.g. truncate). */
   transformResult?: TransformResult;
+  /** Host-side validators used by the original runtime configuration. */
+  validators?: readonly CodemodeValidator[];
 };
 
 /** Connectors an execution/snippet recorded but the runtime no longer has. */
@@ -837,6 +885,21 @@ export async function resumeCodemode(
           `configured on this runtime.`
       };
     }
+
+    const missingValidators = missingConnectors(
+      existing.validators,
+      new Set(toolCallValidatorNames(options.validators))
+    );
+    if (missingValidators.length > 0) {
+      return {
+        status: "error",
+        executionId: options.executionId,
+        error:
+          `Execution "${options.executionId}" requires validator(s) ` +
+          `${missingValidators.map((name) => `"${name}"`).join(", ")} that ` +
+          `are not configured on this runtime.`
+      };
+    }
   }
 
   const execution = await runtime.resume(options.executionId);
@@ -859,7 +922,8 @@ export async function resumeCodemode(
     setup,
     runtime,
     options.executor,
-    options.transformResult
+    options.transformResult,
+    options.validators
   );
 }
 

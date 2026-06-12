@@ -17,6 +17,7 @@ import {
 } from "./proxy-tool";
 import type { ExecutionState, PendingAction } from "./runtime";
 import type { SaveSnippetOptions, Snippet } from "./snippet";
+import { validateValidators, type CodemodeValidator } from "./validation";
 
 export type CreateCodemodeRuntimeOptions = {
   ctx: DurableObjectState;
@@ -44,6 +45,12 @@ export type CreateCodemodeRuntimeOptions = {
    * Applies to both the initial run and a resume after approval.
    */
   transformResult?: TransformResult;
+  /**
+   * Host-side validators for generated code and concrete connector calls.
+   * Validator implementations are transient request objects. Call-validator
+   * names are recorded so a paused execution cannot resume without them.
+   */
+  validators?: readonly CodemodeValidator[];
 };
 
 export type CodemodeRuntimeToolOptions = {
@@ -127,6 +134,7 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
 
   constructor(options: CreateCodemodeRuntimeOptions) {
     validateConnectorNames(options.connectors);
+    validateValidators(options.validators);
     this.#options = options;
   }
 
@@ -141,7 +149,8 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
       description: options?.description,
       connectorHints: options?.connectorHints,
       maxExecutions: this.#options.maxExecutions,
-      transformResult: this.#options.transformResult
+      transformResult: this.#options.transformResult,
+      validators: this.#options.validators
     });
   }
 
@@ -153,7 +162,8 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
       name: this.#options.name,
       executionId: options.executionId,
       maxExecutions: this.#options.maxExecutions,
-      transformResult: this.#options.transformResult
+      transformResult: this.#options.transformResult,
+      validators: this.#options.validators
     });
   }
 
