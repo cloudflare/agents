@@ -43,7 +43,7 @@
   },
   "peerDependencies": {
     "@chat-adapter/telegram": "^4.29.0",
-    "agents": ">=0.14.0 <1.0.0",
+    "agents": ">=0.16.0 <1.0.0",
     "ai": "^6.0.182",
     "vite": ">=6 <9",
     "zod": "^4.0.0"

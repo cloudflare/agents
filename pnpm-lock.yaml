@@ -3379,10 +3379,10 @@ importers:
         specifier: ^4.1.1
         version: 4.1.1
       '@cloudflare/ai-chat':
-        specifier: '>=0.8.0 <1.0.0'
+        specifier: '>=0.8.5 <1.0.0'
         version: link:../ai-chat
       '@cloudflare/codemode':
-        specifier: '*'
+        specifier: '>=0.4.0'
         version: link:../codemode
       '@modelcontextprotocol/sdk':
         specifier: 1.29.0
@@ -3467,7 +3467,7 @@ importers:
         specifier: ^3.0.204
         version: 3.0.204(react@19.2.7)(zod@4.4.3)
       agents:
-        specifier: '>=0.14.0 <1.0.0'
+        specifier: '>=0.16.0 <1.0.0'
         version: link:../agents
       nanoid:
         specifier: ^5.1.11
@@ -3544,7 +3544,7 @@ importers:
   packages/shell:
     dependencies:
       '@cloudflare/codemode':
-        specifier: '*'
+        specifier: '>=0.4.0'
         version: link:../codemode
       isomorphic-git:
         specifier: ^1.38.4
@@ -3566,7 +3566,7 @@ importers:
         specifier: '>=0.4.0'
         version: link:../shell
       agents:
-        specifier: '>=0.14.0 <1.0.0'
+        specifier: '>=0.16.0 <1.0.0'
         version: link:../agents
       aywson:
         specifier: ^0.0.16
@@ -3612,7 +3612,7 @@ importers:
   packages/voice:
     dependencies:
       agents:
-        specifier: '>=0.14.0 <1.0.0'
+        specifier: '>=0.16.0 <1.0.0'
         version: link:../agents
       partysocket:
         specifier: ^1.0.0

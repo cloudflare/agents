@@ -26,7 +26,7 @@
   "dependencies": {
     "@babel/plugin-proposal-decorators": "^7.29.7",
     "@cfworker/json-schema": "^4.1.1",
-    "@cloudflare/codemode": "*",
+    "@cloudflare/codemode": ">=0.4.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@rolldown/plugin-babel": "^0.2.3",
     "cron-schedule": "^6.0.0",
@@ -55,7 +55,7 @@
     "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "@cloudflare/ai-chat": ">=0.8.0 <1.0.0",
+    "@cloudflare/ai-chat": ">=0.8.5 <1.0.0",
     "@tanstack/ai": ">=0.10.2 <1.0.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",
