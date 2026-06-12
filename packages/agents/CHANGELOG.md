@@ -1,5 +1,125 @@
 # @cloudflare/agents
 
+## 0.16.0
+
+### Minor Changes
+
+- [#1656](https://github.com/cloudflare/agents/pull/1656) [`4c2d1a7`](https://github.com/cloudflare/agents/commit/4c2d1a7f7f337bf426b0b35e3c9e8e4901c6360b) Thanks [@cjol](https://github.com/cjol)! - Rebuild `agents/browser` on the codemode connector runtime (experimental).
+
+  The browser tool surface is now a single durable tool, **`browser_execute`**: the model writes sandboxed code against a `cdp` connector (`cdp.send`, `cdp.attachToTarget`, `cdp.spec`, `cdp.getDebugLog`, …) instead of picking from several flat tools. Executions are recorded on a `CodemodeRuntime` Durable Object facet with abort-and-replay, so a run can pause for approval and resume with its browser session, tabs, and cookies intact.
+
+  - **`BrowserConnector`** — a `CodemodeConnector` (name `cdp`) that owns CDP sockets keyed by execution id. Sockets are released at the end of every execution pass (`onPassEnd`); browser sessions are torn down on terminal status (`disposeExecution`) — never on pause.
+  - **Session modes** — `one-shot` (default, fresh session per execution), `reuse` (named shared session), and `dynamic` (starts one-shot; the model can promote with `cdp.startSession()` after e.g. logging in). Shared sessions are tracked in durable storage and survive hibernation; `connector.sweep()` reclaims expired ones from a scheduled task.
+  - **Safe sweeping** — per-execution entries are touched on use and only swept after `maxExecIdleMs` (default 24h, matching the runtime's paused TTL), so a run awaiting approval keeps its browser. A swept entry leaves a tombstone so a later resume fails with a clear "expired or was swept" error instead of silently continuing in a fresh browser. Concurrent CDP calls share one in-flight socket connect instead of leaking the loser's WebSocket. Session-store locks wrap storage operations only — liveness probes and session create/delete happen outside the lock (with a commit re-check; a racing create's redundant session is deleted), so a hung Browser Rendering call can't serialize other session operations.
+  - **Stable attach handles** — `cdp.attachToTarget` returns `{ sessionId }` where the id is a stable handle bound to the target (not a raw CDP session id), so handles recorded before a pause still work after the resume reconnects. The object shape mirrors the real `Target.attachToTarget` response, which is what models expect.
+  - **Model-actionable CDP errors** — a "method wasn't found" failure on a `send` without a sessionId explains that page-scoped commands need `cdp.attachToTarget` first, and a missing `targetId` explains how to list/create targets.
+  - **`createBrowserTools({ ctx, browser, loader, session? })`** (AI SDK and TanStack AI variants) now requires the hosting Durable Object's `ctx` and returns `{ browser_execute }`; `createBrowserRuntime` additionally exposes the runtime handle and connector for host-side wiring (approvals, `sessionInfo`/`closeSession`/`sweep`). The previous `browser_search`/flat-tool surface and `createBrowserProvider` are removed.
+  - Worker entries must export the facet class: `export { CodemodeRuntime } from "agents/browser"`.
+
+  `agents/chat` gains `pausedExecutionUpdate`, a tool-part update that replaces a paused execution's output in the transcript with its resolved outcome (completed / rejected / paused again) — the transcript-side half of human-in-the-loop approvals for durable executions.
+
+- [#1746](https://github.com/cloudflare/agents/pull/1746) [`e45b5ec`](https://github.com/cloudflare/agents/commit/e45b5ece5fda6221b9a8d4f40a367616cad8584d) Thanks [@threepointone](https://github.com/threepointone)! - Fix RPC calls hanging forever during connection churn ([#1738](https://github.com/cloudflare/agents/issues/1738)).
+
+  `useAgent`'s RPC layer now survives socket replacement. `usePartySocket` creates a brand-new socket whenever connection options change (async query refresh, `enabled` toggle, path change) — previously, a call issued against a stale `agent` reference was buffered inside the permanently-closed old socket and its promise never settled, and a call transmitted just before replacement lost its response with no rejection either.
+
+  - `agent.call()` (and `agent.stub` / `agent.setState`) now route through the live socket, so stale references captured by mount-time effects keep working.
+  - RPC requests are only handed to a socket once it's open. Until then they're queued by the hook and flushed on the next open — including on a replacement socket. This is safe: queued requests were never transmitted, so they can't double-execute.
+  - Calls whose request was already transmitted are rejected with `Connection closed` when their socket closes or is replaced (the response is connection-bound and can never arrive). Calls in flight on a newer socket are no longer spuriously rejected by a stale close event from an old socket.
+  - Queued calls only follow the connection to the _same_ agent instance. If the hook is re-pointed at a different address (the `agent`, `name`, `basePath`, or path props change) before a queued call could be transmitted, the call is rejected instead of executing against an instance it wasn't composed for.
+  - `AgentClient` similarly keeps buffered (untransmitted) calls pending across transient disconnects — PartySocket re-sends them on reconnect — and only rejects calls the server actually received.
+  - Non-streaming calls now have a default 30s timeout as a backstop so lost responses reject instead of hanging. Configure per client via `defaultCallTimeout` (0 disables) on `useAgent` / `AgentClient`, or per call via the existing `timeout` option (`timeout: 0` opts out). Streaming calls are exempt.
+  - RPC responses that arrive with no matching pending call (e.g. after a timeout) now log a `console.warn` instead of being silently discarded.
+
+### Patch Changes
+
+- [#1742](https://github.com/cloudflare/agents/pull/1742) [`4b201a9`](https://github.com/cloudflare/agents/commit/4b201a972b72a76de68bc6c1f8436c2cc2be8c2b) Thanks [@threepointone](https://github.com/threepointone)! - Fix duplicated assistant text parts when a stream resume is replayed twice ([#1733](https://github.com/cloudflare/agents/issues/1733)).
+
+  The server intentionally sends `CF_AGENT_STREAM_RESUMING` for the same request from both `onConnect` and its `CF_AGENT_STREAM_RESUME_REQUEST` handler. When both offers reached the `useAgentChat` fallback path (e.g. the transport's resume handshake had already timed out), the client ACKed both, the full chunk buffer was replayed twice into the same accumulator, and the streaming reply rendered as two stacked text blocks until refresh.
+
+  - `useAgentChat` now fallback-ACKs a given resume offer at most once per socket (reset on close/reconnect). A repeated offer is still handed to a waiting transport resume handshake first, so a fallback-observed stream can become transport-owned. It also resets the matching trailing assistant message on **every** replayed non-continuation `start`, not only while the resume request id is still pending.
+  - The shared broadcast stream state machine re-initializes its accumulator on a replayed `start`, making replay idempotent under any number of replays.
+  - Replay frames now carry `continuation: true` for continuation streams (persisted in stream metadata and restored after hibernation), so a replayed continuation appends to the existing assistant message instead of being mistaken for a fresh turn.
+
+- [#1740](https://github.com/cloudflare/agents/pull/1740) [`6c9de59`](https://github.com/cloudflare/agents/commit/6c9de59a08ba151d62e7eb50a1f3d36eac2eafc4) Thanks [@threepointone](https://github.com/threepointone)! - Defer one-shot scheduled callbacks (and chat-recovery give-ups) on platform transients instead of consuming them mid-deploy ([#1730](https://github.com/cloudflare/agents/issues/1730)).
+
+  A mid-execution Durable Object code-update reset surfaces storage failures in two shapes: the verbatim reset/supersede messages (already deferred) and `SqlError: SQL query failed: Network connection lost.` — a wrapper that drops the CF `retryable` flag and dodges the reset matcher. The second shape burned the in-process retry budget inside the same few-seconds reset window (which outlasts the retry schedule by design) and then consumed the one-shot row on exhaustion, freezing the turn for minutes until incident re-detection — in the reported production capture, storage was healthy again 15 ms after the final attempt.
+
+  - **`agents`** — new cause-aware `isPlatformTransientError` classifier (exported, alongside `isDurableObjectCodeUpdateReset`): reset/supersede messages, `retryable`-flagged platform errors (excluding overloaded), and "Network connection lost.", looked up through wrapper `cause` chains. `_executeScheduleCallback` keeps in-process retries for connection-lost transients (a genuine blip heals fast) but on exhaustion of a one-shot row it now re-throws instead of swallowing, so the row survives and the alarm re-runs it in the healthy window that follows. Genuine application errors are still abandoned after `maxAttempts` exactly as before.
+  - **`@cloudflare/think`** — `_handleRecoveryCallbackError` now defers (re-throws) on any platform transient instead of terminalizing through a give-up whose own seal needs the storage that is down; the bookkeeping write on the defer path is best-effort. The defer path no longer marks the recovered submission `error` (which made the deferred re-run skip with `submission_not_running` — a self-defeating defer); it stays `running` for the re-run to pick up. The give-up now seals the incident `exhausted` only after the terminal writes succeed, so a transient mid-seal defers the whole give-up for an idempotent re-run instead of half-sealing.
+  - **`@cloudflare/ai-chat`** — same give-up seal ordering: the incident is sealed only after `_exhaustChatRecovery` (incl. the durable terminal record) succeeds, so a transient mid-seal preserves the one-shot row and the give-up re-runs in full on a healthy isolate.
+
+- [#1745](https://github.com/cloudflare/agents/pull/1745) [`99c9326`](https://github.com/cloudflare/agents/commit/99c9326bb14c2278fca1c149bc8d6731fd4a0e99) Thanks [@cjol](https://github.com/cjol)! - Make agent teardown reliable when the initiating request is already canceled ([#1625](https://github.com/cloudflare/agents/issues/1625)).
+
+  The MCP Streamable-HTTP session-DELETE handler ran `agent.destroy()` via the request's `ctx.waitUntil`. By the time the DELETE lands the client is usually gone, the runtime gives a canceled request's trailing work little to no grace, and the multi-step teardown (drop tables, delete alarm, delete all storage, dispose connections) was routinely cut short — leaving half-deleted session DOs whose tables the constructor silently recreated on the next wake. (The associated `waitUntil() tasks did not complete` log warning itself originates inside workerd's WebSocket handling and is unaffected by this change.)
+
+  Teardown is now deferred to the agent's own alarm invocation. The DELETE handler awaits two fast storage writes — a durable "condemned" marker plus an immediate alarm — and responds 204; the alarm then runs the real `destroy()` with a fresh execution budget. The marker is removed by the final `deleteAll()`, so it survives any interruption: `alarm()` checks it before any other work (including `onStart`) and finishes the teardown instead of resuming normal operation on a condemned agent, and `_scheduleNextAlarm()` keeps the destroy alarm armed rather than deleting it as "no work pending". `destroy()` itself now writes the marker first, so a direct destroy that gets interrupted converges the same way.
+
+  New internal API: `Agent._cf_scheduleDestroy()` (used by the MCP handler; unlike `destroy()` it does not abort the isolate, so callers don't need to swallow an abort error). No public API or storage-schema changes; the marker is a single internal KV record (`cf_agents_destroy_pending`).
+
+- [#1729](https://github.com/cloudflare/agents/pull/1729) [`1c8fdf5`](https://github.com/cloudflare/agents/commit/1c8fdf58b621282838af88fa85596453317df8f4) Thanks [@threepointone](https://github.com/threepointone)! - Fix runFiber recovery starving when a recovery scan leaves work behind. `_scheduleNextAlarm()` only armed a follow-up alarm for active keepAlive leases, due schedules, and facet runs — never for orphaned `cf_agents_runs` rows (or interrupted/pending managed ledger fibers) still awaiting recovery. Because orphaned fibers hold no keepAlive ref, a scan that yielded on `fiberRecoveryScanDeadlineMs` (or a pass that retained a repeatedly-throwing unmanaged hook for retry) would never get another alarm, so the remaining fibers were never recovered. The scheduler now arms a follow-up alarm whenever fiber recovery work is still outstanding, so multi-pass recovery resumes and eventually drains every fiber (and ages out poison rows via `fiberRecoveryMaxAgeMs`).
+
+  The follow-up alarm uses exponential backoff (capped at 5 minutes) while scans make no forward progress, so a repeatedly-throwing recovery hook — or a `fiberRecoveryMaxAgeMs: 0` ("retain forever") row whose hook keeps throwing — no longer wakes the Durable Object every `keepAliveIntervalMs`. A scan that recovers any fiber (including a scan-deadline yield that drained part of a large batch) resets the backoff, so legitimate multi-pass draining stays prompt.
+
+- [#1737](https://github.com/cloudflare/agents/pull/1737) [`bc43133`](https://github.com/cloudflare/agents/commit/bc43133824f87da86e6d62a15ee2f183ed1a3f84) Thanks [@cjol](https://github.com/cjol)! - Fix the two remaining [#1575](https://github.com/cloudflare/agents/issues/1575) gaps in how in-band stream errors (`{type: "error", errorText}` chunks inside an otherwise-healthy provider stream) are observed after the fact.
+
+  **Errored-stream replay (partial content was lost on reconnect).** A client reconnecting after an in-band error received the terminal error frame ([#1645](https://github.com/cloudflare/agents/issues/1645)) but not the content the model streamed before the error — the replay path only served `status = 'completed'` streams, so an errored stream's buffered chunks were unreachable, and the server pushes no messages on connect. `ResumableStream` gains `replayErroredChunksByRequestId`, and the resume-ACK terminal replay (`_replayTerminalOnAck` in both AIChatAgent and Think) now replays the errored stream's stored chunks before the `done: true, error: true` frame, so a reconnecting client observes the same sequence a live client did. No wire-format or schema changes: replayed chunks reuse the existing `replay: true` frame shape and the error text still comes from the durable terminal record.
+
+  **Agent-tool error attribution (cross-run contamination).** When an in-band error frame was broadcast on a child agent and the active run was unknown, the error was stamped onto every tailed run — so an unrelated turn's failure (or one of several overlapping runs) could mark healthy runs as `error`, and capture depended on a tailer being attached at the right moment. Frames are now attributed by the request id they carry: each agent-tool run is bound to its turn's request id when the turn starts (persisted on the run row at start rather than at terminal, so attribution survives a DO restart mid-run), and only the owning run's error/progress state is updated. Frame inspection also no longer requires an attached tailer, so error capture is independent of tailer timing.
+
+- [#1707](https://github.com/cloudflare/agents/pull/1707) [`d96a17c`](https://github.com/cloudflare/agents/commit/d96a17cfaa93a420b5565f4b6cbd81aebf029c13) Thanks [@threepointone](https://github.com/threepointone)! - Fix `keepAlive()` leaving a stale 30s heartbeat alarm after the lease is released. Previously the dispose returned by `keepAlive()` (and used by `keepAliveWhile()`) only decremented the in-memory ref count and never rescheduled the alarm, so a short-lived lease could permanently bump the next alarm to `now + keepAliveIntervalMs` with nothing to pull it back. The dispose now recomputes the alarm from persistent state when the last lease is released (mirroring the facet release path), clearing the heartbeat when no other work needs it. Fixes [#1704](https://github.com/cloudflare/agents/issues/1704) (root cause behind [#1703](https://github.com/cloudflare/agents/issues/1703)).
+
+- [#1724](https://github.com/cloudflare/agents/pull/1724) [`c18a446`](https://github.com/cloudflare/agents/commit/c18a446daa4547b886bf01ecd9719a23bf7905fc) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fix SQLite memory amplification in `AgentSessionProvider.getHistory()` and add byte-budgeted history reads ([#1710](https://github.com/cloudflare/agents/issues/1710)).
+
+  The history path query previously selected `m.*` inside its recursive CTE, so every message blob was materialized in SQLite's recursion queue AND its `ORDER BY` sorter — 2-3 transient copies of the entire transcript inside the SQLite allocator, which in workerd shares the isolate's memory budget with the JS heap. On large media-heavy sessions this exhausted the allocator and surfaced as `SQLITE_NOMEM` on every wake. The CTE now recurses over `(id, parent_id, depth)` only and content is fetched separately in bounded chunks via `json_each`, which streams without materializing the result set. Leaf detection similarly no longer drags content blobs through its sorter.
+
+  New session APIs for hosts that need to bound wake-time memory:
+
+  - `Session.getRecentHistory(maxContentBytes, minRecentMessages?)` — returns the most recent messages on the active path that fit a byte budget (always at least the leaf, and at least `minRecentMessages` rows when provided — rows are individually capped at write time, so the floor keeps memory bounded), plus `truncated` and `totalContentBytes`. Backed by the optional `SessionProvider.getRecentHistory()`; falls back to a full read for providers that don't implement it, reporting the real serialized size and warning once that the budget cannot be enforced.
+  - `Session.getHistoryRowStats()` — per-row stored sizes AND roles for the active path WITHOUT loading content (optional `SessionProvider.getHistoryRowStats()`), so oversized rows can be found and processed one at a time.
+  - `Session.internal_rewriteMessage()` — maintenance write path that skips the full-history token-estimate status broadcast of a public `updateMessage()`, for framework passes (media eviction) that rewrite many rows with bounded memory.
+
+  Bounded init reads: the init-time loaded-skill restore scan is now skipped entirely when no skill-capable context provider is configured, and when one is, it reads row stats and fetches assistant messages ONE AT A TIME instead of materializing the full transcript (full-read fallback for providers without row stats). Content hydration chunks are additionally bounded by cumulative stored bytes (4MB), not just row count, removing the 50-near-cap-rows worst case.
+
+  Also adds `chat:onstart:degraded`, `chat:hydration:windowed`, and `chat:media:evicted` observability event types emitted by `@cloudflare/think`.
+
+- [#1748](https://github.com/cloudflare/agents/pull/1748) [`4ec3b07`](https://github.com/cloudflare/agents/commit/4ec3b07dae49008184ca39aa19b3aa5625abb98c) Thanks [@threepointone](https://github.com/threepointone)! - Ignore RPC responses when the WebSocket has already closed.
+
+  Async callable methods can finish after a client disconnects. The server now treats that closed-socket response delivery as a no-op instead of surfacing an uncaught `WebSocket send() after close()` error from the Workers runtime.
+
+- [#1712](https://github.com/cloudflare/agents/pull/1712) [`835e7b0`](https://github.com/cloudflare/agents/commit/835e7b0e0b7bb06c57b35ca3b330e4e962ccffed) Thanks [@threepointone](https://github.com/threepointone)! - Reclaim resumable-stream buffers from an alarm so idle chats don't leak storage ([#1706](https://github.com/cloudflare/agents/issues/1706))
+
+  Resumable-stream chunk buffers (`cf_ai_chat_stream_*`) were only swept lazily when a _subsequent_ stream completed. A chat that received a single turn and then went idle never triggered that sweep, so its buffers lingered in the Durable Object's SQLite for the lifetime of the DO.
+
+  `AIChatAgent` and `Think` now arm a scheduled cleanup alarm whenever a stream starts and whenever it finishes (completes or errors). Arming on start guarantees that a stream whose DO is evicted mid-flight and never reaches a finish still gets a future sweep instead of leaking. This is the safety net for the non-durable path (e.g. `chatRecovery: false`, the `AIChatAgent` default): those turns don't run inside `runFiber`, so there's no leftover `keepAlive` alarm and no fiber-recovery scan, and if the client never reconnects nothing else wakes the DO. (Durable `runFiber` turns already self-heal — the `keepAlive` alarm survives eviction, wakes the DO, and recovery finalizes the stream, which arms cleanup — so arming on start is belt-and-suspenders there.) The alarm sweeps aged buffers via the retention windows below and re-arms only while reclaimable rows remain, so a fully-swept DO stops waking itself. Arming is idempotent so high-turn-count chats never accumulate cleanup schedules; the in-callback re-arm uses a fresh (non-idempotent) row so it survives the one-shot deletion of the firing schedule. No per-turn Durable Object and no change to the session DO lifecycle are required.
+
+  Retention is now split into two short, purpose-specific windows instead of a single 24h threshold: completed/errored buffers are kept for a brief **10-minute** reconnect-and-replay grace (the assistant message is persisted separately, so the buffer is only needed to replay a just-finished stream or deliver a terminal error frame to a reconnecting client), while abandoned in-flight (`streaming`) rows are kept for **1 hour** so an interrupted turn has ample time to be resumed or recovered before its buffer is presumed dead. The abandoned-row sweep keys off **last chunk activity** rather than stream start time, so a long-running stream that is still emitting chunks is never reclaimed mid-flight.
+
+  `ResumableStream` gains `cleanup(now?)` (force a sweep, bypassing the lazy interval gate) and `hasReclaimableStreams()` to support alarm-driven cleanup.
+
+- [#1713](https://github.com/cloudflare/agents/pull/1713) [`18c438b`](https://github.com/cloudflare/agents/commit/18c438b05fbc95787b40b6d1c849e569aa253bb9) Thanks [@threepointone](https://github.com/threepointone)! - Support client tools on the Think sub-agent `chat()` RPC path ([#1709](https://github.com/cloudflare/agents/issues/1709))
+
+  `ChatOptions` now accepts `clientTools` (the same `ClientToolSchema[]` carried over the WebSocket chat protocol) and an `onClientToolCall` executor. This lets a parent agent that drives a Think sub-agent over `chat()` expose client-defined tools to the sub-agent and complete the tool round trip within the same turn:
+
+  ```ts
+  await child.chat(message, callback, {
+    signal,
+    clientTools: [
+      { name: "get_user_timezone", parameters: { type: "object" } },
+    ],
+    onClientToolCall: async ({ toolName, input }) =>
+      runClientTool(toolName, input),
+  });
+  ```
+
+  Without `onClientToolCall`, the schemas are still registered and the model's call is surfaced through the stream callback (execute-less), matching the WebSocket behavior. With it, the call is resolved inline so the turn can continue to completion — the RPC stream callback has no inbound result channel of its own.
+
+  Unlike the WebSocket path, the schemas and executor are kept per-turn and are NOT persisted: the executor is a live RPC reference that cannot survive an eviction, and there is no SPA to replay a `tool-result`. This keeps chat recovery correct — an eviction-interrupted client-tool call is repaired like a server tool (the model proceeds) rather than being mistaken for a pending human interaction and parking forever.
+
+  `agents/chat`'s `createToolsFromClientSchemas` gains an optional `{ execute }` delegate (and exports a new `ClientToolExecutor` type) to build the executable variant. Both additions are backward-compatible.
+
+- Updated dependencies [[`b2b6762`](https://github.com/cloudflare/agents/commit/b2b67623deab327042b99344d8ee530ae37a71b2), [`4c2d1a7`](https://github.com/cloudflare/agents/commit/4c2d1a7f7f337bf426b0b35e3c9e8e4901c6360b), [`4c2d1a7`](https://github.com/cloudflare/agents/commit/4c2d1a7f7f337bf426b0b35e3c9e8e4901c6360b)]:
+  - @cloudflare/codemode@0.4.0
+
 ## 0.15.0
 
 ### Minor Changes

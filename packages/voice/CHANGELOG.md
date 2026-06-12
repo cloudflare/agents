@@ -1,5 +1,11 @@
 # @cloudflare/voice
 
+## 0.3.0
+
+### Minor Changes
+
+- [#1711](https://github.com/cloudflare/agents/pull/1711) [`a3a8d83`](https://github.com/cloudflare/agents/commit/a3a8d8357b5043a726e04fd911acdf0dbd20f271) Thanks [@cjol](https://github.com/cjol)! - Add `outputDeviceId` and `setOutputDevice()` for routing assistant playback to a selected audio output device when the browser supports sink selection.
+
 ## 0.2.1
 
 ### Patch Changes

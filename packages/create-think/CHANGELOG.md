@@ -1,5 +1,11 @@
 # create-think
 
+## 0.0.4
+
+### Patch Changes
+
+- [`7bcd1b1`](https://github.com/cloudflare/agents/commit/7bcd1b1a471ec887b781662747a44bf105593efc) Thanks [@threepointone](https://github.com/threepointone)! - Bundle runtime dependencies (`tiged`, `yargs`, and their transitive deps) into the published output. `create-think` now ships as a fully self-contained package, so `npm create think` is a single download that runs without resolving or installing any transitive dependencies.
+
 ## 0.0.3
 
 ### Patch Changes

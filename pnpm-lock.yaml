@@ -3535,7 +3535,7 @@ importers:
   packages/hono-agents:
     devDependencies:
       agents:
-        specifier: ^0.15.0
+        specifier: ^0.16.0
         version: link:../agents
       hono:
         specifier: ^4.12.25
@@ -3560,10 +3560,10 @@ importers:
   packages/think:
     dependencies:
       '@cloudflare/codemode':
-        specifier: '>=0.3.8 <1.0.0'
+        specifier: '>=0.4.0'
         version: link:../codemode
       '@cloudflare/shell':
-        specifier: '>=0.3.8 <1.0.0'
+        specifier: '>=0.4.0'
         version: link:../shell
       agents:
         specifier: '>=0.14.0 <1.0.0'
