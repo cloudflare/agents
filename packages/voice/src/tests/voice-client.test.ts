@@ -63,6 +63,7 @@ class FakeAudioContext {
   pendingDecode: (() => void) | null = null;
   destination = {};
   mediaStreamDestination = { stream: {} };
+  mediaStreamDestinationCount = 0;
 
   async resume(): Promise<void> {}
 
@@ -81,6 +82,7 @@ class FakeAudioContext {
   }
 
   createMediaStreamDestination(): MediaStreamAudioDestinationNode {
+    this.mediaStreamDestinationCount++;
     return this
       .mediaStreamDestination as unknown as MediaStreamAudioDestinationNode;
   }
@@ -92,11 +94,25 @@ class FakeAudioElement {
   paused = false;
   playCount = 0;
   rejectPlay = false;
+  deferPlay = false;
+  pendingPlayResolve: (() => void) | null = null;
   rejectSinkId = false;
   sinkIds: string[] = [];
+  currentSinkId: string | null = null;
+  deferredSinkIds = new Set<string>();
+  pendingSinkIdResolves = new Map<string, () => void>();
 
   async play(): Promise<void> {
     this.playCount++;
+    if (this.deferPlay) {
+      await new Promise<void>((resolve) => {
+        this.pendingPlayResolve = () => {
+          this.deferPlay = false;
+          this.pendingPlayResolve = null;
+          resolve();
+        };
+      });
+    }
     if (this.rejectPlay) throw new Error("play rejected");
   }
 
@@ -106,7 +122,25 @@ class FakeAudioElement {
 
   async setSinkId(sinkId: string): Promise<void> {
     this.sinkIds.push(sinkId);
+    if (this.deferredSinkIds.has(sinkId)) {
+      await new Promise<void>((resolve) => {
+        this.pendingSinkIdResolves.set(sinkId, () => {
+          this.deferredSinkIds.delete(sinkId);
+          this.pendingSinkIdResolves.delete(sinkId);
+          resolve();
+        });
+      });
+    }
     if (this.rejectSinkId) throw new Error("setSinkId rejected");
+    this.currentSinkId = sinkId;
+  }
+
+  resolveSinkId(sinkId: string): void {
+    this.pendingSinkIdResolves.get(sinkId)?.();
+  }
+
+  resolvePlay(): void {
+    this.pendingPlayResolve?.();
   }
 }
 
@@ -136,6 +170,14 @@ async function waitForConnectedSource(): Promise<FakeAudioBufferSourceNode> {
     await Promise.resolve();
   }
   throw new Error("expected audio source to be connected");
+}
+
+async function waitForPlayCount(count: number): Promise<void> {
+  for (let i = 0; i < 10; i++) {
+    if (audioElement.playCount >= count) return;
+    await Promise.resolve();
+  }
+  throw new Error(`expected audio play count to reach ${count}`);
 }
 
 describe("VoiceClient playback interrupt", () => {
@@ -252,14 +294,16 @@ describe("VoiceClient playback interrupt", () => {
 
   it("reports output device failures without stopping playback", async () => {
     const transport = new MockTransport();
-    const errors: Array<string | null> = [];
+    const outputDeviceErrors: Array<string | null> = [];
     const client = new VoiceClient({
       agent: "test-agent",
       transport,
       outputDeviceId: "missing-speaker"
     });
     audioElement.rejectSinkId = true;
-    client.addEventListener("error", (error) => errors.push(error));
+    client.addEventListener("outputdeviceerror", (error) =>
+      outputDeviceErrors.push(error)
+    );
 
     client.connect();
     transport.receive(JSON.stringify({ type: "audio_config", format: "mp3" }));
@@ -270,19 +314,27 @@ describe("VoiceClient playback interrupt", () => {
     expect(source.connectedTo).toBe(audioContext.mediaStreamDestination);
     expect(audioElement.playCount).toBe(1);
     expect(audioElement.sinkIds).toEqual(["missing-speaker"]);
-    expect(errors).toContain("Could not switch audio output device.");
+    expect(outputDeviceErrors).toContain(
+      "Could not switch audio output device."
+    );
+    expect(client.error).toBeNull();
+    expect(client.outputDeviceError).toBe(
+      "Could not switch audio output device."
+    );
   });
 
   it("clears output device errors after a later successful switch", async () => {
     const transport = new MockTransport();
-    const errors: Array<string | null> = [];
+    const outputDeviceErrors: Array<string | null> = [];
     const client = new VoiceClient({
       agent: "test-agent",
       transport,
       outputDeviceId: "missing-speaker"
     });
     audioElement.rejectSinkId = true;
-    client.addEventListener("error", (error) => errors.push(error));
+    client.addEventListener("outputdeviceerror", (error) =>
+      outputDeviceErrors.push(error)
+    );
 
     client.connect();
     transport.receive(JSON.stringify({ type: "audio_config", format: "mp3" }));
@@ -292,8 +344,109 @@ describe("VoiceClient playback interrupt", () => {
     audioElement.rejectSinkId = false;
     await client.setOutputDevice("speaker-1");
 
-    expect(errors).toContain("Could not switch audio output device.");
-    expect(errors.at(-1)).toBeNull();
+    expect(outputDeviceErrors).toContain(
+      "Could not switch audio output device."
+    );
+    expect(outputDeviceErrors.at(-1)).toBeNull();
+    expect(client.outputDeviceError).toBeNull();
+  });
+
+  it("clears unsupported output device errors when switching back to default", async () => {
+    const transport = new MockTransport();
+    const outputDeviceErrors: Array<string | null> = [];
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      outputDeviceId: "speaker-1"
+    });
+    (
+      audioElement as { setSinkId?: (sinkId: string) => Promise<void> }
+    ).setSinkId = undefined;
+    client.addEventListener("outputdeviceerror", (error) =>
+      outputDeviceErrors.push(error)
+    );
+
+    client.connect();
+    transport.receive(JSON.stringify({ type: "audio_config", format: "mp3" }));
+    transport.receive(new ArrayBuffer(4));
+    await waitForConnectedSource();
+
+    await client.setOutputDevice();
+
+    expect(outputDeviceErrors).toContain(
+      "Audio output device selection is not supported in this browser."
+    );
+    expect(outputDeviceErrors.at(-1)).toBeNull();
+    expect(client.outputDeviceError).toBeNull();
+  });
+
+  it("does not overwrite global errors when output device switching fails", async () => {
+    const transport = new MockTransport();
+    const globalErrors: Array<string | null> = [];
+    const outputDeviceErrors: Array<string | null> = [];
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      outputDeviceId: "missing-speaker"
+    });
+    audioElement.rejectSinkId = true;
+    client.addEventListener("error", (error) => globalErrors.push(error));
+    client.addEventListener("outputdeviceerror", (error) =>
+      outputDeviceErrors.push(error)
+    );
+
+    client.connect();
+    transport.receive(
+      JSON.stringify({ type: "error", message: "Voice pipeline failed" })
+    );
+    transport.receive(JSON.stringify({ type: "audio_config", format: "mp3" }));
+    transport.receive(new ArrayBuffer(4));
+
+    await waitForConnectedSource();
+
+    expect(globalErrors).toContain("Voice pipeline failed");
+    expect(globalErrors).not.toContain("Could not switch audio output device.");
+    expect(client.error).toBe("Voice pipeline failed");
+    expect(outputDeviceErrors).toContain(
+      "Could not switch audio output device."
+    );
+  });
+
+  it("keeps the latest output device when sink switches resolve out of order", async () => {
+    const transport = new MockTransport();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      outputDeviceId: "default"
+    });
+
+    client.connect();
+    transport.receive(JSON.stringify({ type: "audio_config", format: "mp3" }));
+    transport.receive(new ArrayBuffer(4));
+    await waitForConnectedSource();
+
+    audioElement.deferredSinkIds.add("speaker-1");
+    audioElement.deferredSinkIds.add("speaker-2");
+
+    const firstSwitch = client.setOutputDevice("speaker-1");
+    await Promise.resolve();
+    const secondSwitch = client.setOutputDevice("speaker-2");
+    await Promise.resolve();
+
+    audioElement.resolveSinkId("speaker-2");
+    await secondSwitch;
+    expect(audioElement.currentSinkId).toBe("speaker-2");
+
+    audioElement.resolveSinkId("speaker-1");
+    await firstSwitch;
+
+    expect(audioElement.currentSinkId).toBe("speaker-2");
+    expect(audioElement.sinkIds).toEqual([
+      "default",
+      "speaker-1",
+      "speaker-2",
+      "speaker-2"
+    ]);
   });
 
   it("falls back to the default AudioContext destination when HTML audio playback is unavailable", async () => {
@@ -317,6 +470,60 @@ describe("VoiceClient playback interrupt", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("shares playback output setup when audio arrives while call start is prewarming playback", async () => {
+    const transport = new MockTransport();
+    const audioInput = new FakeAudioInput();
+    const client = new VoiceClient({
+      agent: "test-agent",
+      transport,
+      audioInput
+    });
+    audioElement.deferPlay = true;
+
+    client.connect();
+    transport.receive(JSON.stringify({ type: "audio_config", format: "mp3" }));
+
+    const startCall = client.startCall();
+    await Promise.resolve();
+    transport.receive(new ArrayBuffer(4));
+    await waitForPlayCount(1);
+
+    expect(audioContext.mediaStreamDestinationCount).toBe(1);
+    expect(audioElement.playCount).toBe(1);
+
+    audioElement.resolvePlay();
+    await startCall;
+    const source = await waitForConnectedSource();
+
+    expect(source.connectedTo).toBe(audioContext.mediaStreamDestination);
+    expect(audioContext.mediaStreamDestinationCount).toBe(1);
+  });
+
+  it("does not orphan playback output if call ends while HTML audio is starting", async () => {
+    const transport = new MockTransport();
+    const client = new VoiceClient({ agent: "test-agent", transport });
+    audioElement.deferPlay = true;
+
+    client.connect();
+    transport.receive(JSON.stringify({ type: "audio_config", format: "mp3" }));
+    transport.receive(new ArrayBuffer(4));
+    await waitForPlayCount(1);
+
+    expect(audioElement.playCount).toBe(1);
+
+    client.endCall();
+    expect(audioElement.paused).toBe(true);
+    expect(audioElement.srcObject).toBeNull();
+
+    audioElement.resolvePlay();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(audioContext.source).toBeNull();
+    expect(audioElement.paused).toBe(true);
+    expect(audioElement.srcObject).toBeNull();
   });
 
   it("does not start playback if interrupted while audio is decoding", async () => {

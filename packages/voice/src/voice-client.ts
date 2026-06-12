@@ -108,6 +108,7 @@ export interface VoiceClientEventMap {
   audiolevelchange: number;
   connectionchange: boolean;
   error: string | null;
+  outputdeviceerror: string | null;
   mutechange: boolean;
   custommessage: unknown;
 }
@@ -265,6 +266,7 @@ export class VoiceClient {
   #isMuted = false;
   #connected = false;
   #error: string | null = null;
+  #outputDeviceError: string | null = null;
   #lastCustomMessage: unknown = null;
   #audioFormat: VoiceAudioFormat | null = null;
   #interimTranscript: string | null = null;
@@ -294,8 +296,11 @@ export class VoiceClient {
   #activeSource: AudioBufferSourceNode | null = null;
   #playbackElement: HTMLAudioElement | null = null;
   #playbackDestination: MediaStreamAudioDestinationNode | null = null;
+  #playbackDestinationPromise: Promise<AudioNode> | null = null;
   #useDefaultPlaybackDestination = false;
   #outputDeviceId: string;
+  #outputDeviceSwitchGeneration = 0;
+  #playbackOutputGeneration = 0;
   #playbackGeneration = 0;
   #interruptChunkCount = 0;
 
@@ -340,6 +345,10 @@ export class VoiceClient {
 
   get error(): string | null {
     return this.#error;
+  }
+
+  get outputDeviceError(): string | null {
+    return this.#outputDeviceError;
   }
 
   /**
@@ -396,6 +405,12 @@ export class VoiceClient {
     if (this.#transcript.length > this.#maxTranscriptMessages) {
       this.#transcript = this.#transcript.slice(-this.#maxTranscriptMessages);
     }
+  }
+
+  #setOutputDeviceError(error: string | null): void {
+    if (this.#outputDeviceError === error) return;
+    this.#outputDeviceError = error;
+    this.#emit("outputdeviceerror", error);
   }
 
   // --- Connection ---
@@ -575,8 +590,9 @@ export class VoiceClient {
    */
   async setOutputDevice(outputDeviceId?: string): Promise<void> {
     this.#outputDeviceId = outputDeviceId ?? "default";
+    const generation = ++this.#outputDeviceSwitchGeneration;
     if (this.#playbackElement) {
-      await this.#applyOutputDevice(this.#playbackElement);
+      await this.#applyOutputDevice(this.#playbackElement, generation);
     }
   }
 
@@ -737,9 +753,28 @@ export class VoiceClient {
   }
 
   async #getPlaybackDestination(ctx: AudioContext): Promise<AudioNode> {
+    if (this.#playbackDestinationPromise) {
+      return this.#playbackDestinationPromise;
+    }
     if (this.#playbackDestination) return this.#playbackDestination;
     if (this.#useDefaultPlaybackDestination) return ctx.destination;
 
+    const outputGeneration = this.#playbackOutputGeneration;
+    const promise = this.#initializePlaybackDestination(ctx, outputGeneration);
+    this.#playbackDestinationPromise = promise;
+    try {
+      return await promise;
+    } finally {
+      if (this.#playbackDestinationPromise === promise) {
+        this.#playbackDestinationPromise = null;
+      }
+    }
+  }
+
+  async #initializePlaybackDestination(
+    ctx: AudioContext,
+    outputGeneration: number
+  ): Promise<AudioNode> {
     try {
       const destination = ctx.createMediaStreamDestination();
       const audio = new Audio();
@@ -747,8 +782,16 @@ export class VoiceClient {
       audio.srcObject = destination.stream;
       this.#playbackElement = audio;
       this.#playbackDestination = destination;
-      await this.#applyOutputDevice(audio);
+      await this.#applyOutputDevice(audio, this.#outputDeviceSwitchGeneration);
+      if (!this.#isCurrentPlaybackOutput(audio, outputGeneration)) {
+        this.#releasePlaybackElement(audio);
+        return ctx.destination;
+      }
       await audio.play();
+      if (!this.#isCurrentPlaybackOutput(audio, outputGeneration)) {
+        this.#releasePlaybackElement(audio);
+        return ctx.destination;
+      }
       return destination;
     } catch (err) {
       console.warn(
@@ -761,39 +804,82 @@ export class VoiceClient {
     }
   }
 
-  async #applyOutputDevice(audio: HTMLAudioElement): Promise<void> {
+  #isCurrentPlaybackOutput(
+    audio: HTMLAudioElement,
+    outputGeneration: number
+  ): boolean {
+    return (
+      this.#playbackElement === audio &&
+      this.#playbackOutputGeneration === outputGeneration
+    );
+  }
+
+  async #applyOutputDevice(
+    audio: HTMLAudioElement,
+    generation: number
+  ): Promise<void> {
     const sinkId = this.#outputDeviceId;
     const setSinkId = (audio as AudioElementWithSinkId).setSinkId;
     if (!setSinkId) {
-      if (sinkId === "default") return;
-      this.#error = UNSUPPORTED_OUTPUT_DEVICE_ERROR;
-      this.#emit("error", this.#error);
+      if (sinkId === "default") {
+        this.#setOutputDeviceError(null);
+        return;
+      }
+      this.#setOutputDeviceError(UNSUPPORTED_OUTPUT_DEVICE_ERROR);
       return;
     }
 
     try {
       await setSinkId.call(audio, sinkId);
       if (
-        this.#error === UNSUPPORTED_OUTPUT_DEVICE_ERROR ||
-        this.#error === OUTPUT_DEVICE_SWITCH_ERROR
+        generation !== this.#outputDeviceSwitchGeneration ||
+        sinkId !== this.#outputDeviceId
       ) {
-        this.#error = null;
-        this.#emit("error", null);
+        if (this.#playbackElement === audio) {
+          await this.#applyOutputDevice(
+            audio,
+            this.#outputDeviceSwitchGeneration
+          );
+        }
+        return;
+      }
+      if (
+        this.#outputDeviceError === UNSUPPORTED_OUTPUT_DEVICE_ERROR ||
+        this.#outputDeviceError === OUTPUT_DEVICE_SWITCH_ERROR
+      ) {
+        this.#setOutputDeviceError(null);
       }
     } catch {
-      this.#error = OUTPUT_DEVICE_SWITCH_ERROR;
-      this.#emit("error", this.#error);
+      if (
+        generation !== this.#outputDeviceSwitchGeneration ||
+        sinkId !== this.#outputDeviceId
+      ) {
+        if (this.#playbackElement === audio) {
+          await this.#applyOutputDevice(
+            audio,
+            this.#outputDeviceSwitchGeneration
+          );
+        }
+        return;
+      }
+      this.#setOutputDeviceError(OUTPUT_DEVICE_SWITCH_ERROR);
     }
   }
 
   #closePlaybackOutput(): void {
+    this.#playbackOutputGeneration++;
     if (this.#playbackElement) {
-      this.#playbackElement.pause();
-      this.#playbackElement.srcObject = null;
+      this.#releasePlaybackElement(this.#playbackElement);
       this.#playbackElement = null;
     }
     this.#playbackDestination = null;
+    this.#playbackDestinationPromise = null;
     this.#useDefaultPlaybackDestination = false;
+  }
+
+  #releasePlaybackElement(audio: HTMLAudioElement): void {
+    audio.pause();
+    audio.srcObject = null;
   }
 
   // --- Audio playback ---
@@ -817,9 +903,11 @@ export class VoiceClient {
       }
       if (generation !== this.#playbackGeneration) return;
 
+      const destination = await this.#getPlaybackDestination(ctx);
+      if (generation !== this.#playbackGeneration) return;
+
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
-      const destination = await this.#getPlaybackDestination(ctx);
       source.connect(destination);
       if (generation !== this.#playbackGeneration) return;
       this.#activeSource = source;

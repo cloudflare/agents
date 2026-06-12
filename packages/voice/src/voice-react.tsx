@@ -50,6 +50,7 @@ export interface UseVoiceAgentReturn {
   isMuted: boolean;
   connected: boolean;
   error: string | null;
+  outputDeviceError: string | null;
   startCall: () => Promise<void>;
   endCall: () => void;
   toggleMute: () => void;
@@ -284,6 +285,9 @@ export function useVoiceAgent(
   const [isMuted, setIsMuted] = useState(false);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [outputDeviceError, setOutputDeviceError] = useState<string | null>(
+    null
+  );
   const [interimTranscript, setInterimTranscript] = useState<string | null>(
     null
   );
@@ -299,6 +303,7 @@ export function useVoiceAgent(
     setIsMuted(false);
     setConnected(false);
     setError(null);
+    setOutputDeviceError(null);
     setInterimTranscript(null);
     setLastCustomMessage(null);
 
@@ -334,6 +339,7 @@ export function useVoiceAgent(
     const onMute = (muted: boolean) => setIsMuted(muted);
     const onConnection = (c: boolean) => setConnected(c);
     const onError = (e: string | null) => setError(e);
+    const onOutputDeviceError = (e: string | null) => setOutputDeviceError(e);
     const onInterim = (text: string | null) => setInterimTranscript(text);
 
     client.addEventListener("statuschange", onStatus);
@@ -344,6 +350,7 @@ export function useVoiceAgent(
     client.addEventListener("mutechange", onMute);
     client.addEventListener("connectionchange", onConnection);
     client.addEventListener("error", onError);
+    client.addEventListener("outputdeviceerror", onOutputDeviceError);
 
     return () => {
       client.removeEventListener("statuschange", onStatus);
@@ -354,6 +361,7 @@ export function useVoiceAgent(
       client.removeEventListener("mutechange", onMute);
       client.removeEventListener("connectionchange", onConnection);
       client.removeEventListener("error", onError);
+      client.removeEventListener("outputdeviceerror", onOutputDeviceError);
       if (clientRef.current === client) {
         clientRef.current = null;
       }
@@ -401,6 +409,7 @@ export function useVoiceAgent(
     isMuted,
     connected,
     error,
+    outputDeviceError,
     startCall,
     endCall,
     toggleMute,

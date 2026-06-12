@@ -393,6 +393,7 @@ function App() {
     isMuted,
     connected,
     error,
+    outputDeviceError,
     startCall,
     endCall,
     toggleMute,
@@ -473,6 +474,11 @@ function App() {
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [transcript, interimTranscript]);
+
+  const handleStartCall = useCallback(async () => {
+    await startCall();
+    await refreshAudioOutputs().catch(() => {});
+  }, [refreshAudioOutputs, startCall]);
 
   // Detect speaker conflict from error messages
   useEffect(() => {
@@ -839,23 +845,31 @@ function App() {
 
         {/* Controls */}
         <div className="flex flex-col items-center justify-center gap-3 sm:flex-row">
-          <select
-            value={outputDeviceId}
-            onChange={(event) => setOutputDeviceId(event.target.value)}
-            className="min-w-0 rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-sm text-kumo-default"
-          >
-            <option value="default">System default</option>
-            {audioOutputDevices
-              .filter((device) => device.deviceId !== "default")
-              .map((device, index) => (
-                <option key={device.deviceId} value={device.deviceId}>
-                  {getAudioOutputLabel(device, index)}
-                </option>
-              ))}
-          </select>
+          <div className="flex flex-col items-center gap-1">
+            <select
+              aria-label="Audio output"
+              value={outputDeviceId}
+              onChange={(event) => setOutputDeviceId(event.target.value)}
+              className="min-w-0 rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-sm text-kumo-default"
+            >
+              <option value="default">System default</option>
+              {audioOutputDevices
+                .filter((device) => device.deviceId !== "default")
+                .map((device, index) => (
+                  <option key={device.deviceId} value={device.deviceId}>
+                    {getAudioOutputLabel(device, index)}
+                  </option>
+                ))}
+            </select>
+            {outputDeviceError && (
+              <span className="max-w-48 text-center text-xs text-kumo-warning">
+                {outputDeviceError}
+              </span>
+            )}
+          </div>
           {!isInCall ? (
             <Button
-              onClick={startCall}
+              onClick={handleStartCall}
               className="px-8 justify-center"
               variant="primary"
               disabled={!connected || speakerConflict}
