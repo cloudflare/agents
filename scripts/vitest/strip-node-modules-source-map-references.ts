@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import type { Plugin } from "vite";
+import type { Plugin } from "vite-plus";
 
 const sourceMapCommentRE =
   /(?:\/\/# sourceMappingURL=.*|\/\*# sourceMappingURL=.*?\*\/)\s*$/s;

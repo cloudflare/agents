@@ -5,7 +5,7 @@
  */
 import { z } from "zod";
 import { jsonSchema } from "ai";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { generateTypes } from "../tool-types";
 import type { ToolSet } from "ai";
 

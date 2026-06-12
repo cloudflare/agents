@@ -2,7 +2,7 @@
  * Tests for createCodeTool — the function that wires tools + executor into
  * a single AI SDK tool.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi } from "vite-plus/test";
 import { createCodeTool } from "../tool";
 import { z } from "zod";
 import type { ToolDescriptors } from "../tool-types";

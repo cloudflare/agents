@@ -7,7 +7,7 @@
  * 4. Restart wrangler with the same persist directory
  * 5. Verify: onChatRecovery fired, partial text persisted, fiber row cleaned up
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vite-plus/test";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { setDefaultAutoSelectFamily, Socket } from "node:net";
 import path from "node:path";

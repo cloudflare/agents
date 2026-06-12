@@ -12,7 +12,7 @@
  */
 
 import { exports, env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { getAgentByName } from "agents";
 import { uniqueDirectoryName } from "./helpers";
 

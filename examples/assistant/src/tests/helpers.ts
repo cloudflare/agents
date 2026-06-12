@@ -1,6 +1,6 @@
 import { exports } from "cloudflare:workers";
-import { expect } from "vitest";
 import type { DirectoryState } from "../../agents/assistant/types";
+import { expect } from "vite-plus/test";
 
 /**
  * Open a WebSocket against the test worker for the given path.

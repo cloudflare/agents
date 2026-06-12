@@ -7,7 +7,7 @@
  * Each test uses toBe with the exact expected output so these tests
  * double as documentation for the output format.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { generateTypes } from "../tool-types";
 import { fromJSONSchema } from "zod";
 import { jsonSchema } from "ai";

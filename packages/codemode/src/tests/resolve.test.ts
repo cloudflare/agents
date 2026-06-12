@@ -4,7 +4,7 @@
  * Verifies that resolveProvider, filterTools, and extractFns work
  * without any dependency on the AI SDK or Zod.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi } from "vite-plus/test";
 import { resolveProvider, filterTools, extractFns } from "../resolve";
 import type { ToolProvider, SimpleToolRecord } from "../executor";
 

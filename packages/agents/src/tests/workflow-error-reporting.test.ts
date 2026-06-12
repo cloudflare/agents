@@ -11,7 +11,7 @@
  */
 import { env } from "cloudflare:workers";
 import { introspectWorkflowInstance } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { getAgentByName } from "..";
 
 // Helper type for callback records

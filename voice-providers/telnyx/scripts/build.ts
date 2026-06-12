@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { build } from "tsdown";
+import { build } from "vite-plus/pack";
 
 async function main() {
   await build({
@@ -13,7 +13,7 @@ async function main() {
     fixedExtension: false
   });
 
-  execSync("oxfmt --write ./dist/*.d.ts");
+  execSync("vp fmt --write ./dist/*.d.ts");
 
   process.exit(0);
 }

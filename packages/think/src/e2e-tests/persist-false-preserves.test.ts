@@ -13,7 +13,7 @@
  * transcript would have ZERO settled tool parts after recovery — so this test
  * fails on the pre-R1 code and passes after it.
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vite-plus/test";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { setDefaultAutoSelectFamily } from "node:net";
 import "./harden-net";

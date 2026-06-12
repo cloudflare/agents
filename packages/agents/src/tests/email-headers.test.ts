@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { isAutoReplyEmail, type EmailHeader } from "../email";
 
 // Helper to create a mock headers array in postal-mime format

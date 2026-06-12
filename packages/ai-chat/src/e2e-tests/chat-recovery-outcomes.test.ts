@@ -10,7 +10,7 @@
  * Both interrupt a turn AFTER it has flushed a non-empty partial (so there is
  * real content to persist or drop).
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vite-plus/test";
 import { type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

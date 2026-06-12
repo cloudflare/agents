@@ -40,7 +40,7 @@
     "url": "git+https://github.com/cloudflare/agents.git"
   },
   "scripts": {
-    "build": "tsx ./scripts/build.ts"
+    "build": "vp run build:package"
   },
   "type": "module",
   "types": "dist/index.d.ts",

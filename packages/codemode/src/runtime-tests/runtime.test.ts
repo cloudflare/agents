@@ -8,7 +8,7 @@
  * execution retention.
  */
 import { env } from "cloudflare:workers";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import type { ProxyToolOutput } from "../proxy-tool";
 import type { ExecutionState, PendingAction } from "../runtime";
 import type { Snippet } from "../snippet";

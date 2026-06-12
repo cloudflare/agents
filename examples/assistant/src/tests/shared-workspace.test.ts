@@ -15,7 +15,7 @@
  */
 
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { getAgentByName, getSubAgentByName } from "agents";
 import { uniqueDirectoryName } from "./helpers";
 import { MyAssistant } from "../../agents/assistant/agents/my-assistant/agent";

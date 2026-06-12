@@ -13,7 +13,7 @@
  */
 
 import { exports, env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { getAgentByName, getSubAgentByName } from "../index";
 import { SpikeSubChild } from "./agents/spike-sub-agent-routing";
 

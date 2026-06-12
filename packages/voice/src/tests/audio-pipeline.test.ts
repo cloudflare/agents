@@ -1,7 +1,7 @@
 /**
  * Unit tests for AudioConnectionManager — transcriber session lifecycle.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { AudioConnectionManager } from "../audio-pipeline";
 import type {
   Transcriber,

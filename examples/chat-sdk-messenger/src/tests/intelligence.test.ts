@@ -1,6 +1,6 @@
 import { Message } from "chat";
 import type { Thread } from "chat";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import type { UIMessage } from "ai";
 import {
   aiReplyFailureMode,

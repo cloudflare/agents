@@ -1,7 +1,14 @@
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
-import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
+import {
+  describe,
+  expect,
+  it,
+  beforeEach,
+  afterEach,
+  vi
+} from "vite-plus/test";
 import { z } from "zod";
 import { MCPClientConnection } from "../../mcp/client-connection";
 import type { MCPObservabilityEvent } from "../../observability/mcp";

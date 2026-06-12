@@ -3,7 +3,7 @@
  * Tests connection, state sync, RPC calls, and hook lifecycle
  * against a real miniflare worker.
  */
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vite-plus/test";
 import { render as _render, cleanup } from "vitest-browser-react";
 import { Suspense, useEffect } from "react";
 import { useAgent, type UseAgentOptions } from "../react";

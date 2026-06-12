@@ -15,7 +15,7 @@
  * idempotency. If reRuns >> evictions, recovery is rolling back PAST completed
  * steps — a framework reconstruction gap.
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vite-plus/test";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { setDefaultAutoSelectFamily } from "node:net";
 import "./harden-net";

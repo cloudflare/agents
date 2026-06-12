@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { env } from "cloudflare:workers";
 import { Agent, routeAgentEmail, getAgentByName } from "../index";
 import type { SendEmailOptions } from "../index";

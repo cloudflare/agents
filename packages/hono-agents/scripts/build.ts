@@ -1,4 +1,4 @@
-import { build } from "tsdown";
+import { build } from "vite-plus/pack";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
 
 async function main() {
@@ -15,7 +15,7 @@ async function main() {
     fixedExtension: false
   });
 
-  // then run oxfmt on the generated .d.ts files
+  // then format the generated .d.ts files
   formatDeclarationFiles();
 
   process.exit(0);

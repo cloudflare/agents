@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 // Provider-level branch coverage for DurableObjectOAuthClientProvider's
 // PKCE-verifier-by-callback-state logic. These run inside TestOAuthAgent so the

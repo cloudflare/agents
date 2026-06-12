@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { exports } from "cloudflare:workers";
 
 // Accept and close WebSocket on response to prevent "WebSocketPipe was destroyed" logs on teardown

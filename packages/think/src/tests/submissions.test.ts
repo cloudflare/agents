@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { getServerByName } from "partyserver";
-import { describe, expect, it } from "vitest";
 import type { UIMessage } from "ai";
+import { describe, expect, it } from "vite-plus/test";
 import type { ThinkProgrammaticTestAgent } from "./agents/think-session";
 import type {
   SubmitMessagesResult,

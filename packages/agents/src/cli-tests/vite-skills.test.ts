@@ -1,8 +1,8 @@
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { Plugin } from "vite";
+import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
+import type { Plugin } from "vite-plus";
 import agents from "../vite";
 import { compileSkillScript, isCompilableSkillScript } from "../skills/compile";
 

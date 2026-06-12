@@ -1,5 +1,5 @@
 import { exports } from "cloudflare:workers";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { MessageType } from "../types";
 
 async function connectWS(path: string) {

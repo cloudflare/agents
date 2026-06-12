@@ -8,7 +8,7 @@
  * yields partway (emitting `scan_deadline_exceeded`) and resumes on the next
  * alarm. Across passes every fiber is eventually recovered with no starvation.
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vite-plus/test";
 import { type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

@@ -99,12 +99,12 @@ src/
 ## Build
 
 ```bash
-pnpm run build          # runs tsx scripts/build.ts
+vp run build            # runs tsx scripts/build.ts
 ```
 
 Uses **tsdown** (ESM-only, with .d.ts generation and sourcemaps). Build entry points are explicitly listed in `scripts/build.ts` — if you add a new export, add it there too.
 
-After build, `oxfmt --write` formats the generated `.d.ts` files.
+After build, `vp fmt --write` formats the generated `.d.ts` files.
 
 The `check:exports` script at the repo root verifies that every `exports` entry in `package.json` has a corresponding file in `dist/`.
 
@@ -115,7 +115,7 @@ Multiple separate test suites, each with its own vitest config:
 ### Workers tests (`src/tests/`)
 
 ```bash
-pnpm run test:workers   # or: vitest -r src/tests
+vp run test:workers     # or: vp test -r src/tests
 ```
 
 Runs inside the Workers runtime via `@cloudflare/vitest-pool-workers`. Uses a `wrangler.jsonc` to configure Durable Object bindings, queues, workflows, etc. Tests cover: state, scheduling, sub-agent routing, callable methods, WebSocket message handling, email routing, MCP protocol, workflows.
@@ -123,7 +123,7 @@ Runs inside the Workers runtime via `@cloudflare/vitest-pool-workers`. Uses a `w
 ### React tests (`src/react-tests/`)
 
 ```bash
-pnpm run test:react     # or: vitest -r src/react-tests
+vp run test:react       # or: vp test -r src/react-tests
 ```
 
 Runs in **Playwright (Chromium, headless)** via `vitest-browser-react`. A global setup script starts a miniflare worker on port 18787. Tests cover: `useAgent` hook, cache invalidation, cache TTL, state sync.
@@ -131,7 +131,7 @@ Runs in **Playwright (Chromium, headless)** via `vitest-browser-react`. A global
 ### CLI tests (`src/cli-tests/`)
 
 ```bash
-pnpm run test:cli       # or: vitest -r src/cli-tests
+vp run test:cli         # or: vp test -r src/cli-tests
 ```
 
 Plain Node.js environment. Tests the `npx agents` CLI.
@@ -139,7 +139,7 @@ Plain Node.js environment. Tests the `npx agents` CLI.
 ### WebMCP tests (`src/webmcp-tests/`)
 
 ```bash
-pnpm run test:webmcp    # or: vitest --project webmcp
+vp run test:webmcp      # or: vp test --project webmcp
 ```
 
 Runs in **Playwright (Chromium, headless)** via `@vitest/browser-playwright`. Tests the experimental WebMCP adapter: tool discovery, registration, execution relay, watch mode (SSE re-sync), error handling, and edge cases.
@@ -147,7 +147,7 @@ Runs in **Playwright (Chromium, headless)** via `@vitest/browser-playwright`. Te
 ### x402 tests (`src/x402-tests/`)
 
 ```bash
-pnpm run test:x402     # or: vitest --project x402
+vp run test:x402       # or: vp test --project x402
 ```
 
 Focused tests for the x402 payment / auth integration.
@@ -182,7 +182,7 @@ Files ending in `.test-d.ts`. These use `expectTypeOf` / `assertType` to verify 
 ### E2E tests (`src/e2e/`)
 
 ```bash
-pnpm run test:e2e       # or: vitest run src/e2e/e2e.test.ts
+vp run test:e2e         # or: vp test run src/e2e/e2e.test.ts
 ```
 
 End-to-end tests that start real workers and test MCP server flows.

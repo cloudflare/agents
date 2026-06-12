@@ -13,7 +13,7 @@
  * restart triggers recovery. Case 3 uses a genuine in-flight submission and a
  * mid-stream SIGKILL.
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vite-plus/test";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { setDefaultAutoSelectFamily } from "node:net";
 import "./harden-net";

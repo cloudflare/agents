@@ -1,5 +1,5 @@
 import { env, exports } from "cloudflare:workers";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 

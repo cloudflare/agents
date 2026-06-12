@@ -1,4 +1,11 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach
+} from "vite-plus/test";
 import { createTelnyxVoiceConfig } from "../../src/helpers/transport-config.js";
 import { TelnyxCallBridge } from "../../src/providers/call-bridge.js";
 

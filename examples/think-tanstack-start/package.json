@@ -5,10 +5,10 @@
   "type": "module",
   "version": "0.0.0",
   "scripts": {
-    "start": "vite dev",
-    "build": "vite build",
-    "deploy": "vite build && wrangler deploy",
-    "test:e2e": "vitest --run -c e2e/vitest.config.ts",
+    "start": "vp dev",
+    "build": "vp run build:vite",
+    "deploy": "vp build && wrangler deploy",
+    "test:e2e": "vp test --run -c e2e/vitest.config.ts",
     "types": "tsc --noEmit"
   },
   "dependencies": {
@@ -27,8 +27,9 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
     "typescript": "^6.0.3",
-    "vite": "^8.0.16",
-    "vitest": "4.1.8",
+    "vite": "catalog:",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:",
     "wrangler": "^4.99.0"
   }
 }

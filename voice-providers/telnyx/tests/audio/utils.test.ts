@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { float32ToInt16, computeRMS } from "../../src/audio/utils.js";
 
 describe("float32ToInt16", () => {

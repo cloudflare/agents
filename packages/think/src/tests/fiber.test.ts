@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { getServerByName } from "partyserver";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import type { ThinkFiberTestAgent } from "./agents/fiber";
 
 async function freshAgent(name: string) {

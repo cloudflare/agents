@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { exports } from "cloudflare:workers";
 import type { RPCResponse } from "../..";
 import { MessageType } from "../../types";

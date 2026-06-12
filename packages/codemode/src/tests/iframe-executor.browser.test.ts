@@ -4,7 +4,7 @@
  * These run in a real browser via @vitest/browser + Playwright.
  * No mocks — real iframes, real postMessage, real code execution.
  */
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { IframeSandboxExecutor } from "../iframe-executor";
 import type { ResolvedProvider } from "../executor-types";
 

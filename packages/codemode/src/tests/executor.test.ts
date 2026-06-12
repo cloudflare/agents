@@ -4,7 +4,7 @@
  * Uses vitest-pool-workers — tests run inside a real Workers runtime
  * with a real WorkerLoader binding, no mocks needed.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi } from "vite-plus/test";
 import { env } from "cloudflare:workers";
 import {
   DynamicWorkerExecutor,

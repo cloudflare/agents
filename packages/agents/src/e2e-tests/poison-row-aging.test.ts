@@ -12,7 +12,7 @@
  * retain/retry phase is observable after the (slower) wrangler restart, short
  * enough to expire within the test's polling window.
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vite-plus/test";
 import { type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

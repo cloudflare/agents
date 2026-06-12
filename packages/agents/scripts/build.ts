@@ -1,4 +1,4 @@
-import { build } from "tsdown";
+import { build } from "vite-plus/pack";
 import { globSync } from "glob";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
@@ -69,7 +69,7 @@ async function main() {
     fixedExtension: false
   });
 
-  // then run oxfmt on the generated .d.ts files
+  // then format the generated .d.ts files
   formatDeclarationFiles();
 
   injectSkillsTypeReference();

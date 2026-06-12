@@ -6,7 +6,7 @@ import type {
 } from "agents";
 import { getAgentByName } from "agents";
 import type { Adapter } from "chat";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import {
   chatSdkMessenger,
   defaultChatSdkEvent,

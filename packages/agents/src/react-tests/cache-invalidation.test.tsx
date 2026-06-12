@@ -5,7 +5,14 @@
  *
  * Related to: https://github.com/cloudflare/agents/issues/836
  */
-import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  afterEach,
+  beforeEach
+} from "vite-plus/test";
 import { render as _render, cleanup } from "vitest-browser-react";
 import { Suspense, useEffect, useState } from "react";
 import { useAgent, _testUtils, type UseAgentOptions } from "../react";

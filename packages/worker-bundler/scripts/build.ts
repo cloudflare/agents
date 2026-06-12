@@ -1,7 +1,7 @@
 import { copyFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { build } from "tsdown";
+import { build } from "vite-plus/pack";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
 import {
   bundleTypeScriptForWorkers,
@@ -51,7 +51,7 @@ async function main() {
     copyFileSync(wasmSource, wasmDest);
     console.log("Copied esbuild.wasm to dist/");
 
-    // then run oxfmt on the generated .d.ts files
+    // then format the generated .d.ts files
     formatDeclarationFiles();
   } finally {
     removeBundledTypeScript(packageRoot);

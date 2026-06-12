@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { STATE_METHOD_NAMES } from "../backend";
 import { StateConnector, stateConnector } from "../connector";
 import { createMemoryStateBackend } from "../memory";

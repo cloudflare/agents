@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { env } from "cloudflare:workers";
 import { createWorker, installDependencies } from "../index";
 import { isCloudflareWorkersRuntime, NOT_IN_WORKERS_ERROR } from "../bundler";

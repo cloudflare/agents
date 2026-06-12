@@ -40,10 +40,11 @@
   "devDependencies": {
     "@types/yargs": "^17.0.35",
     "tiged": "^2.12.8",
+    "vite-plus": "catalog:",
     "yargs": "^18.0.0"
   },
   "scripts": {
-    "build": "tsx ./scripts/build.ts",
-    "test": "vitest --run -c src/tests/vitest.config.ts"
+    "build": "vp run build:package",
+    "test": "vp test --run -c src/tests/vitest.config.ts"
   }
 }

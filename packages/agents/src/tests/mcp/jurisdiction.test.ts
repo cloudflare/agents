@@ -1,6 +1,13 @@
 import { env } from "cloudflare:workers";
 import { createExecutionContext } from "cloudflare:test";
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  expect,
+  it,
+  vi,
+  beforeEach,
+  afterEach
+} from "vite-plus/test";
 import { TestMcpJurisdiction } from "../worker";
 import * as indexModule from "../../index";
 

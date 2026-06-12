@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { createExecutionContext } from "cloudflare:test";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import worker from "../worker";
 import { MCPClientManager } from "../../mcp/client";
 import type { MCPServerRow } from "../../mcp/client-storage";

@@ -36,6 +36,12 @@ export const THINK_TEMPLATES_REPO = "cloudflare/agents/think-starters";
 /** Default git ref used when fetching a remote template. */
 export const DEFAULT_TEMPLATE_REF = "main";
 
+export const STANDALONE_CATALOG_DEPENDENCIES: Record<string, string> = {
+  vite: "npm:@voidzero-dev/vite-plus-core@latest",
+  vitest: "npm:@voidzero-dev/vite-plus-test@latest",
+  "vite-plus": "latest"
+};
+
 /** Files/directories that are never copied from a local workspace template. */
 const LOCAL_COPY_IGNORE = new Set([
   "node_modules",
@@ -133,9 +139,9 @@ const WRANGLER_CONFIG_FILES = [
 
 /**
  * After a template is fetched, set the project name (in both `package.json` and
- * the Wrangler config's `name`) and rewrite any `workspace:*` dependencies
- * (used so templates build inside the monorepo) to published version ranges so
- * the project installs standalone.
+ * the Wrangler config's `name`) and rewrite monorepo-only dependency ranges
+ * (`workspace:*` and `catalog:`) to published version ranges so the project
+ * installs standalone.
  */
 export async function finalizeTemplate(
   dest: string,
@@ -157,7 +163,7 @@ async function finalizePackageJson(
   for (const field of ["dependencies", "devDependencies", "peerDependencies"]) {
     const deps = pkg[field];
     if (deps && typeof deps === "object") {
-      rewriteWorkspaceVersions(deps as Record<string, string>);
+      rewriteStandaloneVersions(deps as Record<string, string>);
     }
   }
   await writeFile(packageJsonPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
@@ -187,10 +193,15 @@ async function finalizeWranglerName(
   }
 }
 
-function rewriteWorkspaceVersions(deps: Record<string, string>): void {
+function rewriteStandaloneVersions(deps: Record<string, string>): void {
   for (const [name, version] of Object.entries(deps)) {
     if (typeof version === "string" && version.startsWith("workspace:")) {
       deps[name] = "latest";
+    } else if (version === "catalog:") {
+      const standaloneVersion = STANDALONE_CATALOG_DEPENDENCIES[name];
+      if (standaloneVersion) {
+        deps[name] = standaloneVersion;
+      }
     }
   }
 }

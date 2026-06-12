@@ -16,7 +16,8 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.16.14",
-    "vitest": "4.1.8"
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
   },
   "types": "dist/index.d.ts",
   "exports": {
@@ -37,9 +38,9 @@
     }
   },
   "scripts": {
-    "build": "tsx ./scripts/build.ts",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "build": "vp run build:package",
+    "test": "vp test run",
+    "test:watch": "vp test"
   },
   "keywords": [
     "cloudflare",

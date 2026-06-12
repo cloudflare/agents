@@ -115,12 +115,12 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsx ./scripts/build.ts",
-    "test": "npm run test:workers && npm run test:generated-entry && npm run test:vite && npm run test:cli",
-    "test:cli": "vitest --run -c src/cli-tests/vitest.config.ts",
-    "test:workers": "vitest --run -c src/tests/vitest.config.ts",
-    "test:generated-entry": "vitest --run -c src/tests/generated-entry/vitest.config.ts",
-    "test:vite": "vitest --run src/vite-tests",
-    "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts"
+    "build": "vp run build:package",
+    "test": "vp test --run -c src/tests/vitest.config.ts && vp test --run -c src/tests/generated-entry/vitest.config.ts && vp test --run src/vite-tests && vp test --run -c src/cli-tests/vitest.config.ts",
+    "test:workers": "vp test --run -c src/tests/vitest.config.ts",
+    "test:generated-entry": "vp test --run -c src/tests/generated-entry/vitest.config.ts",
+    "test:vite": "vp test --run src/vite-tests",
+    "test:cli": "vp test --run -c src/cli-tests/vitest.config.ts",
+    "test:e2e": "vp test --run -c src/e2e-tests/vitest.config.ts"
   }
 }

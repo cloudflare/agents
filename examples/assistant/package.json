@@ -5,10 +5,11 @@
   "type": "module",
   "version": "0.0.0",
   "scripts": {
-    "start": "vite dev",
-    "deploy": "vite build && wrangler deploy",
-    "test": "vitest --run --config src/tests/vitest.config.ts",
-    "types": "think types"
+    "start": "vp dev",
+    "deploy": "vp build && wrangler deploy",
+    "test": "vp test --run --config src/tests/vitest.config.ts",
+    "types": "think types",
+    "build": "vp run build:vite"
   },
   "dependencies": {
     "@cloudflare/ai-chat": "*",
@@ -37,7 +38,8 @@
     "@vitejs/plugin-react": "^6.0.2",
     "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",
-    "vite": "^8.0.16",
+    "vite": "catalog:",
+    "vite-plus": "catalog:",
     "wrangler": "^4.99.0"
   }
 }

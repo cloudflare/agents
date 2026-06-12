@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { WorkersAIFluxSTT, WorkersAINova3STT } from "../workers-ai-providers";
 
 class MockWebSocket {

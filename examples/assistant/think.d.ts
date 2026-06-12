@@ -14,7 +14,9 @@ declare module "virtual:think/router" {
 declare namespace Cloudflare {
   interface Env {
     AssistantDirectory: DurableObjectNamespace<
-      InstanceType<(typeof import("./agents/assistant/agent"))["AssistantDirectory"]>
+      InstanceType<
+        (typeof import("./agents/assistant/agent"))["AssistantDirectory"]
+      >
     >;
   }
 }

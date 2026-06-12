@@ -5,7 +5,7 @@
  * connects via WebSocket, and exercises session management,
  * streaming chat, and workspace tool usage with a real LLM.
  */
-import { describe, it, expect, afterAll, beforeAll } from "vitest";
+import { describe, it, expect, afterAll, beforeAll } from "vite-plus/test";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { setDefaultAutoSelectFamily } from "node:net";
 import "./harden-net";

@@ -13,7 +13,7 @@
  * No process kills: the overflow is injected deterministically via the model, so
  * this exercises the full recovery path quickly and reliably.
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vite-plus/test";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { setDefaultAutoSelectFamily } from "node:net";
 import "./harden-net";

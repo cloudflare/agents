@@ -12,7 +12,13 @@ const tsconfigs: string[] = [];
 
 for await (const file of await fg.glob("**/tsconfig.json", {
   followSymbolicLinks: false,
-  ignore: ["**/node_modules/**"]
+  ignore: [
+    "**/node_modules/**",
+    "**/.wrangler/**",
+    "**/.vite/**",
+    "**/dist/**",
+    "**/coverage/**"
+  ]
 })) {
   if (filter && !file.includes(filter)) continue;
   tsconfigs.push(file);

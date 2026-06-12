@@ -1,14 +1,30 @@
-import { cloudflare } from "@cloudflare/vite-plugin";
-import tailwindcss from "@tailwindcss/vite";
-import react from "@vitejs/plugin-react";
-import agents from "agents/vite";
-import { defineConfig } from "vite";
+import { viteBuildTask } from "../../scripts/vite-task-cache";
+import { defineConfig, lazyPlugins } from "vite-plus";
 
 export default defineConfig({
-  plugins: [
-    agents(),
-    react(),
-    cloudflare({ tunnel: { autoStart: true } }),
-    tailwindcss()
-  ]
+  plugins: lazyPlugins(async () => {
+    const [
+      { cloudflare },
+      { default: tailwindcss },
+      { default: react },
+      { default: agents }
+    ] = await Promise.all([
+      import("@cloudflare/vite-plugin"),
+      import("@tailwindcss/vite"),
+      import("@vitejs/plugin-react"),
+      import("agents/vite")
+    ]);
+
+    return [
+      agents(),
+      react(),
+      cloudflare({ tunnel: { autoStart: true } }),
+      tailwindcss()
+    ];
+  }),
+  run: {
+    tasks: {
+      "build:vite": viteBuildTask
+    }
+  }
 });

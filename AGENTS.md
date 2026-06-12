@@ -52,36 +52,34 @@ Some directories have their own AGENTS.md with deeper guidance:
 ## Setup
 
 ```bash
-pnpm install       # installs all workspaces
+vp install       # installs all workspaces
 ```
 
-Node 24+ required. Uses pnpm workspaces with [Nx](https://nx.dev) for task orchestration, caching, and affected detection.
+Node 24+ required. Uses pnpm workspaces with Vite+ for task orchestration and caching.
 
 ## Commands
 
 Run from the repo root:
 
-| Command                            | What it does                                                       |
-| ---------------------------------- | ------------------------------------------------------------------ |
-| `pnpm run build`                   | Builds all packages via Nx (cached, dependency-ordered)            |
-| `pnpm run check`                   | Full CI check: sherif + export checks + oxfmt + oxlint + typecheck |
-| `pnpm run test`                    | Runs all tests via Nx (cached)                                     |
-| `pnpm run test:react`              | Runs Playwright-based React hook tests for agents                  |
-| `pnpm run typecheck`               | TypeScript type checking across the repo (custom script)           |
-| `pnpm run format`                  | Oxfmt format all files                                             |
-| `pnpm run check:exports`           | Verifies package.json exports match actual build output            |
-| `pnpm exec nx affected -t build`   | Build only packages affected by current changes                    |
-| `pnpm exec nx affected -t test`    | Test only packages affected by current changes                     |
-| `pnpm exec nx run <project>:build` | Build a single project (and its dependencies)                      |
+| Command                                   | What it does                                                    |
+| ----------------------------------------- | --------------------------------------------------------------- |
+| `vp run build`                            | Builds all packages via Vite Task                               |
+| `vp run check`                            | Full CI check: sherif + export checks + Vite+ check + typecheck |
+| `vp run test`                             | Builds all packages, then runs workspace tests                  |
+| `vp run agents#test:react`                | Runs Playwright-based React hook tests for agents               |
+| `vp run typecheck`                        | TypeScript type checking across the repo (custom script)        |
+| `vp fmt --write .`                        | Format files with Vite+                                         |
+| `vp run check:exports`                    | Verifies package.json exports match actual build output         |
+| `vp run --filter ./packages/agents build` | Build a single package and its dependencies through Vite Task   |
 
 Run an example locally:
 
 ```bash
 cd examples/playground   # or any example
-pnpm dev                 # starts Vite dev server + Workers runtime via @cloudflare/vite-plugin
+vp run dev               # starts Vite dev server + Workers runtime via @cloudflare/vite-plugin
 ```
 
-Example apps will normally hot reload when the dev server is running. When the dev server is running, make sure to rebuild changed packages (`pnpm run build`) to see changes reflected in the running app.
+Example apps will normally hot reload when the dev server is running. When the dev server is running, make sure to rebuild changed packages (`vp run build`) to see changes reflected in the running app.
 
 ## Code standards
 
@@ -94,7 +92,7 @@ Example apps will normally hot reload when the dev server is running. When the d
 
 ### Linting — Oxlint
 
-Config in `.oxlintrc.json`. Plugins: `react`, `jsx-a11y`, `typescript`, `react-hooks`. Key rules:
+Config in the root `vite.config.ts` `lint` block. Plugins: `react`, `jsx-a11y`, `typescript`, `react-hooks`. Key rules:
 
 - `no-explicit-any: "error"` — never use `any`, use `unknown` and narrow
 - `no-unused-vars: "error"` — with `varsIgnorePattern: "^_"` and `argsIgnorePattern: "^_"`
@@ -106,8 +104,8 @@ Oxlint does **not** handle formatting — Oxfmt does.
 
 ### Formatting — Oxfmt
 
-- Run `pnpm run format` or rely on lint-staged (auto-formats on commit via husky)
-- Config in `.oxfmtrc.json` (`trailingComma: "none"`, `printWidth: 80`)
+- Run `vp fmt --write .` or rely on `vp staged` (auto-formats on commit via Vite+ hooks)
+- Config in the root `vite.config.ts` `fmt` block (`trailingComma: "none"`, `printWidth: 80`)
 
 ### Workers conventions
 
@@ -122,8 +120,8 @@ Oxlint does **not** handle formatting — Oxfmt does.
 Tests use **vitest** with `@cloudflare/vitest-pool-workers` for running inside the Workers runtime.
 
 ```bash
-pnpm run test             # agents + ai-chat unit/integration tests
-pnpm run test:react       # Playwright-based React hook tests (agents package)
+vp run test               # agents + ai-chat unit/integration tests
+vp run agents#test:react  # Playwright-based React hook tests (agents package)
 ```
 
 Test locations:
@@ -142,7 +140,7 @@ Each test directory has its own `vitest.config.ts` and (for Workers tests) a `wr
 Changes to `packages/` that affect the public API or fix bugs need a changeset:
 
 ```bash
-pnpm exec changeset       # interactive prompt — pick packages, semver bump, description
+vp exec changeset         # interactive prompt — pick packages, semver bump, description
 ```
 
 This creates a markdown file in `.changeset/` that gets consumed during release.
@@ -151,12 +149,12 @@ Examples, guides, and sites don't need changesets.
 
 ### Pull request process
 
-CI runs on every PR (`pnpm install --frozen-lockfile && pnpm run build && pnpm run check && pnpm exec nx affected -t test`); the workflow is in `.github/workflows/pullrequest.yml`. On push to `main` the Release workflow (`.github/workflows/release.yml`) runs the same steps but uses `nx run-many -t test` as a safety net against under-reported affected projects, then publishes via changesets. All checks must pass.
+CI runs on every PR (`vp install --frozen-lockfile && vp run build && vp run check && vp run -r test`); the workflow is in `.github/workflows/pullrequest.yml`. On push to `main` the Release workflow (`.github/workflows/release.yml`) runs the same validation, then publishes via changesets. All checks must pass.
 
 ### Generated files
 
-- `env.d.ts` files are generated by `wrangler types` — regenerate with `pnpm exec wrangler types` inside the relevant example/package, don't hand-edit
-- `pnpm-lock.yaml` — regenerated by `pnpm install`, don't hand-edit
+- `env.d.ts` files are generated by `wrangler types` — regenerate with `vp exec wrangler types` inside the relevant example/package, don't hand-edit
+- `pnpm-lock.yaml` — regenerated by `vp install`, don't hand-edit
 
 ## Learned Workspace Facts
 
@@ -172,7 +170,7 @@ CI runs on every PR (`pnpm install --frozen-lockfile && pnpm run build && pnpm r
 
 **Always:**
 
-- Run `pnpm run check` before considering work done
+- Run `vp run check` before considering work done
 - Use `import type` for type-only imports (enforced by `verbatimModuleSyntax`)
 - Keep examples simple and self-contained — they're user-facing learning material
 - Use Cloudflare Workers APIs (KV, D1, R2, Durable Objects, etc.) over third-party equivalents

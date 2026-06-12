@@ -20,33 +20,22 @@ jobs:
     timeout-minutes: 20
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
           filter: tree:0
 
       - uses: ./.github/actions/install
 
-      - uses: nrwl/nx-set-shas@v5
-
-      - name: Cache Nx
-        uses: actions/cache@v5
-        with:
-          path: .nx/cache
-          key: ${{ runner.os }}-nx-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-nx-${{ hashFiles('pnpm-lock.yaml') }}-
-            ${{ runner.os }}-nx-
-
-      - run: pnpm run build
-      - run: pnpm run check
+      - run: vp run build
+      - run: vp run check
 
       - name: Get Playwright version
         id: playwright-version
         run: echo "version=$(node -p 'require(\"playwright/package.json\").version')" >> $GITHUB_OUTPUT
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         id: playwright-cache
         with:
           path: ~/.cache/ms-playwright
@@ -54,8 +43,8 @@ jobs:
 
       - name: Install Playwright browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: pnpm exec playwright install --with-deps chromium
+        run: vp exec playwright install --with-deps chromium
 
-      - run: CI=true pnpm exec nx affected -t test
+      - run: CI=true vp run -r test
 
-      - run: pnpm exec pkg-pr-new publish --peerDeps ./packages/*
+      - run: vp exec pkg-pr-new publish --peerDeps ./packages/*

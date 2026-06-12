@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, vi } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vite-plus/test";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { DurableObjectEventStore } from "../../mcp/event-store";
 

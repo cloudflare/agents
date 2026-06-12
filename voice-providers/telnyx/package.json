@@ -43,8 +43,8 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsx ./scripts/build.ts",
-    "test": "vitest run"
+    "build": "vp run build:package",
+    "test": "vp test run"
   },
   "keywords": [
     "cloudflare",

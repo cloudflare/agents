@@ -7,7 +7,7 @@
  * `onExhausted` reason, persists/broadcasts the terminal banner, and cleans up
  * the fiber rows.
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vite-plus/test";
 import { type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
