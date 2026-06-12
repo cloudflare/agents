@@ -21,17 +21,18 @@ const runtime = createCodemodeRuntime({
 });
 ```
 
-| Handle method                                        | Purpose                                                                           |
-| ---------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `runtime.tool(options?)`                             | The single model-facing AI SDK tool, `codemode({ code })`                         |
-| `runtime.pending(executionId?)`                      | Actions awaiting approval — drives approval UIs; no id aggregates all paused runs |
-| `runtime.approve({ executionId })`                   | Approve the pending action and continue via replay                                |
-| `runtime.reject({ seq, executionId })`               | Reject a pending action; ends the execution                                       |
-| `runtime.rollback({ executionId })`                  | Revert applied actions in reverse order via each tool's `revert`                  |
-| `runtime.executions(limit?)`                         | All executions, newest first — the audit trail for developer UIs                  |
-| `runtime.deleteExecution(id)` / `pruneExecutions(n)` | Drop one execution / keep only the newest N terminal ones                         |
-| `runtime.saveSnippet(name, opts?)`                   | Promote an execution's script to a reusable [snippet](./snippets.md)              |
-| `runtime.snippets()` / `runtime.deleteSnippet(name)` | List / remove saved snippets                                                      |
+| Handle method                                        | Purpose                                                                                                                                    |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `runtime.tool(options?)`                             | The single model-facing AI SDK tool, `codemode({ code })`                                                                                  |
+| `runtime.pending(executionId?)`                      | Actions awaiting approval — drives approval UIs; no id aggregates all paused runs                                                          |
+| `runtime.approve({ executionId })`                   | Approve the pending action and continue via replay                                                                                         |
+| `runtime.reject({ seq, executionId })`               | Reject a pending action; ends the execution. Returns `false` if it was a no-op (action no longer pending — approved or rejected elsewhere) |
+| `runtime.rollback({ executionId })`                  | Revert applied actions in reverse order via each tool's `revert`                                                                           |
+| `runtime.expirePaused({ maxAgeMs? })`                | Expire stale awaiting-approval runs and reclaim their resources                                                                            |
+| `runtime.executions(limit?)`                         | All executions, newest first — the audit trail for developer UIs                                                                           |
+| `runtime.deleteExecution(id)` / `pruneExecutions(n)` | Drop one execution / keep only the newest N terminal ones                                                                                  |
+| `runtime.saveSnippet(name, opts?)`                   | Promote an execution's script to a reusable [snippet](./snippets.md)                                                                       |
+| `runtime.snippets()` / `runtime.deleteSnippet(name)` | List / remove saved snippets                                                                                                               |
 
 ## The sandbox API (`codemode.*`)
 
@@ -129,13 +130,24 @@ type ToolLogEntry = {
   connector: string;
   method: string;
   args: unknown;
-  result?: unknown; // recorded for replay
+  result?: unknown; // recorded for replay (never for ephemeral entries)
   requiresApproval: boolean;
+  ephemeral?: boolean; // replay: "reexecute" — re-runs instead of replaying
   state: "executing" | "applied" | "pending" | "reverted";
 };
 ```
 
 A call is logged `executing` the moment the runtime decides to run it, and only flips to `applied` once its result is recorded. So a crash between those two points replays as a fresh execution (re-run) rather than replaying a missing result. Once a run pauses or terminates, every further call/step gets a pause decision and records nothing — model code that catches the pause and keeps going cannot apply extra effects.
+
+The log lives in the facet's SQLite database — one row per entry, so recording a call appends a row instead of rewriting the whole execution.
+
+### Ephemeral entries
+
+A tool can opt out of result recording with [`replay: "reexecute"`](./connectors.md#replay-policy). Its calls are still logged (for sequencing and divergence detection) but the result is never stored: a replay **re-executes** the call instead of replaying a recorded value. Use it for idempotent reads with large results — file contents, directory listings — that would otherwise bloat the durable log.
+
+### Size limits
+
+Any single recorded value (a call's arguments, a recorded result, the final result) is capped at 1 MB serialized (`MAX_DURABLE_VALUE_BYTES`). Truncating a logged value is never an option — replay would feed resumed code corrupted data — so an oversized argument or call result **fails the run** with a model-actionable error suggesting the data be written to a file/workspace and passed by reference. An oversized **final** result does not fail the run (replay never needs it): the run completes, the model receives the real value, and the audit trail stores a placeholder note.
 
 ## Rollback
 
@@ -179,6 +191,13 @@ await runtime.deleteExecution(id); // drop one (returns whether it existed)
 await runtime.pruneExecutions(10); // keep only the newest N terminal runs
 ```
 
+Because paused runs are exempt from pruning, an approval nobody ever answers would otherwise live forever — holding its log and any per-execution connector resources (a browser session, for example). `runtime.expirePaused({ maxAgeMs })` (default 24 hours) marks stale paused runs `rejected` and fires each connector's `disposeExecution`, reclaiming their resources. Call it from a recurring alarm or scheduled task:
+
+```ts
+// e.g. in a daily scheduled task
+const expired = await runtime.expirePaused({ maxAgeMs: 24 * 60 * 60 * 1000 });
+```
+
 ## Shaping results
 
 A run's final result can be large enough to crowd the model's context. Pass `transformResult` to reshape the **model-facing** result of a completed run — most often to truncate it. It runs after the raw result is recorded, so the audit trail (`runtime.executions()`) keeps the full value while the model sees the shaped one. It applies on both the initial run and a resume after approval.
@@ -205,15 +224,25 @@ The runtime also stores [snippets](./snippets.md) — durable, addressable scrip
 
 ## Runtime identity
 
-The runtime facet's identity is **derived from the connector set** it was created with — the facet name is a fingerprint of the connector names. This is deliberate and load-bearing:
+The runtime facet's identity is an explicit **name** (default `"default"`):
 
-- A snippet references connectors as globals (`github.list_pull_requests(...)`), so it is only valid against the connectors that were present when it was saved.
-- Because the runtime is keyed by its connector set, a snippet can only ever be stored in, and run from, a runtime that has those connectors.
-- Change the connector set — add, remove, or rename a connector — and you address a **different** runtime, with its own snippets and executions.
+```ts
+const runtime = createCodemodeRuntime({
+  ctx,
+  executor,
+  connectors,
+  name: "research" // optional — distinct names keep separate histories
+});
+```
 
-So snippet validity is **structural**: a snippet is always run against exactly the connectors it was written with. No per-snippet dependency tracking, no orphaned references, no validation. The same applies to paused executions — a paused run can only resume against the connector set it started with.
+The connector set is **data, not identity**: adding, removing, or renaming a connector does not address a different runtime, so executions and snippets survive connector changes. Staleness is handled with recorded requirements instead — every execution and snippet records the connector names it ran with, and:
 
-The runtime handle keeps the same `ctx`, `executor`, and `connectors` together, so lifecycle calls address the same durable facet:
+- **Resuming** a paused run whose recorded connectors are no longer configured returns a clear error outcome (instead of diverging confusingly mid-replay).
+- **Running a snippet** (`codemode.run`) whose recorded connectors are missing returns an error explaining which connector is absent.
+
+Use distinct names when two runtimes should not share history (for example, two unrelated tools on the same agent).
+
+The runtime handle keeps the same `ctx`, `executor`, `connectors`, and `name` together, so lifecycle calls address the same durable facet:
 
 ```ts
 const runtime = createCodemodeRuntime({ ctx, executor, connectors });
@@ -229,4 +258,4 @@ The runtime is a DurableObject facet of the agent because:
 
 - The log, snippets, and state must survive hibernation — approvals can take minutes or hours.
 - The facet is durable; the executor and connector stubs are transient and re-provided per message.
-- One runtime facet per connector set owns the whole execution lifecycle.
+- One named runtime facet owns the whole execution lifecycle, with its own isolated SQLite database.

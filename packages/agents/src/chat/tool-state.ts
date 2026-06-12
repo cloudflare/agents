@@ -143,6 +143,50 @@ export function crossMessageToolResultUpdate(
 }
 
 /**
+ * Build an update descriptor that replaces the output of a *paused durable
+ * execution* tool part (e.g. a codemode runtime tool that paused for
+ * approval).
+ *
+ * A paused execution completes its tool call normally — the part is already
+ * `output-available` with an output of `{ status: "paused", executionId }`.
+ * When the host later approves/rejects the execution, the new outcome
+ * (completed / rejected / paused-again) must replace that output in place.
+ *
+ * Matching is deliberately narrow and idempotent:
+ *
+ * - only `output-available` parts are considered;
+ * - the existing output must be a paused-execution object carrying the same
+ *   `executionId` — anything else (already replaced, different execution)
+ *   returns the *same part reference*, which callers treat as a no-op signal
+ *   (skip persist + broadcast), mirroring {@link crossMessageToolResultUpdate}.
+ */
+export function pausedExecutionUpdate(
+  toolCallId: string,
+  executionId: string,
+  output: unknown
+): ToolPartUpdate {
+  return {
+    toolCallId,
+    matchStates: ["output-available"],
+    apply: (part) => {
+      const current = part.output as
+        | { status?: unknown; executionId?: unknown }
+        | null
+        | undefined;
+      if (
+        current == null ||
+        typeof current !== "object" ||
+        current.status !== "paused" ||
+        current.executionId !== executionId
+      ) {
+        return part;
+      }
+      return { ...part, output, preliminary: false };
+    }
+  };
+}
+
+/**
  * Build an update descriptor for applying a tool approval.
  *
  * Matches parts in `input-available` or `approval-requested` state.

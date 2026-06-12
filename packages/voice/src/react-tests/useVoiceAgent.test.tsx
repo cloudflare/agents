@@ -66,6 +66,7 @@ import {
   type UseVoiceAgentReturn,
   type UseVoiceAgentOptions
 } from "../voice-react";
+import { VoiceClient } from "../voice-client";
 
 // --- Audio API mocks ---
 
@@ -100,6 +101,7 @@ function createMockAudioContext() {
     resume: vi.fn(async () => {}),
     close: vi.fn(async () => {}),
     destination: {},
+    createMediaStreamDestination: vi.fn(() => ({ stream: {} })),
     audioWorklet: {
       addModule: vi.fn(async () => {})
     },
@@ -118,10 +120,28 @@ function createMockAudioContext() {
 }
 
 let mockAudioCtx: ReturnType<typeof createMockAudioContext>;
+let mockAudioElement: {
+  autoplay: boolean;
+  srcObject: MediaStream | null;
+  play: ReturnType<typeof vi.fn>;
+  pause: ReturnType<typeof vi.fn>;
+  setSinkId: ReturnType<typeof vi.fn>;
+  rejectSinkId: boolean;
+};
 const mockTrackStop = vi.fn();
 
 function setupAudioMocks() {
   mockAudioCtx = createMockAudioContext();
+  mockAudioElement = {
+    autoplay: false,
+    srcObject: null,
+    play: vi.fn(async () => {}),
+    pause: vi.fn(),
+    setSinkId: vi.fn(async function (this: { rejectSinkId: boolean }) {
+      if (this.rejectSinkId) throw new Error("setSinkId rejected");
+    }),
+    rejectSinkId: false
+  };
   workletPortOnMessage = null;
 
   vi.stubGlobal(
@@ -135,6 +155,13 @@ function setupAudioMocks() {
     "AudioWorkletNode",
     vi.fn(function () {
       return mockAudioCtx._mockWorkletNode;
+    })
+  );
+
+  vi.stubGlobal(
+    "Audio",
+    vi.fn(function () {
+      return mockAudioElement;
     })
   );
 
@@ -178,6 +205,7 @@ function TestVoiceComponent({
     result.status,
     result.connected,
     result.error,
+    result.outputDeviceError,
     result.isMuted,
     result.transcript,
     result.metrics,
@@ -191,6 +219,9 @@ function TestVoiceComponent({
       <span data-testid="status">{result.status}</span>
       <span data-testid="connected">{String(result.connected)}</span>
       <span data-testid="error">{result.error ?? ""}</span>
+      <span data-testid="output-device-error">
+        {result.outputDeviceError ?? ""}
+      </span>
       <span data-testid="muted">{String(result.isMuted)}</span>
       <span data-testid="transcript-count">{result.transcript.length}</span>
     </div>
@@ -434,6 +465,63 @@ describe("useVoiceAgent", () => {
       expect(vi.mocked(PartySocket)).toHaveBeenCalledTimes(2);
       expect(socketOptions?.room).toBe("second");
       expect(onReconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it("should update output device without reconnecting", async () => {
+      const setOutputDevice = vi.spyOn(
+        VoiceClient.prototype,
+        "setOutputDevice"
+      );
+      const screen = await render(
+        <TestVoiceComponent
+          options={{ agent: "voice-agent", outputDeviceId: "speaker-1" }}
+          onResult={vi.fn()}
+        />
+      );
+      await sleep(10);
+
+      await act(async () => {
+        screen.rerender(
+          <TestVoiceComponent
+            options={{ agent: "voice-agent", outputDeviceId: "speaker-2" }}
+            onResult={vi.fn()}
+          />
+        );
+        await sleep(10);
+      });
+
+      expect(socketClose).not.toHaveBeenCalled();
+      expect(vi.mocked(PartySocket)).toHaveBeenCalledTimes(1);
+      expect(setOutputDevice).toHaveBeenCalledWith("speaker-1");
+      expect(setOutputDevice).toHaveBeenCalledWith("speaker-2");
+    });
+
+    it("should expose output device failures separately from global errors", async () => {
+      mockAudioElement.rejectSinkId = true;
+      const { container, getResult } = await renderHook({
+        outputDeviceId: "missing-speaker"
+      });
+
+      await act(async () => {
+        fireJSON({ type: "error", message: "Voice pipeline failed" });
+        fireJSON({ type: "audio_config", format: "mp3" });
+        fireMessage(new ArrayBuffer(4));
+        await sleep(10);
+      });
+
+      await vi.waitFor(() => {
+        expect(getResult().error).toBe("Voice pipeline failed");
+        expect(getResult().outputDeviceError).toBe(
+          "Could not switch audio output device."
+        );
+        expect(
+          container.querySelector('[data-testid="error"]')?.textContent
+        ).toBe("Voice pipeline failed");
+        expect(
+          container.querySelector('[data-testid="output-device-error"]')
+            ?.textContent
+        ).toBe("Could not switch audio output device.");
+      });
     });
 
     it("should disconnect and reset state when enabled flips true to false", async () => {

@@ -3,11 +3,14 @@ import type { CodemodeConnector } from "./connectors";
 import type { Executor } from "./executor";
 import {
   createProxyTool,
+  disposeConnectors,
+  expireCodemode,
   getCodemodeRuntime,
   pendingCodemode,
   rejectCodemode,
   resumeCodemode,
   rollbackCodemode,
+  validateConnectorNames,
   type ProxyToolInput,
   type ProxyToolOutput,
   type TransformResult
@@ -20,9 +23,18 @@ export type CreateCodemodeRuntimeOptions = {
   connectors: CodemodeConnector[];
   executor: Executor;
   /**
+   * Runtime name — the durable identity of this runtime's facet (its
+   * executions and snippets). Defaults to `"default"`. Use distinct names for
+   * runtimes that should keep separate histories. Adding or removing
+   * connectors does NOT change the identity: each execution/snippet records
+   * the connector names it needs, and resuming/re-running verifies they are
+   * still configured.
+   */
+  name?: string;
+  /**
    * How many terminal (completed/error) executions to retain per runtime.
    * Older ones are pruned automatically when a new run begins. Running and
-   * paused executions are never pruned. Defaults to 50.
+   * paused executions are never pruned (see `expirePaused`). Defaults to 50.
    */
   maxExecutions?: number;
   /**
@@ -36,6 +48,12 @@ export type CreateCodemodeRuntimeOptions = {
 
 export type CodemodeRuntimeToolOptions = {
   description?: string;
+  /**
+   * One-line hints rendered next to each connector in the default tool
+   * description (keyed by connector name). Ignored when a custom
+   * `description` is given.
+   */
+  connectorHints?: Record<string, string>;
 };
 
 export type CodemodeApproveOptions = {
@@ -54,17 +72,41 @@ export type CodemodeRollbackOptions = {
   executionId: string;
 };
 
+export type CodemodeExpireOptions = {
+  /**
+   * Expire non-terminal runs whose last state change is older than this.
+   * Defaults to 24 hours.
+   */
+  maxAgeMs?: number;
+};
+
 export interface CodemodeRuntimeHandle {
   tool(
     options?: CodemodeRuntimeToolOptions
   ): Tool<ProxyToolInput, ProxyToolOutput>;
   approve(options: CodemodeApproveOptions): Promise<ProxyToolOutput>;
-  reject(options: CodemodeRejectOptions): Promise<void>;
+  /**
+   * Reject a pending action, ending the run. Returns whether the reject
+   * actually terminated it — `false` when the action was no longer pending
+   * (approved or rejected from elsewhere, or expired), in which case the run
+   * was NOT rejected and the action may have executed.
+   */
+  reject(options: CodemodeRejectOptions): Promise<boolean>;
   rollback(options: CodemodeRollbackOptions): Promise<void>;
   pending(executionId?: string): Promise<PendingAction[]>;
+  /**
+   * Expire stale non-terminal runs (neither is ever auto-pruned), disposing
+   * per-execution connector resources: paused runs nobody approved are marked
+   * rejected; running runs whose host died mid-pass are marked error. Call
+   * from a recurring alarm/scheduled task. Returns the expired ids.
+   */
+  expirePaused(options?: CodemodeExpireOptions): Promise<string[]>;
   /** All executions, newest first — the audit trail. Optionally capped. */
   executions(limit?: number): Promise<ExecutionState[]>;
-  /** Delete a single execution from the audit trail. */
+  /**
+   * Delete a single execution from the audit trail. Deleting a non-terminal
+   * execution also disposes its per-execution connector resources.
+   */
   deleteExecution(id: string): Promise<boolean>;
   /** Prune terminal executions, keeping the newest `keep`. */
   pruneExecutions(keep?: number): Promise<number>;
@@ -84,6 +126,7 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
   #options: CreateCodemodeRuntimeOptions;
 
   constructor(options: CreateCodemodeRuntimeOptions) {
+    validateConnectorNames(options.connectors);
     this.#options = options;
   }
 
@@ -94,7 +137,9 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
       ctx: this.#options.ctx,
       executor: this.#options.executor,
       connectors: this.#options.connectors,
+      name: this.#options.name,
       description: options?.description,
+      connectorHints: options?.connectorHints,
       maxExecutions: this.#options.maxExecutions,
       transformResult: this.#options.transformResult
     });
@@ -105,16 +150,18 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
       ctx: this.#options.ctx,
       executor: this.#options.executor,
       connectors: this.#options.connectors,
+      name: this.#options.name,
       executionId: options.executionId,
       maxExecutions: this.#options.maxExecutions,
       transformResult: this.#options.transformResult
     });
   }
 
-  reject(options: CodemodeRejectOptions): Promise<void> {
+  reject(options: CodemodeRejectOptions): Promise<boolean> {
     return rejectCodemode({
       ctx: this.#options.ctx,
       connectors: this.#options.connectors,
+      name: this.#options.name,
       seq: options.seq,
       executionId: options.executionId
     });
@@ -124,6 +171,7 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
     return rollbackCodemode({
       ctx: this.#options.ctx,
       connectors: this.#options.connectors,
+      name: this.#options.name,
       executionId: options.executionId
     });
   }
@@ -131,8 +179,17 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
   pending(executionId?: string): Promise<PendingAction[]> {
     return pendingCodemode({
       ctx: this.#options.ctx,
-      connectors: this.#options.connectors,
+      name: this.#options.name,
       executionId
+    });
+  }
+
+  expirePaused(options?: CodemodeExpireOptions): Promise<string[]> {
+    return expireCodemode({
+      ctx: this.#options.ctx,
+      connectors: this.#options.connectors,
+      name: this.#options.name,
+      maxAgeMs: options?.maxAgeMs
     });
   }
 
@@ -140,8 +197,20 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
     return this.#runtime().listExecutions(limit);
   }
 
-  deleteExecution(id: string): Promise<boolean> {
-    return this.#runtime().deleteExecution(id);
+  async deleteExecution(id: string): Promise<boolean> {
+    const runtime = this.#runtime();
+    // A non-terminal execution still owns per-execution connector resources
+    // (e.g. a browser session) that `disposeExecution` would normally release
+    // on its terminal transition — deleting the record must not leak them.
+    const state = await runtime.getExecution(id);
+    const deleted = await runtime.deleteExecution(id);
+    if (
+      deleted &&
+      (state?.status === "paused" || state?.status === "running")
+    ) {
+      await disposeConnectors(this.#options.connectors, id, "rejected");
+    }
+    return deleted;
   }
 
   pruneExecutions(keep?: number): Promise<number> {
@@ -161,6 +230,6 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
   }
 
   #runtime() {
-    return getCodemodeRuntime(this.#options.ctx, this.#options.connectors);
+    return getCodemodeRuntime(this.#options.ctx, this.#options.name);
   }
 }

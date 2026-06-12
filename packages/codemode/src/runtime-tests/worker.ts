@@ -11,7 +11,8 @@ import { DurableObject } from "cloudflare:workers";
 import {
   CodemodeConnector,
   type ConnectorTools,
-  type ExecutionEndStatus
+  type ExecutionEndStatus,
+  type PassEndStatus
 } from "../connectors";
 import { DynamicWorkerExecutor } from "../executor";
 import { createCodemodeRuntime } from "../runtime-handle";
@@ -44,6 +45,10 @@ class ItemsConnector extends CodemodeConnector<Env> {
   // status (never on pause).
   opened: string[] = [];
   disposed: Array<{ executionId: string; status: ExecutionEndStatus }> = [];
+  // Per-pass lifecycle — onPassEnd fires for EVERY pass, including pauses.
+  passEnds: Array<{ executionId: string; status: PassEndStatus }> = [];
+  // Counts real executions of the ephemeral read — replays must re-execute.
+  ephemeralReads = 0;
 
   name() {
     return "items";
@@ -54,6 +59,23 @@ class ItemsConnector extends CodemodeConnector<Env> {
       list_items: {
         description: "List all items.",
         execute: () => [...this.created]
+      },
+      read_counter: {
+        // Ephemeral read: result is never stored in the durable log; replay
+        // re-executes it. The counter makes re-execution observable.
+        description: "Ephemeral read that counts its real executions.",
+        replay: "reexecute",
+        execute: () => ({ reads: ++this.ephemeralReads })
+      },
+      get_bytes: {
+        // Binary result — exercises the storage codec roundtrip through the
+        // durable log (record on first pass, replay decoded on resume).
+        description: "Return binary data.",
+        execute: () => new Uint8Array([1, 2, 3, 4, 5])
+      },
+      big_result: {
+        description: "Return a result too large for the durable log.",
+        execute: () => "x".repeat(1_100_000)
       },
       session_id: {
         // Reads the execution context — opens a per-execution "session".
@@ -109,6 +131,13 @@ class ItemsConnector extends CodemodeConnector<Env> {
   ): Promise<void> {
     this.disposed.push({ executionId, status });
   }
+
+  override async onPassEnd(
+    executionId: string,
+    status: PassEndStatus
+  ): Promise<void> {
+    this.passEnds.push({ executionId, status });
+  }
 }
 
 type RunOptions = { maxExecutions?: number };
@@ -124,12 +153,13 @@ export class CodemodeTestHost extends DurableObject<Env> {
     return this.#connector;
   }
 
-  #runtime(options?: RunOptions) {
+  #runtime(options?: RunOptions & { name?: string; noConnectors?: boolean }) {
     const executor = new DynamicWorkerExecutor({ loader: this.env.LOADER });
     return createCodemodeRuntime({
       ctx: this.ctx,
       executor,
-      connectors: [this.#items()],
+      connectors: options?.noConnectors ? [] : [this.#items()],
+      name: options?.name,
       maxExecutions: options?.maxExecutions,
       transformResult: this.#shape ? (r) => ({ shaped: r }) : undefined
     });
@@ -139,7 +169,10 @@ export class CodemodeTestHost extends DurableObject<Env> {
     this.#shape = true;
   }
 
-  async run(code: string, options?: RunOptions): Promise<ProxyToolOutput> {
+  async run(
+    code: string,
+    options?: RunOptions & { name?: string }
+  ): Promise<ProxyToolOutput> {
     const codemode = this.#runtime(options).tool();
     const execute = codemode.execute as (
       input: ProxyToolInput,
@@ -152,7 +185,32 @@ export class CodemodeTestHost extends DurableObject<Env> {
     return this.#runtime().approve({ executionId });
   }
 
-  reject(seq: number, executionId: string): Promise<void> {
+  /**
+   * Approve via a runtime whose connector set no longer includes "items" —
+   * exercises the recorded-connector-requirements validation on resume.
+   */
+  approveWithoutItems(executionId: string): Promise<ProxyToolOutput> {
+    return this.#runtime({ noConnectors: true }).approve({ executionId });
+  }
+
+  /** Run a snippet by name on a runtime with NO connectors configured. */
+  async runSnippetWithoutItems(snippet: string): Promise<ProxyToolOutput> {
+    const codemode = this.#runtime({ noConnectors: true }).tool();
+    const execute = codemode.execute as (
+      input: ProxyToolInput,
+      ctx: unknown
+    ) => Promise<ProxyToolOutput>;
+    return execute(
+      { code: `async () => await codemode.run(${JSON.stringify(snippet)})` },
+      { toolCallId: "test", messages: [] }
+    );
+  }
+
+  expirePaused(maxAgeMs?: number): Promise<string[]> {
+    return this.#runtime().expirePaused({ maxAgeMs });
+  }
+
+  reject(seq: number, executionId: string): Promise<boolean> {
     return this.#runtime().reject({ seq, executionId });
   }
 
@@ -164,12 +222,25 @@ export class CodemodeTestHost extends DurableObject<Env> {
     return this.#runtime().pending(executionId);
   }
 
-  executions() {
-    return this.#runtime().executions();
+  executions(name?: string) {
+    return this.#runtime({ name }).executions();
   }
 
   deleteExecution(id: string) {
     return this.#runtime().deleteExecution(id);
+  }
+
+  /**
+   * Begin an execution directly on the facet and "die" without running a
+   * pass — leaves the row stuck in `running`, like a host crash mid-pass.
+   */
+  beginOnly(code: string): Promise<string> {
+    return getCodemodeRuntime(this.ctx).begin(code);
+  }
+
+  /** The model-facing description of the execute tool. */
+  toolDescription(connectorHints?: Record<string, string>): string {
+    return this.#runtime().tool({ connectorHints }).description ?? "";
   }
 
   saveSnippet(name: string, description: string, executionId: string) {
@@ -190,6 +261,10 @@ export class CodemodeTestHost extends DurableObject<Env> {
     return { opened: c.opened, disposed: c.disposed };
   }
 
+  passEnds() {
+    return this.#items().passEnds;
+  }
+
   /**
    * Drive the facet directly to reproduce the approve→execute→reject race at the
    * decision boundary: once an approved action is decided for execution it must
@@ -197,7 +272,7 @@ export class CodemodeTestHost extends DurableObject<Env> {
    * reverting an action already running on the host.
    */
   async raceRejectDuringApprovedExecute() {
-    const facet = getCodemodeRuntime(this.ctx, [this.#items()]);
+    const facet = getCodemodeRuntime(this.ctx);
     const id = await facet.begin("async () => {}");
     const args = { title: "race" };
 

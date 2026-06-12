@@ -30,6 +30,7 @@ the sub-agent routing primitive from `agents`.
 - **Think base class** — `getModel()`, `configureSession()`, `getTools()`, `maxSteps` for a batteries-included agent
 - **Built-in workspace** — file tools (read, write, edit, find, grep, delete) auto-wired on every turn
 - **Sandboxed code execution** — `createExecuteTool` lets the LLM write and run JavaScript in a Dynamic Worker via `@cloudflare/codemode`
+- **Browser automation** — the `BROWSER` binding gives the execute sandbox a `cdp.*` connector: a real browser driven over the Chrome DevTools Protocol, with durable sessions the model can promote and reuse across messages
 - **Self-authored extensions** — `extensionLoader` + `createExtensionTools` let the agent create new tools at runtime
 - **Persistent memory** — context blocks (`soul`, `memory`) the model can read and write across sessions
 - **Non-destructive compaction** — older messages summarized when context overflows, originals preserved
@@ -45,6 +46,7 @@ the sub-agent routing primitive from `agents`.
 - **Durable chat recovery** — Think's default `chatRecovery` wraps turns in fibers for eviction recovery, with bounded retry/exhaustion behavior
 - **Declarative scheduled work** — the directory is a `Think` accumulator that declares a daily-summary task via `getScheduledTasks()` (a deterministic handler), reconciled by Think on startup; it fans out to the most recently active chat
 - **Regeneration with branch navigation** — v1/v2/v3 response versions via `getBranches`
+- **Streaming markdown rendering** — assistant replies render through [streamdown](https://streamdown.ai) with syntax-highlighted code blocks (`@streamdown/code`)
 - **Stream resumption** — page refresh replays the active stream (built into Think)
 - **useAgentChat** — Think speaks the same CF_AGENT protocol as AIChatAgent
 - **GitHub OAuth** — users sign in with GitHub; the Worker owns all DO naming, so each user gets their own directory + isolated chats
@@ -81,6 +83,11 @@ npm start
 
 Open the app, click **Sign in with GitHub**, approve the OAuth flow, and you
 will land in the Think assistant scoped to your GitHub login.
+
+> [!TIP]
+> For local development you can skip the OAuth flow entirely: put
+> `DEV_USER=yourname` in `.env.local` (gitignored) and the Worker will act as
+> that user without talking to GitHub. Never set `DEV_USER` in production.
 
 To manually exercise client stream resumption, ask for a long response and
 refresh the page mid-stream. To exercise Durable Object eviction recovery,
@@ -154,12 +161,12 @@ class MyAssistant extends Think<Env> {
 
   getTools() {
     return {
-      execute: createExecuteTool({
-        tools: createWorkspaceTools(this.workspace),
-        // state.* in the sandbox also hits the shared workspace,
-        // because SharedWorkspace satisfies WorkspaceFsLike.
-        state: createWorkspaceStateBackend(this.workspace),
-        loader: this.env.LOADER
+      // The agent one-liner: ctx/loader from the agent, and state.* in the
+      // sandbox hits the shared workspace because SharedWorkspace satisfies
+      // WorkspaceFsLike. tools.* adds the workspace tools (and any
+      // needsApproval tools pause durably for the approval card).
+      execute: createExecuteTool(this, {
+        tools: createWorkspaceTools(this.workspace)
       })
       // ...
     };

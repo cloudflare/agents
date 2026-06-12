@@ -13,6 +13,7 @@ import {
   type ExecutionState,
   type Snippet
 } from "@cloudflare/codemode";
+import { BrowserConnector, DurableBrowserSessionStore } from "agents/browser";
 import { GithubConnector } from "./github.codemode" with { type: "connectors" };
 import { RepoApiConnector } from "./repoapi.codemode" with { type: "connectors" };
 
@@ -111,8 +112,8 @@ export class Chat extends AIChatAgent<Env> {
    * Build the codemode runtime for this agent. Connectors are constructed
    * in-process (note: no `ExecutionContext` cast — the connector base accepts
    * `this.ctx`). The runtime is shared between the chat tool and the callable
-   * approval/snippet methods below because its facet identity is derived from
-   * the connector set.
+   * approval/snippet methods below; its identity is its name, so connectors
+   * can be added without forking executions or snippets.
    */
   #runtime(): CodemodeRuntimeHandle {
     const server = this.mcp.listServers().find((s) => s.name === "github");
@@ -123,10 +124,19 @@ export class Chat extends AIChatAgent<Env> {
     const github = new GithubConnector(this.ctx, this.env, conn);
     const repoApi = new RepoApiConnector(this.ctx, this.env);
 
+    // Live browser over the Chrome DevTools Protocol. Sessions are one-shot
+    // per execution by default; the model can call cdp.startSession() to
+    // keep one alive across executions (dynamic mode).
+    const browser = new BrowserConnector(this.ctx, {
+      browser: this.env.BROWSER,
+      store: new DurableBrowserSessionStore(this.ctx.storage),
+      session: { mode: "dynamic" }
+    });
+
     return createCodemodeRuntime({
       ctx: this.ctx,
       executor: new DynamicWorkerExecutor({ loader: this.env.LOADER }),
-      connectors: [github, repoApi]
+      connectors: [github, repoApi, browser]
     });
   }
 
@@ -144,7 +154,7 @@ export class Chat extends AIChatAgent<Env> {
         '  - await codemode.describe("connector.method") for TypeScript docs',
         "  - await <connector>.<method>(args) to call a method directly",
         '  - await codemode.run("name", input) to run a saved snippet',
-        "Connectors: `github` (pull requests, issues) and `repoApi` (repo metadata, releases).",
+        "Connectors: `github` (pull requests, issues), `repoApi` (repo metadata, releases), and `cdp` (a live browser over the Chrome DevTools Protocol — cdp.send, cdp.attachToTarget, cdp.spec).",
         "Some actions (like github.create_issue) require approval — the run pauses and resumes after the user approves. Write code as if the call returns normally.",
         "",
         `The current date and time is ${new Date().toISOString()}.`

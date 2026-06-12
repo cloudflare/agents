@@ -92,10 +92,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function getScreenshotPreview(output: unknown): {
+function getScreenshotPreview(outer: unknown): {
   src: string;
   base64Length: number;
 } | null {
+  // browser_execute wraps the sandbox return value: { status, result, ... }
+  const output =
+    isRecord(outer) && isRecord(outer.result) ? outer.result : outer;
   if (!isRecord(output) || typeof output.data !== "string") {
     return null;
   }
@@ -121,14 +124,11 @@ function formatToolOutput(
   }
 
   if (screenshotPreview && isRecord(output)) {
-    return JSON.stringify(
-      {
-        ...output,
-        data: `[base64 image data omitted: ${screenshotPreview.base64Length} chars]`
-      },
-      null,
-      2
-    );
+    const omitted = `[base64 image data omitted: ${screenshotPreview.base64Length} chars]`;
+    const redacted = isRecord(output.result)
+      ? { ...output, result: { ...output.result, data: omitted } }
+      : { ...output, data: omitted };
+    return JSON.stringify(redacted, null, 2);
   }
 
   return JSON.stringify(output, null, 2);

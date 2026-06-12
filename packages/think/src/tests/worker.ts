@@ -2,6 +2,9 @@ import { routeAgentRequest } from "agents";
 
 export { HostBridgeLoopback } from "../extensions";
 
+// Facet class behind tools built on createCodemodeRuntime (execute tool).
+export { CodemodeRuntime } from "@cloudflare/codemode";
+
 export {
   TestAssistantToolsAgent,
   TestAssistantAgentAgent,
@@ -26,6 +29,8 @@ export {
   ThinkAgentToolParent,
   StuckThinkAgentToolChild,
   ThinkExtensionHookAgent,
+  ThinkExecuteToolAgent,
+  ThinkExecuteHitlAgent,
   ThinkMessengerRouteTestAgent
 } from "./agents";
 
@@ -53,6 +58,8 @@ import type {
   ThinkAgentToolParent,
   StuckThinkAgentToolChild,
   ThinkExtensionHookAgent,
+  ThinkExecuteToolAgent,
+  ThinkExecuteHitlAgent,
   ThinkMessengerRouteTestAgent
 } from "./agents";
 
@@ -81,6 +88,8 @@ export type Env = {
   StuckThinkAgentToolChild: DurableObjectNamespace<StuckThinkAgentToolChild>;
   ThinkExtensionHookAgent: DurableObjectNamespace<ThinkExtensionHookAgent>;
   ThinkMessengerRouteTestAgent: DurableObjectNamespace<ThinkMessengerRouteTestAgent>;
+  ThinkExecuteToolAgent: DurableObjectNamespace<ThinkExecuteToolAgent>;
+  ThinkExecuteHitlAgent: DurableObjectNamespace<ThinkExecuteHitlAgent>;
   LOADER: WorkerLoader;
 };
 

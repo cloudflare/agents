@@ -155,9 +155,41 @@ Implementation rules (the default is a no-op, so connectors with no per-run stat
 - **No instance memory.** It may run on a different connector instance than the one that opened the resource (the host can reconstruct connectors per request, and the opening pass may have hibernated). Read what you need from durable storage keyed by `executionId`.
 - **Never throws.** Teardown failures must not turn a finished run into a failure; the runtime ignores rejections from this hook.
 
-> To abandon a paused run and release its resources, [`reject`](./approvals.md) the pending action — that's a terminal transition and fires `disposeExecution`. (`rollback` only fires it when it actually reverts an effect; a paused, read-only run isn't terminated by rollback.)
+> To abandon a paused run and release its resources, [`reject`](./approvals.md) the pending action — that's a terminal transition and fires `disposeExecution`. Stale paused runs nobody answers can be reclaimed in bulk with [`runtime.expirePaused`](./runtime.md#retention). (`rollback` only fires `disposeExecution` when it actually reverts an effect; a paused, read-only run isn't terminated by rollback.)
+
+### Per-pass resources
+
+`onPassEnd(executionId, status)` fires at the end of **every** execution pass — including a pass that ends in a pause, where `disposeExecution` deliberately does not fire. Use it to release per-pass resources: an open socket, a lease, an in-memory cache entry. `status` is an `ExecutionEndStatus` or `"paused"`. On a terminal pass, `onPassEnd` fires first, then `disposeExecution`.
+
+```ts
+// Keep the browser session (per-execution) across a pause, but close the
+// CDP socket (per-pass) — the resume pass reconnects.
+override async onPassEnd(executionId: string, _status: PassEndStatus) {
+  await this.closeSocketFor(executionId);
+}
+```
+
+The same implementation rules as `disposeExecution` apply: idempotent, no instance memory, never throws.
 
 > **AI SDK toolsets:** when `tools()` returns an AI SDK `ToolSet`, codemode passes `{ executionId }` as the tool's second `execute` argument — the slot the AI SDK uses for its own call options. Inside codemode those options aren't otherwise populated, but a tool authored against the AI SDK's `toolCallId`/`messages` won't receive them here.
+
+## Replay policy
+
+By default every call's result is recorded in the durable log and replayed on resume. A tool whose results are large and cheap to recompute can opt out with `replay: "reexecute"`:
+
+```ts
+protected tools(): ConnectorTools {
+  return {
+    read_file: {
+      description: "Read a file from the workspace.",
+      replay: "reexecute", // ephemeral: re-runs on replay, result never stored
+      execute: ({ path }) => this.fs.read(path)
+    }
+  };
+}
+```
+
+The call is still logged (for sequencing and divergence detection), but its result stays out of the durable log and a replay **re-executes** it. Only use this for idempotent reads — the call runs again on every resume pass, and the value may legitimately differ across passes (which the code must tolerate). `replay: "reexecute"` cannot be combined with `requiresApproval`: an approved side effect must be logged, never re-executed.
 
 ## McpConnector
 

@@ -43,8 +43,14 @@ export { camelCaseToKebabCase } from "./utils";
 import {
   type RetryOptions,
   tryN,
+  isDurableObjectCodeUpdateReset,
   isErrorRetryable,
+  isPlatformTransientError,
   validateRetryOptions
+} from "./retries";
+export {
+  isDurableObjectCodeUpdateReset,
+  isPlatformTransientError
 } from "./retries";
 import {
   MCPClientManager,
@@ -1301,43 +1307,11 @@ function resolveRetryConfig(
   };
 }
 
-/**
- * Whether an error is a transient "superseded isolate" failure — the invocation
- * is running on an isolate the platform has replaced with a new version (a
- * deploy / code update). For the rest of that invocation every operation throws
- * the same error (code never reloads mid-invocation), so in-process retries are
- * futile; but the next fresh invocation runs the new code and succeeds.
- *
- * workerd surfaces this as a plain `Error` with one of a few messages, all the
- * same failure class — a message match is the only signal:
- *   - "Durable Object reset because its code was updated."  (DO storage op on a
- *     superseded isolate / deploy bounce)
- *   - "This script has been upgraded. Please send a new request to connect to
- *     the new version."  (a stub/connection to a superseded script; the message
- *     literally instructs the caller to retry on the new version)
- *
- * The match stays close to the verbatim platform strings (rather than a loose
- * "upgraded"/"reset" substring) so an ordinary application error that happens
- * to mention those words is NOT misclassified as a supersede — a false positive
- * would defer + re-run a genuinely-failing callback on the platform's alarm
- * retries instead of abandoning it.
- *
- * NOTE: "Network connection lost." is deliberately NOT included — it is a
- * connection error, not an isolate replacement, and may succeed on in-process
- * retry (it is gated by the CF `retryable` property via `isErrorRetryable`),
- * so it stays on the normal retry path rather than the immediate-defer path.
- */
-function isDurableObjectCodeUpdateReset(error: unknown): boolean {
-  const message =
-    error instanceof Error
-      ? error.message
-      : typeof error === "string"
-        ? error
-        : "";
-  return /reset because its code was updated|this script has been upgraded/i.test(
-    message
-  );
-}
+// `isDurableObjectCodeUpdateReset` / `isPlatformTransientError` (used by the
+// scheduler's defer-vs-abandon decisions below) live in ./retries next to
+// `isErrorRetryable`, and are re-exported from the package root so higher
+// layers (e.g. `@cloudflare/think`) classify with the SAME matcher instead of
+// drifting copies.
 
 export function getCurrentAgent<
   T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
@@ -5852,10 +5826,24 @@ export class Agent<
         // that transient we skip the doomed retries and re-throw so `alarm()`
         // rejects, the one-shot row survives, and the platform re-runs it on a
         // fresh isolate (= new code) under the at-least-once alarm guarantee.
+        //
+        // Other platform transients ("Network connection lost." / errors the
+        // platform flags `retryable`) MAY succeed on an in-process retry (a
+        // momentary blip), so they keep the normal retry budget — but if the
+        // budget drains while the platform is still unhealthy (#1730: a
+        // deploy-reset window outlasts the few-seconds retry schedule by
+        // design), the row is deferred on exhaustion instead of consumed: the
+        // platform failed, not the callback, and the same work succeeds when
+        // the alarm re-fires in the healthy window that follows. A genuinely
+        // failing callback throws application-shaped errors (none of the
+        // platform signals) and is still abandoned after `maxAttempts` exactly
+        // as before.
         const isOneShotSchedule =
           row.type === "delayed" || row.type === "scheduled";
         const shouldDeferReset = (error: unknown): boolean =>
           isOneShotSchedule && isDurableObjectCodeUpdateReset(error);
+        const shouldDeferOnExhaustion = (error: unknown): boolean =>
+          isOneShotSchedule && isPlatformTransientError(error);
 
         try {
           this._emit("schedule:execute", {
@@ -5891,6 +5879,12 @@ export class Agent<
           if (shouldDeferReset(e)) {
             console.warn(
               `Deferring scheduled callback "${row.callback}" to a fresh invocation after a Durable Object code-update reset; the one-shot row is preserved and the alarm will re-run on new code.`
+            );
+            throw e;
+          }
+          if (shouldDeferOnExhaustion(e)) {
+            console.warn(
+              `Deferring scheduled callback "${row.callback}" after exhausting in-process retries on a transient platform error; the one-shot row is preserved and the alarm will re-run once the platform recovers.`
             );
             throw e;
           }

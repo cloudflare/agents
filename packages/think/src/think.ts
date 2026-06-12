@@ -120,6 +120,9 @@ export { skills };
 export type { SkillRunContext, SkillSource } from "agents/skills";
 import {
   Agent,
+  callable,
+  getCurrentAgent,
+  isPlatformTransientError,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
 } from "agents";
 
@@ -145,6 +148,7 @@ import {
   toolResultUpdate,
   crossMessageToolResultUpdate,
   toolApprovalUpdate,
+  pausedExecutionUpdate,
   parseProtocolMessage,
   applyChunkToParts,
   normalizeToolInput,
@@ -168,6 +172,7 @@ import { Session } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
 import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "./tools/workspace";
+import { truncatePausedExecutionOutput } from "./tools/execute";
 import { ExtensionManager, sanitizeName } from "./extensions/manager";
 import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
 import type {
@@ -1773,6 +1778,15 @@ export class Think<
   workspace!: WorkspaceLike;
 
   /**
+   * The codemode runtime behind the execute tool, when one has been created
+   * via `createExecuteRuntime(this)` / `createExecuteTool(this)` (from
+   * `@cloudflare/think/tools/execute`). Gives callables and lifecycle hooks
+   * access to approvals (`approve`/`reject`/`pending`), the audit trail
+   * (`executions`), `expirePaused`, and snippets.
+   */
+  codemode?: import("@cloudflare/codemode").CodemodeRuntimeHandle;
+
+  /**
    * Include the default workspace Bash tool. Enabled by default so models can
    * run shell-style multi-file workflows against the workspace. Set to `false`
    * to omit it from the built-in workspace tools.
@@ -2226,6 +2240,15 @@ export class Think<
   private _agentToolLastErrors = new Map<string, string>();
   private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
   private _agentToolLiveSequences = new Map<string, number>();
+  /**
+   * Request id → run id for in-flight agent-tool turns (null = resolved as
+   * not an agent-tool turn, cached so unrelated turns don't re-query SQLite
+   * per frame). Drives frame attribution in {@link broadcast}: a frame
+   * belongs to a run iff it carries that run's turn request id, so an error
+   * in an unrelated turn or a concurrent run can never leak into another
+   * run's state (#1575).
+   */
+  private _agentToolRunsByRequestId = new Map<string, string | null>();
   private _submissionTableEnsured = false;
   private _workflowNotificationTableEnsured = false;
   private _declaredScheduledTasksTableEnsured = false;
@@ -2239,27 +2262,47 @@ export class Think<
     msg: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): void {
-    if (this._agentToolForwarders.size > 0 && typeof msg === "string") {
+    // Inspect frames while any agent-tool run is in flight (live sequences
+    // exist for the run's whole lifecycle), not only while a tailer is
+    // attached — error capture must not depend on tailer timing (#1575).
+    if (
+      (this._agentToolForwarders.size > 0 ||
+        this._agentToolLiveSequences.size > 0) &&
+      typeof msg === "string"
+    ) {
       try {
         const parsed = JSON.parse(msg) as {
           type?: unknown;
           body?: unknown;
           error?: unknown;
+          id?: unknown;
         };
-        if (parsed.type === MSG_CHAT_RESPONSE) {
-          if (parsed.error === true && typeof parsed.body === "string") {
-            for (const runId of this._agentToolForwarders.keys()) {
+        if (
+          parsed.type === MSG_CHAT_RESPONSE &&
+          typeof parsed.id === "string"
+        ) {
+          // A frame belongs to a run iff it carries that run's turn request
+          // id. Frames from unrelated turns (a user-driven turn on this
+          // agent, or another run's turn) resolve to a different — or no —
+          // run and are left alone, so concurrent runs cannot
+          // cross-contaminate each other's progress or error state (#1575).
+          const runId = this._agentToolRunForRequest(parsed.id);
+          if (runId !== null) {
+            if (parsed.error === true && typeof parsed.body === "string") {
               this._agentToolLastErrors.set(runId, parsed.body);
-            }
-          } else if (
-            typeof parsed.body === "string" &&
-            parsed.body.length > 0
-          ) {
-            for (const [runId, forwarders] of this._agentToolForwarders) {
+            } else if (
+              typeof parsed.body === "string" &&
+              parsed.body.length > 0
+            ) {
+              // Advance the live sequence even with no tailer attached so a
+              // tailer registering mid-run resumes at the right offset.
               const sequence = this._agentToolLiveSequences.get(runId) ?? 0;
               this._agentToolLiveSequences.set(runId, sequence + 1);
               const chunk = { sequence, body: parsed.body };
-              for (const forward of forwarders) forward(chunk);
+              const forwarders = this._agentToolForwarders.get(runId);
+              if (forwarders) {
+                for (const forward of forwarders) forward(chunk);
+              }
             }
           }
         }
@@ -2268,6 +2311,26 @@ export class Think<
       }
     }
     super.broadcast(msg, without);
+  }
+
+  /**
+   * Resolve the agent-tool run whose turn owns a request id, or null when the
+   * request is not an agent-tool turn. Falls back to the persisted child-run
+   * row (whose `request_id` is written when the run's turn is bound, see
+   * `startAgentToolRun`) so attribution survives a DO restart mid-run; either
+   * outcome is cached.
+   */
+  private _agentToolRunForRequest(requestId: string): string | null {
+    const cached = this._agentToolRunsByRequestId.get(requestId);
+    if (cached !== undefined) return cached;
+    const rows = this.sql<{ run_id: string }>`
+      SELECT run_id FROM cf_agent_tool_child_runs
+      WHERE request_id = ${requestId} AND completed_at IS NULL
+      LIMIT 1
+    `;
+    const runId = rows[0]?.run_id ?? null;
+    this._agentToolRunsByRequestId.set(requestId, runId);
+    return runId;
   }
 
   override async alarm(): Promise<void> {
@@ -4405,7 +4468,20 @@ export class Think<
           SET status = 'running'
           WHERE run_id = ${options.runId} AND status = 'starting'
         `;
-        const result = await this.saveMessages(
+        // Bind the run to its turn's request id BEFORE the turn starts —
+        // in memory for live frame attribution in `broadcast`, and on the
+        // child-run row so attribution survives a DO restart mid-run
+        // (#1575). `saveMessages` would generate the id internally, so call
+        // the inner turn runner with a pre-generated one instead.
+        const requestId = crypto.randomUUID();
+        this._agentToolRunsByRequestId.set(requestId, options.runId);
+        this.sql`
+          UPDATE cf_agent_tool_child_runs
+          SET request_id = ${requestId}
+          WHERE run_id = ${options.runId}
+        `;
+        const result = await this._runProgrammaticMessagesTurn(
+          requestId,
           [this.formatAgentToolInput(input)],
           {
             signal: controller.signal
@@ -4458,6 +4534,19 @@ export class Think<
         this._agentToolAbortControllers.delete(options.runId);
         this._agentToolForwarders.delete(options.runId);
         this._agentToolLiveSequences.delete(options.runId);
+        // Drop this run's request-id mappings. When no runs remain in flight
+        // clear the whole map, so negatively-cached (null) entries for
+        // unrelated turns can't accumulate for the DO's lifetime — the map is
+        // only consulted while a run is active (#1575).
+        if (this._agentToolAbortControllers.size === 0) {
+          this._agentToolRunsByRequestId.clear();
+        } else {
+          for (const [reqId, runId] of this._agentToolRunsByRequestId) {
+            if (runId === options.runId) {
+              this._agentToolRunsByRequestId.delete(reqId);
+            }
+          }
+        }
         this._agentToolLastErrors.delete(options.runId);
         this._agentToolPreTurnAssistantIds.delete(options.runId);
         for (const close of this._agentToolClosers.get(options.runId) ?? []) {
@@ -6029,6 +6118,8 @@ export class Think<
           captureProgrammaticStreamError: true,
           captureOutput: Boolean(workflowPrompt?.output),
           workflowPrompt: workflowPrompt ?? undefined,
+          shouldApplyMessages: () =>
+            this._readSubmission(row.submission_id)?.status === "running",
           onMessagesApplied: () => {
             this.sql`
               UPDATE cf_think_submissions
@@ -6064,17 +6155,13 @@ export class Think<
           WHERE submission_id = ${row.submission_id}
             AND status = 'running'
         `;
-        this._insertWorkflowNotification(
-          {
-            ...this._inspectionFromSubmissionRow(claimed),
-            requestId: result.requestId,
-            status: finalStatus,
-            error:
-              finalStatus === "error" ? (errorMessage ?? undefined) : undefined,
-            completedAt
-          },
-          output
-        );
+        const finalized = this._readSubmission(row.submission_id);
+        if (finalized && this._isTerminalSubmissionStatus(finalized.status)) {
+          this._insertWorkflowNotification(
+            this._inspectionFromSubmissionRow(finalized),
+            output
+          );
+        }
       });
     } catch (error) {
       const errorMessage =
@@ -6089,12 +6176,12 @@ export class Think<
           WHERE submission_id = ${row.submission_id}
             AND status = 'running'
         `;
-        this._insertWorkflowNotification({
-          ...this._inspectionFromSubmissionRow(claimed),
-          status: "error",
-          error: errorMessage,
-          completedAt
-        });
+        const finalized = this._readSubmission(row.submission_id);
+        if (finalized && this._isTerminalSubmissionStatus(finalized.status)) {
+          this._insertWorkflowNotification(
+            this._inspectionFromSubmissionRow(finalized)
+          );
+        }
       });
     } finally {
       this._programmaticStreamErrors.delete(requestId);
@@ -6369,6 +6456,7 @@ export class Think<
       captureOutput?: boolean;
       body?: Record<string, unknown>;
       workflowPrompt?: ThinkWorkflowPromptContext;
+      shouldApplyMessages?: () => boolean | Promise<boolean>;
     }
   ): Promise<ProgrammaticMessagesResult> {
     const clientTools = this._lastClientTools;
@@ -6381,6 +6469,19 @@ export class Think<
 
     await this.keepAliveWhile(async () => {
       await this._turnQueue.enqueue(requestId, async () => {
+        if (this._turnQueue.generation !== epoch) {
+          status = "skipped";
+          return;
+        }
+
+        if (
+          options?.shouldApplyMessages &&
+          !(await options.shouldApplyMessages())
+        ) {
+          status = "aborted";
+          return;
+        }
+
         const resolved =
           typeof messages === "function"
             ? await messages(this.messages)
@@ -6388,6 +6489,14 @@ export class Think<
 
         if (this._turnQueue.generation !== epoch) {
           status = "skipped";
+          return;
+        }
+
+        if (
+          options?.shouldApplyMessages &&
+          !(await options.shouldApplyMessages())
+        ) {
+          status = "aborted";
           return;
         }
 
@@ -8345,6 +8454,257 @@ export class Think<
     await this._applyToolUpdateToMessages(update);
   }
 
+  // ── Durable execution approvals (codemode HITL) ──────────────────
+  //
+  // A `requiresApproval` connector call inside the execute tool pauses the
+  // run *durably*: the tool returns `{ status: "paused", executionId,
+  // pending }` as a normal output, the model narrates what it needs, and the
+  // turn ends. These callables are the resume path: approve/reject the
+  // pending action on the codemode runtime, replace the paused output in the
+  // transcript with the new outcome, and auto-continue so the model sees it.
+
+  /**
+   * The codemode runtime handle behind the execute tool. `this.codemode` is
+   * assigned when `createExecuteRuntime(this)` / `createExecuteTool(this)`
+   * runs (normally at turn start, via `getTools()`); after a DO restart no
+   * turn may have run yet, so fall back to building the tools once.
+   */
+  private _codemodeRuntime():
+    | import("@cloudflare/codemode").CodemodeRuntimeHandle
+    | undefined {
+    if (!this.codemode) {
+      try {
+        this.getTools();
+      } catch {
+        // getTools may require turn-time context; without it there is
+        // simply no runtime to resolve.
+      }
+    }
+    return this.codemode;
+  }
+
+  /**
+   * Pending (awaiting-approval) actions across paused executions of the
+   * execute tool's codemode runtime — `{ executionId, seq, connector,
+   * method, args }` each, with FULL args (the transcript copy is truncated).
+   * Clients reconcile approval cards against this on load.
+   *
+   * Client-callable (registered below — see the `callable()` calls after the
+   * class body).
+   */
+  async pendingExecutions(
+    executionId?: string
+  ): Promise<import("@cloudflare/codemode").PendingAction[]> {
+    const runtime = this._codemodeRuntime();
+    if (!runtime) return [];
+    return runtime.pending(executionId);
+  }
+
+  /**
+   * Approve a paused execution and resume it. The run continues from where
+   * it stopped (replaying logged work, executing the approved call); the
+   * outcome — completed, errored, or paused again on the NEXT gated call —
+   * replaces the paused tool output in the transcript and the chat
+   * auto-continues so the model can act on it.
+   *
+   * Approving an execution that is no longer pending (already settled,
+   * expired, or unknown) returns `{ status: "error" }` with an explanatory
+   * message — it never throws.
+   *
+   * Client-callable.
+   */
+  async approveExecution(executionId: string): Promise<unknown> {
+    const runtime = this._codemodeRuntime();
+    if (!runtime) {
+      return {
+        status: "error",
+        executionId,
+        error:
+          "No codemode runtime is configured — the execute tool was never " +
+          "created on this agent."
+      };
+    }
+    const output = truncatePausedExecutionOutput(
+      await runtime.approve({ executionId })
+    );
+    await this._applyExecutionOutcome(executionId, output);
+    return output;
+  }
+
+  /**
+   * Reject a paused execution's pending action, ending the run. The
+   * transcript's paused output is replaced with
+   * `{ status: "rejected", executionId, reason }` and the chat
+   * auto-continues so the model can adapt (or explain) instead of erroring.
+   *
+   * Client-callable.
+   */
+  async rejectExecution(
+    executionId: string,
+    reason?: string
+  ): Promise<unknown> {
+    const runtime = this._codemodeRuntime();
+    if (!runtime) {
+      return {
+        status: "error",
+        executionId,
+        error:
+          "No codemode runtime is configured — the execute tool was never " +
+          "created on this agent."
+      };
+    }
+    const pending = await runtime.pending(executionId);
+    if (pending.length === 0) {
+      return {
+        status: "error",
+        executionId,
+        error: `Execution "${executionId}" is no longer pending.`
+      };
+    }
+    // `reject` reports whether it actually terminated the run. A `false`
+    // means the action was resolved between our `pending()` check and the
+    // reject (approve/reject interleave across facet RPC awaits — input
+    // gates only cover storage). Writing "rejected" then would clobber a
+    // paused part whose real outcome (e.g. an in-flight approval) is still
+    // coming, so surface an error instead.
+    const terminated = await runtime.reject({
+      executionId,
+      seq: pending[0].seq
+    });
+    if (!terminated) {
+      return {
+        status: "error",
+        executionId,
+        error: `Execution "${executionId}" is no longer pending — it was approved or rejected elsewhere.`
+      };
+    }
+    const output = {
+      status: "rejected",
+      executionId,
+      reason: reason ?? "Rejected by user"
+    };
+    await this._applyExecutionOutcome(executionId, output);
+    return output;
+  }
+
+  /**
+   * Replace a paused execute-tool output in the transcript with the
+   * execution's new outcome and kick the auto-continuation so the model sees
+   * it.
+   *
+   * When no paused part carries `executionId` — the output was already
+   * replaced from another tab, or compaction summarized the part away — the
+   * runtime has still durably applied the approval/rejection, so the outcome
+   * must not be dropped: it is appended as a system note instead, and the
+   * continuation still fires so the model can act on it.
+   */
+  private async _applyExecutionOutcome(
+    executionId: string,
+    output: unknown
+  ): Promise<boolean> {
+    const toolCallId = this._findPausedExecutionToolCall(executionId);
+    if (!toolCallId) {
+      // Already resolved in place (e.g. approved from another tab)? Then the
+      // transcript has the outcome and nothing more is needed.
+      if (this._findExecutionToolCall(executionId) != null) return false;
+      let summary: string;
+      try {
+        summary = JSON.stringify(output)?.slice(0, 4_000) ?? String(output);
+      } catch {
+        summary = String(output);
+      }
+      await this._appendMessageToHistory({
+        id: `exec-outcome-${executionId}-${crypto.randomUUID()}`,
+        role: "system",
+        parts: [
+          {
+            type: "text",
+            text:
+              `[execute tool] The paused execution "${executionId}" was ` +
+              `resolved, but its tool call is no longer in the transcript ` +
+              `(it may have been compacted). Outcome: ${summary}`
+          }
+        ]
+      } as UIMessage);
+    } else {
+      await this._enqueueInteractionApply(() =>
+        this._applyToolUpdateToMessages(
+          pausedExecutionUpdate(toolCallId, executionId, output)
+        )
+      );
+    }
+    // Continue on the approving connection when there is one (WS callable),
+    // else any open connection (DO-stub approval with clients attached).
+    const { connection } = getCurrentAgent();
+    let target = connection;
+    if (!target) {
+      for (const open of this.getConnections()) {
+        target = open;
+        break;
+      }
+    }
+    if (target) {
+      this._scheduleAutoContinuation(target);
+    }
+    return true;
+  }
+
+  /**
+   * Find the tool part holding the paused output of `executionId` — in the
+   * in-flight streaming accumulator first (an approval can land while a new
+   * turn streams), then the persisted transcript, newest message first.
+   */
+  private _findPausedExecutionToolCall(executionId: string): string | null {
+    return this._findExecutionToolCall(executionId, true);
+  }
+
+  /**
+   * Find the tool part carrying `executionId` in its output. With
+   * `pausedOnly`, only a still-paused output matches — used to locate the
+   * part an approval outcome should replace. Without it, any settled output
+   * matches — used to distinguish "already resolved elsewhere" from "the
+   * part is gone from the transcript" (e.g. compacted away).
+   */
+  private _findExecutionToolCall(
+    executionId: string,
+    pausedOnly = false
+  ): string | null {
+    const matches = (part: Record<string, unknown>): boolean => {
+      if (part.state !== "output-available") return false;
+      if (typeof part.toolCallId !== "string") return false;
+      const output = part.output as
+        | { status?: unknown; executionId?: unknown }
+        | null
+        | undefined;
+      return (
+        output != null &&
+        typeof output === "object" &&
+        (!pausedOnly || output.status === "paused") &&
+        output.executionId === executionId
+      );
+    };
+
+    const streaming = this._streamingAssistant;
+    if (streaming) {
+      for (const part of streaming.parts as unknown as Array<
+        Record<string, unknown>
+      >) {
+        if (matches(part)) return part.toolCallId as string;
+      }
+    }
+
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const message = this.messages[i];
+      if (message.role !== "assistant") continue;
+      for (const part of message.parts as unknown as Array<
+        Record<string, unknown>
+      >) {
+        if (matches(part)) return part.toolCallId as string;
+      }
+    }
+    return null;
+  }
+
   private async _applyToolUpdateToMessages(update: {
     toolCallId: string;
     matchStates: string[];
@@ -9613,31 +9973,35 @@ export class Think<
    * completed the recovered submission as `error`, which bypassed
    * `_exhaustChatRecovery` entirely — so an app relying on `onExhausted` for the
    * terminal banner regressed to an eternal spinner when recovery gave up under
-   * extreme churn. The error path matters just as much: a non-reset throw in a
-   * recovery callback is SWALLOWED by `Agent._executeScheduleCallback` (only a
-   * code-update reset is re-thrown to preserve the one-shot row), so without
-   * routing it here the alarm row is deleted with no terminal UX at all — the
-   * half-finished message wedges silently. Shared by `_chatRecoveryRetry` and
-   * `_chatRecoveryContinue`.
+   * extreme churn. The error path matters just as much: a non-transient throw
+   * in a recovery callback is SWALLOWED by `Agent._executeScheduleCallback`
+   * (only a platform transient is re-thrown to preserve the one-shot row), so
+   * without routing it here the alarm row is deleted with no terminal UX at
+   * all — the half-finished message wedges silently. Shared by
+   * `_chatRecoveryRetry` and `_chatRecoveryContinue`.
    *
    * Exactly-once terminalization is defended by two independent guards:
    *  1. The `stored?.status === "exhausted"` re-entry guard below — once an
    *     incident is sealed, a duplicate stale alarm (or retried callback)
-   *     returns before re-firing. The sealed incident is re-persisted even when
-   *     the record was found missing, so a swept record is re-armed for the
-   *     guard on the next alarm.
+   *     returns before re-firing. The seal is persisted only AFTER the
+   *     terminal writes in `_exhaustChatRecovery` succeed (see the ordering
+   *     note at the call below), so a give-up interrupted by a platform
+   *     transient re-runs in full instead of being half-sealed.
    *  2. The durable-submission paths additionally short-circuit earlier at the
    *     `submission_not_running` check (the submission is already `error` after
    *     the first give-up). This is the ONLY guard `@cloudflare/ai-chat` lacks
    *     (no submission layer), so guard #1 carries it there.
    *
-   * Two residual at-least-once edges, both deliberately accepted as "deliver a
+   * Residual at-least-once edges, all deliberately accepted as "deliver a
    * second banner" ≫ "silently drop the turn":
    *  • No `incidentId` at all in the payload (only reachable via a direct/test
    *    invocation — every production scheduler carries one): the synthesized
    *    incident can't be persisted (no key), so guard #1 can't arm.
    *  • The record is swept AGAIN between two alarms (guard #1 re-persists on the
    *    first, so this needs a second independent sweep) — vanishingly unlikely.
+   *  • A platform transient interrupts `_exhaustChatRecovery` after the banner
+   *    broadcast — the deferred re-run re-fires `onExhausted` + the banner
+   *    (the terminal writes themselves are idempotent).
    */
   private async _exhaustRecoveryGiveUp(
     callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
@@ -9702,9 +10066,40 @@ export class Think<
           reason
         };
 
+    const streamId = this._resolveRecoveryStreamId(
+      incident.recoveryRootRequestId ?? incident.requestId
+    );
+    const partial = streamId
+      ? this._getPartialStreamText(streamId)
+      : { text: "", parts: [] as MessagePart[] };
+
+    // Terminalize BEFORE sealing the incident. The terminal writes inside
+    // `_exhaustChatRecovery` (`_recordTerminalChatStatus`,
+    // `_markRecoveredSubmissionInterrupted`) hit storage and can reject with a
+    // platform transient in exactly the window a give-up tends to run in
+    // (#1730: deploy reset / storage outage). Letting that throw propagate is
+    // deliberate: the recovery callback's caller (`Agent._executeScheduleCallback`)
+    // defers the one-shot row on a platform transient, so the WHOLE give-up
+    // re-runs on a healthy isolate instead of half-sealing. Sealing first
+    // would arm the re-entry guard above and turn that re-run into a no-op —
+    // dropping the durable terminal record and the submission's terminal
+    // state. The re-run is idempotent: `_recordTerminalChatStatus` overwrites
+    // the same key and `_markRecoveredSubmissionInterrupted` is gated on
+    // `status = 'running'`; `onExhausted` + the banner may fire again — the
+    // documented at-least-once edge ("deliver a second banner" ≫ "silently
+    // drop the turn").
+    await this._exhaustChatRecovery(
+      incident,
+      config,
+      partial,
+      streamId,
+      incident.firstSeenAt
+    );
+
     // Persist the sealed incident (retained for inspection / TTL sweep) so the
     // re-entry guard above sees `exhausted` if a duplicate stale alarm fires.
-    // Best-effort: a failed persist must not block terminalization below.
+    // Best-effort: terminalization already fully succeeded, so a failed seal
+    // write costs at most a re-delivered banner on a duplicate alarm.
     if (incidentKey) {
       try {
         await this.ctx.storage.put(incidentKey, incident);
@@ -9715,21 +10110,6 @@ export class Think<
         );
       }
     }
-
-    const streamId = this._resolveRecoveryStreamId(
-      incident.recoveryRootRequestId ?? incident.requestId
-    );
-    const partial = streamId
-      ? this._getPartialStreamText(streamId)
-      : { text: "", parts: [] as MessagePart[] };
-
-    await this._exhaustChatRecovery(
-      incident,
-      config,
-      partial,
-      streamId,
-      incident.firstSeenAt
-    );
   }
 
   /**
@@ -9745,76 +10125,60 @@ export class Think<
   }
 
   /**
-   * Whether an error is a transient "superseded isolate" failure — a deploy /
-   * code update replaced the isolate mid-invocation. Mirrors the base `Agent`
-   * check (`isDurableObjectCodeUpdateReset`) and MUST stay in lockstep with it:
-   * the base `_executeScheduleCallback` re-throws this class for a one-shot row
-   * (preserving it so the platform re-runs on the new code), so a recovery
-   * callback must also re-throw — NOT terminalize — since recovery will re-run
-   * and succeed on the fresh isolate. The matched family (kept identical to the
-   * base):
-   *   - "Durable Object reset because its code was updated." (deploy bounce)
-   *   - "This script has been upgraded. Please send a new request to connect to
-   *     the new version." (a stub/connection to a superseded script)
-   * "Network connection lost." is intentionally excluded (a connection error,
-   * not an isolate replacement — see the base helper's note). The match stays
-   * close to the verbatim platform strings so an ordinary error mentioning
-   * those words isn't misclassified as a supersede.
-   */
-  private _isDeployCodeUpdateReset(error: unknown): boolean {
-    const message =
-      error instanceof Error
-        ? error.message
-        : typeof error === "string"
-          ? error
-          : "";
-    return /reset because its code was updated|this script has been upgraded/i.test(
-      message
-    );
-  }
-
-  /**
    * Handle an error thrown by `_chatRecoveryContinue` / `_chatRecoveryRetry`
    * after the incident was opened.
    *
-   * - A deploy code-update reset is re-thrown (after marking the incident
-   *   `failed` for observability) so `Agent._executeScheduleCallback` preserves
-   *   the one-shot alarm row and the platform re-runs recovery on the fresh
-   *   isolate — the turn can still recover, so it must NOT terminalize.
-   * - Any OTHER error is terminalized through the give-up path
+   * - A platform transient (`isPlatformTransientError` from `agents` — a
+   *   deploy code-update reset / script supersede, a `retryable`-flagged
+   *   platform error, or "Network connection lost.", looking through wrappers
+   *   like `SqlError` via the `cause` chain) is re-thrown (after best-effort
+   *   marking the incident `failed` for observability) so
+   *   `Agent._executeScheduleCallback` preserves the one-shot alarm row and
+   *   the platform re-runs recovery once it is healthy again — the turn can
+   *   still recover, so it must NOT terminalize. Terminalizing here was the
+   *   #1730 freeze: the give-up's own seal needs the very storage that is
+   *   down, so it throws too, burns the in-process retry budget inside the
+   *   same reset window, and the row is consumed milliseconds before storage
+   *   recovers. The submission is deliberately left `running` — the deferred
+   *   re-run reads it via `_readRunningSubmissionByRequestId`, so marking it
+   *   terminal here would turn the preserved row into a guaranteed
+   *   `submission_not_running` no-op skip (a self-defeating defer).
+   * - Any OTHER (application) error is terminalized through the give-up path
    *   (`onExhausted` + the `terminalMessage` banner) and NOT re-thrown. This is
    *   the fix for the silent-seal failure mode: `_executeScheduleCallback`
-   *   swallows a non-reset throw and then `alarm()` deletes the one-shot row, so
-   *   without terminalizing here the half-finished turn is dropped with no
-   *   terminal event and no banner (the user stares at a frozen message until
-   *   they send something new).
+   *   swallows a non-transient throw and then `alarm()` deletes the one-shot
+   *   row, so without terminalizing here the half-finished turn is dropped
+   *   with no terminal event and no banner (the user stares at a frozen
+   *   message until they send something new).
    */
   private async _handleRecoveryCallbackError(
     callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
     error: unknown
   ): Promise<void> {
-    if (this._isDeployCodeUpdateReset(error)) {
+    if (isPlatformTransientError(error)) {
       const message = error instanceof Error ? error.message : String(error);
-      await this._updateChatRecoveryIncident(
-        data?.incidentId,
-        "failed",
-        message
-      );
-      if (data?.recoveredRequestId) {
-        await this._completeRecoveredSubmission(
-          data.recoveredRequestId,
-          "error",
-          null,
+      try {
+        await this._updateChatRecoveryIncident(
+          data?.incidentId,
+          "failed",
           message
+        );
+      } catch (bookkeepingError) {
+        // Best-effort observability only — in the exact window this branch
+        // fires (deploy reset / storage outage) the incident write itself can
+        // reject; that must not replace the deferral with its own error.
+        console.error(
+          "[Think] failed to mark recovery incident failed before deferring",
+          bookkeepingError
         );
       }
       throw error;
     }
     // Preserve the underlying error for operators — the give-up path records
     // only the `recovery_error` category on the incident / `onExhausted` ctx,
-    // so without this log the actual cause (e.g. a transient storage reject)
-    // would be lost. Mirrors `Agent._executeScheduleCallback`'s own logging.
+    // so without this log the actual cause would be lost. Mirrors
+    // `Agent._executeScheduleCallback`'s own logging.
     console.error(
       `[Think] ${callback} threw during recovery; terminalizing instead of leaving the turn wedged`,
       error
@@ -10705,6 +11069,19 @@ export class Think<
   ): Promise<boolean> {
     const pending = await this._pendingChatTerminal();
     if (!pending || pending.requestId !== requestId) return false;
+    // Replay any partial content the errored stream produced before the
+    // error, so the reconnecting client observes the same sequence a live
+    // client did — content chunks, then the terminal error (#1575). If the
+    // connection drops mid-replay, skip the terminal frame; the record is
+    // retained, so the next reconnect retries the whole sequence.
+    if (
+      !this._resumableStream.replayErroredChunksByRequestId(
+        connection,
+        pending.requestId
+      )
+    ) {
+      return true;
+    }
     sendIfOpen(
       connection,
       JSON.stringify({
@@ -10941,4 +11318,16 @@ export class Think<
       exclude
     );
   }
+}
+
+// Register the HITL methods as client-callable. Imperative registration
+// (rather than `@callable()` decorator syntax on the methods) because TC39
+// decorators don't survive every consumer toolchain that compiles this file
+// from source (e.g. esbuild targeting ES2021).
+for (const method of [
+  Think.prototype.pendingExecutions,
+  Think.prototype.approveExecution,
+  Think.prototype.rejectExecution
+]) {
+  callable()(method, undefined as unknown as ClassMethodDecoratorContext);
 }

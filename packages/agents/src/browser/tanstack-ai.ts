@@ -1,29 +1,29 @@
 import { toolDefinition } from "@tanstack/ai";
 import type { ServerTool } from "@tanstack/ai";
+import type { ProxyToolOutput } from "@cloudflare/codemode";
 import { z } from "zod";
-import {
-  createBrowserToolHandlers,
-  SEARCH_DESCRIPTION,
-  EXECUTE_DESCRIPTION,
-  type BrowserToolsOptions
-} from "./shared";
+import { createBrowserRuntime, type CreateBrowserToolsOptions } from "./ai";
 
-export type { BrowserToolsOptions } from "./shared";
+export type { CreateBrowserToolsOptions } from "./ai";
 
 /**
  * Create TanStack AI tools for browser automation via CDP code mode.
  *
- * Returns an array of `ServerTool`s: `browser_search` (query the CDP spec)
- * and `browser_execute` (run CDP commands against a live browser).
+ * Returns an array with a single durable `browser_execute` `ServerTool`
+ * backed by the same codemode runtime as `agents/browser/ai` — the model
+ * writes TypeScript against the `cdp` connector and browser sessions
+ * survive pauses.
  *
  * @example
  * ```ts
  * import { createBrowserTools } from "agents/browser/tanstack-ai";
  * import { chat } from "@tanstack/ai";
  *
+ * // inside a Durable Object / Agent:
  * const browserTools = createBrowserTools({
- *   browser: env.BROWSER,
- *   loader: env.LOADER,
+ *   ctx: this.ctx,
+ *   browser: this.env.BROWSER,
+ *   loader: this.env.LOADER,
  * });
  *
  * const stream = chat({
@@ -33,40 +33,31 @@ export type { BrowserToolsOptions } from "./shared";
  * });
  * ```
  */
-export function createBrowserTools(options: BrowserToolsOptions): ServerTool[] {
-  const handlers = createBrowserToolHandlers(options);
-
-  const search = toolDefinition({
-    name: "browser_search" as const,
-    description: SEARCH_DESCRIPTION,
-    inputSchema: z.object({
-      code: z.string().meta({
-        description: "JavaScript async arrow function that queries the CDP spec"
-      })
-    })
-  }).server(async ({ code }) => {
-    const result = await handlers.search(code);
-    if (result.isError) {
-      throw new Error(result.text);
-    }
-    return { text: result.text };
-  });
+export function createBrowserTools(
+  options: CreateBrowserToolsOptions
+): ServerTool[] {
+  const { tools } = createBrowserRuntime(options);
+  const executeTool = tools.browser_execute;
 
   const execute = toolDefinition({
     name: "browser_execute" as const,
-    description: EXECUTE_DESCRIPTION,
+    description: executeTool.description ?? "",
     inputSchema: z.object({
       code: z.string().meta({
-        description: "JavaScript async arrow function that uses the cdp helper"
+        description:
+          "TypeScript async arrow function that uses the cdp connector"
       })
     })
   }).server(async ({ code }) => {
-    const result = await handlers.execute(code);
-    if (result.isError) {
-      throw new Error(result.text);
+    if (!executeTool.execute) {
+      throw new Error("browser_execute tool is not executable");
     }
-    return { text: result.text };
+    const result = (await executeTool.execute(
+      { code },
+      { toolCallId: crypto.randomUUID(), messages: [] }
+    )) as ProxyToolOutput;
+    return result;
   });
 
-  return [search, execute];
+  return [execute];
 }

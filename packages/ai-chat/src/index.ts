@@ -511,7 +511,15 @@ export class AIChatAgent<
   private _agentToolLastErrors = new Map<string, string>();
   private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
   private _agentToolLiveSequences = new Map<string, number>();
-  private _agentToolActiveRunId: string | null = null;
+  /**
+   * Request id → run id for in-flight agent-tool turns (null = resolved as
+   * not an agent-tool turn, cached so unrelated turns don't re-query SQLite
+   * per frame). Drives frame attribution in {@link broadcast}: a frame
+   * belongs to a run iff it carries that run's turn request id, so an error
+   * in a user-driven turn or a concurrent run can never leak into another
+   * run's state (#1575).
+   */
+  private _agentToolRunsByRequestId = new Map<string, string | null>();
 
   /**
    * Client tool schemas from the most recent chat request.
@@ -654,42 +662,47 @@ export class AIChatAgent<
     msg: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): void {
-    if (this._agentToolForwarders.size > 0 && typeof msg === "string") {
+    // Inspect frames while any agent-tool run is in flight (live sequences
+    // exist for the run's whole lifecycle), not only while a tailer is
+    // attached — error capture must not depend on tailer timing (#1575).
+    if (
+      (this._agentToolForwarders.size > 0 ||
+        this._agentToolLiveSequences.size > 0) &&
+      typeof msg === "string"
+    ) {
       try {
         const parsed = JSON.parse(msg) as {
           type?: unknown;
           body?: unknown;
           error?: unknown;
+          id?: unknown;
         };
-        if (parsed.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
-          if (parsed.error === true && typeof parsed.body === "string") {
-            const runIds =
-              this._agentToolActiveRunId !== null
-                ? [this._agentToolActiveRunId]
-                : [...this._agentToolForwarders.keys()];
-            for (const runId of runIds) {
+        if (
+          parsed.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          typeof parsed.id === "string"
+        ) {
+          // A frame belongs to a run iff it carries that run's turn request
+          // id. Frames from unrelated turns (a user-driven turn on this
+          // agent, or another run's turn) resolve to a different — or no —
+          // run and are left alone, so concurrent runs cannot
+          // cross-contaminate each other's progress or error state (#1575).
+          const runId = this._agentToolRunForRequest(parsed.id);
+          if (runId !== null) {
+            if (parsed.error === true && typeof parsed.body === "string") {
               this._agentToolLastErrors.set(runId, parsed.body);
-            }
-          } else if (
-            typeof parsed.body === "string" &&
-            parsed.body.length > 0
-          ) {
-            const entries =
-              this._agentToolActiveRunId !== null
-                ? [
-                    [
-                      this._agentToolActiveRunId,
-                      this._agentToolForwarders.get(
-                        this._agentToolActiveRunId
-                      ) ?? new Set<(chunk: AgentToolStoredChunk) => void>()
-                    ] as const
-                  ]
-                : [...this._agentToolForwarders.entries()];
-            for (const [runId, forwarders] of entries) {
+            } else if (
+              typeof parsed.body === "string" &&
+              parsed.body.length > 0
+            ) {
+              // Advance the live sequence even with no tailer attached so a
+              // tailer registering mid-run resumes at the right offset.
               const sequence = this._agentToolLiveSequences.get(runId) ?? 0;
               this._agentToolLiveSequences.set(runId, sequence + 1);
               const chunk = { sequence, body: parsed.body };
-              for (const forward of forwarders) forward(chunk);
+              const forwarders = this._agentToolForwarders.get(runId);
+              if (forwarders) {
+                for (const forward of forwarders) forward(chunk);
+              }
             }
           }
         }
@@ -698,6 +711,25 @@ export class AIChatAgent<
       }
     }
     super.broadcast(msg, without);
+  }
+
+  /**
+   * Resolve the agent-tool run whose turn owns a request id, or null when the
+   * request is not an agent-tool turn. Falls back to the persisted run row
+   * (written when the turn starts, see `_registerAgentToolTurn`) so
+   * attribution survives a DO restart mid-run; either outcome is cached.
+   */
+  private _agentToolRunForRequest(requestId: string): string | null {
+    const cached = this._agentToolRunsByRequestId.get(requestId);
+    if (cached !== undefined) return cached;
+    const rows = this.sql<{ run_id: string }>`
+      select run_id from cf_ai_chat_agent_tool_runs
+      where request_id = ${requestId} and status = 'running'
+      limit 1
+    `;
+    const runId = rows?.[0]?.run_id ?? null;
+    this._agentToolRunsByRequestId.set(requestId, runId);
+    return runId;
   }
 
   constructor(ctx: AgentContext, env: Env) {
@@ -1330,6 +1362,16 @@ export class AIChatAgent<
   /**
    * Notify a connection about an active stream that can be resumed.
    * The client should respond with CF_AGENT_STREAM_RESUME_ACK to receive chunks.
+   *
+   * A connection can legitimately be notified more than once for the same
+   * request — proactively from onConnect AND in response to its
+   * CF_AGENT_STREAM_RESUME_REQUEST (#1733). This is intentional and must NOT
+   * be deduped here: an explicit resume request always deserves a response
+   * (the client's reconnectToStream would otherwise hang until its safety
+   * timeout, with no replay), and the proactive notify is required for
+   * clients that never send a resume request. The notify itself is a single
+   * tiny frame; clients are responsible for deduping the ACK so the full
+   * chunk buffer is not replayed twice.
    * @param connection - The WebSocket connection to notify
    */
   private _notifyStreamResuming(connection: Connection) {
@@ -1369,7 +1411,7 @@ export class AIChatAgent<
   /** @internal Delegate to _resumableStream */
   protected _startStream(
     requestId: string,
-    options: { messageId?: string } = {}
+    options: { messageId?: string; continuation?: boolean } = {}
   ): string {
     const streamId = this._resumableStream.start(requestId, options);
     if (this._continuation.pending?.requestId === requestId) {
@@ -2802,6 +2844,34 @@ export class AIChatAgent<
     }
   }
 
+  /**
+   * Bind the child turn that is about to stream to its agent-tool run, at
+   * the moment the turn's request id is first knowable (inside the turn,
+   * before any frame is broadcast). The in-memory mapping drives frame
+   * attribution in {@link broadcast}; the run row's `request_id` is
+   * persisted here rather than at terminal so attribution also survives a
+   * DO restart mid-run (#1575).
+   */
+  private _registerAgentToolTurn(runId: string): void {
+    const requestId = this._turnQueue.activeRequestId;
+    if (requestId === null) {
+      // Invariant: this runs inside the turn's enqueued fn, so the turn
+      // queue's active request id is set. If it ever isn't, the run can't be
+      // bound to its frames and its error/progress capture silently degrades
+      // (#1575) — surface it rather than fail quietly.
+      console.warn(
+        `[AIChatAgent] agent-tool run ${runId} has no active request id at turn start; frame attribution will be skipped`
+      );
+      return;
+    }
+    this._agentToolRunsByRequestId.set(requestId, runId);
+    this.sql`
+      update cf_ai_chat_agent_tool_runs
+      set request_id = ${requestId}
+      where run_id = ${runId}
+    `;
+  }
+
   async startAgentToolRun(
     input: unknown,
     options: { runId: string; signal?: AbortSignal }
@@ -2846,7 +2916,7 @@ export class AIChatAgent<
         this._setRequestContext(undefined, { agentToolInput: input });
         const result = await this.saveMessages(
           async (messages) => {
-            this._agentToolActiveRunId = options.runId;
+            this._registerAgentToolTurn(options.runId);
             return [
               ...messages,
               this.formatAgentToolInput(input, { runId: options.runId })
@@ -2936,8 +3006,18 @@ export class AIChatAgent<
         options.signal?.removeEventListener("abort", abortFromParent);
         this._agentToolAbortControllers.delete(options.runId);
         this._agentToolLiveSequences.delete(options.runId);
-        if (this._agentToolActiveRunId === options.runId) {
-          this._agentToolActiveRunId = null;
+        // Drop this run's request-id mappings. When no runs remain in flight
+        // clear the whole map, so negatively-cached (null) entries for
+        // unrelated turns can't accumulate for the DO's lifetime — the map is
+        // only consulted while a run is active (#1575).
+        if (this._agentToolAbortControllers.size === 0) {
+          this._agentToolRunsByRequestId.clear();
+        } else {
+          for (const [reqId, runId] of this._agentToolRunsByRequestId) {
+            if (runId === options.runId) {
+              this._agentToolRunsByRequestId.delete(reqId);
+            }
+          }
         }
         this._agentToolLastErrors.delete(options.runId);
         this._agentToolPreTurnAssistantIds.delete(options.runId);
@@ -4061,6 +4141,19 @@ export class AIChatAgent<
   ): Promise<boolean> {
     const pending = await this._pendingChatTerminal();
     if (!pending || pending.requestId !== requestId) return false;
+    // Replay any partial content the errored stream produced before the
+    // error, so the reconnecting client observes the same sequence a live
+    // client did — content chunks, then the terminal error (#1575). If the
+    // connection drops mid-replay, skip the terminal frame; the record is
+    // retained, so the next reconnect retries the whole sequence.
+    if (
+      !this._resumableStream.replayErroredChunksByRequestId(
+        connection,
+        pending.requestId
+      )
+    ) {
+      return true;
+    }
     sendIfOpen(
       connection,
       JSON.stringify({
@@ -4616,9 +4709,10 @@ export class AIChatAgent<
    * Exactly-once terminalization here rests SOLELY on the
    * `stored?.status === "exhausted"` re-entry guard below — unlike
    * `@cloudflare/think`, `@cloudflare/ai-chat` has no durable-submission layer
-   * to short-circuit a duplicate alarm earlier. The sealed incident is
-   * re-persisted even when the record was found missing, so a swept record is
-   * re-armed for the guard on the next alarm.
+   * to short-circuit a duplicate alarm earlier. The incident read/write are
+   * best-effort because they back only that guard, not the terminal UX: a
+   * failed read synthesizes the incident and a failed seal write costs at most
+   * a re-delivered banner on a duplicate alarm.
    *
    * Two residual at-least-once edges, both deliberately accepted as "deliver a
    * second banner" ≫ "silently drop the turn":
@@ -4637,9 +4731,19 @@ export class AIChatAgent<
     const incidentKey = data?.incidentId
       ? this._chatRecoveryIncidentKey(data.incidentId)
       : null;
-    const stored = incidentKey
-      ? await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)
-      : null;
+    let stored: ChatRecoveryIncident | null = null;
+    if (incidentKey) {
+      try {
+        stored =
+          (await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)) ??
+          null;
+      } catch (readError) {
+        console.error(
+          "[AIChatAgent] failed to read recovery incident during give-up; synthesizing",
+          readError
+        );
+      }
+    }
 
     // Re-entry guard (see method doc): a sealed incident means terminalization
     // already happened, so a duplicate stale alarm must not re-fire
@@ -4675,12 +4779,6 @@ export class AIChatAgent<
           reason: "stable_timeout"
         };
 
-    // Persist the sealed incident (retained for inspection / TTL sweep) so the
-    // re-entry guard above sees `exhausted` if a duplicate stale alarm fires.
-    if (incidentKey) {
-      await this.ctx.storage.put(incidentKey, incident);
-    }
-
     const streamId = this._resolveRecoveryStreamId(
       incident.recoveryRootRequestId ?? incident.requestId
     );
@@ -4688,6 +4786,17 @@ export class AIChatAgent<
       ? this._getPartialStreamText(streamId)
       : { text: "", parts: [] as MessagePart[] };
 
+    // Terminalize BEFORE sealing the incident. The terminal write inside
+    // `_exhaustChatRecovery` (`_recordChatTerminal`) hits storage and can
+    // reject with a platform transient in exactly the window a give-up tends
+    // to run in (#1730: deploy reset / storage outage). Letting that throw
+    // propagate is deliberate: `Agent._executeScheduleCallback` defers the
+    // one-shot row on a platform transient, so the WHOLE give-up re-runs on a
+    // healthy isolate instead of half-sealing. Sealing first would arm the
+    // re-entry guard above and turn that re-run into a no-op — dropping the
+    // durable terminal record (#1645). The re-run is idempotent
+    // (`_recordChatTerminal` overwrites the same key); `onExhausted` + the
+    // banner may fire again — the documented at-least-once edge.
     await this._exhaustChatRecovery(
       incident,
       config,
@@ -4695,6 +4804,21 @@ export class AIChatAgent<
       streamId,
       incident.firstSeenAt
     );
+
+    // Persist the sealed incident (retained for inspection / TTL sweep) so the
+    // re-entry guard above sees `exhausted` if a duplicate stale alarm fires.
+    // Best-effort: terminalization already fully succeeded, so a failed seal
+    // write costs at most a re-delivered banner on a duplicate alarm.
+    if (incidentKey) {
+      try {
+        await this.ctx.storage.put(incidentKey, incident);
+      } catch (writeError) {
+        console.error(
+          "[AIChatAgent] failed to persist sealed recovery incident during give-up",
+          writeError
+        );
+      }
+    }
   }
 
   private _shouldRetryRecoveredPreStreamTurn(
@@ -6194,7 +6318,15 @@ export class AIChatAgent<
         // continuation this is the cloned last-assistant id, so recovery merges
         // into it; for a new turn it is a fresh id, so recovery keeps it
         // distinct.
-        const streamId = this._startStream(id, { messageId: message.id });
+        // The continuation flag is persisted in stream metadata so replayed
+        // frames carry `continuation: true` exactly like the live broadcast
+        // frames below (#1733) — a reconnecting client needs it to append to
+        // the existing assistant message instead of rebuilding it from
+        // scratch and dropping the pre-continuation parts.
+        const streamId = this._startStream(id, {
+          messageId: message.id,
+          continuation
+        });
 
         const reader = response.body.getReader();
 

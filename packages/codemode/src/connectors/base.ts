@@ -7,6 +7,7 @@ import {
 import type {
   ConnectorDescription,
   ExecutionEndStatus,
+  PassEndStatus,
   ToolAnnotations,
   ToolExecuteContext
 } from "./types";
@@ -25,6 +26,15 @@ export type ConnectorTool = {
   outputSchema?: JSONSchema7;
   /** Pause for user approval before executing. Omit to execute immediately. */
   requiresApproval?: boolean;
+  /**
+   * Replay policy for the durable log. `"reexecute"` marks the call ephemeral:
+   * its result is never stored durably, and a replay re-executes the call
+   * instead of replaying a recorded result. Use it for idempotent reads whose
+   * results are large (file contents, directory listings) — they'd otherwise
+   * bloat the replay log. Incompatible with `requiresApproval` (an approved
+   * side effect must be logged, never re-executed). Defaults to `"log"`.
+   */
+  replay?: "log" | "reexecute";
   execute: (
     args: unknown,
     ctx?: ToolExecuteContext
@@ -143,13 +153,25 @@ export abstract class CodemodeConnector<
     const descriptors: JsonSchemaToolDescriptors = {};
     const annotations: Record<string, ToolAnnotations> = {};
     for (const [name, t] of Object.entries(tools)) {
+      if (t.requiresApproval && t.replay === "reexecute") {
+        // An approved action is a side effect; replaying it by re-executing
+        // would re-apply the side effect on every later resume of the run.
+        throw new Error(
+          `Connector "${this.name()}" tool "${name}" cannot combine ` +
+            `requiresApproval with replay: "reexecute" — approved actions ` +
+            `must be logged, not re-executed.`
+        );
+      }
       descriptors[name] = {
         description: t.description,
         inputSchema: toolInputSchema(t),
         outputSchema: t.outputSchema
       };
-      if (t.requiresApproval) {
-        annotations[name] = { requiresApproval: true };
+      if (t.requiresApproval || t.replay === "reexecute") {
+        annotations[name] = {
+          ...(t.requiresApproval ? { requiresApproval: true } : {}),
+          ...(t.replay === "reexecute" ? { replay: "reexecute" as const } : {})
+        };
       }
     }
     return {
@@ -167,7 +189,10 @@ export abstract class CodemodeConnector<
   ): Promise<unknown> {
     const tool = (await this.resolvedTools())[method];
     if (!tool) throw new Error(`Tool "${method}" not found on ${this.name()}`);
-    return tool.execute(args, ctx);
+    // `return await` (not `return`) so a synchronously-rejected promise gets
+    // its handler attached in the same tick — workerd otherwise reports a
+    // false-positive unhandled rejection during promise adoption.
+    return await tool.execute(args, ctx);
   }
 
   /**
@@ -186,6 +211,24 @@ export abstract class CodemodeConnector<
     await tool.revert(args, result, ctx);
     return true;
   }
+
+  /**
+   * Called at the end of every execution *pass* — including a pass that ends
+   * in a pause awaiting approval, where `disposeExecution` deliberately does
+   * NOT fire. Override to release per-pass resources: an open socket, a lease,
+   * an in-memory cache entry. Per-execution resources (e.g. a browser session
+   * that must survive the pause for the resume) belong in `disposeExecution`.
+   *
+   * On a terminal pass, `onPassEnd` fires first, then `disposeExecution`.
+   *
+   * Contract for implementers: be idempotent, don't rely on instance memory
+   * (a resume may run on a fresh instance), and don't throw — the runtime
+   * ignores rejections from this hook.
+   */
+  async onPassEnd(
+    _executionId: string,
+    _status: PassEndStatus
+  ): Promise<void> {}
 
   /**
    * Called once when a codemode execution reaches a terminal state — completed,

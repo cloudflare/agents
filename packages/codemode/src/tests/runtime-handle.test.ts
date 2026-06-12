@@ -17,6 +17,35 @@ function createMockExecutor(result: unknown = "ok"): Executor {
 }
 
 describe("createCodemodeRuntime", () => {
+  it("rejects duplicate and reserved connector names up front", () => {
+    const named = (name: string) =>
+      ({
+        name: () => name
+      }) as unknown as import("../connectors").CodemodeConnector;
+    const base = {
+      ctx: createMockCtx({}),
+      executor: createMockExecutor()
+    };
+
+    expect(() =>
+      createCodemodeRuntime({
+        ...base,
+        connectors: [named("state"), named("state")]
+      })
+    ).toThrow('Duplicate connector name "state"');
+
+    expect(() =>
+      createCodemodeRuntime({ ...base, connectors: [named("codemode")] })
+    ).toThrow("reserved");
+
+    expect(() =>
+      createCodemodeRuntime({
+        ...base,
+        connectors: [named("state"), named("cdp")]
+      })
+    ).not.toThrow();
+  });
+
   it("exposes the model-facing tool from the runtime handle", () => {
     const runtimeStub = {};
     const ctx = createMockCtx(runtimeStub);

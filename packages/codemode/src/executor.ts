@@ -25,7 +25,7 @@ export type {
 } from "./executor-types";
 // ConnectorBinding re-exported for public API — used by proxy-tool and runtime.
 
-const BINARY_TAG = "__codemode_binary_v1__";
+import { stringifyForCodemode, parseForCodemode } from "./codec";
 
 // Control protocol between a connector binding (host) and the sandbox proxy.
 // A binding returns `{ [CONNECTOR_CONTROL_KEY]: "pause" }` (awaiting approval /
@@ -34,77 +34,6 @@ const BINARY_TAG = "__codemode_binary_v1__";
 // locally. Keep in sync with proxy-tool.ts (CONTROL_KEY / PAUSE_SENTINEL).
 const CONNECTOR_CONTROL_KEY = "__codemode_control__";
 const PAUSE_SENTINEL_LITERAL = "__CODEMODE_PAUSE__";
-
-type EncodedBinary = {
-  [BINARY_TAG]: "Uint8Array" | "ArrayBuffer" | "ArrayBufferView";
-  data: string;
-};
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-    binary += String.fromCharCode(
-      ...bytes.subarray(i, Math.min(i + chunkSize, bytes.byteLength))
-    );
-  }
-  return btoa(binary);
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
-function encodeCodemodeValue(value: unknown): unknown {
-  if (value instanceof Uint8Array) {
-    return { [BINARY_TAG]: "Uint8Array", data: bytesToBase64(value) };
-  }
-  if (value instanceof ArrayBuffer) {
-    return {
-      [BINARY_TAG]: "ArrayBuffer",
-      data: bytesToBase64(new Uint8Array(value))
-    };
-  }
-  if (ArrayBuffer.isView(value)) {
-    const view = value as ArrayBufferView;
-    return {
-      [BINARY_TAG]: "ArrayBufferView",
-      data: bytesToBase64(
-        new Uint8Array(view.buffer, view.byteOffset, view.byteLength)
-      )
-    };
-  }
-  return value;
-}
-
-function decodeCodemodeValue(value: unknown): unknown {
-  if (!value || typeof value !== "object" || !(BINARY_TAG in value)) {
-    return value;
-  }
-  const encoded = value as EncodedBinary;
-  if (typeof encoded.data !== "string") return value;
-  const bytes = base64ToBytes(encoded.data);
-  if (encoded[BINARY_TAG] === "ArrayBuffer") {
-    return bytes.buffer.slice(
-      bytes.byteOffset,
-      bytes.byteOffset + bytes.byteLength
-    );
-  }
-  return bytes;
-}
-
-function stringifyForCodemode(value: unknown): string {
-  return JSON.stringify(value, (_key, nested) => encodeCodemodeValue(nested));
-}
-
-function parseForCodemode(json: string): unknown {
-  return JSON.parse(json, (_key, nested) => decodeCodemodeValue(nested));
-}
 
 const SANDBOX_CODEC = String.raw`
     const __CODEMODE_BINARY_TAG = "__codemode_binary_v1__";
@@ -316,8 +245,14 @@ export class DynamicWorkerExecutor implements Executor {
     const normalized = normalizeCode(code);
     const timeoutMs = this.#timeout;
 
-    // Validate provider names.
+    // Validate provider names. Each provider is declared as a top-level
+    // `const <name>` inside the generated `evaluate()` body, so a provider
+    // name must not collide with the harness's own locals/imports or with the
+    // JS globals the harness relies on (e.g. `Promise.race`, `setTimeout`,
+    // `new Error`, `console`) — shadowing those would break execution in
+    // confusing ways.
     const RESERVED_NAMES = new Set([
+      // Harness internals (locals/imports/classes in the generated module).
       "__dispatchers",
       "__connectors",
       "__logs",
@@ -327,7 +262,14 @@ export class DynamicWorkerExecutor implements Executor {
       "__encodeCodemodeValue",
       "__decodeCodemodeValue",
       "__stringifyForCodemode",
-      "__parseForCodemode"
+      "__parseForCodemode",
+      "WorkerEntrypoint",
+      "CodeExecutor",
+      // Globals the generated harness code depends on.
+      "Promise",
+      "setTimeout",
+      "Error",
+      "console"
     ]);
     const VALID_IDENT = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
     const seenNames = new Set<string>();

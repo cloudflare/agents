@@ -47,6 +47,9 @@
 .sd-theme pre code {
   all: unset;
   font: inherit;
+  /* `all: unset` also wipes Streamdown's line-number counter — restore it,
+     otherwise every line renders as "1" */
+  counter-reset: line;
 }
 
 /* Playground-specific: log entry styles (no Kumo equivalent) */

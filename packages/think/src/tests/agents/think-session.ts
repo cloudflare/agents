@@ -15,6 +15,7 @@ import type {
   StreamableResult,
   ChatOptions,
   ChatResponseResult,
+  SaveMessagesOptions,
   SaveMessagesResult,
   ChatRecoveryConfig,
   ChatRecoveryContext,
@@ -506,6 +507,47 @@ export class ThinkTestAgent extends Think {
     const msg = error instanceof Error ? error.message : String(error);
     this._chatErrorLog.push(msg);
     return error;
+  }
+
+  /**
+   * #1575: broadcast a chat error frame whose request id belongs to no
+   * agent-tool run, simulating an unrelated turn failing on this agent
+   * while a run is being tailed.
+   */
+  broadcastUnrelatedErrorForTest(requestId: string): void {
+    this.broadcast(
+      JSON.stringify({
+        type: "cf_agent_use_chat_response",
+        id: requestId,
+        error: true,
+        done: false,
+        body: "unrelated turn failure"
+      })
+    );
+  }
+
+  /**
+   * #1575: simulate a DO restart mid-run — the in-memory request-id map is
+   * empty (wiped by the restart), but the child-run row persisted its
+   * `request_id` at turn start. `_agentToolRunForRequest` must still attribute
+   * a frame to the run via the SQL fallback, and an unknown request resolves
+   * to null.
+   */
+  resolveAgentToolRunAfterRestartForTest(
+    runId: string,
+    requestId: string
+  ): { running: string | null; unknown: string | null } {
+    this["_ensureAgentToolChildRunTable"]();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs (run_id, request_id, status, started_at)
+      VALUES (${runId}, ${requestId}, 'running', ${Date.now()})
+    `;
+    // Cold in-memory map, as after a restart.
+    this["_agentToolRunsByRequestId"].clear();
+    return {
+      running: this["_agentToolRunForRequest"](requestId),
+      unknown: this["_agentToolRunForRequest"]("no-such-request")
+    };
   }
 
   private _beforeTurnLog: Array<{
@@ -1432,6 +1474,46 @@ export class ThinkTestAgent extends Think {
     )._streamResult(crypto.randomUUID(), createEmptyStreamResult());
   }
 
+  /**
+   * #1575: drive `_replayTerminalOnAck` end to end — produce a real errored
+   * stream that buffered partial content, then replay the pending terminal
+   * onto a capturing connection. Returns the frames a reconnecting client
+   * would observe, in order, so the test can assert the partial content is
+   * replayed before the terminal error frame.
+   */
+  async replayTerminalOnAckCaptureForTest(errorText: string): Promise<{
+    returned: boolean;
+    frames: Array<Record<string, unknown>>;
+  }> {
+    const requestId = crypto.randomUUID();
+    await (
+      this as unknown as {
+        _streamResult: (
+          requestId: string,
+          result: StreamableResult
+        ) => Promise<void>;
+      }
+    )._streamResult(
+      requestId,
+      createInBandErrorStreamResult(errorText, ["partial response"])
+    );
+    const frames: Array<Record<string, unknown>> = [];
+    const fakeConnection = {
+      send(message: string) {
+        frames.push(JSON.parse(message) as Record<string, unknown>);
+      }
+    };
+    const returned = await (
+      this as unknown as {
+        _replayTerminalOnAck: (
+          connection: { send(message: string): void },
+          requestId: string
+        ) => Promise<boolean>;
+      }
+    )._replayTerminalOnAck(fakeConnection, requestId);
+    return { returned, frames };
+  }
+
   async runEmptyRpcStreamForTest(): Promise<{ doneCalled: boolean }> {
     let doneCalled = false;
     await (
@@ -1843,6 +1925,73 @@ export class ThinkAgentToolParent extends Agent {
       input,
       inputPreview: input
     });
+  }
+
+  /**
+   * #1575: run a Think child while injecting a chat error frame from an
+   * UNRELATED turn (a request id that belongs to no agent-tool run) into the
+   * child's broadcast stream mid-run. The run's terminal status must not be
+   * contaminated by it.
+   */
+  async runThinkChildWithInjectedUnrelatedError(
+    input: string,
+    injectAfterMs: number,
+    runId = crypto.randomUUID()
+  ): Promise<RunAgentToolResult> {
+    this.events = [];
+    this.finishes = [];
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    const timer = setTimeout(() => {
+      void child.broadcastUnrelatedErrorForTest(`unrelated-turn-${runId}`);
+    }, injectAfterMs);
+    try {
+      return await this.runAgentTool(ThinkTestAgent, {
+        runId,
+        parentToolCallId: "think-tool-call",
+        input,
+        inputPreview: input
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * #1575: run a Think child whose turn dies with an in-band stream error.
+   * Used to assert error classification independent of tailer timing and that
+   * concurrent runs stay isolated.
+   */
+  async runThinkChildWithInBandError(
+    input: string,
+    errorText: string,
+    runId = crypto.randomUUID()
+  ): Promise<RunAgentToolResult> {
+    this.events = [];
+    this.finishes = [];
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.setInBandErrorResponse(errorText);
+    return this.runAgentTool(ThinkTestAgent, {
+      runId,
+      parentToolCallId: "think-tool-call",
+      input,
+      inputPreview: input
+    });
+  }
+
+  /**
+   * #1575: start a Think child run directly — no tailer is ever attached —
+   * with a turn that dies in-band, and wait for its terminal inspection.
+   * Terminal status must come from the child's own result, not from tailing.
+   */
+  async startThinkChildWithoutTailForTest(
+    input: string,
+    errorText: string,
+    runId = crypto.randomUUID()
+  ): Promise<AgentToolRunInspection> {
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.setInBandErrorResponse(errorText);
+    await child.startAgentToolRun(input, { runId });
+    return this.waitForTerminalInspectionForTest(child, runId);
   }
 
   /**
@@ -3141,6 +3290,32 @@ export class ThinkProgrammaticTestAgent extends Think {
     errorText: string;
     textChunks: string[];
   } | null = null;
+  private _failNextContinueTransient: string | null = null;
+
+  /**
+   * Arm a ONE-SHOT platform-transient fault on the next `continueLastTurn`
+   * (#1730): the next recovered continuation throws the production `SqlError`
+   * shape (`SQL query failed: <message>` with the bare platform error as
+   * `cause`, no `retryable` flag on the wrapper), then the fault clears so the
+   * deferred re-run succeeds.
+   */
+  async failNextRecoveredContinueForTest(message: string): Promise<void> {
+    this._failNextContinueTransient = message;
+  }
+
+  protected override async continueLastTurn(
+    body?: Record<string, unknown>,
+    options?: SaveMessagesOptions
+  ): Promise<SaveMessagesResult> {
+    if (this._failNextContinueTransient) {
+      const message = this._failNextContinueTransient;
+      this._failNextContinueTransient = null;
+      throw new Error(`SQL query failed: ${message}`, {
+        cause: new Error(message)
+      });
+    }
+    return super.continueLastTurn(body, options);
+  }
 
   override getModel(): LanguageModel {
     if (this._inBandErrorResponse) {
@@ -3343,6 +3518,107 @@ export class ThinkProgrammaticTestAgent extends Think {
     );
   }
 
+  private async _waitForSubmissionForTest(
+    submissionId: string,
+    predicate: (submission: ThinkSubmissionInspection) => boolean
+  ): Promise<ThinkSubmissionInspection> {
+    for (let attempt = 0; attempt < 80; attempt++) {
+      const submission = await this.inspectSubmission(submissionId);
+      if (submission && predicate(submission)) return submission;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    const submission = await this.inspectSubmission(submissionId);
+    if (!submission) {
+      throw new Error(`Submission ${submissionId} was not found`);
+    }
+    return submission;
+  }
+
+  async cancelQueuedRunningSubmissionBeforeSlotForTest(options?: {
+    submissionId?: string;
+    metadata?: Record<string, unknown>;
+    messageTexts?: string[];
+  }): Promise<{
+    submission: ThinkSubmissionInspection | null;
+    messages: UIMessage[];
+    responses: ChatResponseResult[];
+    submissionLog: ThinkSubmissionInspection[];
+    workflowEvents: Array<{
+      workflowName: string;
+      workflowId: string;
+      event: { type: string; payload?: unknown };
+    }>;
+  }> {
+    const previousDelayedChunks = this._delayedChunks;
+    this._delayedChunks = {
+      chunks: ["active ", "turn ", "still ", "running"],
+      delayMs: 50
+    };
+
+    const activeCallback = new TestCollectingCallback();
+    const activeTurn = this.chat("active turn", activeCallback);
+    try {
+      let activeTurnStarted = false;
+      for (let attempt = 0; attempt < 80; attempt++) {
+        const activeUserMessage = (await this.getMessages()).find(
+          (message) =>
+            message.role === "user" &&
+            message.parts.some(
+              (part) => part.type === "text" && part.text === "active turn"
+            )
+        );
+        if (activeUserMessage) {
+          activeTurnStarted = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      if (!activeTurnStarted) {
+        throw new Error("Active turn did not start before queued submission");
+      }
+
+      const submissionId = options?.submissionId ?? "sub-queued-running-cancel";
+      const messageTexts = options?.messageTexts ?? ["queued then cancelled"];
+      await this.submitMessages(
+        messageTexts.map((text, index) => ({
+          id: `${submissionId}-message-${index}`,
+          role: "user" as const,
+          parts: [{ type: "text" as const, text }]
+        })),
+        {
+          submissionId,
+          metadata: options?.metadata
+        }
+      );
+
+      await this._waitForSubmissionForTest(
+        submissionId,
+        (submission) => submission.status === "running"
+      );
+      await this.cancelSubmission(submissionId, "cancelled before queue slot");
+
+      await activeTurn;
+      await (
+        this as unknown as {
+          _turnQueue: { waitForIdle: () => Promise<void> };
+        }
+      )._turnQueue.waitForIdle();
+      await this.drainWorkflowNotificationsForTest();
+
+      return {
+        submission: await this.inspectSubmission(submissionId),
+        messages: await this.getMessages(),
+        responses: this._responseLog,
+        submissionLog: this._submissionLog,
+        workflowEvents: this._workflowEventLog
+      };
+    } finally {
+      this._delayedChunks = previousDelayedChunks;
+      await activeTurn.catch(() => {});
+    }
+  }
+
   async testSubmitMessagesError(
     text: string,
     options?: {
@@ -3435,6 +3711,23 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async continueRecoveredChatForTest(requestId: string): Promise<void> {
     await this._chatRecoveryContinue({ recoveredRequestId: requestId });
+  }
+
+  /**
+   * Like `continueRecoveredChatForTest` but catches in-DO and returns the
+   * thrown message (or `null` when nothing threw) — a rejection crossing the
+   * RPC boundary is also reported by workerd as an unhandled rejection, which
+   * pollutes test output even when the caller expects it.
+   */
+  async continueRecoveredChatCatchingForTest(
+    requestId: string
+  ): Promise<string | null> {
+    try {
+      await this._chatRecoveryContinue({ recoveredRequestId: requestId });
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
 
   async cancelDuringRecoveredContinuationForTest(
@@ -4876,15 +5169,31 @@ export class ThinkRecoveryTestAgent extends Think {
    * Drive `_handleRecoveryCallbackError` (the catch path of
    * `_chatRecoveryContinue` / `_chatRecoveryRetry`) and report the outcome.
    *
-   * - A non-reset throw must terminalize (fire `onExhausted` + broadcast the
-   *   terminal banner, seal the incident `exhausted`) and NOT re-throw — so
-   *   `Agent._executeScheduleCallback` doesn't swallow it and delete the
-   *   one-shot row with no terminal UX.
-   * - A deploy code-update reset must re-throw (so the platform re-runs
-   *   recovery on the fresh isolate) and NOT terminalize.
+   * - A non-transient (application) throw must terminalize (fire `onExhausted`
+   *   + broadcast the terminal banner, seal the incident `exhausted`) and NOT
+   *   re-throw — so `Agent._executeScheduleCallback` doesn't swallow it and
+   *   delete the one-shot row with no terminal UX.
+   * - A PLATFORM TRANSIENT (deploy code-update reset / script supersede,
+   *   "Network connection lost.", a `retryable`-flagged error — bare or
+   *   wrapped like `SqlError`) must re-throw (so the platform re-runs recovery
+   *   once healthy) and NOT terminalize (#1730). The recovered submission must
+   *   stay `running` so the deferred re-run picks it up instead of skipping
+   *   with `submission_not_running`.
+   *
+   * `errorShape` controls how `errorMessage` is thrown:
+   *   - "plain" (default): `new Error(errorMessage)`
+   *   - "sql-wrapped": the `SqlError` shape — message prefixed with
+   *     "SQL query failed: ", original error only in `cause`, no flag
+   *   - "retryable": `retryable: true` set on the error object
+   *
+   * `seedRunningSubmission` inserts a `running` durable submission keyed by
+   * the incident's requestId and passes it as `recoveredRequestId`, so tests
+   * can assert what the handler does to it on each branch.
    */
   async testRecoveryCallbackError(input: {
     errorMessage: string;
+    errorShape?: "plain" | "sql-wrapped" | "retryable";
+    seedRunningSubmission?: boolean;
     maxAttempts?: number;
     terminalMessage?: string;
   }): Promise<{
@@ -4893,6 +5202,7 @@ export class ThinkRecoveryTestAgent extends Think {
     exhaustedReason: string | undefined;
     terminalBroadcast: string | undefined;
     incidentStatus: string | undefined;
+    submissionStatus: string | null;
   }> {
     const maxAttempts = input.maxAttempts ?? 5;
     const terminalMessage =
@@ -4913,6 +5223,24 @@ export class ThinkRecoveryTestAgent extends Think {
       latestUserMessageId: null,
       recoveryKind: "continue"
     });
+
+    if (input.seedRunningSubmission) {
+      (
+        this as unknown as { _ensureSubmissionTable: () => void }
+      )._ensureSubmissionTable();
+      const now = Date.now();
+      this.sql`
+        INSERT INTO cf_think_submissions (
+          submission_id, idempotency_key, request_id, stream_id, status,
+          messages_json, metadata_json, error_message, created_at,
+          messages_applied_at, started_at, completed_at
+        )
+        VALUES (
+          ${requestId}, NULL, ${requestId}, NULL, 'running',
+          ${JSON.stringify([])}, NULL, NULL, ${now}, ${now}, ${now}, NULL
+        )
+      `;
+    }
 
     let terminalBroadcast: string | undefined;
     const realBroadcast = (
@@ -4937,7 +5265,15 @@ export class ThinkRecoveryTestAgent extends Think {
       realBroadcast(m);
     };
 
-    const error = new Error(input.errorMessage);
+    const error =
+      input.errorShape === "sql-wrapped"
+        ? new Error(`SQL query failed: ${input.errorMessage}`, {
+            cause: new Error(input.errorMessage)
+          })
+        : new Error(input.errorMessage);
+    if (input.errorShape === "retryable") {
+      (error as unknown as { retryable: boolean }).retryable = true;
+    }
 
     let threw = false;
     try {
@@ -4951,7 +5287,13 @@ export class ThinkRecoveryTestAgent extends Think {
         }
       )._handleRecoveryCallbackError(
         "_chatRecoveryContinue",
-        { incidentId: begun.incidentId, originalRequestId: requestId },
+        {
+          incidentId: begun.incidentId,
+          originalRequestId: requestId,
+          ...(input.seedRunningSubmission
+            ? { recoveredRequestId: requestId }
+            : {})
+        },
         error
       );
     } catch {
@@ -4965,12 +5307,141 @@ export class ThinkRecoveryTestAgent extends Think {
     const incidents = await this.ctx.storage.list<{ status: string }>({
       prefix: "cf:chat-recovery:incident:"
     });
+    const submissionRows = input.seedRunningSubmission
+      ? this.sql<{ status: string }>`
+          SELECT status FROM cf_think_submissions
+          WHERE request_id = ${requestId}
+          LIMIT 1
+        `
+      : [];
     return {
       threw,
       exhaustedContexts: captured.length,
       exhaustedReason: captured[0]?.reason,
       terminalBroadcast,
-      incidentStatus: [...incidents.values()][0]?.status
+      incidentStatus: [...incidents.values()][0]?.status,
+      submissionStatus: submissionRows[0]?.status ?? null
+    };
+  }
+
+  /**
+   * #1730 layer 3: drive the give-up path while the durable terminal write
+   * (`_recordTerminalChatStatus`) rejects with a platform transient — the
+   * exact window a give-up tends to run in. The FIRST give-up must re-throw
+   * (so the one-shot row is preserved) and must NOT seal the incident
+   * `exhausted` (a half-seal would make the deferred re-run a no-op and drop
+   * the durable terminal record). The SECOND give-up (the deferred re-run on
+   * a healthy isolate) must terminalize fully: banner + sealed incident.
+   */
+  async testGiveUpSealTransientDefer(input: {
+    transientMessage: string;
+    terminalMessage?: string;
+  }): Promise<{
+    firstThrew: boolean;
+    incidentStatusAfterFirst: string | undefined;
+    secondThrew: boolean;
+    incidentStatusAfterSecond: string | undefined;
+    terminalBroadcast: string | undefined;
+    exhaustedReasons: string[];
+  }> {
+    const terminalMessage =
+      input.terminalMessage ?? "Conversation interrupted.";
+    const captured: ChatRecoveryExhaustedContext[] = [];
+    this.chatRecovery = {
+      maxAttempts: 5,
+      terminalMessage,
+      onExhausted: (ctx) => {
+        captured.push(ctx);
+      }
+    };
+
+    const requestId = `seal-transient-${crypto.randomUUID()}`;
+    const begun = await this.beginIncidentForTest({
+      requestId,
+      recoveryRootRequestId: requestId,
+      latestUserMessageId: null,
+      recoveryKind: "continue"
+    });
+
+    let terminalBroadcast: string | undefined;
+    const self = this as unknown as {
+      _broadcastChat(m: {
+        body?: string;
+        error?: boolean;
+        done?: boolean;
+      }): void;
+      _recordTerminalChatStatus(
+        status: string,
+        requestId: string,
+        body: string
+      ): Promise<void>;
+      _handleRecoveryCallbackError(
+        callback: string,
+        data: unknown,
+        error: unknown
+      ): Promise<void>;
+    };
+    const realBroadcast = self._broadcastChat.bind(this);
+    self._broadcastChat = (m) => {
+      if (m.error && m.done) terminalBroadcast = m.body;
+      realBroadcast(m);
+    };
+    const realRecordTerminal = self._recordTerminalChatStatus.bind(this);
+    let failTerminalWriteOnce = true;
+    self._recordTerminalChatStatus = async (status, reqId, body) => {
+      if (failTerminalWriteOnce) {
+        failTerminalWriteOnce = false;
+        throw new Error(`SQL query failed: ${input.transientMessage}`, {
+          cause: new Error(input.transientMessage)
+        });
+      }
+      await realRecordTerminal(status, reqId, body);
+    };
+
+    const data = { incidentId: begun.incidentId, originalRequestId: requestId };
+    const appError = new Error("model rejected the continuation");
+
+    const readIncidentStatus = async (): Promise<string | undefined> => {
+      const incidents = await this.ctx.storage.list<{ status: string }>({
+        prefix: "cf:chat-recovery:incident:"
+      });
+      return [...incidents.values()][0]?.status;
+    };
+
+    let firstThrew = false;
+    try {
+      await self._handleRecoveryCallbackError(
+        "_chatRecoveryContinue",
+        data,
+        appError
+      );
+    } catch {
+      firstThrew = true;
+    }
+    const incidentStatusAfterFirst = await readIncidentStatus();
+
+    let secondThrew = false;
+    try {
+      await self._handleRecoveryCallbackError(
+        "_chatRecoveryContinue",
+        data,
+        appError
+      );
+    } catch {
+      secondThrew = true;
+    } finally {
+      self._broadcastChat = realBroadcast;
+      self._recordTerminalChatStatus = realRecordTerminal;
+    }
+    const incidentStatusAfterSecond = await readIncidentStatus();
+
+    return {
+      firstThrew,
+      incidentStatusAfterFirst,
+      secondThrew,
+      incidentStatusAfterSecond,
+      terminalBroadcast,
+      exhaustedReasons: captured.map((c) => c.reason)
     };
   }
 

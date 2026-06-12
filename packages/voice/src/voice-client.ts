@@ -81,7 +81,23 @@ export interface VoiceClientOptions {
   interruptChunks?: number;
   /** Maximum transcript messages to keep in memory. @default 200 */
   maxTranscriptMessages?: number;
+
+  /**
+   * Preferred audio output device for assistant playback.
+   * Pass a MediaDeviceInfo.deviceId from an audiooutput device.
+   * Unsupported browsers continue playing through the default output.
+   * @default "default"
+   */
+  outputDeviceId?: string;
 }
+
+type AudioElementWithSinkId = HTMLAudioElement & {
+  setSinkId?: (sinkId: string) => Promise<void>;
+};
+
+const UNSUPPORTED_OUTPUT_DEVICE_ERROR =
+  "Audio output device selection is not supported in this browser.";
+const OUTPUT_DEVICE_SWITCH_ERROR = "Could not switch audio output device.";
 
 /** Maps each event name to the data type passed to its listeners. */
 export interface VoiceClientEventMap {
@@ -92,6 +108,7 @@ export interface VoiceClientEventMap {
   audiolevelchange: number;
   connectionchange: boolean;
   error: string | null;
+  outputdeviceerror: string | null;
   mutechange: boolean;
   custommessage: unknown;
 }
@@ -249,6 +266,7 @@ export class VoiceClient {
   #isMuted = false;
   #connected = false;
   #error: string | null = null;
+  #outputDeviceError: string | null = null;
   #lastCustomMessage: unknown = null;
   #audioFormat: VoiceAudioFormat | null = null;
   #interimTranscript: string | null = null;
@@ -278,6 +296,13 @@ export class VoiceClient {
   #isScheduling = false;
   #scheduledSources = new Set<AudioBufferSourceNode>();
   #playbackCursor = 0;
+  #playbackElement: HTMLAudioElement | null = null;
+  #playbackDestination: MediaStreamAudioDestinationNode | null = null;
+  #playbackDestinationPromise: Promise<AudioNode> | null = null;
+  #useDefaultPlaybackDestination = false;
+  #outputDeviceId: string;
+  #outputDeviceSwitchGeneration = 0;
+  #playbackOutputGeneration = 0;
   #playbackGeneration = 0;
   #interruptChunkCount = 0;
 
@@ -291,6 +316,7 @@ export class VoiceClient {
     this.#interruptThreshold = options.interruptThreshold ?? 0.05;
     this.#interruptChunks = options.interruptChunks ?? 2;
     this.#maxTranscriptMessages = options.maxTranscriptMessages ?? 200;
+    this.#outputDeviceId = options.outputDeviceId ?? "default";
   }
 
   // --- Public getters ---
@@ -321,6 +347,10 @@ export class VoiceClient {
 
   get error(): string | null {
     return this.#error;
+  }
+
+  get outputDeviceError(): string | null {
+    return this.#outputDeviceError;
   }
 
   /**
@@ -377,6 +407,12 @@ export class VoiceClient {
     if (this.#transcript.length > this.#maxTranscriptMessages) {
       this.#transcript = this.#transcript.slice(-this.#maxTranscriptMessages);
     }
+  }
+
+  #setOutputDeviceError(error: string | null): void {
+    if (this.#outputDeviceError === error) return;
+    this.#outputDeviceError = error;
+    this.#emit("outputdeviceerror", error);
   }
 
   // --- Connection ---
@@ -467,6 +503,8 @@ export class VoiceClient {
       startMsg.preferred_format = this.#options.preferredFormat;
     }
     this.#transport.sendJSON(startMsg);
+    const ctx = await this.#getAudioContext();
+    await this.#getPlaybackDestination(ctx);
     if (this.#options.audioInput) {
       this.#options.audioInput.onAudioLevel = (rms) =>
         this.#processAudioLevel(rms);
@@ -545,6 +583,18 @@ export class VoiceClient {
   sendJSON(data: Record<string, unknown>): void {
     if (this.#transport?.connected) {
       this.#transport.sendJSON(data);
+    }
+  }
+
+  /**
+   * Set the preferred audio output device for assistant playback.
+   * Unsupported browsers continue playing through the default output.
+   */
+  async setOutputDevice(outputDeviceId?: string): Promise<void> {
+    this.#outputDeviceId = outputDeviceId ?? "default";
+    const generation = ++this.#outputDeviceSwitchGeneration;
+    if (this.#playbackElement) {
+      await this.#applyOutputDevice(this.#playbackElement, generation);
     }
   }
 
@@ -697,10 +747,141 @@ export class VoiceClient {
   /** Close the AudioContext and release resources. */
   #closeAudioContext(): void {
     if (this.#audioContext) {
+      this.#closePlaybackOutput();
       this.#audioContext.close().catch(() => {});
       this.#audioContext = null;
       this.#workletRegistered = false;
     }
+  }
+
+  async #getPlaybackDestination(ctx: AudioContext): Promise<AudioNode> {
+    if (this.#playbackDestinationPromise) {
+      return this.#playbackDestinationPromise;
+    }
+    if (this.#playbackDestination) return this.#playbackDestination;
+    if (this.#useDefaultPlaybackDestination) return ctx.destination;
+
+    const outputGeneration = this.#playbackOutputGeneration;
+    const promise = this.#initializePlaybackDestination(ctx, outputGeneration);
+    this.#playbackDestinationPromise = promise;
+    try {
+      return await promise;
+    } finally {
+      if (this.#playbackDestinationPromise === promise) {
+        this.#playbackDestinationPromise = null;
+      }
+    }
+  }
+
+  async #initializePlaybackDestination(
+    ctx: AudioContext,
+    outputGeneration: number
+  ): Promise<AudioNode> {
+    try {
+      const destination = ctx.createMediaStreamDestination();
+      const audio = new Audio();
+      audio.autoplay = true;
+      audio.srcObject = destination.stream;
+      this.#playbackElement = audio;
+      this.#playbackDestination = destination;
+      await this.#applyOutputDevice(audio, this.#outputDeviceSwitchGeneration);
+      if (!this.#isCurrentPlaybackOutput(audio, outputGeneration)) {
+        this.#releasePlaybackElement(audio);
+        return ctx.destination;
+      }
+      await audio.play();
+      if (!this.#isCurrentPlaybackOutput(audio, outputGeneration)) {
+        this.#releasePlaybackElement(audio);
+        return ctx.destination;
+      }
+      return destination;
+    } catch (err) {
+      console.warn(
+        "[VoiceClient] HTMLAudioElement playback output unavailable; using default AudioContext destination.",
+        err
+      );
+      this.#closePlaybackOutput();
+      this.#useDefaultPlaybackDestination = true;
+      return ctx.destination;
+    }
+  }
+
+  #isCurrentPlaybackOutput(
+    audio: HTMLAudioElement,
+    outputGeneration: number
+  ): boolean {
+    return (
+      this.#playbackElement === audio &&
+      this.#playbackOutputGeneration === outputGeneration
+    );
+  }
+
+  async #applyOutputDevice(
+    audio: HTMLAudioElement,
+    generation: number
+  ): Promise<void> {
+    const sinkId = this.#outputDeviceId;
+    const setSinkId = (audio as AudioElementWithSinkId).setSinkId;
+    if (!setSinkId) {
+      if (sinkId === "default") {
+        this.#setOutputDeviceError(null);
+        return;
+      }
+      this.#setOutputDeviceError(UNSUPPORTED_OUTPUT_DEVICE_ERROR);
+      return;
+    }
+
+    try {
+      await setSinkId.call(audio, sinkId);
+      if (
+        generation !== this.#outputDeviceSwitchGeneration ||
+        sinkId !== this.#outputDeviceId
+      ) {
+        if (this.#playbackElement === audio) {
+          await this.#applyOutputDevice(
+            audio,
+            this.#outputDeviceSwitchGeneration
+          );
+        }
+        return;
+      }
+      if (
+        this.#outputDeviceError === UNSUPPORTED_OUTPUT_DEVICE_ERROR ||
+        this.#outputDeviceError === OUTPUT_DEVICE_SWITCH_ERROR
+      ) {
+        this.#setOutputDeviceError(null);
+      }
+    } catch {
+      if (
+        generation !== this.#outputDeviceSwitchGeneration ||
+        sinkId !== this.#outputDeviceId
+      ) {
+        if (this.#playbackElement === audio) {
+          await this.#applyOutputDevice(
+            audio,
+            this.#outputDeviceSwitchGeneration
+          );
+        }
+        return;
+      }
+      this.#setOutputDeviceError(OUTPUT_DEVICE_SWITCH_ERROR);
+    }
+  }
+
+  #closePlaybackOutput(): void {
+    this.#playbackOutputGeneration++;
+    if (this.#playbackElement) {
+      this.#releasePlaybackElement(this.#playbackElement);
+      this.#playbackElement = null;
+    }
+    this.#playbackDestination = null;
+    this.#playbackDestinationPromise = null;
+    this.#useDefaultPlaybackDestination = false;
+  }
+
+  #releasePlaybackElement(audio: HTMLAudioElement): void {
+    audio.pause();
+    audio.srcObject = null;
   }
 
   // --- Audio playback ---
@@ -724,9 +905,12 @@ export class VoiceClient {
       }
       if (generation !== this.#playbackGeneration) return;
 
+      const destination = await this.#getPlaybackDestination(ctx);
+      if (generation !== this.#playbackGeneration) return;
+
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
-      source.connect(ctx.destination);
+      source.connect(destination);
       this.#scheduledSources.add(source);
       source.onended = () => {
         this.#scheduledSources.delete(source);

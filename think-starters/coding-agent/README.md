@@ -5,6 +5,9 @@ Cloudflare Workers, with a small React chat UI.
 
 The model works in a persistent virtual filesystem using the built-in workspace
 tools (read, write, edit, find, grep) and has a colocated `code-review` skill.
+It also has the durable `execute` tool (`createExecuteTool(this)`): the model
+writes sandboxed TypeScript against `state.*` (the same workspace filesystem)
+for batch operations that would otherwise take many tool calls.
 
 ## Develop
 

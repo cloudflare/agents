@@ -4354,17 +4354,17 @@ describe("Think — onChatRecovery", () => {
     expect(result.terminalBroadcast).toBe(terminalMessage);
   });
 
-  it("terminalizes a non-reset throw in a recovery callback instead of letting it be swallowed + silently sealed", async () => {
+  it("terminalizes a non-transient (application) throw in a recovery callback instead of letting it be swallowed + silently sealed", async () => {
     const agent = await freshRecoveryAgent("recovery-throw-terminalize");
     const terminalMessage = "The assistant was interrupted. Please try again.";
 
     const result = await agent.testRecoveryCallbackError({
-      errorMessage: "transient storage failure mid-recovery",
+      errorMessage: "model rejected the continuation request",
       maxAttempts: 5,
       terminalMessage
     });
 
-    // The catch must NOT re-throw — re-throwing a non-reset error lets
+    // The catch must NOT re-throw — re-throwing an application error lets
     // Agent._executeScheduleCallback swallow it and delete the one-shot row
     // with no terminal UX (the silent-seal bug).
     expect(result.threw).toBe(false);
@@ -4408,6 +4408,117 @@ describe("Think — onChatRecovery", () => {
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
     expect(result.incidentStatus).toBe("failed");
+  });
+
+  it('re-throws "Network connection lost." (storage transient in a deploy-reset window) and does NOT terminalize (#1730)', async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-connection-lost");
+
+    // The production #1730 capture: storage errors during a reset window
+    // surface as connection-lost, not as the verbatim reset message.
+    // Terminalizing here is doomed — the give-up's own seal needs the storage
+    // that's down — so it must defer like a reset.
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage: "Network connection lost.",
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(true);
+    expect(result.exhaustedContexts).toBe(0);
+    expect(result.terminalBroadcast).toBeUndefined();
+    expect(result.incidentStatus).toBe("failed");
+  });
+
+  it("re-throws the SqlError shape (wrapped transient, retryable flag lost) and does NOT terminalize (#1730)", async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-sqlerror");
+
+    // `SqlError: SQL query failed: Network connection lost.` — the wrapper
+    // prefixes the message and keeps the platform error only in `cause`.
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage: "Network connection lost.",
+      errorShape: "sql-wrapped",
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(true);
+    expect(result.exhaustedContexts).toBe(0);
+    expect(result.terminalBroadcast).toBeUndefined();
+    expect(result.incidentStatus).toBe("failed");
+  });
+
+  it("re-throws a retryable-flagged platform error and does NOT terminalize (#1730)", async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-retryable-flag");
+
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage: "internal error",
+      errorShape: "retryable",
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(true);
+    expect(result.exhaustedContexts).toBe(0);
+    expect(result.terminalBroadcast).toBeUndefined();
+    expect(result.incidentStatus).toBe("failed");
+  });
+
+  it("leaves the recovered submission `running` on a deferral so the re-run picks it up (#1730)", async () => {
+    const agent = await freshRecoveryAgent("recovery-defer-keeps-submission");
+
+    // Regression for the self-defeating defer: marking the submission `error`
+    // before re-throwing makes the deferred re-run of `_chatRecoveryContinue`
+    // skip with `submission_not_running` — the preserved row becomes a no-op
+    // and the turn never resumes. A deferral must leave the submission alone.
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage: "Durable Object reset because its code was updated.",
+      seedRunningSubmission: true,
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(true);
+    expect(result.submissionStatus).toBe("running");
+  });
+
+  it("still marks the recovered submission terminal when an application error terminalizes the turn", async () => {
+    const agent = await freshRecoveryAgent("recovery-app-error-submission");
+
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage: "model rejected the continuation request",
+      seedRunningSubmission: true,
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(false);
+    expect(result.incidentStatus).toBe("exhausted");
+    // `_exhaustChatRecovery` → `_markRecoveredSubmissionInterrupted` seals the
+    // submission so it doesn't hang `running` on a turn nobody will finish.
+    expect(result.submissionStatus).toBe("error");
+  });
+
+  it("defers a give-up whose terminal write hits a platform transient instead of half-sealing, then seals fully on the re-run (#1730)", async () => {
+    const agent = await freshRecoveryAgent("recovery-seal-transient-defer");
+    const terminalMessage = "The assistant was interrupted. Please try again.";
+
+    const result = await agent.testGiveUpSealTransientDefer({
+      transientMessage: "Network connection lost.",
+      terminalMessage
+    });
+
+    // First give-up: the terminal write rejects mid-deploy → the transient
+    // propagates (the one-shot row is preserved by the base scheduler) and the
+    // incident is NOT sealed — sealing first would turn the re-run into a
+    // no-op and drop the durable terminal record.
+    expect(result.firstThrew).toBe(true);
+    expect(result.incidentStatusAfterFirst).not.toBe("exhausted");
+    // Second give-up (the deferred re-run on a healthy isolate): terminalizes
+    // fully — banner delivered, incident sealed, no re-throw.
+    expect(result.secondThrew).toBe(false);
+    expect(result.incidentStatusAfterSecond).toBe("exhausted");
+    expect(result.terminalBroadcast).toBe(terminalMessage);
+    // `onExhausted` fired on both passes — the documented at-least-once edge
+    // ("deliver a second banner" ≫ "silently drop the turn").
+    expect(result.exhaustedReasons).toEqual([
+      "recovery_error",
+      "recovery_error"
+    ]);
   });
 });
 

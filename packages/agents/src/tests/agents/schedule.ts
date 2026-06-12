@@ -437,6 +437,90 @@ export class TestScheduleAgent extends Agent {
     return { threw, remaining: rows[0].count };
   }
 
+  // --- Exhaustion-defer (platform-transient) test helpers (#1730) ---
+
+  private _errorSequenceForTest: Array<{
+    kind: "throw" | "throw-retryable" | "throw-wrapped" | "succeed";
+    message?: string;
+  }> = [];
+  private _errorSequenceCallsForTest = 0;
+
+  // One-shot callback that consumes a scripted step per attempt, so tests can
+  // exercise the in-process retry loop with attempt-by-attempt error shapes
+  // (e.g. "Network connection lost." on attempt 1, success on attempt 2).
+  async sequencedErrorCallbackForTest(): Promise<void> {
+    const step = this._errorSequenceForTest[
+      this._errorSequenceCallsForTest
+    ] ?? {
+      kind: "succeed" as const
+    };
+    this._errorSequenceCallsForTest++;
+    switch (step.kind) {
+      case "succeed":
+        return;
+      case "throw":
+        throw new Error(step.message ?? "scripted error");
+      case "throw-retryable": {
+        const e = new Error(step.message ?? "scripted retryable error");
+        (e as unknown as { retryable: boolean }).retryable = true;
+        throw e;
+      }
+      case "throw-wrapped":
+        // The `SqlError` shape: a wrapper that prefixes the message and keeps
+        // the original platform error only in `cause` (no `retryable` flag on
+        // the wrapper itself).
+        throw new Error(`SQL query failed: ${step.message ?? "inner error"}`, {
+          cause: new Error(step.message ?? "inner error")
+        });
+    }
+  }
+
+  // Schedule a one-shot callback driven by a scripted error sequence (one step
+  // per in-process attempt), drive `alarm()` once in-instance, and report
+  // whether the alarm rejected (deferred), whether the one-shot row survived,
+  // and how many attempts ran. Deterministic — tight retry delays, no reliance
+  // on the external alarm scheduler's timing.
+  @callable()
+  async runOneShotSequenceForTest(
+    steps: Array<{
+      kind: "throw" | "throw-retryable" | "throw-wrapped" | "succeed";
+      message?: string;
+    }>,
+    maxAttempts: number
+  ): Promise<{ threw: boolean; remaining: number; calls: number }> {
+    this._errorSequenceForTest = steps;
+    this._errorSequenceCallsForTest = 0;
+    const schedule = await this.schedule(
+      60,
+      "sequencedErrorCallbackForTest",
+      undefined,
+      { retry: { maxAttempts, baseDelayMs: 1, maxDelayMs: 2 } }
+    );
+    // Backdate so the row is due when alarm() scans `time <= now`.
+    this.sql`
+      UPDATE cf_agents_schedules
+      SET time = ${Math.floor(Date.now() / 1000) - 1}
+      WHERE id = ${schedule.id}
+    `;
+    let threw = false;
+    try {
+      await this.alarm();
+    } catch {
+      // A deferred (re-thrown) error rejects alarm(); a swallowed one does not.
+      threw = true;
+    }
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_schedules WHERE id = ${schedule.id}
+    `;
+    const calls = this._errorSequenceCallsForTest;
+    this._errorSequenceForTest = [];
+    this._errorSequenceCallsForTest = 0;
+    // Clean up a deferred (surviving) row so it doesn't leak into later tests
+    // on the same instance.
+    this.sql`DELETE FROM cf_agents_schedules WHERE id = ${schedule.id}`;
+    return { threw, remaining: rows[0].count, calls };
+  }
+
   @callable()
   async insertStaleDelayedRows(count: number, cb: string): Promise<void> {
     const past = Math.floor(Date.now() / 1000) - 60;

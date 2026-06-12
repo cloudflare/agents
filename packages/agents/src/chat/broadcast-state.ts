@@ -85,7 +85,24 @@ export function transition(
     case "response": {
       let accumulator: StreamAccumulator;
 
-      if (state.status === "idle" || state.streamId !== event.streamId) {
+      // A replayed `start` chunk means the server is re-sending the stream
+      // buffer from chunk 0 (resume replay). Re-initialize the accumulator
+      // instead of appending into an existing one: replaying into an
+      // accumulator that already holds this stream's parts would duplicate
+      // them (a second `text-start` unconditionally opens a second text
+      // part — #1733). Re-initializing makes replay idempotent under any
+      // number of replays, including a second replay triggered by a
+      // duplicate STREAM_RESUMING → ACK cycle or a reconnect.
+      const isReplayedStart =
+        event.replay === true &&
+        (event.chunkData as { type?: string } | null | undefined)?.type ===
+          "start";
+
+      if (
+        state.status === "idle" ||
+        state.streamId !== event.streamId ||
+        isReplayedStart
+      ) {
         let messageId = event.messageId;
         let existingParts: UIMessage["parts"] | undefined;
         let existingMetadata: Record<string, unknown> | undefined;

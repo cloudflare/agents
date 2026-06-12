@@ -32,6 +32,8 @@ import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { isToolUIPart, getToolName } from "ai";
 import type { UIMessage } from "ai";
+import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 import type { MCPServersState } from "agents";
 import {
   Banner,
@@ -63,6 +65,7 @@ import {
   SunIcon,
   InfoIcon,
   ArrowsClockwiseIcon,
+  CopyIcon,
   CaretLeftIcon,
   CaretRightIcon,
   FolderOpenIcon,
@@ -139,12 +142,271 @@ function getMessageText(message: UIMessage): string {
     .join("");
 }
 
+/**
+ * A paused durable execution surfaced as a normal tool output: the execute
+ * tool returned `{ status: "paused", executionId, pending }` because a
+ * gated call inside the sandbox needs human approval. Approving resumes the
+ * run where it stopped; rejecting ends it with a reason the model can see.
+ */
+function asPausedExecution(output: unknown): {
+  executionId: string;
+  pending: Array<{ connector?: string; method?: string; args?: unknown }>;
+} | null {
+  if (typeof output !== "object" || output === null) return null;
+  const o = output as Record<string, unknown>;
+  if (o.status !== "paused" || typeof o.executionId !== "string") return null;
+  return {
+    executionId: o.executionId,
+    pending: Array.isArray(o.pending)
+      ? (o.pending as Array<{
+          connector?: string;
+          method?: string;
+          args?: unknown;
+        }>)
+      : []
+  };
+}
+
+type PendingActionPreview = {
+  connector?: string;
+  method?: string;
+  args?: unknown;
+};
+
+/**
+ * Approval card for a paused execution. The transcript's `pending` is a
+ * truncated preview (args are bounded so they don't blow up model context) —
+ * the FULL args live on the codemode runtime. A human must see what they're
+ * approving, so this card fetches the authoritative pending actions via the
+ * `pendingExecutions` callable on mount and keeps Approve disabled until
+ * that fetch settles.
+ */
+function PausedExecutionCard({
+  agent,
+  executionId,
+  toolName,
+  preview,
+  resolving,
+  onResolve
+}: {
+  agent: {
+    ready: Promise<void>;
+    call: (
+      method: string,
+      args?: unknown[],
+      options?: { timeout?: number }
+    ) => Promise<unknown>;
+  };
+  executionId: string;
+  toolName: string;
+  preview: PendingActionPreview[];
+  resolving: boolean;
+  onResolve: (executionId: string, action: "approve" | "reject") => void;
+}) {
+  const [full, setFull] = useState<
+    | { state: "loading" }
+    | { state: "loaded"; actions: PendingActionPreview[] }
+    | { state: "unavailable" }
+  >({ state: "loading" });
+
+  useEffect(() => {
+    let cancelled = false;
+    // Wait for the socket to be identified before calling: an RPC issued
+    // during the initial connect/reconnect churn can have its response
+    // dropped, leaving the promise pending forever. Retry once with a
+    // timeout for the same reason.
+    (async () => {
+      await agent.ready;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (cancelled) return;
+        try {
+          const actions = await agent.call("pendingExecutions", [executionId], {
+            timeout: 10_000
+          });
+          if (cancelled) return;
+          // An empty list means the execution is no longer pending (resolved
+          // elsewhere, expired, or swept) — the card is stale.
+          setFull(
+            Array.isArray(actions) && actions.length > 0
+              ? { state: "loaded", actions: actions as PendingActionPreview[] }
+              : { state: "unavailable" }
+          );
+          return;
+        } catch {
+          // Connection churn — retry once after it settles.
+          await agent.ready;
+        }
+      }
+      if (!cancelled) setFull({ state: "unavailable" });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [agent, executionId]);
+
+  const actions = full.state === "loaded" ? full.actions : preview;
+
+  return (
+    <Surface className="max-w-[85%] px-4 py-3 rounded-xl ring-2 ring-kumo-warning">
+      <div className="flex items-center gap-2 mb-2">
+        <GearIcon size={14} className="text-kumo-warning" />
+        <Text size="sm" bold>
+          Approval needed: {toolName} paused
+        </Text>
+      </div>
+      <div className="font-mono mb-3 space-y-1">
+        {actions.map((action, i) => (
+          <div key={i}>
+            <Text size="xs" variant="secondary" bold>
+              {action.connector}.{action.method}
+            </Text>
+            {action.args != null && (
+              <pre className="text-xs text-kumo-subtle whitespace-pre-wrap max-h-60 overflow-auto">
+                {JSON.stringify(action.args, null, 2)}
+              </pre>
+            )}
+          </div>
+        ))}
+      </div>
+      {full.state === "loading" && (
+        <Text size="xs" variant="secondary">
+          Verifying full arguments…
+        </Text>
+      )}
+      {full.state === "unavailable" && (
+        <div className="mb-2">
+          <Text size="xs" variant="error">
+            Couldn't load the full arguments — this card may be stale, and the
+            preview above may be truncated.
+          </Text>
+        </div>
+      )}
+      <div className="flex gap-2">
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={resolving || full.state === "loading"}
+          icon={<CheckCircleIcon size={14} />}
+          onClick={() => onResolve(executionId, "approve")}
+        >
+          Approve &amp; resume
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={resolving}
+          icon={<XCircleIcon size={14} />}
+          onClick={() => onResolve(executionId, "reject")}
+        >
+          Reject
+        </Button>
+      </div>
+    </Surface>
+  );
+}
+
 /** Text and reasoning parts use `state: streaming` with empty `text` until the first delta. */
 function shouldShowStreamedTextPart(part: {
   text: string;
   state?: "streaming" | "done";
 }): boolean {
   return part.text.length > 0 || part.state === "streaming";
+}
+
+function formatJsonBlock(value: unknown): string {
+  let text: string;
+  try {
+    text = JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    text = String(value);
+  }
+  return `\`\`\`json\n${text}\n\`\`\``;
+}
+
+/**
+ * Serialize the visible chat into plain markdown so a transcript can be
+ * pasted anywhere (issues, chats, docs) with user/assistant/tool turns and
+ * reasoning clearly annotated.
+ */
+function formatTranscript(messages: UIMessage[], chatTitle: string): string {
+  const lines: string[] = [`# ${chatTitle}`, ""];
+
+  for (const message of messages) {
+    if (message.role === "user") {
+      lines.push("## User", "", getMessageText(message), "");
+      continue;
+    }
+
+    if (message.role !== "assistant") continue;
+    lines.push("## Assistant", "");
+
+    for (const part of message.parts) {
+      if (part.type === "text") {
+        if (part.text.trim()) lines.push(part.text.trim(), "");
+        continue;
+      }
+
+      if (part.type === "reasoning") {
+        if (!part.text.trim()) continue;
+        lines.push(
+          "<details><summary>Reasoning</summary>",
+          "",
+          part.text.trim(),
+          "",
+          "</details>",
+          ""
+        );
+        continue;
+      }
+
+      if (isToolUIPart(part)) {
+        const toolName = getToolName(part);
+        lines.push(`### Tool: \`${toolName}\``, "");
+        if (part.input != null) {
+          lines.push("**Input**", "", formatJsonBlock(part.input), "");
+        }
+        if (part.state === "output-available") {
+          lines.push("**Output**", "", formatJsonBlock(part.output), "");
+        } else if (part.state === "output-error") {
+          lines.push("**Error**", "", "```", part.errorText ?? "", "```", "");
+        } else if (part.state === "approval-requested") {
+          lines.push("_Waiting for approval._", "");
+        } else {
+          lines.push(`_State: ${part.state}_`, "");
+        }
+      }
+    }
+  }
+
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+function CopyTranscriptButton({
+  messages,
+  chatTitle
+}: {
+  messages: UIMessage[];
+  chatTitle: string;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  const copy = useCallback(async () => {
+    await navigator.clipboard.writeText(formatTranscript(messages, chatTitle));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }, [messages, chatTitle]);
+
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      shape="square"
+      aria-label="Copy transcript as markdown"
+      icon={copied ? <CheckCircleIcon size={12} /> : <CopyIcon size={12} />}
+      disabled={messages.length === 0}
+      onClick={copy}
+    />
+  );
 }
 
 function Chat({
@@ -217,6 +479,13 @@ function Chat({
     modelTier: "fast" | "capable";
     persona: string;
   } | null>(null);
+
+  // Execution ids with an approve/reject in flight — disables the card's
+  // buttons until the runtime answers (the updated tool output then arrives
+  // over the socket and re-renders the card away).
+  const [resolvingExecutions, setResolvingExecutions] = useState<Set<string>>(
+    () => new Set()
+  );
 
   const agent = useAgent({
     // This chat lives as a facet of the user's AssistantDirectory. The
@@ -297,6 +566,31 @@ function Chat({
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [showConfigPanel]);
+
+  const resolveExecution = useCallback(
+    async (executionId: string, action: "approve" | "reject") => {
+      setResolvingExecutions((prev) => new Set(prev).add(executionId));
+      try {
+        // The callable replaces the paused tool output in the transcript and
+        // auto-continues the chat; the updated message arrives over the
+        // socket. A stale card (expired / approved elsewhere) resolves to a
+        // graceful error output the same way.
+        await agent.call(
+          action === "approve" ? "approveExecution" : "rejectExecution",
+          [executionId]
+        );
+      } catch (error) {
+        console.error(`Failed to ${action} execution:`, error);
+      } finally {
+        setResolvingExecutions((prev) => {
+          const next = new Set(prev);
+          next.delete(executionId);
+          return next;
+        });
+      }
+    },
+    [agent]
+  );
 
   const refreshWorkspaceFiles = useCallback(async () => {
     try {
@@ -502,6 +796,7 @@ function Chat({
               icon={<TrashIcon size={12} />}
               onClick={onRequestDelete}
             />
+            <CopyTranscriptButton messages={messages} chatTitle={chatTitle} />
           </div>
           <div className="flex items-center gap-3">
             <ConnectionIndicator status={connectionStatus} />
@@ -1022,15 +1317,16 @@ function Chat({
                     return (
                       <div key={partIndex} className="flex justify-start">
                         <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed">
-                          <div className="whitespace-pre-wrap min-h-[1.25em]">
-                            {part.text ||
-                              (part.state === "streaming" ? "\u00a0" : null)}
-                            {isLastAssistant &&
-                              isLastTextPart &&
-                              isStreaming && (
-                                <span className="inline-block w-0.5 h-[1em] bg-kumo-brand ml-0.5 align-text-bottom animate-blink-cursor" />
-                              )}
-                          </div>
+                          <Streamdown
+                            className="sd-theme min-h-[1.25em]"
+                            plugins={{ code }}
+                            controls={false}
+                            isAnimating={
+                              isLastAssistant && isLastTextPart && isStreaming
+                            }
+                          >
+                            {part.text}
+                          </Streamdown>
                         </div>
                       </div>
                     );
@@ -1063,6 +1359,26 @@ function Chat({
                   const toolName = getToolName(part);
 
                   if (part.state === "output-available") {
+                    const pausedExecution = asPausedExecution(part.output);
+                    if (pausedExecution) {
+                      return (
+                        <div
+                          key={part.toolCallId}
+                          className="flex justify-start"
+                        >
+                          <PausedExecutionCard
+                            agent={agent}
+                            executionId={pausedExecution.executionId}
+                            toolName={toolName}
+                            preview={pausedExecution.pending}
+                            resolving={resolvingExecutions.has(
+                              pausedExecution.executionId
+                            )}
+                            onResolve={resolveExecution}
+                          />
+                        </div>
+                      );
+                    }
                     return (
                       <div key={part.toolCallId} className="flex justify-start">
                         <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">

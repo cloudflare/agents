@@ -71,6 +71,7 @@ export {
   toolResultUpdate,
   crossMessageToolResultUpdate,
   toolApprovalUpdate,
+  pausedExecutionUpdate,
   type ToolPartUpdate
 } from "./tool-state";
 

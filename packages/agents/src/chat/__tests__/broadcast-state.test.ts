@@ -460,6 +460,143 @@ describe("broadcast stream state machine", () => {
     }
   });
 
+  // ── replayed start restarts the accumulator (#1733) ──────────────
+
+  it("re-initializes the accumulator on a replayed start for the same stream", () => {
+    const replayChunks = [
+      { type: "start", messageId: "m-srv" },
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: "Hel" }
+    ];
+
+    // First replay pass.
+    let state = transition(idle, {
+      type: "resume-fallback",
+      streamId: "req-1",
+      messageId: "tmp"
+    }).state;
+    for (const chunkData of replayChunks) {
+      state = transition(state, {
+        type: "response",
+        streamId: "req-1",
+        messageId: "tmp",
+        chunkData,
+        replay: true
+      }).state;
+    }
+
+    const firstAccumulator =
+      state.status === "observing" ? state.accumulator : null;
+    expect(firstAccumulator).not.toBeNull();
+
+    // Second replay pass of the same (now longer) buffer — e.g. a duplicate
+    // STREAM_RESUMING → ACK cycle. The replayed `start` must re-initialize
+    // the accumulator instead of appending duplicate step/text parts.
+    const secondReplay = [
+      { type: "start", messageId: "m-srv" },
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: "Hello" }
+    ];
+    for (const chunkData of secondReplay) {
+      state = transition(state, {
+        type: "response",
+        streamId: "req-1",
+        messageId: "tmp",
+        chunkData,
+        replay: true
+      }).state;
+    }
+
+    expect(state.status).toBe("observing");
+    if (state.status === "observing") {
+      expect(state.accumulator).not.toBe(firstAccumulator);
+    }
+
+    const done = transition(state, {
+      type: "response",
+      streamId: "req-1",
+      messageId: "tmp",
+      done: true
+    });
+
+    const messages = done.messagesUpdate!([] as UIMessage[]);
+    expect(messages).toHaveLength(1);
+    const textParts = messages[0].parts.filter((p) => p.type === "text");
+    expect(textParts).toHaveLength(1);
+    expect((textParts[0] as { text: string }).text).toBe("Hello");
+  });
+
+  it("a live (non-replay) start does not restart the accumulator", () => {
+    const first = transition(idle, {
+      type: "response",
+      streamId: "s1",
+      messageId: "m1",
+      chunkData: { type: "start", messageId: "m1" }
+    });
+
+    const second = transition(first.state, {
+      type: "response",
+      streamId: "s1",
+      messageId: "m-ignored",
+      chunkData: { type: "text-delta", id: "t1", delta: "hi" }
+    });
+
+    if (
+      first.state.status === "observing" &&
+      second.state.status === "observing"
+    ) {
+      expect(second.state.accumulator).toBe(first.state.accumulator);
+    }
+  });
+
+  it("replayed continuation start re-initializes with existing parts intact", () => {
+    const current = makeMessages("hi", "first half");
+
+    const replay = (state: BroadcastStreamState, chunkData: unknown) =>
+      transition(state, {
+        type: "response",
+        streamId: "req-c",
+        messageId: "tmp",
+        chunkData,
+        replay: true,
+        continuation: true,
+        currentMessages: current
+      });
+
+    let state = replay(idle, { type: "start", messageId: "msg-1" }).state;
+    state = replay(state, {
+      type: "text-delta",
+      id: "t1",
+      delta: " second half"
+    }).state;
+
+    expect(state.status).toBe("observing");
+    if (state.status === "observing") {
+      // Continuation picked up the trailing assistant's id + parts.
+      expect(state.accumulator.messageId).toBe("msg-1");
+      const texts = state.accumulator.parts.filter((p) => p.type === "text");
+      expect(texts.length).toBeGreaterThan(0);
+    }
+
+    const done = transition(state, {
+      type: "response",
+      streamId: "req-c",
+      messageId: "tmp",
+      done: true,
+      continuation: true,
+      currentMessages: current
+    });
+    const messages = done.messagesUpdate!(current);
+    // Continuation merged into the existing assistant, no extra message.
+    expect(messages).toHaveLength(2);
+    const fullText = messages[1].parts
+      .filter((p) => p.type === "text")
+      .map((p) => (p as { text: string }).text)
+      .join("");
+    expect(fullText).toContain("first half");
+    expect(fullText).toContain(" second half");
+  });
+
   // ── resume-fallback then response chunks ─────────────────────────
 
   it("response chunks reuse accumulator created by resume-fallback", () => {

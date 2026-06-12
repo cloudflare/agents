@@ -163,6 +163,8 @@ getTools(): ToolSet {
 
 When `needsApproval` returns `true`, the tool call is sent to the client for approval. The conversation pauses until the client responds with `CF_AGENT_TOOL_APPROVAL`. See [Client Tools](./client-tools.md) for the approval flow.
 
+> Inside the [Code Execution Tool](#code-execution-tool)'s sandbox, `needsApproval` behaves differently: it maps to the codemode runtime's durable pause/approve/resume flow, and a function-valued `needsApproval` always requires approval (see [Approvals](#approvals-human-in-the-loop)).
+
 ### Per-turn Tool Overrides
 
 The `beforeTurn` hook can restrict or add tools for a specific turn:
@@ -221,16 +223,17 @@ See [Connecting to MCP Servers](../mcp-client.md) for full MCP client documentat
 
 ## Code Execution Tool
 
-Let the LLM write and run JavaScript in a sandboxed Worker. Requires `@cloudflare/codemode` and a `worker_loaders` binding.
+Let the LLM write and run TypeScript in a sandboxed Worker, recorded on a durable codemode runtime (abort-and-replay, human approvals, audit trail, reusable snippets). Requires `@cloudflare/codemode` and a `worker_loaders` binding.
 
 ```sh
 npm install @cloudflare/codemode
 ```
 
+The one-liner infers everything from the agent — `state.*` from `this.workspace`, the executor from `env.LOADER`, and a live browser (`cdp.*`) from `env.BROWSER` if bound:
+
 ```typescript
 import { Think } from "@cloudflare/think";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
-import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 
 export class MyAgent extends Think<Env> {
   getModel() {
@@ -239,34 +242,81 @@ export class MyAgent extends Think<Env> {
 
   getTools() {
     return {
-      execute: createExecuteTool({
-        tools: createWorkspaceTools(this.workspace),
-        loader: this.env.LOADER
-      })
+      execute: createExecuteTool(this)
     };
   }
 }
 ```
 
-Add the `worker_loaders` binding in `wrangler.jsonc`:
+Setup checklist:
 
 ```jsonc
+// wrangler.jsonc
 {
-  "worker_loaders": [{ "binding": "LOADER" }]
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "browser": { "binding": "BROWSER" } // optional — enables cdp.*
 }
 ```
 
-The sandbox has access to `codemode.*` tool calls. For richer filesystem access, pass a `state` backend:
+```typescript
+// worker entry — the runtime lives in a Durable Object facet, so the class
+// must be exported (the @cloudflare/codemode/vite plugin does this
+// automatically; the Think framework's generated entry already includes it)
+export { CodemodeRuntime } from "@cloudflare/codemode";
+```
+
+Each missing piece fails with an error naming the step.
+
+Inside the sandbox the model sees typed namespaces plus the platform SDK:
+
+- `tools.*` — your AI SDK tools (object args, validated against their schemas). Only tools with an `execute` function are exposed — client-side tools can't run in the sandbox.
+- `state.*` — the workspace filesystem (`state.readFile({ path })`, `state.glob({ pattern })`, `state.planEdits(...)`, …)
+- `cdp.*` — the browser, when a Browser Rendering binding is configured. The execute tool defaults to `session: { mode: "dynamic" }`: sessions are per-execution unless the model promotes one with `cdp.startSession()`.
+- `codemode.search` / `codemode.describe` / `codemode.step` / `codemode.run` — discovery, side-effect boundaries, and saved snippets
+
+Pass overrides for anything beyond the defaults — e.g. custom `tools.*` alongside the agent-derived state:
+
+```typescript
+execute: createExecuteTool(this, { tools: myDomainTools });
+```
+
+Or fully explicit options (no agent inference):
 
 ```typescript
 import { createWorkspaceStateBackend } from "@cloudflare/shell";
 
 createExecuteTool({
+  ctx: this.ctx,
   tools: myDomainTools,
   state: createWorkspaceStateBackend(this.workspace),
+  browser: this.env.BROWSER,
   loader: this.env.LOADER
 });
-// sandbox: codemode.myTool() AND state.readFile(), state.planEdits(), etc.
+```
+
+### Approvals (human-in-the-loop)
+
+An AI SDK tool with `needsApproval` doesn't run immediately inside the sandbox — calling it **pauses the run durably**. The pause comes back as a normal tool output (`{ status: "paused", executionId, pending }`), the model tells the user what it needs, and the turn ends. Note this differs from the client-side approval flow for plain `getTools()` tools: inside the sandbox a function-valued `needsApproval` can't be evaluated against the call's arguments ahead of time, so it conservatively **always** requires approval. Think ships built-in callables to resolve it:
+
+- `approveExecution(executionId)` — resumes the run where it stopped (already-done work is replayed, not re-executed); the outcome replaces the paused output in the transcript and the chat auto-continues.
+- `rejectExecution(executionId, reason?)` — ends the run with `{ status: "rejected", reason }` so the model can adapt.
+- `pendingExecutions()` — pending actions (with full args) for rendering approval UI.
+
+> **Render approval cards from `pendingExecutions()`, not the transcript.** The `pending` array in the paused tool output is a _truncated preview_ — args are bounded (~2 KB each) so they don't blow up model context, but the full args (up to 1 MB) are what actually execute on approve. A human approving a gated call must see the authoritative args, so fetch them via `pendingExecutions(executionId)` before enabling the Approve button. `examples/assistant`'s `PausedExecutionCard` shows the pattern.
+
+See `examples/assistant` for a working approval card, and `design/think-execute-hitl.md` for the design.
+
+### The runtime handle
+
+`createExecuteRuntime` returns the moving parts when the host needs more than the tool — and the handle is also assigned to `this.codemode` when created from an agent:
+
+```typescript
+import { createExecuteRuntime } from "@cloudflare/think/tools/execute";
+
+const { runtime, connectors, tool } = createExecuteRuntime(this);
+await runtime.executions(); // audit trail
+await runtime.expirePaused(); // reclaim stale never-approved pauses (call from a scheduled task)
+await runtime.saveSnippet("name", { executionId }); // promote a script for reuse
 ```
 
 ## Browser Tools
@@ -289,6 +339,7 @@ export class MyAgent extends Think<Env> {
   getTools() {
     return {
       ...createBrowserTools({
+        ctx: this.ctx,
         browser: this.env.BROWSER,
         loader: this.env.LOADER
       })
@@ -306,16 +357,17 @@ Add the Browser Rendering and Worker Loader bindings in `wrangler.jsonc`:
 }
 ```
 
-This adds two tools to your agent:
+This adds one durable tool to your agent:
 
-| Tool              | Description                                                                             |
-| ----------------- | --------------------------------------------------------------------------------------- |
-| `browser_search`  | Query the CDP protocol spec to discover commands, events, and types                     |
-| `browser_execute` | Run CDP commands against a live browser session (screenshots, DOM reads, JS evaluation) |
+| Tool              | Description                                                                               |
+| ----------------- | ----------------------------------------------------------------------------------------- |
+| `browser_execute` | Run TypeScript against a live browser over CDP (screenshots, DOM reads, JS evaluation, …) |
 
-Both tools use the code-mode pattern — the model writes JavaScript async arrow functions that run in a sandboxed Worker isolate. In `browser_search`, the sandbox has access to `spec.get()` which returns the full normalized CDP protocol. In `browser_execute`, the sandbox has access to `cdp.send()`, `cdp.attachToTarget()`, and debug log helpers.
+The tool is backed by a codemode runtime with the `cdp` connector: the model writes async arrow functions that run in a sandboxed Worker isolate, with `cdp.send()`, `cdp.attachToTarget()`, `cdp.spec()` (the live, normalized protocol description), session helpers (`cdp.startSession()`, `cdp.sessionInfo()`, `cdp.closeSession()`), and debug-log helpers. Executions are recorded for abort-and-replay, so browser sessions survive approval pauses.
 
-Each `browser_execute` call opens a fresh browser session and closes it when the code finishes. For page-scoped CDP commands (`Page.*`, `Runtime.*`, `DOM.*`), the model must create a target, attach to it, and pass the `sessionId`.
+By default each execution gets a fresh browser session (`one-shot`), torn down when the run ends. Pass `session: { mode: "dynamic" }` to let the model promote a session with `cdp.startSession()` so later executions continue in the same browser, or `session: { mode: "reuse", key }` for a named long-lived session. Stale sessions are reclaimed by the connector's `sweep()` — call it from a scheduled task (see `createBrowserRuntime` in `agents/browser` for the connector handle).
+
+> The simplest setup is the unified execute tool above: `createExecuteTool(this)` already includes `cdp.*` alongside `state.*` and `tools.*` when `env.BROWSER` is bound — one tool, one durable history. Use `createBrowserTools` when you want a separate, browser-only tool.
 
 ### Combining with Other Tools
 
@@ -332,16 +384,14 @@ export class ResearchAgent extends Think<Env> {
 
   getTools() {
     return {
-      // Browse the web
+      // Browse the web (separate browser-only tool with its own history)
       ...createBrowserTools({
+        ctx: this.ctx,
         browser: this.env.BROWSER,
         loader: this.env.LOADER
       }),
       // Run sandboxed code against workspace files
-      execute: createExecuteTool({
-        tools: createWorkspaceTools(this.workspace),
-        loader: this.env.LOADER
-      })
+      execute: createExecuteTool(this)
     };
   }
 }
@@ -353,6 +403,7 @@ To connect to a Chrome instance running outside of Browser Rendering (e.g. `chro
 
 ```typescript
 createBrowserTools({
+  ctx: this.ctx,
   cdpUrl: "http://localhost:9222",
   loader: this.env.LOADER
 });

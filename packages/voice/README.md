@@ -119,6 +119,7 @@ export class DictationAgent extends InputAgent<Env> {
 import { useVoiceAgent } from "@cloudflare/voice/react";
 
 function App() {
+  const selectedSpeakerId = "default";
   const {
     status, // "idle" | "listening" | "thinking" | "speaking"
     transcript, // TranscriptMessage[]
@@ -128,6 +129,7 @@ function App() {
     isMuted, // boolean
     connected, // boolean
     error, // string | null
+    outputDeviceError, // string | null
     startCall, // () => Promise<void>
     endCall, // () => void
     toggleMute, // () => void
@@ -135,6 +137,8 @@ function App() {
     sendJSON // (data: Record<string, unknown>) => void
   } = useVoiceAgent({
     agent: "my-agent",
+    // Route assistant playback to a selected audiooutput device when supported.
+    outputDeviceId: selectedSpeakerId,
     // Set false to delay connecting until async prerequisites are ready.
     enabled: true
   });
@@ -144,6 +148,8 @@ function App() {
 ```
 
 When `enabled` is `false`, the hook does not create or connect a `VoiceClient`, returns the idle/disconnected state, and action callbacks such as `startCall()`, `sendText()`, and `sendJSON()` are safe no-ops. The first change from disabled to enabled connects with the current options without firing `onReconnect`; later connection identity changes while enabled do fire `onReconnect`.
+
+`outputDeviceId` accepts a `MediaDeviceInfo.deviceId` from an `audiooutput` device. Browsers without `HTMLMediaElement.setSinkId()` support continue playing through the default output and set `outputDeviceError` for non-default devices. Use `"default"` or `undefined` to return to the system default output. Device labels may be blank until the user grants microphone permission.
 
 For voice input only:
 
@@ -160,10 +166,14 @@ const { transcript, interimTranscript, isListening, start, stop, clear } =
 import { VoiceClient } from "@cloudflare/voice/client";
 
 const client = new VoiceClient({ agent: "my-agent" });
+const selectedSpeakerId = "default";
 
 client.addEventListener("statuschange", () => console.log(client.status));
 client.connect();
 await client.startCall();
+
+// Switch assistant playback without reconnecting the call.
+await client.setOutputDevice(selectedSpeakerId);
 ```
 
 ## Workers AI providers (built-in)

@@ -10,6 +10,7 @@ export { describeTarget } from "./describe";
 export type {
   ConnectorDescription,
   ExecutionEndStatus,
+  PassEndStatus,
   ToolAnnotations,
   ToolExecuteContext,
   SearchResult,

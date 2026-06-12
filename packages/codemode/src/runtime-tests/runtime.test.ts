@@ -28,14 +28,19 @@ type SideEffects = {
 interface Host {
   run(
     code: string,
-    options?: { maxExecutions?: number }
+    options?: { maxExecutions?: number; name?: string }
   ): Promise<ProxyToolOutput>;
   approve(executionId: string): Promise<ProxyToolOutput>;
-  reject(seq: number, executionId: string): Promise<void>;
+  approveWithoutItems(executionId: string): Promise<ProxyToolOutput>;
+  runSnippetWithoutItems(snippet: string): Promise<ProxyToolOutput>;
+  expirePaused(maxAgeMs?: number): Promise<string[]>;
+  reject(seq: number, executionId: string): Promise<boolean>;
   rollback(executionId: string): Promise<void>;
   pending(executionId?: string): Promise<PendingAction[]>;
-  executions(): Promise<ExecutionState[]>;
+  executions(name?: string): Promise<ExecutionState[]>;
   deleteExecution(id: string): Promise<boolean>;
+  beginOnly(code: string): Promise<string>;
+  toolDescription(connectorHints?: Record<string, string>): Promise<string>;
   saveSnippet(
     name: string,
     description: string,
@@ -47,6 +52,7 @@ interface Host {
     opened: string[];
     disposed: Array<{ executionId: string; status: string }>;
   }>;
+  passEnds(): Promise<Array<{ executionId: string; status: string }>>;
   enableShaping(): Promise<void>;
   raceRejectDuringApprovedExecute(): Promise<{
     decisionKind: string;
@@ -80,6 +86,33 @@ describe("codemode durable runtime (e2e)", () => {
 
     expect(out.status).toBe("completed");
     if (out.status === "completed") expect(out.result).toEqual([]);
+  });
+
+  it("names the connector globals (and renders hints) in the tool description", async () => {
+    const h = host();
+
+    const plain = await h.toolDescription();
+    expect(plain).toContain("The ONLY globals are `items` and `codemode`");
+    expect(plain).toContain("- `items`");
+
+    const hinted = await h.toolDescription({
+      items: "manage the item store"
+    });
+    expect(hinted).toContain("- `items` — manage the item store");
+  });
+
+  it("appends the available globals to a sandbox ReferenceError", async () => {
+    const h = host();
+    const out = (await h.run(
+      `async () => await host.writeFile({ path: "/a.txt" })`
+    )) as ProxyToolOutput;
+
+    expect(out.status).toBe("error");
+    if (out.status !== "error") return;
+    expect(out.error).toContain("host is not defined");
+    expect(out.error).toContain(
+      "the only globals available in the sandbox are: items, codemode"
+    );
   });
 
   it("pauses on an approval-gated action, then resumes on approve", async () => {
@@ -139,7 +172,7 @@ describe("codemode durable runtime (e2e)", () => {
     expect(first.status).toBe("paused");
     if (first.status !== "paused") return;
 
-    await h.reject(first.pending[0].seq, first.executionId);
+    expect(await h.reject(first.pending[0].seq, first.executionId)).toBe(true);
 
     expect((await h.sideEffects()).created).toEqual([]);
     const execs = await h.executions();
@@ -503,8 +536,10 @@ describe("codemode durable runtime (e2e)", () => {
     if (first.status !== "paused") return;
 
     // A seq that isn't pending (no such entry) — reject is a no-op, so the run
-    // stays paused/resumable and its resources must NOT be torn down.
-    await h.reject(999, first.executionId);
+    // stays paused/resumable and its resources must NOT be torn down. The
+    // no-op is reported to the caller so it doesn't claim the run was
+    // rejected.
+    expect(await h.reject(999, first.executionId)).toBe(false);
     expect((await h.lifecycle()).disposed).toEqual([]);
 
     // The run is still live: approving it completes normally.
@@ -535,6 +570,272 @@ describe("codemode durable runtime (e2e)", () => {
       { executionId: out.executionId, status: "completed" },
       { executionId: out.executionId, status: "rolled_back" }
     ]);
+  });
+
+  // -------------------------------------------------------------------------
+  // onPassEnd — per-pass lifecycle (fires on pause too, before dispose)
+  // -------------------------------------------------------------------------
+
+  it("fires onPassEnd for every pass, including the pause", async () => {
+    const h = host();
+    const first = (await h.run(
+      `async () => await items.create_item({ title: "hi" })`
+    )) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    // The pausing pass ended — onPassEnd fired with "paused", while
+    // disposeExecution (terminal-only) did not.
+    expect(await h.passEnds()).toEqual([
+      { executionId: first.executionId, status: "paused" }
+    ]);
+    expect((await h.lifecycle()).disposed).toEqual([]);
+
+    const resumed = (await h.approve(first.executionId)) as ProxyToolOutput;
+    expect(resumed.status).toBe("completed");
+
+    expect(await h.passEnds()).toEqual([
+      { executionId: first.executionId, status: "paused" },
+      { executionId: first.executionId, status: "completed" }
+    ]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Ephemeral tools (replay: "reexecute") — results stay out of the log
+  // -------------------------------------------------------------------------
+
+  it("re-executes ephemeral reads on replay instead of replaying a result", async () => {
+    const h = host();
+    const code = `async () => {
+      const r = await items.read_counter();
+      await items.create_item({ title: "t" });
+      return r;
+    }`;
+    const first = (await h.run(code)) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    const resumed = (await h.approve(first.executionId)) as ProxyToolOutput;
+    expect(resumed.status).toBe("completed");
+    if (resumed.status !== "completed") return;
+    // The read ran twice (once per pass) — the resumed pass re-executed it
+    // and saw the fresh value rather than a replayed one.
+    expect(resumed.result).toEqual({ reads: 2 });
+
+    // The durable log never stored the ephemeral result.
+    const exec = (await h.executions()).find((e) => e.id === first.executionId);
+    const entry = exec?.log.find((e) => e?.method === "read_counter");
+    expect(entry?.state).toBe("applied");
+    expect(entry?.result).toBeUndefined();
+    expect(entry?.ephemeral).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // Storage codec — binary results round-trip through the durable log
+  // -------------------------------------------------------------------------
+
+  it("replays a binary result from the log intact after a pause", async () => {
+    const h = host();
+    const code = `async () => {
+      const bytes = await items.get_bytes();
+      await items.create_item({ title: "b" });
+      return { isBytes: bytes instanceof Uint8Array, values: Array.from(bytes) };
+    }`;
+    const first = (await h.run(code)) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    // On resume, get_bytes is REPLAYED from the durable log (not re-executed)
+    // — the stored value must decode back to a real Uint8Array.
+    const resumed = (await h.approve(first.executionId)) as ProxyToolOutput;
+    expect(resumed.status).toBe("completed");
+    if (resumed.status === "completed") {
+      expect(resumed.result).toEqual({
+        isBytes: true,
+        values: [1, 2, 3, 4, 5]
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Durable-log size guard — oversized values fail with an actionable error
+  // -------------------------------------------------------------------------
+
+  it("fails a run whose recorded call result exceeds the durable limit", async () => {
+    const h = host();
+    const out = (await h.run(
+      `async () => { const r = await items.big_result(); return r.length; }`
+    )) as ProxyToolOutput;
+
+    expect(out.status).toBe("error");
+    if (out.status !== "error") return;
+    expect(out.error).toMatch(/too large to record durably/);
+    expect(out.error).toMatch(/Write large data to a file or workspace/);
+    const exec = (await h.executions()).find((e) => e.id === out.executionId);
+    expect(exec?.status).toBe("error");
+  });
+
+  it("keeps a completed run whose FINAL result is oversized (audit placeholder)", async () => {
+    const h = host();
+    // No connector call records the big value — only the final result is big.
+    // Replay never needs the final result, so the run completes and the audit
+    // trail stores a placeholder note instead.
+    const out = (await h.run(
+      `async () => "y".repeat(1_100_000)`
+    )) as ProxyToolOutput;
+
+    expect(out.status).toBe("completed");
+    if (out.status !== "completed") return;
+    // The model still gets the real result.
+    expect((out.result as string).length).toBe(1_100_000);
+    const exec = (await h.executions()).find((e) => e.id === out.executionId);
+    expect(exec?.status).toBe("completed");
+    expect(String(exec?.result)).toMatch(/result omitted from the audit trail/);
+  });
+
+  // -------------------------------------------------------------------------
+  // expirePaused — stale awaiting-approval runs get reclaimed
+  // -------------------------------------------------------------------------
+
+  it("expires stale paused runs and disposes their resources", async () => {
+    const h = host();
+    const first = (await h.run(
+      `async () => await items.create_item({ title: "stale" })`
+    )) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    // A young pause is not touched.
+    expect(await h.expirePaused(60_000)).toEqual([]);
+    expect((await h.lifecycle()).disposed).toEqual([]);
+
+    // maxAgeMs 0 → everything paused is stale.
+    expect(await h.expirePaused(0)).toEqual([first.executionId]);
+
+    const exec = (await h.executions()).find((e) => e.id === first.executionId);
+    expect(exec?.status).toBe("rejected");
+    expect(exec?.error).toMatch(/Expired awaiting approval/);
+    expect(await h.pending()).toEqual([]);
+    // Per-execution resources were reclaimed.
+    expect((await h.lifecycle()).disposed).toEqual([
+      { executionId: first.executionId, status: "rejected" }
+    ]);
+    // The expired run cannot be revived.
+    const revived = (await h.approve(first.executionId)) as ProxyToolOutput;
+    expect(revived.status).toBe("error");
+  });
+
+  it("expires a stale running run left behind by a dead host", async () => {
+    const h = host();
+    const id = await h.beginOnly(`async () => 1`);
+
+    // A fresh running run is not touched.
+    expect(await h.expirePaused(60_000)).toEqual([]);
+
+    expect(await h.expirePaused(0)).toEqual([id]);
+    const exec = (await h.executions()).find((e) => e.id === id);
+    expect(exec?.status).toBe("error");
+    expect(exec?.error).toMatch(/Expired while running/);
+
+    // The flip is conditional on the observed status — a second sweep no-ops.
+    expect(await h.expirePaused(0)).toEqual([]);
+  });
+
+  it("deleting a non-terminal execution disposes its connector resources", async () => {
+    const h = host();
+    const first = (await h.run(
+      `async () => await items.create_item({ title: "delete-me" })`
+    )) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    expect((await h.lifecycle()).disposed).toEqual([]);
+    expect(await h.deleteExecution(first.executionId)).toBe(true);
+
+    // The paused run's resources (e.g. a browser session) were not leaked.
+    expect((await h.lifecycle()).disposed).toEqual([
+      { executionId: first.executionId, status: "rejected" }
+    ]);
+  });
+
+  it("rejects oversized execution code with a model-actionable error", async () => {
+    const h = host();
+    const out = (await h.run(
+      `async () => { /* ${"x".repeat(1_000_001)} */ return 1; }`
+    )) as ProxyToolOutput;
+    expect(out.status).toBe("error");
+    if (out.status !== "error") return;
+    expect(out.error).toMatch(/too large to record durably/);
+    // Nothing was recorded for it.
+    expect((await h.executions()).length).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Runtime identity — explicit name, connector requirements as data
+  // -------------------------------------------------------------------------
+
+  it("keeps histories separate across runtime names", async () => {
+    const h = host();
+    await h.run(`async () => "default"`);
+    await h.run(`async () => "other"`, { name: "other" });
+
+    const defaultExecs = await h.executions();
+    const otherExecs = await h.executions("other");
+    expect(defaultExecs).toHaveLength(1);
+    expect(otherExecs).toHaveLength(1);
+    expect(defaultExecs[0].result).toBe("default");
+    expect(otherExecs[0].result).toBe("other");
+  });
+
+  it("records connector requirements and refuses to resume without them", async () => {
+    const h = host();
+    const first = (await h.run(
+      `async () => await items.create_item({ title: "needs items" })`
+    )) as ProxyToolOutput;
+    expect(first.status).toBe("paused");
+    if (first.status !== "paused") return;
+
+    const exec = (await h.executions()).find((e) => e.id === first.executionId);
+    expect(exec?.connectors).toEqual(["items"]);
+
+    // Same runtime name, but the connector set no longer has "items" — the
+    // resume must fail with a clear error instead of diverging mid-replay.
+    const resumed = (await h.approveWithoutItems(
+      first.executionId
+    )) as ProxyToolOutput;
+    expect(resumed.status).toBe("error");
+    if (resumed.status === "error") {
+      expect(resumed.error).toMatch(/requires connector\(s\) "items"/);
+    }
+
+    // Still paused — the failed resume didn't consume or corrupt the run.
+    const after = await h.approve(first.executionId);
+    expect(after.status).toBe("completed");
+  });
+
+  it("refuses to run a snippet whose connectors are missing", async () => {
+    const h = host();
+    const out = (await h.run(
+      `async () => (await items.list_items()).length`
+    )) as ProxyToolOutput;
+    expect(out.status).toBe("completed");
+    if (out.status !== "completed") return;
+    await h.saveSnippet("counter", "counts", out.executionId);
+
+    const snippet = (await h.snippets()).find((s) => s.name === "counter");
+    expect(snippet?.connectors).toEqual(["items"]);
+
+    const reuse = (await h.runSnippetWithoutItems(
+      "counter"
+    )) as ProxyToolOutput;
+    // The snippet refusal surfaces as the snippet-run's value (an error
+    // object), so the outer run completes with that explanation.
+    expect(reuse.status).toBe("completed");
+    if (reuse.status === "completed") {
+      expect(reuse.result).toMatchObject({
+        error: expect.stringMatching(/requires connector\(s\) "items"/)
+      });
+    }
   });
 
   // -------------------------------------------------------------------------

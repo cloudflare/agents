@@ -25,11 +25,18 @@ import type { Executor, ResolvedProvider, ConnectorBinding } from "./executor";
 import { runCode } from "./run-code";
 import { normalizeCode } from "./normalize";
 import type { CodemodeConnector, ConnectorDescription } from "./connectors";
-import type { ExecutionEndStatus, ToolAnnotations } from "./connectors";
+import type {
+  ExecutionEndStatus,
+  PassEndStatus,
+  ToolAnnotations
+} from "./connectors";
 import { searchConnectors, describeTarget } from "./connectors";
 import {
   CodemodeRuntime,
+  MAX_DURABLE_VALUE_BYTES,
   STEP_CONNECTOR,
+  tooLargeMessage,
+  type BeginOptions,
   type PendingAction,
   type ToolDecision,
   type ToolLogEntry,
@@ -50,7 +57,7 @@ type AnnotationMap = Record<string, ToolAnnotations>;
  * break `decision.kind` narrowing. This interface keeps the domain types intact.
  */
 interface RuntimeStub {
-  begin(code: string, maxExecutions?: number): Promise<string>;
+  begin(code: string, options?: BeginOptions): Promise<string>;
   resume(id: string): Promise<ExecutionState | null>;
   decide(
     executionId: string,
@@ -58,7 +65,8 @@ interface RuntimeStub {
     connector: string,
     method: string,
     args: unknown,
-    requiresApproval: boolean
+    requiresApproval: boolean,
+    ephemeral?: boolean
   ): Promise<ToolDecision>;
   recordResult(
     executionId: string,
@@ -73,6 +81,7 @@ interface RuntimeStub {
   fail(executionId: string, error: string, logs?: string[]): Promise<void>;
   listPending(executionId?: string): Promise<PendingAction[]>;
   reject(seq: number, executionId: string): Promise<boolean>;
+  expirePaused(maxAgeMs?: number): Promise<string[]>;
   actionsToRevert(executionId: string): Promise<ToolLogEntry[]>;
   markReverted(seq: number, executionId: string): Promise<void>;
   markRolledBack(executionId: string): Promise<void>;
@@ -127,7 +136,23 @@ export type CreateProxyToolOptions = {
   ctx: DurableObjectState;
   connectors: CodemodeConnector[];
   executor: Executor;
+  /**
+   * Runtime name — the durable identity of this runtime's facet (executions,
+   * snippets). Defaults to `"default"`. Use distinct names for runtimes that
+   * should not share history. Adding or removing connectors does NOT change
+   * the identity: each execution/snippet records the connector names it needs,
+   * and resuming/re-running verifies they are still configured.
+   */
+  name?: string;
   description?: string;
+  /**
+   * One-line hints rendered next to each connector in the default tool
+   * description (keyed by connector name). Use them to tell the model what a
+   * namespace is for — e.g. `{ state: "the workspace filesystem" }` — without
+   * it having to run a `codemode.search` discovery pass first. Ignored when a
+   * custom `description` is given.
+   */
+  connectorHints?: Record<string, string>;
   /** Terminal executions retained per runtime. Defaults to 50. */
   maxExecutions?: number;
   /** Optionally reshape the model-facing result (e.g. truncate). */
@@ -240,7 +265,7 @@ async function loadSetup(connectors: CodemodeConnector[]): Promise<Setup> {
  * Fires for every connector regardless of whether it took part in the run —
  * connectors that own no per-execution state default to a no-op.
  */
-async function disposeConnectors(
+export async function disposeConnectors(
   connectors: Iterable<CodemodeConnector>,
   executionId: string,
   status: ExecutionEndStatus
@@ -254,6 +279,53 @@ async function disposeConnectors(
       }
     })
   );
+}
+
+/**
+ * Notify every connector that an execution pass ended — including a pause,
+ * where `disposeExecution` deliberately does not fire — so per-pass resources
+ * (open sockets, leases) can be released. Rejections are swallowed for the
+ * same reason as `disposeConnectors`.
+ */
+async function notifyPassEnd(
+  connectors: Iterable<CodemodeConnector>,
+  executionId: string,
+  status: PassEndStatus
+): Promise<void> {
+  await Promise.all(
+    [...connectors].map(async (connector) => {
+      try {
+        await connector.onPassEnd(executionId, status);
+      } catch {
+        // Intentionally ignored — see doc comment.
+      }
+    })
+  );
+}
+
+/**
+ * Reject reserved and duplicate connector namespaces up front. Duplicates
+ * would silently shadow each other in the sandbox (last one wins).
+ */
+export function validateConnectorNames(
+  connectors: Iterable<CodemodeConnector>
+): void {
+  const seen = new Set<string>();
+  for (const connector of connectors) {
+    const name = connector.name();
+    if (name === "codemode") {
+      throw new Error(
+        'Connector name "codemode" is reserved for the codemode platform SDK.'
+      );
+    }
+    if (seen.has(name)) {
+      throw new Error(
+        `Duplicate connector name "${name}" — each connector needs a unique ` +
+          `namespace (pass a distinct \`name\` option).`
+      );
+    }
+    seen.add(name);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -278,16 +350,17 @@ function buildConnectorBindings(
       // (and which surfaces as an "error" execution exactly as a raw throw did).
       try {
         const seq = cursor.next();
-        const requiresApproval =
-          setup.annotations[`${desc.name}.${method}`]?.requiresApproval ??
-          false;
+        const annotation = setup.annotations[`${desc.name}.${method}`];
+        const requiresApproval = annotation?.requiresApproval ?? false;
+        const ephemeral = annotation?.replay === "reexecute";
         const decision = await runtime.decide(
           executionId,
           seq,
           desc.name,
           method,
           args,
-          requiresApproval
+          requiresApproval,
+          ephemeral
         );
 
         if (decision.kind === "replay") return decision.result;
@@ -354,6 +427,21 @@ function createPlatformProvider(
       run: async (...args: unknown[]) => {
         const snippet = await runtime.getSnippet(String(args[0]));
         if (!snippet) return { error: `Snippet "${args[0]}" not found.` };
+        // The snippet recorded the connectors its source execution ran with;
+        // refuse with a clear error when one is no longer configured rather
+        // than failing partway through the script.
+        const missing = missingConnectors(
+          snippet.connectors,
+          new Set(setup.connectorsByName.keys())
+        );
+        if (missing.length > 0) {
+          return {
+            error:
+              `Snippet "${args[0]}" requires connector(s) ` +
+              `${missing.map((m) => `"${m}"`).join(", ")} that are not ` +
+              `configured on this runtime.`
+          };
+        }
         // Snippets are saved execution code, so they may use the codemode
         // SDK (e.g. codemode.step) — run them with this same provider, which
         // shares the cursor so the snippet's calls continue this run's log.
@@ -401,11 +489,20 @@ function createPlatformProvider(
 
 function buildDescription(
   connectors: CodemodeConnector[],
-  customDescription?: string
+  customDescription?: string,
+  connectorHints?: Record<string, string>
 ): string {
   if (customDescription) return customDescription;
 
-  const namespaces = connectors.map((c) => `- \`${c.name()}\``).join("\n");
+  const namespaces = connectors
+    .map((c) => {
+      const name = c.name();
+      const hint = connectorHints?.[name];
+      return hint ? `- \`${name}\` — ${hint}` : `- \`${name}\``;
+    })
+    .join("\n");
+
+  const names = connectors.map((c) => `\`${c.name()}\``).join(", ");
 
   const lines = [
     "Execute TypeScript in a sandbox with access to connector SDKs.",
@@ -418,12 +515,13 @@ function buildDescription(
     "",
     "## Rules",
     "",
-    "- `codemode.search(query)` returns ranked matches across connector methods and saved snippets.",
+    `- The ONLY globals are ${names} and \`codemode\` (plus standard JavaScript). There is no \`host\`, \`fs\`, \`require\`, \`process\`, or Node.js API — all I/O goes through the connectors below.`,
+    "- Never guess method names. If you have not used a connector in this conversation, run a discovery pass first: `codemode.search(query)` returns ranked matches across connector methods and saved snippets.",
     '- `codemode.describe("connector.method")` returns TypeScript type declarations.',
     "- `codemode.step(name, fn)` wraps side-effectful or nondeterministic work (raw fetch, random, time) so it runs once and is replayed on resume. Use it for anything that isn't a connector call.",
     "- Some methods require approval. The run pauses until the user approves, then resumes automatically. Write code as if the call returns normally.",
+    '- A result with `status: "paused"` means the run is awaiting human approval. Tell the user what is pending and wait — do NOT re-issue the code; the run resumes on its own once approved.',
     "- All code outside connector calls and `codemode.step` must be deterministic so resume can replay it.",
-    "- Connector SDKs are available as globals named after each connector.",
     "- Do not use `fetch` — use connector SDKs.",
     "",
     "## Snippets",
@@ -463,59 +561,97 @@ async function runPass(
     cursor
   );
 
-  let output: CodeOutput | undefined;
-  let threw: unknown;
-  try {
-    output = await runCode({
-      code,
-      executor,
-      providers: [platformProvider],
-      connectors: bindings
-    });
-  } catch (err) {
-    threw = err;
-  }
-
-  // The facet status is the source of truth: a pause (approval or divergence)
-  // records itself there before aborting the run. The PAUSE_SENTINEL only stops
-  // the sandbox; it is never the deciding signal here.
   const connectors = [...setup.connectorsByName.values()];
 
-  const execution = await runtime.getExecution(executionId);
-  if (execution?.status === "paused") {
-    // Not terminal — the run may resume, so connector resources stay open.
-    return {
-      status: "paused",
-      executionId,
-      pending: await runtime.listPending(executionId)
-    };
-  }
-  if (execution?.status === "error") {
-    // A replay divergence, already recorded on the execution by the facet.
-    await disposeConnectors(connectors, executionId, "error");
-    return {
-      status: "error",
-      executionId,
-      error: execution.error ?? "Codemode execution failed"
-    };
-  }
-
-  if (threw) {
-    const message = threw instanceof Error ? threw.message : String(threw);
-    await runtime.fail(executionId, message);
-    await disposeConnectors(connectors, executionId, "error");
-    return { status: "error", executionId, error: message };
-  }
-
-  const result = output?.result;
-  await runtime.complete(executionId, result, output?.logs);
-  await disposeConnectors(connectors, executionId, "completed");
-  return {
-    status: "completed",
-    executionId,
-    result: await applyTransform(transformResult, result),
-    logs: output?.logs
+  // Every pass — paused, completed, or errored — must end with onPassEnd so
+  // connectors can release per-pass resources (sockets, leases). On terminal
+  // outcomes, disposeExecution follows. `ended` makes the finally a safety net
+  // for crashes inside this function itself (e.g. a facet RPC failure), not a
+  // double-fire.
+  let ended = false;
+  const endPass = async (status: PassEndStatus) => {
+    ended = true;
+    await notifyPassEnd(connectors, executionId, status);
+    if (status !== "paused") {
+      await disposeConnectors(connectors, executionId, status);
+    }
   };
+
+  try {
+    let output: CodeOutput | undefined;
+    let threw: unknown;
+    try {
+      output = await runCode({
+        code,
+        executor,
+        providers: [platformProvider],
+        connectors: bindings
+      });
+    } catch (err) {
+      threw = err;
+    }
+
+    // The facet status is the source of truth: a pause (approval or
+    // divergence) records itself there before aborting the run. The
+    // PAUSE_SENTINEL only stops the sandbox; it is never the deciding signal
+    // here.
+    const execution = await runtime.getExecution(executionId);
+    if (execution?.status === "paused") {
+      // Not terminal — the run may resume, so per-execution connector
+      // resources stay open. Per-pass resources are still released.
+      await endPass("paused");
+      return {
+        status: "paused",
+        executionId,
+        pending: await runtime.listPending(executionId)
+      };
+    }
+    if (execution?.status === "error") {
+      // A replay divergence (or an in-run durable-log failure), already
+      // recorded on the execution by the facet.
+      await endPass("error");
+      return {
+        status: "error",
+        executionId,
+        error: execution.error ?? "Codemode execution failed"
+      };
+    }
+
+    if (threw) {
+      const raw = threw instanceof Error ? threw.message : String(threw);
+      const message = withGlobalsHint(raw, setup);
+      await runtime.fail(executionId, message);
+      await endPass("error");
+      return { status: "error", executionId, error: message };
+    }
+
+    const result = output?.result;
+    await runtime.complete(executionId, result, output?.logs);
+    await endPass("completed");
+    return {
+      status: "completed",
+      executionId,
+      result: await applyTransform(transformResult, result),
+      logs: output?.logs
+    };
+  } finally {
+    if (!ended) {
+      // Something inside runPass itself threw before any labeled exit — make
+      // sure connectors still hear about the pass ending.
+      await endPass("error");
+    }
+  }
+}
+
+/**
+ * A sandbox `ReferenceError` usually means the model invented a global (e.g.
+ * `host.writeFile(...)`). Append the real globals so the retry is informed
+ * instead of another guess.
+ */
+function withGlobalsHint(message: string, setup: Setup): string {
+  if (!/\bis not defined\b/.test(message)) return message;
+  const names = [...setup.connectorsByName.keys(), "codemode"].join(", ");
+  return `${message} (the only globals available in the sandbox are: ${names})`;
 }
 
 /**
@@ -548,20 +684,14 @@ export function createProxyTool(
   options: CreateProxyToolOptions
 ): Tool<ProxyToolInput, ProxyToolOutput> {
   const connectors = options.connectors;
+  validateConnectorNames(connectors);
 
-  for (const connector of connectors) {
-    if (connector.name() === "codemode") {
-      throw new Error(
-        'Connector name "codemode" is reserved for the codemode platform SDK.'
-      );
-    }
-  }
-
-  // Spawn the runtime facet on the agent DO. The facet's identity is derived
-  // from the connector set, so changing connectors yields a different runtime
-  // — which guarantees every snippet stored in a runtime only ever references
-  // connectors that are present.
-  const runtime = getRuntime(options.ctx, connectors);
+  // Spawn the runtime facet on the agent DO, keyed by the runtime name. The
+  // connector set is data, not identity: each execution/snippet records the
+  // connector names it needs, and resume/snippet-run verifies they are still
+  // configured — so a runtime can gain or lose connectors without forking its
+  // history.
+  const runtime = getRuntime(options.ctx, options.name);
 
   let setupPromise: Promise<Setup> | undefined;
   function getSetup() {
@@ -569,11 +699,28 @@ export function createProxyTool(
   }
 
   return tool({
-    description: buildDescription(connectors, options.description),
+    description: buildDescription(
+      connectors,
+      options.description,
+      options.connectorHints
+    ),
     inputSchema: proxySchema,
     execute: async ({ code }) => {
+      // Validate size host-side (the facet's own guard would surface as a
+      // cross-worker unhandled rejection) and return a model-actionable
+      // tool result instead of breaking the agent loop.
+      if (code.length > MAX_DURABLE_VALUE_BYTES) {
+        return {
+          status: "error",
+          executionId: "",
+          error: tooLargeMessage("The execution code", code.length)
+        };
+      }
       const setup = await getSetup();
-      const executionId = await runtime.begin(code, options.maxExecutions);
+      const executionId = await runtime.begin(code, {
+        maxExecutions: options.maxExecutions,
+        connectors: connectors.map((c) => c.name())
+      });
       return runPass(
         executionId,
         code,
@@ -590,19 +737,25 @@ export function createProxyTool(
 // Shared facet handle
 // ---------------------------------------------------------------------------
 
+/** Default runtime name when none is given. */
+const DEFAULT_RUNTIME_NAME = "default";
+
 /**
- * Fingerprint the connector set: sorted connector names. The runtime facet is
- * keyed by this, so a given runtime (and its saved snippets + paused
- * executions) is bound to exactly the connectors it was created with. Add,
- * remove, or rename a connector and you address a fresh runtime — stale
- * snippets that reference a now-absent connector can never surface.
+ * The facet is keyed by an explicit runtime *name* (default `"default"`), not
+ * by the connector set: a runtime keeps its executions and snippets when
+ * connectors are added or removed. Staleness is handled as data instead —
+ * every execution and snippet records the connector names it needs, and
+ * resume/snippet-run verifies they are present, failing with a clear error
+ * when one is missing.
  */
-function runtimeFacetName(connectors: CodemodeConnector[]): string {
-  const names = connectors
-    .map((c) => c.name())
-    .sort()
-    .join(",");
-  return `codemode:${names}`;
+function runtimeFacetName(name = DEFAULT_RUNTIME_NAME): string {
+  if (!/^[a-zA-Z0-9_.-]+$/.test(name)) {
+    throw new Error(
+      `Invalid codemode runtime name "${name}" — use letters, digits, ` +
+        `"_", "-" or "."`
+    );
+  }
+  return `codemode:${name}`;
 }
 
 // `ctx.facets` / `ctx.exports` are facet-runtime additions not yet in the
@@ -617,13 +770,10 @@ type FacetCapableCtx = DurableObjectState & {
   exports?: Record<string, unknown>;
 };
 
-function getRuntime(
-  ctx: DurableObjectState,
-  connectors: CodemodeConnector[]
-): RuntimeStub {
+function getRuntime(ctx: DurableObjectState, name?: string): RuntimeStub {
   const facetCtx = ctx as unknown as FacetCapableCtx;
   const runtimeClass = facetCtx.exports?.CodemodeRuntime ?? CodemodeRuntime;
-  return facetCtx.facets.get<RuntimeStub>(runtimeFacetName(connectors), () => ({
+  return facetCtx.facets.get<RuntimeStub>(runtimeFacetName(name), () => ({
     class: runtimeClass
   }));
 }
@@ -639,12 +789,22 @@ export type ResumeCodemodeOptions = {
   ctx: DurableObjectState;
   connectors: CodemodeConnector[];
   executor: Executor;
+  /** Runtime name (facet identity). Defaults to `"default"`. */
+  name?: string;
   /** Execution id to resume. */
   executionId: string;
   maxExecutions?: number;
   /** Optionally reshape the model-facing result (e.g. truncate). */
   transformResult?: TransformResult;
 };
+
+/** Connectors an execution/snippet recorded but the runtime no longer has. */
+function missingConnectors(
+  required: string[] | undefined,
+  available: Set<string>
+): string[] {
+  return (required ?? []).filter((name) => !available.has(name));
+}
 
 /**
  * Approve a pending action and continue the paused execution. Re-runs the
@@ -654,9 +814,30 @@ export type ResumeCodemodeOptions = {
 export async function resumeCodemode(
   options: ResumeCodemodeOptions
 ): Promise<ProxyToolOutput> {
-  const runtime = getRuntime(options.ctx, options.connectors);
+  const runtime = getRuntime(options.ctx, options.name);
 
   const setup = await loadSetup(options.connectors);
+
+  // The execution recorded the connector set it started with. Refuse to
+  // resume when a required connector is no longer configured — replaying its
+  // logged calls would fail confusingly partway through otherwise.
+  const existing = await runtime.getExecution(options.executionId);
+  if (existing) {
+    const missing = missingConnectors(
+      existing.connectors,
+      new Set(setup.connectorsByName.keys())
+    );
+    if (missing.length > 0) {
+      return {
+        status: "error",
+        executionId: options.executionId,
+        error:
+          `Execution "${options.executionId}" requires connector(s) ` +
+          `${missing.map((m) => `"${m}"`).join(", ")} that are not ` +
+          `configured on this runtime.`
+      };
+    }
+  }
 
   const execution = await runtime.resume(options.executionId);
   if (!execution) {
@@ -665,7 +846,6 @@ export async function resumeCodemode(
     // run (which would re-offer rejected actions or re-apply rolled-back work).
     // Surface this as an error *outcome* (not a throw) to match the divergence/
     // pause paths — the agent loop stays unbroken and nothing is re-executed.
-    const existing = await runtime.getExecution(options.executionId);
     const error = existing
       ? `Execution "${options.executionId}" is not paused (status: ` +
         `${existing.status}); only a paused run can be approved.`
@@ -687,13 +867,21 @@ export async function resumeCodemode(
 // Reject — reject a pending action, ending the execution
 // ---------------------------------------------------------------------------
 
+/**
+ * Returns whether the reject actually terminated the run — `false` when the
+ * seq was no longer pending (already approved, rejected elsewhere, or
+ * expired). Callers MUST check this before reporting the run as rejected:
+ * approve and reject can interleave across the facet RPC await, and a no-op
+ * reject means the action may have executed.
+ */
 export async function rejectCodemode(options: {
   ctx: DurableObjectState;
   connectors: CodemodeConnector[];
+  name?: string;
   seq: number;
   executionId: string;
-}): Promise<void> {
-  const terminated = await getRuntime(options.ctx, options.connectors).reject(
+}): Promise<boolean> {
+  const terminated = await getRuntime(options.ctx, options.name).reject(
     options.seq,
     options.executionId
   );
@@ -707,6 +895,7 @@ export async function rejectCodemode(options: {
       "rejected"
     );
   }
+  return terminated;
 }
 
 // ---------------------------------------------------------------------------
@@ -715,12 +904,38 @@ export async function rejectCodemode(options: {
 
 export async function pendingCodemode(options: {
   ctx: DurableObjectState;
-  connectors: CodemodeConnector[];
+  name?: string;
   executionId?: string;
 }): Promise<PendingAction[]> {
-  return getRuntime(options.ctx, options.connectors).listPending(
-    options.executionId
+  return getRuntime(options.ctx, options.name).listPending(options.executionId);
+}
+
+// ---------------------------------------------------------------------------
+// Expiry — reclaim paused runs nobody ever approved
+// ---------------------------------------------------------------------------
+
+/**
+ * Expire paused (awaiting-approval) executions idle past `maxAgeMs`, marking
+ * them rejected and firing each connector's `disposeExecution` so
+ * per-execution resources (e.g. browser sessions) are reclaimed. Paused runs
+ * are deliberately exempt from retention pruning, so without this a
+ * never-answered approval would live forever. Returns the expired ids.
+ * Designed to be called from a recurring alarm/scheduled task.
+ */
+export async function expireCodemode(options: {
+  ctx: DurableObjectState;
+  connectors: CodemodeConnector[];
+  name?: string;
+  /** Expire paused runs whose last state change is older than this. */
+  maxAgeMs?: number;
+}): Promise<string[]> {
+  const expired = await getRuntime(options.ctx, options.name).expirePaused(
+    options.maxAgeMs
   );
+  for (const executionId of expired) {
+    await disposeConnectors(options.connectors, executionId, "rejected");
+  }
+  return expired;
 }
 
 // ---------------------------------------------------------------------------
@@ -730,9 +945,10 @@ export async function pendingCodemode(options: {
 export async function rollbackCodemode(options: {
   ctx: DurableObjectState;
   connectors: CodemodeConnector[];
+  name?: string;
   executionId: string;
 }): Promise<void> {
-  const runtime = getRuntime(options.ctx, options.connectors);
+  const runtime = getRuntime(options.ctx, options.name);
 
   const byName = new Map(options.connectors.map((c) => [c.name(), c]));
   const actions = await runtime.actionsToRevert(options.executionId);

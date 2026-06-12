@@ -89,8 +89,10 @@ await runtime.pending();
 await runtime.approve({ executionId });
 
 // Reject — ends the execution. Does NOT undo actions already applied earlier
-// in the same run; call rollback() for that.
-await runtime.reject({ seq, executionId });
+// in the same run; call rollback() for that. Returns false if the action was
+// no longer pending (approved/rejected elsewhere) — check it before telling
+// the user the run was rejected, because the action may have executed.
+const terminated = await runtime.reject({ seq, executionId });
 
 // Roll back applied actions in reverse order
 await runtime.rollback({ executionId });

@@ -1051,18 +1051,6 @@ describe("schedule operations", () => {
       expect(remaining).toBe(0);
     });
 
-    it('does NOT defer "Network connection lost." (not an isolate replacement)', async () => {
-      const agentStub = await getAgentByName(
-        env.TestScheduleAgent,
-        "no-defer-connection-lost"
-      );
-      const { threw, remaining } = await agentStub.runOneShotThrowingForTest(
-        "Network connection lost."
-      );
-      expect(threw).toBe(false);
-      expect(remaining).toBe(0);
-    });
-
     it("does NOT treat an ordinary error that merely mentions an upgraded script as a supersede", async () => {
       // Guards the tightened matcher: only the verbatim platform phrase ("this
       // script has been upgraded") defers; a lookalike app error is swallowed.
@@ -1075,6 +1063,153 @@ describe("schedule operations", () => {
       );
       expect(threw).toBe(false);
       expect(remaining).toBe(0);
+    });
+  });
+
+  describe("one-shot defer on retry exhaustion of a platform transient (#1730)", () => {
+    // A deploy-reset window outlasts the in-process retry schedule by design
+    // (all attempts land inside the same few-seconds storage-unavailable
+    // window). When the budget drains on a PLATFORM transient — "Network
+    // connection lost.", a `retryable`-flagged error, or a wrapped supersede —
+    // the platform failed, not the callback, so the one-shot row must be
+    // PRESERVED (alarm rejected → platform re-runs it in the healthy window
+    // that follows), not consumed.
+    it('defers "Network connection lost." on exhaustion instead of consuming the row', async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "exhaust-defer-connection-lost"
+      );
+      const { threw, remaining, calls } =
+        await agentStub.runOneShotSequenceForTest(
+          [
+            { kind: "throw", message: "Network connection lost." },
+            { kind: "throw", message: "Network connection lost." },
+            { kind: "throw", message: "Network connection lost." }
+          ],
+          3
+        );
+      // All in-process retries ran (a genuine blip would have healed), THEN
+      // the row was deferred.
+      expect(calls).toBe(3);
+      expect(threw).toBe(true);
+      expect(remaining).toBe(1);
+    });
+
+    it("defers the SqlError shape (wrapped, retryable flag lost) on exhaustion", async () => {
+      // The production #1730 shape: `SqlError: SQL query failed: Network
+      // connection lost.` — the wrapper prefixes the message and drops the CF
+      // `retryable` flag, keeping the platform error only in `cause`.
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "exhaust-defer-sqlerror"
+      );
+      const { threw, remaining } = await agentStub.runOneShotSequenceForTest(
+        [
+          { kind: "throw-wrapped", message: "Network connection lost." },
+          { kind: "throw-wrapped", message: "Network connection lost." }
+        ],
+        2
+      );
+      expect(threw).toBe(true);
+      expect(remaining).toBe(1);
+    });
+
+    it("defers a retryable-flagged platform error on exhaustion", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "exhaust-defer-retryable-flag"
+      );
+      const { threw, remaining } = await agentStub.runOneShotSequenceForTest(
+        [
+          { kind: "throw-retryable", message: "internal error" },
+          { kind: "throw-retryable", message: "internal error" }
+        ],
+        2
+      );
+      expect(threw).toBe(true);
+      expect(remaining).toBe(1);
+    });
+
+    it('still retries "Network connection lost." in-process first (a momentary blip heals without deferral)', async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "ncl-in-process-retry-heals"
+      );
+      const { threw, remaining, calls } =
+        await agentStub.runOneShotSequenceForTest(
+          [
+            { kind: "throw", message: "Network connection lost." },
+            { kind: "succeed" }
+          ],
+          3
+        );
+      // Attempt 2 succeeded — no deferral, row consumed normally.
+      expect(calls).toBe(2);
+      expect(threw).toBe(false);
+      expect(remaining).toBe(0);
+    });
+
+    it("still abandons the row when the FINAL error is an application error", async () => {
+      // Mixed shapes ending in an app error: the callback itself failed on a
+      // healthy platform, so the existing swallow-and-delete semantics hold.
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "exhaust-consume-app-error"
+      );
+      const { threw, remaining, calls } =
+        await agentStub.runOneShotSequenceForTest(
+          [
+            { kind: "throw", message: "Network connection lost." },
+            { kind: "throw", message: "some ordinary application error" }
+          ],
+          2
+        );
+      expect(calls).toBe(2);
+      expect(threw).toBe(false);
+      expect(remaining).toBe(0);
+    });
+
+    it("still abandons the row on exhaustion of a pure application error", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "exhaust-consume-pure-app-error"
+      );
+      const { threw, remaining, calls } =
+        await agentStub.runOneShotSequenceForTest(
+          [
+            { kind: "throw", message: "boom" },
+            { kind: "throw", message: "boom" },
+            { kind: "throw", message: "boom" }
+          ],
+          3
+        );
+      expect(calls).toBe(3);
+      expect(threw).toBe(false);
+      expect(remaining).toBe(0);
+    });
+
+    it("a supersede error mid-sequence still defers IMMEDIATELY without burning the remaining budget", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "supersede-immediate-defer-budget"
+      );
+      const { threw, remaining, calls } =
+        await agentStub.runOneShotSequenceForTest(
+          [
+            { kind: "throw", message: "Network connection lost." },
+            {
+              kind: "throw",
+              message: "Durable Object reset because its code was updated."
+            },
+            { kind: "succeed" }
+          ],
+          5
+        );
+      // Attempt 2's reset stops the in-process loop cold (retrying on a
+      // superseded isolate is futile) — attempt 3 never runs.
+      expect(calls).toBe(2);
+      expect(threw).toBe(true);
+      expect(remaining).toBe(1);
     });
   });
 });

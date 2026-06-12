@@ -42,6 +42,8 @@ export function createExtensionTools(options: ExtensionToolsOptions) {
         "workspace access (host.readFile, host.writeFile, host.listFiles), " +
         "context access (host.getContext, host.setContext), and " +
         "message access (host.getMessages, host.sendMessage). " +
+        "NOTE: `host` exists ONLY inside extension source code passed to this tool — " +
+        "it is NOT a global in the `execute` code sandbox or anywhere else. " +
         "Hooks are optional lifecycle functions (beforeTurn, etc.). " +
         "IMPORTANT: Use only lowercase letters, numbers, and underscores in the extension name. " +
         "Tool names are prefixed: name 'math' with tool 'add' becomes 'math_add'. " +

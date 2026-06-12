@@ -89,6 +89,34 @@ describe("CodemodeConnector base", () => {
     const desc = await new Decorated(ctx, {}).describe();
     expect(desc.annotations?.listItems).toEqual({ requiresApproval: true });
   });
+
+  it("surfaces replay: 'reexecute' as an ephemeral annotation", async () => {
+    class Ephemeral extends ItemsConnector {
+      protected override tool(name: string, t: ConnectorTools[string]) {
+        return name === "listItems"
+          ? { ...t, replay: "reexecute" as const }
+          : t;
+      }
+    }
+    const desc = await new Ephemeral(ctx, {}).describe();
+    expect(desc.annotations).toEqual({
+      listItems: { replay: "reexecute" },
+      createItem: { requiresApproval: true }
+    });
+  });
+
+  it("rejects a tool that combines requiresApproval with replay: 'reexecute'", async () => {
+    class Broken extends ItemsConnector {
+      protected override tool(name: string, t: ConnectorTools[string]) {
+        return name === "createItem"
+          ? { ...t, replay: "reexecute" as const }
+          : t;
+      }
+    }
+    await expect(new Broken(ctx, {}).describe()).rejects.toThrow(
+      /cannot combine requiresApproval with replay/
+    );
+  });
 });
 
 describe("McpConnector", () => {

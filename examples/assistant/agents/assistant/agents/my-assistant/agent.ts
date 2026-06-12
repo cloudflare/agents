@@ -7,10 +7,7 @@ import {
   defaultContextOverflowClassifier
 } from "@cloudflare/think";
 import bundledSkills from "agents:skills";
-import {
-  createWorkspaceStateBackend,
-  type WorkspaceFsLike
-} from "@cloudflare/shell";
+import type { WorkspaceFsLike } from "@cloudflare/shell";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { createExtensionTools } from "@cloudflare/think/tools/extensions";
@@ -128,7 +125,7 @@ export class MyAssistant extends Think<Env> {
   configureSession(session: Session) {
     const persona =
       this.getConfig<AgentConfig>()?.persona ||
-      "You are a capable technical assistant. You have access to a persistent workspace, sandboxed code execution, and the ability to create new tools on the fly. You think before you act, and you prefer writing code over making many sequential tool calls.";
+      "You are a capable technical assistant. You have access to a persistent workspace, sandboxed code execution, a real browser you can drive over the Chrome DevTools Protocol (the `cdp.*` namespace inside execute), and the ability to create new tools on the fly. You think before you act, and you prefer writing code over making many sequential tool calls.";
 
     return session
       .withContext("soul", {
@@ -137,7 +134,7 @@ export class MyAssistant extends Think<Env> {
             `${persona}
 
 Be concise. Prefer short, direct answers over lengthy explanations.
-The execute tool runs JavaScript you write in a sandboxed environment. Use it for multi-file operations, data transformations, or any task that would require many sequential tool calls.
+The execute tool runs JavaScript you write in a sandboxed environment. Use it for multi-file operations, data transformations, or any task that would require many sequential tool calls. Inside that sandbox the only globals are the connector namespaces listed in the tool description (e.g. \`state.*\` for workspace files, \`tools.*\` for your tools) plus \`codemode\` — there is no \`host\` object, \`fs\`, or Node.js API.
 You can create extensions: new tools that persist across conversations. Offer to create one when a recurring task would benefit from it.
 When you learn something about the user or their project, save it to memory.`
         }
@@ -171,15 +168,33 @@ When you learn something about the user or their project, save it to memory.`
       : {};
 
     return {
-      execute: createExecuteTool({
-        tools: createWorkspaceTools(this.workspace),
-        // `state.*` inside the sandbox is backed by the SHARED workspace
-        // too — `createWorkspaceStateBackend` accepts our `SharedWorkspace`
-        // proxy because it satisfies the `WorkspaceFsLike` interface from
-        // `@cloudflare/shell`. That means `state.planEdits`/`applyEdits`
-        // in chat B sees and mutates the same files chat A just wrote.
-        state: createWorkspaceStateBackend(this.workspace),
-        loader: this.env.LOADER
+      // Agent one-liner with overrides: the executor comes from
+      // `env.LOADER`, `cdp.*` from `env.BROWSER` (if bound), and `state.*`
+      // inside the sandbox is backed by the SHARED workspace — the
+      // `SharedWorkspace` proxy satisfies `WorkspaceFsLike`, so
+      // `state.planEdits`/`applyEdits` in chat B sees and mutates the same
+      // files chat A just wrote. This also assigns `this.codemode`, which
+      // powers the built-in `approveExecution` / `rejectExecution` /
+      // `pendingExecutions` callables behind the approval card.
+      execute: createExecuteTool(this, {
+        tools: {
+          ...createWorkspaceTools(this.workspace),
+          // Approval-gated sandbox tool: calling it pauses the run durably
+          // and renders the approval card in the client. Approving resumes
+          // the run exactly where it stopped.
+          sendAnnouncement: tool({
+            description:
+              "Send an announcement to the team channel. Requires human approval before it goes out.",
+            inputSchema: z.object({
+              message: z.string().describe("The announcement text")
+            }),
+            needsApproval: true,
+            execute: async ({ message }) => ({
+              sent: true,
+              message
+            })
+          })
+        }
       }),
 
       ...extensionTools,

@@ -317,6 +317,8 @@ Wraps `VoiceClient` for `withVoice` agents. Manages connection, mic capture, pla
 ```tsx
 import { useVoiceAgent } from "@cloudflare/voice/react";
 
+const selectedSpeakerId = "default";
+
 const {
   status, // "idle" | "listening" | "thinking" | "speaking"
   transcript, // TranscriptMessage[] — conversation history
@@ -326,6 +328,7 @@ const {
   isMuted, // boolean
   connected, // boolean — WebSocket connected
   error, // string | null
+  outputDeviceError, // string | null — non-fatal speaker routing issue
   startCall, // () => Promise<void>
   endCall, // () => void
   toggleMute, // () => void
@@ -336,11 +339,27 @@ const {
   agent: "MyAgent", // Required: Durable Object class name
   name: "default", // Instance name (default: "default")
   host: window.location.host, // Host to connect to
+  outputDeviceId: selectedSpeakerId, // Optional audiooutput device ID
   enabled: true // Set false to delay connecting until prerequisites are ready
 });
 ```
 
 Use `enabled: false` when the app must wait for async connection prerequisites, such as a user-scoped capability token. While disabled, the hook does not create or connect a `VoiceClient`, returns the idle/disconnected state, and action callbacks such as `startCall()`, `sendText()`, and `sendJSON()` are safe no-ops. When `enabled` changes to `true`, the hook connects with the current options. The first enable is treated as an initial connection, so `onReconnect` only fires for later connection identity changes while the hook remains enabled.
+
+#### Output Device Selection
+
+Pass `outputDeviceId` to route assistant playback to a selected speaker when the browser supports `HTMLMediaElement.setSinkId()`:
+
+```tsx
+const [outputDeviceId, setOutputDeviceId] = useState("default");
+
+const voice = useVoiceAgent({
+  agent: "MyAgent",
+  outputDeviceId
+});
+```
+
+Use a `MediaDeviceInfo.deviceId` from `navigator.mediaDevices.enumerateDevices()` where `kind === "audiooutput"`. `"default"` and `undefined` use the system default output. Browsers without sink selection support continue playing through the default output and set `outputDeviceError` when a non-default output is requested. Device labels may be blank until the user grants microphone permission, so refresh device lists after `startCall()` if you show a speaker picker.
 
 #### Tuning Options
 
@@ -412,6 +431,9 @@ client.addEventListener("error", (err) => {
 client.connect();
 await client.startCall();
 
+// Switch assistant playback without reconnecting the call.
+await client.setOutputDevice(selectedSpeakerId);
+
 // Later:
 client.endCall();
 client.disconnect();
@@ -429,6 +451,7 @@ client.disconnect();
 | `connectionchange`  | `boolean`              | WebSocket connected/disconnected      |
 | `mutechange`        | `boolean`              | Mute state changed                    |
 | `error`             | `string \| null`       | Error occurred                        |
+| `outputdeviceerror` | `string \| null`       | Non-fatal speaker routing issue       |
 | `custommessage`     | `unknown`              | Non-voice message from server         |
 
 ### Advanced Options
@@ -438,6 +461,7 @@ client.disconnect();
 | `transport`       | `VoiceTransport`   | Custom transport (default: WebSocket via PartySocket) |
 | `audioInput`      | `VoiceAudioInput`  | Custom mic capture (default: built-in AudioWorklet)   |
 | `preferredFormat` | `VoiceAudioFormat` | Hint for server audio format (advisory only)          |
+| `outputDeviceId`  | `string`           | Preferred `audiooutput` device for assistant playback |
 
 ## Providers
 

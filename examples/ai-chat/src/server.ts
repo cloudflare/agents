@@ -1,6 +1,10 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest, callable } from "agents";
 import { createBrowserTools } from "agents/browser/ai";
+
+// The browser tool runs on a durable codemode runtime that lives in a facet
+// of the agent — the facet class must be exported from the worker entry.
+export { CodemodeRuntime } from "agents/browser";
 import {
   AIChatAgent,
   type OnChatMessageOptions,
@@ -67,6 +71,7 @@ export class ChatAgent extends AIChatAgent {
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     const mcpTools = this.mcp.getAITools();
     const browserTools = createBrowserTools({
+      ctx: this.ctx,
       browser: this.env.BROWSER,
       loader: this.env.LOADER
     });
@@ -80,8 +85,10 @@ export class ChatAgent extends AIChatAgent {
       system:
         "You are a helpful assistant. You can check the weather, get the user's timezone, " +
         "run calculations, and use a browser to inspect web pages via Chrome DevTools Protocol. " +
-        "For page-scoped browser commands, create a target, attach with cdp.attachToTarget(targetId), " +
-        "and pass the returned sessionId to Page, Runtime, and DOM commands. " +
+        "The browser_execute tool runs TypeScript with a cdp connector: " +
+        "for page-scoped commands, create a target with cdp.send({ method: 'Target.createTarget', ... }), " +
+        "attach with const { sessionId } = await cdp.attachToTarget({ targetId }), and pass " +
+        "that sessionId to Page, Runtime, and DOM commands. " +
         "For calculations with large numbers (over 1000), you need user approval first.",
       // Prune old tool calls and reasoning to save tokens on long conversations
       messages: pruneMessages({

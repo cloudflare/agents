@@ -2,6 +2,9 @@
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "think-assistant",
   "ai": { "binding": "AI", "remote": true },
+  // Browser Rendering for the execute tool's `cdp.*` connector — the agent
+  // one-liner picks up `env.BROWSER` automatically.
+  "browser": { "binding": "BROWSER" },
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
@@ -29,7 +32,12 @@
       "tag": "v1"
     }
   ],
-  "secrets": {
-    "required": ["GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"]
+  "vars": {
+    // Optional local-dev escape hatch (see src/server.ts): set DEV_USER in
+    // .env.local to skip GitHub OAuth and act as that user. Blank = disabled.
+    // NOTE: no `secrets.required` allowlist here — it would stop optional
+    // entries like DEV_USER from being read out of .env/.env.local. The
+    // server throws a clear error when the GitHub secrets are missing.
+    "DEV_USER": ""
   }
 }

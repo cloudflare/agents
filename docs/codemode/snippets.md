@@ -74,18 +74,15 @@ interface Snippet {
   code: string; // the saved script source
   savedAt: number;
   inputSchema?: unknown;
+  connectors?: string[]; // connector names the source execution ran with
 }
 ```
 
-## Snippets are bound to their connector set
+## Snippets record their connector requirements
 
-Snippets live on the runtime, and the runtime's identity is derived from the connector set it was created with (see [Runtime](./runtime.md#runtime-identity)). This is deliberate:
+A snippet's code references connectors as globals (`github.list_pull_requests(...)`), so it is only valid when those connectors are configured. When an execution is promoted, the connector names it ran with carry over to the snippet. `codemode.run(name)` checks them against the runtime's current connector set and returns a clear error — naming the missing connector — instead of failing partway through the script.
 
-- A snippet's code references connectors as globals (`github.list_pull_requests(...)`).
-- A snippet can only ever be stored in, and run from, a runtime that has those connectors.
-- Change the connector set — add, remove, or rename a connector — and you address a **different** runtime. Snippets that referenced a now-absent connector can never surface against a connector set that lacks it.
-
-So snippet validity is **structural**, not tracked per-snippet: a snippet is always run against exactly the connectors it was written with. There is no orphaned-reference problem and no dependency bookkeeping.
+This means the runtime can gain or lose connectors without orphaning its snippets (see [Runtime identity](./runtime.md#runtime-identity)): snippets whose requirements are still met keep working, and ones whose requirements are not are refused up front.
 
 ## Why durable and curated, not authored
 
@@ -94,6 +91,6 @@ Earlier designs passed in a static list of "skills" at construction. Snippets re
 - **Grown, not authored** — snippets come from real runs that worked, instead of a human pre-writing recipes.
 - **Curated, not self-promoted** — the developer (or their user) decides what the model gets to reuse; the model doesn't grade its own work.
 - **Durable** — they persist on the facet across runs and conversations.
-- **Self-consistent** — bound to the connector set that can run them.
+- **Self-consistent** — they record the connector set that can run them, and refuse to run without it.
 
 There is no separate skill-source interface to implement. Snippets are part of the runtime.

@@ -39,15 +39,18 @@ export class CdpSession {
   #debugLog: DebugEntry[] = [];
   #defaultTimeoutMs: number;
   #dispose?: () => void;
+  readonly sessionId?: string;
 
   constructor(
     socket: WebSocket,
     defaultTimeoutMs = DEFAULT_TIMEOUT_MS,
-    dispose?: () => void
+    dispose?: () => void,
+    sessionId?: string
   ) {
     this.#socket = socket;
     this.#defaultTimeoutMs = defaultTimeoutMs;
     this.#dispose = dispose;
+    this.sessionId = sessionId;
 
     socket.addEventListener("message", (event) => this.#handleMessage(event));
     socket.addEventListener("error", () => {
@@ -107,7 +110,11 @@ export class CdpSession {
     options: CdpAttachOptions = {}
   ): Promise<string> {
     if (typeof targetId !== "string" || !targetId) {
-      throw new Error("attachToTarget requires a targetId");
+      throw new Error(
+        "attachToTarget requires a targetId — list open tabs with " +
+          "send('Target.getTargets') or create one with " +
+          "send('Target.createTarget', { url })"
+      );
     }
 
     const result = (await this.send(
@@ -141,13 +148,17 @@ export class CdpSession {
     this.#debugLog = [];
   }
 
-  close(): void {
-    this.#rejectAll(new Error("CDP session closed"));
+  disconnect(): void {
+    this.#rejectAll(new Error("CDP session disconnected"));
     try {
       this.#socket.close(1000, "Done");
     } catch {
       // socket may already be closed
     }
+  }
+
+  close(): void {
+    this.disconnect();
     this.#dispose?.();
   }
 
@@ -213,44 +224,6 @@ export class CdpSession {
       this.#debugLog.splice(0, this.#debugLog.length - MAX_DEBUG_ENTRIES);
     }
   }
-}
-
-/**
- * Connect to a browser via the Browser Rendering binding (Fetcher).
- * Establishes a CDP WebSocket through the binding's fetch interface.
- */
-export async function connectBrowser(
-  browser: Fetcher,
-  timeoutMs?: number
-): Promise<CdpSession> {
-  const response = await browser.fetch(
-    "https://localhost/v1/devtools/browser",
-    {
-      headers: { Upgrade: "websocket" }
-    }
-  );
-
-  const ws = response.webSocket;
-  if (!ws) {
-    throw new Error(
-      "Browser Rendering binding did not return a WebSocket. " +
-        "Ensure the 'browser' binding is configured in wrangler.jsonc."
-    );
-  }
-
-  const sessionId = response.headers.get("cf-browser-session-id");
-  if (!sessionId) {
-    throw new Error(
-      "Browser Rendering binding did not include a session ID when opening the CDP WebSocket"
-    );
-  }
-
-  ws.accept();
-  return new CdpSession(ws, timeoutMs, () => {
-    void browser.fetch(`https://localhost/v1/devtools/browser/${sessionId}`, {
-      method: "DELETE"
-    });
-  });
 }
 
 const LOCALHOST_HOSTS = new Set([
