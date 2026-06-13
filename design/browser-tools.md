@@ -12,9 +12,14 @@ Browser access is a **codemode connector**. `BrowserConnector` (namespace `cdp`)
 
 - `cdp.send(args)` issues a CDP command over a host-side WebSocket; `cdp.attachToTarget` attaches to a page target; `cdp.spec` queries the live protocol description (fetched from the browser, normalized, cached per binding).
 - `cdp.startSession` / `cdp.sessionInfo` / `cdp.closeSession` / `cdp.resetSession` manage session lifetime from inside the sandbox; `getDebugLog` / `clearDebugLog` aid debugging.
+- `cdp.getLiveViewUrl({ targetId?, mode? })` returns a [Live View](https://developers.cloudflare.com/browser-run/features/live-view/) link for a tab — a URL a human can open to watch and control the session in real time. The sandbox uses it for human-in-the-loop handoffs: surface the link, then make an approval-gated call so the run pauses (the codemode runtime's durable pause/approve) until the human is done. It's a `reexecute` read — the URL is ephemeral (~5 min) so it must never be pinned in the replay log.
 - The sandbox never holds the socket. It sees a typed RPC surface; the WebSocket, the Browser Rendering session, and all session bookkeeping stay on the host.
 
-`createBrowserTools(options)` returns `{ browser_execute }` — one durable tool. `createBrowserRuntime(options)` additionally exposes the runtime handle (approvals, audit, snippets) and the connector (host-side `sessionInfo()` / `closeSession()` / `sweep()`).
+`createBrowserTools(options)` returns `{ browser_execute }` — one durable tool. `createBrowserRuntime(options)` additionally exposes the runtime handle (approvals, audit, snippets) and the connector (host-side `sessionInfo()` / `liveView()` / `closeSession()` / `sweep()`). `connector.liveView()` returns the shared (reuse/promoted) session's Live View URLs so the _host_ (e.g. an agent UI or a Slack notification) can hand a human a link into a long-lived session.
+
+### Live View (human-in-the-loop)
+
+Live View rides data that's already in the protocol: every target in a Browser Run session carries a `devtoolsFrontendUrl` (a `live.browser.run` link). The connector exposes it two ways — `cdp.getLiveViewUrl()` for autonomous handoffs from inside a run, and `connector.liveView()` for host-driven handoffs into the shared session — and optionally rewrites the hosted UI's `mode` query param (`tab` for an interactive page view, `devtools` for the full inspector). Because the codemode runtime already supports pausing a run for approval _with the browser session intact_, "human in the loop" is just: get the URL → surface it → make an approval-gated call → resume after the human acts. No new pause machinery is needed.
 
 ### Session lifecycle
 

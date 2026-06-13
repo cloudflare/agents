@@ -6059,15 +6059,38 @@ export class AIChatAgent<
             // Rewrite chunks before storing and broadcasting:
             // 1. Strip messageId from continuation start chunks so clients
             //    reuse the existing assistant message (#1229).
-            // 2. Convert the internal "finish" event's finishReason into the
+            // 2. Stamp the allocated assistant id onto a new turn's start chunk
+            //    so the client builds the live message under the SAME id the
+            //    server persists under (see below).
+            // 3. Convert the internal "finish" event's finishReason into the
             //    UIMessageStreamPart messageMetadata format (#677).
             let eventToSend: unknown = data;
-            if (continuation && data.type === "start" && "messageId" in data) {
-              const { messageId: _, ...rest } = data as {
-                messageId: unknown;
-                [key: string]: unknown;
-              };
-              eventToSend = rest;
+            if (data.type === "start") {
+              if (continuation && "messageId" in data) {
+                const { messageId: _, ...rest } = data as {
+                  messageId: unknown;
+                  [key: string]: unknown;
+                };
+                eventToSend = rest;
+              } else if (!continuation) {
+                // Most providers (e.g. Workers AI) emit no `start.messageId`,
+                // so the client's AI SDK would build the streaming assistant
+                // under its own generated id while the server persists under
+                // `message.id`. The two then can't be reconciled by id, and the
+                // originating tab briefly renders the turn twice — the live copy
+                // plus the `CF_AGENT_CHAT_MESSAGES` broadcast — before
+                // collapsing. Stamping the allocated id here makes the common
+                // case behave like the provider-id case the client already
+                // relies on (react.tsx records `start.messageId` to map the
+                // local stream to the persisted message).
+                const startData = data as {
+                  messageId?: unknown;
+                  [key: string]: unknown;
+                };
+                if (startData.messageId == null) {
+                  eventToSend = { ...startData, messageId: message.id };
+                }
+              }
             }
             if (data.type === "finish" && "finishReason" in data) {
               const { finishReason, ...rest } = data as {

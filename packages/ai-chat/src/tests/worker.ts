@@ -163,6 +163,18 @@ export class TestChatAgent extends AIChatAgent<Env> {
       ]);
     }
 
+    // Mirrors the common provider (e.g. Workers AI) that emits a `start`
+    // chunk WITHOUT a messageId, so the server must stamp its allocated id.
+    if (options?.body?.sseWithoutMessageId === true) {
+      return makeSSEChunkResponse([
+        { type: "start" },
+        { type: "text-start", id: "sse-t" },
+        { type: "text-delta", id: "sse-t", delta: "SSE reply" },
+        { type: "text-end", id: "sse-t" },
+        { type: "finish" }
+      ]);
+    }
+
     const continuationStreamError = options?.body?.continuationStreamError;
     if (options?.continuation && typeof continuationStreamError === "string") {
       const delayMs =

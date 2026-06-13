@@ -1770,9 +1770,41 @@ export function useAgentChat<
           setIsRecovering(Boolean(data.recovering));
           break;
 
-        case MessageType.CF_AGENT_CHAT_MESSAGES:
-          setMessages(preserveProtectedStreamingAssistant(data.messages));
+        case MessageType.CF_AGENT_CHAT_MESSAGES: {
+          let next = preserveProtectedStreamingAssistant(data.messages);
+          // A cross-tab observer builds the in-flight assistant via the
+          // broadcast accumulator, not the local transport — so
+          // `protectedStreamingAssistantRef` is never armed for it. Without
+          // this, a behind-the-stream snapshot would replace the observed
+          // assistant's streamed parts until the next chunk re-merges them
+          // (the same disappear/reappear the originating tab gets without the
+          // start-chunk re-arm above). Re-apply the accumulator — it adopted
+          // the server id from the `start` chunk, so `mergeInto` replaces the
+          // snapshot's copy in place (or appends a not-yet-persisted turn).
+          const observed = streamStateRef.current;
+          if (
+            observed.status === "observing" &&
+            observed.accumulator.parts.length > 0
+          ) {
+            // Only re-apply the live accumulator when it is at least as
+            // complete as the snapshot's copy of the same message. A fresh
+            // observer rebuilding its accumulator from a chunk-0 replay can
+            // briefly trail a fully-persisted snapshot; merging then would drop
+            // parts until replay catches up. In steady-state live observing the
+            // accumulator is always at or ahead of the snapshot, so this still
+            // fixes the disappear/reappear flicker.
+            const snapshotIdx = next.findIndex(
+              (m) => m.id === observed.accumulator.messageId
+            );
+            const snapshotParts =
+              snapshotIdx >= 0 ? next[snapshotIdx].parts.length : 0;
+            if (observed.accumulator.parts.length >= snapshotParts) {
+              next = observed.accumulator.mergeInto(next) as ChatMessage[];
+            }
+          }
+          setMessages(next);
           break;
+        }
 
         case MessageType.CF_AGENT_MESSAGE_UPDATED:
           // Server updated a message (e.g., applied tool result)
@@ -1915,6 +1947,33 @@ export function useAgentChat<
                   typeof chunkData.messageId === "string"
                 ) {
                   localResponseIds.set(data.id, chunkData.messageId);
+                  // Re-arm streaming protection to the ACTUAL assistant id for
+                  // this turn. `protectStreamingAssistantTail` runs at send
+                  // time — before the assistant message is minted — so it can
+                  // only latch the PREVIOUS turn's id (or nothing on the first
+                  // turn). Without correcting it here, a mid-stream full-list
+                  // broadcast (`CF_AGENT_CHAT_MESSAGES`, which Think emits after
+                  // every tool result) replaces the live-streamed assistant
+                  // with a possibly-behind server snapshot, so its parts (e.g.
+                  // tool cards) briefly disappear and reappear. Continuations
+                  // are skipped: they extend the existing protected assistant.
+                  if (!data.continuation) {
+                    const protection = protectedStreamingAssistantRef.current;
+                    if (protection?.assistantId !== chunkData.messageId) {
+                      const msgs = messagesRef.current;
+                      const idx = msgs.findIndex(
+                        (m) => m.id === chunkData.messageId
+                      );
+                      const anchorMessageId =
+                        idx >= 0
+                          ? (msgs[idx - 1]?.id ?? null)
+                          : (msgs[msgs.length - 1]?.id ?? null);
+                      protectedStreamingAssistantRef.current = {
+                        assistantId: chunkData.messageId,
+                        anchorMessageId
+                      };
+                    }
+                  }
                   // EVERY replayed `start` rebuilds the message from chunk 0,
                   // so the matching trailing assistant must be reset each
                   // time — not only while the resume request id is still

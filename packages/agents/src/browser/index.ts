@@ -38,7 +38,11 @@ export {
   type BrowserConnectorOptions,
   type BrowserConnectorSessionOptions,
   type BrowserConnectorSweepOptions,
-  type BrowserConnectorSweepResult
+  type BrowserConnectorSweepResult,
+  type BrowserLiveView,
+  type BrowserLiveViewTarget,
+  type BrowserLiveViewUrl,
+  type LiveViewMode
 } from "./connector";
 
 // Re-exported so browser-tool consumers can satisfy the facet wiring with

@@ -7899,6 +7899,29 @@ export class Think<
     );
   }
 
+  /**
+   * Stamp the allocated assistant id onto a new turn's `start` chunk so a chat
+   * client builds the live-streamed message under the SAME id this agent
+   * persists under. Providers that emit no `start.messageId` (e.g. Workers AI)
+   * otherwise leave the client to generate its own id; the live stream and the
+   * persisted message broadcast then can't reconcile by id, and the originating
+   * tab briefly renders the turn twice before collapsing. Mirrors the fix in
+   * `@cloudflare/ai-chat`. Continuations are skipped — they reuse the existing
+   * assistant message via the `continuation` frame flag, so the id must not
+   * change mid-message. The orphan-recovery path inherits the id from the
+   * stored chunk, so it needs no separate stamping.
+   */
+  private _alignStreamStartId(
+    chunk: StreamChunkData,
+    action: { type: string; messageId?: string } | undefined,
+    accumulator: StreamAccumulator,
+    continuation: boolean
+  ): void {
+    if (action?.type === "start" && action.messageId == null && !continuation) {
+      (chunk as { messageId?: string }).messageId = accumulator.messageId;
+    }
+  }
+
   private async _streamResultToRpcCallback(
     requestId: string,
     result: StreamableResult,
@@ -8011,6 +8034,8 @@ export class Think<
             });
             break;
           }
+
+          this._alignStreamStartId(streamChunk, action, accumulator, false);
 
           const chunkBody = JSON.stringify(chunk);
           await this._storeChunkDurably(
@@ -8506,6 +8531,13 @@ export class Think<
             });
             break;
           }
+
+          this._alignStreamStartId(
+            streamChunk,
+            action,
+            accumulator,
+            continuation
+          );
 
           const chunkBody = JSON.stringify(chunk);
           await this._storeChunkDurably(

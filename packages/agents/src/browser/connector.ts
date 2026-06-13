@@ -13,7 +13,8 @@ import {
   listBrowserTargets,
   BrowserRenderingError,
   type BrowserBinding,
-  type BrowserSessionInfo
+  type BrowserSessionInfo,
+  type BrowserTargetInfo
 } from "./browser-run";
 import { loadCdpSpec, type SearchableCdpSpec } from "./spec";
 import type {
@@ -93,6 +94,48 @@ export interface BrowserConnectorSweepResult {
   swept: Array<{ key: string; sessionId: string }>;
 }
 
+/**
+ * Live View rendering mode (the `mode` query param the hosted UI at
+ * `live.browser.run` understands):
+ *
+ * - `"tab"` — a standalone, interactive page view (best for handing control
+ *   to a human).
+ * - `"devtools"` — the full DevTools inspector panel (Elements, Console,
+ *   Network, …).
+ *
+ * Omit it to use whatever mode the binding's `devtoolsFrontendUrl` defaults
+ * to.
+ */
+export type LiveViewMode = "tab" | "devtools";
+
+/** A single tab's Live View URL. */
+export interface BrowserLiveViewUrl {
+  /** Open this in a browser to watch/control the tab in real time. */
+  url: string;
+  /** CDP target (tab) id the URL points at. */
+  targetId: string;
+  /** Milliseconds the URL stays valid from when it was generated (~5 min). */
+  expiresInMs: number;
+}
+
+export interface BrowserLiveViewTarget {
+  targetId: string;
+  /** Embeddable Live View URL (the `devtoolsFrontendUrl`) for this tab. */
+  url: string;
+  /** The page the tab is currently showing (e.g. `https://example.com`). */
+  pageUrl?: string;
+  title?: string;
+  type?: string;
+}
+
+/** Live View URLs for every tab in a (shared) session. */
+export interface BrowserLiveView {
+  sessionId: string;
+  targets: BrowserLiveViewTarget[];
+  /** Milliseconds the URLs stay valid from when they were generated (~5 min). */
+  expiresInMs: number;
+}
+
 const EXEC_KEY_PREFIX = "cdp:exec:";
 const REUSE_KEY_PREFIX = "cdp:reuse:";
 
@@ -111,8 +154,31 @@ export const DEFAULT_EXEC_SWEEP_IDLE_MS = 24 * 60 * 60 * 1000;
  */
 const EXEC_TOUCH_INTERVAL_MS = 60 * 1000;
 
+/**
+ * Browser Run mints `devtoolsFrontendUrl`s (the Live View links) that are
+ * valid for ~5 minutes. We surface the window so callers can decide how long
+ * a shared link is good for before re-listing targets.
+ */
+const LIVE_VIEW_URL_TTL_MS = 5 * 60 * 1000;
+
 function isMissingBrowserSession(error: unknown): boolean {
   return error instanceof BrowserRenderingError && error.status === 404;
+}
+
+/**
+ * Rewrite the hosted Live View UI's `mode` query param (`tab` | `devtools`).
+ * The raw `devtoolsFrontendUrl` is returned unchanged when no mode is asked
+ * for or the URL can't be parsed.
+ */
+function applyLiveViewMode(rawUrl: string, mode?: LiveViewMode): string {
+  if (!mode) return rawUrl;
+  try {
+    const url = new URL(rawUrl);
+    url.searchParams.set("mode", mode === "devtools" ? "devtools" : "tab");
+    return url.toString();
+  } catch {
+    return rawUrl;
+  }
 }
 
 interface CachedSocket {
@@ -190,7 +256,8 @@ export class BrowserConnector extends CodemodeConnector {
       "Browser-/Target-scoped commands (Target.createTarget, Target.getTargets) need no sessionId. Page-scoped commands (Page.navigate, Runtime.evaluate) require one: `const { sessionId } = await cdp.attachToTarget({ targetId });` then pass it to every page-scoped send.",
       "Write large outputs (screenshots, page dumps) to a file or workspace immediately and pass around small references — large return values fail to record.",
       "Use cdp.spec() to discover commands, events, and types when unsure.",
-      "If a command fails or times out, check cdp.getDebugLog() for recent protocol traffic."
+      "If a command fails or times out, check cdp.getDebugLog() for recent protocol traffic.",
+      "When a step needs a human (login, MFA, CAPTCHA, sensitive input), call cdp.getLiveViewUrl() to get a link they can open to control the browser live — surface it, then make an approval-gated call so the run pauses until they're done."
     ];
     if (mode === "one-shot") {
       lines.push(
@@ -358,6 +425,41 @@ export class BrowserConnector extends CodemodeConnector {
           socket.clearDebugLog();
           return null;
         }
+      },
+
+      getLiveViewUrl: {
+        description:
+          "Return a Live View URL for a tab — a link a human can open in a " +
+          "browser to watch and control this session in real time. Use it " +
+          "for human-in-the-loop steps (login, MFA, CAPTCHA, sensitive " +
+          "input): get the URL, surface it to the user, then make a call " +
+          "that pauses for approval so they can act before the run " +
+          "continues. The URL is valid for ~5 minutes.",
+        replay: "reexecute",
+        inputSchema: {
+          type: "object",
+          properties: {
+            targetId: {
+              type: "string",
+              description:
+                "Target (tab) id to view; defaults to the first open page"
+            },
+            mode: {
+              type: "string",
+              enum: ["tab", "devtools"],
+              description:
+                "tab = standalone interactive page view (best for handoff); " +
+                "devtools = full DevTools inspector panel"
+            }
+          }
+        },
+        execute: async (args, ctx) => {
+          const { targetId, mode } = (args ?? {}) as {
+            targetId?: string;
+            mode?: LiveViewMode;
+          };
+          return this.#liveViewUrl(this.#executionId(ctx), { targetId, mode });
+        }
       }
     };
 
@@ -497,6 +599,36 @@ export class BrowserConnector extends CodemodeConnector {
     }
   }
 
+  /**
+   * Live View URLs for the shared (reuse/promoted) session's tabs, or
+   * `undefined` when no shared session exists. Each URL opens an interactive,
+   * real-time view of the browser — surface them in your UI (or send them via
+   * Slack/email) to let a human watch or take over a running session
+   * (human-in-the-loop). URLs are valid for ~5 minutes; call again for fresh
+   * ones. Only meaningful with the Browser Rendering binding in
+   * `reuse`/`dynamic` mode.
+   */
+  async liveView(options?: {
+    mode?: LiveViewMode;
+  }): Promise<BrowserLiveView | undefined> {
+    const info = await this.sessionInfo();
+    if (!info) return undefined;
+    const targets = (info.targets ?? [])
+      .filter((target) => target.devtoolsFrontendUrl)
+      .map((target) => ({
+        targetId: target.id,
+        url: applyLiveViewMode(target.devtoolsFrontendUrl!, options?.mode),
+        pageUrl: target.url,
+        title: target.title,
+        type: target.type
+      }));
+    return {
+      sessionId: info.sessionId,
+      targets,
+      expiresInMs: LIVE_VIEW_URL_TTL_MS
+    };
+  }
+
   /** Close the shared (reuse/promoted) session, if one exists. */
   async closeSession(): Promise<void> {
     if (!this.#options.browser) return;
@@ -619,6 +751,69 @@ export class BrowserConnector extends CodemodeConnector {
     const live = await socket.attachToTarget(targetId, { timeoutMs });
     cached?.attached.set(handle, live);
     return live;
+  }
+
+  /**
+   * List the current tabs (targets) for this execution's browser, including
+   * their `devtoolsFrontendUrl` (the Live View link). For the binding this is
+   * the current Browser Run session; for an externally-managed `cdpUrl` it is
+   * the standard CDP `/json/list`.
+   */
+  async #liveTargets(executionId: string): Promise<BrowserTargetInfo[]> {
+    if (this.#options.cdpUrl) {
+      const endpoint = new URL("/json/list", this.#options.cdpUrl).toString();
+      const response = await fetch(endpoint, {
+        headers: this.#options.cdpHeaders
+      });
+      if (!response.ok) {
+        throw new Error(
+          `Failed to list targets at ${endpoint}: ${response.status}`
+        );
+      }
+      const payload = (await response.json()) as unknown;
+      return Array.isArray(payload) ? (payload as BrowserTargetInfo[]) : [];
+    }
+
+    const browser = this.#options.browser;
+    if (!browser) throw new Error("BrowserConnector has no browser binding");
+    // Ensure a session + socket exist, then read the resolved Browser Run id.
+    await this.#socket(executionId);
+    const sessionId = this.#sockets.get(executionId)?.browserSessionId;
+    if (!sessionId) return [];
+    return listBrowserTargets(browser, sessionId);
+  }
+
+  /** Build a Live View URL for one tab in this execution's browser. */
+  async #liveViewUrl(
+    executionId: string,
+    options: { targetId?: string; mode?: LiveViewMode }
+  ): Promise<BrowserLiveViewUrl> {
+    const targets = await this.#liveTargets(executionId);
+    const target = options.targetId
+      ? targets.find((candidate) => candidate.id === options.targetId)
+      : (targets.find(
+          (candidate) =>
+            candidate.type === "page" && candidate.devtoolsFrontendUrl
+        ) ?? targets.find((candidate) => candidate.devtoolsFrontendUrl));
+
+    if (!target) {
+      throw new Error(
+        options.targetId
+          ? `No target ${options.targetId} found. List tabs with Target.getTargets or open one with Target.createTarget.`
+          : "No browser tab is open yet. Create one (Target.createTarget) before requesting a Live View URL."
+      );
+    }
+    if (!target.devtoolsFrontendUrl) {
+      throw new Error(
+        `Target ${target.id} has no Live View URL (devtoolsFrontendUrl). Live View needs the Browser Rendering binding.`
+      );
+    }
+
+    return {
+      url: applyLiveViewMode(target.devtoolsFrontendUrl, options.mode),
+      targetId: target.id,
+      expiresInMs: LIVE_VIEW_URL_TTL_MS
+    };
   }
 
   /**

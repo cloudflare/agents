@@ -199,10 +199,39 @@ const { runtime, connector, tools } = createBrowserRuntime({
 });
 
 await connector.sessionInfo(); // shared session id + open targets
+await connector.liveView(); // Live View URLs for the shared session's tabs
 await connector.closeSession(); // close the shared session
 await connector.sweep(); // reclaim expired/stale sessions — call from a scheduled task
 await runtime.expirePaused(); // reject stale never-approved pauses, freeing their sessions
 ```
+
+## Live View and human-in-the-loop
+
+[Live View](https://developers.cloudflare.com/browser-run/features/live-view/) lets a human open a URL and watch — or take control of — a running browser session in real time. It is the building block for human-in-the-loop steps such as logging in, solving a CAPTCHA, completing MFA, or entering data you do not want to pass through an automation script.
+
+Because the codemode runtime can already pause a run for approval _with the browser session intact_, a handoff is a four-step pattern:
+
+1. The model calls `cdp.getLiveViewUrl()` to get a link to the current tab.
+2. It surfaces the link to the user (for example by returning it, writing it to state, or sending it via Slack or email).
+3. It makes an approval-gated call, so the run pauses durably while the human acts in the live browser.
+4. After approval, the run resumes against the same session — cookies and login state intact.
+
+```javascript
+async () => {
+  const { targetId } = await cdp.send({
+    method: "Target.createTarget",
+    params: { url: "https://example.com/login" }
+  });
+
+  // A link the user opens to log in themselves.
+  const { url } = await cdp.getLiveViewUrl({ targetId, mode: "tab" });
+  return { needsHumanLogin: url };
+};
+```
+
+Pass `mode: "tab"` for a standalone interactive page view (best for a handoff) or `mode: "devtools"` for the full DevTools inspector panel. The URL is valid for about five minutes; call again for a fresh one.
+
+From the host side, `connector.liveView()` returns the shared (`reuse`/`dynamic`) session's tabs and their Live View URLs, so an agent can render a "take over this session" link in its own UI without entering the sandbox. Each tab also carries its current `pageUrl`, so a UI can label tabs and skip blank or internal (`about:blank`, `chrome://`) pages.
 
 ## Execution model
 
@@ -222,6 +251,7 @@ Inside `browser_execute`, the `cdp` namespace provides (all methods take one obj
 | `cdp.spec()`                                            | The searchable, normalized CDP protocol spec                                   |
 | `cdp.getDebugLog({ limit? })`                           | Recent CDP traffic (sends, receives, warnings) for this execution's connection |
 | `cdp.clearDebugLog()`                                   | Clear the debug log buffer                                                     |
+| `cdp.getLiveViewUrl({ targetId?, mode? })`              | A Live View URL a human can open to watch/control the session in real time     |
 | `cdp.startSession()` _(reuse/dynamic)_                  | Promote/ensure the shared session; returns its info                            |
 | `cdp.sessionInfo()` _(reuse/dynamic)_                   | Shared session info, or `null`                                                 |
 | `cdp.closeSession()` _(reuse/dynamic)_                  | Close the shared session                                                       |

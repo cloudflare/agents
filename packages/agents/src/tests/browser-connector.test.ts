@@ -126,6 +126,8 @@ interface BrowserRequest {
 function createFakeBrowser(options?: {
   listStatuses?: number[];
   cdpErrors?: Set<string>;
+  /** Include a `devtoolsFrontendUrl` (the Live View link) on listed targets. */
+  liveTargets?: boolean;
 }) {
   const requests: BrowserRequest[] = [];
   const sockets: FakeCdpSocket[] = [];
@@ -172,7 +174,20 @@ function createFakeBrowser(options?: {
       if (url.endsWith("/json/list")) {
         const status = listStatuses.shift();
         if (status) return new Response(null, { status });
-        return Response.json([{ id: "target-1", type: "page" }]);
+        const sessionId =
+          url.match(/\/browser\/(session-[^/?]+)/)?.[1] ?? "session";
+        return Response.json([
+          {
+            id: "target-1",
+            type: "page",
+            ...(options?.liveTargets
+              ? {
+                  url: "https://example.com/",
+                  devtoolsFrontendUrl: `https://live.browser.run/ui/inspector?wss=live.browser.run/api/devtools/browser/${sessionId}/page/target-1?jwt=token`
+                }
+              : {})
+          }
+        ]);
       }
 
       if (method === "DELETE") {
@@ -226,11 +241,15 @@ describe("BrowserConnector", () => {
       "attachToTarget",
       "clearDebugLog",
       "getDebugLog",
+      "getLiveViewUrl",
       "send",
       "spec"
     ]);
     expect(oneShotDesc.annotations?.spec).toEqual({ replay: "reexecute" });
     expect(oneShotDesc.annotations?.getDebugLog).toEqual({
+      replay: "reexecute"
+    });
+    expect(oneShotDesc.annotations?.getLiveViewUrl).toEqual({
       replay: "reexecute"
     });
     expect(oneShotDesc.annotations?.send).toBeUndefined();
@@ -778,5 +797,75 @@ describe("BrowserConnector", () => {
     await connector.closeSession();
     expect(store.sessions.has("cdp:reuse:default")).toBe(false);
     expect(deletesFor(requests, "session-1")).toHaveLength(1);
+  });
+
+  it("builds a Live View URL for the current execution's tab", async () => {
+    const { browser } = createFakeBrowser({ liveTargets: true });
+    const store = new MemorySessionStore();
+    const connector = new BrowserConnector(fakeCtx, { browser, store });
+
+    const result = (await connector.executeTool(
+      "getLiveViewUrl",
+      {},
+      { executionId: "exec-a" }
+    )) as { url: string; targetId: string; expiresInMs: number };
+
+    expect(result.targetId).toBe("target-1");
+    expect(result.url).toContain("live.browser.run");
+    expect(result.url).toContain("session-1");
+    expect(result.expiresInMs).toBeGreaterThan(0);
+  });
+
+  it("rewrites the Live View mode query param when asked", async () => {
+    const { browser } = createFakeBrowser({ liveTargets: true });
+    const store = new MemorySessionStore();
+    const connector = new BrowserConnector(fakeCtx, { browser, store });
+
+    const result = (await connector.executeTool(
+      "getLiveViewUrl",
+      { mode: "devtools" },
+      { executionId: "exec-a" }
+    )) as { url: string };
+
+    expect(new URL(result.url).searchParams.get("mode")).toBe("devtools");
+  });
+
+  it("errors clearly when the requested Live View target is missing", async () => {
+    const { browser } = createFakeBrowser({ liveTargets: true });
+    const store = new MemorySessionStore();
+    const connector = new BrowserConnector(fakeCtx, { browser, store });
+
+    await expect(
+      connector.executeTool(
+        "getLiveViewUrl",
+        { targetId: "nope" },
+        { executionId: "exec-a" }
+      )
+    ).rejects.toThrow("No target nope found");
+  });
+
+  it("exposes shared-session Live View URLs via the host helper", async () => {
+    const { browser } = createFakeBrowser({ liveTargets: true });
+    const store = new MemorySessionStore();
+    const connector = new BrowserConnector(fakeCtx, {
+      browser,
+      store,
+      session: { mode: "reuse" }
+    });
+
+    expect(await connector.liveView()).toBeUndefined();
+
+    await connector.executeTool(
+      "send",
+      { method: "Browser.getVersion" },
+      { executionId: "exec-a" }
+    );
+
+    const view = await connector.liveView({ mode: "tab" });
+    expect(view?.sessionId).toBe("session-1");
+    expect(view?.targets).toHaveLength(1);
+    expect(view?.targets[0].targetId).toBe("target-1");
+    expect(view?.targets[0].pageUrl).toBe("https://example.com/");
+    expect(new URL(view!.targets[0].url).searchParams.get("mode")).toBe("tab");
   });
 });
