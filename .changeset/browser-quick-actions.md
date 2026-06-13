@@ -1,6 +1,6 @@
 ---
-"agents": minor
-"@cloudflare/think": minor
+"agents": patch
+"@cloudflare/think": patch
 ---
 
 Add Browser Run Quick Actions to the browser tools: stateless, one-shot

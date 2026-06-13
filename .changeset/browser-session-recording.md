@@ -1,5 +1,5 @@
 ---
-"agents": minor
+"agents": patch
 ---
 
 Add Browser Run session recording to the browser tools. Set `recording: true`

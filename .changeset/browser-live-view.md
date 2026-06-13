@@ -1,5 +1,5 @@
 ---
-"agents": minor
+"agents": patch
 ---
 
 Add Browser Run Live View support to the browser tools. The `cdp` connector
