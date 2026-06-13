@@ -76,7 +76,7 @@ Server-only examples can use Wrangler directly:
 
 - Use `wrangler.jsonc` (not `.toml`)
 - Include `"$schema": "../../node_modules/wrangler/config-schema.json"`
-- `compatibility_date: "2026-01-28"`, `compatibility_flags: ["nodejs_compat"]`
+- `compatibility_date: "2026-06-11"`, `compatibility_flags: ["nodejs_compat"]`
 - Full-stack apps with client routing: add `"assets": { "not_found_handling": "single-page-application" }`
 - Use `"run_worker_first"` to route API/agent paths to the Worker
 - Do not set `"directory"` in assets — the Vite plugin handles this

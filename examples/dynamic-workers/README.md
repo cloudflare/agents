@@ -17,7 +17,7 @@ The host Worker exposes a `/api/run` endpoint. The React frontend sends user-wri
 
 ```ts
 const worker = env.LOADER.load({
-  compatibilityDate: "2026-01-28",
+  compatibilityDate: "2026-06-11",
   mainModule: "worker.js",
   modules: {
     "worker.js": code

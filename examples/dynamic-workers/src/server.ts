@@ -14,7 +14,7 @@ export default {
 
       try {
         const worker = env.LOADER.load({
-          compatibilityDate: "2026-01-28",
+          compatibilityDate: "2026-06-11",
           mainModule: "worker.js",
           modules: {
             "worker.js": code

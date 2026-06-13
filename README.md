@@ -89,7 +89,7 @@ The agent is a Durable Object, so it needs a binding and a SQLite migration in `
 {
   "name": "counter",
   "main": "server.ts",
-  "compatibility_date": "2026-01-28",
+  "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [{ "name": "CounterAgent", "class_name": "CounterAgent" }]

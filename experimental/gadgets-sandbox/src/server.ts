@@ -353,7 +353,7 @@ export class SandboxAgent extends AIChatAgent<Env, SandboxState> {
     // Create the dynamic isolate via the Worker Loader.
     // Each execution gets a unique ID so isolates don't collide.
     const worker = this.env.LOADER.get(executionId, () => ({
-      compatibilityDate: "2026-01-28",
+      compatibilityDate: "2026-06-11",
       mainModule: "harness.js",
       modules: {
         "harness.js": CODE_HARNESS,

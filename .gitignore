@@ -155,3 +155,6 @@ test-results/
 # Nx
 .nx/cache
 .nx/workspace-data
+
+# Temporary compat-verification harness (Layer A)
+.compat-harness/

@@ -2,7 +2,7 @@
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "dynamic-workers-example",
   "main": "src/server.ts",
-  "compatibility_date": "2026-01-28",
+  "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "not_found_handling": "single-page-application",

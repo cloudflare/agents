@@ -1,7 +1,7 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "voice-agent",
-  "compatibility_date": "2026-01-28",
+  "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/server.ts",
   "ai": {

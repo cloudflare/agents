@@ -2,7 +2,7 @@
   "$schema": "../../../../node_modules/wrangler/config-schema.json",
   // Same compat date as the production example so partyserver 0.5.x
   // can rely on `ctx.id.name` inside alarm handlers.
-  "compatibility_date": "2026-04-15",
+  "compatibility_date": "2026-06-11",
   "compatibility_flags": [
     "nodejs_compat",
     // vitest-pool-workers needs these flags on top of nodejs_compat.

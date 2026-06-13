@@ -45,7 +45,7 @@ export function createThinkWorkerDefaults(
   return {
     name: options.name ?? "think-app",
     main: options.main ?? "virtual:think/entry",
-    compatibility_date: options.compatibilityDate ?? "2026-01-28",
+    compatibility_date: options.compatibilityDate ?? "2026-06-11",
     compatibility_flags: ["nodejs_compat"],
     durable_objects: {
       bindings: manifest.bindings.map((binding) => ({

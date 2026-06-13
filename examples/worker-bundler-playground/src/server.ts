@@ -239,7 +239,7 @@ export class WorkerPlayground extends AIChatAgent<Env> {
       mainModule: result.mainModule,
       modules: result.modules,
       compatibilityDate:
-        result.wranglerConfig?.compatibilityDate ?? "2026-01-28",
+        result.wranglerConfig?.compatibilityDate ?? "2026-06-11",
       compatibilityFlags: result.wranglerConfig?.compatibilityFlags
     }));
 

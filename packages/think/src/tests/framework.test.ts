@@ -187,7 +187,7 @@ describe("Think framework discovery", () => {
     expect(createThinkWorkerConfig(manifest, { name: "support-app" })).toEqual({
       name: "support-app",
       main: "virtual:think/entry",
-      compatibility_date: "2026-01-28",
+      compatibility_date: "2026-06-11",
       compatibility_flags: ["nodejs_compat"],
       durable_objects: {
         bindings: [

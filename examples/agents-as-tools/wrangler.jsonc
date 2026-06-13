@@ -7,7 +7,7 @@
   // `this.name` getter when a wake path goes through alarm() instead
   // of fetch() with idFromName(). Symptom is
   // "Error in Assistant:<unnamed> fetch: … this.ctx.id.name is not set".
-  "compatibility_date": "2026-04-15",
+  "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "not_found_handling": "single-page-application",

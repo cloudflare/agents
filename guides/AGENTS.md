@@ -47,7 +47,7 @@ Keep it narrative. The reader should be able to follow the README top-to-bottom 
 
 - Follow the same Vite, wrangler, and tsconfig conventions as `/examples` (see `/examples/AGENTS.md`)
 - Use `.env.example` for secrets
-- `compatibility_date: "2026-01-28"`, `compatibility_flags: ["nodejs_compat"]`
+- `compatibility_date: "2026-06-11"`, `compatibility_flags: ["nodejs_compat"]`
 
 ## Current guides
 

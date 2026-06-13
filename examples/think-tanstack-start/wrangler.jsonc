@@ -2,7 +2,7 @@
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "think-tanstack-start",
   "main": "src/worker.ts",
-  "compatibility_date": "2026-01-28",
+  "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
