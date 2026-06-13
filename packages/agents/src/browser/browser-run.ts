@@ -29,6 +29,25 @@ export interface ConnectBrowserOptions {
   timeoutMs?: number;
   keepAliveMs?: number;
   includeTargets?: boolean;
+  /**
+   * Opt into Browser Run [session recording](https://developers.cloudflare.com/browser-run/features/session-recording/):
+   * an rrweb capture of DOM changes, input, and navigation, finalized when the
+   * session closes. Set at session-launch time. Retrieve later with
+   * {@link getBrowserRecording}.
+   */
+  recording?: boolean;
+}
+
+/** An rrweb session recording for a closed Browser Run session. */
+export interface BrowserRecording {
+  sessionId: string;
+  /** Recording length in milliseconds. */
+  duration: number;
+  /**
+   * rrweb event arrays keyed by CDP target id (one per tab). Each value can be
+   * passed directly to `rrweb-player` to replay that tab.
+   */
+  events: Record<string, unknown[]>;
 }
 
 export class BrowserRenderingError extends Error {
@@ -43,7 +62,11 @@ export class BrowserRenderingError extends Error {
 
 function browserSessionEndpoint(
   sessionId?: string,
-  options?: { keepAliveMs?: number; includeTargets?: boolean }
+  options?: {
+    keepAliveMs?: number;
+    includeTargets?: boolean;
+    recording?: boolean;
+  }
 ): string {
   const path = sessionId
     ? `/v1/devtools/browser/${sessionId}`
@@ -55,6 +78,9 @@ function browserSessionEndpoint(
   }
   if (options?.includeTargets) {
     url.searchParams.set("targets", "true");
+  }
+  if (options?.recording) {
+    url.searchParams.set("recording", "true");
   }
 
   return url.toString();
@@ -89,7 +115,11 @@ async function parseBrowserSessionInfo(
 
 export async function createBrowserSession(
   browser: BrowserBinding,
-  options?: { keepAliveMs?: number; includeTargets?: boolean }
+  options?: {
+    keepAliveMs?: number;
+    includeTargets?: boolean;
+    recording?: boolean;
+  }
 ): Promise<BrowserSessionInfo> {
   const response = await browser.fetch(
     browserSessionEndpoint(undefined, options),
@@ -154,7 +184,8 @@ export async function connectBrowser(
   const response = await browser.fetch(
     browserSessionEndpoint(undefined, {
       keepAliveMs: normalizedOptions.keepAliveMs,
-      includeTargets: normalizedOptions.includeTargets
+      includeTargets: normalizedOptions.includeTargets,
+      recording: normalizedOptions.recording
     }),
     { headers: { Upgrade: "websocket" } }
   );
@@ -188,6 +219,52 @@ export async function connectBrowser(
     },
     sessionId
   );
+}
+
+/**
+ * Fetch a Browser Run [session recording](https://developers.cloudflare.com/browser-run/features/session-recording/)
+ * by session id, via the Browser Rendering REST API.
+ *
+ * A recording is only available **after** the session closes (explicit
+ * `closeSession()`, idle `keep_alive` expiry, or sweep) and is retained for 30
+ * days. Capture the session id while the session is alive — e.g. from
+ * `connector.liveView()`/`sessionInfo()` — then call this once it has ended.
+ *
+ * Unlike the binding-based helpers, this hits `api.cloudflare.com` directly, so
+ * it needs an account id and an API token with `Browser Rendering` read access
+ * (the Workers Browser Run binding cannot read recordings).
+ */
+export async function getBrowserRecording(options: {
+  accountId: string;
+  apiToken: string;
+  sessionId: string;
+  /** Override for testing; defaults to the global `fetch`. */
+  fetchImpl?: typeof fetch;
+}): Promise<BrowserRecording> {
+  const { accountId, apiToken, sessionId } = options;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const endpoint = `https://api.cloudflare.com/client/v4/accounts/${accountId}/browser-rendering/recording/${sessionId}`;
+
+  const response = await fetchImpl(endpoint, {
+    headers: { Authorization: `Bearer ${apiToken}` }
+  });
+
+  if (!response.ok) {
+    throw new BrowserRenderingError(
+      `Failed to fetch Browser Run recording for ${sessionId}: ${response.status}`,
+      response.status
+    );
+  }
+
+  // The recording endpoint returns the recording object directly; tolerate a
+  // standard v4 `{ result }` envelope in case that changes.
+  const payload = (await response.json()) as
+    | BrowserRecording
+    | { result?: BrowserRecording };
+  const recording =
+    "result" in payload && payload.result ? payload.result : payload;
+
+  return recording as BrowserRecording;
 }
 
 /**

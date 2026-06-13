@@ -38,6 +38,14 @@ export interface BrowserConnectorSessionOptions {
   key?: string;
   /** Browser Run inactivity timeout. Browser Run currently caps this server-side. */
   keepAliveMs?: number;
+  /**
+   * Opt into Browser Run [session recording](https://developers.cloudflare.com/browser-run/features/session-recording/)
+   * for sessions this connector creates: an rrweb capture of everything the
+   * agent did, finalized when the session closes. Retrieve it afterward with
+   * {@link getBrowserRecording} using the session id from
+   * {@link BrowserConnector.liveView}/`sessionInfo()`.
+   */
+  recording?: boolean;
 }
 
 export type BrowserConnectorOptions = (
@@ -1008,7 +1016,8 @@ export class BrowserConnector extends CodemodeConnector {
     const store = this.#store;
 
     const info = await createBrowserSession(browser, {
-      keepAliveMs: this.#options.session?.keepAliveMs
+      keepAliveMs: this.#options.session?.keepAliveMs,
+      recording: this.#options.session?.recording
     });
     const now = Date.now();
     const stored: StoredBrowserSession = {

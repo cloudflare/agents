@@ -233,6 +233,41 @@ Pass `mode: "tab"` for a standalone interactive page view (best for a handoff) o
 
 From the host side, `connector.liveView()` returns the shared (`reuse`/`dynamic`) session's tabs and their Live View URLs, so an agent can render a "take over this session" link in its own UI without entering the sandbox. Each tab also carries its current `pageUrl`, so a UI can label tabs and skip blank or internal (`about:blank`, `chrome://`) pages.
 
+## Session recording
+
+Where Live View lets you watch a session _live_, [session recording](https://developers.cloudflare.com/browser-run/features/session-recording/) captures everything the agent did so you can review it _afterward_ — an [rrweb](https://github.com/rrweb-io/rrweb) capture of DOM changes, input, and navigation (structured JSON, not video). It is the natural audit trail for an autonomous browser run.
+
+Opt in per session via the `session` option; sessions this connector creates then record until they close:
+
+```ts
+const { connector, tools } = createBrowserRuntime({
+  ctx: this.ctx,
+  browser: this.env.BROWSER,
+  loader: this.env.LOADER,
+  session: { mode: "reuse", key: "main", recording: true }
+});
+```
+
+A recording is only finalized once the session closes (an explicit `connector.closeSession()`, idle `keep_alive` expiry, or `connector.sweep()`), so capture the session id while the session is alive and fetch the recording later:
+
+```ts
+import { getBrowserRecording } from "agents/browser";
+
+const { sessionId } = (await connector.sessionInfo()) ?? {};
+// ...later, after the session has closed...
+const recording = await getBrowserRecording({
+  accountId: this.env.CF_ACCOUNT_ID,
+  apiToken: this.env.CF_API_TOKEN,
+  sessionId
+});
+// recording.events is keyed by CDP target (one rrweb event array per tab),
+// ready to hand to rrweb-player.
+```
+
+Retrieval goes through the Browser Rendering REST API, so it needs an account id and an API token with `Browser Rendering` read access (the Workers binding cannot read recordings). Recordings are retained for 30 days and capped at 2 hours per session.
+
+Be deliberate with recording on shared (`reuse`/`dynamic`) sessions: the recording spans the session's _entire_ lifetime — every turn, and every user that shares the session `key` — until it closes. rrweb masks input fields by default, but treat a recording as potentially sensitive and scope the session `key` accordingly.
+
 ## Execution model
 
 - LLM-generated code runs in a Worker sandbox; the CDP WebSocket and the browser session stay in the host worker.

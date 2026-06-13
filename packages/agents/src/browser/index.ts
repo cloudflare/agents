@@ -10,9 +10,11 @@ export {
   connectBrowserSession,
   createBrowserSession,
   deleteBrowserSession,
+  getBrowserRecording,
   listBrowserTargets,
   BrowserRenderingError,
   type BrowserBinding,
+  type BrowserRecording,
   type BrowserSessionInfo,
   type BrowserTargetInfo,
   type ConnectBrowserOptions
