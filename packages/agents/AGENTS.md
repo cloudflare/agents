@@ -24,6 +24,9 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/vite`                | `src/vite.ts`                | Vite plugin — decorator transforms and the `agents:skills` import transform  |
 | `agents/skills`              | `src/skills/index.ts`        | Framework-agnostic Agent Skills engine — sources, `SkillRegistry`, runner    |
 | `agents/experimental/webmcp` | `src/experimental/webmcp.ts` | WebMCP adapter — bridges MCP tools to Chrome's `navigator.modelContext`      |
+| `agents/browser`             | `src/browser/index.ts`       | Browser Run helpers — CDP sessions, connector, Quick Action primitives       |
+| `agents/browser/ai`          | `src/browser/ai.ts`          | AI SDK browser tools — `createBrowserTools` (CDP) + `createQuickActionTools` |
+| `agents/browser/tanstack-ai` | `src/browser/tanstack-ai.ts` | TanStack AI browser tool (`browser_execute`)                                 |
 
 The `agents:skills` virtual-module types ship from `skills-module.d.ts` (referenced from the built `dist/index.d.ts`); `@cloudflare/think` consumes `agents/skills` and `@cloudflare/ai-chat` can too.
 
@@ -91,6 +94,17 @@ src/
 
   experimental/         # Experimental features (published but unstable)
     webmcp.ts           # WebMCP adapter (browser-side, uses MCP SDK client)
+
+  browser/              # Browser Run integration (experimental)
+    index.ts            # Barrel for agents/browser
+    browser-run.ts      # Low-level Browser Run REST/binding calls + errors
+    cdp-session.ts      # CdpSession — Chrome DevTools Protocol over WebSocket
+    connector.ts        # BrowserConnector — codemode connector + session helpers
+    session-manager.ts  # Durable session-id store + sweep
+    spec.ts             # CDP protocol spec loader (cdp.spec())
+    quick-actions.ts    # Stateless Quick Action primitives (browserMarkdown, …)
+    ai.ts               # createBrowserTools + createQuickActionTools (AI SDK)
+    tanstack-ai.ts      # createBrowserTools for TanStack AI
 
   core/                 # Internal utilities
     events.ts           # DisposableStore

@@ -10,27 +10,44 @@ const fakeCtx = {
 } as unknown as DurableObjectState;
 
 describe("createBrowserTools", () => {
-  it("returns a ToolSet with a single browser_execute tool", () => {
+  it("returns browser_execute plus the default Quick Action tools when a binding is present", () => {
     const tools = createBrowserTools({
       ctx: fakeCtx,
       browser: {} as Fetcher,
       loader: {} as WorkerLoader
     });
 
-    expect(Object.keys(tools)).toEqual(["browser_execute"]);
+    expect(Object.keys(tools).sort()).toEqual([
+      "browser_execute",
+      "browser_extract",
+      "browser_links",
+      "browser_markdown",
+      "browser_scrape"
+    ]);
     expect(typeof tools.browser_execute.execute).toBe("function");
     // The runtime tool description lists the cdp connector namespace.
     expect(tools.browser_execute.description).toContain("`cdp`");
   });
 
-  it("accepts cdpUrl instead of browser binding", () => {
+  it("omits Quick Action tools when quickActions is false", () => {
+    const tools = createBrowserTools({
+      ctx: fakeCtx,
+      browser: {} as Fetcher,
+      loader: {} as WorkerLoader,
+      quickActions: false
+    });
+
+    expect(Object.keys(tools)).toEqual(["browser_execute"]);
+  });
+
+  it("accepts cdpUrl instead of browser binding (Quick Actions skipped without a binding)", () => {
     const tools = createBrowserTools({
       ctx: fakeCtx,
       cdpUrl: "http://localhost:9222",
       loader: {} as WorkerLoader
     });
 
-    expect(tools).toHaveProperty("browser_execute");
+    expect(Object.keys(tools)).toEqual(["browser_execute"]);
   });
 
   it("accepts optional timeout and session mode", () => {

@@ -9,7 +9,10 @@ declare namespace Cloudflare {
   interface Env {
     LOADER: WorkerLoader;
     AI: Ai;
-    BROWSER: Fetcher;
+    // `BrowserRun` (not just `Fetcher`) so the Quick Action tools can call
+    // `env.BROWSER.quickAction(...)`. It still satisfies the CDP path, which
+    // only needs `fetch`.
+    BROWSER: BrowserRun;
     GITHUB_CLIENT_ID: string;
     GITHUB_CLIENT_SECRET: string;
     /**

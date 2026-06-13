@@ -14,6 +14,10 @@ export type { CreateBrowserToolsOptions } from "./ai";
  * writes TypeScript against the `cdp` connector and browser sessions
  * survive pauses.
  *
+ * The stateless Quick Action tools are not surfaced through this TanStack
+ * wrapper (it exposes only `browser_execute`); use `createQuickActionTools`
+ * from `agents/browser/ai` if you want them.
+ *
  * @example
  * ```ts
  * import { createBrowserTools } from "agents/browser/tanstack-ai";
@@ -36,7 +40,9 @@ export type { CreateBrowserToolsOptions } from "./ai";
 export function createBrowserTools(
   options: CreateBrowserToolsOptions
 ): ServerTool[] {
-  const { tools } = createBrowserRuntime(options);
+  // This wrapper only surfaces `browser_execute`, so don't build the default-on
+  // Quick Action tools just to discard them.
+  const { tools } = createBrowserRuntime({ ...options, quickActions: false });
   const executeTool = tools.browser_execute;
 
   const execute = toolDefinition({

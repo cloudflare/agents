@@ -11,6 +11,7 @@ import type { WorkspaceFsLike } from "@cloudflare/shell";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { createExtensionTools } from "@cloudflare/think/tools/extensions";
+import { createQuickActionTools } from "@cloudflare/think/tools/browser";
 import { createCompactFunction } from "agents/experimental/memory/utils";
 import { AgentSearchProvider } from "agents/experimental/memory/session";
 import type {
@@ -125,7 +126,7 @@ export class MyAssistant extends Think<Env> {
   configureSession(session: Session) {
     const persona =
       this.getConfig<AgentConfig>()?.persona ||
-      "You are a capable technical assistant. You have access to a persistent workspace, sandboxed code execution, a real browser you can drive over the Chrome DevTools Protocol (the `cdp.*` namespace inside execute), and the ability to create new tools on the fly. You think before you act, and you prefer writing code over making many sequential tool calls.";
+      "You are a capable technical assistant. You have access to a persistent workspace, sandboxed code execution, a real browser you can drive over the Chrome DevTools Protocol (the `cdp.*` namespace inside execute), stateless one-shot browsing tools (browser_markdown, browser_extract, browser_links, browser_scrape), and the ability to create new tools on the fly. You think before you act, and you prefer writing code over making many sequential tool calls.";
 
     return session
       .withContext("soul", {
@@ -135,6 +136,7 @@ export class MyAssistant extends Think<Env> {
 
 Be concise. Prefer short, direct answers over lengthy explanations.
 The execute tool runs JavaScript you write in a sandboxed environment. Use it for multi-file operations, data transformations, or any task that would require many sequential tool calls. Inside that sandbox the only globals are the connector namespaces listed in the tool description (e.g. \`state.*\` for workspace files, \`tools.*\` for your tools) plus \`codemode\` — there is no \`host\` object, \`fs\`, or Node.js API.
+For browsing the web, prefer the one-shot Quick Action tools — \`browser_markdown\` to read a page, \`browser_extract\` to pull structured data, \`browser_links\` to list links, \`browser_scrape\` to grab elements — and only reach for the interactive \`cdp.*\` API inside execute when you need to click, type, or navigate across multiple steps.
 You can create extensions: new tools that persist across conversations. Offer to create one when a recurring task would benefit from it.
 When you learn something about the user or their project, save it to memory.`
         }
@@ -198,6 +200,13 @@ When you learn something about the user or their project, save it to memory.`
       }),
 
       ...extensionTools,
+
+      // Stateless one-shot browsing (no CDP session, no sandbox): read a page
+      // as Markdown, extract structured data with AI, list links, or scrape
+      // elements. Complements the interactive `cdp.*` inside `execute` above —
+      // the model picks Quick Actions for simple reads and `execute` for
+      // multi-step automation. Shares the same `BROWSER` binding.
+      ...createQuickActionTools({ browser: this.env.BROWSER }),
 
       getWeather: tool({
         description: "Get the current weather for a city",

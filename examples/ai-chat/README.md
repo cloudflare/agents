@@ -7,7 +7,7 @@ A complete chat application built with `@cloudflare/ai-chat` showcasing the reco
 **Server (`src/server.ts`):**
 
 - `toUIMessageStreamResponse()` -- the simplest streaming pattern
-- Browser Rendering tools via `agents/browser/ai`
+- Browser Rendering tools via `agents/browser/ai` -- the durable CDP `browser_execute` tool plus the default-on stateless Quick Actions (`browser_markdown`, `browser_extract`, `browser_links`, `browser_scrape`)
 - Server-side tools with `execute` (weather lookup)
 - Client-side tools without `execute` (browser timezone)
 - Tool approval with `needsApproval` (calculation with amount threshold)
@@ -30,12 +30,14 @@ npm install
 npm start
 ```
 
-Uses Workers AI (no API key needed) with `@cf/moonshotai/kimi-k2.5`.
+Uses Workers AI (no API key needed) with `@cf/moonshotai/kimi-k2.6`.
 
 Recent Wrangler releases run the Browser Rendering binding locally, so no separate Chrome process is required.
 
 ## Try it
 
+- "Read https://example.com as markdown" -- one-shot `browser_markdown` Quick Action (no CDP session)
+- "List the links on https://developers.cloudflare.com/agents/" -- `browser_links` Quick Action
 - "Open https://example.com and tell me the page title" -- uses the browser binding and CDP tools
 - "Search the CDP spec for screenshot commands" -- exercises `cdp.spec()` inside `browser_execute`
 - "Take a screenshot of https://example.com" -- exercises `browser_execute` and renders the image inline

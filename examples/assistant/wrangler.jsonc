@@ -2,10 +2,14 @@
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "think-assistant",
   "ai": { "binding": "AI", "remote": true },
-  // Browser Rendering for the execute tool's `cdp.*` connector — the agent
-  // one-liner picks up `env.BROWSER` automatically.
-  "browser": { "binding": "BROWSER" },
-  "compatibility_date": "2026-01-28",
+  // Browser Rendering powers two surfaces: the execute tool's `cdp.*`
+  // connector (interactive automation) and the stateless Quick Action tools
+  // (browser_markdown/extract/links/scrape). `remote: true` is required for
+  // Quick Actions to work in local `vite dev` (they run on the real Browser
+  // Run service); it also routes `cdp.*` to the real service.
+  "browser": { "binding": "BROWSER", "remote": true },
+  // 2026-03-24+ is the minimum for the Quick Actions binding (`quickAction`).
+  "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "not_found_handling": "single-page-application",

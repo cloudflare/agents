@@ -357,13 +357,19 @@ Add the Browser Rendering and Worker Loader bindings in `wrangler.jsonc`:
 }
 ```
 
-This adds one durable tool to your agent:
+This adds the durable CDP tool plus — whenever a `browser` binding is present — the stateless [Quick Action](../browse-the-web.md#quick-actions-stateless-browsing) tools by default:
 
-| Tool              | Description                                                                               |
-| ----------------- | ----------------------------------------------------------------------------------------- |
-| `browser_execute` | Run TypeScript against a live browser over CDP (screenshots, DOM reads, JS evaluation, …) |
+| Tool               | Description                                                                               |
+| ------------------ | ----------------------------------------------------------------------------------------- |
+| `browser_execute`  | Run TypeScript against a live browser over CDP (screenshots, DOM reads, JS evaluation, …) |
+| `browser_markdown` | Read a page (or raw HTML) as Markdown                                                     |
+| `browser_extract`  | Extract structured data from a page with AI                                               |
+| `browser_links`    | List every link on a page                                                                 |
+| `browser_scrape`   | Scrape specific elements by CSS selector                                                  |
 
-The tool is backed by a codemode runtime with the `cdp` connector: the model writes async arrow functions that run in a sandboxed Worker isolate, with `cdp.send()`, `cdp.attachToTarget()`, `cdp.spec()` (the live, normalized protocol description), session helpers (`cdp.startSession()`, `cdp.sessionInfo()`, `cdp.closeSession()`), and debug-log helpers. Executions are recorded for abort-and-replay, so browser sessions survive approval pauses.
+Pass `quickActions: false` to keep only `browser_execute`, or `quickActions: { actions, maxChars, options }` to configure them. They share the `browser` binding, need no Worker Loader, and `ctx` is resolved from the current Agent automatically (you only need to pass it outside an Agent). For the stateless tools _without_ the CDP tool, import `createQuickActionTools` directly from `@cloudflare/think/tools/browser`.
+
+`browser_execute` is backed by a codemode runtime with the `cdp` connector: the model writes async arrow functions that run in a sandboxed Worker isolate, with `cdp.send()`, `cdp.attachToTarget()`, `cdp.spec()` (the live, normalized protocol description), session helpers (`cdp.startSession()`, `cdp.sessionInfo()`, `cdp.closeSession()`), and debug-log helpers. Executions are recorded for abort-and-replay, so browser sessions survive approval pauses.
 
 By default each execution gets a fresh browser session (`one-shot`), torn down when the run ends. Pass `session: { mode: "dynamic" }` to let the model promote a session with `cdp.startSession()` so later executions continue in the same browser, or `session: { mode: "reuse", key }` for a named long-lived session. Stale sessions are reclaimed by the connector's `sweep()` — call it from a scheduled task (see `createBrowserRuntime` in `agents/browser` for the connector handle).
 

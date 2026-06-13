@@ -2,8 +2,11 @@ import type { ToolSet } from "ai";
 import {
   createBrowserRuntime,
   createBrowserTools as createBrowserToolsForAi,
+  createQuickActionTools,
   type BrowserRuntime,
-  type CreateBrowserToolsOptions
+  type CreateBrowserToolsOptions,
+  type CreateQuickActionToolsOptions,
+  type QuickActionToolName
 } from "agents/browser/ai";
 
 export {
@@ -12,15 +15,49 @@ export {
   type CreateBrowserToolsOptions
 };
 
+// Stateless Quick Action tools — re-exported so a Think agent can expose them
+// from `getTools()` with a single import, including the loader-free path
+// (`createQuickActionTools`) that needs only the `browser` binding.
+export {
+  createQuickActionTools,
+  type CreateQuickActionToolsOptions,
+  type QuickActionToolName
+};
+export {
+  browserContent,
+  browserExtract,
+  browserLinks,
+  browserMarkdown,
+  browserPdf,
+  browserScrape,
+  browserScreenshot,
+  browserSnapshot,
+  runQuickAction,
+  type QuickAction,
+  type QuickActionBinary,
+  type QuickActionBinding,
+  type QuickActionCommonOptions,
+  type QuickActionExtractInput,
+  type QuickActionInput,
+  type QuickActionPage,
+  type QuickActionScrapeInput,
+  type QuickActionScrapeResult,
+  type QuickActionScreenshotInput,
+  type QuickActionSnapshot
+} from "agents/browser";
+
 /**
  * Create browser automation tools for Think agents.
  *
- * Returns a `ToolSet` with a single durable `browser_execute` tool backed by
- * a codemode runtime: the model writes TypeScript against the `cdp`
- * connector (`cdp.send`, `cdp.attachToTarget`, `cdp.spec`, …). Executions
- * are recorded for abort-and-replay, and browser sessions are keyed by
- * execution — they survive pauses and, in `reuse`/`dynamic` session modes,
- * span executions.
+ * Returns the durable `browser_execute` tool backed by a codemode runtime —
+ * the model writes TypeScript against the `cdp` connector (`cdp.send`,
+ * `cdp.attachToTarget`, `cdp.spec`, …); executions are recorded for
+ * abort-and-replay, and browser sessions are keyed by execution (they survive
+ * pauses and, in `reuse`/`dynamic` modes, span executions) — plus the stateless
+ * {@link createQuickActionTools | Quick Action} tools (`browser_markdown`,
+ * `browser_extract`, …) by default whenever a `browser` binding is present.
+ * Pass `quickActions: false` to omit them, or use `createQuickActionTools`
+ * directly for the stateless tools alone (no Worker Loader required).
  *
  * Setup checklist:
  *

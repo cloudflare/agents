@@ -29,6 +29,29 @@ export {
 } from "./session-manager";
 
 export {
+  browserContent,
+  browserExtract,
+  browserLinks,
+  browserMarkdown,
+  browserPdf,
+  browserScrape,
+  browserScreenshot,
+  browserSnapshot,
+  runQuickAction,
+  type QuickAction,
+  type QuickActionBinary,
+  type QuickActionBinding,
+  type QuickActionCommonOptions,
+  type QuickActionExtractInput,
+  type QuickActionInput,
+  type QuickActionPage,
+  type QuickActionScrapeInput,
+  type QuickActionScrapeResult,
+  type QuickActionScreenshotInput,
+  type QuickActionSnapshot
+} from "./quick-actions";
+
+export {
   loadCdpSpec,
   type CdpSpecSource,
   type SearchableCdpSpec

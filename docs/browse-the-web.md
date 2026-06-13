@@ -205,6 +205,80 @@ await connector.sweep(); // reclaim expired/stale sessions — call from a sched
 await runtime.expirePaused(); // reject stale never-approved pauses, freeing their sessions
 ```
 
+## Quick Actions (stateless browsing)
+
+`browser_execute` drives a full, stateful CDP session — the right tool for interactive, multi-step automation. But a lot of agent browsing is really one-shot: _read this page as Markdown_, _extract these fields_, _list the links_. For those, [Quick Actions](https://developers.cloudflare.com/browser-run/quick-actions/) are simpler, faster, and cheaper. They need only the `browser` binding — no Durable Object, Worker Loader, or sandbox — so they work from any Worker.
+
+```ts
+import { createQuickActionTools } from "agents/browser/ai";
+
+const tools = createQuickActionTools({ browser: this.env.BROWSER });
+// browser_markdown, browser_extract, browser_links, browser_scrape
+const result = await generateText({ model, tools, messages });
+```
+
+By default you get the text-returning, model-friendly tools; `browser_content` (raw HTML) is opt-in via `actions`.
+
+**Context safety.** Every result is bounded to roughly `maxChars` (default 50000) so a single browse cannot blow the context window, while preserving each result's shape so the model sees a consistent type: text (markdown/content) is truncated to a string, oversized link/scrape arrays are trimmed but stay arrays, and only an opaque oversized object (e.g. a sprawling `extract`) degrades to a `{ truncated, note, preview }` summary. Set `maxChars: 0` to disable.
+
+**Authenticated and JavaScript-heavy pages.** The model only ever supplies the page (`url`/`html`) and action-specific fields. Host-supplied options — `cookies`, `authenticate`, `setExtraHTTPHeaders` for protected pages, or `gotoOptions` / `viewport` for pages that need to settle — are passed once via `options` and merged into every request:
+
+```ts
+const tools = createQuickActionTools({
+  browser: this.env.BROWSER,
+  actions: ["markdown", "extract", "links"],
+  maxChars: 20_000,
+  options: {
+    authenticate: { username: "user", password: env.SITE_PASSWORD },
+    gotoOptions: { waitUntil: "networkidle0" }
+  }
+});
+```
+
+You can also call the primitives directly:
+
+```ts
+import { browserMarkdown, browserExtract } from "agents/browser";
+
+const md = await browserMarkdown(this.env.BROWSER, { url });
+const data = await browserExtract<{ price: number }>(this.env.BROWSER, {
+  url,
+  prompt: "the product price",
+  response_format: { type: "json_schema", schema: priceSchema }
+});
+```
+
+For an endpoint or option not yet wrapped, `runQuickAction(browser, action, params)` returns the raw `Response`; its `params` are typed against the action (`"json"` expects an extract input, `"scrape"` expects `elements`, and so on).
+
+**Using them with `browser_execute`.** Quick Actions and the durable CDP tool share the same `BROWSER` binding and complement each other — one-shot reads versus interactive sessions. `createBrowserTools` / `createBrowserRuntime` expose **both by default** whenever a `browser` binding is present, and resolve `ctx` from the current Agent (via `getCurrentAgent()`) so you can skip threading `this.ctx`:
+
+```ts
+// Inside an Agent method — ctx is picked up automatically:
+const tools = createBrowserTools({
+  browser: this.env.BROWSER,
+  loader: this.env.LOADER
+});
+// browser_execute + browser_markdown + browser_extract + browser_links + browser_scrape
+
+// Configure or disable the Quick Action half:
+createBrowserTools({ browser, loader, quickActions: { maxChars: 20_000 } });
+createBrowserTools({ browser, loader, quickActions: false });
+```
+
+When only `cdpUrl` is set (no binding), the Quick Action tools are skipped silently.
+
+**Using them with `@cloudflare/think`.** Quick Action tools are an ordinary `ToolSet`, so a Think agent exposes them by spreading them from `getTools()`:
+
+```ts
+class Researcher extends Think<Env> {
+  getTools() {
+    return { ...createQuickActionTools({ browser: this.env.BROWSER }) };
+  }
+}
+```
+
+Quick Actions require a Worker `compatibility_date` of `2026-03-24` or later and `remote: true` on the browser binding for local `wrangler dev`.
+
 ## Live View and human-in-the-loop
 
 [Live View](https://developers.cloudflare.com/browser-run/features/live-view/) lets a human open a URL and watch — or take control of — a running browser session in real time. It is the building block for human-in-the-loop steps such as logging in, solving a CAPTCHA, completing MFA, or entering data you do not want to pass through an automation script.

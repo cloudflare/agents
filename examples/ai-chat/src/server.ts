@@ -70,6 +70,11 @@ export class ChatAgent extends AIChatAgent {
 
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     const mcpTools = this.mcp.getAITools();
+    // `createBrowserTools` returns the durable CDP `browser_execute` tool plus
+    // the stateless Quick Action tools (browser_markdown/extract/links/scrape)
+    // by default, since the BROWSER binding supports both. Prefer the Quick
+    // Actions for simple one-shot reads, and browser_execute for interactive,
+    // multi-step automation.
     const browserTools = createBrowserTools({
       ctx: this.ctx,
       browser: this.env.BROWSER,
@@ -84,9 +89,12 @@ export class ChatAgent extends AIChatAgent {
       }),
       system:
         "You are a helpful assistant. You can check the weather, get the user's timezone, " +
-        "run calculations, and use a browser to inspect web pages via Chrome DevTools Protocol. " +
-        "The browser_execute tool runs TypeScript with a cdp connector: " +
-        "for page-scoped commands, create a target with cdp.send({ method: 'Target.createTarget', ... }), " +
+        "run calculations, and browse the web. " +
+        "For simple one-shot reads, prefer the Quick Action tools: browser_markdown (read a " +
+        "page as Markdown), browser_extract (pull structured data with a prompt/schema), " +
+        "browser_links (list links), and browser_scrape (grab elements by CSS selector). " +
+        "For interactive, multi-step automation use browser_execute, which runs TypeScript " +
+        "with a cdp connector: create a target with cdp.send({ method: 'Target.createTarget', ... }), " +
         "attach with const { sessionId } = await cdp.attachToTarget({ targetId }), and pass " +
         "that sessionId to Page, Runtime, and DOM commands. " +
         "For calculations with large numbers (over 1000), you need user approval first.",
@@ -100,7 +108,7 @@ export class ChatAgent extends AIChatAgent {
         // MCP tools from connected servers
         ...mcpTools,
 
-        // Browser tools: search CDP spec + execute CDP commands
+        // Browser tools: durable CDP browser_execute + stateless Quick Actions
         ...browserTools,
 
         // Server-side tool: executes automatically

@@ -31,6 +31,7 @@ the sub-agent routing primitive from `agents`.
 - **Built-in workspace** — file tools (read, write, edit, find, grep, delete) auto-wired on every turn
 - **Sandboxed code execution** — `createExecuteTool` lets the LLM write and run JavaScript in a Dynamic Worker via `@cloudflare/codemode`
 - **Browser automation** — the `BROWSER` binding gives the execute sandbox a `cdp.*` connector: a real browser driven over the Chrome DevTools Protocol, with durable sessions the model can promote and reuse across messages
+- **Stateless browsing (Quick Actions)** — `createQuickActionTools` adds `browser_markdown`, `browser_extract`, `browser_links`, and `browser_scrape` for one-shot page reads (no CDP session or sandbox); the model uses these for simple reads and `cdp.*` for interactive automation
 - **Self-authored extensions** — `extensionLoader` + `createExtensionTools` let the agent create new tools at runtime
 - **Persistent memory** — context blocks (`soul`, `memory`) the model can read and write across sessions
 - **Non-destructive compaction** — older messages summarized when context overflows, originals preserved
@@ -376,7 +377,7 @@ export class MyAssistant extends Think<Env> {
     /* persona, memory, compaction, knowledge */
   }
   getTools() {
-    /* execute, extensions, getWeather, calculate, ... */
+    /* execute, extensions, quick-action browser tools, getWeather, calculate, ... */
   }
 
   // Each turn updates the parent's sidebar preview via the

@@ -12,6 +12,10 @@ declare namespace Cloudflare {
     // (which tests don't trigger). Declared here so `src/server.ts`
     // and `src/auth.ts` typecheck under the test tsconfig.
     AI: Ai;
+    // `BROWSER` is used by `MyAssistant.getTools()` to build the Quick Action
+    // tools. The test worker doesn't bind it (tests never invoke those tools),
+    // but the type is needed so the shared agent typechecks here.
+    BROWSER: BrowserRun;
     GITHUB_CLIENT_ID: string;
     GITHUB_CLIENT_SECRET: string;
   }
