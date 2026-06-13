@@ -369,6 +369,9 @@ importers:
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@streamdown/code':
+        specifier: ^1.1.1
+        version: 1.1.1(react@19.2.7)
       agents:
         specifier: '*'
         version: link:../../packages/agents
@@ -384,6 +387,9 @@ importers:
       react-dom:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
+      streamdown:
+        specifier: ^2.5.0
+        version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
         specifier: ^3.1.14
         version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
@@ -582,6 +588,9 @@ importers:
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@streamdown/code':
+        specifier: ^1.1.1
+        version: 1.1.1(react@19.2.7)
       agents:
         specifier: '*'
         version: link:../../packages/agents
@@ -594,6 +603,9 @@ importers:
       react-dom:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
+      streamdown:
+        specifier: ^2.5.0
+        version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
         specifier: ^3.1.14
         version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
@@ -1223,6 +1235,9 @@ importers:
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@streamdown/code':
+        specifier: ^1.1.1
+        version: 1.1.1(react@19.2.7)
       agents:
         specifier: '*'
         version: link:../../packages/agents
@@ -1235,6 +1250,9 @@ importers:
       react-dom:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
+      streamdown:
+        specifier: ^2.5.0
+        version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
         specifier: ^3.1.14
         version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
@@ -1873,6 +1891,9 @@ importers:
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@streamdown/code':
+        specifier: ^1.1.1
+        version: 1.1.1(react@19.2.7)
       agents:
         specifier: '*'
         version: link:../../packages/agents
@@ -1888,6 +1909,9 @@ importers:
       react-dom:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
+      streamdown:
+        specifier: ^2.5.0
+        version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
         specifier: ^3.1.14
         version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
@@ -2153,6 +2177,9 @@ importers:
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@streamdown/code':
+        specifier: ^1.1.1
+        version: 1.1.1(react@19.2.7)
       agents:
         specifier: '*'
         version: link:../../packages/agents
@@ -2165,6 +2192,9 @@ importers:
       react-dom:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
+      streamdown:
+        specifier: ^2.5.0
+        version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
         specifier: ^3.1.14
         version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
@@ -2746,6 +2776,9 @@ importers:
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@streamdown/code':
+        specifier: ^1.1.1
+        version: 1.1.1(react@19.2.7)
       agents:
         specifier: '*'
         version: link:../../packages/agents
@@ -2758,6 +2791,9 @@ importers:
       react-dom:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
+      streamdown:
+        specifier: ^2.5.0
+        version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
         specifier: ^3.1.14
         version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
@@ -3865,9 +3901,18 @@ importers:
       '@cloudflare/ai-chat':
         specifier: workspace:*
         version: link:../../packages/ai-chat
+      '@cloudflare/kumo':
+        specifier: ^2.5.2
+        version: 2.5.2(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
       '@cloudflare/think':
         specifier: workspace:*
         version: link:../../packages/think
+      '@phosphor-icons/react':
+        specifier: ^2.1.10
+        version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@streamdown/code':
+        specifier: ^1.1.1
+        version: 1.1.1(react@19.2.7)
       agents:
         specifier: workspace:*
         version: link:../../packages/agents
@@ -3880,6 +3925,9 @@ importers:
       react-dom:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
+      streamdown:
+        specifier: ^2.5.0
+        version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
         specifier: ^3.1.14
         version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
@@ -3890,6 +3938,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: ^4.20260612.1
         version: 4.20260612.1
+      '@tailwindcss/vite':
+        specifier: ^4
+        version: 4.3.0(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
       '@types/react':
         specifier: ^19.2.17
         version: 19.2.17
@@ -3899,6 +3950,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^6.0.2
         version: 6.0.2(@rolldown/plugin-babel@0.2.3(@babel/core@7.29.7)(@babel/runtime@7.29.7)(rolldown@1.1.1)(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      tailwindcss:
+        specifier: ^4.3.0
+        version: 4.3.0
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -3914,9 +3968,18 @@ importers:
       '@cloudflare/ai-chat':
         specifier: workspace:*
         version: link:../../packages/ai-chat
+      '@cloudflare/kumo':
+        specifier: ^2.5.2
+        version: 2.5.2(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
       '@cloudflare/think':
         specifier: workspace:*
         version: link:../../packages/think
+      '@phosphor-icons/react':
+        specifier: ^2.1.10
+        version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@streamdown/code':
+        specifier: ^1.1.1
+        version: 1.1.1(react@19.2.7)
       agents:
         specifier: workspace:*
         version: link:../../packages/agents
@@ -3929,6 +3992,9 @@ importers:
       react-dom:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
+      streamdown:
+        specifier: ^2.5.0
+        version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
         specifier: ^3.1.14
         version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
@@ -3939,6 +4005,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: ^4.20260612.1
         version: 4.20260612.1
+      '@tailwindcss/vite':
+        specifier: ^4
+        version: 4.3.0(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
       '@types/react':
         specifier: ^19.2.17
         version: 19.2.17
@@ -3948,6 +4017,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^6.0.2
         version: 6.0.2(@rolldown/plugin-babel@0.2.3(@babel/core@7.29.7)(@babel/runtime@7.29.7)(rolldown@1.1.1)(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      tailwindcss:
+        specifier: ^4.3.0
+        version: 4.3.0
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -3963,9 +4035,18 @@ importers:
       '@cloudflare/ai-chat':
         specifier: workspace:*
         version: link:../../packages/ai-chat
+      '@cloudflare/kumo':
+        specifier: ^2.5.2
+        version: 2.5.2(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
       '@cloudflare/think':
         specifier: workspace:*
         version: link:../../packages/think
+      '@phosphor-icons/react':
+        specifier: ^2.1.10
+        version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@streamdown/code':
+        specifier: ^1.1.1
+        version: 1.1.1(react@19.2.7)
       agents:
         specifier: workspace:*
         version: link:../../packages/agents
@@ -3978,6 +4059,9 @@ importers:
       react-dom:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
+      streamdown:
+        specifier: ^2.5.0
+        version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
         specifier: ^3.1.14
         version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
@@ -3991,6 +4075,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: ^4.20260612.1
         version: 4.20260612.1
+      '@tailwindcss/vite':
+        specifier: ^4
+        version: 4.3.0(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
       '@types/react':
         specifier: ^19.2.17
         version: 19.2.17
@@ -4000,6 +4087,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^6.0.2
         version: 6.0.2(@rolldown/plugin-babel@0.2.3(@babel/core@7.29.7)(@babel/runtime@7.29.7)(rolldown@1.1.1)(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      tailwindcss:
+        specifier: ^4.3.0
+        version: 4.3.0
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -4015,9 +4105,18 @@ importers:
       '@cloudflare/ai-chat':
         specifier: workspace:*
         version: link:../../packages/ai-chat
+      '@cloudflare/kumo':
+        specifier: ^2.5.2
+        version: 2.5.2(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
       '@cloudflare/think':
         specifier: workspace:*
         version: link:../../packages/think
+      '@phosphor-icons/react':
+        specifier: ^2.1.10
+        version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@streamdown/code':
+        specifier: ^1.1.1
+        version: 1.1.1(react@19.2.7)
       agents:
         specifier: workspace:*
         version: link:../../packages/agents
@@ -4030,6 +4129,9 @@ importers:
       react-dom:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
+      streamdown:
+        specifier: ^2.5.0
+        version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
         specifier: ^3.1.14
         version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
@@ -4040,6 +4142,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: ^4.20260612.1
         version: 4.20260612.1
+      '@tailwindcss/vite':
+        specifier: ^4
+        version: 4.3.0(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
       '@types/react':
         specifier: ^19.2.17
         version: 19.2.17
@@ -4049,6 +4154,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^6.0.2
         version: 6.0.2(@rolldown/plugin-babel@0.2.3(@babel/core@7.29.7)(@babel/runtime@7.29.7)(rolldown@1.1.1)(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      tailwindcss:
+        specifier: ^4.3.0
+        version: 4.3.0
       typescript:
         specifier: ^6.0.3
         version: 6.0.3

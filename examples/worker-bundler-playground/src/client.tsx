@@ -3,6 +3,8 @@ import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { isToolUIPart, isReasoningUIPart, getToolName } from "ai";
 import type { UIMessage } from "ai";
+import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 import {
   Button,
   Badge,
@@ -538,8 +540,10 @@ function Chat() {
                 </div>
               )}
 
-              {messages.map((message) => {
+              {messages.map((message, index) => {
                 const isUser = message.role === "user";
+                const isLastAssistant =
+                  message.role === "assistant" && index === messages.length - 1;
 
                 if (isUser) {
                   return (
@@ -555,11 +559,30 @@ function Chat() {
                   <div key={message.id} className="space-y-2">
                     {message.parts.map((part, partIndex) => {
                       if (part.type === "text") {
-                        if (!part.text) return null;
+                        if (
+                          part.text.length === 0 &&
+                          part.state !== "streaming"
+                        ) {
+                          return null;
+                        }
+                        const isLastTextPart = message.parts
+                          .slice(partIndex + 1)
+                          .every((p) => p.type !== "text");
                         return (
                           <div key={partIndex} className="flex justify-start">
-                            <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed whitespace-pre-wrap">
-                              {part.text}
+                            <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed">
+                              <Streamdown
+                                className="sd-theme min-h-[1.25em]"
+                                plugins={{ code }}
+                                controls={false}
+                                isAnimating={
+                                  isLastAssistant &&
+                                  isLastTextPart &&
+                                  isStreaming
+                                }
+                              >
+                                {part.text}
+                              </Streamdown>
                             </div>
                           </div>
                         );

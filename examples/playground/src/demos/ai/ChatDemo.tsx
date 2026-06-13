@@ -319,10 +319,41 @@ function ChatUI() {
                       );
                     }
 
+                    if (part.state === "output-error") {
+                      const errorText =
+                        (part as { errorText?: string }).errorText ??
+                        "Tool execution failed.";
+                      return (
+                        <div
+                          key={part.toolCallId}
+                          className="flex justify-start"
+                        >
+                          <Surface className="max-w-[80%] px-3 py-2 rounded-xl ring-2 ring-red-500/30">
+                            <div className="flex items-center gap-2 mb-1">
+                              <GearIcon
+                                size={14}
+                                className="text-kumo-inactive"
+                              />
+                              <Text size="xs" variant="secondary" bold>
+                                {toolName}
+                              </Text>
+                              <Badge variant="destructive">Error</Badge>
+                            </div>
+                            <pre className="font-mono text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded p-2 overflow-x-auto whitespace-pre-wrap">
+                              {errorText}
+                            </pre>
+                          </Surface>
+                        </div>
+                      );
+                    }
+
                     if (
                       part.state === "input-available" ||
                       part.state === "input-streaming"
                     ) {
+                      const toolInput = part.input as
+                        | Record<string, unknown>
+                        | undefined;
                       return (
                         <div
                           key={part.toolCallId}
@@ -338,6 +369,11 @@ function ChatUI() {
                                 Running {toolName}...
                               </Text>
                             </div>
+                            {toolInput != null && (
+                              <pre className="font-mono text-xs text-kumo-subtle overflow-x-auto mt-1.5 bg-kumo-elevated rounded p-2">
+                                {JSON.stringify(toolInput, null, 2)}
+                              </pre>
+                            )}
                           </Surface>
                         </div>
                       );

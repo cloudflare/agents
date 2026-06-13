@@ -583,6 +583,38 @@ function Chat() {
                       );
                     }
 
+                    if (part.state === "output-error") {
+                      const errorText = (part as { errorText?: string })
+                        .errorText;
+                      return (
+                        <div
+                          key={part.toolCallId}
+                          className="flex justify-start"
+                        >
+                          <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
+                            <div className="flex items-center gap-2 mb-2">
+                              <GearIcon
+                                size={14}
+                                className="text-kumo-inactive"
+                              />
+                              <Text size="xs" variant="secondary" bold>
+                                {toolName}
+                              </Text>
+                              <Badge variant="destructive">Error</Badge>
+                            </div>
+                            <div>
+                              <span className="block text-[10px] text-kumo-inactive uppercase tracking-wide mb-0.5">
+                                Error
+                              </span>
+                              <pre className="font-mono text-xs text-red-500 bg-red-500/10 border border-red-500/20 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
+                                {errorText ?? "Tool execution failed"}
+                              </pre>
+                            </div>
+                          </Surface>
+                        </div>
+                      );
+                    }
+
                     if (
                       part.state === "input-available" ||
                       part.state === "input-streaming"

@@ -14,6 +14,8 @@ import {
 } from "@cloudflare/ai-chat/react";
 import { isToolUIPart, getToolName } from "ai";
 import type { UIMessage } from "ai";
+import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 import {
   Button,
   Badge,
@@ -31,6 +33,7 @@ import {
   InfoIcon,
   ToggleLeftIcon,
   ToggleRightIcon,
+  XCircleIcon,
   MoonIcon,
   SunIcon
 } from "@phosphor-icons/react";
@@ -149,6 +152,14 @@ function getMessageText(message: UIMessage): string {
     .filter((part) => part.type === "text")
     .map((part) => (part as { type: "text"; text: string }).text)
     .join("");
+}
+
+/** Text and reasoning parts use `state: streaming` with empty `text` until the first delta. */
+function shouldShowStreamedTextPart(part: {
+  text: string;
+  state?: "streaming" | "done";
+}): boolean {
+  return part.text.length > 0 || part.state === "streaming";
 }
 
 function Chat() {
@@ -353,87 +364,154 @@ function Chat() {
                 const isLastAssistant =
                   message.role === "assistant" && index === messages.length - 1;
 
+                if (isUser) {
+                  return (
+                    <div key={message.id} className="flex justify-end">
+                      <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-br-md bg-kumo-contrast text-kumo-inverse leading-relaxed">
+                        {getMessageText(message)}
+                      </div>
+                    </div>
+                  );
+                }
+
+                // Assistant: render parts in chronological order
                 return (
                   <div key={message.id} className="space-y-2">
-                    {isUser ? (
-                      <div className="flex justify-end">
-                        <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-br-md bg-kumo-contrast text-kumo-inverse leading-relaxed">
-                          {getMessageText(message)}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="flex justify-start">
-                        <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed">
-                          <div className="whitespace-pre-wrap">
-                            {getMessageText(message)}
-                            {isLastAssistant && isStreaming && (
-                              <span className="inline-block w-0.5 h-[1em] bg-kumo-brand ml-0.5 align-text-bottom animate-blink-cursor" />
-                            )}
+                    {message.parts.map((part, partIndex) => {
+                      // Text
+                      if (part.type === "text") {
+                        if (!shouldShowStreamedTextPart(part)) return null;
+                        const isLastTextPart = message.parts
+                          .slice(partIndex + 1)
+                          .every((p) => p.type !== "text");
+                        return (
+                          <div key={partIndex} className="flex justify-start">
+                            <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed">
+                              <Streamdown
+                                className="sd-theme min-h-[1.25em]"
+                                plugins={{ code }}
+                                controls={false}
+                                isAnimating={
+                                  isLastAssistant &&
+                                  isLastTextPart &&
+                                  isStreaming
+                                }
+                              >
+                                {part.text}
+                              </Streamdown>
+                            </div>
                           </div>
+                        );
+                      }
+
+                      // Reasoning
+                      if (part.type === "reasoning") {
+                        if (!shouldShowStreamedTextPart(part)) return null;
+                        return (
+                          <div key={partIndex} className="flex justify-start">
+                            <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line opacity-70">
+                              <div className="flex items-center gap-2 mb-1">
+                                <GearIcon
+                                  size={14}
+                                  className="text-kumo-inactive"
+                                />
+                                <Text size="xs" variant="secondary" bold>
+                                  Reasoning
+                                </Text>
+                              </div>
+                              <div className="whitespace-pre-wrap text-xs text-kumo-subtle italic min-h-[1em]">
+                                {part.text ||
+                                  (part.state === "streaming" ? "…" : null)}
+                              </div>
+                            </Surface>
+                          </div>
+                        );
+                      }
+
+                      // Tool invocations
+                      if (!isToolUIPart(part)) return null;
+                      const toolName = getToolName(part);
+                      const toolInput = part.input as
+                        | Record<string, unknown>
+                        | undefined;
+                      const toolOutput = (part as { output?: unknown }).output;
+                      const errorText = (part as { errorText?: string })
+                        .errorText;
+
+                      const isRunning =
+                        part.state === "input-available" ||
+                        part.state === "input-streaming";
+                      const isDone = part.state === "output-available";
+                      const isError = part.state === "output-error";
+
+                      const statusBadge = isDone ? (
+                        <Badge variant="secondary">Done</Badge>
+                      ) : isError ? (
+                        <Badge variant="destructive">Error</Badge>
+                      ) : isRunning ? null : (
+                        <Badge variant="secondary">{part.state}</Badge>
+                      );
+
+                      const statusIcon = isError ? (
+                        <XCircleIcon size={14} className="text-kumo-inactive" />
+                      ) : isRunning ? (
+                        <GearIcon
+                          size={14}
+                          className="text-kumo-inactive animate-spin"
+                        />
+                      ) : (
+                        <GearIcon size={14} className="text-kumo-inactive" />
+                      );
+
+                      return (
+                        <div
+                          key={part.toolCallId}
+                          className="flex justify-start"
+                        >
+                          <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line overflow-hidden">
+                            <div className="flex items-center gap-2 mb-1">
+                              {statusIcon}
+                              <Text size="xs" variant="secondary" bold>
+                                {isRunning
+                                  ? `Running ${toolName}...`
+                                  : toolName}
+                              </Text>
+                              {statusBadge}
+                            </div>
+                            {toolInput != null && (
+                              <div className="mt-2">
+                                <span className="text-[10px] uppercase tracking-wider text-kumo-inactive font-semibold">
+                                  Input
+                                </span>
+                                <pre className="mt-1 p-2 rounded-lg bg-kumo-elevated text-xs font-mono text-kumo-subtle overflow-x-auto max-h-40 overflow-y-auto whitespace-pre-wrap break-all">
+                                  {JSON.stringify(toolInput, null, 2)}
+                                </pre>
+                              </div>
+                            )}
+                            {errorText && (
+                              <div className="mt-2">
+                                <span className="text-[10px] uppercase tracking-wider text-red-400 font-semibold">
+                                  Error
+                                </span>
+                                <pre className="mt-1 p-2 rounded-lg bg-red-50 dark:bg-red-950/20 text-xs font-mono text-red-600 dark:text-red-400 overflow-x-auto max-h-40 overflow-y-auto whitespace-pre-wrap break-all">
+                                  {errorText}
+                                </pre>
+                              </div>
+                            )}
+                            {toolOutput != null && (
+                              <div className="mt-2">
+                                <span className="text-[10px] uppercase tracking-wider text-kumo-inactive font-semibold">
+                                  Output
+                                </span>
+                                <pre className="mt-1 p-2 rounded-lg bg-kumo-elevated text-xs font-mono text-kumo-subtle overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap break-all">
+                                  {JSON.stringify(toolOutput, null, 2)}
+                                </pre>
+                              </div>
+                            )}
+                          </Surface>
                         </div>
-                      </div>
-                    )}
-
-                    {/* Tool parts */}
-                    {message.parts
-                      .filter((part) => isToolUIPart(part))
-                      .map((part) => {
-                        if (!isToolUIPart(part)) return null;
-                        const toolName = getToolName(part);
-
-                        if (part.state === "output-available") {
-                          return (
-                            <div
-                              key={part.toolCallId}
-                              className="flex justify-start"
-                            >
-                              <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
-                                <div className="flex items-center gap-2 mb-1">
-                                  <GearIcon
-                                    size={14}
-                                    className="text-kumo-inactive"
-                                  />
-                                  <Text size="xs" variant="secondary" bold>
-                                    {toolName}
-                                  </Text>
-                                  <Badge variant="secondary">Done</Badge>
-                                </div>
-                                <div className="font-mono">
-                                  <Text size="xs" variant="secondary">
-                                    {JSON.stringify(part.output, null, 2)}
-                                  </Text>
-                                </div>
-                              </Surface>
-                            </div>
-                          );
-                        }
-
-                        if (
-                          part.state === "input-available" ||
-                          part.state === "input-streaming"
-                        ) {
-                          return (
-                            <div
-                              key={part.toolCallId}
-                              className="flex justify-start"
-                            >
-                              <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
-                                <div className="flex items-center gap-2">
-                                  <GearIcon
-                                    size={14}
-                                    className="text-kumo-inactive animate-spin"
-                                  />
-                                  <Text size="xs" variant="secondary">
-                                    Running {toolName}...
-                                  </Text>
-                                </div>
-                              </Surface>
-                            </div>
-                          );
-                        }
-
-                        return null;
-                      })}
+                      );
+                    })}
                   </div>
                 );
               })}

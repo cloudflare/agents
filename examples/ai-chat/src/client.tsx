@@ -3,6 +3,8 @@ import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { isToolUIPart, getToolName } from "ai";
 import type { UIMessage } from "ai";
+import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 import type { MCPServersState } from "agents";
 import {
   Button,
@@ -86,6 +88,14 @@ function getMessageText(message: UIMessage): string {
     .filter((part) => part.type === "text")
     .map((part) => (part as { type: "text"; text: string }).text)
     .join("");
+}
+
+/** Text and reasoning parts use `state: streaming` with empty `text` until the first delta. */
+function shouldShowStreamedTextPart(part: {
+  text: string;
+  state?: "streaming" | "done";
+}): boolean {
+  return part.text.length > 0 || part.state === "streaming";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -469,21 +479,23 @@ function Chat() {
                 {message.parts.map((part, partIndex) => {
                   // Text
                   if (part.type === "text") {
-                    if (!part.text) return null;
+                    if (!shouldShowStreamedTextPart(part)) return null;
                     const isLastTextPart = message.parts
                       .slice(partIndex + 1)
                       .every((p) => p.type !== "text");
                     return (
                       <div key={partIndex} className="flex justify-start">
                         <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed">
-                          <div className="whitespace-pre-wrap">
+                          <Streamdown
+                            className="sd-theme min-h-[1.25em]"
+                            plugins={{ code }}
+                            controls={false}
+                            isAnimating={
+                              isLastAssistant && isLastTextPart && isStreaming
+                            }
+                          >
                             {part.text}
-                            {isLastAssistant &&
-                              isLastTextPart &&
-                              isStreaming && (
-                                <span className="inline-block w-0.5 h-[1em] bg-kumo-brand ml-0.5 align-text-bottom animate-blink-cursor" />
-                              )}
-                          </div>
+                          </Streamdown>
                         </div>
                       </div>
                     );

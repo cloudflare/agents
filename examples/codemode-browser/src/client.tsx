@@ -20,6 +20,7 @@ import {
   Text
 } from "@cloudflare/kumo";
 import {
+  BrainIcon,
   CheckCircleIcon,
   CircleNotchIcon,
   CodeIcon,
@@ -198,6 +199,29 @@ function ToolCard({ part }: { part: ToolPart }) {
               </pre>
             </div>
           )}
+          {!part.output?.code && part.input?.code && (
+            <div>
+              <div className="flex items-center gap-1 mb-1">
+                <CodeIcon size={10} className="text-kumo-inactive" />
+                <Text size="xs" variant="secondary" bold>
+                  Code
+                </Text>
+              </div>
+              <pre className="font-mono text-xs text-kumo-subtle bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap wrap-break-word">
+                {part.input.code}
+              </pre>
+            </div>
+          )}
+          {!part.output?.code && !part.input?.code && part.input && (
+            <div>
+              <Text size="xs" variant="secondary" bold>
+                Input
+              </Text>
+              <pre className="font-mono text-xs text-kumo-subtle bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap mt-1">
+                {JSON.stringify(part.input, null, 2)}
+              </pre>
+            </div>
+          )}
           {part.output?.result !== undefined && (
             <div>
               <Text size="xs" variant="secondary" bold>
@@ -221,8 +245,10 @@ function ToolCard({ part }: { part: ToolPart }) {
               </pre>
             </div>
           ) : null}
-          {part.errorText && (
-            <div className="text-red-500 text-xs">{part.errorText}</div>
+          {hasError && (
+            <div className="text-red-500 text-xs">
+              {part.errorText ?? "Tool execution failed"}
+            </div>
           )}
         </div>
       )}
@@ -365,6 +391,26 @@ function App() {
                         >
                           {part.text}
                         </Streamdown>
+                      </Surface>
+                    );
+                  }
+                  if (part.type === "reasoning") {
+                    if (!(part.text.length > 0 || part.state === "streaming"))
+                      return null;
+                    return (
+                      <Surface
+                        key={idx}
+                        className="max-w-[80%] rounded-xl ring ring-kumo-line opacity-70 px-4 py-2.5"
+                      >
+                        <div className="flex items-center gap-2 mb-1">
+                          <BrainIcon size={14} className="text-kumo-inactive" />
+                          <Text size="xs" variant="secondary" bold>
+                            Thinking
+                          </Text>
+                        </div>
+                        <div className="whitespace-pre-wrap text-xs text-kumo-subtle italic">
+                          {part.text}
+                        </div>
                       </Surface>
                     );
                   }

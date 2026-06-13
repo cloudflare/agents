@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
+import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 import {
   Badge,
   Button,
@@ -161,7 +163,9 @@ function MessageParts({
       {message.parts.map((part, i) => {
         // Text
         if (part.type === "text") {
-          if (!part.text) return null;
+          if (part.text.length === 0 && part.state !== "streaming") {
+            return null;
+          }
           const isLastTextPart = message.parts
             .slice(i + 1)
             .every((p) => p.type !== "text");
@@ -174,16 +178,20 @@ function MessageParts({
                   : ""
               }`}
             >
-              <div className="whitespace-pre-wrap">
-                <Text size="sm">
+              {message.role === "assistant" ? (
+                <Streamdown
+                  className="sd-theme min-h-[1.25em]"
+                  plugins={{ code }}
+                  controls={false}
+                  isAnimating={streaming && isLastTextPart}
+                >
                   {part.text}
-                  {message.role === "assistant" &&
-                    streaming &&
-                    isLastTextPart && (
-                      <span className="inline-block w-0.5 h-[1em] bg-kumo-accent ml-0.5 align-text-bottom animate-pulse" />
-                    )}
-                </Text>
-              </div>
+                </Streamdown>
+              ) : (
+                <div className="whitespace-pre-wrap">
+                  <Text size="sm">{part.text}</Text>
+                </div>
+              )}
             </Surface>
           );
         }

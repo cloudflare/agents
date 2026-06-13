@@ -6,6 +6,8 @@ import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { isToolUIPart, getToolName } from "ai";
 import type { DynamicToolUIPart, ToolUIPart } from "ai";
+import { Streamdown } from "streamdown";
+import { code as codePlugin } from "@streamdown/code";
 import type { BrowserLiveView, BrowserLiveViewTarget } from "agents/browser";
 import {
   Badge,
@@ -19,6 +21,8 @@ import {
 import {
   ArrowClockwiseIcon,
   ArrowSquareOutIcon,
+  BrainIcon,
+  CaretDownIcon,
   GearIcon,
   GlobeIcon,
   InfoIcon,
@@ -100,6 +104,34 @@ function formatOutput(output: unknown, screenshotSrc: string | null): string {
   return JSON.stringify(output, null, 2);
 }
 
+/** A small labeled, scrollable code/JSON block used for tool input & output. */
+function ToolBlock({
+  label,
+  children,
+  tone = "default"
+}: {
+  label: string;
+  children: string;
+  tone?: "default" | "error";
+}) {
+  return (
+    <div className="mt-2">
+      <Text size="xs" variant="secondary">
+        {label}
+      </Text>
+      <pre
+        className={`mt-1 max-h-52 overflow-auto rounded-lg p-2 font-mono text-xs whitespace-pre-wrap ${
+          tone === "error"
+            ? "bg-red-50 text-red-600 dark:bg-red-950/20 dark:text-red-400"
+            : "bg-kumo-elevated text-kumo-subtle"
+        }`}
+      >
+        {children}
+      </pre>
+    </div>
+  );
+}
+
 function ToolPart({
   part,
   isStreaming
@@ -112,13 +144,20 @@ function ToolPart({
   const toolOutput = (part as { output?: unknown }).output;
   const errorText = (part as { errorText?: string }).errorText;
   const screenshotSrc = getScreenshotSrc(toolOutput);
-  const hasCode = isRecord(toolInput) && typeof toolInput.code === "string";
+  // The `execute` tool's input is TypeScript source; render it as code. Every
+  // other tool gets its full input object rendered as JSON.
+  const code =
+    isRecord(toolInput) && typeof toolInput.code === "string"
+      ? toolInput.code
+      : null;
+  const hasInputJson =
+    !code && isRecord(toolInput) && Object.keys(toolInput).length > 0;
   const isRunning =
     part.state === "input-available" || part.state === "input-streaming";
 
   return (
     <Surface className="max-w-[85%] overflow-hidden rounded-xl px-4 py-2.5 ring ring-kumo-line">
-      <div className="mb-1 flex items-center gap-2">
+      <div className="flex items-center gap-2">
         <GearIcon
           size={14}
           className={`text-kumo-inactive ${isRunning ? "animate-spin" : ""}`}
@@ -133,15 +172,16 @@ function ToolPart({
           <Badge variant="destructive">Error</Badge>
         )}
       </div>
-      {hasCode && (
-        <pre className="mt-1 max-h-40 overflow-auto rounded-lg bg-kumo-elevated p-2 font-mono text-xs whitespace-pre-wrap text-kumo-subtle">
-          {toolInput?.code as string}
-        </pre>
+      {code != null && <ToolBlock label="Input">{code}</ToolBlock>}
+      {hasInputJson && (
+        <ToolBlock label="Input">
+          {JSON.stringify(toolInput, null, 2)}
+        </ToolBlock>
       )}
       {errorText && (
-        <pre className="mt-2 max-h-40 overflow-auto rounded-lg bg-red-50 p-2 font-mono text-xs whitespace-pre-wrap text-red-600 dark:bg-red-950/20 dark:text-red-400">
+        <ToolBlock label="Error" tone="error">
           {errorText}
-        </pre>
+        </ToolBlock>
       )}
       {toolOutput != null && !isStreaming && (
         <div className="mt-2">
@@ -152,10 +192,54 @@ function ToolPart({
               className="mb-2 block max-h-72 w-full rounded-md object-contain"
             />
           )}
-          <pre className="max-h-52 overflow-auto rounded-lg bg-kumo-elevated p-2 font-mono text-xs whitespace-pre-wrap text-kumo-subtle">
+          <ToolBlock label="Output">
             {formatOutput(toolOutput, screenshotSrc)}
-          </pre>
+          </ToolBlock>
         </div>
+      )}
+    </Surface>
+  );
+}
+
+/**
+ * The model's reasoning trace for a turn. Collapsible (open while it streams in
+ * so you can watch it think, collapsible afterward to keep the transcript tidy).
+ */
+function ReasoningPart({
+  text,
+  streaming
+}: {
+  text: string;
+  streaming: boolean;
+}) {
+  const [open, setOpen] = useState(true);
+  if (!text) return null;
+  return (
+    <Surface className="max-w-[85%] overflow-hidden rounded-xl px-4 py-2.5 ring ring-kumo-line">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 text-left"
+      >
+        <BrainIcon
+          size={14}
+          className={`text-kumo-inactive ${streaming ? "animate-pulse" : ""}`}
+        />
+        <Text size="xs" variant="secondary" bold>
+          {streaming ? "Thinking..." : "Reasoning"}
+        </Text>
+        <CaretDownIcon
+          size={12}
+          className={`ml-auto text-kumo-inactive transition-transform ${
+            open ? "" : "-rotate-90"
+          }`}
+        />
+      </button>
+      {open && (
+        <p className="mt-2 leading-relaxed whitespace-pre-wrap text-sm text-kumo-subtle italic">
+          {text}
+        </p>
       )}
     </Surface>
   );
@@ -364,7 +448,7 @@ function App() {
   });
 
   const { messages, sendMessage, clearHistory, stop, isStreaming } =
-    useAgentChat({ agent });
+    useAgentChat({ agent, experimental_throttle: 100 });
 
   const isConnected = connectionStatus === "connected";
 
@@ -515,7 +599,7 @@ function App() {
                 />
               )}
 
-              {messages.map((message) => {
+              {messages.map((message, index) => {
                 if (message.role === "user") {
                   return (
                     <div key={message.id} className="flex justify-end">
@@ -529,15 +613,47 @@ function App() {
                   );
                 }
 
+                const isLastAssistant = index === messages.length - 1;
+
                 return (
                   <div key={message.id} className="space-y-2">
                     {message.parts.map((part, i) => {
-                      if (part.type === "text") {
-                        if (!part.text) return null;
+                      if (part.type === "reasoning") {
                         return (
                           <div key={i} className="flex justify-start">
-                            <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-kumo-base px-4 py-2.5 leading-relaxed whitespace-pre-wrap">
-                              {part.text}
+                            <ReasoningPart
+                              text={part.text}
+                              streaming={
+                                isStreaming && part.state === "streaming"
+                              }
+                            />
+                          </div>
+                        );
+                      }
+                      if (part.type === "text") {
+                        if (
+                          part.text.length === 0 &&
+                          part.state !== "streaming"
+                        )
+                          return null;
+                        const isLastTextPart = message.parts
+                          .slice(i + 1)
+                          .every((p) => p.type !== "text");
+                        return (
+                          <div key={i} className="flex justify-start">
+                            <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-kumo-base px-4 py-2.5 leading-relaxed">
+                              <Streamdown
+                                className="sd-theme min-h-[1.25em]"
+                                plugins={{ code: codePlugin }}
+                                controls={false}
+                                isAnimating={
+                                  isLastAssistant &&
+                                  isLastTextPart &&
+                                  isStreaming
+                                }
+                              >
+                                {part.text}
+                              </Streamdown>
                             </div>
                           </div>
                         );

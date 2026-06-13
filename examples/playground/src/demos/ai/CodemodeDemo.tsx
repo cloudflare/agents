@@ -131,7 +131,10 @@ function ToolCard({ toolPart }: { toolPart: ToolPart }) {
 
       {expanded && (
         <div className="px-3 pb-3 border-t border-kumo-line space-y-2 pt-2">
-          {toolPart.output?.code && (
+          {(toolPart.output?.code ??
+            (typeof toolPart.input?.code === "string"
+              ? toolPart.input.code
+              : undefined)) && (
             <div>
               <div className="flex items-center gap-1 mb-1">
                 <CodeIcon size={10} className="text-kumo-inactive" />
@@ -140,7 +143,7 @@ function ToolCard({ toolPart }: { toolPart: ToolPart }) {
                 </Text>
               </div>
               <pre className="font-mono text-xs text-kumo-subtle bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap wrap-break-word">
-                {toolPart.output.code}
+                {toolPart.output?.code ?? (toolPart.input?.code as string)}
               </pre>
             </div>
           )}
