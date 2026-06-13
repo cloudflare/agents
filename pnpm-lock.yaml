@@ -109,8 +109,8 @@ importers:
         specifier: ^1.69.0
         version: 1.69.0
       partyserver:
-        specifier: ^0.5.6
-        version: 0.5.6(@cloudflare/workers-types@4.20260612.1)
+        specifier: ^0.5.7
+        version: 0.5.7(@cloudflare/workers-types@4.20260612.1)
       partysocket:
         specifier: 1.2.0
         version: 1.2.0(react@19.2.7)
@@ -579,6 +579,64 @@ importers:
       '@cloudflare/think':
         specifier: '*'
         version: link:../../packages/think
+      '@phosphor-icons/react':
+        specifier: ^2.1.10
+        version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
+      ai:
+        specifier: ^6.0.202
+        version: 6.0.202(zod@4.4.3)
+      react:
+        specifier: ^19.2.7
+        version: 19.2.7
+      react-dom:
+        specifier: ^19.2.7
+        version: 19.2.7(react@19.2.7)
+      workers-ai-provider:
+        specifier: ^3.1.14
+        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+    devDependencies:
+      '@cloudflare/vite-plugin':
+        specifier: ^1.40.2
+        version: 1.40.2(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(workerd@1.20260611.1)(wrangler@4.100.0(@cloudflare/workers-types@4.20260612.1))
+      '@cloudflare/workers-types':
+        specifier: ^4.20260612.1
+        version: 4.20260612.1
+      '@tailwindcss/vite':
+        specifier: ^4
+        version: 4.3.0(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      '@types/node':
+        specifier: ^25.9.3
+        version: 25.9.3
+      '@types/react':
+        specifier: ^19.2.17
+        version: 19.2.17
+      '@types/react-dom':
+        specifier: ^19.2.3
+        version: 19.2.3(@types/react@19.2.17)
+      '@vitejs/plugin-react':
+        specifier: ^6.0.2
+        version: 6.0.2(@rolldown/plugin-babel@0.2.3(@babel/core@7.29.7)(@babel/runtime@7.29.7)(rolldown@1.1.1)(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      tailwindcss:
+        specifier: ^4.3.0
+        version: 4.3.0
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      vite:
+        specifier: ^8.0.16
+        version: 8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
+      wrangler:
+        specifier: ^4.100.0
+        version: 4.100.0(@cloudflare/workers-types@4.20260612.1)
+
+  examples/browser-quick-actions:
+    dependencies:
+      '@cloudflare/kumo':
+        specifier: ^2.5.2
+        version: 2.5.2(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -3470,8 +3528,8 @@ importers:
         specifier: ^5.1.11
         version: 5.1.11
       partyserver:
-        specifier: ^0.5.6
-        version: 0.5.6(@cloudflare/workers-types@4.20260612.1)
+        specifier: ^0.5.7
+        version: 0.5.7(@cloudflare/workers-types@4.20260612.1)
       partysocket:
         specifier: 1.2.0
         version: 1.2.0(react@19.2.7)
@@ -9384,6 +9442,11 @@ packages:
 
   partyserver@0.5.6:
     resolution: {integrity: sha512-/LKCqlq9nWzNXA8UXZFO/Xz15QDCjJnGAgRQVLnXJO9bA0HKt5J8VM8wLnGc814WatzuQgeG17tqzI//y5WFGA==}
+    peerDependencies:
+      '@cloudflare/workers-types': ^4.20260424.1
+
+  partyserver@0.5.7:
+    resolution: {integrity: sha512-3xeJh2F7V9qsyVYUJHLDb9P4IJ8PyaWenBOXRWKifAYoS0WdVuTmrK1T2tsRgc5GoeQkeIdRSAZ1cftC47oSyw==}
     peerDependencies:
       '@cloudflare/workers-types': ^4.20260424.1
 
@@ -16570,6 +16633,11 @@ snapshots:
   partial-json@0.1.7: {}
 
   partyserver@0.5.6(@cloudflare/workers-types@4.20260612.1):
+    dependencies:
+      '@cloudflare/workers-types': 4.20260612.1
+      nanoid: 5.1.11
+
+  partyserver@0.5.7(@cloudflare/workers-types@4.20260612.1):
     dependencies:
       '@cloudflare/workers-types': 4.20260612.1
       nanoid: 5.1.11

@@ -12,6 +12,50 @@ import type {
 /** Max audio buffer size per connection: 30 seconds at 16kHz mono 16-bit = 960KB. */
 export const MAX_AUDIO_BUFFER_BYTES = 960_000;
 
+// --- Teardown-aware background task helper ---
+
+/**
+ * True when an error is the platform's signal that a connection (or its
+ * Durable Object) was torn down while an operation was in flight. A client
+ * can drop at any moment — including mid-`start_call` while a `keepAlive()`
+ * alarm write is still pending — and the runtime surfaces that as a
+ * retryable "Network connection lost." rejection (or a Durable Object reset).
+ * These are expected races during shutdown, not bugs.
+ */
+export function isConnectionTeardownError(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const e = err as { message?: unknown; retryable?: unknown };
+  const message = typeof e.message === "string" ? e.message : "";
+  return (
+    e.retryable === true ||
+    message.includes("Network connection lost") ||
+    message.includes("Durable Object reset") ||
+    message.includes("Durable Object is overloaded") ||
+    message.includes("cannot access storage")
+  );
+}
+
+/**
+ * Run a fire-and-forget task triggered by a WebSocket message so that it can
+ * never surface as an unhandled rejection. Voice lifecycle handlers (start
+ * call, end call, interrupt, transcript emission) do async work — storage
+ * writes for `keepAlive()`, user-defined hooks — but are dispatched without
+ * being awaited from the synchronous `onMessage` handler. If the connection
+ * is torn down before that work settles, the rejection would otherwise be
+ * unhandled. Expected teardown races are swallowed; anything else is logged.
+ */
+export function runBackground(
+  label: string,
+  fn: () => void | Promise<void>
+): void {
+  Promise.resolve()
+    .then(fn)
+    .catch((err: unknown) => {
+      if (isConnectionTeardownError(err)) return;
+      console.error(`[voice] ${label} failed:`, err);
+    });
+}
+
 // --- Protocol helper ---
 
 export function sendVoiceJSON(

@@ -2650,6 +2650,37 @@ export class Agent<
   private _ensureConnectionWrapped(connection: Connection) {
     if (this._rawStateAccessors.has(connection)) return;
 
+    // As of compatibility date 2026-03-17 the runtime defaults a server-side
+    // WebSocket's `binaryType` to "blob" (the `websocket_standard_binary_type`
+    // flag), so binary frames arrive as `Blob` instead of `ArrayBuffer`. The
+    // Agent protocol and every downstream consumer (e.g. voice audio frames,
+    // user-defined `onMessage` handlers that do `message instanceof ArrayBuffer`)
+    // have always relied on binary frames being delivered as `ArrayBuffer`.
+    //
+    // For non-hibernating agents (`static options = { hibernate: false }`)
+    // messages are delivered through `addEventListener("message", ...)`, where
+    // this new default applies and would silently break binary handling. Pin
+    // it back to "arraybuffer" so the contract holds regardless of the app's
+    // compatibility date. This first runs in `onConnect` before the client can
+    // send any frame, so it takes effect for every message on the connection.
+    //
+    // This is defense-in-depth: partyserver >= 0.5.7 also pins `binaryType` in
+    // `accept()`, but agents may run against an older partyserver or a custom
+    // connection, so we keep our own pin. It runs once per connection per
+    // isolate lifetime (gated by the `_rawStateAccessors` check above); after a
+    // hibernation wake that in-memory map is empty, so it re-pins on the first
+    // call. The hibernatable `webSocketMessage` handler always delivers
+    // `ArrayBuffer` regardless of this flag, so for hibernating agents this is a
+    // harmless no-op.
+    try {
+      if (connection.binaryType !== "arraybuffer") {
+        connection.binaryType = "arraybuffer";
+      }
+    } catch {
+      // Some connection shims may not expose a settable `binaryType`; the
+      // protocol still works for string frames, so ignore and continue.
+    }
+
     // Determine whether `state` is an accessor (getter) or a data property.
     // partyserver always defines `state` as a getter via Object.defineProperties,
     // but we handle the data-property case to stay robust for hibernate: false
