@@ -114,7 +114,8 @@ type AgentToolInterruptedReason =
   | "not-tailable"
   | "inspect-timeout"
   | "inspect-failed"
-  | "recovery-deadline";
+  | "recovery-deadline"
+  | "budget-exceeded";
 ```
 
 `retryable` is `true` only for an `interrupted` run — the child was reset or
@@ -180,6 +181,90 @@ const [a, b] = await Promise.allSettled([
 `runAgentTool()` is idempotent by `runId`. Passing the same `runId` never starts
 a duplicate child turn. Completed, failed, aborted, and interrupted runs are
 retained until you explicitly clear them.
+
+## Detached (background) runs
+
+By default `runAgentTool()` **awaits** the child to terminal before returning.
+For long-running work — large imports, video renders, deep research — that you
+do not want to block the dispatching turn on, pass `detached`. The run is
+dispatched, the current turn continues, and `runAgentTool()` returns a handle
+immediately:
+
+```ts
+type DetachedRunAgentToolResult = {
+  runId: string;
+  agentType: string;
+  status: "running" | "error"; // "error" only if dispatch itself was rejected
+};
+```
+
+`detached: true` is fire-and-forget — observe the run through `agent-tool-event`
+frames (the same ones `useAgentToolEvents()` consumes) and the global
+`onAgentToolFinish()` hook. Pass an object to wire a targeted, durable
+completion callback:
+
+```ts
+async startImport(input: ImportInput) {
+  const { runId } = await this.runAgentTool(ImportAgent, {
+    input,
+    detached: { onFinish: "onImportDone", maxBudgetMs: 60 * 60 * 1000 }
+  });
+  return runId;
+}
+
+// Fires once, even if the Durable Object was evicted and rehydrated while the
+// child ran. Referenced by METHOD NAME (like schedule()) — never a closure,
+// which cannot survive eviction.
+async onImportDone(run: AgentToolRunInfo, result: AgentToolLifecycleResult) {
+  switch (result.status) {
+    case "completed":
+      await this.markImportReady(run.runId, result.summary);
+      break;
+    case "error":
+      await this.markImportFailed(run.runId, result.error);
+      break;
+    case "interrupted":
+      // reason "budget-exceeded" ⇒ the run hit its maxBudgetMs ceiling.
+      // interrupted is soft: a child that finishes anyway re-fires this hook
+      // with "completed", so make the handler idempotent.
+      break;
+  }
+}
+```
+
+Key behaviors:
+
+- **Durable completion.** Delivery survives eviction and deploys: a warm fast
+  path delivers with low latency while the isolate is alive, and a
+  self-scheduling reconcile backbone finalizes anything the fast path missed.
+  Delivery is exactly-once on the happy path; under a crash it is at-least-once,
+  so `onFinish` handlers must be idempotent.
+- **Give-up vs. finish are independent.** A budget give-up is delivered as
+  `status: "interrupted"`, `reason: "budget-exceeded"`. Because `interrupted` is
+  soft, a child that completes after the give-up still re-fires `onFinish` with
+  the real result — a premature give-up never hides a late completion.
+- **Bounded.** Every detached run has an absolute `maxBudgetMs` ceiling
+  (per-run, or the `detachedMaxBudgetMs` static option; default 24h). On expiry
+  the parent gives up watching and tears the child down so an abandoned run
+  cannot hold a `maxConcurrentAgentTools` slot forever.
+- **No inherited signal.** A detached run must outlive the spawning turn, so it
+  does **not** inherit `options.signal`. Cancel it explicitly:
+
+```ts
+await this.cancelAgentTool(runId); // idempotent; delivers onFinish "aborted"
+```
+
+### The `inspectAgentToolRun` contract
+
+A child's `inspectAgentToolRun(runId)` returns the run's current status snapshot,
+or `null`. **`null` does not mean "failed"** — it means the child has no record
+of that run *yet*. This is normal immediately after dispatch (the child may
+still be persisting its first row) and is also what a freshly-rehydrated child
+returns before it has lazily reconciled a stale `running` row. Callers — and the
+framework's own reconcile backbone — treat `null` as "not terminal, keep
+watching within budget", never as a terminal failure. Only a non-`null`
+inspection with a terminal `status` (`completed` / `error` / `aborted`)
+finalizes a run.
 
 ## Render child timelines in React
 
