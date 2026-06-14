@@ -9,6 +9,10 @@ This example now uses the shipped primitives:
 - `agentTool(Researcher, ...)` for ordinary LLM-selected helper calls.
 - `this.runAgentTool(Researcher, ...)` for explicit fan-out from the `compare`
   tool.
+- `this.runAgentTool(Researcher, { detached: { notify: true } })` for a
+  **background (detached)** run that returns immediately and posts its result
+  back into the chat when it finishes (see `research_background`).
+- `this.cancelAgentTool(runId)` to stop a background run early.
 - `useAgentToolEvents({ agent })` to collect `agent-tool-event` frames in React.
 - `clearAgentToolRuns()` to delete retained child facets when the chat is
   cleared.
@@ -28,6 +32,8 @@ Open the dev URL and ask for research or planning:
 - _Find me three good arguments for and against monorepos._
 - _What changed in HTTP/3 versus HTTP/2?_
 - _Plan how I should add rate limiting to a Worker._
+- _Research the history of TLS in the background — don't make me wait._
+  (dispatches a detached run; the result arrives as a follow-up message)
 
 The assistant can call `research`, `plan`, or `compare`. Each call starts a real
 Think sub-agent (`Researcher` or `Planner`) with its own model, tools, messages,
@@ -56,6 +62,11 @@ The important pieces are:
 - **Parallel fan-out.** `compare` dispatches two `Researcher` runs with the same
   parent tool call id and different display order values, so both panels render
   under one tool part.
+- **Background (detached) runs.** `research_background` calls `runAgentTool`
+  with `detached: { notify: true }`. The turn returns immediately with a run id
+  while the Researcher keeps working; when it finishes the framework injects the
+  result back into the chat (durably, even across parent eviction or reconnect)
+  so the model reacts to it. `cancelBackground(runId)` stops it early.
 - **Drill-in.** Each panel has an open button that connects directly to
   `/sub/{agent}/{runId}` with `useAgentChat`; it is the child agent's real chat,
   not a synthetic event viewer.

@@ -154,6 +154,11 @@ export class Assistant extends Think<Env> {
       "You are a friendly, concise assistant.",
       "Use `research` for deep background, `compare` for two-topic comparisons,",
       "and `plan` for implementation/refactor planning.",
+      "When the user wants something investigated 'in the background' or asks you",
+      "not to wait, use `research_background`: it returns immediately with a run",
+      "id while the Researcher keeps working. Tell the user it is running and",
+      "that you will report back when it finishes — a follow-up message will",
+      "arrive automatically with the result, and you should react to it then.",
       "After tools return, give the user a brief response grounded in the",
       "agent tools' findings. If a branch reports an error, acknowledge it",
       "instead of pretending it succeeded."
@@ -177,6 +182,33 @@ export class Assistant extends Think<Env> {
         inputSchema: z.object({
           description: z.string().min(5)
         })
+      }),
+      research_background: tool({
+        description:
+          "Dispatch a Researcher agent in the BACKGROUND (detached). Returns " +
+          "immediately with a run id; the result is injected back into the " +
+          "chat automatically when it finishes, even across reconnects.",
+        inputSchema: z.object({
+          query: z.string().min(3)
+        }),
+        execute: async ({ query }) => {
+          // Detached: does not block this turn, survives parent eviction, and
+          // `notify: true` posts the completion back into the chat so the model
+          // reacts to it later. `cancelBackground(runId)` can stop it early.
+          const dispatched = await this.runAgentTool<ResearchInput>(
+            Researcher,
+            {
+              input: { query },
+              display: { name: "Researcher" },
+              detached: { notify: true, maxBudgetMs: 5 * 60 * 1000 }
+            }
+          );
+          return {
+            status: "dispatched",
+            runId: dispatched.runId,
+            note: "Running in the background; I'll report back when it's done."
+          };
+        }
       }),
       compare: tool({
         description:
@@ -246,6 +278,16 @@ export class Assistant extends Think<Env> {
   @callable()
   async clearHelperRuns(): Promise<void> {
     await this.clearAgentToolRuns();
+  }
+
+  /**
+   * Cancel a background (detached) run early. Idempotent: a no-op if the run
+   * already finished. Delivers the `notify` completion with an "aborted" status
+   * so the chat still reflects the outcome.
+   */
+  @callable()
+  async cancelBackground(runId: string): Promise<void> {
+    await this.cancelAgentTool(runId);
   }
 }
 
