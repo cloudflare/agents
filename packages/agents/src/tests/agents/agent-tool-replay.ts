@@ -3,8 +3,11 @@ import type {
   AgentToolEvent,
   AgentToolEventMessage,
   AgentToolInterruptedReason,
+  AgentToolLifecycleResult,
+  AgentToolRunInfo,
   AgentToolRunInspection,
   AgentToolStoredChunk,
+  AgentToolTerminalStatus,
   RunAgentToolResult
 } from "../../agent-tool-types.ts";
 
@@ -22,6 +25,7 @@ type StubRunInput = {
  * Private framework internals this fixture drives directly to reproduce the
  * #1630 follow-up bug: the typed interrupted cause (`reason` /
  * `childStillRunning`) must survive a reconnect replay, not just live events.
+ * Also used to exercise the detached-run delivery ledger (#1752) directly.
  */
 type AgentToolInternals = {
   _updateAgentToolTerminal(
@@ -32,6 +36,20 @@ type AgentToolInternals = {
   _readAgentToolRun(runId: string): unknown;
   _resultFromAgentToolRow(row: unknown): RunAgentToolResult;
   _replayAgentToolRuns(connection: Connection): Promise<void>;
+  _deliverDetachedTerminal(
+    runId: string,
+    kind: "finish" | "give_up",
+    result: RunAgentToolResult,
+    options?: { sequence?: number },
+    completedAt?: number
+  ): Promise<void>;
+};
+
+type DetachedDeliveryLogEntry = {
+  hook: "onAgentToolFinish" | "onDetachedDone";
+  runId: string;
+  status: AgentToolTerminalStatus;
+  reason?: AgentToolInterruptedReason;
 };
 
 export class TestAgentToolReplayAgent extends Agent {
@@ -118,6 +136,85 @@ export class TestAgentToolReplayAgent extends Agent {
       "interrupted"
     ]);
     return captured.filter((event) => terminalKinds.has(event.kind));
+  }
+
+  // ── Detached-run delivery ledger (#1752) ──────────────────────────────
+
+  /** Records every delivery so a test can assert exactly-once / two-slot. */
+  detachedDeliveryLog: DetachedDeliveryLogEntry[] = [];
+
+  /** The global metering hook still fires for detached runs. */
+  override async onAgentToolFinish(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): Promise<void> {
+    this.detachedDeliveryLog.push({
+      hook: "onAgentToolFinish",
+      runId: run.runId,
+      status: result.status,
+      ...(result.reason !== undefined ? { reason: result.reason } : {})
+    });
+  }
+
+  /** The targeted, durable per-run callback wired via `detached.onFinish`. */
+  async onDetachedDone(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): Promise<void> {
+    this.detachedDeliveryLog.push({
+      hook: "onDetachedDone",
+      runId: run.runId,
+      status: result.status,
+      ...(result.reason !== undefined ? { reason: result.reason } : {})
+    });
+  }
+
+  getDetachedDeliveryLog(): DetachedDeliveryLogEntry[] {
+    return this.detachedDeliveryLog;
+  }
+
+  /** Seed a `running` detached run row with the `onDetachedDone` hook wired. */
+  seedDetachedRunForTest(runId: string, maxBudgetAt?: number): void {
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, status, display_order,
+        started_at, detached, detached_on_finish, detached_max_budget_at
+      ) VALUES (
+        ${runId}, ${null}, 'Child', 'running', 0, ${Date.now()}, 1,
+        'onDetachedDone', ${maxBudgetAt ?? null}
+      )
+    `;
+  }
+
+  async deliverFinishForTest(
+    runId: string,
+    status: AgentToolTerminalStatus,
+    text: string
+  ): Promise<void> {
+    await this._agentTool._deliverDetachedTerminal(runId, "finish", {
+      runId,
+      agentType: "Child",
+      status,
+      ...(status === "completed" ? { summary: text } : { error: text })
+    });
+  }
+
+  async deliverGiveUpForTest(runId: string): Promise<void> {
+    await this._agentTool._deliverDetachedTerminal(runId, "give_up", {
+      runId,
+      agentType: "Child",
+      status: "interrupted",
+      error: "detached run exceeded its budget before completing",
+      reason: "budget-exceeded",
+      childStillRunning: true
+    });
+  }
+
+  readRunStatusForTest(runId: string): string | null {
+    const row = this._agentTool._readAgentToolRun(runId) as {
+      status: string;
+    } | null;
+    return row ? row.status : null;
   }
 
   /**

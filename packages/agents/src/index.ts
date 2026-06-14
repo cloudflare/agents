@@ -8086,25 +8086,28 @@ export class Agent<
   ): Promise<void> {
     const now = Date.now();
     const leaseFloor = now - DETACHED_DELIVERY_LEASE_MS;
-    const claimed =
+    // Guarded CAS claim. `rowsWritten` (changes()) is the affected-row count, so
+    // exactly one concurrent caller observes 1 and proceeds; everyone else (a
+    // racing path, or a re-delivery within the lease) observes 0 and bails.
+    const claimQuery =
       kind === "finish"
-        ? this.sql<{ run_id: string }>`
-            UPDATE cf_agent_tool_runs
-            SET finish_claimed_at = ${now}
-            WHERE run_id = ${runId}
-              AND finish_delivered_at IS NULL
-              AND (finish_claimed_at IS NULL OR finish_claimed_at < ${leaseFloor})
-            RETURNING run_id
-          `
-        : this.sql<{ run_id: string }>`
-            UPDATE cf_agent_tool_runs
-            SET give_up_claimed_at = ${now}
-            WHERE run_id = ${runId}
-              AND give_up_delivered_at IS NULL
-              AND (give_up_claimed_at IS NULL OR give_up_claimed_at < ${leaseFloor})
-            RETURNING run_id
-          `;
-    if (claimed.length === 0) return;
+        ? `UPDATE cf_agent_tool_runs
+             SET finish_claimed_at = ?
+             WHERE run_id = ?
+               AND finish_delivered_at IS NULL
+               AND (finish_claimed_at IS NULL OR finish_claimed_at < ?)`
+        : `UPDATE cf_agent_tool_runs
+             SET give_up_claimed_at = ?
+             WHERE run_id = ?
+               AND give_up_delivered_at IS NULL
+               AND (give_up_claimed_at IS NULL OR give_up_claimed_at < ?)`;
+    const claimed = this.ctx.storage.sql.exec(
+      claimQuery,
+      now,
+      runId,
+      leaseFloor
+    ).rowsWritten;
+    if (claimed === 0) return;
 
     const row = this._readAgentToolRun(runId);
     if (!row) return;
