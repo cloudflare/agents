@@ -3293,6 +3293,40 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
 
+  experimental/gateway-resume-think:
+    dependencies:
+      '@ai-sdk/anthropic':
+        specifier: ^3.0.83
+        version: 3.0.83(zod@4.4.3)
+      '@ai-sdk/openai':
+        specifier: ^3.0.70
+        version: 3.0.70(zod@4.4.3)
+      '@ai-sdk/provider':
+        specifier: ^3.0.10
+        version: 3.0.10
+      '@cloudflare/think':
+        specifier: '*'
+        version: link:../../packages/think
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
+      ai:
+        specifier: ^6.0.202
+        version: 6.0.202(zod@4.4.3)
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^4.20260612.1
+        version: 4.20260612.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: 4.1.8
+        version: 4.1.8(@opentelemetry/api@1.9.1)(@types/node@25.9.3)(@vitest/browser-playwright@4.1.8)(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      wrangler:
+        specifier: ^4.100.0
+        version: 4.100.0(@cloudflare/workers-types@4.20260612.1)
+
   experimental/inference-buffer: {}
 
   experimental/session-memory:
