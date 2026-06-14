@@ -312,9 +312,22 @@ Native `@cf/*` (§5) attaches it to stream/result metadata directly.
 >   complete coherent parse, `finishReason: stop`, no stream error.
 > - **Cross-invocation re-attach** (no `initial` body + `fromEvent` offset): a new
 >   invocation resumes directly from a persisted event index. Harness `/reattach`:
->   `from=0` reproduces the full response through the `@ai-sdk` parser (`stop`);
->   `from=mid` is **byte-exact** against the known tail (openai 152 events,
->   anthropic 21 — both byte-equal). This is the primitive Layer B (§9) uses.
+>   `from=0` reproduces the **full** response through the `@ai-sdk` parser (`stop`,
+>   772 chars); `from=mid` is **byte-exact** against the known tail AND parses
+>   cleanly through the provider parser (`stop`), yielding exactly the **tail
+>   text** (e.g. 392 chars from event 83 of 167 — the prefix is intentionally
+>   absent, not corrupted). This is the primitive Layer B (§9) uses.
+>
+> **The run is server-driven / detached — generation continues to completion after
+> the originating request disconnects.** Harness `/detach` (read 3 events, then
+> `reader.cancel()` to simulate disconnect): the first `resume?from=0` **blocks
+> while tailing the live run** (openai 6.7s → 513 events; anthropic claude-opus-4.7
+> 8.6s → 24 events) and replays the complete stream **including the terminal event**
+> (`[DONE]` / `message_stop`), despite only 3 events being consumed before the
+> disconnect. Implication: re-attach is genuinely **zero-loss** — the upstream run
+> is not tied to the originating socket, so a re-attaching invocation recovers the
+> whole answer (full via `from=0`, or prefix-from-Layer-A + tail-via-`from=N`),
+> never just the bytes buffered at disconnect.
 >
 > An `onProgress(eventOffset)` callback (on `createResumableStream` and surfaced as
 > a delegate call option) reports the live SSE event offset so callers can persist
@@ -507,8 +520,14 @@ Plug-in path (every hook already exists in `packages/ai-chat` /
    re-attach stream with `createResumableStream({ binding, gateway, runId,
    fromEvent: eventOffset })` (**no `initial` body**), feed it through the same
    `@ai-sdk` model → `UIMessageChunk`s → the existing `_reply` / Think stream
-   loop. Fall back to `continueLastTurn()` on expiry/miss (today's behavior, via
-   `onResumeExpired` or a `404` from the re-attach).
+   loop. Because the run is detached (§7.1), the re-attach delivers the **tail**
+   (events `eventOffset`→end of the *completed* run); concatenated with the
+   prefix Layer A already streamed/persisted (`partialText`/`partialParts`) this
+   reconstructs the full message with **zero regeneration**. (Alternatively, a
+   `fromEvent: 0` re-attach replays the whole message and the loop replaces the
+   partial — simpler, re-streams the prefix.) Fall back to `continueLastTurn()`
+   on expiry/miss (today's behavior, via `onResumeExpired` or a `404` from the
+   re-attach).
 4. **Offset-space mismatch (handled).** Layer A counts post-parse
    `UIMessageChunk`s; gateway `from=N` counts **provider-native SSE events**
    (§7.1). These are different cursors — stash the **SSE event index** from

@@ -71,13 +71,18 @@ recovery `plan` was `reattach` and the transcript converged. Example run:
 ✓ turn converged — assistant message: 510 chars
 ```
 
-> **What "converged" means here.** AI Gateway resume replays the run's
-> **buffered** stream from `from=N`. When the originating request is aborted
-> mid-generation, upstream generation halts, so the re-attached turn contains
-> what was buffered up to the abort (here ~510 chars), replayed byte-exactly with
-> **zero new tokens** — not a fresh, full regeneration. The point this validates
-> is the Layer-B path: capture → stash → recovery decision → byte-exact
-> re-attach → clean convergence, on a real DO eviction.
+> **What "converged" means here.** The AI Gateway run is **server-driven /
+> detached**: generation continues to completion even after the originating
+> request disconnects (verified in `experimental/gateway-resume` via `/detach` —
+> a `resume?from=0` issued after a mid-stream `reader.cancel()` blocks while
+> tailing the live run and replays the **complete** stream including the terminal
+> event). So re-attach is genuinely **zero-loss**, not "whatever was buffered at
+> the abort." The 510 chars above is the **tail** (events 88→end), parsed
+> byte-exactly from `from=88` and concatenated with the prefix Layer A already
+> delivered — together the full message, **zero new tokens**. (Re-attaching with
+> `fromEvent: 0` instead would replay the whole message and replace the partial.)
+> The point this validates is the Layer-B path: capture → stash → recovery
+> decision → byte-exact re-attach → clean convergence, on a real DO eviction.
 
 ## Caveats
 

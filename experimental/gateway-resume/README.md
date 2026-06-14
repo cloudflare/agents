@@ -108,6 +108,34 @@ Conclusions:
 
 Raw matrix output is saved in [`findings.json`](./findings.json).
 
+## Detachment: does generation continue after the originating disconnect? (2026-06-14)
+
+`GET /detach?model=<slug>&k=3&maxTokens=512&waits=0,5000,12000` starts a run,
+reads `k` SSE events, then calls `reader.cancel()` to **simulate the originating
+request disconnecting mid-stream**, and samples `resume?from=0` over time.
+
+| model | read before cancel | first `resume(0)` drain | total events | terminal? | verdict |
+| --- | --- | --- | --- | --- | --- |
+| `openai/gpt-5.4` | 3 events | **6.7s (tailed live)** | 513 | `[DONE]` ✓ | keeps generating to completion |
+| `anthropic/claude-opus-4.7` | 3 events | **8.6s (tailed live)** | 24 | `message_stop` ✓ | keeps generating to completion |
+
+**The run is server-driven / detached.** After we disconnect having read only 3
+events, the first `resume?from=0` **blocks for seconds while tailing the live
+run**, then replays the *complete* stream including the terminal event. Later
+samples return the same frozen buffer instantly (~50–250ms). So upstream
+generation is **not** tied to the originating socket — it runs to completion
+regardless, and resume tails it.
+
+Consequence for recovery: re-attach is genuinely **zero-loss**. A re-attaching
+invocation recovers the whole answer — `from=0` replays the full message
+(`/reattach`: 772 chars, `finishReason: stop` through `@ai-sdk`), or `from=N`
+replays exactly the **tail** (events `N`→end), byte-exact and cleanly parsed
+(`/reattach` mid-parse: 392 chars from event 83 of 167, `stop`). The tail is to
+be concatenated with the prefix the client/Layer A already received. (Edge note:
+with a very large `maxTokens=4096`, one gpt-5.4 run tailed ~30s to 2953 events
+and froze **without** a `[DONE]` — an abnormal/truncated finish; small clean
+runs always carried the terminal.)
+
 ## Request-side passthrough (2026-06-14) — the run-path delegate gate
 
 The resume findings above prove the **response** side (native SSE, byte-exact

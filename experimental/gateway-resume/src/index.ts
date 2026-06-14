@@ -138,6 +138,65 @@ function preview(bytes: Uint8Array, max = 240): string {
   return td.decode(bytes.slice(0, max));
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Count complete SSE events (terminated by a blank line) in `bytes`. */
+function countSseEvents(bytes: Uint8Array): number {
+  let n = 0;
+  for (let i = 0; i + 1 < bytes.length; i++) {
+    if (bytes[i] === 0x0a && bytes[i + 1] === 0x0a) {
+      n++;
+      i++;
+    }
+  }
+  return n;
+}
+
+/** Whether the stream carries its provider-native terminator (run completed). */
+function hasTerminalEvent(bytes: Uint8Array, model: string): boolean {
+  const text = td.decode(bytes);
+  if (model.startsWith("anthropic/")) return text.includes("message_stop");
+  // openai (and most others routed through the run API) end with `data: [DONE]`.
+  return text.includes("[DONE]");
+}
+
+/**
+ * Read up to `k` complete SSE events from `body`, then CANCEL the reader to
+ * simulate the originating request disconnecting mid-stream. Returns how much we
+ * consumed before cancelling.
+ */
+async function readSomeThenCancel(
+  body: ReadableStream<Uint8Array>,
+  k: number
+): Promise<{ readEvents: number; readBytes: number }> {
+  const reader = body.getReader();
+  let events = 0;
+  let bytes = 0;
+  let buf = "";
+  try {
+    while (events < k) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.length > 0) {
+        bytes += value.length;
+        buf += td.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf("\n\n")) !== -1) {
+          events++;
+          buf = buf.slice(idx + 2);
+          if (events >= k) break;
+        }
+      }
+    }
+  } finally {
+    // cancel() releases the upstream subrequest — the gateway sees us disconnect.
+    await reader.cancel("detach-probe").catch(() => {});
+  }
+  return { readEvents: events, readBytes: bytes };
+}
+
 // ---------------------------------------------------------------------------
 // Core operations
 // ---------------------------------------------------------------------------
@@ -907,6 +966,131 @@ export default {
         }
       }
 
+      // Detachment probe — does the gateway KEEP GENERATING after the
+      // originating request disconnects mid-stream? Read a few events, cancel
+      // the reader (simulating disconnect), then sample resume?from=0 over time.
+      // If the event count GROWS after the cancel and/or a terminal event
+      // appears, generation continued server-side (the run is "detached"). If it
+      // plateaus at the cancel point with no terminal, generation halted.
+      case "/detach": {
+        const model = url.searchParams.get("model") ?? DEFAULT_MODELS[0];
+        const k = Number(url.searchParams.get("k") ?? "3");
+        const waits = (url.searchParams.get("waits") ?? "0,4000,10000,20000")
+          .split(",")
+          .map((s) => Number(s.trim()))
+          .filter((n) => Number.isFinite(n));
+
+        // Start a run with a long prompt so generation lasts long enough to
+        // observe; capture run-id from the raw response.
+        const longPrompt =
+          "Write an exhaustive 2500-word technical essay about distributed " +
+          "systems consistency models. Cover linearizability, sequential " +
+          "consistency, causal consistency, eventual consistency, CRDTs, " +
+          "consensus (Paxos, Raft), and real-world tradeoffs. Be thorough.";
+        const ai = env.AI as unknown as {
+          run(
+            model: string,
+            inputs: Record<string, unknown>,
+            options: Record<string, unknown>
+          ): Promise<Response>;
+        };
+        const maxTokens = Number(url.searchParams.get("maxTokens") ?? "1024");
+        const tokenParam: Record<string, number> = model.startsWith(
+          "anthropic/"
+        )
+          ? { max_tokens: maxTokens }
+          : { max_completion_tokens: maxTokens };
+        const resp = await ai.run(
+          model,
+          {
+            stream: true,
+            ...tokenParam,
+            messages: [{ role: "user", content: longPrompt }]
+          },
+          { gateway: { id: gateway }, returnRawResponse: true }
+        );
+        const runId = resp.headers.get("cf-aig-run-id");
+        if (!resp.body || !runId) {
+          return Response.json(
+            { experiment: "detach", model, error: "no body or cf-aig-run-id" },
+            { status: 502 }
+          );
+        }
+
+        // Consume k events, then disconnect.
+        const consumed = await readSomeThenCancel(resp.body, k);
+        const cancelledAt = Date.now();
+
+        // Sample the resume buffer at increasing offsets-from-cancel. Each
+        // resume?from=0 fully drains whatever the buffer yields at that moment.
+        const samples: Array<{
+          atMs: number;
+          drainMs: number;
+          status: number;
+          events: number;
+          bytes: number;
+          terminal: boolean;
+        }> = [];
+        let prev = 0;
+        for (const w of waits) {
+          if (w > prev) await sleep(w - prev);
+          prev = w;
+          const t0 = Date.now();
+          const r = await resume(env, gateway, runId, 0);
+          samples.push({
+            atMs: Date.now() - cancelledAt,
+            drainMs: Date.now() - t0,
+            status: r.status,
+            events: countSseEvents(r.bytes),
+            bytes: r.bytes.length,
+            terminal: hasTerminalEvent(r.bytes, model)
+          });
+        }
+
+        // Verdict. The decisive signals that generation continued AFTER our
+        // disconnect (rather than the run being tied to the originating request):
+        //   - the first resume BLOCKED while tailing live generation (drainMs
+        //     much larger than the trivially-buffered later samples), and/or
+        //   - the buffer holds far MORE events than we read before cancelling.
+        const first = samples[0];
+        const last = samples[samples.length - 1];
+        const completed = samples.some((s) => s.terminal);
+        const tailedLive = first.drainMs > 1500;
+        const exceedsRead = first.events > consumed.readEvents * 3 + 5;
+        const grewAcrossSamples = last.events > first.events;
+
+        let verdict: string;
+        if (completed && (tailedLive || exceedsRead)) {
+          verdict =
+            "KEEPS GENERATING TO COMPLETION — generation continued after the " +
+            "disconnect and reached its terminal event; resume tails the live run.";
+        } else if (tailedLive || exceedsRead || grewAcrossSamples) {
+          verdict =
+            "KEEPS GENERATING — generation continued after the disconnect " +
+            `(buffer reached ${last.events} events vs ${consumed.readEvents} read; ` +
+            `first resume tailed for ${first.drainMs}ms)` +
+            (completed
+              ? " and completed"
+              : " but no terminal event was buffered") +
+            ".";
+        } else {
+          verdict =
+            "HALTS — the buffer plateaued near the disconnect point; generation " +
+            "appears tied to the originating request.";
+        }
+
+        return Response.json({
+          experiment: "detach",
+          model,
+          maxTokens,
+          runId,
+          readBeforeCancel: consumed,
+          samples,
+          terminalObserved: completed,
+          verdict
+        });
+      }
+
       // Cross-invocation re-attach (RFC §7.1 / §9) — simulate "invocation #1"
       // starting a run, then "invocation #2 after eviction" re-attaching with NO
       // initial body via createResumableStream({ fromEvent }). Verifies (a) from=0
@@ -999,6 +1183,57 @@ export default {
         );
         const tailByteExact = bytesEqual(midBytes, expectedTail);
 
+        // (c) Parse the mid re-attach through @ai-sdk — measures how lossy a
+        // mid-stream START is for the provider parser (the stream begins at a
+        // bare delta with no `role`/`message_start`), vs the from=0 parse above.
+        let midParseChars = 0;
+        let midParseFinish: string | undefined;
+        let midParseError: string | undefined;
+        try {
+          const midFetch = (
+            _i: RequestInfo | URL,
+            _x?: RequestInit
+          ): Promise<Response> =>
+            Promise.resolve(
+              new Response(
+                createResumableStream({
+                  env,
+                  gateway,
+                  runId: run.runId as string,
+                  fromEvent: midEvent
+                }),
+                {
+                  status: 200,
+                  headers: { "content-type": "text/event-stream" }
+                }
+              )
+            );
+          const midModel: LanguageModel =
+            vendor === "openai"
+              ? createOpenAI({
+                  apiKey: "unused",
+                  fetch: midFetch as typeof globalThis.fetch
+                }).chat(bareModel)
+              : createAnthropic({
+                  apiKey: "unused",
+                  fetch: midFetch as typeof globalThis.fetch
+                })(bareModel);
+          const midResult = streamText({ model: midModel, prompt });
+          for await (const part of midResult.fullStream) {
+            if (part.type === "text-delta") {
+              midParseChars +=
+                (part as unknown as { text?: string }).text?.length ?? 0;
+            } else if (part.type === "error") {
+              midParseError = String(
+                (part as unknown as { error: unknown }).error
+              );
+            }
+          }
+          midParseFinish = await midResult.finishReason;
+        } catch (e) {
+          midParseError = e instanceof Error ? e.message : String(e);
+        }
+
         return Response.json({
           experiment: "reattach",
           model,
@@ -1013,7 +1248,12 @@ export default {
             fromEvent: midEvent,
             tailByteExact,
             reattachBytes: midBytes.length,
-            expectedBytes: expectedTail.length
+            expectedBytes: expectedTail.length,
+            parse: {
+              finishReason: midParseFinish,
+              textChars: midParseChars,
+              error: midParseError
+            }
           }
         });
       }
