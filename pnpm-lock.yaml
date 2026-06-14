@@ -109,8 +109,8 @@ importers:
         specifier: ^1.69.0
         version: 1.69.0
       partyserver:
-        specifier: ^0.5.7
-        version: 0.5.7(@cloudflare/workers-types@4.20260612.1)
+        specifier: ^0.5.8
+        version: 0.5.8(@cloudflare/workers-types@4.20260612.1)
       partysocket:
         specifier: 1.2.0
         version: 1.2.0(react@19.2.7)
@@ -3564,8 +3564,8 @@ importers:
         specifier: ^5.1.11
         version: 5.1.11
       partyserver:
-        specifier: ^0.5.7
-        version: 0.5.7(@cloudflare/workers-types@4.20260612.1)
+        specifier: ^0.5.8
+        version: 0.5.8(@cloudflare/workers-types@4.20260612.1)
       partysocket:
         specifier: 1.2.0
         version: 1.2.0(react@19.2.7)
@@ -9553,8 +9553,8 @@ packages:
     peerDependencies:
       '@cloudflare/workers-types': ^4.20260424.1
 
-  partyserver@0.5.7:
-    resolution: {integrity: sha512-3xeJh2F7V9qsyVYUJHLDb9P4IJ8PyaWenBOXRWKifAYoS0WdVuTmrK1T2tsRgc5GoeQkeIdRSAZ1cftC47oSyw==}
+  partyserver@0.5.8:
+    resolution: {integrity: sha512-htgSwiBcBu9zIYLrsxBAOvdkjukHvncbTk0nDrJgfruvZ08rxtEN1Ab4T7j9osykP80Bq3zA2oWFd3ngc4Z9uw==}
     peerDependencies:
       '@cloudflare/workers-types': ^4.20260424.1
 
@@ -16745,7 +16745,7 @@ snapshots:
       '@cloudflare/workers-types': 4.20260612.1
       nanoid: 5.1.11
 
-  partyserver@0.5.7(@cloudflare/workers-types@4.20260612.1):
+  partyserver@0.5.8(@cloudflare/workers-types@4.20260612.1):
     dependencies:
       '@cloudflare/workers-types': 4.20260612.1
       nanoid: 5.1.11

@@ -62,7 +62,7 @@
     "nx": "^22.7.5",
     "oxfmt": "^0.54.0",
     "oxlint": "^1.69.0",
-    "partyserver": "^0.5.7",
+    "partyserver": "^0.5.8",
     "partysocket": "1.2.0",
     "pkg-pr-new": "^0.0.75",
     "playwright": "^1.60.0",

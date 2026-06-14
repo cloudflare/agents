@@ -71,4 +71,4 @@ minimumReleaseAgeExclude:
   - miniflare@4.20260611.0
   - partysocket@1.2.0
   - wrangler@4.100.0
-  - partyserver@0.5.7
+  - partyserver@0.5.8
