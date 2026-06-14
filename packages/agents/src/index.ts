@@ -95,6 +95,8 @@ import type {
   AgentToolRunStatus,
   AgentToolStoredChunk,
   ChatCapableAgentClass,
+  DetachedAgentToolConfig,
+  DetachedRunAgentToolResult,
   RunAgentToolOptions,
   RunAgentToolResult
 } from "./agent-tool-types";
@@ -116,6 +118,8 @@ export type {
   AgentToolStoredChunk,
   AgentToolTerminalStatus,
   ChatCapableAgentClass,
+  DetachedAgentToolConfig,
+  DetachedRunAgentToolResult,
   RunAgentToolOptions,
   RunAgentToolResult
 } from "./agent-tool-types";
@@ -609,6 +613,14 @@ type AgentToolRunStorageRow = {
   display_order: number;
   started_at: number;
   completed_at: number | null;
+  // Detached ("background") run bookkeeping (rfc-detached-agent-tools).
+  detached: number;
+  detached_on_finish: string | null;
+  detached_max_budget_at: number | null;
+  finish_claimed_at: number | null;
+  finish_delivered_at: number | null;
+  give_up_claimed_at: number | null;
+  give_up_delivered_at: number | null;
 };
 
 type DeferredAgentToolFinish = () => Promise<void>;
@@ -998,6 +1010,26 @@ const DEFAULT_AGENT_TOOL_REATTACH_NO_PROGRESS_TIMEOUT_MS = 120_000;
 // want a hard wall-clock cap (and the `window-exceeded` child teardown it
 // triggers) can still set `agentToolReattachMaxWindowMs` to a finite value.
 const DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS = Number.POSITIVE_INFINITY;
+// Absolute safety ceiling on a DETACHED ("background") agent-tool run
+// (rfc-detached-agent-tools). A detached run has no awaiting parent turn and no
+// live observer, so unlike the re-attach window above this defaults to a FINITE
+// value: an abandoned detached run otherwise holds a concurrency slot + live
+// facet forever with nobody to notice the leak. On expiry the parent gives up
+// watching (delivers the completion hook with `interrupted`/`budget-exceeded`)
+// and tears the child down. 24h is generous enough for video renders / large
+// batch jobs while still bounding a genuinely stuck run.
+const DEFAULT_DETACHED_MAX_BUDGET_MS = 24 * 60 * 60 * 1000;
+// How long a detached terminal-delivery claim is leased before another delivery
+// path (a backbone reconcile racing the warm fast path, or a re-delivery after
+// a crash mid-handler) may re-claim it. Guards against a double-fire on the
+// happy path while guaranteeing at-least-once delivery under failure.
+const DETACHED_DELIVERY_LEASE_MS = 60_000;
+// Escalating cadence for the self-scheduling detached reconcile backbone. The
+// warm fast path makes the first entries near-moot; these bound worst-case
+// post-eviction latency while keeping steady-state alarm cost low. The schedule
+// cancels itself once no detached run remains outstanding.
+const DETACHED_BACKBONE_CADENCE_S = [5, 15, 30, 120];
+const DETACHED_RECONCILE_CALLBACK = "_cfDetachedReconcileTick";
 const SUB_AGENT_IDENTITY_VERSION_LEGACY = "legacy";
 const SUB_AGENT_IDENTITY_VERSION_PATH_V2 = "path-v2";
 const SUB_AGENT_IDENTITY_PATH_V2_PREFIX = "cf-agents:v2:";
@@ -1021,7 +1053,7 @@ type AgentToolRecoveryInspection =
  * The constructor stores this as a row in cf_agents_state and checks it
  * on wake to skip DDL on established DOs.
  */
-const CURRENT_SCHEMA_VERSION = 9;
+const CURRENT_SCHEMA_VERSION = 10;
 
 const SCHEMA_VERSION_ROW_ID = "cf_schema_version";
 const STATE_ROW_ID = "cf_state_row_id";
@@ -1247,7 +1279,8 @@ export const DEFAULT_AGENT_STATIC_OPTIONS = {
    * `maxRecoveryWork` / `shouldKeepRecovering`. Set a finite value to impose a
    * wall-clock cap (which also tears the child down on `window-exceeded`).
    */
-  agentToolReattachMaxWindowMs: DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS
+  agentToolReattachMaxWindowMs: DEFAULT_AGENT_TOOL_REATTACH_MAX_WINDOW_MS,
+  detachedMaxBudgetMs: DEFAULT_DETACHED_MAX_BUDGET_MS
 };
 
 /**
@@ -1264,6 +1297,7 @@ interface ResolvedAgentOptions {
   fiberRecoveryMaxAgeMs: number;
   agentToolReattachNoProgressTimeoutMs: number;
   agentToolReattachMaxWindowMs: number;
+  detachedMaxBudgetMs: number;
 }
 
 /**
@@ -1328,6 +1362,18 @@ export interface AgentStaticOptions {
    * also disables the ceiling.
    */
   agentToolReattachMaxWindowMs?: number;
+  /**
+   * Absolute safety ceiling in milliseconds for a DETACHED ("background")
+   * agent-tool run dispatched via `runAgentTool(cls, { detached: ... })`
+   * (rfc-detached-agent-tools). A detached run has no awaiting parent turn, so
+   * on expiry the parent gives up watching — delivers the completion hook with
+   * `interrupted` / `budget-exceeded` and tears the child down — rather than
+   * holding a concurrency slot + live facet forever. Unlike the re-attach
+   * window this defaults to a FINITE value (24h) precisely because an abandoned
+   * detached run has no observer to notice the leak. Override per-run via
+   * `detached: { maxBudgetMs }`.
+   */
+  detachedMaxBudgetMs?: number;
 }
 
 /**
@@ -1690,7 +1736,10 @@ export class Agent<
         DEFAULT_AGENT_STATIC_OPTIONS.agentToolReattachNoProgressTimeoutMs,
       agentToolReattachMaxWindowMs:
         ctor.options?.agentToolReattachMaxWindowMs ??
-        DEFAULT_AGENT_STATIC_OPTIONS.agentToolReattachMaxWindowMs
+        DEFAULT_AGENT_STATIC_OPTIONS.agentToolReattachMaxWindowMs,
+      detachedMaxBudgetMs:
+        ctor.options?.detachedMaxBudgetMs ??
+        DEFAULT_AGENT_STATIC_OPTIONS.detachedMaxBudgetMs
     };
     return this._cachedOptions;
   }
@@ -2036,6 +2085,37 @@ export class Agent<
       );
       addColumnIfNotExists(
         "ALTER TABLE cf_agent_tool_runs ADD COLUMN child_still_running INTEGER"
+      );
+      // Detached ("background") runs (rfc-detached-agent-tools). `detached`
+      // marks a run dispatched without an awaiting parent turn;
+      // `detached_on_finish` is the parent METHOD NAME to call on terminal
+      // (durable, eviction-surviving — like a `schedule` callback);
+      // `detached_max_budget_at` is the absolute give-up deadline. The four
+      // ledger columns implement a two-slot (finish / give-up) claim+lease so
+      // delivery is exactly-once on the happy path and at-least-once under
+      // failure — give-up and finish are INDEPENDENT slots so a premature
+      // give-up can never dedupe a child's real late completion away (the
+      // production incident in #1752).
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached INTEGER NOT NULL DEFAULT 0"
+      );
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_on_finish TEXT"
+      );
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agent_tool_runs ADD COLUMN detached_max_budget_at INTEGER"
+      );
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agent_tool_runs ADD COLUMN finish_claimed_at INTEGER"
+      );
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agent_tool_runs ADD COLUMN finish_delivered_at INTEGER"
+      );
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agent_tool_runs ADD COLUMN give_up_claimed_at INTEGER"
+      );
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agent_tool_runs ADD COLUMN give_up_delivered_at INTEGER"
       );
 
       // Mark schema as up-to-date
@@ -7531,12 +7611,36 @@ export class Agent<
 
   async runAgentTool<Input = unknown, Output = unknown>(
     cls: ChatCapableAgentClass,
+    options: RunAgentToolOptions<Input> & {
+      detached: true | DetachedAgentToolConfig;
+    }
+  ): Promise<DetachedRunAgentToolResult>;
+  async runAgentTool<Input = unknown, Output = unknown>(
+    cls: ChatCapableAgentClass,
     options: RunAgentToolOptions<Input>
-  ): Promise<RunAgentToolResult<Output>> {
+  ): Promise<RunAgentToolResult<Output>>;
+  async runAgentTool<Input = unknown, Output = unknown>(
+    cls: ChatCapableAgentClass,
+    options: RunAgentToolOptions<Input>
+  ): Promise<RunAgentToolResult<Output> | DetachedRunAgentToolResult> {
     const runId = options.runId ?? nanoid(12);
     const agentType = cls.name;
+    const detached = this._parseDetachedOption(options.detached);
+
     const existing = this._readAgentToolRun(runId);
     if (existing) {
+      // Detached re-dispatch (e.g. chat recovery re-running the dispatching
+      // turn) is idempotent by runId: re-arm the durable backbone for a still
+      // non-terminal run and hand back the live handle instead of re-tailing or
+      // spawning fresh work. A run that already reached terminal simply returns
+      // a running-shaped handle — its delivery already happened (or is owned by
+      // the ledger).
+      if (detached) {
+        if (!this._isAgentToolRowHardTerminal(existing.status)) {
+          await this._armDetachedBackbone();
+        }
+        return { runId, agentType, status: "running" };
+      }
       // HARD terminals (completed/error/aborted) are returned as-is. `interrupted`
       // is a SOFT terminal — recovery gave up once, but the child may have
       // reached its real terminal since — so it falls through to the re-attach
@@ -7656,14 +7760,20 @@ export class Agent<
       return { runId, agentType, status: "error", error };
     }
 
+    const detachedMaxBudgetAt = detached
+      ? startedAt +
+        (detached.maxBudgetMs ?? this._resolvedOptions.detachedMaxBudgetMs)
+      : null;
     this.sql`
       INSERT INTO cf_agent_tool_runs (
         run_id, parent_tool_call_id, agent_type, input_preview,
-        input_redacted, status, display_metadata, display_order, started_at
+        input_redacted, status, display_metadata, display_order, started_at,
+        detached, detached_on_finish, detached_max_budget_at
       ) VALUES (
         ${runId}, ${options.parentToolCallId ?? null}, ${agentType},
         ${inputPreviewJson}, 1, 'starting', ${displayJson}, ${displayOrder},
-        ${startedAt}
+        ${startedAt}, ${detached ? 1 : 0}, ${detached?.onFinishName ?? null},
+        ${detachedMaxBudgetAt}
       )
     `;
 
@@ -7693,6 +7803,26 @@ export class Agent<
       runId
     });
     this._markAgentToolRunning(runId);
+
+    if (detached) {
+      // The child must OUTLIVE the dispatching turn, so a detached run never
+      // inherits `options.signal` (which aborts when this turn ends). Cancel a
+      // detached run explicitly with `cancelAgentTool(runId)`.
+      if (options.signal) {
+        console.warn(
+          `[agents] runAgentTool: \`signal\` is ignored for a detached run (${runId}); a detached child must outlive the spawning turn. Use cancelAgentTool(runId) to cancel it.`
+        );
+      }
+      // Arm the durable backbone first so eviction between here and the fast
+      // path still finalizes the run, then kick the warm fast path that tails
+      // the child to terminal and delivers with low latency while alive.
+      await this._armDetachedBackbone();
+      this.ctx.waitUntil(
+        this._detachedFastPath<Input, Output>(runInfo, cls, runId)
+      );
+      return { runId, agentType, status: "running" };
+    }
+
     let sequence = 1;
     let parentAbortListener: (() => void) | undefined;
     if (options.signal) {
@@ -7803,6 +7933,387 @@ export class Agent<
     }
   }
 
+  /**
+   * Cancel a detached (or awaited) agent-tool run by id. Idempotent: cancelling
+   * an already-terminal run is a no-op; a late cancel never rewrites a hard
+   * terminal. Delivers through the same guarded path as a natural terminal, so
+   * a wired `onFinish` still fires once with `status: "aborted"`.
+   */
+  async cancelAgentTool(runId: string, reason?: unknown): Promise<void> {
+    const row = this._readAgentToolRun(runId);
+    if (!row) return;
+    if (this._isAgentToolRowHardTerminal(row.status)) return;
+    const message =
+      reason instanceof Error
+        ? reason.message
+        : String(reason ?? "cancelled by parent");
+    try {
+      const child = await this._cf_resolveSubAgent(row.agent_type, runId);
+      const adapter = this._asAgentToolChildAdapter(child);
+      await adapter.cancelAgentToolRun(runId, reason);
+    } catch {
+      // Best-effort child teardown; we still record the aborted terminal so the
+      // parent stops watching and any wired callback fires.
+    }
+    await this._deliverDetachedTerminal(runId, "finish", {
+      runId,
+      agentType: row.agent_type,
+      status: "aborted",
+      error: message
+    });
+  }
+
+  /**
+   * Parse + validate the `detached` option. Returns `null` for a non-detached
+   * run, or the normalized config (with the validated `onFinish` method name)
+   * for a detached one. Throws if `onFinish` does not name a method on this
+   * agent — closures cannot survive Durable Object eviction, so the durable
+   * hook is referenced by method name (the same contract as `schedule`).
+   */
+  private _parseDetachedOption(
+    detached: RunAgentToolOptions["detached"]
+  ): { onFinishName?: string; maxBudgetMs?: number } | null {
+    if (!detached) return null;
+    if (detached === true) return {};
+    const onFinishName = detached.onFinish as string | undefined;
+    if (onFinishName !== undefined) {
+      const callback = (this as unknown as Record<string, unknown>)[
+        onFinishName
+      ];
+      if (typeof callback !== "function") {
+        throw new Error(
+          `runAgentTool: detached.onFinish "${onFinishName}" is not a method on ${this.constructor.name}. ` +
+            'Pass the NAME of a method (e.g. "onImportDone"), not a closure — ' +
+            "closures cannot be rehydrated after the Durable Object is evicted."
+        );
+      }
+    }
+    return {
+      ...(onFinishName !== undefined ? { onFinishName } : {}),
+      ...(detached.maxBudgetMs !== undefined
+        ? { maxBudgetMs: detached.maxBudgetMs }
+        : {})
+    };
+  }
+
+  private _isAgentToolRowHardTerminal(status: AgentToolRunStatus): boolean {
+    return status === "completed" || status === "error" || status === "aborted";
+  }
+
+  private _hasOutstandingDetachedRuns(): boolean {
+    const rows = this.sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM cf_agent_tool_runs
+      WHERE detached = 1 AND finish_delivered_at IS NULL
+    `;
+    return (rows[0]?.n ?? 0) > 0;
+  }
+
+  /**
+   * Warm fast path for a detached run: tail the child to terminal (so the
+   * parent re-broadcasts its live stream to clients) and deliver the completion
+   * with low latency while the isolate stays alive. Best-effort — the durable
+   * `_cfDetachedReconcileTick` backbone is the guarantee; anything this misses
+   * (eviction, a child that has not yet reached terminal) the backbone collects.
+   */
+  private async _detachedFastPath<Input, Output>(
+    runInfo: AgentToolRunInfo,
+    cls: ChatCapableAgentClass,
+    runId: string
+  ): Promise<void> {
+    try {
+      const child = await this.subAgent(cls as SubAgentClass<Agent>, runId);
+      const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
+      let sequence = 1;
+      if (adapter.tailAgentToolRun) {
+        const stream = await adapter.tailAgentToolRun(runId, {
+          afterSequence: -1
+        });
+        sequence = (
+          await this._forwardAgentToolStream(
+            stream,
+            runInfo.parentToolCallId,
+            runId,
+            sequence,
+            undefined
+          )
+        ).next;
+      }
+      const inspection = await adapter.inspectAgentToolRun(runId);
+      if (
+        inspection &&
+        this._isAgentToolRowHardTerminal(
+          inspection.status as AgentToolRunStatus
+        )
+      ) {
+        const result = this._terminalResultFromInspection<Output>(
+          runInfo.agentType,
+          inspection
+        );
+        await this._deliverDetachedTerminal(
+          runId,
+          "finish",
+          result,
+          { sequence },
+          inspection.completedAt
+        );
+      }
+    } catch {
+      // Leave it to the backbone reconcile.
+    }
+  }
+
+  /**
+   * Single delivery funnel for a detached terminal. Both the warm fast path and
+   * the durable backbone route through here, with INDEPENDENT ledger slots for
+   * `finish` (the real terminal) vs `give_up` (budget exhausted). Each slot is
+   * delivered at-least-once via a claim + lease:
+   *
+   * - Concurrent double-fire is prevented by the guarded CAS claim (RETURNING
+   *   yields the row only to the winner).
+   * - A crash after the side effect but before `*_delivered_at` is written lets
+   *   the lease expire so a later reconcile re-delivers — hence handlers must be
+   *   idempotent.
+   * - Two slots, not one, because `interrupted` is SOFT: a give-up followed by a
+   *   real completion is legitimate, and a single shared "delivered" bit would
+   *   dedupe the child's real late result away (the #1752 production incident).
+   */
+  private async _deliverDetachedTerminal<Output>(
+    runId: string,
+    kind: "finish" | "give_up",
+    result: RunAgentToolResult<Output>,
+    options?: { sequence?: number },
+    completedAt = Date.now()
+  ): Promise<void> {
+    const now = Date.now();
+    const leaseFloor = now - DETACHED_DELIVERY_LEASE_MS;
+    const claimed =
+      kind === "finish"
+        ? this.sql<{ run_id: string }>`
+            UPDATE cf_agent_tool_runs
+            SET finish_claimed_at = ${now}
+            WHERE run_id = ${runId}
+              AND finish_delivered_at IS NULL
+              AND (finish_claimed_at IS NULL OR finish_claimed_at < ${leaseFloor})
+            RETURNING run_id
+          `
+        : this.sql<{ run_id: string }>`
+            UPDATE cf_agent_tool_runs
+            SET give_up_claimed_at = ${now}
+            WHERE run_id = ${runId}
+              AND give_up_delivered_at IS NULL
+              AND (give_up_claimed_at IS NULL OR give_up_claimed_at < ${leaseFloor})
+            RETURNING run_id
+          `;
+    if (claimed.length === 0) return;
+
+    const row = this._readAgentToolRun(runId);
+    if (!row) return;
+
+    this._updateAgentToolTerminal(runId, result, completedAt);
+    if (options?.sequence !== undefined) {
+      this._broadcastAgentToolTerminal(
+        row.parent_tool_call_id ?? undefined,
+        options.sequence,
+        result
+      );
+    }
+
+    const runInfo = this._agentToolRunInfoFromRow(
+      row,
+      result.status,
+      completedAt
+    );
+    const lifecycle: AgentToolLifecycleResult = {
+      status: result.status,
+      ...(result.summary !== undefined ? { summary: result.summary } : {}),
+      ...(result.error !== undefined ? { error: result.error } : {}),
+      ...(result.reason !== undefined ? { reason: result.reason } : {}),
+      ...(result.childStillRunning !== undefined
+        ? { childStillRunning: result.childStillRunning }
+        : {})
+    };
+
+    const invoke = async () => {
+      // Global metering hook fires for detached runs too (cost accounting
+      // parity with the awaited path).
+      try {
+        await this.onAgentToolFinish(runInfo, lifecycle);
+      } catch (error) {
+        await this._safeRunOnError(error);
+      }
+      // Targeted, durable per-run callback (method name persisted on the row).
+      const callbackName = row.detached_on_finish;
+      if (callbackName) {
+        const callback = (this as unknown as Record<string, unknown>)[
+          callbackName
+        ];
+        if (typeof callback === "function") {
+          try {
+            await (
+              callback as (
+                run: AgentToolRunInfo,
+                res: AgentToolLifecycleResult
+              ) => Promise<void>
+            ).bind(this)(runInfo, lifecycle);
+          } catch (error) {
+            await this._safeRunOnError(error);
+          }
+        }
+      }
+    };
+
+    // Delivery can fire from a scheduled alarm (no ambient turn / connection /
+    // agentContext). Run inside agentContext so a handler that itself calls
+    // runAgentTool / setState / submitMessages works.
+    if (agentContext.getStore()?.agent) {
+      await invoke();
+    } else {
+      await agentContext.run(
+        {
+          agent: this,
+          connection: undefined,
+          request: undefined,
+          email: undefined
+        },
+        invoke
+      );
+    }
+
+    // Mark delivered only AFTER the handler resolves. A crash before this point
+    // leaves the lease to expire and a later reconcile to re-deliver.
+    if (kind === "finish") {
+      this.sql`
+        UPDATE cf_agent_tool_runs
+        SET finish_delivered_at = ${Date.now()}
+        WHERE run_id = ${runId}
+      `;
+    } else {
+      this.sql`
+        UPDATE cf_agent_tool_runs
+        SET give_up_delivered_at = ${Date.now()}
+        WHERE run_id = ${runId}
+      `;
+    }
+  }
+
+  private async _safeRunOnError(error: unknown): Promise<void> {
+    try {
+      await this.onError(error);
+    } catch {
+      // Delivery hooks are best-effort; a failing onError must not wedge the
+      // ledger or other detached runs.
+    }
+  }
+
+  /**
+   * Arm the self-scheduling detached reconcile backbone if it is not already
+   * armed. Idempotent — checks for an existing schedule on the reconcile
+   * callback first, so repeated detached dispatches share one backbone.
+   */
+  private async _armDetachedBackbone(): Promise<void> {
+    const schedules = await this.listSchedules();
+    const armed = schedules.some(
+      (schedule) => schedule.callback === DETACHED_RECONCILE_CALLBACK
+    );
+    if (armed) return;
+    await this.schedule(
+      DETACHED_BACKBONE_CADENCE_S[0],
+      DETACHED_RECONCILE_CALLBACK as keyof this
+    );
+  }
+
+  /**
+   * Durable backbone for detached runs. Runs on a self-rescheduling alarm:
+   * collects any detached run that has reached terminal but was not yet
+   * delivered (e.g. the parent was evicted before the fast path landed), gives
+   * up on any run past its absolute budget (tearing the child down), and
+   * reschedules itself while any detached run remains undelivered — cancelling
+   * itself once everything has settled (zero steady-state cost).
+   */
+  async _cfDetachedReconcileTick(): Promise<void> {
+    const rows = this.sql<AgentToolRunStorageRow>`
+      SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
+             summary, output_json, error_message, interrupted_reason,
+             child_still_running, display_metadata, display_order,
+             started_at, completed_at, detached, detached_on_finish,
+             detached_max_budget_at, finish_claimed_at, finish_delivered_at,
+             give_up_claimed_at, give_up_delivered_at
+      FROM cf_agent_tool_runs
+      WHERE detached = 1 AND finish_delivered_at IS NULL
+      ORDER BY started_at ASC
+    `;
+
+    for (const row of rows) {
+      const runId = row.run_id;
+      let inspection: AgentToolRunInspection | null = null;
+      try {
+        const child = await this._cf_resolveSubAgent(row.agent_type, runId);
+        const adapter = this._asAgentToolChildAdapter(child);
+        inspection = await adapter.inspectAgentToolRun(runId);
+      } catch {
+        // Treat an unreachable child like a null inspection: keep waiting within
+        // budget rather than sealing (a single failure is not proof it is gone).
+      }
+
+      if (
+        inspection &&
+        this._isAgentToolRowHardTerminal(
+          inspection.status as AgentToolRunStatus
+        )
+      ) {
+        const result = this._terminalResultFromInspection(
+          row.agent_type,
+          inspection
+        );
+        await this._deliverDetachedTerminal(
+          runId,
+          "finish",
+          result,
+          { sequence: Date.now() },
+          inspection.completedAt
+        );
+        continue;
+      }
+
+      // Still non-terminal. Give up only when the absolute budget has elapsed,
+      // and only once (the give_up slot guards re-delivery).
+      const budgetAt = row.detached_max_budget_at;
+      if (
+        budgetAt !== null &&
+        Date.now() >= budgetAt &&
+        row.give_up_delivered_at === null
+      ) {
+        let childTornDown = false;
+        try {
+          const child = await this._cf_resolveSubAgent(row.agent_type, runId);
+          const adapter = this._asAgentToolChildAdapter(child);
+          await adapter.cancelAgentToolRun(runId, "detached budget exceeded");
+          childTornDown = true;
+        } catch {
+          // Could not confirm teardown; the child may complete anyway and the
+          // finish slot (still open) will deliver the real result.
+        }
+        await this._deliverDetachedTerminal(runId, "give_up", {
+          runId,
+          agentType: row.agent_type,
+          status: "interrupted",
+          error: "detached run exceeded its budget before completing",
+          reason: "budget-exceeded",
+          childStillRunning: !childTornDown
+        });
+      }
+    }
+
+    // Reschedule while anything remains undelivered; otherwise let the backbone
+    // go quiet (the schedule is one-shot and is not recreated here).
+    if (this._hasOutstandingDetachedRuns()) {
+      await this.schedule(
+        DETACHED_BACKBONE_CADENCE_S[1],
+        DETACHED_RECONCILE_CALLBACK as keyof this
+      );
+    }
+  }
+
   hasAgentToolRun<T extends Agent>(
     cls: SubAgentClass<T>,
     runId: string
@@ -7896,7 +8407,9 @@ export class Agent<
       SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
              summary, output_json, error_message, interrupted_reason,
              child_still_running, display_metadata, display_order,
-             started_at, completed_at
+             started_at, completed_at, detached, detached_on_finish,
+             detached_max_budget_at, finish_claimed_at, finish_delivered_at,
+             give_up_claimed_at, give_up_delivered_at
       FROM cf_agent_tool_runs
       WHERE run_id = ${runId}
       LIMIT 1
@@ -8850,9 +9363,17 @@ export class Agent<
              child_still_running, display_metadata, display_order,
              started_at, completed_at
       FROM cf_agent_tool_runs
-      WHERE status IN ('starting', 'running')
+      WHERE status IN ('starting', 'running') AND detached = 0
       ORDER BY started_at ASC
     `;
+    // NOTE: detached runs are deliberately excluded. The awaited reconcile seals
+    // a still-running, not-tailable run `interrupted` because a lost observer
+    // means the dispatching turn cannot continue. For a DETACHED run a lost
+    // observer is the NORMAL state — sealing it would defeat the feature — so
+    // detached runs are owned by the self-scheduling `_cfDetachedReconcileTick`
+    // backbone instead, which keeps them alive within budget and delivers on
+    // terminal. The backbone is (re-)armed on startup by
+    // `_scheduleAgentToolRunRecovery`.
     const runIds =
       options?.runIds !== undefined ? new Set(options.runIds) : undefined;
     const recoveryRows = rows.filter(
@@ -9111,6 +9632,13 @@ export class Agent<
         runIds: options?.runIds
       });
       await this._runDeferredAgentToolFinishHooks(recoveredAgentToolFinishes);
+      // Re-arm the detached backbone if this DO woke with outstanding detached
+      // runs (the schedule row survives eviction, but this also recreates it if
+      // a dispatching turn crashed after inserting the run row but before
+      // arming the schedule).
+      if (this._hasOutstandingDetachedRuns()) {
+        await this._armDetachedBackbone();
+      }
     })()
       .catch(async (error) => {
         this._emit("agent_tool:recovery:failed", {

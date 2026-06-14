@@ -29,6 +29,10 @@ export type AgentToolTerminalStatus = Extract<
  * - `inspect-failed` — inspecting the child failed during parent recovery.
  * - `recovery-deadline` — the overall parent-recovery deadline elapsed before
  *   this run could be reconciled.
+ * - `budget-exceeded` — a detached run's absolute `maxBudgetMs` ceiling elapsed
+ *   before it reached a terminal. The parent gave up watching and tore the
+ *   child down. Like `window-exceeded` this is a soft seal: a child that
+ *   completes anyway can still repair the run and re-fire the completion hook.
  */
 export type AgentToolInterruptedReason =
   | "no-progress"
@@ -36,7 +40,8 @@ export type AgentToolInterruptedReason =
   | "not-tailable"
   | "inspect-timeout"
   | "inspect-failed"
-  | "recovery-deadline";
+  | "recovery-deadline"
+  | "budget-exceeded";
 
 /**
  * Structured failure envelope an `agentTool()` returns when a sub-agent run
@@ -98,7 +103,40 @@ export type AgentToolLifecycleResult = {
   childStillRunning?: boolean;
 };
 
-export type RunAgentToolOptions<Input = unknown> = {
+/**
+ * Configuration for a detached ("background") agent-tool run. See
+ * `design/rfc-detached-agent-tools.md`.
+ *
+ * Callbacks are referenced by **method name** on the dispatching agent (the same
+ * durable, eviction-surviving pattern as `Agent.schedule`) — never closures,
+ * which cannot be rehydrated after the Durable Object is evicted.
+ *
+ * `Self` is threaded from `runAgentTool(cls, options)` so the method names are
+ * type-checked against the calling agent's own methods.
+ */
+export type DetachedAgentToolConfig<Self = Record<string, unknown>> = {
+  /**
+   * Method invoked once per terminal delivery. Branch on `result.status`:
+   * `"completed" | "error" | "aborted" | "interrupted"`. A budget give-up
+   * arrives as `status: "interrupted"` with `reason: "budget-exceeded"`; because
+   * `interrupted` is soft, a child that later completes can fire the hook again
+   * with `"completed"`, so a give-up never hides a late real result. Make the
+   * handler idempotent.
+   */
+  onFinish?: Extract<keyof Self, string>;
+  /**
+   * Absolute safety ceiling — a backstop against a child that runs forever. On
+   * expiry the parent gives up watching (delivers `onFinish` with
+   * `interrupted` / `budget-exceeded`) and tears the child down. Defaults to the
+   * parent-level `detachedMaxBudgetMs`.
+   */
+  maxBudgetMs?: number;
+};
+
+export type RunAgentToolOptions<
+  Input = unknown,
+  Self = Record<string, unknown>
+> = {
   input: Input;
   runId?: string;
   parentToolCallId?: string;
@@ -106,6 +144,31 @@ export type RunAgentToolOptions<Input = unknown> = {
   signal?: AbortSignal;
   inputPreview?: unknown;
   display?: AgentToolDisplayMetadata;
+  /**
+   * Run the sub-agent **detached**: dispatch it, let the current turn continue,
+   * and (optionally) get a durable callback when it finishes. `true` is
+   * fire-and-forget (observe via `agent-tool-event` frames + the global
+   * `onAgentToolFinish` hook); an object adds the targeted, eviction-surviving
+   * `onFinish` callback. A detached run does NOT inherit `options.signal` — it
+   * must outlive the spawning turn; cancel it explicitly via `cancelAgentTool`.
+   */
+  detached?: boolean | DetachedAgentToolConfig<Self>;
+};
+
+/**
+ * Result of dispatching a detached run. Returns immediately after dispatch
+ * rather than after completion.
+ */
+export type DetachedRunAgentToolResult = {
+  runId: string;
+  agentType: string;
+  /**
+   * `"running"` on a successful dispatch; `"error"` if dispatch itself failed
+   * (e.g. the `maxConcurrentAgentTools` cap was exceeded — rejected
+   * synchronously, no child started, no callback wired).
+   */
+  status: "running" | "error";
+  error?: string;
 };
 
 export type RunAgentToolResult<Output = unknown> = {

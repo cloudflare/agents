@@ -26,7 +26,8 @@ const reasons: AgentToolInterruptedReason[] = [
   "not-tailable",
   "inspect-timeout",
   "inspect-failed",
-  "recovery-deadline"
+  "recovery-deadline",
+  "budget-exceeded"
 ];
 void reasons;
 
@@ -43,6 +44,7 @@ function describeReason(reason: AgentToolInterruptedReason): string {
     case "inspect-timeout":
     case "inspect-failed":
     case "recovery-deadline":
+    case "budget-exceeded":
       return reason;
     default: {
       const exhaustive: never = reason;
@@ -111,7 +113,8 @@ void wrongChildStillRunning;
 
 const options: AgentStaticOptions = {
   agentToolReattachNoProgressTimeoutMs: 120_000,
-  agentToolReattachMaxWindowMs: 900_000
+  agentToolReattachMaxWindowMs: 900_000,
+  detachedMaxBudgetMs: 24 * 60 * 60 * 1000
 };
 void options;
 
