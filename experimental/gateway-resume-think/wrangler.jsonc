@@ -12,7 +12,7 @@
   "vars": {
     // The AI Gateway id resume runs are issued under (must have unified billing
     // or BYOK configured for the model vendors below).
-    "GATEWAY": "demo-gateway",
+    "GATEWAY": "default",
     // "<vendor>/<model>" routed through the gateway run API (resume-capable).
     "MODEL": "openai/gpt-5.4"
   },

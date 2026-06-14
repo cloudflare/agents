@@ -60,9 +60,24 @@ pnpm --filter @cloudflare/agents-gateway-resume-think deploy
 node scripts/driver.mjs https://<your-worker-url>
 ```
 
-The driver starts a turn, interrupts it mid-stream (`ctx.abort()`), then polls
-`/gw/debug` and asserts the recovery `plan` was `reattach` and the transcript
-converged.
+The driver starts a turn, waits until the run-id is **captured + stashed**,
+interrupts mid-stream (`ctx.abort()`), then polls `/gw/debug` and asserts the
+recovery `plan` was `reattach` and the transcript converged. Example run:
+
+```
+✓ captured run 47e67890a911… at event 86
+→ interrupt (ctx.abort, mid-stream)
+✓ re-attached to run 47e67890a911… from event 88
+✓ turn converged — assistant message: 510 chars
+```
+
+> **What "converged" means here.** AI Gateway resume replays the run's
+> **buffered** stream from `from=N`. When the originating request is aborted
+> mid-generation, upstream generation halts, so the re-attached turn contains
+> what was buffered up to the abort (here ~510 chars), replayed byte-exactly with
+> **zero new tokens** — not a fresh, full regeneration. The point this validates
+> is the Layer-B path: capture → stash → recovery decision → byte-exact
+> re-attach → clean convergence, on a real DO eviction.
 
 ## Caveats
 
