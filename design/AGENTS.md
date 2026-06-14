@@ -92,6 +92,7 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | `rfc-ai-chat-maintenance.md`            | RFC        | AIChatAgent first-class stance, shared chat toolkit, multi-session example direction                     |
 | `loopback.md`                           | design doc | Loopback pattern — cross-boundary RPC for sub-agents and dynamic isolates                                |
 | `worker-bundler.md`                     | design doc | Worker bundler — host-side assets, no code generation, mounting is caller's concern                      |
+| `rfc-workers-ai-gateway-merge.md`       | RFC        | Merge ai-gateway-provider into workers-ai-provider — registry routing, universal run API, resume (proposed) |
 
 ## Relationship to `/docs`
 

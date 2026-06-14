@@ -3278,6 +3278,21 @@ importers:
         specifier: ^4.3.0
         version: 4.3.0
 
+  experimental/gateway-resume:
+    dependencies:
+      '@ai-sdk/anthropic':
+        specifier: ^3.0.83
+        version: 3.0.83(zod@4.4.3)
+      '@ai-sdk/openai':
+        specifier: ^3.0.70
+        version: 3.0.70(zod@4.4.3)
+      ai:
+        specifier: ^6.0.202
+        version: 6.0.202(zod@4.4.3)
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+
   experimental/inference-buffer: {}
 
   experimental/session-memory:
