@@ -44,14 +44,18 @@ export interface ResumableHooks {
   onReconnect?: (fromEvent: number, attempt: number) => void;
   /** Fired when the buffer has expired (resume 404). */
   onExpired?: (fromEvent: number) => void;
+  /** Fired with the cumulative SSE event offset as complete events are emitted. */
+  onProgress?: (eventOffset: number) => void;
 }
 
 export interface CreateResumableArgs {
   env: { AI: Ai };
   gateway: string;
   runId: string;
-  /** The initial run-path response body. */
-  initial: ReadableStream<Uint8Array>;
+  /** Initial run-path response body. Omit for cross-invocation re-attach (starts from `resume?from=fromEvent`). */
+  initial?: ReadableStream<Uint8Array>;
+  /** SSE event index to (re-)attach from. Defaults to 0. */
+  fromEvent?: number;
   /** Test-only: simulate a drop once this many complete events have been emitted. */
   dropAfterEvents?: number;
   /** Max reconnect attempts before giving up. Defaults to 5. */
@@ -96,14 +100,38 @@ export function createResumableStream(
   const { env, gateway, runId } = args;
   const maxReconnects = args.maxReconnects ?? 5;
 
-  let emittedEvents = 0; // complete SSE events emitted downstream so far
+  let emittedEvents = args.fromEvent ?? 0; // absolute SSE event index reached
   let pending: Uint8Array<ArrayBuffer> = new Uint8Array(new ArrayBuffer(0)); // buffered trailing partial event (not emitted)
   let reconnects = 0;
   let faultInjected = false;
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
-      let current: ReadableStream<Uint8Array> = args.initial;
+      // In-stream wrap starts from the live body; re-attach (no `initial`) starts
+      // by resuming from `fromEvent`.
+      let current: ReadableStream<Uint8Array>;
+      if (args.initial) {
+        current = args.initial;
+      } else {
+        const res = await (env.AI as AiWithFetch).fetch(
+          resumeUrl(gateway, runId, emittedEvents),
+          { method: "GET" }
+        );
+        if (res.status === 404) {
+          args.hooks?.onExpired?.(emittedEvents);
+          controller.error(new ResumeExpiredError(emittedEvents));
+          return;
+        }
+        if (!res.ok || !res.body) {
+          controller.error(
+            new Error(
+              `Re-attach failed (${res.status}) at event ${emittedEvents}.`
+            )
+          );
+          return;
+        }
+        current = res.body;
+      }
 
       for (;;) {
         const reader = current.getReader();
@@ -137,6 +165,7 @@ export function createResumableStream(
               const complete = pending.slice(0, boundary);
               controller.enqueue(complete);
               emittedEvents += countEvents(complete);
+              args.hooks?.onProgress?.(emittedEvents);
               pending = pending.slice(boundary);
             }
           }

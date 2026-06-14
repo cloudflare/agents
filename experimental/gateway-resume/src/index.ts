@@ -907,6 +907,117 @@ export default {
         }
       }
 
+      // Cross-invocation re-attach (RFC §7.1 / §9) — simulate "invocation #1"
+      // starting a run, then "invocation #2 after eviction" re-attaching with NO
+      // initial body via createResumableStream({ fromEvent }). Verifies (a) from=0
+      // reproduces the full response through the @ai-sdk parser, and (b) from=mid
+      // is byte-exact against the known tail.
+      case "/reattach": {
+        const model = url.searchParams.get("model");
+        if (!model) return jsonError("Missing ?model=", 400);
+
+        // Invocation #1: start the run, learn its run-id + event count.
+        const run = await startRun(env, model, gateway, prompt);
+        if (!run.runId) {
+          return Response.json(
+            { experiment: "reattach", model, error: "no cf-aig-run-id" },
+            {
+              status: 502
+            }
+          );
+        }
+        const totalEvents = run.eventOffsets.length;
+        const midEvent = Math.floor(totalEvents / 2);
+
+        // (a) Invocation #2a: re-attach from 0 and parse through @ai-sdk.
+        const slash = model.indexOf("/");
+        const vendor = model.slice(0, slash);
+        const bareModel = model.slice(slash + 1);
+        const reattachFetch = (
+          _input: RequestInfo | URL,
+          _init?: RequestInit
+        ): Promise<Response> => {
+          const stream = createResumableStream({
+            env,
+            gateway,
+            runId: run.runId as string,
+            fromEvent: 0
+          });
+          return Promise.resolve(
+            new Response(stream, {
+              status: 200,
+              headers: { "content-type": "text/event-stream" }
+            })
+          );
+        };
+
+        let parseChars = 0;
+        let parseFinish: string | undefined;
+        let parseError: string | undefined;
+        try {
+          let delegateModel: LanguageModel;
+          if (vendor === "openai") {
+            delegateModel = createOpenAI({
+              apiKey: "unused",
+              fetch: reattachFetch as typeof globalThis.fetch
+            }).chat(bareModel);
+          } else if (vendor === "anthropic") {
+            delegateModel = createAnthropic({
+              apiKey: "unused",
+              fetch: reattachFetch as typeof globalThis.fetch
+            })(bareModel);
+          } else {
+            return jsonError(`reattach not mapped for vendor "${vendor}"`, 400);
+          }
+          const result = streamText({ model: delegateModel, prompt });
+          for await (const part of result.fullStream) {
+            if (part.type === "text-delta") {
+              parseChars +=
+                (part as unknown as { text?: string }).text?.length ?? 0;
+            } else if (part.type === "error") {
+              parseError = String(
+                (part as unknown as { error: unknown }).error
+              );
+            }
+          }
+          parseFinish = await result.finishReason;
+        } catch (e) {
+          parseError = e instanceof Error ? e.message : String(e);
+        }
+
+        // (b) Invocation #2b: re-attach from a mid offset and compare bytes to the
+        // known tail (alignment proof, no parser fragility on a mid-stream start).
+        const midStream = createResumableStream({
+          env,
+          gateway,
+          runId: run.runId,
+          fromEvent: midEvent
+        });
+        const midBytes = await drain(midStream);
+        const expectedTail = run.bytes.slice(
+          run.eventOffsets[midEvent] ?? run.bytes.length
+        );
+        const tailByteExact = bytesEqual(midBytes, expectedTail);
+
+        return Response.json({
+          experiment: "reattach",
+          model,
+          runId: run.runId,
+          totalEvents,
+          fullFromZero: {
+            finishReason: parseFinish,
+            textChars: parseChars,
+            error: parseError
+          },
+          midReattach: {
+            fromEvent: midEvent,
+            tailByteExact,
+            reattachBytes: midBytes.length,
+            expectedBytes: expectedTail.length
+          }
+        });
+      }
+
       case "/run": {
         const model = url.searchParams.get("model");
         if (!model) return jsonError("Missing ?model=", 400);

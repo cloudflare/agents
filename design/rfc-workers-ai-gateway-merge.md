@@ -305,14 +305,22 @@ Native `@cf/*` (§5) attaches it to stream/result metadata directly.
 ### 7. Resume mechanics + expiry recovery
 
 > **Status: BUILT + VALIDATED.** Tier-1 (gateway resume) ships in
-> `workers-ai-provider` as `createResumableStream` (wired into the run-path
-> `fetch`, plus exported for cross-invocation re-attach). Live-tested in the
-> harness (`/resume-stream`): clean run → 0 reconnects; injected mid-stream drop
-> (early/late, openai + anthropic native SSE) → 1 reconnect, complete coherent
-> parse, `finishReason: stop`, no stream error. The package version reconnects on
-> **real** read errors (no fault injection) and honors `onResumeExpired`. Tier-2
-> (continue/regenerate) is a Think-layer concern; v1 package policy is
-> `"error" | "accept-partial"`.
+> `workers-ai-provider` as `createResumableStream`, in two modes:
+> - **In-stream wrap** (default, run-path `fetch`): a transient mid-stream drop
+>   reconnects transparently. Harness `/resume-stream`: clean run → 0 reconnects;
+>   injected drop (early/late, openai + anthropic native SSE) → 1 reconnect,
+>   complete coherent parse, `finishReason: stop`, no stream error.
+> - **Cross-invocation re-attach** (no `initial` body + `fromEvent` offset): a new
+>   invocation resumes directly from a persisted event index. Harness `/reattach`:
+>   `from=0` reproduces the full response through the `@ai-sdk` parser (`stop`);
+>   `from=mid` is **byte-exact** against the known tail (openai 152 events,
+>   anthropic 21 — both byte-equal). This is the primitive Layer B (§9) uses.
+>
+> An `onProgress(eventOffset)` callback (on `createResumableStream` and surfaced as
+> a delegate call option) reports the live SSE event offset so callers can persist
+> `{ runId, eventOffset }` for re-attach. The package reconnects on **real** read
+> errors and honors `onResumeExpired` (`"error" | "accept-partial"`); tier-2
+> continue/regenerate stays a Think-layer concern.
 
 Capturing the run-id is step one. Replay needs two format-agnostic pieces:
 
@@ -483,21 +491,28 @@ capability to the second rather than replacing anything.
   re-attach to the *same* upstream run and replay the exact tail.
 
 Plug-in path (every hook already exists in `packages/ai-chat` /
-`packages/think`):
+`packages/think`; the resume primitive is now **built** — see §7.1 status):
 
-1. **Capture** `cf-aig-run-id` off the response headers in the delegate (§6).
-   Today the framework reads only `content-type` from the `onChatMessage`
-   `Response` and ignores upstream headers — that gap must close.
-2. **Stash** `{ aigRunId, eventOffset }` in the chat fiber via `this.stash()`
-   (survives eviction).
-3. **On recovery** (`_handleInternalFiberRecovery` → `onChatRecovery`): attempt
-   gateway resume from the stashed offset, feed the provider SSE back through the
-   `@ai-sdk` parser → `UIMessageChunk`s → the existing `_reply` / Think stream
-   loop. Fall back to `continueLastTurn()` on expiry/miss (today's behavior).
-4. **Offset-space mismatch (important).** Layer A counts post-parse
+1. **Capture.** The delegate already surfaces both halves: `onDispatch(info)`
+   gives `info.runId` (the `cf-aig-run-id`), and `onProgress(eventOffset)` fires
+   the live SSE event index as the stream advances. No framework header-reading
+   gap to close — the delegate owns it. (The old "framework reads only
+   `content-type`" concern is moot when the model is the delegate.)
+2. **Stash** `{ aigRunId, eventOffset }` via `this.stash()` while inside the chat
+   fiber (`__cf_internal_chat_turn:${requestId}`, persisted to `cf_agents_runs`,
+   survives eviction). Throttle: `onProgress` can fire per chunk, so debounce the
+   stash like the existing `_bumpChatRecoveryProgress` flush.
+3. **On recovery** (`_handleInternalFiberRecovery` → `onChatRecovery`,
+   `ctx.recoveryData` carries the stashed `{ aigRunId, eventOffset }`): build the
+   re-attach stream with `createResumableStream({ binding, gateway, runId,
+   fromEvent: eventOffset })` (**no `initial` body**), feed it through the same
+   `@ai-sdk` model → `UIMessageChunk`s → the existing `_reply` / Think stream
+   loop. Fall back to `continueLastTurn()` on expiry/miss (today's behavior, via
+   `onResumeExpired` or a `404` from the re-attach).
+4. **Offset-space mismatch (handled).** Layer A counts post-parse
    `UIMessageChunk`s; gateway `from=N` counts **provider-native SSE events**
-   (§7.1). These are different cursors — we track and stash the **SSE event
-   index** separately (the §7.1 `TransformStream` counter), not the chunk count.
+   (§7.1). These are different cursors — stash the **SSE event index** from
+   `onProgress` (the §7.1 byte-layer counter), *not* the chunk count.
 5. **`recoveryKind` mapping.** `ChatRecoveryContext` already carries
    `recoveryKind: "retry" | "continue"` plus `partialText` / `partialParts`.
    Gateway resume is the preferred **"continue"** strategy (byte-exact, free);
