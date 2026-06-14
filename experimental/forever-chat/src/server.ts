@@ -703,7 +703,7 @@ export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
           accountId: "buffer-replay",
           apiKey: "buffer-replay",
           fetch: replayFetch
-        })("@cf/moonshotai/kimi-k2.6", {
+        })("@cf/moonshotai/kimi-k2.7-code", {
           sessionAffinity: this.sessionAffinity
         });
     }
@@ -723,7 +723,7 @@ export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
         })("claude-sonnet-4-6");
       default: {
         const binding = useBuffer ? this._makeBufferedAIBinding() : this.env.AI;
-        return createWorkersAI({ binding })("@cf/moonshotai/kimi-k2.6", {
+        return createWorkersAI({ binding })("@cf/moonshotai/kimi-k2.7-code", {
           sessionAffinity: this.sessionAffinity
         });
       }

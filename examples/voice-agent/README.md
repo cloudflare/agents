@@ -7,7 +7,7 @@ Uses Workers AI for all models — zero external API keys required:
 - **STT**: Deepgram Flux (`@cf/deepgram/flux`) by default, with a Nova 3 (`@cf/deepgram/nova-3`) option in the UI
 - **TTS**: Deepgram Aura (`@cf/deepgram/aura-1`)
 - **Turn detection**: Flux `StartOfTurn` / `EndOfTurn` events
-- **LLM**: Kimi K2.6 (`@cf/moonshotai/kimi-k2.6`), GPT OSS 20B, or GLM 4.7 Flash
+- **LLM**: Kimi K2.7 Code (`@cf/moonshotai/kimi-k2.7-code`), GPT OSS 20B, or GLM 4.7 Flash
 
 ## Run it
 

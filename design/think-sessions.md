@@ -436,7 +436,7 @@ For agents that don't need context blocks, `getSystemPrompt()` still works exact
 export class SimpleAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.6"
+      "@cf/moonshotai/kimi-k2.7-code"
     );
   }
   getSystemPrompt() {
@@ -804,7 +804,7 @@ This is an advanced feature. Most agents use the default single-session mode and
 export class ChatAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.6"
+      "@cf/moonshotai/kimi-k2.7-code"
     );
   }
 }
@@ -818,7 +818,7 @@ No `configureSession` needed. No context blocks. `getSystemPrompt()` returns the
 export class ChatAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.6"
+      "@cf/moonshotai/kimi-k2.7-code"
     );
   }
   getSystemPrompt() {
@@ -833,7 +833,7 @@ export class ChatAgent extends Think<Env> {
 export class MemoryAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.6"
+      "@cf/moonshotai/kimi-k2.7-code"
     );
   }
 
@@ -866,7 +866,7 @@ import { createCompactFunction } from "agents/experimental/memory/utils";
 export class LongChatAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.6"
+      "@cf/moonshotai/kimi-k2.7-code"
     );
   }
 
@@ -895,7 +895,7 @@ import { R2SkillProvider } from "agents/experimental/memory/session";
 export class KnowledgeAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.6"
+      "@cf/moonshotai/kimi-k2.7-code"
     );
   }
 
@@ -919,7 +919,7 @@ System prompt shows skill metadata (list of available docs). Model uses `load_co
 export class TrackedAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.6"
+      "@cf/moonshotai/kimi-k2.7-code"
     );
   }
 

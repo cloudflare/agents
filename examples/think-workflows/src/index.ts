@@ -34,7 +34,7 @@ const reportDraftSchema = z.object({
 export class ReportAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.6"
+      "@cf/moonshotai/kimi-k2.7-code"
     );
   }
 

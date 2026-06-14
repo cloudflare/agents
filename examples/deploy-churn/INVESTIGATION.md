@@ -42,7 +42,7 @@ Run with `npm start`, then curl. `maxRetries: 0` so a 400 surfaces immediately.
 
 Results:
 
-- **Kimi 2.6 (`@cf/moonshotai/kimi-k2.6`, Workers AI): does NOT reproduce.**
+- **Kimi 2.7 Code (`@cf/moonshotai/kimi-k2.7-code`, Workers AI): does NOT reproduce.**
   - trailing-user → `ok` ("Hello, it's a pleasure to connect with you!")
   - trailing-assistant → `ok` ("Hello, it's wonderful to meet you!")
   - Kimi tolerates a trailing assistant message (just responds). No 400.
@@ -175,7 +175,7 @@ cd examples/deploy-churn
 npm start            # vite dev (note: heavy; has crashed the editor — prefer short sessions)
 curl "http://localhost:5173/probe/trailing-user?provider=anthropic&model=claude-sonnet-4-6"
 curl "http://localhost:5173/probe/trailing-assistant?provider=anthropic&model=claude-sonnet-4-6"
-# Kimi (no key): drop the query params (defaults to @cf/moonshotai/kimi-k2.6)
+# Kimi (no key): drop the query params (defaults to @cf/moonshotai/kimi-k2.7-code)
 ```
 
 ## Notes

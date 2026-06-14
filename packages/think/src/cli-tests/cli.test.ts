@@ -260,7 +260,7 @@ describe("think CLI", () => {
       "utf8"
     );
     expect(agentSource).toContain("export class Assistant");
-    expect(agentSource).toContain("@cf/moonshotai/kimi-k2.6");
+    expect(agentSource).toContain("@cf/moonshotai/kimi-k2.7-code");
     expect(await readFile(path.join(appRoot, "think.d.ts"), "utf8")).toContain(
       `declare module "virtual:think/entry"`
     );

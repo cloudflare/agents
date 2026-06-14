@@ -26,7 +26,7 @@
  * Anthropic: `data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}`
  *            Tool calls via `content_block_start` (type: "tool_use") + `input_json_delta`.
  *
- * Workers AI: Either OpenAI-compatible (newer models like kimi-k2.5) or
+ * Workers AI: Either OpenAI-compatible (newer models like kimi-k2.7-code) or
  *             native `data: {"response":"text"}` format.
  */
 

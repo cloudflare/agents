@@ -42,7 +42,7 @@ import { createCodeTool } from "@cloudflare/codemode/ai";
 class CodemodeAgent extends AIChatAgent<Env> {
   async onChatMessage(onFinish) {
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.6"),
+      model: workersai("@cf/moonshotai/kimi-k2.7-code"),
       messages: this.messages,
       tools: {
         code: createCodeTool(this.env),

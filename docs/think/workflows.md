@@ -118,7 +118,7 @@ a terminal error state and `step.prompt()` throws.
 - **The model must support streaming tool calls.** Think streams every turn, so
   `step.prompt()` works only with models that reliably emit a forced tool call
   while streaming. Strong tool-callers (for example OpenAI `gpt-4o-mini`,
-  Anthropic `claude-haiku-4-5`, and Workers AI `@cf/moonshotai/kimi-k2.6`) are
+  Anthropic `claude-haiku-4-5`, and Workers AI `@cf/moonshotai/kimi-k2.7-code`) are
   verified to work. Some models honor a forced `toolChoice` only on
   non-streaming requests and will reply in plain text and stop while streaming —
   for example Workers AI `@cf/meta/llama-3.3-70b-instruct-fp8-fast`. With those

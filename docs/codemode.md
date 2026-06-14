@@ -230,7 +230,7 @@ export class BrowserCodemodeAgent extends AIChatAgent<Env> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      model: workersai("@cf/moonshotai/kimi-k2.7-code"),
       messages: await convertToModelMessages(this.messages),
       tools: createToolsFromClientSchemas(options?.clientTools),
       stopWhen: stepCountIs(10)

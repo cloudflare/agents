@@ -55,7 +55,7 @@ type Env = {
   ANTHROPIC_API_KEY?: string;
 };
 
-const DEFAULT_WORKERS_AI_MODEL = "@cf/moonshotai/kimi-k2.6";
+const DEFAULT_WORKERS_AI_MODEL = "@cf/moonshotai/kimi-k2.7-code";
 const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 
 /**

@@ -7,7 +7,7 @@ import { test, expect } from "@playwright/test";
  *   user prompt → LLM generates code → createCodeTool → DynamicWorkerExecutor
  *   → sandboxed Worker → tool dispatch via RPC → result → LLM response.
  *
- * Uses Workers AI (@cf/moonshotai/kimi-k2.5) — no API key needed.
+ * Uses Workers AI (@cf/moonshotai/kimi-k2.7-code) — no API key needed.
  */
 
 async function runChat(

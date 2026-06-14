@@ -45,7 +45,7 @@ const tools = createQuickActionTools({ browser: this.env.BROWSER });
 // browser_markdown, browser_extract, browser_links, browser_scrape
 
 const { text } = await generateText({
-  model: workersai("@cf/moonshotai/kimi-k2.6"),
+  model: workersai("@cf/moonshotai/kimi-k2.7-code"),
   prompt: `Page: ${url}\n\nQuestion: ${question}`,
   tools,
   stopWhen: stepCountIs(6)

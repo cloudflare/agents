@@ -30,7 +30,7 @@ npm install
 npm start
 ```
 
-Uses Workers AI (no API key needed) with `@cf/moonshotai/kimi-k2.6`.
+Uses Workers AI (no API key needed) with `@cf/moonshotai/kimi-k2.7-code`.
 
 Recent Wrangler releases run the Browser Rendering binding locally, so no separate Chrome process is required.
 

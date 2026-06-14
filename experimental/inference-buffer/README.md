@@ -122,7 +122,7 @@ createModel: (fetch) =>
   createAnthropic({ apiKey: "replay", fetch })("claude-sonnet-4-6");
 createModel: (fetch) =>
   createWorkersAI({ accountId: "replay", apiKey: "replay", fetch })(
-    "@cf/moonshotai/kimi-k2.6"
+    "@cf/moonshotai/kimi-k2.7-code"
   );
 ```
 
@@ -158,7 +158,7 @@ Content-Type: application/json
 ```
 POST /proxy?id=fiber-abc123
 X-Provider-Type: workers-ai
-X-AI-Model: @cf/moonshotai/kimi-k2.5
+X-AI-Model: @cf/moonshotai/kimi-k2.7-code
 Content-Type: application/json
 
 {"messages": [...], "stream": true}

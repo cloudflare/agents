@@ -144,7 +144,7 @@ export class Chat extends AIChatAgent<Env> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.6", {
+      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
       system: [

@@ -165,7 +165,7 @@ export class VoiceChatAgent extends AIChatAgent<Env, VoiceChatState> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.6"),
+      model: workersai("@cf/moonshotai/kimi-k2.7-code"),
       system:
         "You are a helpful, friendly assistant. Keep your responses concise — they will be read aloud via text-to-speech, so aim for natural spoken language rather than markdown formatting.",
       messages: pruneMessages({

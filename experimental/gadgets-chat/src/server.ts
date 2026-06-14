@@ -121,7 +121,7 @@ export class ChatRoom extends Agent<Env> {
     // Stream the LLM response using the AI SDK's UIMessageStream protocol
     const workersai = createWorkersAI({ binding: this.env.AI });
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.6", {
+      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
       system:
