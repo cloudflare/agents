@@ -258,7 +258,7 @@ await this.cancelAgentTool(runId); // idempotent; delivers onFinish "aborted"
 
 A child's `inspectAgentToolRun(runId)` returns the run's current status snapshot,
 or `null`. **`null` does not mean "failed"** — it means the child has no record
-of that run *yet*. This is normal immediately after dispatch (the child may
+of that run _yet_. This is normal immediately after dispatch (the child may
 still be persisting its first row) and is also what a freshly-rehydrated child
 returns before it has lazily reconciled a stale `running` row. Callers — and the
 framework's own reconcile backbone — treat `null` as "not terminal, keep

@@ -56,7 +56,7 @@ folding the result back in when it lands measured at **−33% total request time
 overlap instead of landing on the user's wait.
 
 **The SDK is already ~90% of the way there.** Everything a run needs is set up
-synchronously *before* `runAgentTool` first awaits the child stream: the row is
+synchronously _before_ `runAgentTool` first awaits the child stream: the row is
 inserted, `onAgentToolStart` fires, and the `started` event is broadcast. So
 minting a `runId` and not awaiting the promise already produces a correct,
 observable run. The reconciler (`_reconcileAgentToolRuns`) even re-fires
@@ -74,7 +74,7 @@ The missing 10% is the hard, easy-to-get-wrong part:
    fast-path racing a scheduled reconcile can fire it twice. The reporter
    defends against double-notify with `submitMessages` idempotency keys.
 3. **`inspectAgentToolRun`'s `null` contract is undocumented.** A single `null`
-   is *not* proof the run is gone — it can race the child's first write.
+   is _not_ proof the run is gone — it can race the child's first write.
    Insta-failing on the first `null` turned every race into a spurious "outcome
    unconfirmed" notification (a real prod incident). The framework's own
    reconciler already tolerates this (`!inspection` ⇒ "still running") but the
@@ -86,8 +86,8 @@ That glue belongs in the framework.
 ## Design principles
 
 - **Detached is a dispatch mode, not a new primitive.** Same run row, same
-  events, same child, same recovery, same cleanup. The only new state is *how
-  completion is delivered*.
+  events, same child, same recovery, same cleanup. The only new state is _how
+  completion is delivered_.
 - **Completion handlers are named methods, not closures.** This is the central
   DX decision (see below). A detached run can outlive the isolate that spawned
   it, so the callback must be addressable by name after rehydration — exactly
@@ -96,24 +96,24 @@ That glue belongs in the framework.
   owns the dedup, the callback owns idempotency.** Consumers should never have to
   reason about consecutive-null tolerance, fast-path/reconcile races, or separate
   ledger slots for success vs give-up — the framework handles those via a guarded
-  claim. But a *named user callback* that runs a side effect and then crashes is
+  claim. But a _named user callback_ that runs a side effect and then crashes is
   re-delivered (lease expiry), so the honest contract is "exactly once unless your
   callback throws after a side effect, in which case at-least-once — make it
   idempotent." The Think convenience is idempotent for you (via `submitMessages`
   keys).
 - **Give-up and finish are independent deliveries, one callback.** "I stopped
   watching" (give-up / budget) is an observer state, not a hard seal: a run the
-  parent gave up on can still complete later. So internally there are *two ledger
-  slots* (give-up, finish) — collapsing them into one "delivered" bit silently
+  parent gave up on can still complete later. So internally there are _two ledger
+  slots_ (give-up, finish) — collapsing them into one "delivered" bit silently
   drops a late real result (a documented production incident in #1752). But both
   surface through the single `onFinish` callback, which branches on
   `result.status`; the two-slot subtlety stays in the implementation, not the API.
 - **Don't give up on healthy long work; do backstop leaks.** The core ships a
   finite absolute ceiling (not `Infinity` — an abandoned detached run has no
   observer to notice the leak). The progress layer then adds, following the
-  accepted `rfc-chat-recovery-work-budget` lesson, a *no-progress* window that
+  accepted `rfc-chat-recovery-work-budget` lesson, a _no-progress_ window that
   **resets on every progress signal** so a child is given up on for going
-  *silent*, never for taking a long time. The no-progress budget belongs with
+  _silent_, never for taking a long time. The no-progress budget belongs with
   progress because without progress signals there is nothing to reset on.
 - **Push when alive, poll as a backstop.** The happy path should be low-latency
   (child notifies parent on terminal); the durable backbone exists only to
@@ -133,14 +133,16 @@ isolate, via hibernation or eviction. When the parent DO is rehydrated to
 deliver the completion, the closure is gone. A name survives:
 
 ```ts
-detached: { onFinish: "onImportFinished" } // keyof this, persisted in the run row
+detached: {
+  onFinish: "onImportFinished";
+} // keyof this, persisted in the run row
 ```
 
 The framework persists the method name on the `cf_agent_tool_runs` row and, when
 the run reaches terminal, resolves `this[name]` on the freshly constructed parent
 and invokes it with `this` bound. This is the same contract `schedule` already
 teaches (`callback: keyof this`), so it is not a new concept for users — it is
-the *consistent* one. `validateScheduleCallback`-style validation rejects a
+the _consistent_ one. `validateScheduleCallback`-style validation rejects a
 detached dispatch whose `onFinish` is not a method at dispatch time, so the
 failure is loud and immediate rather than silent two minutes later.
 
@@ -247,7 +249,7 @@ reconcile the parent owns whenever any detached run is outstanding:
   turn) likewise ensures the backbone is armed rather than returning a stale
   handle.
 - Each tick runs a **detached-aware** reconcile over `<detached, non-terminal>`
-  runs. Crucially this is *not* the awaited-path reconcile: a still-running,
+  runs. Crucially this is _not_ the awaited-path reconcile: a still-running,
   not-tailable detached run is **kept waiting** (its observer being gone is the
   normal state), not sealed `interrupted` the way an awaited run would be. See
   "Reconcile fork" below.
@@ -309,7 +311,7 @@ deliverDetachedTerminal(runId, kind):   // kind ∈ { finish, giveUp }
    `agentContext.run({ agent: this, ... })` (as `onStart` does) so a handler that
    itself calls `runAgentTool`, `setState`, or `submitMessages` works —
    `runAgentTool` hard-requires `agentContext.getStore()?.agent`.
-2. **Serialization.** The fast-path push can land *mid-turn*. Firing `onFinish`
+2. **Serialization.** The fast-path push can land _mid-turn_. Firing `onFinish`
    (which may mutate state) concurrently with an active LLM turn is a data race.
    Delivery is therefore serialized against the parent's turn queue: it runs
    between turns, never interleaved. The Think `notify` path is already safe
@@ -322,14 +324,14 @@ The shipped reconcile (`_reconcileAgentToolRuns`, fired once from `onStart`) was
 designed for awaited runs: a still-running, not-tailable run whose observer is
 gone is sealed `interrupted`, because for an awaited run a lost observer means the
 dispatching turn cannot continue. For a **detached** run a lost observer is the
-*normal* state, not a failure — sealing it would defeat the entire feature.
+_normal_ state, not a failure — sealing it would defeat the entire feature.
 
 So the reconcile gains a fork keyed on the `detached` column:
 
 - **Awaited rows:** unchanged behaviour (re-attach if tailable, else seal
   `interrupted`).
 - **Detached rows:** never sealed on the basis of "no observer". On restart,
-  reconcile (a) re-delivers any run that is *already* terminal but whose ledger
+  reconcile (a) re-delivers any run that is _already_ terminal but whose ledger
   slot is unset, and (b) for runs still non-terminal and within budget,
   **keeps them alive and re-arms the recurring backbone** rather than marking them
   interrupted. Only the budget (no-progress / absolute give-up) or explicit
@@ -347,7 +349,7 @@ Independent of the dispatch mode, document the adapter contract the reconciler
 already relies on:
 
 > `inspectAgentToolRun(runId)` returns `null` when the child has **no record**
-> of the run *at this instant*. `null` is **not** proof the run is gone — it can
+> of the run _at this instant_. `null` is **not** proof the run is gone — it can
 > race the child facet's first durable write. Recovery treats `null` as "still
 > running, keep waiting"; a caller polling directly MUST tolerate N consecutive
 > `null`s before concluding the run is lost. A terminal result is only ever a
@@ -381,7 +383,7 @@ This is the subtlety that the rest of the design (chunk forwarding, progress, th
 On the **awaited** path, the child's chunks reach the parent's clients because
 the dispatching turn runs a live tail loop (`tailAgentToolRun` /
 `_forwardAgentToolStream`) for the child's whole lifecycle. A **detached** parent
-returns early and runs *no* tail loop. So a detached run is precisely the
+returns early and runs _no_ tail loop. So a detached run is precisely the
 "observer is gone" case the orchestration RFC deferred as "no late live-tail
 reattach" — there is no parent-side reader of the child's stream by default.
 
@@ -405,7 +407,7 @@ conflated:
    milestones + latest progress snapshot) to reconstruct state it never observed
    live.
 
-So: progress and milestones are *encoded* as reserved data parts on the child's
+So: progress and milestones are _encoded_ as reserved data parts on the child's
 durable chunk stream (for drill-in + replay), **and** pushed as discrete RPC
 signals to the parent (for live hooks + re-broadcast). The earlier "rides the
 chunk stream, no new transport" framing is true for the child-side record and the
@@ -420,7 +422,7 @@ during that gap is lost by design; milestones are not.
 ### Progress and milestone signaling
 
 A terminal-only callback makes a detached run a black box for minutes. Letting
-the child signal *while it runs* is what turns "non-blocking" into "fast" — the
+the child signal _while it runs_ is what turns "non-blocking" into "fast" — the
 parent can show live progress, start dependent work the instant a prerequisite
 lands, and steer or abort early. The same channel also hardens recovery and cost
 control. This applies to awaited runs too, but it is most valuable for detached
@@ -432,12 +434,12 @@ runs, where the parent has no other window into the child.
    heartbeats — "Ingested 40k/80k rows", "Verifying…", "~2 min left". Richer than
    raw chat tokens for a status UI.
 2. **Control-flow unblocking (the performance multiplier).** The parent overlaps
-   *precisely up to a dependency* instead of overlapping an opaque whole. Dispatch
+   _precisely up to a dependency_ instead of overlapping an opaque whole. Dispatch
    the import detached, `await` only the `"schema-ready"` milestone (seconds),
    start building the schema-dependent UI while the multi-minute ingest continues
    detached, then fold the loaded data in on `onFinish`. A milestone is an
    awaitable join point — it converts an all-or-nothing detached run into a
-   *partially-awaited* one.
+   _partially-awaited_ one.
 3. **Steering / early decisions (active).** A progress signal lets the parent (or
    the parent model) cancel early ("found 50 matches, that's enough"), redirect,
    abort on a token/cost budget, or escalate to a human ("child needs approval to
@@ -453,14 +455,14 @@ Treating all signals equally would force a bad tradeoff (persist everything and
 bloat the DB, or persist nothing and lose join points). So the design splits
 them:
 
-| | Ephemeral progress | Durable milestone |
-| --- | --- | --- |
-| Emitter | `this.reportProgress({ ... })` | `this.reportProgress({ milestone: "name", ... })` |
-| Frequency | high (per batch / per step / heartbeat) | low (named phase boundaries) |
-| Persistence | latest snapshot only, on the run row | one persisted row per milestone |
-| Delivery if parent evicted | dropped (snapshot read on wake) | survives; replays; re-resolves waiters |
-| Parent reception | `onProgress` hook | `onProgress` hook, `awaitAgentToolMilestone` |
-| Purpose | inform | gate / unblock / branch |
+|                            | Ephemeral progress                      | Durable milestone                                 |
+| -------------------------- | --------------------------------------- | ------------------------------------------------- |
+| Emitter                    | `this.reportProgress({ ... })`          | `this.reportProgress({ milestone: "name", ... })` |
+| Frequency                  | high (per batch / per step / heartbeat) | low (named phase boundaries)                      |
+| Persistence                | latest snapshot only, on the run row    | one persisted row per milestone                   |
+| Delivery if parent evicted | dropped (snapshot read on wake)         | survives; replays; re-resolves waiters            |
+| Parent reception           | `onProgress` hook                       | `onProgress` hook, `awaitAgentToolMilestone`      |
+| Purpose                    | inform                                  | gate / unblock / branch                           |
 
 This mirrors the existing soft/hard split elsewhere in the agent-tool code and
 keeps the steady-state write cost bounded: only milestones and the single latest
@@ -476,7 +478,10 @@ the durable tier:
 
 ```ts
 // inside a long-running child tool implementation (most useful for the import case)
-this.reportProgress({ fraction: ingested / total, message: `Ingested ${ingested}/${total} rows` });
+this.reportProgress({
+  fraction: ingested / total,
+  message: `Ingested ${ingested}/${total} rows`
+});
 this.reportProgress({ milestone: "schema-ready", data: { tables: 4 } }); // durable
 ```
 
@@ -501,11 +506,11 @@ awaitable:
 
 ```ts
 type AgentToolProgress<T = unknown> = {
-  fraction?: number;     // 0..1, drives a progress bar
-  message?: string;      // human-readable status line
-  phase?: string;        // coarse stage label
-  milestone?: string;    // present ⇒ durable, persisted, awaitable join point
-  data?: T;              // app-specific escape hatch
+  fraction?: number; // 0..1, drives a progress bar
+  message?: string; // human-readable status line
+  phase?: string; // coarse stage label
+  milestone?: string; // present ⇒ durable, persisted, awaitable join point
+  data?: T; // app-specific escape hatch
 };
 ```
 
@@ -520,8 +525,8 @@ persisted, matching the ephemeral tier) and `data-agent-milestone` as a
 bespoke store). The client reducer (`applyChunkToParts`) already understands data
 parts, so a drill-in client and the awaited parent's tail loop get them for free.
 
-The typed `agent-tool-event` additions below are the *server- and client-facing
-projection* the parent re-broadcasts, not a third wire format:
+The typed `agent-tool-event` additions below are the _server- and client-facing
+projection_ the parent re-broadcasts, not a third wire format:
 
 ```ts
 type AgentToolEvent =
@@ -569,7 +574,7 @@ the parent turn across child signals, which fights chat recovery (a re-run turn
 cannot resume a half-consumed iterator); the push hook is recovery-safe and
 covers the steering case without the extra surface.
 
-`awaitAgentToolMilestone` is durable by *replay*, not by promise suspension:
+`awaitAgentToolMilestone` is durable by _replay_, not by promise suspension:
 because milestones persist, a parent evicted mid-await does not resume a suspended
 promise — the turn re-runs via chat recovery and re-executes the `await`, which
 resolves immediately if the milestone already landed (idempotent by construction).
@@ -595,8 +600,8 @@ for short waits (seconds) — see "Edge cases & resolved decisions".
 
 #### Think convenience for progress
 
-Just as `detached: { notify: true }` folds the *result* into chat, Think can fold
-*milestones* in when they should surface to the user/model — e.g.
+Just as `detached: { notify: true }` folds the _result_ into chat, Think can fold
+_milestones_ in when they should surface to the user/model — e.g.
 `detached: { notify: { onMilestones: ["schema-ready"] } }` submits an idempotent
 synthetic message (keyed `detached-ms:${sessionId}:${runId}:${name}`) when a
 named milestone lands, so the agent can react in-conversation ("Schema's ready —
@@ -620,10 +625,10 @@ this.runAgentTool(ImportAgent, {
 On completion Think calls `submitMessages([...], { idempotencyKey: \`detached:${sessionId}:${runId}\` })`,
 injecting a synthetic user-role message that summarises the result as the
 parent's next-turn input (FIFO behind any running turn). The message carries
-`metadata.source = "agent-tool"` so the rendered transcript can filter it out
-while the model still sees it. The idempotency key is derived from `runId`, so
+`metadata.source = "agent-tool"`so the rendered transcript can filter it out
+while the model still sees it. The idempotency key is derived from`runId`, so
 the durable backbone and fast path cannot double-submit — reusing the exact
-primitive (`submitMessages` + `UNIQUE(idempotency_key)`) the reporter already
+primitive (`submitMessages`+`UNIQUE(idempotency_key)`) the reporter already
 validated, but framework-owned. Apps override the wording via
 `formatDetachedCompletion(run, result): UIMessage`.
 
@@ -643,7 +648,7 @@ free:
   With progress signalling, `AgentToolRunState` also carries `progress` (a
   `fraction`/`message` snapshot for a bar + ETA) and a `milestones` list, so the
   tray shows "Importing… 50% — schema ready, ingesting rows" instead of a bare
-  spinner. No new *client* protocol (the existing reducer handles the new event
+  spinner. No new _client_ protocol (the existing reducer handles the new event
   kinds); the new plumbing is server-side re-broadcast, not client tailing.
 - **Full transcript on demand.** For the child's complete streamed output (not
   just the status snapshot), a client drills into the child directly
@@ -692,7 +697,7 @@ free:
 
 ## Concurrency and cost
 
-Detached runs hold a `maxConcurrentAgentTools` slot for their *entire* life, not
+Detached runs hold a `maxConcurrentAgentTools` slot for their _entire_ life, not
 just a turn — a different cost profile from awaited runs. Decisions:
 
 - Detached runs count against the **same** `maxConcurrentAgentTools` cap
@@ -701,7 +706,7 @@ just a turn — a different cost profile from awaited runs. Decisions:
 - A separate `maxConcurrentDetachedAgentTools` is **deferred** — start with one
   cap and observe. But because `Infinity` + detached accumulation is a real
   footgun with no observer to notice, the framework emits an observability
-  **warning event** when the live *detached* count crosses a threshold (proposed
+  **warning event** when the live _detached_ count crosses a threshold (proposed
   50), rather than silently accumulating. The separate cap lands only if evidence
   shows the single cap is conflating two genuinely different budgets (awaited
   fan-out vs long-lived detached).
@@ -719,7 +724,7 @@ contestable ones is below.
 - **Cleanup, and clear-while-in-flight: cancel, suppress user-facing delivery,
   still meter.** `clearAgentToolRuns(...)` deletes the milestone rows and the
   `progress_json` snapshot for each run and cancels the recurring backbone once no
-  detached run remains. Clearing the session *while a detached run is in flight*
+  detached run remains. Clearing the session _while a detached run is in flight_
   follows the orchestration RFC's cancel-then-delete ordering, and the
   cancel path clears the run's pending delivery + idempotency rows **before**
   deleting the session. **Decision:** the user-facing delivery
@@ -736,7 +741,7 @@ contestable ones is below.
   **Decision:** `progress_json` persists `fraction`/`phase`/`message` only; the
   free-form `data` field is **live-only**, with an explicit opt-in
   (`reportProgress({ ... }, { persist: true })`) for apps that want it durable.
-  A signal with a `milestone` name *does* persist its `data` — it is app-named,
+  A signal with a `milestone` name _does_ persist its `data` — it is app-named,
   low-cardinality, and deliberately authored.
 
 - **`awaitAgentToolMilestone`: default timeout, short-wait contract, reject don't
@@ -747,7 +752,7 @@ contestable ones is below.
   mysteriously tripping recovery; an explicit longer timeout signals the caller
   understands the tradeoff. On eviction the promise does **not** suspend-and-resume
   — the turn re-runs via chat recovery and re-executes the `await`, resolving
-  immediately *because milestones are durable*. The await **rejects** (never hangs,
+  immediately _because milestones are durable_. The await **rejects** (never hangs,
   never seals the run) on timeout, on give-up/budget, and on a
   terminal-without-the-milestone.
 
@@ -798,7 +803,7 @@ contestable ones is below.
 - **A down-channel / bidirectional control protocol.** Progress flows child →
   parent. The parent steers only with the existing levers (`cancelAgentTool`,
   milestone-gated re-dispatch, and not awaiting), which cover most needs. Sending
-  arbitrary directives *into* a running child needs its own durability/ordering/
+  arbitrary directives _into_ a running child needs its own durability/ordering/
   delivery story — that is "interactive sub-agents," not "background sub-agents,"
   and belongs in a **separate future RFC**, named here so the boundary is
   deliberate rather than an omission.
@@ -825,7 +830,7 @@ eviction guarantee.
 
 ### Reuse the global `onAgentToolFinish` as the only hook
 
-Rejected as *sufficient*, kept as *additive*. The global hook has no per-run
+Rejected as _sufficient_, kept as _additive_. The global hook has no per-run
 delivery ledger and fires unconditionally, so it cannot be made exactly-once
 without the per-run `delivered` bit this RFC adds. We keep it for metering and
 add the targeted callback for control flow.
@@ -843,7 +848,7 @@ Rejected. A flag on `runAgentTool` keeps one mental model and one set of
 semantics (idempotent by `runId`, same registry, same events). A second method
 would duplicate the surface and invite drift.
 
-### Auto-arm the backbone for *all* non-terminal runs
+### Auto-arm the backbone for _all_ non-terminal runs
 
 Rejected. Awaited runs already have a live observer; arming a schedule for them
 is wasted work. Only detached runs lack an observer, so only they need the
@@ -851,21 +856,21 @@ backbone.
 
 ### Treat chat chunks as the progress signal (no new API)
 
-Rejected as *sufficient*. The child's chat tokens are already forwarded, and you
-*can* scrape them for status. But they are unstructured, model-generated, and
+Rejected as _sufficient_. The child's chat tokens are already forwarded, and you
+_can_ scrape them for status. But they are unstructured, model-generated, and
 token-level — there is no reliable `fraction`, no named join point to `await`, and
 no clean signal to reset the no-progress timer or meter cost against. A structured
-`reportProgress` call is a different, app-defined channel that happens to *travel*
+`reportProgress` call is a different, app-defined channel that happens to _travel_
 on the same stream.
 
 ### Progress alternatives (channel, tiers, scope)
 
-Rejected, briefly: (a) *a separate durable progress channel* — duplicates the
+Rejected, briefly: (a) _a separate durable progress channel_ — duplicates the
 persistence/replay/reducer logic that reserved `data-agent-progress` (transient)
-and `data-agent-milestone` (persisted) parts already provide; (b) *one flat tier*
+and `data-agent-milestone` (persisted) parts already provide; (b) _one flat tier_
 — forces persist-everything (DB bloat) or persist-nothing (no awaitable join
 points); the ephemeral/milestone split keeps status cheap and boundaries durable;
-(c) *progress on awaited runs only* — backwards, since the detached parent is
+(c) _progress on awaited runs only_ — backwards, since the detached parent is
 exactly the one with no other window into the child, and the same emit path works
 for both.
 
@@ -876,7 +881,7 @@ position (rationale in "Edge cases & resolved decisions"); they are summarised
 here so reviewers can challenge them directly:
 
 - **Core budget is a finite absolute ceiling (default ~24h); the progress phase
-  adds a *resetting no-progress* window (default ~1h) on top.** Finite (not
+  adds a _resetting no-progress_ window (default ~1h) on top.** Finite (not
   `Infinity`) because a detached run holds a slot + live facet with no observer.
   The resetting window mirrors `rfc-chat-recovery-work-budget` — never give up on a
   child still signalling, only on one gone silent — and ships with progress because
@@ -922,7 +927,7 @@ Suggested phasing:
    unblocking, and the background-tasks tray UI with live progress bars; distil
    user-facing guidance into `/docs`.
 
-Phase 2 must not ship without the durable hook: a `detached` flag *without*
+Phase 2 must not ship without the durable hook: a `detached` flag _without_
 exactly-once delivery would make the floating-promise footgun a blessed,
 advertised API. The flag and the guarantee land together or not at all.
 
