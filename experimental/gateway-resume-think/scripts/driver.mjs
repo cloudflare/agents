@@ -82,6 +82,20 @@ async function main() {
     `✓ captured run ${captured.capture.runId.slice(0, 12)}… at event ${captured.capture.eventOffset}`
   );
 
+  // Let the stream advance a bit so multiple throttled stashes should have run,
+  // then snapshot the PRE-eviction diagnostics (the post-eviction instance is
+  // fresh and would report zeros).
+  await sleep(2500);
+  const pre = await getDebug();
+  if (pre?.stashDiag) {
+    const s = pre.stashDiag;
+    console.log(
+      `  pre-evict stash — capture.offset=${pre.capture?.eventOffset} ` +
+        `attempts=${s.attempts} ok=${s.ok} failed=${s.failed} ` +
+        `lastOk=${s.lastOk} lastError=${s.lastError ?? "—"}`
+    );
+  }
+
   console.log("→ interrupt (ctx.abort, mid-stream)");
   await post("interrupt");
 
@@ -98,15 +112,64 @@ async function main() {
     process.exit(1);
   }
 
-  const assistant = (recovered.transcript ?? []).find(
-    (m) => m.role === "assistant"
+  console.log(
+    `✓ recovery decision: reattach run ${plan.runId.slice(0, 12)}… ` +
+      `(stashed offset ${plan.fromEvent}; re-attaching from 0 = full replay)`
+  );
+
+  // Wait for the continuation to finish: poll until the assistant message
+  // length is STABLE across several reads (so we don't read mid-stream).
+  const assistantLen = (d) =>
+    (d.transcript ?? []).find((m) => m.role === "assistant")?.text?.length ?? 0;
+  let prevLen = -1;
+  let stableCount = 0;
+  const settled = await pollUntil(
+    (d) => {
+      const len = assistantLen(d);
+      stableCount = len > 0 && len === prevLen ? stableCount + 1 : 0;
+      prevLen = len;
+      return stableCount >= 3; // stable across 3 consecutive polls
+    },
+    { label: "turn to settle", tries: 80, intervalMs: 1000 }
   );
   console.log(
-    `✓ re-attached to run ${plan.runId.slice(0, 12)}… from event ${plan.fromEvent}`
+    `✓ turn converged — assistant message: ${assistantLen(settled)} chars`
   );
-  console.log(
-    `✓ turn converged — assistant message: ${assistant?.text?.length ?? 0} chars`
-  );
+
+  // The headline proof: does the recovered message equal the FULL run?
+  // Poll verify over time so a still-streaming recovery turn (race) is
+  // distinguishable from a genuine stall.
+  console.log("→ verify against ground-truth resume(from=0)");
+  let v = null;
+  for (let i = 0; i < 10; i++) {
+    v = await readJson(await fetch(url("verify")));
+    if (!v || v.error) {
+      console.error(`✗ verify failed: ${v?.error ?? "no response"}`);
+      process.exit(1);
+    }
+    console.log(
+      `  recovered ${v.recoveredLen} / full ${v.fullLen} chars` +
+        (v.match ? " — MATCH" : ` — diverge@${v.firstDivergence}`)
+    );
+    if (v.match) break;
+    await sleep(2000);
+  }
+
+  if (v.match) {
+    console.log(
+      `✓ ZERO-LOSS — recovered === full run ${v.fullLen} chars ` +
+        `(re-attached from event ${v.reattachedFromEvent}, zero regenerated tokens)`
+    );
+  } else {
+    console.warn(
+      `⚠ seam mismatch — recovered ${v.recoveredLen} vs full ${v.fullLen} chars, ` +
+        `first divergence at index ${v.firstDivergence}.`
+    );
+    console.warn(`  recovered head: ${JSON.stringify(v.recoveredHead)}`);
+    console.warn(`  full      head: ${JSON.stringify(v.fullHead)}`);
+    console.warn(`  recovered tail: ${JSON.stringify(v.recoveredTail)}`);
+    console.warn(`  full      tail: ${JSON.stringify(v.fullTail)}`);
+  }
 }
 
 main().catch((e) => {

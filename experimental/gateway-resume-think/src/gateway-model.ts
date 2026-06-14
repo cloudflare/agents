@@ -12,7 +12,7 @@
  */
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
-import type { LanguageModel } from "ai";
+import { streamText, type LanguageModel } from "ai";
 import { createResumableStream, type ResumeFetcher } from "./resume";
 
 interface RunBinding extends ResumeFetcher {
@@ -126,4 +126,24 @@ export function buildReattachModel(args: ReattachModelArgs): LanguageModel {
   }) as typeof globalThis.fetch;
 
   return buildProvider(vendor, modelId, reattachFetch);
+}
+
+/**
+ * Parse a re-attach to TEXT through the provider parser. With `fromEvent: 0`
+ * this yields the **full** message the run produced (ground truth for the
+ * zero-loss check, since the run is server-driven — it completes regardless of
+ * the originating disconnect); with `fromEvent: N` it yields just the tail.
+ */
+export async function parseReattachText(
+  args: ReattachModelArgs
+): Promise<string> {
+  const model = buildReattachModel(args);
+  const result = streamText({ model, prompt: "resume" });
+  let text = "";
+  for await (const part of result.fullStream) {
+    if (part.type === "text-delta") {
+      text += (part as unknown as { text?: string }).text ?? "";
+    }
+  }
+  return text;
 }

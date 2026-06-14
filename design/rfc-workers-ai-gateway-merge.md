@@ -518,16 +518,28 @@ Plug-in path (every hook already exists in `packages/ai-chat` /
 3. **On recovery** (`_handleInternalFiberRecovery` → `onChatRecovery`,
    `ctx.recoveryData` carries the stashed `{ aigRunId, eventOffset }`): build the
    re-attach stream with `createResumableStream({ binding, gateway, runId,
-   fromEvent: eventOffset })` (**no `initial` body**), feed it through the same
-   `@ai-sdk` model → `UIMessageChunk`s → the existing `_reply` / Think stream
-   loop. Because the run is detached (§7.1), the re-attach delivers the **tail**
-   (events `eventOffset`→end of the *completed* run); concatenated with the
-   prefix Layer A already streamed/persisted (`partialText`/`partialParts`) this
-   reconstructs the full message with **zero regeneration**. (Alternatively, a
-   `fromEvent: 0` re-attach replays the whole message and the loop replaces the
-   partial — simpler, re-streams the prefix.) Fall back to `continueLastTurn()`
-   on expiry/miss (today's behavior, via `onResumeExpired` or a `404` from the
-   re-attach).
+   fromEvent: 0 })` (**no `initial` body**), feed it through the same `@ai-sdk`
+   model → `UIMessageChunk`s → the existing `_reply` / Think stream loop. Because
+   the run is detached (§7.1), `fromEvent: 0` replays the **complete** run; the
+   framework's `continueLastTurn` **replaces** the partial leaf with that replay,
+   so the recovered message is **byte-identical to the full run, zero regenerated
+   tokens** — validated live (`experimental/gateway-resume-think`: recovered
+   `=== full`, e.g. 17303 chars, via a `/gw/verify` ground-truth check against
+   `resume?from=0`). Fall back to `continueLastTurn()` on expiry/miss (via
+   `onResumeExpired` or a `404` from the re-attach).
+
+   **`from=0` over a tail re-attach (`from=eventOffset`).** A tail re-attach would
+   save re-streaming the prefix bytes, but it is *not* zero-loss in practice: with
+   `continueLastTurn`'s replace semantics it drops the already-streamed prefix
+   (the partial leaf is overwritten by just the tail), and even with append
+   semantics the Layer-A↔SSE offset-space mismatch (point 4) misaligns the seam.
+   `from=0` needs only the run-id, costs zero tokens (it replays the gateway
+   buffer, not the model), and is provably whole — so it is the recommended Layer
+   B strategy. The event offset is still worth stashing (observability + the
+   opt-in tail path); stash it with a **delta-based** throttle, not `eventOffset %
+   N` — SSE offsets jump (one chunk can carry several events), so a modulo check
+   often never lands on a boundary and the offset is never re-stashed (observed:
+   only the initial offset-0 stash survived until this was fixed).
 4. **Offset-space mismatch (handled).** Layer A counts post-parse
    `UIMessageChunk`s; gateway `from=N` counts **provider-native SSE events**
    (§7.1). These are different cursors — stash the **SSE event index** from
@@ -540,7 +552,9 @@ Plug-in path (every hook already exists in `packages/ai-chat` /
    Anthropic 4.6+), else cold **"retry"**.
 
 Net: gateway resume turns DO-eviction recovery from a regenerate into a
-**byte-exact, zero-token re-attach**. The attempt tree (§8a) gives Think one
+**zero-token, full re-attach** — proven end-to-end (`experimental/gateway-resume-think`:
+real `ctx.abort()` eviction mid-turn → recovered message byte-identical to the
+completed run, zero regenerated tokens). The attempt tree (§8a) gives Think one
 structured object to log/display for "which model/provider/layer served or
 failed" without bespoke parsing.
 

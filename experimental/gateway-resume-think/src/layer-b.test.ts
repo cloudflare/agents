@@ -1,3 +1,5 @@
+import { createOpenAI } from "@ai-sdk/openai";
+import { streamText } from "ai";
 import { describe, expect, it, vi } from "vitest";
 import { planResume } from "./plan";
 import {
@@ -151,5 +153,80 @@ describe("createResumableStream (re-attach)", () => {
     expect(await readAll(rs)).toBe("data: 1\n\ndata: 2\n\ndata: 3\n\n");
     // fromEvent(4) + 2 emitted = reconnect at absolute index 6.
     expect(urls[0]).toContain("resume?from=6");
+  });
+});
+
+// ── zero-loss reconstruction (parse-layer seam) ────────────────────────────
+// Mirrors the live /gw/verify proof hermetically: the recovered message is the
+// prefix Layer A persisted + the tail the re-attach replays. At an aligned SSE
+// event boundary, prefix(events 0..k) + tail(from=k) must equal full(from=0)
+// once parsed through the provider parser — no byte dropped or duplicated.
+
+function openaiChunk(content: string): string {
+  const chunk = {
+    id: "chatcmpl-test",
+    object: "chat.completion.chunk",
+    created: 0,
+    model: "gpt-4o-mini",
+    choices: [{ index: 0, delta: { content }, finish_reason: null }]
+  };
+  return `data: ${JSON.stringify(chunk)}\n\n`;
+}
+const OPENAI_DONE = "data: [DONE]\n\n";
+
+/** Binding whose resume endpoint serves `events.slice(from)` per the URL. */
+function runBinding(events: string[]): ResumeFetcher {
+  return {
+    fetch: vi.fn(async (u: RequestInfo | URL) => {
+      const from = Number(new URL(String(u)).searchParams.get("from") ?? "0");
+      return new Response(streamFrom(events.slice(from)), { status: 200 });
+    })
+  } as unknown as ResumeFetcher;
+}
+
+/** Parse a re-attach (from `fromEvent`) of `events` through the openai parser. */
+async function parseText(events: string[], fromEvent: number): Promise<string> {
+  const binding = runBinding(events);
+  const fetchImpl = (async () =>
+    new Response(
+      createResumableStream({ binding, gateway: "gw", runId: "r", fromEvent }),
+      { status: 200, headers: { "content-type": "text/event-stream" } }
+    )) as typeof globalThis.fetch;
+  const model = createOpenAI({ apiKey: "unused", fetch: fetchImpl }).chat(
+    "gpt-4o-mini"
+  );
+  const result = streamText({ model, prompt: "x" });
+  let text = "";
+  for await (const part of result.fullStream) {
+    if (part.type === "text-delta") {
+      text += (part as unknown as { text?: string }).text ?? "";
+    }
+  }
+  return text;
+}
+
+describe("zero-loss reconstruction (parse-layer seam)", () => {
+  it("full(from=0) === prefix(0..k) + tail(from=k)", async () => {
+    const contents = [
+      "Hello",
+      " world",
+      " from",
+      " Cloudflare",
+      " Workers",
+      " and",
+      " Durable",
+      " Objects."
+    ];
+    const events = [...contents.map(openaiChunk), OPENAI_DONE];
+
+    const full = await parseText(events, 0);
+    expect(full).toBe(contents.join(""));
+
+    const k = 3; // eviction "happened" after 3 events were streamed/persisted
+    const prefix = await parseText(events.slice(0, k), 0);
+    const tail = await parseText(events, k);
+
+    expect(prefix).toBe(contents.slice(0, k).join(""));
+    expect(prefix + tail).toBe(full);
   });
 });
