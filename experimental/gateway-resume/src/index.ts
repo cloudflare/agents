@@ -35,13 +35,16 @@
  *   GET /resume?runId=..&from=N — passthrough to the gateway resume endpoint
  */
 
-import { streamText } from "ai";
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { createOpenAI } from "@ai-sdk/openai";
+import { streamText, type LanguageModel } from "ai";
 import {
   buildDelegateModel,
   DelegateError,
   type DelegateOptions
 } from "./delegate";
 import { passthroughProbe, type PassthroughResult } from "./passthrough";
+import { createResumableStream, ResumeExpiredError } from "./resumable";
 
 interface Env {
   AI: Ai;
@@ -774,6 +777,133 @@ export default {
             );
           }
           return jsonError(e instanceof Error ? e.message : String(e), 502);
+        }
+      }
+
+      // Resume reconnect/replay layer (RFC §7.1) — run streamText through a
+      // run-path model whose body is wrapped in a self-healing resumable stream.
+      // ?model=openai/gpt-5.4 [&dropAfter=N] simulates a mid-stream drop after N
+      // SSE events and verifies the @ai-sdk parser still produces complete output.
+      case "/resume-stream": {
+        const model = url.searchParams.get("model");
+        if (!model) return jsonError("Missing ?model=", 400);
+        const dropParam = url.searchParams.get("dropAfter");
+        const dropAfterEvents = dropParam ? Number(dropParam) : undefined;
+
+        const slash = model.indexOf("/");
+        const vendor = model.slice(0, slash);
+        const bareModel = model.slice(slash + 1);
+
+        let runId: string | null = null;
+        let reconnects = 0;
+        let expired = false;
+
+        const runFetch = (async (
+          _input: RequestInfo | URL,
+          init?: RequestInit
+        ): Promise<Response> => {
+          const bodyText =
+            typeof init?.body === "string"
+              ? init.body
+              : init?.body
+                ? td.decode(init.body as ArrayBuffer)
+                : "{}";
+          const body = JSON.parse(bodyText) as Record<string, unknown>;
+          delete body.model;
+          const ai = env.AI as unknown as {
+            run(
+              m: string,
+              i: Record<string, unknown>,
+              o: Record<string, unknown>
+            ): Promise<Response>;
+          };
+          const resp = await ai.run(model, body, {
+            gateway: { id: gateway },
+            returnRawResponse: true
+          });
+          runId = resp.headers.get("cf-aig-run-id");
+          if (!resp.body || !runId) return resp; // resume unavailable — passthrough
+          const wrapped = createResumableStream({
+            env,
+            gateway,
+            runId,
+            initial: resp.body,
+            dropAfterEvents,
+            hooks: {
+              onReconnect: () => {
+                reconnects++;
+              },
+              onExpired: () => {
+                expired = true;
+              }
+            }
+          });
+          return new Response(wrapped, {
+            status: resp.status,
+            headers: resp.headers
+          });
+        }) as typeof globalThis.fetch;
+
+        let delegateModel: LanguageModel;
+        if (vendor === "openai") {
+          delegateModel = createOpenAI({
+            apiKey: "unused",
+            fetch: runFetch
+          }).chat(bareModel);
+        } else if (vendor === "anthropic") {
+          delegateModel = createAnthropic({
+            apiKey: "unused",
+            fetch: runFetch
+          })(bareModel);
+        } else {
+          return jsonError(
+            `resume-stream not mapped for vendor "${vendor}"`,
+            400
+          );
+        }
+
+        const partTypes: Record<string, number> = {};
+        let textChars = 0;
+        let streamError: string | undefined;
+        try {
+          const result = streamText({ model: delegateModel, prompt });
+          for await (const part of result.fullStream) {
+            partTypes[part.type] = (partTypes[part.type] ?? 0) + 1;
+            if (part.type === "text-delta") {
+              textChars +=
+                (part as unknown as { text?: string }).text?.length ?? 0;
+            } else if (part.type === "error") {
+              streamError = String(
+                (part as unknown as { error: unknown }).error
+              );
+            }
+          }
+          const finishReason = await result.finishReason;
+          return Response.json({
+            experiment: "resumable-stream",
+            model,
+            dropAfterEvents: dropAfterEvents ?? null,
+            runId,
+            reconnects,
+            expired,
+            output: { textChars, finishReason, partTypes, streamError }
+          });
+        } catch (e) {
+          return Response.json({
+            experiment: "resumable-stream",
+            model,
+            dropAfterEvents: dropAfterEvents ?? null,
+            runId,
+            reconnects,
+            expired,
+            error:
+              e instanceof ResumeExpiredError
+                ? { kind: "resume-expired", message: e.message }
+                : {
+                    kind: "unknown",
+                    message: e instanceof Error ? e.message : String(e)
+                  }
+          });
         }
       }
 

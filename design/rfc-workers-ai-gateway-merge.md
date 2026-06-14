@@ -304,16 +304,33 @@ Native `@cf/*` (§5) attaches it to stream/result metadata directly.
 
 ### 7. Resume mechanics + expiry recovery
 
+> **Status: BUILT + VALIDATED.** Tier-1 (gateway resume) ships in
+> `workers-ai-provider` as `createResumableStream` (wired into the run-path
+> `fetch`, plus exported for cross-invocation re-attach). Live-tested in the
+> harness (`/resume-stream`): clean run → 0 reconnects; injected mid-stream drop
+> (early/late, openai + anthropic native SSE) → 1 reconnect, complete coherent
+> parse, `finishReason: stop`, no stream error. The package version reconnects on
+> **real** read errors (no fault injection) and honors `onResumeExpired`. Tier-2
+> (continue/regenerate) is a Think-layer concern; v1 package policy is
+> `"error" | "accept-partial"`.
+
 Capturing the run-id is step one. Replay needs two format-agnostic pieces:
 
-1. **Event counting.** `from` is an **SSE event index** (`\n\n` count), per the
-   harness — counted at the *byte layer*, not the parsed-part layer (one provider
-   part may span several SSE events). The delegate threads the stream through a
-   `TransformStream` that increments an event counter, exposing the live count.
-2. **Replay re-parse.** On reconnect, rebuild the *same* `@ai-sdk/*` model with a
-   delegate fetch returning the resume-endpoint Response
-   (`/run/{runId}/resume?from={n}`); the provider's own parser consumes the tail.
-   Exactly `experimental/forever-chat/replay-model.ts`.
+1. **Event counting + boundary buffering (the correctness core).** `from` is an
+   **SSE event index** (`\n\n` count), per the harness — counted at the *byte
+   layer*, not the parsed-part layer (one provider part may span several SSE
+   events). The wrapper emits only **complete** events downstream and buffers any
+   trailing partial event. On a drop the buffered partial is **discarded** and
+   resume starts from the count of complete events already emitted — landing
+   exactly on the next event boundary, so no bytes are duplicated or truncated.
+   (A naive byte-offset or part counter would misalign here; verified by the
+   "discards a partial event and realigns" unit test.)
+2. **Replay re-parse.** On reconnect, the same wrapped stream continues feeding the
+   *same* `@ai-sdk/*` parser bytes from the resume-endpoint Response
+   (`/run/{runId}/resume?from={n}`) — the consumer never sees the break, so no
+   model rebuild is needed for in-stream recovery. (Cross-invocation re-attach
+   after DO eviction seeds `createResumableStream` with a persisted run-id +
+   event offset instead of an initial body.)
 
 **Expiry is a real regression vs the old design and must be handled.** The
 DO-based `inference-buffer` *owned* the buffer, so it never expired mid-recovery.
@@ -832,3 +849,10 @@ RFC-first otherwise.
   `tanstack-ai/src/adapters/openrouter.ts` (construction-time fetch into the SDK's
   `httpClient`). Conclusion: gateway integration *is* the wrapped SDK + gateway
   fetch — no new transport (§3b).
+- Implementation (2026-06-14): delegate engine + provider plugins + sub-path
+  exports landed in `cloudflare/ai` (branch `feat/workers-ai-provider-gateway-delegate`).
+  Resume reconnect/replay layer (§7.1) built as `createResumableStream` and
+  validated live via the harness `/resume-stream` endpoint (clean +
+  injected-drop, openai + anthropic): transparent reconnect, complete parse,
+  `finishReason: stop`. Buffer TTL pinned to ≈330–360s with a clean `404` expiry
+  contract via `ttl-sweep*.sh`.
