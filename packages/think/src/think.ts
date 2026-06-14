@@ -131,6 +131,8 @@ import {
 
 const agentToolChunkEncoder = new TextEncoder();
 import type {
+  AgentToolLifecycleResult,
+  AgentToolRunInfo,
   Connection,
   FiberRecoveryContext,
   RetryOptions,
@@ -6797,6 +6799,71 @@ export class Think<
       }
     }
     return "";
+  }
+
+  /**
+   * Format the message injected back into the chat when a `detached:
+   * { notify: true }` run finishes. Override to customize the prose (or return
+   * an empty string to suppress the notification for a given outcome). The
+   * default announces the terminal status and any summary/error so the model
+   * has enough context to react.
+   */
+  protected formatDetachedCompletion(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): string {
+    const label = `Background task "${run.agentType}" (run ${run.runId})`;
+    switch (result.status) {
+      case "completed":
+        return result.summary
+          ? `${label} finished:\n\n${result.summary}`
+          : `${label} finished successfully.`;
+      case "error":
+        return `${label} failed${result.error ? `: ${result.error}` : "."}`;
+      case "aborted":
+        return `${label} was cancelled.`;
+      case "interrupted":
+        return result.reason === "budget-exceeded"
+          ? `${label} ran out of time before completing and was stopped.`
+          : `${label} was interrupted before completing${result.error ? `: ${result.error}` : "."}`;
+      default:
+        return `${label} ended (${result.status}).`;
+    }
+  }
+
+  /**
+   * Targeted completion hook for `detached: { notify: true }`. Auto-wired by
+   * `runAgentTool` (resolved by name so the base Agent stays decoupled from the
+   * chat layer). Injects the formatted completion as a programmatic turn so the
+   * model reacts to the background result. Idempotent per run + status, so an
+   * exactly-once finish — or a soft give-up followed by a real completion —
+   * never injects a duplicate, while a give-up and a later real completion are
+   * surfaced as two distinct turns.
+   */
+  async _cfDetachedNotifyFinish(
+    run: AgentToolRunInfo,
+    result: AgentToolLifecycleResult
+  ): Promise<void> {
+    const text = this.formatDetachedCompletion(run, result);
+    if (!text) return;
+    await this.submitMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text }]
+        }
+      ],
+      {
+        idempotencyKey: `detached-finish:${run.runId}:${result.status}`,
+        metadata: {
+          source: "detached-agent-tool",
+          runId: run.runId,
+          agentType: run.agentType,
+          status: result.status
+        }
+      }
+    );
   }
 
   async startAgentToolRun(

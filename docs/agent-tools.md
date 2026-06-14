@@ -254,6 +254,22 @@ Key behaviors:
 await this.cancelAgentTool(runId); // idempotent; delivers onFinish "aborted"
 ```
 
+### Notify the chat on completion (Think / AIChatAgent)
+
+On a chat agent you usually want the model to _react_ to a finished background
+run. Instead of wiring `onFinish` by hand, pass `notify: true` — when the run
+finishes the agent injects a message into the chat (via `submitMessages`, so it
+is idempotent per run + status) and the model takes its next turn with the
+result in context:
+
+```ts
+await this.runAgentTool(ResearchAgent, { input, detached: { notify: true } });
+```
+
+Override `formatDetachedCompletion(run, result)` to customize the injected text,
+or return an empty string to suppress the notification for a given outcome. An
+explicit `onFinish` takes precedence over `notify`.
+
 ### The `inspectAgentToolRun` contract
 
 A child's `inspectAgentToolRun(runId)` returns the run's current status snapshot,

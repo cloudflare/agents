@@ -1030,6 +1030,10 @@ const DETACHED_DELIVERY_LEASE_MS = 60_000;
 // cancels itself once no detached run remains outstanding.
 const DETACHED_BACKBONE_CADENCE_S = [5, 15, 30, 120];
 const DETACHED_RECONCILE_CALLBACK = "_cfDetachedReconcileTick";
+// Conventional method name a chat agent (Think / AIChatAgent) implements to
+// receive `detached: { notify: true }` completions. Resolved by name so the
+// base Agent stays decoupled from the chat layer.
+const DETACHED_NOTIFY_CALLBACK = "_cfDetachedNotifyFinish";
 const SUB_AGENT_IDENTITY_VERSION_LEGACY = "legacy";
 const SUB_AGENT_IDENTITY_VERSION_PATH_V2 = "path-v2";
 const SUB_AGENT_IDENTITY_PATH_V2_PREFIX = "cf-agents:v2:";
@@ -7975,7 +7979,7 @@ export class Agent<
   ): { onFinishName?: string; maxBudgetMs?: number } | null {
     if (!detached) return null;
     if (detached === true) return {};
-    const onFinishName = detached.onFinish as string | undefined;
+    let onFinishName = detached.onFinish as string | undefined;
     if (onFinishName !== undefined) {
       const callback = (this as unknown as Record<string, unknown>)[
         onFinishName
@@ -7986,6 +7990,15 @@ export class Agent<
             'Pass the NAME of a method (e.g. "onImportDone"), not a closure — ' +
             "closures cannot be rehydrated after the Durable Object is evicted."
         );
+      }
+    } else if (detached.notify) {
+      // `notify` sugar: auto-target the chat-agent notify hook if present.
+      // A no-op on a base Agent that does not implement it.
+      const notifyHook = (this as unknown as Record<string, unknown>)[
+        DETACHED_NOTIFY_CALLBACK
+      ];
+      if (typeof notifyHook === "function") {
+        onFinishName = DETACHED_NOTIFY_CALLBACK;
       }
     }
     return {

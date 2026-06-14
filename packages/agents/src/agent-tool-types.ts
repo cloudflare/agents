@@ -131,6 +131,16 @@ export type DetachedAgentToolConfig<Self = Record<string, unknown>> = {
    * parent-level `detachedMaxBudgetMs`.
    */
   maxBudgetMs?: number;
+  /**
+   * Chat-agent convenience (`@cloudflare/think` / `AIChatAgent`): when the run
+   * finishes, inject a message into the chat so the model can react to the
+   * result, instead of you wiring `onFinish` by hand. Sugar that auto-targets
+   * the agent's `_cfDetachedNotifyFinish` hook; ignored on a base `Agent` that
+   * does not implement it, and ignored when `onFinish` is also set (an explicit
+   * `onFinish` wins). Override `formatDetachedCompletion()` to customize the
+   * injected text.
+   */
+  notify?: boolean;
 };
 
 export type RunAgentToolOptions<
