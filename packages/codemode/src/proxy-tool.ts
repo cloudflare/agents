@@ -505,7 +505,7 @@ function buildDescription(
   const names = connectors.map((c) => `\`${c.name()}\``).join(", ");
 
   const lines = [
-    "Execute TypeScript in a sandbox with access to connector SDKs.",
+    "Execute JavaScript in a sandbox with access to connector SDKs.",
     "",
     "## Workflow",
     "",
