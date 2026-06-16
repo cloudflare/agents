@@ -1,0 +1,23 @@
+{
+  "name": "@cloudflare/agents-ops-approval-agent",
+  "description": "Non-coding Think discovery prototype: refund/approval ops agent (qw-demo)",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/think": "*",
+    "agents": "*",
+    "ai": "^6.0.202",
+    "workers-ai-provider": "^3.2.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260612.1",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.100.0"
+  }
+}

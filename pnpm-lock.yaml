@@ -3329,6 +3329,31 @@ importers:
 
   experimental/inference-buffer: {}
 
+  experimental/ops-approval-agent:
+    dependencies:
+      '@cloudflare/think':
+        specifier: '*'
+        version: link:../../packages/think
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
+      ai:
+        specifier: ^6.0.202
+        version: 6.0.202(zod@4.4.3)
+      workers-ai-provider:
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^4.20260612.1
+        version: 4.20260612.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      wrangler:
+        specifier: ^4.100.0
+        version: 4.100.0(@cloudflare/workers-types@4.20260612.1)
+
   experimental/session-memory:
     dependencies:
       '@cloudflare/ai-chat':
