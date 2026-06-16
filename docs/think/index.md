@@ -6,6 +6,18 @@ Think works as both a **top-level agent** (WebSocket chat to browser clients via
 
 > **Experimental.** The API surface is stable but may evolve before graduating out of experimental.
 
+## Why Think
+
+Think is for agents whose work must outlive the request. The opinionated pieces are the ones that are tedious and dangerous to get right by hand:
+
+- **Durable turns** — an in-flight turn survives Durable Object eviction and resumes; it is not silently lost on deploy or hibernation.
+- **Recovery-aware delivery** — replies are snapshotted as `accepted`, `streaming`, or `completed`, so a restart replays a not-yet-streamed answer but posts a safe interruption notice instead of a duplicate partial. See [Delivery and Recovery](./messengers.md#delivery-and-recovery).
+- **Durable submissions** — webhooks and RPC callers submit a turn with an idempotency key and check status later. See [Programmatic Submissions](./programmatic-submissions.md).
+- **Sessions, not just a message list** — tree-structured history with branching, compaction, and full-text search.
+- **Human-in-the-loop and client tools** — a turn can pause for approval or a browser-side tool and resume later, without holding a request open. See [Human in the Loop](../human-in-the-loop.md) and [Client Tools](./client-tools.md).
+
+If you only need a chat-protocol adapter where you own the loop and the `Response`, use [`AIChatAgent`](../chat-agents.md) instead. See [Choose your path](../index.md#choose-your-path) for the full comparison.
+
 ## Quick Start
 
 ### Install
