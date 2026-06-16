@@ -23,7 +23,7 @@ const runtime = createCodemodeRuntime({
 
 | Handle method                                        | Purpose                                                                                                                                    |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `runtime.tool(options?)`                             | The single model-facing AI SDK tool, `codemode({ code })`                                                                                  |
+| `runtime.tool(options?)`                             | The framework-independent model-facing tool, `codemode({ code })`                                                                          |
 | `runtime.pending(executionId?)`                      | Actions awaiting approval — drives approval UIs; no id aggregates all paused runs                                                          |
 | `runtime.approve({ executionId })`                   | Approve the pending action and continue via replay                                                                                         |
 | `runtime.reject({ seq, executionId })`               | Reject a pending action; ends the execution. Returns `false` if it was a no-op (action no longer pending — approved or rejected elsewhere) |
@@ -148,6 +148,32 @@ A tool can opt out of result recording with [`replay: "reexecute"`](./connectors
 ### Size limits
 
 Any single recorded value (a call's arguments, a recorded result, the final result) is capped at 1 MB serialized (`MAX_DURABLE_VALUE_BYTES`). Truncating a logged value is never an option — replay would feed resumed code corrupted data — so an oversized argument or call result **fails the run** with a model-actionable error suggesting the data be written to a file/workspace and passed by reference. An oversized **final** result does not fail the run (replay never needs it): the run completes, the model receives the real value, and the audit trail stores a placeholder note.
+
+## Retrying failed passes
+
+A connector requests a retry by throwing `RetryableError`. By default the runtime makes three total attempts, honoring `retryAfterMs` when present and otherwise using bounded exponential backoff (500ms, 1s, up to 10s). A retry keeps the same execution id and re-runs the stored code: applied calls replay from the durable log, while the call left `executing` at the failure boundary executes again. No configuration is needed for this default.
+
+```ts
+const runtime = createCodemodeRuntime({ ctx, executor, connectors });
+```
+
+Customize the policy when needed, or pass `retry: false` to disable automatic retries:
+
+```ts
+const runtime = createCodemodeRuntime({
+  ctx,
+  executor,
+  connectors,
+  retry: {
+    maxAttempts: 4,
+    shouldRetry: ({ failure }) => failure.kind === "retryable"
+  }
+});
+```
+
+The error message and optional `retryAfterMs` cross the connector RPC and sandbox boundaries as structured metadata. Dynamic-worker timeouts also arrive as `failure.kind === "timeout"`, but are not retried by default: an operation may have succeeded remotely before its response was lost, so the application must decide whether that boundary is safe to repeat.
+
+Before retry policy or delay callbacks run, the runtime advances a durable attempt fence. Late calls and results from the superseded sandbox are inert and cannot overwrite the newer pass.
 
 ## Rollback
 

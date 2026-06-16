@@ -60,7 +60,10 @@ export class MyConnector extends CodemodeConnector<Env> {
 ### Each tool
 
 ```ts
-type ToolExecuteContext = { executionId: string };
+type ToolExecuteContext = {
+  executionId: string;
+  signal?: AbortSignal;
+};
 
 type ConnectorTool = {
   description?: string;
@@ -79,7 +82,7 @@ type ConnectorTool = {
 };
 ```
 
-`execute`/`revert` receive an optional `ctx` carrying the `executionId` of the run they belong to. The id is stable across a run's pause/resume passes, so it's the key to use for any resource scoped to the whole execution (see [Per-execution resources](#per-execution-resources)).
+`execute`/`revert` receive an optional `ctx` carrying the stable `executionId` and an operation-scoped `AbortSignal`. Both fields remain optional for compatibility with AI SDK toolsets and direct connector tests; the Code Mode runtime supplies both on real calls. The runtime aborts the signal when the pass or rollback operation ends. Connectors should pass it to cancellable I/O such as `fetch(..., { signal: ctx?.signal })`. Cancellation is cooperative and cannot roll back an operation already committed by a remote service.
 
 `requiresApproval: true` pauses the run for [approval](./approvals.md). `revert` enables [rollback](./runtime.md#rollback). Everything else executes immediately and is recorded in the durable log.
 
@@ -109,7 +112,7 @@ The proxy tool talks to connectors over Workers RPC. The base class derives this
 
 Some connectors own a resource that must live for the lifetime of one run — a browser/CDP session, a database transaction, a temp workspace. Two pieces of the contract make this work:
 
-1. **`execute(args, ctx)`** receives the `executionId`. Use it to lazily acquire (or reconnect to) the resource on first use, keyed by that id. Because the id is stable across pause/resume, the resource is addressable even after a run pauses for approval and resumes in a later Worker invocation. `ctx` is typed optional (so AI SDK toolsets stay shape-compatible), so read it as `ctx?.executionId` — the runtime always provides it on a real call.
+1. **`execute(args, ctx)`** receives the stable `executionId` plus a pass-scoped `signal`. Use the id to lazily acquire (or reconnect to) per-execution resources, and use the signal to stop per-pass work when the runtime moves on. Because the id is stable across pause/resume, the resource remains addressable in a later Worker invocation. `ctx` is typed optional (so AI SDK toolsets stay shape-compatible), but the runtime always provides it on a real call.
 2. **`disposeExecution(executionId, status)`** is called when the run reaches a **terminal** state, so you can tear the resource down.
 
 ```ts
@@ -124,7 +127,7 @@ export class BrowserConnector extends CodemodeConnector<Env> {
         description: "Open a URL in the run's browser session.",
         execute: async ({ url }, ctx) => {
           const session = await this.sessionFor(ctx?.executionId);
-          return session.goto(url);
+          return session.goto(url, { signal: ctx?.signal });
         }
       }
     };
@@ -171,7 +174,7 @@ override async onPassEnd(executionId: string, _status: PassEndStatus) {
 
 The same implementation rules as `disposeExecution` apply: idempotent, no instance memory, never throws.
 
-> **AI SDK toolsets:** when `tools()` returns an AI SDK `ToolSet`, codemode passes `{ executionId }` as the tool's second `execute` argument — the slot the AI SDK uses for its own call options. Inside codemode those options aren't otherwise populated, but a tool authored against the AI SDK's `toolCallId`/`messages` won't receive them here.
+> **AI SDK toolsets:** when `tools()` returns an AI SDK `ToolSet`, codemode passes `{ executionId, signal }` as the tool's second `execute` argument — the slot the AI SDK uses for its own call options. A tool authored against the AI SDK's `toolCallId`/`messages` won't receive them here.
 
 ## Replay policy
 

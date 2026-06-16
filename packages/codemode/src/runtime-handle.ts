@@ -2,18 +2,18 @@ import type { CodemodeConnector } from "./connectors";
 import type { Executor } from "./executor";
 import {
   createProxyTool,
-  disposeConnectors,
   expireCodemode,
   getCodemodeRuntime,
   pendingCodemode,
   rejectCodemode,
   resumeCodemode,
   rollbackCodemode,
-  validateConnectorNames,
   type CodemodeTool,
   type ProxyToolOutput,
   type TransformResult
 } from "./proxy-tool";
+import { disposeConnectors, validateConnectorNames } from "./runtime-execution";
+import type { CodemodeRetryPolicy } from "./retry";
 import type { ExecutionState, PendingAction } from "./runtime";
 import type { SaveSnippetOptions, Snippet } from "./snippet";
 
@@ -43,6 +43,8 @@ export type CreateCodemodeRuntimeOptions = {
    * Applies to both the initial run and a resume after approval.
    */
   transformResult?: TransformResult;
+  /** Durable retry policy. Explicit RetryableErrors retry by default. */
+  retry?: CodemodeRetryPolicy;
 };
 
 export type CodemodeRuntimeToolOptions = {
@@ -136,7 +138,8 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
       description: options?.description,
       connectorHints: options?.connectorHints,
       maxExecutions: this.#options.maxExecutions,
-      transformResult: this.#options.transformResult
+      transformResult: this.#options.transformResult,
+      retry: this.#options.retry
     });
   }
 
@@ -148,7 +151,8 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
       name: this.#options.name,
       executionId: options.executionId,
       maxExecutions: this.#options.maxExecutions,
-      transformResult: this.#options.transformResult
+      transformResult: this.#options.transformResult,
+      retry: this.#options.retry
     });
   }
 
