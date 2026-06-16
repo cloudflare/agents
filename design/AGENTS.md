@@ -72,6 +72,7 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | File                                    | Type       | Scope                                                                                                       |
 | --------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------- |
 | `chat-shared-layer.md`                  | design doc | Chat shared layer — streaming, sanitization, and protocol primitives in agents/chat                         |
+| `durable-streams-comparison.md`         | analysis   | Durable Streams (ElectricSQL) vs the Agents SDK — layer mapping, what each has, strategic takeaways         |
 | `think.md`                              | design doc | Think — chat agent base class, streaming, client tools, resumable streams, extensions                       |
 | `think-sessions.md`                     | design doc | Think + Session integration design (implemented in Phase 1)                                                 |
 | `think-vs-aichat.md`                    | design doc | Think vs AIChatAgent — comparison, use cases, architectural differences                                     |
