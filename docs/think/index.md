@@ -607,7 +607,7 @@ driving the work and what the caller needs back.
 | A parent agent delegates work to a retained child agent        | `agentTool()` or `runAgentTool()`               |
 | Surround a turn with idempotent app-owned side effects         | `startFiber()`                                  |
 | Coordinate multi-step durable orchestration                    | Workflows                                       |
-| Add context or messages without starting a model turn          | `persistMessages()`                             |
+| Add context or messages without starting a model turn          | `addMessages()`                                 |
 | Advanced subclass or recovery code continues an assistant turn | `continueLastTurn()`                            |
 
 Use [`saveMessages()`](./sub-agents.md#programmatic-turns-with-savemessages)
@@ -632,6 +632,39 @@ internal recovery records, not externally inspectable application jobs.
 
 Use [Workflows](../workflows.md) when the durable unit is a multi-step process
 with retries per step, long waits, external events, or approvals.
+
+### Adding messages without a turn
+
+Use `addMessages()` to write to the transcript **without** starting a model turn
+— for importing prior history or injecting background context the next turn
+should see:
+
+```typescript
+await this.addMessages([
+  {
+    id: crypto.randomUUID(),
+    role: "user",
+    parts: [{ type: "text", text: "Imported context" }]
+  }
+]);
+```
+
+`addMessages()` appends (or upserts) into the Session tree:
+
+- It does **not** run inference and does **not** enter the turn queue, so it is
+  safe to call from inside a tool's `execute` without deadlocking.
+- Array entries are appended **linearly** (each attaches under the previous one),
+  so imported history stays a single path. By default the first message attaches
+  to the latest committed leaf; pass `parentId` to attach elsewhere, or `null`
+  for a root message.
+- Appends are **idempotent by message id**. Pass `{ mode: "upsert" }` to update
+  an existing message in place instead.
+
+This is distinct from `saveMessages()` (which runs a turn) and from
+`AIChatAgent`'s `persistMessages()` (which replaces/reconciles a flat array
+rather than appending into a tree). The supported pattern is "add context, then
+run a turn": call `addMessages()`, then `saveMessages()` / the WebSocket chat
+path.
 
 ## Configuration Overrides
 

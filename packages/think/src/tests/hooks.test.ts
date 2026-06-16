@@ -422,6 +422,20 @@ describe("Think — ToolCallDecision honored by wrapped execute", () => {
     expect(after.length).toBeGreaterThan(0);
     expect(JSON.parse(after[0].outputJson)).toBe("echo: hello");
   });
+
+  it("addMessages from inside a tool execute runs mid-turn and persists", async () => {
+    // Validates the premise the mid-turn broadcast gate relies on: a real tool
+    // `execute` runs with `_insideInferenceLoop === true`, so `addMessages`
+    // suppresses its broadcast there. Also confirms the write is durable the
+    // moment it returns (not deferred to the next turn).
+    const agent = await freshToolAgent("dec-add-messages");
+    await agent.setEchoExecuteMode("add-messages");
+    await agent.testChat("call echo");
+
+    const probe = await agent.getMidTurnAddProbe();
+    expect(probe.insideLoop).toBe(true);
+    expect(probe.persisted).toBe(true);
+  });
 });
 
 // ── Extension hook dispatch ─────────────────────────────────────

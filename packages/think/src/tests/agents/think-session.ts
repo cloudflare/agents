@@ -1711,6 +1711,47 @@ export class ThinkTestAgent extends Think {
     await this.appendMessageToHistory(msg);
   }
 
+  /**
+   * Calls `addMessages` and returns the error message instead of letting the
+   * throw cross the RPC boundary (which workerd logs as an unhandled rejection).
+   */
+  async addMessagesExpectingError(
+    messages: UIMessage[],
+    options?: Parameters<ThinkTestAgent["addMessages"]>[1]
+  ): Promise<string | null> {
+    try {
+      await this.addMessages(messages, options);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  /**
+   * Calls `addMessages` while the agent believes a turn is in flight, to
+   * exercise the mid-turn gating (durable write only; live cache untouched).
+   */
+  async addMessagesMidTurnForTest(messages: UIMessage[]): Promise<{
+    cacheLengthDuring: number;
+    storedAfter: number;
+  }> {
+    const self = this as unknown as { _insideInferenceLoop: boolean };
+    const prev = self._insideInferenceLoop;
+    self._insideInferenceLoop = true;
+    let cacheLengthDuring: number;
+    try {
+      await this.addMessages(messages);
+      cacheLengthDuring = this.messages.length;
+    } finally {
+      self._insideInferenceLoop = prev;
+    }
+    const stored = (await this.session.getHistory()) as UIMessage[];
+    return {
+      cacheLengthDuring,
+      storedAfter: stored.length
+    };
+  }
+
   async appendSessionMessageForTest(msg: UIMessage): Promise<void> {
     await this.session.appendMessage(msg);
   }
@@ -3158,6 +3199,33 @@ export class ThinkToolsTestAgent extends Think {
         })
       };
     }
+    if (mode === "add-messages") {
+      // Calls `addMessages` from inside a real tool `execute` to verify the
+      // mid-turn contract: the inference-loop flag is set (so the broadcast is
+      // suppressed) and the durable write lands immediately.
+      return {
+        echo: tool({
+          description: "Echo a message back (and inject context mid-turn)",
+          inputSchema: z.object({ message: z.string() }),
+          execute: async ({ message }: { message: string }) => {
+            this._midTurnInsideLoop = (
+              this as unknown as { _insideInferenceLoop: boolean }
+            )._insideInferenceLoop;
+            await this.addMessages([
+              {
+                id: "mid-turn-injected",
+                role: "user",
+                parts: [{ type: "text", text: "injected during execute" }]
+              }
+            ]);
+            this._midTurnPersisted = Boolean(
+              await this.session.getMessage("mid-turn-injected")
+            );
+            return `echo: ${message}`;
+          }
+        })
+      };
+    }
     return {
       echo: tool({
         description: "Echo a message back",
@@ -3167,13 +3235,29 @@ export class ThinkToolsTestAgent extends Think {
     };
   }
 
-  private _echoExecuteMode: "default" | "async-iterable" | "sync-iterable" =
-    "default";
+  private _echoExecuteMode:
+    | "default"
+    | "async-iterable"
+    | "sync-iterable"
+    | "add-messages" = "default";
+
+  private _midTurnInsideLoop: boolean | null = null;
+  private _midTurnPersisted: boolean | null = null;
 
   async setEchoExecuteMode(
-    mode: "default" | "async-iterable" | "sync-iterable"
+    mode: "default" | "async-iterable" | "sync-iterable" | "add-messages"
   ): Promise<void> {
     this._echoExecuteMode = mode;
+  }
+
+  async getMidTurnAddProbe(): Promise<{
+    insideLoop: boolean | null;
+    persisted: boolean | null;
+  }> {
+    return {
+      insideLoop: this._midTurnInsideLoop,
+      persisted: this._midTurnPersisted
+    };
   }
 
   async stopAfterEchoToolCall(): Promise<void> {

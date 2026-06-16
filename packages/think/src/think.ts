@@ -910,6 +910,36 @@ export interface ChatOptions {
   onClientToolCall?: ClientToolExecutor;
 }
 
+/** Options for {@link Think.addMessages}. */
+export interface AddMessagesOptions {
+  /**
+   * Parent to attach the first message under. Omitted (`undefined`) attaches to
+   * the latest committed leaf at call time; `null` attaches at the root. An
+   * explicit id that does not exist throws (fail fast rather than silently
+   * misattaching). Subsequent messages in an array chain under the previous one.
+   */
+  parentId?: string | null;
+  /**
+   * `"append"` (default) inserts new rows, idempotent by message id.
+   * `"upsert"` inserts, or updates in place when the id already exists (in which
+   * case `parentId` is ignored — re-parenting is not supported).
+   *
+   * Idempotency is by id against the whole session tree, not just the target
+   * path: if a message id already exists *anywhere* in history, `"append"` is a
+   * no-op for it (no new row, no re-parent) and `"upsert"` updates it in place
+   * wherever it lives. In both modes the next message in the array chains under
+   * that existing id, so passing already-present ids mid-array threads new
+   * messages onto the existing branch rather than forking a new one.
+   */
+  mode?: "append" | "upsert";
+  /**
+   * Broadcast the change to connected clients. Default `true`. Has no effect
+   * when called from inside an active turn (e.g. a tool `execute`), where the
+   * live view is intentionally not touched until the next turn's sync.
+   */
+  broadcast?: boolean;
+}
+
 type AgentToolChildRunStatus =
   | "starting"
   | "running"
@@ -6921,6 +6951,88 @@ export class Think<
   ): Promise<SaveMessagesResult> {
     const requestId = crypto.randomUUID();
     return this._runProgrammaticMessagesTurn(requestId, messages, options);
+  }
+
+  /**
+   * Add messages to history WITHOUT starting a model turn.
+   *
+   * Distinct from {@link Think.saveMessages} (which runs a turn) and from
+   * AIChatAgent's `persistMessages()` (which replaces/reconciles a flat array):
+   * `addMessages` appends or upserts into the Session tree and never enqueues a
+   * turn. Because it bypasses the turn queue, it never deadlocks — including
+   * when called from inside a tool `execute` during an active turn.
+   *
+   * Array entries are appended **linearly**: the first attaches under the
+   * resolved parent (the latest committed leaf by default, or `parentId`), and
+   * each subsequent message attaches under the previous one, so imported history
+   * stays a single path rather than a fan-out of siblings. Appends are
+   * idempotent by message id; pass `{ mode: "upsert" }` to update an existing
+   * message in place instead (upsert never re-parents). Any role may be written;
+   * an `assistant` message added this way is inert transcript data (it does not
+   * mark a completed turn or trigger auto-continuation).
+   *
+   * The live message cache stays coherent automatically (the Session keeps it
+   * in sync on every write, branches included). Broadcast behaviour depends on
+   * whether a turn is running:
+   *
+   * - **Out of a turn** (the supported pattern — "add context, then run a
+   *   turn"): the new messages are broadcast to connected clients immediately
+   *   (unless `broadcast: false`).
+   * - **Inside a turn** (e.g. from a tool `execute`): no broadcast is sent, so a
+   *   full snapshot can't clobber the in-progress streamed message; the injected
+   *   messages ride along on the turn's next broadcast. The write is still
+   *   durable and visible to the running turn's next sync.
+   */
+  async addMessages(
+    messages:
+      | UIMessage[]
+      | ((currentMessages: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>),
+    options?: AddMessagesOptions
+  ): Promise<void> {
+    const resolved =
+      typeof messages === "function" ? await messages(this.messages) : messages;
+    if (resolved.length === 0) return;
+
+    const mode = options?.mode ?? "append";
+
+    // Validate an explicit parentId up front. The Session provider silently
+    // falls back to the root for an unknown parent; fail fast instead so a
+    // typo'd id surfaces as an error rather than a misattached message.
+    if (typeof options?.parentId === "string") {
+      const parent = await this.session.getMessage(options.parentId);
+      if (!parent) {
+        throw new Error(
+          `addMessages: parentId "${options.parentId}" does not exist in this session`
+        );
+      }
+    }
+
+    let parentId = options?.parentId;
+    for (const message of resolved) {
+      const existing = await this.session.getMessage(message.id);
+      if (existing) {
+        // Append mode is idempotent by id (existing id → no-op); upsert updates
+        // the content in place. Neither path re-parents an existing message.
+        if (mode === "upsert") await this._updateMessageInHistory(message);
+        parentId = message.id;
+      } else {
+        const stored = await this._appendMessageToHistory(message, parentId);
+        parentId = stored.id;
+      }
+    }
+
+    // The live cache is kept coherent automatically by the Session change
+    // listener wired in `onStart` (`internal_onMessagesChanged`), which handles
+    // both linear appends and branches (an explicit `parentId` triggers a full
+    // resync). So `addMessages` only owns the broadcast — and suppresses it
+    // mid-turn: pushing a full `MSG_CHAT_MESSAGES` snapshot while a turn streams
+    // would clobber the in-progress assistant message on connected clients (the
+    // same reason the streaming path defers its snapshot). The injected messages
+    // ride along on the turn's next broadcast.
+    if (this._insideInferenceLoop) return;
+    if (options?.broadcast !== false) {
+      this._broadcastMessages();
+    }
   }
 
   private async _runProgrammaticMessagesTurn(
