@@ -1,5 +1,11 @@
 # @cloudflare/codemode
 
+## 0.4.1
+
+### Patch Changes
+
+- [#1760](https://github.com/cloudflare/agents/pull/1760) [`6769830`](https://github.com/cloudflare/agents/commit/676983019be59cc96e2faaca6f1551a0cb3caa08) Thanks [@cjol](https://github.com/cjol)! - Fix the runtime tool description to say "Execute JavaScript" instead of "Execute TypeScript". The codemode sandbox executes JavaScript only; TypeScript types are generated for LLM context but are not executed.
+
 ## 0.4.0
 
 ### Minor Changes

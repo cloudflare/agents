@@ -1,5 +1,44 @@
 # @cloudflare/think
 
+## 0.9.1
+
+### Patch Changes
+
+- [#1754](https://github.com/cloudflare/agents/pull/1754) [`151d457`](https://github.com/cloudflare/agents/commit/151d457d320fccc9852fccbf168edfc54d72d9a3) Thanks [@threepointone](https://github.com/threepointone)! - Add Browser Run Quick Actions to the browser tools: stateless, one-shot
+  browsing that needs only the `browser` binding — no Durable Object, loader, or
+  sandbox. New primitives in `agents/browser` (`browserMarkdown`,
+  `browserExtract`, `browserLinks`, `browserScrape`, `browserContent`,
+  `browserSnapshot`, `browserScreenshot`, `browserPdf`, plus `runQuickAction`)
+  wrap the `quickAction()` binding and unwrap its `{ success, result }` envelope.
+  A new `createQuickActionTools({ browser })` (from `agents/browser/ai`) returns
+  AI SDK tools (`browser_markdown`, `browser_extract`, `browser_links`,
+  `browser_scrape`, opt-in `browser_content`) so an agent can read a page as
+  Markdown, extract structured data with AI, or list/scrape elements in a single
+  call. Every result is bounded to `maxChars` (text truncated, oversized
+  arrays/objects summarized) to protect the context window, and host-only request
+  options (`cookies`, `authenticate`, `gotoOptions`, `viewport`, …) can be passed
+  once via `options` for authenticated or JavaScript-heavy pages without exposing
+  them to the model. `createBrowserTools`/`createBrowserRuntime` now expose these tools alongside the
+  durable `browser_execute` tool **by default** whenever a `browser` binding is
+  present (pass `quickActions: false` to opt out), and they resolve `ctx` from the
+  current Agent via `getCurrentAgent()` so `ctx` no longer has to be passed
+  explicitly from inside an Agent. Result bounding is shape-stable — arrays stay
+  arrays (trimmed), so the model sees a consistent type, except when even the
+  first element overflows the budget, where the result degrades to the
+  truncated-preview summary rather than a misleading empty array.
+  `runQuickAction`'s `params` are now typed per action. `@cloudflare/think/tools/browser` re-exports
+  `createQuickActionTools` and the Quick Action primitives/types so a Think agent
+  can expose them from `getTools()` with a single import. Quick Actions require a
+  Worker `compatibility_date` of `2026-03-24`+ and `remote: true` on the browser
+  binding for local `wrangler dev`.
+
+- [#1754](https://github.com/cloudflare/agents/pull/1754) [`151d457`](https://github.com/cloudflare/agents/commit/151d457d320fccc9852fccbf168edfc54d72d9a3) Thanks [@threepointone](https://github.com/threepointone)! - Align the streamed assistant message id with the persisted id during chat streaming. Providers that emit no `start.messageId` (e.g. Workers AI) previously left the client to generate its own id, so the live stream and the persisted message broadcast couldn't reconcile by id and the originating tab briefly rendered the turn twice before collapsing. The `start` chunk is now stamped with the allocated assistant id for new turns (continuations are unaffected). Mirrors the same fix in `@cloudflare/ai-chat`.
+
+- [#1754](https://github.com/cloudflare/agents/pull/1754) [`151d457`](https://github.com/cloudflare/agents/commit/151d457d320fccc9852fccbf168edfc54d72d9a3) Thanks [@threepointone](https://github.com/threepointone)! - Bump the default `compatibility_date` used when generating a Think app's Worker
+  config (`createThinkWorkerConfig`) from `2026-01-28` to `2026-06-11`. Apps that
+  set `compatibility_date` in their own `wrangler.jsonc` are unaffected; this only
+  changes the fallback used when none is specified.
+
 ## 0.9.0
 
 ### Minor Changes

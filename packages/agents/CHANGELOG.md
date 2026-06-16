@@ -1,5 +1,86 @@
 # @cloudflare/agents
 
+## 0.16.1
+
+### Patch Changes
+
+- [#1757](https://github.com/cloudflare/agents/pull/1757) [`92a5ba1`](https://github.com/cloudflare/agents/commit/92a5ba1798ce12047e1e6221968d44bd5ae30d6e) Thanks [@threepointone](https://github.com/threepointone)! - Bump the `partyserver` dependency to `^0.5.8`, which base64-encodes the
+  `x-partykit-props` header so props containing non-ASCII characters (e.g.
+  accented names) no longer trigger workerd's "header value contains non-ASCII
+  characters" warning (which throws a `TypeError` in browser fetch
+  implementations). The header is decoded back to the original Unicode payload on
+  the server, and raw-JSON values from older callers are still accepted for
+  backwards compatibility.
+
+- [#1754](https://github.com/cloudflare/agents/pull/1754) [`151d457`](https://github.com/cloudflare/agents/commit/151d457d320fccc9852fccbf168edfc54d72d9a3) Thanks [@threepointone](https://github.com/threepointone)! - Pin accepted WebSocket connections to `binaryType = "arraybuffer"`. On Worker
+  `compatibility_date`s `>= 2026-03-17` the runtime defaults a server WebSocket's
+  `binaryType` to `"blob"` (the `websocket_standard_binary_type` flag), so binary
+  frames arrive as `Blob` instead of `ArrayBuffer`. The Agent protocol and every
+  downstream consumer (e.g. `@cloudflare/voice` audio frames, user `onMessage`
+  handlers that check `message instanceof ArrayBuffer`) have always relied on
+  `ArrayBuffer`. The Agent now sets `connection.binaryType = "arraybuffer"` when a
+  connection is established, restoring the historical contract regardless of
+  compatibility date without requiring the `no_websocket_standard_binary_type`
+  flag. (The hibernatable `webSocketMessage` handler always delivers
+  `ArrayBuffer`, so this only affects non-hibernating agents.)
+
+  Also bumps the `partyserver` dependency to `^0.5.7`, which pins `binaryType` at
+  the connection layer (`accept()`), accepts non-hibernating connections in
+  half-open mode, and suppresses retryable transport-teardown errors on
+  already-closing/closed connections. With partyserver now pinning `binaryType`
+  itself, the Agent's own pin becomes defense-in-depth (kept for older partyserver
+  versions and custom connections) and runs once per connection per isolate
+  lifetime instead of on every state access.
+
+- [#1754](https://github.com/cloudflare/agents/pull/1754) [`151d457`](https://github.com/cloudflare/agents/commit/151d457d320fccc9852fccbf168edfc54d72d9a3) Thanks [@threepointone](https://github.com/threepointone)! - Add Browser Run Live View support to the browser tools. The `cdp` connector
+  gains a `getLiveViewUrl({ targetId?, mode? })` tool that returns a link a human
+  can open to watch and control a session in real time — the building block for
+  human-in-the-loop handoffs (login, MFA, CAPTCHA, sensitive input), paired with
+  the runtime's durable approval pause. `BrowserConnector` also exposes a
+  host-side `liveView()` helper for surfacing the shared session's Live View URLs
+  in your own UI; each `BrowserLiveViewTarget` includes the tab's current
+  `pageUrl` so you can label tabs and filter out blank/internal pages. New
+  `LiveViewMode`, `BrowserLiveView`, `BrowserLiveViewTarget`, and
+  `BrowserLiveViewUrl` types are exported from `agents/browser`.
+
+- [#1754](https://github.com/cloudflare/agents/pull/1754) [`151d457`](https://github.com/cloudflare/agents/commit/151d457d320fccc9852fccbf168edfc54d72d9a3) Thanks [@threepointone](https://github.com/threepointone)! - Add Browser Run Quick Actions to the browser tools: stateless, one-shot
+  browsing that needs only the `browser` binding — no Durable Object, loader, or
+  sandbox. New primitives in `agents/browser` (`browserMarkdown`,
+  `browserExtract`, `browserLinks`, `browserScrape`, `browserContent`,
+  `browserSnapshot`, `browserScreenshot`, `browserPdf`, plus `runQuickAction`)
+  wrap the `quickAction()` binding and unwrap its `{ success, result }` envelope.
+  A new `createQuickActionTools({ browser })` (from `agents/browser/ai`) returns
+  AI SDK tools (`browser_markdown`, `browser_extract`, `browser_links`,
+  `browser_scrape`, opt-in `browser_content`) so an agent can read a page as
+  Markdown, extract structured data with AI, or list/scrape elements in a single
+  call. Every result is bounded to `maxChars` (text truncated, oversized
+  arrays/objects summarized) to protect the context window, and host-only request
+  options (`cookies`, `authenticate`, `gotoOptions`, `viewport`, …) can be passed
+  once via `options` for authenticated or JavaScript-heavy pages without exposing
+  them to the model. `createBrowserTools`/`createBrowserRuntime` now expose these tools alongside the
+  durable `browser_execute` tool **by default** whenever a `browser` binding is
+  present (pass `quickActions: false` to opt out), and they resolve `ctx` from the
+  current Agent via `getCurrentAgent()` so `ctx` no longer has to be passed
+  explicitly from inside an Agent. Result bounding is shape-stable — arrays stay
+  arrays (trimmed), so the model sees a consistent type, except when even the
+  first element overflows the budget, where the result degrades to the
+  truncated-preview summary rather than a misleading empty array.
+  `runQuickAction`'s `params` are now typed per action. `@cloudflare/think/tools/browser` re-exports
+  `createQuickActionTools` and the Quick Action primitives/types so a Think agent
+  can expose them from `getTools()` with a single import. Quick Actions require a
+  Worker `compatibility_date` of `2026-03-24`+ and `remote: true` on the browser
+  binding for local `wrangler dev`.
+
+- [#1754](https://github.com/cloudflare/agents/pull/1754) [`151d457`](https://github.com/cloudflare/agents/commit/151d457d320fccc9852fccbf168edfc54d72d9a3) Thanks [@threepointone](https://github.com/threepointone)! - Add Browser Run session recording to the browser tools. Set `recording: true`
+  on the connector's `session` option (or `ConnectBrowserOptions`/
+  `createBrowserSession`) to opt a session into an rrweb capture of everything
+  the agent did in the browser — DOM changes, input, and navigation — finalized
+  when the session closes. Pairs with Live View: watch a session live, then
+  review the recording afterward for audit or debugging. A new
+  `getBrowserRecording({ accountId, apiToken, sessionId })` helper fetches a
+  finished recording via the Browser Rendering REST API, returning per-tab rrweb
+  event arrays (`BrowserRecording`) ready for `rrweb-player`.
+
 ## 0.16.0
 
 ### Minor Changes

@@ -1,5 +1,19 @@
 # @cloudflare/ai-chat
 
+## 0.8.6
+
+### Patch Changes
+
+- [#1754](https://github.com/cloudflare/agents/pull/1754) [`151d457`](https://github.com/cloudflare/agents/commit/151d457d320fccc9852fccbf168edfc54d72d9a3) Thanks [@threepointone](https://github.com/threepointone)! - Fix transient duplicate assistant messages in the chat UI when the model
+  provider does not emit a `start.messageId` (e.g. Workers AI). The agent now
+  stamps the assistant message id it persists under onto the new-turn `start`
+  chunk it streams to clients, so the live-streamed message and the persisted
+  `CF_AGENT_CHAT_MESSAGES` broadcast share an id and reconcile cleanly instead of
+  briefly rendering the turn twice before collapsing. Continuation turns still
+  strip `start.messageId` so they append to the existing assistant message.
+
+- [#1754](https://github.com/cloudflare/agents/pull/1754) [`151d457`](https://github.com/cloudflare/agents/commit/151d457d320fccc9852fccbf168edfc54d72d9a3) Thanks [@threepointone](https://github.com/threepointone)! - Stop a mid-stream full-message-list broadcast (`CF_AGENT_CHAT_MESSAGES`) from briefly clobbering the live-streamed assistant. On the originating tab, streaming protection was only armed at send time — before the turn's assistant message exists — so it latched the previous turn's id (or nothing on the first turn); it is now re-armed to the real assistant id the moment the `start` chunk reports it. Cross-tab observers, which build the in-flight assistant via the broadcast accumulator rather than the local transport, now re-apply that accumulator over an incoming snapshot too. Either way the active turn's parts (e.g. tool cards) no longer disappear and reappear when the server re-broadcasts a behind-the-stream snapshot mid-turn (most visible with agents like Think that broadcast after every tool result).
+
 ## 0.8.5
 
 ### Patch Changes
