@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "think-webhook-agent-starter",
+  "main": "virtual:think/entry",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI" },
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*", "/messengers/*", "/__think/*", "/webhook"]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "ThinkAgent_Inbox", "name": "ThinkAgent_Inbox" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ThinkAgent_Inbox"] }]
+}

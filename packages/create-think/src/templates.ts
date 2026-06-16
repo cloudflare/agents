@@ -23,6 +23,16 @@ export const THINK_TEMPLATES = [
   {
     name: "customer-support",
     description: "Support agent with custom tools and an escalation skill."
+  },
+  {
+    name: "webhook-agent",
+    description:
+      "Agent fed by inbound webhooks via durable, idempotent submissions."
+  },
+  {
+    name: "business-workflow",
+    description:
+      "Operations agent with human-in-the-loop approval gates and a scheduled digest."
   }
 ] as const;
 
