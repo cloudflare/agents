@@ -26,7 +26,7 @@
     "react-router-dom": "^7.17.0",
     "shiki": "^4.2.0",
     "streamdown": "^2.5.0",
-    "workers-ai-provider": "^3.1.14",
+    "workers-ai-provider": "^3.2.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

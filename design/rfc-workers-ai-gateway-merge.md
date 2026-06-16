@@ -43,13 +43,13 @@ Three findings from the `gateway-resume` harness force the design:
 
 Meanwhile the two providers are architecturally opposite:
 
-| | `workers-ai-provider` | `ai-gateway-provider` (PR #409) |
-| --- | --- | --- |
-| Shape | Native `LanguageModelV3` | Decorator over another provider |
-| Wire protocol | `binding.run(model, inputs)` (Workers AI) | Captures inner provider's `fetch`, re-routes through gateway |
-| Parsing | Its own (`streaming.ts`, finish/usage mappers) | **Delegates to the wrapped `@ai-sdk/*` provider** |
-| `cf-aig-run-id` | Never captured (no `returnRawResponse`) | Response is raw; capturable |
-| Unified billing / BYOK | n/a | Strips provider auth headers |
+|                        | `workers-ai-provider`                          | `ai-gateway-provider` (PR #409)                              |
+| ---------------------- | ---------------------------------------------- | ------------------------------------------------------------ |
+| Shape                  | Native `LanguageModelV3`                       | Decorator over another provider                              |
+| Wire protocol          | `binding.run(model, inputs)` (Workers AI)      | Captures inner provider's `fetch`, re-routes through gateway |
+| Parsing                | Its own (`streaming.ts`, finish/usage mappers) | **Delegates to the wrapped `@ai-sdk/*` provider**            |
+| `cf-aig-run-id`        | Never captured (no `returnRawResponse`)        | Response is raw; capturable                                  |
+| Unified billing / BYOK | n/a                                            | Strips provider auth headers                                 |
 
 The decorator approach (PR #409) is exactly right for catalog models: by feeding
 the gateway response back into the real provider's own `fetch`
@@ -90,7 +90,7 @@ provider parses it, and lift `cf-aig-*` headers off the response:
   the slug is known, so no URL→provider mapping is needed. Resume-bearing.
 - **Gateway-path dispatch (capture/redispatch, #409's mechanism).** Hijack
   `config.fetch`, let `doStream` build the request, capture `{url, headers,
-  body}` (sentinel-throw to stop before the network), reshape into
+body}` (sentinel-throw to stop before the network), reshape into
   `{ provider, endpoint, headers, query }`, dispatch **one**
   `env.AI.gateway(id).run([…])` (array of N for server-side fallback), then feed
   back. Carries the full `cf-aig-*` surface + `cf-aig-step`, but **no resume**.
@@ -113,20 +113,20 @@ requested options (intersection); selection rules:
 
 Capability matrix (verified 2026-06-14; **update as parity lands**):
 
-| Option / feature | Run path | Gateway path |
-| --- | --- | --- |
-| `resume` (default on) | ✅ | ❌ |
-| `fallback: "server"` (`cf-aig-step`) | ❌ | ✅ |
-| `cacheTtl` / `skipCache` / `cacheKey` | ❌ | ✅ |
-| `collectLog` (`cf-aig-log-id`) | ❌ | ✅ |
-| `retries` / `requestTimeoutMs` | ❌ (verify) | ✅ |
-| `zdr` / `byokAlias` | ❌ (verify) | ✅ |
-| `metadata` / `eventId` | ✅ (header) | ✅ |
-| `byok` / unified billing | ✅ | ✅ |
-| `fallback: "client"` | ✅ | n/a (§4) |
+| Option / feature                      | Run path    | Gateway path |
+| ------------------------------------- | ----------- | ------------ |
+| `resume` (default on)                 | ✅          | ❌           |
+| `fallback: "server"` (`cf-aig-step`)  | ❌          | ✅           |
+| `cacheTtl` / `skipCache` / `cacheKey` | ❌          | ✅           |
+| `collectLog` (`cf-aig-log-id`)        | ❌          | ✅           |
+| `retries` / `requestTimeoutMs`        | ❌ (verify) | ✅           |
+| `zdr` / `byokAlias`                   | ❌ (verify) | ✅           |
+| `metadata` / `eventId`                | ✅ (header) | ✅           |
+| `byok` / unified billing              | ✅          | ✅           |
+| `fallback: "client"`                  | ✅          | n/a (§4)     |
 
 **Primary risk — request-side passthrough (run path): RESOLVED ✅.** The harness
-now feeds the *exact* body a real `@ai-sdk/*` provider emits through
+now feeds the _exact_ body a real `@ai-sdk/*` provider emits through
 `env.AI.run(slug, body, { returnRawResponse })` and lets the same provider parse
 the response (`experimental/gateway-resume/src/passthrough.ts`, `/passthrough`).
 Verified live on this account:
@@ -139,7 +139,7 @@ Verified live on this account:
   anthropic-native usage (`cache_creation`, `service_tier`, `inference_geo`)
   normalized. A 200 here also settles **Risk #2** (`anthropic-version` survives
   the run path) — the API would reject the request otherwise.
-- **`cf-aig-run-id` (Risk #3)** — surfaced identically via our fetch *and*
+- **`cf-aig-run-id` (Risk #3)** — surfaced identically via our fetch _and_
   `result.response.headers["cf-aig-run-id"]` on every call, so the delegate can
   capture it from the parsed result without a side channel.
 - Dropping the redundant `model` field works (slug supplies it), and keeping it
@@ -151,7 +151,7 @@ round-trip is already proven by #409's 124 tests. **Use `openai.chat()`, not the
 bare `openai()` factory** — AI SDK v6 defaults the latter to the Responses API
 (§10a), which the run catalog does not serve.
 
-**Footguns** (harness + #409): call `binding.run`/`gateway().run` as *methods*
+**Footguns** (harness + #409): call `binding.run`/`gateway().run` as _methods_
 (don't detach `this` — this bit us); forward `init.signal`; restore `config.fetch`
 in `finally` (gateway mode); confirm `returnRawResponse` parity in
 REST/credentials mode; non-auth headers (Anthropic `anthropic-version`) must
@@ -258,14 +258,14 @@ test — but it turns out to need **no new machinery**. It is **not on Cloudflar
 unified-billing run catalog** (verified 2026-06-14: the run API + unified billing
 covers only OpenAI, Anthropic, Google AI Studio, Google Vertex AI, xAI, Groq), so
 it cannot ride the resume-bearing run path. It is, however, a **provider-native
-gateway endpoint** (`/{account}/{gateway}/openrouter`), reached via the *same*
+gateway endpoint** (`/{account}/{gateway}/openrouter`), reached via the _same_
 `env.AI.gateway(id).run([{ provider: "openrouter", … }])` binding as every catalog
 model. A `workers-ai-provider/openrouter` wrapper (peer-deps
 `@openrouter/ai-sdk-provider`) is therefore just another gateway-path wrapper:
 
 - **The "gateway OpenRouter provider" and "wrap the `@ai-sdk` provider" are the
   same thing, not a choice.** The gateway's OpenRouter integration is a
-  *passthrough endpoint* that preserves OpenRouter's (OpenAI-compatible) schema
+  _passthrough endpoint_ that preserves OpenRouter's (OpenAI-compatible) schema
   and adds `cf-aig-*`; you still need the SDK provider to build/parse. So we wrap
   `@openrouter/ai-sdk-provider` **and** route its fetch through the gateway —
   exactly what `tanstack-ai`'s `adapters/openrouter.ts` and #409's
@@ -280,8 +280,8 @@ model. A `workers-ai-provider/openrouter` wrapper (peer-deps
 - **Gateway-only column, automatically** (§2): `cf-aig-run-id` is unavailable, so
   **resume is off** (warned) — no special-casing, the matrix handles it.
 - **Nested routing.** OpenRouter does its own provider fallback internally; our
-  `wai.fallback([...])` composes *on top*. Guidance: let OpenRouter handle
-  within-model provider selection, use our fallback for cross-*model* fallback,
+  `wai.fallback([...])` composes _on top_. Guidance: let OpenRouter handle
+  within-model provider selection, use our fallback for cross-_model_ fallback,
   and surface both layers' attempts in the error taxonomy (§8) so "which layer
   retried" stays debuggable.
 - **Three-segment slugs** — `openrouter/anthropic/claude-sonnet-4.5`: resolver =
@@ -334,6 +334,7 @@ Native `@cf/*` (§5) attaches it to stream/result metadata directly.
 
 > **Status: BUILT + VALIDATED.** Tier-1 (gateway resume) ships in
 > `workers-ai-provider` as `createResumableStream`, in two modes:
+>
 > - **In-stream wrap** (default, run-path `fetch`): a transient mid-stream drop
 >   reconnects transparently. Harness `/resume-stream`: clean run → 0 reconnects;
 >   injected drop (early/late, openai + anthropic native SSE) → 1 reconnect,
@@ -366,8 +367,8 @@ Native `@cf/*` (§5) attaches it to stream/result metadata directly.
 Capturing the run-id is step one. Replay needs two format-agnostic pieces:
 
 1. **Event counting + boundary buffering (the correctness core).** `from` is an
-   **SSE event index** (`\n\n` count), per the harness — counted at the *byte
-   layer*, not the parsed-part layer (one provider part may span several SSE
+   **SSE event index** (`\n\n` count), per the harness — counted at the _byte
+   layer_, not the parsed-part layer (one provider part may span several SSE
    events). The wrapper emits only **complete** events downstream and buffers any
    trailing partial event. On a drop the buffered partial is **discarded** and
    resume starts from the count of complete events already emitted — landing
@@ -375,21 +376,22 @@ Capturing the run-id is step one. Replay needs two format-agnostic pieces:
    (A naive byte-offset or part counter would misalign here; verified by the
    "discards a partial event and realigns" unit test.)
 2. **Replay re-parse.** On reconnect, the same wrapped stream continues feeding the
-   *same* `@ai-sdk/*` parser bytes from the resume-endpoint Response
+   _same_ `@ai-sdk/*` parser bytes from the resume-endpoint Response
    (`/run/{runId}/resume?from={n}`) — the consumer never sees the break, so no
    model rebuild is needed for in-stream recovery. (Cross-invocation re-attach
    after DO eviction seeds `createResumableStream` with a persisted run-id +
    event offset instead of an initial body.)
 
 **Expiry is a real regression vs the old design and must be handled.** The
-DO-based `inference-buffer` *owned* the buffer, so it never expired mid-recovery.
+DO-based `inference-buffer` _owned_ the buffer, so it never expired mid-recovery.
 The **native gateway buffer TTL is ≈330–360s (~5.5 min)** (harness sweep: alive at
 t+330s, gone by t+360s) — that is the window a DO has to re-attach after eviction
 before a byte-exact resume is impossible. The expiry signal is **unambiguous**: `resume`
 returns **`404` `{"error":"Request not found"}`** once the buffer is gone (vs `200`
-+ 0 bytes for an in-range-but-past-end `from`, vs `500` `AiGatewayError` 2002 for a
-malformed id). The delegate branches the recovery ladder on that `404`. Tiered
-recovery:
+
+- 0 bytes for an in-range-but-past-end `from`, vs `500` `AiGatewayError` 2002 for a
+  malformed id). The delegate branches the recovery ladder on that `404`. Tiered
+  recovery:
 
 1. **Gateway resume** from the event index (fast, byte-exact) — the happy path,
    valid for ≈5 min after the run.
@@ -408,7 +410,7 @@ recovery:
      most durable backstop. Future, gated on §10a delegation.
    - Otherwise a **cold regenerate** (retry).
 3. **Policy hook `onResumeExpired`** → `"continue" | "regenerate" | "accept-partial"
-   | "error"` so apps choose cost/consistency trade-offs (cold regeneration spends
+| "error"` so apps choose cost/consistency trade-offs (cold regeneration spends
    tokens and may diverge from the lost tail; user-message continuation (§10c) is
    cheaper and works on all providers, but is semantic, not byte-exact).
 
@@ -417,74 +419,74 @@ recovery:
 A single typed error hierarchy classified by recoverability, surfaced uniformly
 across native, delegated, fallback, and resume paths:
 
-| Surface | Shape | Class |
-| --- | --- | --- |
-| Run dispatch (`{ success:false, errors:[{code}] }`): gateway missing, unauthorized, model-not-found, 402 billing | Cloudflare envelope → typed `WorkersAIGatewayError` **before** the provider parser sees it | **unrecoverable** |
-| 429 capacity / 5xx | Cloudflare envelope | **retryable** (bounded client-side, then surface) |
-| Provider request error (e.g. OpenAI 400) | provider-native → `@ai-sdk` throws `APICallError` | **unrecoverable** |
-| Mid-stream connection drop, valid run-id + live buffer | — | **recoverable** → resume (§7.1) |
-| Resume expired / buffer miss | resume endpoint error | **degraded-recoverable** → §7 tiered recovery |
-| Fallback exhausted (all models/steps failed) | `WorkersAIFallbackError` carrying the **attempt tree** (§8a) | **unrecoverable** |
-| Abort (`AbortSignal`) | — | **never auto-recover**; propagate |
+| Surface                                                                                                          | Shape                                                                                      | Class                                             |
+| ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------- |
+| Run dispatch (`{ success:false, errors:[{code}] }`): gateway missing, unauthorized, model-not-found, 402 billing | Cloudflare envelope → typed `WorkersAIGatewayError` **before** the provider parser sees it | **unrecoverable**                                 |
+| 429 capacity / 5xx                                                                                               | Cloudflare envelope                                                                        | **retryable** (bounded client-side, then surface) |
+| Provider request error (e.g. OpenAI 400)                                                                         | provider-native → `@ai-sdk` throws `APICallError`                                          | **unrecoverable**                                 |
+| Mid-stream connection drop, valid run-id + live buffer                                                           | —                                                                                          | **recoverable** → resume (§7.1)                   |
+| Resume expired / buffer miss                                                                                     | resume endpoint error                                                                      | **degraded-recoverable** → §7 tiered recovery     |
+| Fallback exhausted (all models/steps failed)                                                                     | `WorkersAIFallbackError` carrying the **attempt tree** (§8a)                               | **unrecoverable**                                 |
+| Abort (`AbortSignal`)                                                                                            | —                                                                                          | **never auto-recover**; propagate                 |
 
 Errors carry `recoverability`, the Cloudflare `code` (when present), and the
 underlying provider error. The Cloudflare-envelope-vs-provider-shape distinction
-is critical: the envelope must be detected and translated *before* the response
+is critical: the envelope must be detected and translated _before_ the response
 is fed to the `@ai-sdk` parser, or it mis-parses as a malformed completion.
 
 #### 8a. Nested fallback: the attempt tree
 
 There can be **up to three independent fallback layers** stacked on one logical
-call, and the #1 debugging question is *"which layer retried?"*. We answer it with
+call, and the #1 debugging question is _"which layer retried?"_. We answer it with
 a single **attempt tree** carried on the error, not a flat list:
 
 1. **Client-side fallback** (ours, §4 `mode:"client"`) — we loop over models; full
    visibility, we drive it.
 2. **Gateway server-side step** (§4 `mode:"server"`, `cf-aig-step`) — the gateway
-   picks among an array in one request; only the *winning* step index is on the
+   picks among an array in one request; only the _winning_ step index is on the
    response header, per-step failures live in the gateway log (`cf-aig-log-id`).
 3. **Routing-layer internal** (OpenRouter, §3b) — the provider re-routes among its
-   own upstreams; only the *serving* upstream (`provider` field) is reliably
+   own upstreams; only the _serving_ upstream (`provider` field) is reliably
    surfaced, discarded sub-attempts only if it includes them in error metadata.
 
 Typed shape (sketch):
 
 ```ts
 type Recoverability =
-  | "recoverable"           // mid-stream drop, valid run-id + live buffer → resume
-  | "degraded-recoverable"  // resume expired → regenerate / accept-partial (§7)
-  | "retryable"             // 429 / 5xx, bounded retry then surface
+  | "recoverable" // mid-stream drop, valid run-id + live buffer → resume
+  | "degraded-recoverable" // resume expired → regenerate / accept-partial (§7)
+  | "retryable" // 429 / 5xx, bounded retry then surface
   | "unrecoverable"
   | "aborted";
 
 type AttemptLayer = "client-fallback" | "gateway-step" | "provider-internal";
 
 interface Attempt {
-  model: string;          // slug as requested, e.g. "openrouter/anthropic/claude-…"
+  model: string; // slug as requested, e.g. "openrouter/anthropic/claude-…"
   layer: AttemptLayer;
   transport: "run" | "gateway";
-  index: number;          // position within its layer
+  index: number; // position within its layer
   startedAt: number;
-  runId?: string;         // cf-aig-run-id (run path only)
-  resumable: boolean;     // had a live run-id when it failed
-  cfStep?: number;        // cf-aig-step (gateway-step layer)
-  cfLogId?: string;       // cf-aig-log-id → where to find per-step detail
-  servedBy?: string;      // routing-layer's chosen upstream (OpenRouter `provider`)
+  runId?: string; // cf-aig-run-id (run path only)
+  resumable: boolean; // had a live run-id when it failed
+  cfStep?: number; // cf-aig-step (gateway-step layer)
+  cfLogId?: string; // cf-aig-log-id → where to find per-step detail
+  servedBy?: string; // routing-layer's chosen upstream (OpenRouter `provider`)
   error?: WorkersAIError; // why it failed; absent if this attempt succeeded
-  children?: Attempt[];   // nested attempts from a deeper layer (best-effort)
+  children?: Attempt[]; // nested attempts from a deeper layer (best-effort)
 }
 
 class WorkersAIError extends Error {
   recoverability: Recoverability;
   source: "cloudflare" | "provider" | "transport" | "client";
-  cfCode?: number;        // Cloudflare envelope error code
-  status?: number;        // HTTP status
-  cause?: unknown;        // underlying @ai-sdk APICallError, etc.
+  cfCode?: number; // Cloudflare envelope error code
+  status?: number; // HTTP status
+  cause?: unknown; // underlying @ai-sdk APICallError, etc.
 }
 
 class WorkersAIFallbackError extends WorkersAIError {
-  attempts: Attempt[];    // the full tree, in attempt order
-  summary(): string;      // flattened, human-readable post-mortem
+  attempts: Attempt[]; // the full tree, in attempt order
+  summary(): string; // flattened, human-readable post-mortem
 }
 ```
 
@@ -525,11 +527,11 @@ capability to the second rather than replacing anything.
   `ResumableStream`): buffers serialized `UIMessageChunk`s in SQLite and replays
   them over WebSocket when a client reconnects. Always on. Fully handles "client
   refreshed / dropped, DO still alive" — **gateway resume is not needed here**.
-- **Layer B — DO ↔ upstream LLM** (*does not exist today*): on **DO eviction
+- **Layer B — DO ↔ upstream LLM** (_does not exist today_): on **DO eviction
   mid-turn**, the `chatRecovery` fiber survives and `onChatRecovery` defaults to
   `continueLastTurn()` — a **fresh model call** that re-spends tokens and
   regenerates. This is exactly where gateway `cf-aig-run-id` resume belongs:
-  re-attach to the *same* upstream run and replay the exact tail.
+  re-attach to the _same_ upstream run and replay the exact tail.
 
 Plug-in path (every hook already exists in `packages/ai-chat` /
 `packages/think`; the resume primitive is now **built** — see §7.1 status):
@@ -546,7 +548,7 @@ Plug-in path (every hook already exists in `packages/ai-chat` /
 3. **On recovery** (`_handleInternalFiberRecovery` → `onChatRecovery`,
    `ctx.recoveryData` carries the stashed `{ aigRunId, eventOffset }`): build the
    re-attach stream with `createResumableStream({ binding, gateway, runId,
-   fromEvent: 0 })` (**no `initial` body**), feed it through the same `@ai-sdk`
+fromEvent: 0 })` (**no `initial` body**), feed it through the same `@ai-sdk`
    model → `UIMessageChunk`s → the existing `_reply` / Think stream loop. Because
    the run is detached (§7.1), `fromEvent: 0` replays the **complete** run; the
    framework's `continueLastTurn` **replaces** the partial leaf with that replay,
@@ -557,7 +559,7 @@ Plug-in path (every hook already exists in `packages/ai-chat` /
    `onResumeExpired` or a `404` from the re-attach).
 
    **`from=0` over a tail re-attach (`from=eventOffset`).** A tail re-attach would
-   save re-streaming the prefix bytes, but it is *not* zero-loss in practice: with
+   save re-streaming the prefix bytes, but it is _not_ zero-loss in practice: with
    `continueLastTurn`'s replace semantics it drops the already-streamed prefix
    (the partial leaf is overwritten by just the tail), and even with append
    semantics the Layer-A↔SSE offset-space mismatch (point 4) misaligns the seam.
@@ -565,13 +567,14 @@ Plug-in path (every hook already exists in `packages/ai-chat` /
    buffer, not the model), and is provably whole — so it is the recommended Layer
    B strategy. The event offset is still worth stashing (observability + the
    opt-in tail path); stash it with a **delta-based** throttle, not `eventOffset %
-   N` — SSE offsets jump (one chunk can carry several events), so a modulo check
+N` — SSE offsets jump (one chunk can carry several events), so a modulo check
    often never lands on a boundary and the offset is never re-stashed (observed:
    only the initial offset-0 stash survived until this was fixed).
+
 4. **Offset-space mismatch (handled).** Layer A counts post-parse
    `UIMessageChunk`s; gateway `from=N` counts **provider-native SSE events**
    (§7.1). These are different cursors — stash the **SSE event index** from
-   `onProgress` (the §7.1 byte-layer counter), *not* the chunk count.
+   `onProgress` (the §7.1 byte-layer counter), _not_ the chunk count.
 5. **`recoveryKind` mapping.** `ChatRecoveryContext` already carries
    `recoveryKind: "retry" | "continue"` plus `partialText` / `partialParts`.
    Gateway resume is the preferred **"continue"** strategy (byte-exact, free);
@@ -642,8 +645,8 @@ interrupted response"), and it's **better** than prefill because it's
 assistant turn:
 
 > Move the continuation to the **user message**, including the final text from the
-> interrupted response: *"Your previous response was interrupted and ended with
-> `[partial]`. Continue from where you left off."*
+> interrupted response: _"Your previous response was interrupted and ended with
+> `[partial]`. Continue from where you left off."_
 
 So tier-2 continuation (§7 tier 2a) becomes: on resume-expiry, append a
 **user-turn continuation instruction** that embeds the persisted partial
@@ -663,27 +666,27 @@ So tier-2 continuation (§7 tier 2a) becomes: on resume-expiry, append a
 ## The alternatives
 
 - **Single transport, run-path-only** (resume always; gateway features deferred
-  until the product gap closes). *Rejected:* strands users who want caching /
+  until the product gap closes). _Rejected:_ strands users who want caching /
   server-side fallback **today** and accept no resume. The capability matrix
   serves both groups now and collapses to this automatically as parity lands.
 - **Single transport, gateway-path-only** (the #409 design — server-side fallback
-  + caching). *Rejected:* that path has **no `cf-aig-run-id`** (verified), so it
-  sacrifices resume — the motivating feature. Available as `transport: "gateway"`
-  / gateway-only options, not the default.
-- **Silently pick a transport without surfacing conflicts.** *Rejected:* a user
+  - caching). _Rejected:_ that path has **no `cf-aig-run-id`** (verified), so it
+    sacrifices resume — the motivating feature. Available as `transport: "gateway"`
+    / gateway-only options, not the default.
+- **Silently pick a transport without surfacing conflicts.** _Rejected:_ a user
   asking for `resume` + `cacheTtl` would get one silently dropped. The matrix
   **errors on impossible combinations and warns when resume is disabled** instead.
 - **Raw `@ai-sdk/*` factory registry** (`providers: { openai: createOpenAI }`),
-  users import from `@ai-sdk` directly (#409's API). *Rejected* in favor of
+  users import from `@ai-sdk` directly (#409's API). _Rejected_ in favor of
   first-party wrapper sub-paths (§3) so we own fetch/quirks and users have one
   import source.
 - **Bundled providers** — core takes all `@ai-sdk/*` as deps and auto-detects.
   Best UX, but heavy deps (an "ask first" per repo rules) + version coupling.
-  *Rejected;* per-sub-path peer deps give granular installs instead.
-- **Block on landing PR #409 and import its engine.** *Rejected:* #409 isn't
+  _Rejected;_ per-sub-path peer deps give granular installs instead.
+- **Block on landing PR #409 and import its engine.** _Rejected:_ #409 isn't
   landing soon; invert the dependency and let it reuse us later.
 - **Hand-roll catalog SSE parsing** (`tanstack-ai` `transformWorkersAiStream`
-  style). *Rejected:* duplicates each `@ai-sdk/*` parser.
+  style). _Rejected:_ duplicates each `@ai-sdk/*` parser.
 
 ## Risks & de-risking order
 
@@ -714,7 +717,7 @@ harness, each gating the next:
 5. **Transport selection — premises RESOLVED ✅.** The three contended features
    land on **disjoint transports**: `cf-aig-run-id` (resume) run-path only;
    `cf-aig-step` (server fallback) and `cf-aig-cache-status` (caching) gateway-path
-   only. So the matrix's split is empirically grounded. The selection *logic*
+   only. So the matrix's split is empirically grounded. The selection _logic_
    (conflict errors/warnings, §2) is delegate code → construction-time + unit tests.
 6. **Gateway-path dispatch — RESOLVED ✅ (fallback).** `env.AI.gateway(id).run([…])`
    with a bad first entry served from `cf-aig-step: 1`, status `200`, real chunks.
@@ -722,8 +725,8 @@ harness, each gating the next:
    is gateway-config-dependent (or `cf-aig-cache-ttl` is a gateway control directive,
    not a per-entry header); not an architecture risk, and #409's 124 tests cover the
    round-trip.
-7. **REST/credentials-mode parity** — *deferred (needs a scoped
-   `CLOUDFLARE_API_TOKEN`; account is OAuth-logged-in).* Low risk: credentials mode
+7. **REST/credentials-mode parity** — _deferred (needs a scoped
+   `CLOUDFLARE_API_TOKEN`; account is OAuth-logged-in)._ Low risk: credentials mode
    hits the same gateway backend, differing only in auth front door + base URL.
 
 With 1–3 green and 4–6 substantially settled, the run-path delegate is
@@ -758,28 +761,28 @@ backbone for this. Run **nightly** and **before release**, not on every PR.
 Coverage is a **feature × model matrix** — each row asserts the real behavior, not
 just a 200:
 
-| Feature | What the live test asserts | Models |
-| --- | --- | --- |
-| Native `@cf/*` text + stream | text streams, finish reason, usage present | a `@cf/*` llama |
-| Catalog text (run path) | non-empty completion, correct finish/usage | openai, anthropic, google |
-| Catalog **streaming** (run path) | chunks arrive in order, parser yields clean text | openai, anthropic, google |
-| **Tool calls** | model emits a tool call the `@ai-sdk` parser decodes; round-trip result | openai, anthropic |
-| **Reasoning** | reasoning parts surfaced where supported | a reasoning model |
-| **`cf-aig-run-id` capture** | header present on `result.response.headers` | every catalog provider |
-| **Resume happy path** | drop at event N, `resume(from=N)` replays exact tail; concatenation equals an uninterrupted run | openai, anthropic |
-| **Resume expiry** | force/await TTL miss → `onResumeExpired` policy fires (continue / regenerate / accept-partial / error) | one provider |
-| **Continuation** (§10c) | after expiry, a **user-turn** continuation instruction embedding the partial makes the model continue; works on all providers (no prefill); falls back to cold retry | openai, anthropic, openrouter |
-| **Client-side fallback** | first model forced to fail → second answers; **each step independently resumable** | openai→anthropic |
-| **Server-side fallback** | `gateway().run([a,b])`, `cf-aig-step` reflects the winner; warns resume disabled | openai+anthropic |
-| **Caching** | 2nd identical call returns `cf-aig-cache-status: HIT` (gateway path) | one provider |
-| **`metadata` / `eventId`** | echoed/observable in gateway logs | one provider |
-| **`byok` / unified billing** | call succeeds with no provider key (binding) | one catalog model |
-| **Transport conflict** | `resume:true` + `cacheTtl` **throws** the documented error | n/a (no network) |
-| **Attempt tree** (§8a) | exhausted fallback → `WorkersAIFallbackError` with ordered per-layer attempts; resumed drop stays one attempt, not a sibling | openai→anthropic, openrouter |
-| **Error envelopes** | model-not-found / 402 / unauthorized → typed `WorkersAIGatewayError`, right recoverability | n/a + live 4xx |
-| **Abort** | `AbortSignal` cancels mid-stream, no auto-recover | one provider |
-| **Routing-layer provider** (§3b) | `openrouter/…` resolves to gateway path, BYOK key works, no `cf-aig-run-id`, resume-disabled warning fires | openrouter |
-| **REST/credentials parity** | a representative subset re-run via credentials mode (not just the binding) | openai |
+| Feature                          | What the live test asserts                                                                                                                                           | Models                        |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| Native `@cf/*` text + stream     | text streams, finish reason, usage present                                                                                                                           | a `@cf/*` llama               |
+| Catalog text (run path)          | non-empty completion, correct finish/usage                                                                                                                           | openai, anthropic, google     |
+| Catalog **streaming** (run path) | chunks arrive in order, parser yields clean text                                                                                                                     | openai, anthropic, google     |
+| **Tool calls**                   | model emits a tool call the `@ai-sdk` parser decodes; round-trip result                                                                                              | openai, anthropic             |
+| **Reasoning**                    | reasoning parts surfaced where supported                                                                                                                             | a reasoning model             |
+| **`cf-aig-run-id` capture**      | header present on `result.response.headers`                                                                                                                          | every catalog provider        |
+| **Resume happy path**            | drop at event N, `resume(from=N)` replays exact tail; concatenation equals an uninterrupted run                                                                      | openai, anthropic             |
+| **Resume expiry**                | force/await TTL miss → `onResumeExpired` policy fires (continue / regenerate / accept-partial / error)                                                               | one provider                  |
+| **Continuation** (§10c)          | after expiry, a **user-turn** continuation instruction embedding the partial makes the model continue; works on all providers (no prefill); falls back to cold retry | openai, anthropic, openrouter |
+| **Client-side fallback**         | first model forced to fail → second answers; **each step independently resumable**                                                                                   | openai→anthropic              |
+| **Server-side fallback**         | `gateway().run([a,b])`, `cf-aig-step` reflects the winner; warns resume disabled                                                                                     | openai+anthropic              |
+| **Caching**                      | 2nd identical call returns `cf-aig-cache-status: HIT` (gateway path)                                                                                                 | one provider                  |
+| **`metadata` / `eventId`**       | echoed/observable in gateway logs                                                                                                                                    | one provider                  |
+| **`byok` / unified billing**     | call succeeds with no provider key (binding)                                                                                                                         | one catalog model             |
+| **Transport conflict**           | `resume:true` + `cacheTtl` **throws** the documented error                                                                                                           | n/a (no network)              |
+| **Attempt tree** (§8a)           | exhausted fallback → `WorkersAIFallbackError` with ordered per-layer attempts; resumed drop stays one attempt, not a sibling                                         | openai→anthropic, openrouter  |
+| **Error envelopes**              | model-not-found / 402 / unauthorized → typed `WorkersAIGatewayError`, right recoverability                                                                           | n/a + live 4xx                |
+| **Abort**                        | `AbortSignal` cancels mid-stream, no auto-recover                                                                                                                    | one provider                  |
+| **Routing-layer provider** (§3b) | `openrouter/…` resolves to gateway path, BYOK key works, no `cf-aig-run-id`, resume-disabled warning fires                                                           | openrouter                    |
+| **REST/credentials parity**      | a representative subset re-run via credentials mode (not just the binding)                                                                                           | openai                        |
 
 Properties the e2e suite must guarantee (beyond "it returned something"):
 **resume correctness** (resumed concatenation byte-equals an uninterrupted
@@ -793,7 +796,7 @@ cheap to update as the catalog changes.
 ## Backward compatibility
 
 `providers` is an additive optional field — non-breaking for `@cf/*` users.
-However, anyone *already* passing a `vendor/model` slug to `createWorkersAI` gets
+However, anyone _already_ passing a `vendor/model` slug to `createWorkersAI` gets
 **new routing behavior** (previously it hit the native Workers AI path, likely
 mis-parsing). Ship with a changeset and a note; the prior behavior was not a
 reliable supported path.
@@ -815,10 +818,10 @@ reliable supported path.
 - **Routing-layer providers** (§3b): _resolved 2026-06-14._ OpenRouter is
   gateway-path-only/BYOK (not on the run catalog) and rides the same
   `gateway().run([{ provider: "openrouter" }])` binding; the gateway integration
-  *is* the wrapped `@openrouter/ai-sdk-provider` routed through a gateway fetch
+  _is_ the wrapped `@openrouter/ai-sdk-provider` routed through a gateway fetch
   (construction-time injection). No new transport. Nested fallback attribution is
   specced as the **attempt tree** (§8a). Remaining: empirically confirm how much
-  of OpenRouter's *internal* routing (discarded sub-attempts, not just the
+  of OpenRouter's _internal_ routing (discarded sub-attempts, not just the
   serving `provider`) is recoverable from its response vs only via `cf-aig-log-id`
   — drives how much of `Attempt.children` we can populate for `provider-internal`.
 - **Slug shape** (§3): confirmed prefix-canonical (`openai/gpt-5.4`) on the
@@ -898,7 +901,7 @@ Original direction (agreed in discussion 2026-06-14), which this implements:
   decoration. Bare slugs only on provider-bound wrappers.
 - **Routing-layer providers** (OpenRouter, §3b) need **no new machinery**: they
   ride the same `gateway().run([{ provider: "openrouter" }])` binding as catalog
-  models. The gateway's OpenRouter integration *is* the wrapped
+  models. The gateway's OpenRouter integration _is_ the wrapped
   `@openrouter/ai-sdk-provider` routed through a gateway fetch (construction-time
   injection, reusing §1) — BYOK, gateway-path-only, no resume, all from the matrix.
 - **Fallback** is `"client"` by default (each attempt resumable, run path) or
@@ -953,7 +956,7 @@ RFC-first otherwise.
   `gateway().run([{ provider: "openrouter" }])`. Existing art:
   `ai-gateway-provider/src/providers/openrouter.ts` (capture/redispatch) and
   `tanstack-ai/src/adapters/openrouter.ts` (construction-time fetch into the SDK's
-  `httpClient`). Conclusion: gateway integration *is* the wrapped SDK + gateway
+  `httpClient`). Conclusion: gateway integration _is_ the wrapped SDK + gateway
   fetch — no new transport (§3b).
 - Implementation (2026-06-14): delegate engine + provider plugins + sub-path
   exports landed in `cloudflare/ai` (branch `feat/workers-ai-provider-gateway-delegate`).

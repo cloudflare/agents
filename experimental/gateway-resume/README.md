@@ -36,17 +36,17 @@ pnpm start           # wrangler dev --remote, http://localhost:8787
 
 Then open `http://localhost:8787/` for the HTML matrix, or:
 
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /` | HTML report over the default model matrix |
-| `GET /probe?model=<slug>` | Single-model JSON report (the core test) |
-| `GET /matrix?models=a,b,c` | JSON report across comma-separated models |
-| `GET /run?model=<slug>` | Raw single run metadata (run id, headers, preview) |
-| `GET /resume?runId=<id>&from=<n>` | Passthrough to the gateway resume endpoint |
-| `GET /gw?model=<slug>` | Same probe but via the **gateway-binding** transport (`env.AI.gateway(id).run([…])`) |
-| `GET /gw-matrix?models=a,b,c` | Gateway-binding probe across models |
-| `GET /passthrough?model=<slug>` | **Risk #1**: feed a real `@ai-sdk/*` body through `env.AI.run` and re-parse with the same provider (`&tools=1`, `&keepModel=1`) |
-| `GET /passthrough-matrix?models=a,b,c` | Passthrough probe across openai/anthropic models |
+| Endpoint                               | Purpose                                                                                                                         |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /`                                | HTML report over the default model matrix                                                                                       |
+| `GET /probe?model=<slug>`              | Single-model JSON report (the core test)                                                                                        |
+| `GET /matrix?models=a,b,c`             | JSON report across comma-separated models                                                                                       |
+| `GET /run?model=<slug>`                | Raw single run metadata (run id, headers, preview)                                                                              |
+| `GET /resume?runId=<id>&from=<n>`      | Passthrough to the gateway resume endpoint                                                                                      |
+| `GET /gw?model=<slug>`                 | Same probe but via the **gateway-binding** transport (`env.AI.gateway(id).run([…])`)                                            |
+| `GET /gw-matrix?models=a,b,c`          | Gateway-binding probe across models                                                                                             |
+| `GET /passthrough?model=<slug>`        | **Risk #1**: feed a real `@ai-sdk/*` body through `env.AI.run` and re-parse with the same provider (`&tools=1`, `&keepModel=1`) |
+| `GET /passthrough-matrix?models=a,b,c` | Passthrough probe across openai/anthropic models                                                                                |
 
 Query params: `?gateway=` (default `default`), `?prompt=`.
 
@@ -54,12 +54,12 @@ Query params: `?gateway=` (default `default`), `?prompt=`.
 
 The two ways to reach catalog models have **disjoint** capabilities:
 
-| Header (response) | Run path `env.AI.run(slug, inputs)` | Gateway path `env.AI.gateway(id).run([…])` |
-| --- | --- | --- |
-| `cf-aig-run-id` (resume) | **present** | **absent** |
-| `cf-aig-step` (server-side fallback) | absent | **present** (`0`) |
-| `cf-aig-cache-status` | absent | **present** (`MISS`) |
-| `cf-aig-log-id` | absent | **present** |
+| Header (response)                    | Run path `env.AI.run(slug, inputs)` | Gateway path `env.AI.gateway(id).run([…])` |
+| ------------------------------------ | ----------------------------------- | ------------------------------------------ |
+| `cf-aig-run-id` (resume)             | **present**                         | **absent**                                 |
+| `cf-aig-step` (server-side fallback) | absent                              | **present** (`0`)                          |
+| `cf-aig-cache-status`                | absent                              | **present** (`MISS`)                       |
+| `cf-aig-log-id`                      | absent                              | **present**                                |
 
 **Conclusion: resume and server-side fallback/caching live on different
 transports.** You cannot get both in one call today. Resume (the motivation) is
@@ -72,22 +72,22 @@ Run via `wrangler dev --remote` against a live account with unified billing.
 Every catalog model below was re-verified end-to-end (run + resume-from-0 +
 resume-from-event-index + resume-from-byte-offset + byte comparison).
 
-| Model | run-id? | `resume(0)` == full | `resume(mid)` == tail | `from` | replay SSE format |
-| --- | --- | --- | --- | --- | --- |
-| `openai/gpt-5.4` | yes | byte-exact | match | **event index** | OpenAI `chat.completion.chunk` |
-| `openai/gpt-4o-mini` | yes | byte-exact | match | **event index** | OpenAI `chat.completion.chunk` |
-| `anthropic/claude-sonnet-4.5` | yes | byte-exact | match | **event index** | **Anthropic native** (`event: message_start`…) |
-| `anthropic/claude-haiku-4.5` | yes | byte-exact | match | **event index** | **Anthropic native** |
-| `google/gemini-2.5-pro` | yes | byte-exact | match | **event index** | OpenAI-ish `choices[].delta` |
-| `google/gemini-3-flash` | yes | byte-exact | match | **event index** | OpenAI-ish `choices[].delta` |
-| `@cf/*` (Workers AI) | **no** | — | — | — | — (not on run API yet) |
+| Model                         | run-id? | `resume(0)` == full | `resume(mid)` == tail | `from`          | replay SSE format                              |
+| ----------------------------- | ------- | ------------------- | --------------------- | --------------- | ---------------------------------------------- |
+| `openai/gpt-5.4`              | yes     | byte-exact          | match                 | **event index** | OpenAI `chat.completion.chunk`                 |
+| `openai/gpt-4o-mini`          | yes     | byte-exact          | match                 | **event index** | OpenAI `chat.completion.chunk`                 |
+| `anthropic/claude-sonnet-4.5` | yes     | byte-exact          | match                 | **event index** | **Anthropic native** (`event: message_start`…) |
+| `anthropic/claude-haiku-4.5`  | yes     | byte-exact          | match                 | **event index** | **Anthropic native**                           |
+| `google/gemini-2.5-pro`       | yes     | byte-exact          | match                 | **event index** | OpenAI-ish `choices[].delta`                   |
+| `google/gemini-3-flash`       | yes     | byte-exact          | match                 | **event index** | OpenAI-ish `choices[].delta`                   |
+| `@cf/*` (Workers AI)          | **no**  | —                   | —                     | —               | — (not on run API yet)                         |
 
 Conclusions:
 
 - **Resumable streaming works for dash-catalog (third-party) models on the new
   run API**, and is a no-op for Workers AI (`@cf/*`) models for now — they get
   no `cf-aig-run-id`. (Cloudflare will add `@cf/*` to the run API later.)
-- **`from` is an SSE *event index*, not a byte offset.** Resuming with a byte
+- **`from` is an SSE _event index_, not a byte offset.** Resuming with a byte
   offset returns 0 bytes; resuming with the event index returns exactly the tail
   of the original stream from that event. Consumers must count `\n\n`-separated
   events.
@@ -101,7 +101,7 @@ Conclusions:
   endpoint would normalize, but the binding's `env.AI.run` uses the universal
   run path.)
 - **Request params are also provider-native, not normalized.** Anthropic
-  *requires* `max_tokens`; OpenAI gpt-5* *rejects* `max_tokens` and wants
+  _requires_ `max_tokens`; OpenAI gpt-5\* _rejects_ `max_tokens` and wants
   `max_completion_tokens`. The harness shapes this per provider.
 - **Unified billing**: OpenAI, Google, and Anthropic all resolve with no
   provider keys configured.
@@ -114,14 +114,14 @@ Raw matrix output is saved in [`findings.json`](./findings.json).
 reads `k` SSE events, then calls `reader.cancel()` to **simulate the originating
 request disconnecting mid-stream**, and samples `resume?from=0` over time.
 
-| model | read before cancel | first `resume(0)` drain | total events | terminal? | verdict |
-| --- | --- | --- | --- | --- | --- |
-| `openai/gpt-5.4` | 3 events | **6.7s (tailed live)** | 513 | `[DONE]` ✓ | keeps generating to completion |
-| `anthropic/claude-opus-4.7` | 3 events | **8.6s (tailed live)** | 24 | `message_stop` ✓ | keeps generating to completion |
+| model                       | read before cancel | first `resume(0)` drain | total events | terminal?        | verdict                        |
+| --------------------------- | ------------------ | ----------------------- | ------------ | ---------------- | ------------------------------ |
+| `openai/gpt-5.4`            | 3 events           | **6.7s (tailed live)**  | 513          | `[DONE]` ✓       | keeps generating to completion |
+| `anthropic/claude-opus-4.7` | 3 events           | **8.6s (tailed live)**  | 24           | `message_stop` ✓ | keeps generating to completion |
 
 **The run is server-driven / detached.** After we disconnect having read only 3
 events, the first `resume?from=0` **blocks for seconds while tailing the live
-run**, then replays the *complete* stream including the terminal event. Later
+run**, then replays the _complete_ stream including the terminal event. Later
 samples return the same frozen buffer instantly (~50–250ms). So upstream
 generation is **not** tied to the originating socket — it runs to completion
 regardless, and resume tails it.
@@ -146,10 +146,10 @@ that same provider parse the response via `streamText`. This is the architecture
 the `workers-ai-provider` run-path delegate will use — so if it parses cleanly,
 no hand-rolled per-provider parsing or param translation is needed.
 
-| Provider / model | text | tools | usage normalized | `cf-aig-run-id` (fetch == `result.response`) |
-| --- | --- | --- | --- | --- |
-| `@ai-sdk/openai` `.chat` → `openai/gpt-5.4` | ✅ 164 deltas | ✅ `tool-call`→`tool-result`→step 2 | ✅ incl. `raw` | ✅ identical |
-| `@ai-sdk/anthropic` → `anthropic/claude-opus-4.7` | ✅ | — | ✅ `cache_creation`/`service_tier` | ✅ identical |
+| Provider / model                                  | text          | tools                               | usage normalized                   | `cf-aig-run-id` (fetch == `result.response`) |
+| ------------------------------------------------- | ------------- | ----------------------------------- | ---------------------------------- | -------------------------------------------- |
+| `@ai-sdk/openai` `.chat` → `openai/gpt-5.4`       | ✅ 164 deltas | ✅ `tool-call`→`tool-result`→step 2 | ✅ incl. `raw`                     | ✅ identical                                 |
+| `@ai-sdk/anthropic` → `anthropic/claude-opus-4.7` | ✅            | —                                   | ✅ `cache_creation`/`service_tier` | ✅ identical                                 |
 
 Conclusions:
 
@@ -170,24 +170,24 @@ Conclusions:
 
 ## Remaining risks — fallback, caching, expiry (2026-06-14)
 
-| Risk | Probe | Verdict |
-| --- | --- | --- |
-| #6 server-side fallback | `/fallback?models=openai/nonexistent-model-xyz,openai/gpt-5.4` | ✅ bad model first → `cf-aig-step: 1`, `200`, real chunks streamed |
-| #6 caching | `/cache?model=openai/gpt-5.4` | ⚠️ MISS/MISS — no HIT on the `default` gateway (caching not enabled, or `cf-aig-cache-ttl` must be a gateway control directive, not a per-entry header). Config-dependent, not an architecture risk. |
-| #4 resume out-of-range | `/resume-info?runId=<live>&from=999999` | ✅ graceful `200` + **0 bytes** (nothing past the end), `from=0` still replays full |
-| #4 invalid runId | `/resume-info?runId=000…0&from=0` | `500` `AiGatewayError` code `2002` — but an all-zeros id is *malformed*, not *expired* (see TTL sweep for the real expiry contract) |
-| #4 buffer TTL | `ttl-sweep.sh` / `ttl-sweep-fine.sh` | ✅ alive at t+330s, **expired by t+360s** (TTL ≈ 330–360s, ~5.5 min); expiry contract is **`404` `{"error":"Request not found"}`** |
+| Risk                    | Probe                                                          | Verdict                                                                                                                                                                                              |
+| ----------------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| #6 server-side fallback | `/fallback?models=openai/nonexistent-model-xyz,openai/gpt-5.4` | ✅ bad model first → `cf-aig-step: 1`, `200`, real chunks streamed                                                                                                                                   |
+| #6 caching              | `/cache?model=openai/gpt-5.4`                                  | ⚠️ MISS/MISS — no HIT on the `default` gateway (caching not enabled, or `cf-aig-cache-ttl` must be a gateway control directive, not a per-entry header). Config-dependent, not an architecture risk. |
+| #4 resume out-of-range  | `/resume-info?runId=<live>&from=999999`                        | ✅ graceful `200` + **0 bytes** (nothing past the end), `from=0` still replays full                                                                                                                  |
+| #4 invalid runId        | `/resume-info?runId=000…0&from=0`                              | `500` `AiGatewayError` code `2002` — but an all-zeros id is _malformed_, not _expired_ (see TTL sweep for the real expiry contract)                                                                  |
+| #4 buffer TTL           | `ttl-sweep.sh` / `ttl-sweep-fine.sh`                           | ✅ alive at t+330s, **expired by t+360s** (TTL ≈ 330–360s, ~5.5 min); expiry contract is **`404` `{"error":"Request not found"}`**                                                                   |
 
 ### Resume expiry contract (the signal §7 tiered recovery keys off)
 
 Three distinct outcomes, each cheap to detect:
 
-| Situation | Response |
-| --- | --- |
-| Live run, `from` in range | `200`, SSE tail bytes |
-| Live run, `from` past end | `200`, **0 bytes** (nothing left to replay) |
-| Buffer **expired** (TTL elapsed) | **`404`** `{"error":"Request not found"}` |
-| **Malformed** runId | `500` `AiGatewayError` code `2002` |
+| Situation                        | Response                                    |
+| -------------------------------- | ------------------------------------------- |
+| Live run, `from` in range        | `200`, SSE tail bytes                       |
+| Live run, `from` past end        | `200`, **0 bytes** (nothing left to replay) |
+| Buffer **expired** (TTL elapsed) | **`404`** `{"error":"Request not found"}`   |
+| **Malformed** runId              | `500` `AiGatewayError` code `2002`          |
 
 So the recovery ladder branches on a clean `404`: buffer gone → fall to tier-2
 (user-message continuation, §10c) or tier-3 (cold regenerate). The buffer TTL is
@@ -204,15 +204,15 @@ taxonomy. `/delegate` runs a real `streamText` through it and reports the chosen
 transport, warnings, dispatch headers, and parsed output. All scenarios verified
 live:
 
-| Scenario | `/delegate` query | Transport | Result |
-| --- | --- | --- | --- |
-| Default (resume) | `model=openai/gpt-5.4` | run | `runId` present, resume on, clean parse |
-| Server fallback | `…&fallback=server:openai/gpt-5.4-mini` | gateway | warns (resume off), `cf-aig-step:0`, no runId |
-| **Conflict** | `…&resume=true&fallback=server:…` | — | **`400` config error** (actionable message) |
-| Caching | `…&cacheTtl=3600` | gateway | warns (resume off), no runId |
-| Escape hatch | `…&transport=gateway` | gateway | no warning (explicit), no runId |
-| Anthropic default | `model=anthropic/claude-opus-4.7` | run | `runId` present, clean parse |
-| **Real fallback step** | `model=openai/nonexistent-xyz&fallback=server:openai/gpt-5.4` | gateway | **`cf-aig-step:1`** — fallback served, parsed cleanly |
+| Scenario               | `/delegate` query                                             | Transport | Result                                                |
+| ---------------------- | ------------------------------------------------------------- | --------- | ----------------------------------------------------- |
+| Default (resume)       | `model=openai/gpt-5.4`                                        | run       | `runId` present, resume on, clean parse               |
+| Server fallback        | `…&fallback=server:openai/gpt-5.4-mini`                       | gateway   | warns (resume off), `cf-aig-step:0`, no runId         |
+| **Conflict**           | `…&resume=true&fallback=server:…`                             | —         | **`400` config error** (actionable message)           |
+| Caching                | `…&cacheTtl=3600`                                             | gateway   | warns (resume off), no runId                          |
+| Escape hatch           | `…&transport=gateway`                                         | gateway   | no warning (explicit), no runId                       |
+| Anthropic default      | `model=anthropic/claude-opus-4.7`                             | run       | `runId` present, clean parse                          |
+| **Real fallback step** | `model=openai/nonexistent-xyz&fallback=server:openai/gpt-5.4` | gateway   | **`cf-aig-step:1`** — fallback served, parsed cleanly |
 
 Conclusions:
 
@@ -235,10 +235,10 @@ Notes:
 - **Risk #5 (transport selection) premises are now empirically validated**: the
   three contended features land on disjoint transports — `cf-aig-run-id` (resume)
   on the run path only; `cf-aig-step` (server fallback) and `cf-aig-cache-status`
-  (caching) on the gateway path only. The selection *logic* itself is delegate
+  (caching) on the gateway path only. The selection _logic_ itself is delegate
   code, covered by construction-time + unit tests, not a live gate.
 - **Risk #7 (REST/credentials-mode parity)** needs a scoped `CLOUDFLARE_API_TOKEN`
-  (this account is OAuth-logged-in). Low risk: credentials mode hits the *same*
+  (this account is OAuth-logged-in). Low risk: credentials mode hits the _same_
   gateway backend, differing only in the auth front door and base URL.
 
 ## Notes
@@ -248,7 +248,7 @@ Notes:
 - `returnRawResponse: true` **is** in the public `AiOptions` type, but
   `workers-ai-provider` never sets it — so the provider currently can't capture
   `cf-aig-run-id`. That's the gap this harness motivates fixing.
-- **Footgun:** call `env.AI.run(...)` as a *method*. Extracting it
+- **Footgun:** call `env.AI.run(...)` as a _method_. Extracting it
   (`const run = env.AI.run; run(...)`) detaches `this`; the binding touches a
   private `#options` field internally and throws
   `Cannot set properties of undefined (setting '#options')`. Cast `env.AI`, not

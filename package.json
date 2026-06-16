@@ -75,7 +75,7 @@
     "vite": "^8.0.16",
     "vitest": "4.1.8",
     "vitest-browser-react": "^2.2.0",
-    "workers-ai-provider": "^3.1.14",
+    "workers-ai-provider": "^3.2.0",
     "wrangler": "^4.100.0",
     "zod": "^4.4.3"
   },

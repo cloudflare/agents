@@ -72,3 +72,4 @@ minimumReleaseAgeExclude:
   - partysocket@1.2.0
   - wrangler@4.100.0
   - partyserver@0.5.8
+  - workers-ai-provider@3.2.0

@@ -17,7 +17,7 @@
     "ai": "^6.0.202",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "workers-ai-provider": "^3.1.14"
+    "workers-ai-provider": "^3.2.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",

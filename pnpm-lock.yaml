@@ -148,8 +148,8 @@ importers:
         specifier: ^2.2.0
         version: 2.2.0(patch_hash=1c11a562f8f4bcb95c9e73d63f769ffaf898ea427aecfd147d6d58acd07f9316)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(vitest@4.1.8)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
       wrangler:
         specifier: ^4.100.0
         version: 4.100.0(@cloudflare/workers-types@4.20260612.1)
@@ -181,8 +181,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.40.2
@@ -245,8 +245,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.40.2
@@ -315,8 +315,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -391,8 +391,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -473,8 +473,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -537,8 +537,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.40.2
@@ -607,8 +607,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.40.2
@@ -665,8 +665,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.40.2
@@ -735,8 +735,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.40.2
@@ -805,8 +805,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -878,8 +878,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -957,8 +957,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
       zod:
         specifier: '*'
         version: 4.4.3
@@ -1074,8 +1074,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.40.2
@@ -1181,8 +1181,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.40.2
@@ -1254,8 +1254,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.40.2
@@ -1428,8 +1428,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -1712,8 +1712,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
       zod:
         specifier: '*'
         version: 4.4.3
@@ -1913,8 +1913,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -2007,8 +2007,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -2129,8 +2129,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.40.2
@@ -2196,8 +2196,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -2263,8 +2263,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.40.2
@@ -2327,8 +2327,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.40.2
@@ -2437,8 +2437,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.40.2
@@ -2538,8 +2538,8 @@ importers:
         specifier: ^6.0.202
         version: 6.0.202(zod@4.4.3)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -2639,8 +2639,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -2795,8 +2795,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -2920,8 +2920,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -3353,8 +3353,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@tailwindcss/vite':
         specifier: ^4
@@ -3384,8 +3384,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@tailwindcss/vite':
         specifier: ^4
@@ -3421,8 +3421,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@tailwindcss/vite':
         specifier: ^4
@@ -3458,8 +3458,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@tailwindcss/vite':
         specifier: ^4
@@ -3495,8 +3495,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@tailwindcss/vite':
         specifier: ^4
@@ -3978,8 +3978,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.40.2
@@ -4045,8 +4045,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.40.2
@@ -4112,8 +4112,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -4182,8 +4182,8 @@ importers:
         specifier: ^2.5.0
         version: 2.5.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.40.2
@@ -4304,8 +4304,8 @@ importers:
         specifier: ^6.0.202
         version: 6.0.202(zod@4.4.3)
       workers-ai-provider:
-        specifier: ^3.1.14
-        version: 3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^4.20260612.1
@@ -11020,11 +11020,21 @@ packages:
     engines: {node: '>=16'}
     hasBin: true
 
-  workers-ai-provider@3.1.14:
-    resolution: {integrity: sha512-/umrajFP6OkZVbDAxwkrO9NPdNFG4c+i0fiVqdf4PGsLN+CiDsLJCI6xW0WXDLDR1ZZyjE4T6Xp6O/IKBIWGHQ==}
+  workers-ai-provider@3.2.0:
+    resolution: {integrity: sha512-zw74Z5gfmF2i8wR+ORzGrTwY/6Ui24T6FpiNbzjqQJMMmUSIzZhCDyDIiRYIIxsFwvATITrsQLCWHZnxPNpQ4Q==}
     peerDependencies:
+      '@ai-sdk/anthropic': ^3.0.0
+      '@ai-sdk/google': ^3.0.0
+      '@ai-sdk/openai': ^3.0.0
       '@ai-sdk/provider': ^3.0.0
       ai: ^6.0.0
+    peerDependenciesMeta:
+      '@ai-sdk/anthropic':
+        optional: true
+      '@ai-sdk/google':
+        optional: true
+      '@ai-sdk/openai':
+        optional: true
 
   wrangler@4.100.0:
     resolution: {integrity: sha512-dSQO7DO+mD6XDzkVWIWBoGLO3yw+lacWSc/KhFvd7pgfpth+kX98qb5SGRHZN8ACCDhhfwzDLXwB6qHsIHhfBg==}
@@ -18240,10 +18250,14 @@ snapshots:
       '@cloudflare/workerd-linux-arm64': 1.20260611.1
       '@cloudflare/workerd-windows-64': 1.20260611.1
 
-  workers-ai-provider@3.1.14(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3)):
+  workers-ai-provider@3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3)):
     dependencies:
       '@ai-sdk/provider': 3.0.10
       ai: 6.0.202(zod@4.4.3)
+    optionalDependencies:
+      '@ai-sdk/anthropic': 3.0.83(zod@4.4.3)
+      '@ai-sdk/google': 3.0.81(zod@4.4.3)
+      '@ai-sdk/openai': 3.0.70(zod@4.4.3)
 
   wrangler@4.100.0(@cloudflare/workers-types@4.20260612.1):
     dependencies:

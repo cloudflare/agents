@@ -14,12 +14,12 @@ mid-turn, the chat-recovery fiber survives and `onChatRecovery` defaults to
 regenerates from scratch.
 
 AI Gateway's resumable streaming (`cf-aig-run-id` + `resume?from=N`) lets us
-re-attach to the *same* upstream run and replay it — **zero new tokens**.
+re-attach to the _same_ upstream run and replay it — **zero new tokens**.
 
 Crucially, the run is **detached / server-driven**: it generates to completion
 after the originating request disconnects (proven in
 [`experimental/gateway-resume`](../gateway-resume) via `/detach`). So on recovery
-we re-attach **from event 0**, which replays the *complete* buffered run and
+we re-attach **from event 0**, which replays the _complete_ buffered run and
 reconstructs the full message — verified byte-for-byte against the ground-truth
 `resume?from=0` (see `/gw/verify` and the driver).
 
@@ -96,7 +96,7 @@ calls `/gw/verify` to compare the recovered message against the ground-truth
 > still-streaming continuation; it converges to a clean match once the tail
 > finishes.
 >
-> **Why `from=0`, not the stashed tail offset.** We *do* capture and stash the
+> **Why `from=0`, not the stashed tail offset.** We _do_ capture and stash the
 > live SSE offset (and the throttle is delta-based — offsets jump, so a `% N`
 > check never lands). But a tail re-attach from that offset would, under
 > `continueLastTurn`'s replace semantics + the Layer-A↔SSE offset-space mismatch

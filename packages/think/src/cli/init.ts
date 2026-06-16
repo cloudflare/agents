@@ -340,7 +340,7 @@ const FRAMEWORK_DEPENDENCIES: Record<string, string> = {
 // starter by a test in `src/cli-tests/cli.test.ts`.
 export const THIRD_PARTY_DEPENDENCIES: Record<string, string> = {
   ai: "^6.0.202",
-  "workers-ai-provider": "^3.1.14"
+  "workers-ai-provider": "^3.2.0"
 };
 
 export const THIRD_PARTY_DEV_DEPENDENCIES: Record<string, string> = {
