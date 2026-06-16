@@ -48,6 +48,10 @@ interface SessionAgentStub {
     role: string;
     bytes: number;
   }> | null>;
+  getAntiJoinCountForTest(): Promise<number>;
+  resetAntiJoinCountForTest(): Promise<void>;
+  rawInsertChildForTest(parentId: string, id: string): Promise<void>;
+  rawDeleteForTest(id: string): Promise<void>;
 }
 
 async function getAgent(name: string): Promise<SessionAgentStub> {
@@ -715,5 +719,148 @@ describe("AgentSessionProvider — byte-budgeted recent history (#1710)", () => 
     for (const row of lengths) {
       expect(row.textLength).toBeGreaterThanOrEqual(1_500_000);
     }
+  });
+});
+
+/**
+ * The active branch tip is cached so finding it doesn't re-scan the whole
+ * session (an anti-join over every row) on every hydration and append.
+ */
+describe("AgentSessionProvider — active-leaf cache", () => {
+  let name: string;
+  beforeEach(() => {
+    name = `leaf-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  });
+
+  it("repeated leaf reads and auto-parent appends never re-run the anti-join", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(20);
+
+    // The chain's first auto-parent append warmed the cache; everything after
+    // is served from it.
+    await agent.resetAntiJoinCountForTest();
+
+    for (let i = 0; i < 5; i++) {
+      expect((await agent.getLatestLeaf())?.id).toBe("m19");
+    }
+    await agent.appendMessage({
+      id: "x0",
+      role: "user",
+      parts: [{ type: "text", text: "next" }]
+    });
+    await agent.appendMessage({
+      id: "x1",
+      role: "assistant",
+      parts: [{ type: "text", text: "reply" }]
+    });
+
+    expect((await agent.getLatestLeaf())?.id).toBe("x1");
+    expect(await agent.getAntiJoinCountForTest()).toBe(0);
+  });
+
+  it("at most one anti-join per cold start, regardless of history length", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(30);
+
+    // Across many reads the scan happens at most once (the first cold lookup);
+    // here the cache is already warm from the append chain, so it's zero.
+    await agent.resetAntiJoinCountForTest();
+    await agent.getHistory();
+    await agent.getRecentHistory(10 * 1024 * 1024);
+    await agent.getHistoryRowStats();
+    await agent.getPathLength();
+    expect(await agent.getAntiJoinCountForTest()).toBe(0);
+  });
+
+  it("tracks the tip across a branch append", async () => {
+    const agent = await getAgent(name);
+    await agent.appendMessage({
+      id: "root",
+      role: "user",
+      parts: [{ type: "text", text: "root" }]
+    });
+    await agent.appendMessage({
+      id: "a",
+      role: "assistant",
+      parts: [{ type: "text", text: "a" }]
+    });
+    // Branch off root: the new node is childless and most recent → new tip.
+    await agent.appendMessage(
+      { id: "b", role: "assistant", parts: [{ type: "text", text: "b" }] },
+      "root"
+    );
+    expect((await agent.getLatestLeaf())?.id).toBe("b");
+    expect((await agent.getHistory()).map((m) => m.id)).toEqual(["root", "b"]);
+  });
+
+  it("recomputes the tip after the leaf is deleted", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(3); // m0 → m1 → m2
+
+    await agent.resetAntiJoinCountForTest();
+    await agent.deleteMessages(["m2"]);
+    // The cache was invalidated, so the next lookup pays exactly one scan and
+    // returns the new tip.
+    expect((await agent.getLatestLeaf())?.id).toBe("m1");
+    expect(await agent.getAntiJoinCountForTest()).toBe(1);
+
+    // …and is cached again afterward.
+    await agent.resetAntiJoinCountForTest();
+    expect((await agent.getLatestLeaf())?.id).toBe("m1");
+    expect(await agent.getAntiJoinCountForTest()).toBe(0);
+  });
+
+  it("deleting an interior (non-tip) message keeps the cached tip", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(3); // m0 → m1 → m2
+
+    await agent.resetAntiJoinCountForTest();
+    await agent.deleteMessages(["m0"]);
+    expect((await agent.getLatestLeaf())?.id).toBe("m2");
+    expect(await agent.getAntiJoinCountForTest()).toBe(0);
+  });
+
+  it("returns null after clear", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(3);
+
+    await agent.clearMessages();
+    expect(await agent.getLatestLeaf()).toBeNull();
+  });
+
+  it("self-heals when another writer gives the cached tip a child", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(3); // m0 → m1 → m2
+    // Warm the cache on m2.
+    expect((await agent.getLatestLeaf())?.id).toBe("m2");
+
+    // A second writer attaches a child to the cached tip, bypassing the
+    // provider — the cache is now stale.
+    await agent.rawInsertChildForTest("m2", "ext-child");
+
+    await agent.resetAntiJoinCountForTest();
+    // The validation check sees m2 is no longer childless and recomputes.
+    expect((await agent.getLatestLeaf())?.id).toBe("ext-child");
+    expect(await agent.getAntiJoinCountForTest()).toBe(1);
+    expect((await agent.getHistory()).map((m) => m.id)).toEqual([
+      "m0",
+      "m1",
+      "m2",
+      "ext-child"
+    ]);
+  });
+
+  it("self-heals when another writer deletes the cached tip", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(3); // m0 → m1 → m2
+    expect((await agent.getLatestLeaf())?.id).toBe("m2");
+
+    // A second writer deletes the cached tip, bypassing the provider.
+    await agent.rawDeleteForTest("m2");
+
+    await agent.resetAntiJoinCountForTest();
+    // The validation check sees m2 is gone and recomputes the new tip.
+    expect((await agent.getLatestLeaf())?.id).toBe("m1");
+    expect(await agent.getAntiJoinCountForTest()).toBe(1);
   });
 });

@@ -90,6 +90,15 @@ function isWebSocketClosedSendError(error: unknown): boolean {
   );
 }
 
+function isMissingMetadataColumnError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    (message.includes("message_id") || message.includes("is_continuation")) &&
+    (message.toLowerCase().includes("no such column") ||
+      message.toLowerCase().includes("has no column named"))
+  );
+}
+
 /**
  * Stored stream chunk for resumable streaming
  */
@@ -182,14 +191,10 @@ export class ResumableStream {
       request_id text not null,
       status text not null,
       created_at integer not null,
-      completed_at integer
+      completed_at integer,
+      message_id text,
+      is_continuation integer
     )`;
-
-    // Backward-compatible migration (#1691): add the column that durably links a
-    // stream to its assistant message. Tables created before this release lack
-    // it, so `alter table add column` is idempotent — the duplicate-column
-    // error (and ONLY that error) is swallowed on an already-migrated table.
-    this._migrateMetadataColumns();
 
     this.sql`create index if not exists idx_stream_chunks_stream_id 
       on cf_ai_chat_stream_chunks(stream_id, chunk_index)`;
@@ -199,10 +204,11 @@ export class ResumableStream {
   }
 
   /**
-   * Add the #1691 recovery column to the metadata table for rows created before
-   * it existed. Inspects the current schema and only runs `alter table` when the
-   * column is absent — idempotent across Durable Object restarts, with no
-   * error-driven control flow.
+   * Add metadata columns for rows created before they existed. Constructors
+   * intentionally do not run this: most wakes never start a stream, so paying a
+   * schema-introspection read every time is wasteful. New tables include these
+   * columns in CREATE TABLE; legacy tables migrate lazily only if a write/read
+   * discovers the columns are missing.
    */
   private _migrateMetadataColumns() {
     const columns =
@@ -269,10 +275,19 @@ export class ResumableStream {
 
     const messageId = options.messageId ?? null;
 
-    this.sql`
-      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, message_id, is_continuation)
-      values (${streamId}, ${requestId}, 'streaming', ${Date.now()}, ${messageId}, ${this._activeIsContinuation ? 1 : 0})
-    `;
+    try {
+      this.sql`
+        insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, message_id, is_continuation)
+        values (${streamId}, ${requestId}, 'streaming', ${Date.now()}, ${messageId}, ${this._activeIsContinuation ? 1 : 0})
+      `;
+    } catch (error) {
+      if (!isMissingMetadataColumnError(error)) throw error;
+      this._migrateMetadataColumns();
+      this.sql`
+        insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, message_id, is_continuation)
+        values (${streamId}, ${requestId}, 'streaming', ${Date.now()}, ${messageId}, ${this._activeIsContinuation ? 1 : 0})
+      `;
+    }
 
     return streamId;
   }
@@ -284,10 +299,16 @@ export class ResumableStream {
    * is a legacy row written before the `message_id` column existed.
    */
   getStreamMessageId(streamId: string): string | null {
-    const rows = this.sql<{ message_id: string | null }>`
-      select message_id from cf_ai_chat_stream_metadata
-      where id = ${streamId}
-    `;
+    let rows: Array<{ message_id: string | null }>;
+    try {
+      rows = this.sql<{ message_id: string | null }>`
+        select message_id from cf_ai_chat_stream_metadata
+        where id = ${streamId}
+      `;
+    } catch (error) {
+      if (!isMissingMetadataColumnError(error)) throw error;
+      return null;
+    }
     if (!rows || rows.length === 0) return null;
     return rows[0].message_id ?? null;
   }

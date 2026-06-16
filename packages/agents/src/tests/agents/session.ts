@@ -1,4 +1,5 @@
 import { Agent } from "../../index";
+import { ResumableStream } from "../../chat";
 import {
   Session,
   AgentSessionProvider,
@@ -13,7 +14,34 @@ import {
  * Test Agent — full Session API
  */
 export class TestSessionAgent extends Agent {
-  session = new Session(new AgentSessionProvider(this));
+  /**
+   * Counts how many times the latest-leaf anti-join (`latestLeafRow`) hits
+   * the database. The active-leaf cache should keep this at zero across
+   * repeated reads and auto-parent appends within a wake.
+   */
+  antiJoinCount = 0;
+
+  session = new Session(
+    new AgentSessionProvider({
+      sql: <T = Record<string, string | number | boolean | null>>(
+        strings: TemplateStringsArray,
+        ...values: (string | number | boolean | null)[]
+      ): T[] => {
+        if (strings.some((s) => s.includes("LEFT JOIN assistant_messages c"))) {
+          this.antiJoinCount++;
+        }
+        return this.sql<T>(strings, ...values);
+      }
+    })
+  );
+
+  async getAntiJoinCountForTest(): Promise<number> {
+    return this.antiJoinCount;
+  }
+
+  async resetAntiJoinCountForTest(): Promise<void> {
+    this.antiJoinCount = 0;
+  }
 
   // ── Messages ────────────────────────────────────────────────────
 
@@ -105,6 +133,29 @@ export class TestSessionAgent extends Agent {
     }
   }
 
+  /**
+   * Insert a child row directly via SQL, bypassing the provider (and its leaf
+   * cache) — simulates another writer mutating the cached tip so tests can
+   * prove the validation path self-heals.
+   */
+  async rawInsertChildForTest(parentId: string, id: string): Promise<void> {
+    const content = JSON.stringify({
+      id,
+      role: "assistant",
+      parts: [{ type: "text", text: id }]
+    });
+    this.sql`
+      INSERT INTO assistant_messages (id, session_id, parent_id, role, content)
+      VALUES (${id}, ${""}, ${parentId}, ${"assistant"}, ${content})
+    `;
+  }
+
+  /** Delete a row directly via SQL, bypassing the provider and its cache. */
+  async rawDeleteForTest(id: string): Promise<void> {
+    this
+      .sql`DELETE FROM assistant_messages WHERE id = ${id} AND session_id = ${""}`;
+  }
+
   /** Overwrite a stored message's content with invalid JSON. */
   async corruptMessageForTest(id: string): Promise<void> {
     const invalid = "{ this is not valid json";
@@ -140,6 +191,85 @@ export class TestSessionAgent extends Agent {
       id: m.id,
       textLength: (m.parts[0] as { text: string }).text.length
     }));
+  }
+
+  // ── ResumableStream legacy migration helpers ────────────────────
+
+  /**
+   * Recreate `cf_ai_chat_stream_metadata` with the pre-#1691/#1733 schema
+   * (no `message_id` / `is_continuation`) and seed one in-flight row, so a
+   * fresh `ResumableStream` exercises the legacy lazy-migration path on a
+   * real workerd SQLite (validates the runtime's actual error strings).
+   */
+  async setupLegacyStreamTableForTest(): Promise<void> {
+    this.sql`drop table if exists cf_ai_chat_stream_metadata`;
+    this.sql`drop table if exists cf_ai_chat_stream_chunks`;
+    this.sql`create table cf_ai_chat_stream_metadata (
+      id text primary key,
+      request_id text not null,
+      status text not null,
+      created_at integer not null,
+      completed_at integer
+    )`;
+    this
+      .sql`insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
+      values ('legacy-stream', 'legacy-req', 'streaming', ${Date.now()})`;
+  }
+
+  private streamMetadataColumnsForTest(): string[] {
+    return this.sql<{ name: string }>`
+      select name from pragma_table_info('cf_ai_chat_stream_metadata')
+    `.map((c) => c.name);
+  }
+
+  /**
+   * Drive a `ResumableStream` over a legacy metadata table and report what
+   * happened, so the test can assert the lazy migration recovered instead of
+   * throwing. Construction itself exercises `restore()` (a `SELECT *` that
+   * must tolerate the missing columns).
+   */
+  async resumableLegacyMigrationForTest(): Promise<{
+    columnsBefore: string[];
+    legacyMessageId: string | null;
+    startThrew: boolean;
+    columnsAfter: string[];
+    newStreamMessageId: string | null;
+  }> {
+    const stream = new ResumableStream(
+      <T = Record<string, unknown>>(
+        strings: TemplateStringsArray,
+        ...values: (string | number | boolean | null)[]
+      ): T[] => this.sql<T>(strings, ...values)
+    );
+
+    const columnsBefore = this.streamMetadataColumnsForTest();
+    // SELECT of the new column on a legacy row: guarded → null, no throw.
+    const legacyMessageId = stream.getStreamMessageId("legacy-stream");
+
+    // INSERT naming the new columns on a legacy table: must migrate + retry.
+    let startThrew = false;
+    let newStreamId = "";
+    try {
+      newStreamId = stream.start("req-x", {
+        messageId: "msg-1",
+        continuation: true
+      });
+    } catch {
+      startThrew = true;
+    }
+
+    const columnsAfter = this.streamMetadataColumnsForTest();
+    const newStreamMessageId = newStreamId
+      ? stream.getStreamMessageId(newStreamId)
+      : null;
+
+    return {
+      columnsBefore,
+      legacyMessageId,
+      startThrew,
+      columnsAfter,
+      newStreamMessageId
+    };
   }
 }
 

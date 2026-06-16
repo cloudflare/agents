@@ -173,7 +173,8 @@ import { truncateOlderMessages } from "agents/experimental/memory/utils";
 import {
   evictLargeMediaFromMessage,
   resolveMediaEvictionConfig,
-  type MediaEvictionConfig
+  type MediaEvictionConfig,
+  type ResolvedMediaEvictionConfig
 } from "./media-eviction";
 
 /**
@@ -1945,8 +1946,10 @@ export class Think<
               this._upsertCachedMessage(event.message as UIMessage);
             }
             // The conversation grew — older messages may have aged out of
-            // the keep-recent window; evict their inline media (#1710).
-            this._scheduleMediaEvictionPass();
+            // the keep-recent window. Only schedule the maintenance scan once
+            // this session has actually observed oversized media; otherwise a
+            // normal text-only chat would pay a row-stat read after every turn.
+            this._scheduleMediaEvictionAfterAppend(event.message as UIMessage);
             break;
           case "update":
             this._patchCachedMessage(event.message as UIMessage);
@@ -1986,6 +1989,7 @@ export class Think<
       if (!hydrated) {
         this._replaceCachedMessages([]);
       }
+      this._refreshMediaEvictionSignalFromCache();
 
       // 3-6. Extension initialization (if extensionLoader is set)
       if (this.extensionLoader) {
@@ -2033,10 +2037,12 @@ export class Think<
           "this wake; the next successful wake will recover them."
       );
 
-      // 11. Background bound on the persisted transcript: evict aged inline
-      // media so the hydration footprint stops growing with session age
+      // 11. Background bound on the persisted transcript: if hydration was
+      // windowed, evict aged inline media so the footprint can converge down
       // (#1710). Runs after `blockConcurrencyWhile` releases — no boot cost.
-      this._scheduleMediaEvictionPass();
+      if (this._lastHydration?.truncated) {
+        this._scheduleMediaEvictionPass({ force: true });
+      }
     };
   }
 
@@ -2336,6 +2342,7 @@ export class Think<
 
   private _mediaEvictionRunning = false;
   private _mediaEvictionScheduled = false;
+  private _mediaEvictionObservedOversized = false;
 
   /**
    * Schedule a background media-eviction pass (see `mediaEviction`).
@@ -2343,14 +2350,51 @@ export class Think<
    * event-loop work (and after `onStart`'s `blockConcurrencyWhile`), so
    * boot and turn latency are unaffected.
    */
-  private _scheduleMediaEvictionPass(): void {
+  private _scheduleMediaEvictionPass(options?: { force?: boolean }): void {
     if (this._mediaEvictionScheduled || this._mediaEvictionRunning) return;
-    if (!resolveMediaEvictionConfig(this.mediaEviction)) return;
+    const config = resolveMediaEvictionConfig(this.mediaEviction);
+    if (!config) return;
+    if (!options?.force && !this._mediaEvictionObservedOversized) return;
     this._mediaEvictionScheduled = true;
     setTimeout(() => {
       this._mediaEvictionScheduled = false;
       void this._evictAgedMediaBestEffort();
     }, 0);
+  }
+
+  private _scheduleMediaEvictionAfterAppend(message: UIMessage): void {
+    const config = resolveMediaEvictionConfig(this.mediaEviction);
+    if (!config) return;
+    if (!this._mediaEvictionObservedOversized) {
+      this._mediaEvictionObservedOversized = this._messageMayNeedMediaEviction(
+        message,
+        config
+      );
+    }
+    if (!this._mediaEvictionObservedOversized) return;
+
+    const keepRecent = Math.max(config.keepRecentMessages, MODEL_RECENT_WINDOW);
+    if (this._cachedMessages.length > keepRecent) {
+      this._scheduleMediaEvictionPass({ force: true });
+    }
+  }
+
+  private _refreshMediaEvictionSignalFromCache(): void {
+    const config = resolveMediaEvictionConfig(this.mediaEviction);
+    if (!config) {
+      this._mediaEvictionObservedOversized = false;
+      return;
+    }
+    this._mediaEvictionObservedOversized = this._cachedMessages.some(
+      (message) => this._messageMayNeedMediaEviction(message, config)
+    );
+  }
+
+  private _messageMayNeedMediaEviction(
+    message: UIMessage,
+    config: ResolvedMediaEvictionConfig
+  ): boolean {
+    return JSON.stringify(message).length >= config.minPartBytes;
   }
 
   private _warnedEvictionUnsupported = false;
@@ -2460,7 +2504,7 @@ export class Think<
       return null;
     } finally {
       this._mediaEvictionRunning = false;
-      if (backlogRemains) this._scheduleMediaEvictionPass();
+      if (backlogRemains) this._scheduleMediaEvictionPass({ force: true });
     }
   }
 

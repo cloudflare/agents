@@ -45,6 +45,26 @@ export class AgentSessionProvider implements SessionProvider {
   private sessionId: string;
 
   /**
+   * Cached id of the active branch tip (latest leaf). `undefined` means "not
+   * cached" (cold, or last lookup found the session empty).
+   *
+   * Finding the tip from scratch is an anti-join over every row in the
+   * session (`latestLeafRow`), which is O(rows). It runs on every hydration
+   * AND every auto-parent append, so on a long transcript it dominates the
+   * read cost of a wake. The tip is maintained in place on append/delete/
+   * clear, and a cached id is re-validated on read with an O(1) existence +
+   * still-childless check before it's trusted — so the cache self-heals if
+   * something else mutates the cached tip: a deleted tip or a tip that gained
+   * a child fails the check and triggers a single recompute. Direct SQL or a
+   * second provider instance that creates a newer leaf without touching the
+   * cached tip is outside the supported writer model and will be observed on
+   * the next cold lookup. The full scan therefore never runs more often than
+   * the original unconditional version did. Reads are synchronous and the DO
+   * is single-threaded, so no locking is needed.
+   */
+  private activeLeafId: string | undefined = undefined;
+
+  /**
    * @param agent - Agent or any object with a `sql` tagged template method
    * @param sessionId - Optional session ID to isolate multiple sessions in the same DO.
    *                    Messages are filtered by session_id within shared tables.
@@ -253,6 +273,11 @@ export class AgentSessionProvider implements SessionProvider {
       VALUES (${message.id}, ${this.sessionId}, ${parent}, ${message.role}, ${json})
     `;
     this.indexFTS(message);
+
+    // The freshly inserted row is the most recent childless node, so it is
+    // now the latest leaf — true even for an explicit-parent branch append.
+    // Keeping the cache current here is what lets appends skip the anti-join.
+    this.activeLeafId = message.id;
   }
 
   updateMessage(message: SessionMessage): void {
@@ -271,6 +296,15 @@ export class AgentSessionProvider implements SessionProvider {
         .sql`DELETE FROM assistant_messages WHERE id = ${id} AND session_id = ${this.sessionId}`;
       this.deleteFTS(id);
     }
+    // Deleting an interior node never changes the tip; deleting the tip does.
+    // Drop the cache so the next lookup recomputes (deletes are rare relative
+    // to reads/appends, so the occasional rescan is fine).
+    if (
+      typeof this.activeLeafId === "string" &&
+      messageIds.includes(this.activeLeafId)
+    ) {
+      this.activeLeafId = undefined;
+    }
   }
 
   clearMessages(): void {
@@ -286,6 +320,7 @@ export class AgentSessionProvider implements SessionProvider {
     for (const row of ftsRows) {
       this.agent.sql`DELETE FROM assistant_fts WHERE rowid = ${row.rowid}`;
     }
+    this.activeLeafId = undefined;
   }
 
   // ── Compaction ─────────────────────────────────────────────────
@@ -357,6 +392,23 @@ export class AgentSessionProvider implements SessionProvider {
   // ── Internal ───────────────────────────────────────────────────
 
   private latestLeafRow(): { id: string } | null {
+    // Trust a cached tip only after an O(1) check that it still exists and is
+    // still childless. This catches a cached tip that was deleted or given a
+    // child by another writer without re-scanning the whole session.
+    if (this.activeLeafId !== undefined) {
+      const stillTip = this.agent.sql<{ id: string }>`
+        SELECT m.id FROM assistant_messages m
+        WHERE m.id = ${this.activeLeafId} AND m.session_id = ${this.sessionId}
+          AND NOT EXISTS (
+            SELECT 1 FROM assistant_messages c
+            WHERE c.parent_id = ${this.activeLeafId}
+              AND c.session_id = ${this.sessionId}
+          )
+      `;
+      if (stillTip.length > 0) return { id: this.activeLeafId };
+      this.activeLeafId = undefined;
+    }
+
     // id-only on purpose: the ORDER BY sorter would otherwise carry every
     // leaf candidate's full content blob while ranking rows.
     const rows = this.agent.sql<{ id: string }>`
@@ -365,6 +417,7 @@ export class AgentSessionProvider implements SessionProvider {
       WHERE c.id IS NULL AND m.session_id = ${this.sessionId}
       ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1
     `;
+    this.activeLeafId = rows[0]?.id;
     return rows[0] ?? null;
   }
 
