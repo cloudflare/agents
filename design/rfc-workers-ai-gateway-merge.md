@@ -1,6 +1,6 @@
 # RFC: Merge `ai-gateway-provider` into `workers-ai-provider`
 
-Status: proposed
+Status: accepted — implemented in [cloudflare/ai#573](https://github.com/cloudflare/ai/pull/573) (single `createWorkersAI` entry; run + gateway transports; resume; client/server fallback; BYOK; metadata; full provider registry; live e2e). Remaining open questions are follow-ups, not blockers.
 
 > Scope note: the code changes live in the [`cloudflare/ai`](https://github.com/cloudflare/ai)
 > repo (`packages/workers-ai-provider`, `packages/ai-gateway-provider`). This RFC
@@ -170,17 +170,42 @@ import { anthropic } from "workers-ai-provider/anthropic"; // peer-deps @ai-sdk/
 
 const wai = createWorkersAI({
   binding: env.AI,
-  gateway: "my-gateway",
   providers: [openai, anthropic],          // opt-in, each pulls its own peer dep
+  // gateway optional — defaults to the account's "default" gateway
 });
 
 wai("@cf/meta/llama-3.3-70b-instruct-fp8-fast"); // native
 wai("openai/gpt-5.4");                            // run catalog → run path, resumable
 wai("openai/gpt-5.4", { cacheTtl: 3600 });        // gateway path → warns resume disabled
-wai("openrouter/anthropic/claude-sonnet-4.5");    // routing-layer provider (§3b), BYOK, gateway path
-wai.fallback([...]);                              // default client-side, each step resumable
-wai.fallback([...], { mode: "server" });          // gateway cf-aig-step, no resume
+wai("openai/gpt-5.4", { fallback: { mode: "client", models: [...] } }); // resumable per leg
 ```
+
+> **As built ([cloudflare/ai#573](https://github.com/cloudflare/ai/pull/573)) — deltas from this section's original sketch:**
+>
+> - **Single public entry.** `createWorkersAI` is the only surface; the delegate
+>   engine is **internal** (no public `workers-ai-provider/gateway-delegate`
+>   sub-path). The transport types, error classes, registry helpers,
+>   `DelegateCallOptions`, and `createResumableStream` are re-exported from root.
+> - **Plugins keyed by wire format, not vendor.** One `openai` plugin serves the
+>   whole OpenAI-compatible long tail (deepseek, xai/grok, groq, mistral,
+>   perplexity, cerebras, openrouter, fireworks) **plus** the run-catalog chat
+>   providers `alibaba`/Qwen and `minimax` — so §3a's separate
+>   `openai-compatible` wrapper was folded in rather than shipped.
+> - **`gateway` is optional**, defaulting to the account's `"default"` gateway for
+>   catalog routing; an explicit `gateway` (config- or call-level) wins, and
+>   plain `@cf/*` models are never forced through a gateway.
+> - **Fallback is a per-call option** (`DelegateCallOptions.fallback`, see §4),
+>   not a `wai.fallback(...)` method.
+> - **Per-slug autocomplete shipped** (resolves the typing open question): the
+>   settings argument is typed from the model-id literal —
+>   `wai("openai/gpt-5", { … })` autocompletes `DelegateCallOptions`, while
+>   `wai("@cf/…", { … })` autocompletes `WorkersAIChatSettings`.
+> - **Run-path wire format is per-provider** (`runWireFormat` in the registry):
+>   the unified catalog normalizes most providers to OpenAI wire on the run path
+>   (so `google/…` parses with the `openai` plugin there), but Anthropic stays
+>   native — `anthropic/…` uses the `anthropic` plugin on both paths.
+> - **Metadata & logging** (`metadata`, `collectLog`) are first-class call
+>   options on both transports.
 
 Each wrapper is a small **descriptor**: `{ vendor, createModel(modelId), quirks }`
 where `createModel` builds the `@ai-sdk/*` model (with a dummy key) and `quirks`
@@ -220,8 +245,11 @@ Routing by resolver key (first segment):
 
 #### 3a. Generic OpenAI-compatible wrapper
 
-`workers-ai-provider/openai-compatible` (peer-deps `@ai-sdk/openai-compatible`)
-handles the long tail of OpenAI-shaped vendors without a bespoke wrapper. Opt-in.
+_Resolved (as built): folded into the `openai` plugin._ Because plugins are keyed
+by **wire format**, the single `openai` plugin already serves every
+OpenAI-shaped vendor in the registry (deepseek, xai/grok, groq, mistral,
+perplexity, cerebras, openrouter, fireworks, alibaba/Qwen, minimax). No separate
+`workers-ai-provider/openai-compatible` sub-path was needed.
 
 #### 3b. Routing-layer providers (OpenRouter, et al.)
 
@@ -779,8 +807,11 @@ reliable supported path.
   expiry signal is a clean `404 {"error":"Request not found"}` (§7). Open
   sub-question: is the TTL **configurable** per gateway? (Affects how aggressively
   we persist partials.)
-- Wrapper descriptor shape (§3): how a wrapper carries `createModel` + quirks
-  cleanly, and whether per-sub-path `peerDependencies` give a good install story.
+- ~~Wrapper descriptor shape (§3)~~ — **resolved ✅ (as built)**: a plugin is
+  `{ wireFormat, create({ modelId, … }) }`, keyed by wire format (one `openai`
+  plugin serves the OpenAI-compatible long tail). Optional per-sub-path
+  `peerDependencies` (`@ai-sdk/openai|anthropic|google`, marked optional) give a
+  clean install story — you pull only the wire formats you use.
 - **Routing-layer providers** (§3b): _resolved 2026-06-14._ OpenRouter is
   gateway-path-only/BYOK (not on the run catalog) and rides the same
   `gateway().run([{ provider: "openrouter" }])` binding; the gateway integration
@@ -806,19 +837,46 @@ reliable supported path.
   `beforeTurn`/`afterTurn` hook, or a provider-level callback?
 - Image / embedding / transcription / speech models: native-only for now, or do
   any catalog equivalents need delegation too?
-- Does typing survive `verbatimModuleSyntax` + `(string & {})` in
-  `TextGenerationModels`, and can wrappers yield real per-slug autocomplete?
-- Fallback ergonomics: `wai.fallback([...slugs], { mode })` vs model instances;
-  retry/backoff policy between client-side steps.
-- **Conflict granularity** (§2): error vs warn boundary — is `resume` "explicitly
-  on" only when the user passes `resume: true`, or also when they pass *no*
-  gateway-only option? (Proposed: default-on, warn when a gateway-only opt-in
-  silently disables it; hard-error only when `resume: true` is explicit.)
-- Should `openai-compatible` (§3a) ship in v1 or wait?
+- ~~Does typing survive `verbatimModuleSyntax` + `(string & {})` in
+  `TextGenerationModels`, and can wrappers yield real per-slug autocomplete?~~ —
+  **resolved ✅ (as built)**: yes. A `KnownTextGenerationModels` literal union
+  (minus the `(string & {})` escape) plus a conditional `ModelSettings<M>` keyed
+  off the captured model-id literal gives real per-slug autocomplete —
+  `DelegateCallOptions` for `"<provider>/<model>"` slugs, `WorkersAIChatSettings`
+  for `@cf/…` — with no breaking change to the return type.
+- ~~Fallback ergonomics~~ — **resolved ✅ (as built)**: fallback is a **per-call
+  option** (`DelegateCallOptions.fallback = { mode, models }`), not a
+  `wai.fallback(...)` method. `"client"` keeps resume per leg; `"server"` uses
+  the gateway path. (Open follow-up: retry/backoff policy between client legs.)
+- ~~**Conflict granularity** (§2)~~ — **resolved ✅ (as built)**: default-on
+  resume; **warn loudly** when a gateway-only opt-in silently disables it;
+  **hard-error** only on impossible explicit combinations (e.g. `resume: true` +
+  `fallback.mode: "server"`, or a gateway-only feature on a run-path-only
+  provider). Run-path-only providers (`gatewayPath: false`, e.g. alibaba/minimax)
+  reject gateway-path features at config time.
+- ~~Should `openai-compatible` (§3a) ship in v1 or wait?~~ — **resolved ✅**: not
+  shipped as a separate wrapper; folded into the wire-format-keyed `openai`
+  plugin (§3a).
 
 ## The decision
 
-_Pending._ Direction agreed in discussion (2026-06-14):
+**Accepted and implemented** in [cloudflare/ai#573](https://github.com/cloudflare/ai/pull/573)
+(2026-06-16). As built, the surface deviated from the original sketch in a few
+deliberate ways (all detailed in §3's "As built" callout):
+
+- **Single public entry** — `createWorkersAI({ providers })`; the delegate engine
+  is internal (no public `gateway-delegate` sub-path).
+- **Plugins keyed by wire format** — one `openai` plugin serves the whole
+  OpenAI-compatible long tail (so §3a's separate wrapper was folded in), plus
+  per-provider `runWireFormat` (Anthropic stays native on the run path).
+- **`gateway` optional**, defaulting to the `"default"` gateway for catalog
+  routing; `@cf/*` models are never forced through a gateway.
+- **Fallback is a per-call option**; **metadata/`collectLog`** are first-class on
+  both transports.
+- **Per-slug autocomplete** via literal-driven conditional settings types.
+- Whole third-party/gateway surface marked **experimental**.
+
+Original direction (agreed in discussion 2026-06-14), which this implements:
 
 - **Capability-driven dual transport.** Support **both** the run path (resume) and
   the gateway path (server-side fallback, caching, full `cf-aig-*`). A capability
@@ -904,3 +962,40 @@ RFC-first otherwise.
   injected-drop, openai + anthropic): transparent reconnect, complete parse,
   `finishReason: stop`. Buffer TTL pinned to ≈330–360s with a clean `404` expiry
   contract via `ttl-sweep*.sh`.
+- Provider/feature layer (2026-06-14): mirroring [cloudflare/ai#409](https://github.com/cloudflare/ai/pull/409),
+  added the full **provider registry** (`src/gateway-providers.ts` — every gateway
+  provider → gateway id, wire format, run-catalog membership, billing, host
+  detection) and reworked provider plugins to be keyed by **wire format**, so one
+  `openai` plugin serves the whole OpenAI-compatible long tail (deepseek, xai/grok,
+  groq, mistral, perplexity, openrouter, cohere, …). Added `@ai-sdk/google` as a
+  third optional peer. New surfaces: **BYOK** header forwarding + per-provider
+  strip, **client-side fallback** (`createClientFallbackModel`, resume preserved
+  per leg, `WorkersAIFallbackError` attempt tree), **server-side fallback** entry
+  shaping, gateway-options + abort passthrough, and a **bring-your-own-provider**
+  wrapper (`workers-ai-provider/gateway` → `createGatewayFetch`/`createGatewayProvider`,
+  URL-detected provider id) for provider-native/non-chat providers. Typed error
+  taxonomy in `src/errors.ts` (`WorkersAIGatewayError` with `code`/`recoverable`/
+  envelope parsing + `classifyStatus`/`extractErrorMessage`). Coverage: 64 new unit
+  tests (registry, transport selection incl. non-run-catalog, gateway entry
+  shaping, header strip, BYOK, fallback entries, abort, cache headers, error
+  classification, attempt tree, BYOG) + a live e2e harness
+  (`test/e2e/fixtures/gateway-worker` + `workers-ai-gateway.e2e.test.ts`, gated on
+  `RUN_E2E`, `test:e2e:gateway`) covering the Tier-2 run/gateway/fallback/cache/BYOG
+  matrix. Package README + changeset updated.
+- API consolidation + ship (2026-06-16): opened
+  [cloudflare/ai#573](https://github.com/cloudflare/ai/pull/573). Made
+  `createWorkersAI` the **single public entry** (delegate engine internalized — no
+  public `gateway-delegate` sub-path); a non-`@cf/` `"<provider>/<model>"` slug is
+  routed automatically when `providers` is set. Added **literal-driven settings
+  typing** (`KnownTextGenerationModels` + `ModelSettings<M>`) for real per-slug
+  autocomplete (resolves the typing open question). Added **first-class
+  metadata/`collectLog`** on both transports, the run-catalog chat providers
+  **alibaba/Qwen** and **minimax** (run-path-only, `gatewayPath: false`), and
+  **per-provider `runWireFormat`** so the run path parses each provider correctly
+  (OpenAI-wire for most; native for Anthropic — addresses
+  [cloudflare/ai#554](https://github.com/cloudflare/ai/issues/554)). Made
+  **`gateway` optional**, defaulting to the account's `"default"` gateway for
+  catalog routing. Hardened the live e2e (real `default` gateway; strict
+  transport/runId/resume assertions; mid-stream-drop byte-identical
+  reconstruction): 370 unit + 16/1-skip gateway e2e + 76 binding e2e passing.
+  Whole gateway surface marked **experimental**.
