@@ -89,6 +89,7 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | `rfc-helper-sub-agent-orchestration.md` | RFC        | Agent tool orchestration — `runAgentTool`, `agentTool`, event forwarding                                    |
 | `rfc-think-multi-session.md`            | RFC        | Multi-session Think / Chats pattern — parent directory + per-chat child DOs                                 |
 | `rfc-chat-recovery-work-budget.md`      | RFC        | Decouple chat-recovery duration from the runaway guard — work budget + `shouldKeepRecovering` (accepted)    |
+| `rfc-chat-recovery-foundation.md`       | RFC        | Shared chat recovery foundation — internal engine, adapters, behavior convergence, and testing strategy     |
 | `rfc-ai-chat-maintenance.md`            | RFC        | AIChatAgent first-class stance, shared chat toolkit, multi-session example direction                        |
 | `loopback.md`                           | design doc | Loopback pattern — cross-boundary RPC for sub-agents and dynamic isolates                                   |
 | `worker-bundler.md`                     | design doc | Worker bundler — host-side assets, no code generation, mounting is caller's concern                         |
