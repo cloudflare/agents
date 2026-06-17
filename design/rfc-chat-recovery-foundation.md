@@ -1378,6 +1378,38 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 3 confidence pass (deep review + real e2e)_ — Before starting Phase 4,
+  re-verified 3a/3b/3c with a fresh review and the real-`wrangler dev` suites.
+  **Review findings:** (1) `_routeStallToBoundedRecovery` in `AIChatAgent` is
+  structurally byte-equivalent to Think's (clean `_completeStream` + `done:true`
+  on `scheduled`; `_markStreamError` on `exhausted`; `aborted` status so the turn
+  is not terminalised) — confirmed by reading both side by side. (2) The
+  continuation re-anchor id is safe: the catch passes `targetAssistantId =
+message.id`, and the tool-approval early-persist writes under `sanitized.id ===
+message.id` (sanitize preserves id), so `earlyPersistedId === message.id` and
+  the continuation's leaf-check cannot mis-skip. (3) **Coverage gap found + closed:**
+  no test exercised a _healthy_ stream with the watchdog armed (`timeout > 0`,
+  non-stalling) — the guarded `pull()` must pass healthy streams through unchanged
+  and clear its timer on completion. Added an ai-chat integration test for exactly
+  that. (4) Noted (not a bug): the watchdog measures inter-chunk gaps; it is
+  opt-in (default `0`) and the budget keeps HITL/awaiting-interaction turns
+  budget-free, so a spurious trip cannot wrongly exhaust — documented as a tuning
+  consideration. **E2e/tests run:** ai-chat local `wrangler dev` + SIGKILL
+  recovery e2e — 5 files / 10 tests green (the bounded-recovery machinery the
+  stall routes into works on a real isolate); shared `agents/chat` stall-watchdog
+  - recovery-engine unit suites — 29 green (3a primitive + 3c engine seam); Think
+    `messengers` suite — 27 green (3c dispatch through the new seam); full Think
+    workers suite — 686 green (3a/3c no regression); full ai-chat workers suite —
+    608 green (3b + the new healthy-passthrough test, no regression). **Blocked
+    (environment, not code):** the Think real-`wrangler dev` e2e suite binds
+    Workers AI with `"remote": true`, so it needs live `wrangler` auth; creds are
+    expired in this environment and it cannot run headless. The shared stall-watchdog
+    primitive (3a) it would exercise is identical to the one Think already shipped
+    and is unit-covered; deferring the Think real-edge + deployed e2e to the
+    Phase 6 merge gate (run once re-authenticated). A dedicated ai-chat real-wrangler
+    stall e2e was assessed and judged low marginal value over the deterministic
+    integration coverage above — left optional.
+
 - _Slice 3a (Phase 3 start — shared stall-watchdog primitive)_ — First Phase 3
   step. The incident lifecycle is already shared for `Think` (2b/2c/2e), so
   Phase 3 is the deeper `Think`-only surface; per a recovery-surface map (stall

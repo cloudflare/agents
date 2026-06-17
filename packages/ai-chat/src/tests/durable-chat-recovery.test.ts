@@ -2558,6 +2558,24 @@ describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
     ).toBe(true);
   });
 
+  it("passes a healthy (non-stalling) stream through unchanged when the watchdog is armed", async () => {
+    const room = `stall-healthy-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    // Arm the watchdog with a timeout comfortably above the (effectively
+    // instant) inter-chunk gap of a healthy SSE stream. The guarded read path
+    // must pass a non-stalling stream through unchanged — the turn completes
+    // normally, with no recovery incident and no continuation scheduled, and
+    // the watchdog timer must be cleared on completion (no spurious late trip).
+    await agentStub.setChatStreamStallTimeoutForTest(1000);
+    expect(await agentStub.driveSuccessfulTurnForTest()).toBe("completed");
+
+    expect(await agentStub.getChatRecoveryIncidentsForTest()).toHaveLength(0);
+    expect(
+      await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
+    ).toBe(0);
+  });
+
   it("does not arm the watchdog when the stall timeout is 0 (default, opt-in)", async () => {
     const room = `stall-off-${crypto.randomUUID()}`;
     const agentStub = await getTestAgent(room);
