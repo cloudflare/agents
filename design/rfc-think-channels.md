@@ -59,13 +59,13 @@ all. Concretely:
   either rides a model turn (messenger reply, WS `MSG_CHAT_RESPONSE`) or is a
   raw `_hostSendMessage` append (`think.ts:4631`) that web clients see but other
   channels do not. There is no supported way to say "tell the user/channel
-  *this exact thing* without invoking the model."
+  _this exact thing_ without invoking the model."
 - **Delivery lifecycle is inferred, not declared.** Delivery state is
   `MessengerReplyStage = "accepted" | "streaming" | "completed"`
   (`delivery.ts:201`) plus heuristics on text shape
   (`messengerReplyFailureMode`, `delivery.ts:261`). Surfaces cannot tell a
-  *final* answer from an *interim* progress note from a deterministic *notice*
-  from a *command*; voice and CLI especially need this explicitly rather than
+  _final_ answer from an _interim_ progress note from a deterministic _notice_
+  from a _command_; voice and CLI especially need this explicitly rather than
   guessing from whether text arrived.
 - **No `informModel`.** When something is delivered outside the model (a
   deterministic status, a fallback, a notice), the next model turn does not know
@@ -104,7 +104,7 @@ rename-and-unify, not rebuild.
   defines the **voice channel seam**; [the Voice spike](./rfc-think-voice.md)
   fills it.
 - Defining the `ReplyAttachment` union — that is owned by the
-  [Actions RFC](./rfc-think-actions.md). This RFC only *consumes* attachments.
+  [Actions RFC](./rfc-think-actions.md). This RFC only _consumes_ attachments.
 - Changing recovery policy/budgets (recovery RFC) or turn admission internals
   (Turns RFC). This RFC plugs into both.
 - Multi-session routing (`rfc-think-multi-session.md`).
@@ -153,14 +153,14 @@ interface ChannelDefinition {
   /** Stable id (the registration key, like a messenger id). */
   // (set by configureChannels()'s record key, mirroring normalizeMessengers)
 
-  capabilities?: ChannelCapabilities;     // == MessengerCapabilities (events.ts:58)
-  conversation?: ConversationMode | ConversationResolver; // == MessengerConversation* 
-  delivery?: ChannelDeliveryPolicy;       // == MessengerDeliveryPolicy (delivery.ts:300)
+  capabilities?: ChannelCapabilities; // == MessengerCapabilities (events.ts:58)
+  conversation?: ConversationMode | ConversationResolver; // == MessengerConversation*
+  delivery?: ChannelDeliveryPolicy; // == MessengerDeliveryPolicy (delivery.ts:300)
 
   /** Per-channel policy (new — see configureChannels). */
   instructions?: string | ((ctx: ChannelContext) => string | Promise<string>);
-  tools?: (all: ToolSet) => ToolSet;      // narrow the tool set for this channel
-  maxTurns?: number;                       // per-turn cap for this channel
+  tools?: (all: ToolSet) => ToolSet; // narrow the tool set for this channel
+  maxTurns?: number; // per-turn cap for this channel
 
   /** Ingress, by kind (below). */
   ingress: ChannelIngress;
@@ -170,32 +170,38 @@ interface ChannelDefinition {
 Field-by-field mapping from `MessengerDefinition` (the messenger channel is the
 identity case — nothing is lost):
 
-| `ChannelDefinition` | `MessengerDefinition` (`chat-sdk.ts`) | Notes |
-| --- | --- | --- |
-| `kind: "messenger"` | (implicit) | new discriminator |
-| id (record key) | id (record key in `ThinkMessengers`) | `normalizeMessengers` enforces uniqueness |
-| `capabilities` | `capabilities` | identical (`MessengerCapabilities`) |
-| `conversation` | `conversation` | identical (`self`/`thread`/resolver) |
-| `delivery` | `delivery` | identical (`MessengerDeliveryPolicy`) |
-| `ingress.adapter`/`adapterName` | `adapter`/`adapterName` | chat-sdk adapter |
-| `ingress.path` | `path` | webhook route |
-| `ingress.verifyWebhook` | `verifyWebhook` | identical |
-| `ingress.toEvent` | `toEvent` | identical |
-| `ingress.respondTo` | `respondTo` | identical |
-| `ingress.subscribeOnMention` | `subscribeOnMention` | identical |
-| `instructions`/`tools`/`maxTurns` | — | net-new per-channel policy |
+| `ChannelDefinition`               | `MessengerDefinition` (`chat-sdk.ts`) | Notes                                     |
+| --------------------------------- | ------------------------------------- | ----------------------------------------- |
+| `kind: "messenger"`               | (implicit)                            | new discriminator                         |
+| id (record key)                   | id (record key in `ThinkMessengers`)  | `normalizeMessengers` enforces uniqueness |
+| `capabilities`                    | `capabilities`                        | identical (`MessengerCapabilities`)       |
+| `conversation`                    | `conversation`                        | identical (`self`/`thread`/resolver)      |
+| `delivery`                        | `delivery`                            | identical (`MessengerDeliveryPolicy`)     |
+| `ingress.adapter`/`adapterName`   | `adapter`/`adapterName`               | chat-sdk adapter                          |
+| `ingress.path`                    | `path`                                | webhook route                             |
+| `ingress.verifyWebhook`           | `verifyWebhook`                       | identical                                 |
+| `ingress.toEvent`                 | `toEvent`                             | identical                                 |
+| `ingress.respondTo`               | `respondTo`                           | identical                                 |
+| `ingress.subscribeOnMention`      | `subscribeOnMention`                  | identical                                 |
+| `instructions`/`tools`/`maxTurns` | —                                     | net-new per-channel policy                |
 
 `ChannelIngress` is a discriminated union so `web`/`voice` do not have to invent
 webhook fields they do not use:
 
 ```ts
 type ChannelIngress =
-  | { transport: "webhook"; adapter: Adapter; adapterName?: string;
-      path?: string; verifyWebhook: VerifyWebhook | false;
-      toEvent?: ToEvent; respondTo?: readonly MessengerRespondTo[];
-      subscribeOnMention?: boolean }              // == messenger ingress today
-  | { transport: "websocket" }                    // built-in web chat
-  | { transport: "voice" };                       // seam for the Voice spike
+  | {
+      transport: "webhook";
+      adapter: Adapter;
+      adapterName?: string;
+      path?: string;
+      verifyWebhook: VerifyWebhook | false;
+      toEvent?: ToEvent;
+      respondTo?: readonly MessengerRespondTo[];
+      subscribeOnMention?: boolean;
+    } // == messenger ingress today
+  | { transport: "websocket" } // built-in web chat
+  | { transport: "voice" }; // seam for the Voice spike
 ```
 
 Internally, a `kind: "messenger"` channel is normalized to exactly today's
@@ -218,7 +224,7 @@ The point of the contract is that `web` and `voice` are not special cases.
   utterance dispatches `runTurn({ channel: "voice", input: utterance })`.
   Delivery surface is TTS. The actual audio transport, barge-in, and
   STT/TTS wiring are the Voice spike's job; this RFC only guarantees voice is
-  *expressible* as a channel (capabilities `{ canStream: true }`, deterministic
+  _expressible_ as a channel (capabilities `{ canStream: true }`, deterministic
   `notice` delivery for spoken status/approval prompts).
 
 This is the crux the parent plan flagged: "how the built-in web WS chat (and
@@ -250,7 +256,7 @@ Resolution order at startup (`_initializeMessengers` becomes
    `normalizeMessengers`' duplicate-id guard, `chat-sdk.ts:589`).
 
 So existing apps that only implement `getMessengers()` keep working untouched;
-the channel runtime simply *contains* their messengers. New apps use
+the channel runtime simply _contains_ their messengers. New apps use
 `configureChannels()` and get web/voice/messenger uniformly.
 
 Per-channel policy (`instructions`/`tools`/`maxTurns`) is applied at turn
@@ -290,7 +296,7 @@ interface DeliverNoticeOptions {
    */
   informModel?: boolean;
   /** Delivery kind for the wire tag. Default "notice". */
-  kind?: DeliveryKind;        // usually "notice" or "command"
+  kind?: DeliveryKind; // usually "notice" or "command"
   /** Conversation/thread hint for multi-thread channels (see routing). */
   thread?: string;
 }
@@ -319,7 +325,7 @@ Semantics:
   the caller must name `channel` (and `thread` for multi-thread messengers);
   otherwise it resolves to `web`. If a named channel/thread cannot be resolved,
   it throws (fail fast rather than silently drop).
-- **Never an incident.** A notice is explicitly *not* a turn, so it must not
+- **Never an incident.** A notice is explicitly _not_ a turn, so it must not
   enter `tryHandleNonChatFiberRecovery` or create a messenger-reply snapshot.
   Notices are best-effort deliveries; if the channel post fails, that is a
   delivery error surfaced to the caller, not a recovery incident. This aligns
@@ -346,9 +352,9 @@ shape. We **extend, not replace**: keep the stage, add an orthogonal delivery
 type DeliveryKind = "final" | "interim" | "notice" | "command";
 
 interface DeliveryTag {
-  stage: MessengerReplyStage;   // unchanged: accepted | streaming | completed
-  kind: DeliveryKind;           // new
-  turnEnded: boolean;           // new — does this delivery close the turn?
+  stage: MessengerReplyStage; // unchanged: accepted | streaming | completed
+  kind: DeliveryKind; // new
+  turnEnded: boolean; // new — does this delivery close the turn?
 }
 ```
 
@@ -396,7 +402,7 @@ said it would expose them.
   RFC reserved). For `kind: "messenger"` channels this is the existing
   `MessengerContext` (`events.ts:67`) — so `chatWithMessengerContext`
   (`think.ts:2980`) becomes the messenger-channel specialization of one general
-  path. The Turns RFC owns admission; this RFC owns what `channel` *means*.
+  path. The Turns RFC owns admission; this RFC owns what `channel` _means_.
 - **Per-channel policy at admission.** `instructions`/`tools`/`maxTurns` are read
   when `_admitTurn` builds the inference loop, so a channel's narrowed tool set
   applies to that turn only.
@@ -466,7 +472,7 @@ actions, and recovery.
 - **Notice during an active turn** branches like `addMessages` when
   `informModel: true` (it appends to the last committed leaf). Supported pattern:
   deliver the notice, let the in-flight turn finish; the annotation is visible to
-  the *next* turn. Documented, same caveat as `addMessages`.
+  the _next_ turn. Documented, same caveat as `addMessages`.
 - **Notice ordering vs streaming.** A `notice`/`command` delivered mid-stream is
   tagged `turnEnded: false` so surfaces render it without closing the turn's
   `final` reply.
@@ -521,7 +527,7 @@ actions, and recovery.
   awaited-durable-handoff invariant either way (parent plan).
 - **Voice as a literal channel vs a parallel surface.** This RFC assumes voice is
   a channel. If the Voice spike finds the audio transport cannot fit the
-  delivery-surface contract, voice may become a parallel surface that *reuses*
+  delivery-surface contract, voice may become a parallel surface that _reuses_
   turns/notices instead of being a `ChannelKind`. The spike decides.
 - **`DeliveryKind` extensibility.** Is the four-value enum enough, or do surfaces
   need an open string union (like `ReplyAttachment`)? Start closed; widen if a

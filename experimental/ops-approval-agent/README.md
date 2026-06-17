@@ -46,14 +46,14 @@ curl 'http://localhost:8787/ops/debug?session=demo'
 
 ## What it exercises (and where it hurts)
 
-| Production semantic            | Today's primitive used        | Gap (RFC)                                            |
-| ------------------------------ | ----------------------------- | --------------------------------------------------- |
-| Permission-gated side effects  | hand-rolled scope set + throw | `action({ permissions })` / `authorizeTurn` (Actions) |
-| Idempotent money movement      | hand-rolled SQLite ledger     | `cf_think_action_ledger` (Actions)                  |
-| Human approval before a write  | `tool({ needsApproval })`     | no server-side resolve path (Actions)               |
-| Durable acceptance of a request | `submitMessages()`            | one of three turn doors (Turns / `runTurn`)         |
-| Proactive daily digest         | `getScheduledTasks()` prompt  | NL-string trigger, not unified (Turns)              |
-| Out-of-band context for the model | `addMessages()`            | model-only; no `deliverNotice({ informModel })` (Channels) |
+| Production semantic               | Today's primitive used        | Gap (RFC)                                                  |
+| --------------------------------- | ----------------------------- | ---------------------------------------------------------- |
+| Permission-gated side effects     | hand-rolled scope set + throw | `action({ permissions })` / `authorizeTurn` (Actions)      |
+| Idempotent money movement         | hand-rolled SQLite ledger     | `cf_think_action_ledger` (Actions)                         |
+| Human approval before a write     | `tool({ needsApproval })`     | no server-side resolve path (Actions)                      |
+| Durable acceptance of a request   | `submitMessages()`            | one of three turn doors (Turns / `runTurn`)                |
+| Proactive daily digest            | `getScheduledTasks()` prompt  | NL-string trigger, not unified (Turns)                     |
+| Out-of-band context for the model | `addMessages()`               | model-only; no `deliverNotice({ informModel })` (Channels) |
 
 ## Related
 

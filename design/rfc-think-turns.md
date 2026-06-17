@@ -33,8 +33,8 @@ What is already built vs. still open in **this** RFC:
   scope of this RFC and what a fresh session should implement.
 
 Recovery-RFC gate (see "Coordination with the chat-recovery RFC"): the
-`runTurn` *facade* (suggested order step 2) can land anytime, but the
-`_admitTurn`/`TurnSpec` *extraction* should follow chat-recovery RFC Phases 0–1
+`runTurn` _facade_ (suggested order step 2) can land anytime, but the
+`_admitTurn`/`TurnSpec` _extraction_ should follow chat-recovery RFC Phases 0–1
 (ideally Phase 3) so it targets `ThinkRecoveryAdapter`
 (`classifyRecoveredTurn`/`resolveStreamForRecovery`) rather than the
 pre-refactor private methods.
@@ -43,7 +43,7 @@ pre-refactor private methods.
 
 Every model turn in Think converges on one private method,
 `_runInferenceLoop(input: TurnInput)` (`packages/think/src/think.ts:3873`). That
-convergence is good. The problem is everything *above* it: there are at least
+convergence is good. The problem is everything _above_ it: there are at least
 seven public/internal admission paths that each re-implement "persist some
 messages, bind a request id, optionally wrap a recovery fiber, enqueue on the
 turn queue, pick a stream sink, run the loop, stream the result" with small
@@ -75,8 +75,8 @@ Two consequences:
 1. **No single mental model for "run a turn."** Users learn `chat`,
    `saveMessages`, `submitMessages`, and "WebSocket just works" as unrelated
    APIs, even though they are the same operation with different admission and
-   delivery. This directly undercuts the strategy goal of making Think *smaller
-   to learn*.
+   delivery. This directly undercuts the strategy goal of making Think _smaller
+   to learn_.
 2. **Admission logic is duplicated and drifts.** Each path independently decides
    request-id source, persistence, recovery-fiber wrapping, turn-queue
    generation binding, and overflow-retry policy. This is the same class of
@@ -87,7 +87,7 @@ Separately, there is a **documentation/API gap**: docs reference a Think
 method. No-turn writes today go only through protected hooks
 (`appendMessageToHistory`, `updateMessageInHistory`, `think.ts:2657`, `2665`)
 and internal helpers (`_hostSendMessage`, `_appendMessageToHistory`). There is
-no supported public way to add a message to history *without* starting a model
+no supported public way to add a message to history _without_ starting a model
 turn.
 
 ## Goals
@@ -260,7 +260,7 @@ UIMessage[] | (current) => ...`), so callers do not relearn input per mode. Two
 behaviors must be specified:
 
 - **Function form evaluation timing.** `(current) => messages` is evaluated
-  against the live transcript at the moment the turn is *admitted to run*:
+  against the live transcript at the moment the turn is _admitted to run_:
   immediately for `wait`/`stream`, and at **drain time** for `submit` (not at
   the `runTurn` call). A `submit` function input therefore sees the transcript
   as it is when the durable submission actually executes, which may be after
@@ -279,7 +279,7 @@ behaviors must be specified:
 
 This is an easy footgun and must be documented prominently. A blocking
 `runTurn({ mode: "wait" })` (or `saveMessages`) called from inside a tool
-`execute`, `beforeTurn`, or any code running *within* an active turn will
+`execute`, `beforeTurn`, or any code running _within_ an active turn will
 **deadlock**: the active turn holds the turn queue, and `wait` enqueues behind
 it. The same applies to `continuation`.
 
@@ -287,7 +287,7 @@ Supported patterns for "do more work from inside a turn":
 
 - **`mode: "submit"`** — durable, runs after the current turn drains. Safe from
   anywhere. Preferred for "schedule follow-up work".
-- **Sub-agent `mode: "stream"`/`"wait"` on a *different* agent** — a child agent
+- **Sub-agent `mode: "stream"`/`"wait"` on a _different_ agent** — a child agent
   has its own turn queue; this is how `startAgentToolRun` / agent tools already
   work.
 - **`addMessages(...)`** — to add transcript context without running a turn (it
@@ -299,15 +299,15 @@ active; use mode: 'submit' or addMessages()") rather than hang.
 
 #### Recipes (DX)
 
-| Task | Call |
-| --- | --- |
-| Browser chat | handled by the WebSocket path; no app code |
-| Sub-agent / RPC streaming reply | `runTurn({ mode: "stream", input, callback })` |
-| Webhook / inbound event (durable, retried) | `runTurn({ mode: "submit", input, idempotencyKey })` |
-| Background job that must finish before returning | `runTurn({ mode: "wait", input })` |
-| Add context the next turn should see (no model call) | `await addMessages(...)` then `runTurn(...)` |
-| Continue a partial/aborted assistant answer | `runTurn({ continuation: true })` |
-| Cancel an in-flight turn | capture `requestId` (pass it in or read `onStart`), then `cancelChat(requestId)` |
+| Task                                                 | Call                                                                             |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Browser chat                                         | handled by the WebSocket path; no app code                                       |
+| Sub-agent / RPC streaming reply                      | `runTurn({ mode: "stream", input, callback })`                                   |
+| Webhook / inbound event (durable, retried)           | `runTurn({ mode: "submit", input, idempotencyKey })`                             |
+| Background job that must finish before returning     | `runTurn({ mode: "wait", input })`                                               |
+| Add context the next turn should see (no model call) | `await addMessages(...)` then `runTurn(...)`                                     |
+| Continue a partial/aborted assistant answer          | `runTurn({ continuation: true })`                                                |
+| Cancel an in-flight turn                             | capture `requestId` (pass it in or read `onStart`), then `cancelChat(requestId)` |
 
 ### 2. `TurnSpec` + `_admitTurn(spec)`
 
@@ -382,7 +382,7 @@ interface TurnSpec {
    continue-from-leaf precondition check).
 6. Optionally wrap in `_runChatRecoveryFiber(requestId, continuation, body)`.
 7. Run `_runInferenceLoop({ signal, clientTools, clientToolExecutor, body,
-   workflowPrompt, continuation })` inside the overflow-retry loop when
+workflowPrompt, continuation })` inside the overflow-retry loop when
    `spec.overflowRetry`.
 8. Stream via the sink: `_streamResult` (ws-broadcast / programmatic-silent) or
    `_streamResultToRpcCallback` (rpc-callback).
@@ -393,27 +393,27 @@ The refactor is mechanical: each existing method becomes a `TurnSpec` builder
 plus a call to `_admitTurn`. No public signature changes.
 
 - `chat` / `chatWithMessengerContext`: `{ trigger: "rpc", admission: "queue",
-  continuation: false, persist: "append-user", sink: { kind: "rpc-callback",
-  callback }, recoveryFiber: chatRecovery, overflowRetry: true, channelContext }`.
+continuation: false, persist: "append-user", sink: { kind: "rpc-callback",
+callback }, recoveryFiber: chatRecovery, overflowRetry: true, channelContext }`.
 - `_handleChatRequest`: `{ trigger: "ws-chat", admission: "queue",
-  requestId: event.id, persist: "append-user" (post-reconcile), sink:
-  { kind: "ws-broadcast", connectionId }, generation: epoch,
-  recoveryFiber: chatRecovery, overflowRetry: true }`.
+requestId: event.id, persist: "append-user" (post-reconcile), sink:
+{ kind: "ws-broadcast", connectionId }, generation: epoch,
+recoveryFiber: chatRecovery, overflowRetry: true }`.
 - `saveMessages`: `{ trigger: "programmatic", admission: "queue",
-  persist: "append-user", sink: { kind: "programmatic-silent" },
-  recoveryFiber: chatRecovery, overflowRetry: true }`.
+persist: "append-user", sink: { kind: "programmatic-silent" },
+recoveryFiber: chatRecovery, overflowRetry: true }`.
 - `submitMessages`: `{ trigger: "submission", admission: "submit",
-  idempotencyKey, submissionId, metadata, persist: "append-user",
-  sink: { kind: "programmatic-silent" } }`.
+idempotencyKey, submissionId, metadata, persist: "append-user",
+sink: { kind: "programmatic-silent" } }`.
 - `continueLastTurn`: `{ trigger: "programmatic", continuation: true,
-  persist: "continue-from-leaf", sink: { kind: "programmatic-silent" } }`.
+persist: "continue-from-leaf", sink: { kind: "programmatic-silent" } }`.
 - `_chatRecoveryContinue` / `_chatRecoveryRetry`: `{ trigger:
-  "recovery-continue" | "recovery-retry", ... }` — these stay owned by the
+"recovery-continue" | "recovery-retry", ... }` — these stay owned by the
   recovery layer and call the same `_admitTurn`.
 - `_fireAutoContinuation`: `{ trigger: "auto-continuation", continuation: true,
-  persist: "continue-from-leaf", sink: { kind: "ws-broadcast" } }`.
+persist: "continue-from-leaf", sink: { kind: "ws-broadcast" } }`.
 - `startAgentToolRun`: `{ trigger: "agent-tool", admission: "queue",
-  requestId: <pre-assigned>, sink: { kind: "programmatic-silent" } }`.
+requestId: <pre-assigned>, sink: { kind: "programmatic-silent" } }`.
 
 This table is the contract for "did the extraction drop a path?" — every row
 must remain behavior-identical (see Testing).
@@ -447,7 +447,9 @@ interface AddMessagesOptions {
 }
 
 function addMessages(
-  messages: UIMessage[] | ((current: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>),
+  messages:
+    | UIMessage[]
+    | ((current: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>),
   options?: AddMessagesOptions
 ): Promise<void>;
 ```
@@ -455,7 +457,7 @@ function addMessages(
 Semantics and implementation:
 
 - Built on the existing Session primitives: `session.appendMessage(message,
-  parentId)` (idempotent by id, `providers/agent.ts:245`) and
+parentId)` (idempotent by id, `providers/agent.ts:245`) and
   `session.updateMessage` for `mode: "upsert"`. Reuses
   `_appendMessageToHistory` so sanitization/row-size enforcement and the
   `_cachedMessages` refresh happen for free (`think.ts:2617`).
@@ -486,7 +488,7 @@ Semantics and implementation:
   id is new.
 - **Tree / branching caveat (must be documented):** if `addMessages` is called
   while a turn is mid-stream, the in-flight assistant message is not yet
-  committed, so the new message attaches to the last *committed* leaf and can
+  committed, so the new message attaches to the last _committed_ leaf and can
   create a branch. The supported pattern is "background context the **next**
   turn should see": call `addMessages`, then `runTurn`. Calling it
   concurrently with an active turn is allowed but branch-creating and is
@@ -662,7 +664,7 @@ Layered, in the spirit of the recovery RFC's approach:
   may need a richer `channelContext`. Flagged so the Channels RFC can extend the
   seam.
 - **Sequencing risk.** If the recovery RFC slips, do we land `runTurn` as a thin
-  facade over the *current* private methods first (user-facing win, no internal
+  facade over the _current_ private methods first (user-facing win, no internal
   unification yet), then unify `_admitTurn` after recovery lands? This is the
   likely fallback and is compatible with everything above.
 - **Concurrency policy exposure.** WebSocket submits honor `MessageConcurrency`
@@ -716,7 +718,7 @@ Suggested implementation order (decouples from the recovery RFC's timeline):
    change on the behavior-parity suite + the mapping table in section 2.
 4. Add `chat:turn:*` observability inside `_admitTurn`.
 
-The `_admitTurn` step list in section 2 is the *logical* sequence; exact ordering
+The `_admitTurn` step list in section 2 is the _logical_ sequence; exact ordering
 (e.g. WS persists/reconciles before enqueue) follows the current per-path code and
 must be preserved by the parity tests, not by this prose.
 

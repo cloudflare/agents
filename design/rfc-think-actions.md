@@ -35,7 +35,7 @@ Second of three sibling API RFCs (turns, actions, channels) to be picked up in
 ## The problem
 
 Think tools today are plain AI SDK tools returned from `getTools(): ToolSet`
-(`think.ts:2960`). They are functional, but everything a *production* action
+(`think.ts:2960`). They are functional, but everything a _production_ action
 needs is left to application folklore:
 
 - **Permissions/authorization.** There is no declarative way to say "this tool
@@ -44,7 +44,7 @@ needs is left to application folklore:
 - **Approval.** Two separate approval mechanisms exist — AI SDK `needsApproval`
   (transcript `approval-requested` → `tool-approval` event → auto-continuation)
   and the execute/codemode durable-pause path (`approveExecution`,
-  `think.ts:9026`). Neither exposes a *stable approval descriptor* a UI, voice,
+  `think.ts:9026`). Neither exposes a _stable approval descriptor_ a UI, voice,
   or messenger surface can render consistently.
 - **Idempotency.** There is **no per-tool-call execution ledger**
   (confirmed across `think.ts`). Idempotency exists only at other layers:
@@ -57,7 +57,7 @@ needs is left to application folklore:
   tool-error envelope, and no standard output truncation in the inference loop.
   Those protections exist only inside specific tools (workspace bash, the
   execute sandbox) — `workspace.ts:1186`, `execute.ts:103`, not for ordinary
-  `getTools()` tools. The turn `AbortSignal` *is* forwarded into `execute`
+  `getTools()` tools. The turn `AbortSignal` _is_ forwarded into `execute`
   (`think.ts:4442`), but nothing bounds a slow tool.
 - **Delivery influence.** A tool cannot tell the channel "send this reply as a
   voice note / email draft / card." Messenger delivery strips everything except
@@ -76,7 +76,7 @@ guardrails on top of raw tools, inconsistently. This is exactly the
 - A durable **action ledger** that makes settled server actions replay-safe on
   recovery, reconciled with the existing submission/event idempotency keyspaces.
 - A stable **approval descriptor** so approvals render/resolve identically
-  across web, voice, messengers, and workflows — built on the *existing*
+  across web, voice, messengers, and workflows — built on the _existing_
   approval/HITL machinery, not a new one.
 - Default **guardrails**: per-action timeout, combined `AbortSignal`, structured
   tool errors, output truncation, safe stringification.
@@ -89,7 +89,7 @@ guardrails on top of raw tools, inconsistently. This is exactly the
 
 - Replacing `getTools()`. Raw AI SDK tools remain first-class; `action()` is an
   opt-in richer descriptor.
-- Owning channel delivery. `attachReply` only *records* intent; the Channels and
+- Owning channel delivery. `attachReply` only _records_ intent; the Channels and
   Voice RFCs own how attachments render.
 - Changing recovery policy. The ledger plugs into the recovery engine's existing
   replay contract; it does not change budgets or scheduling
@@ -106,11 +106,11 @@ without any code generation.
 
 ```ts
 type ActionKind =
-  | "server"          // runs server-side; ledger-protected; default
-  | "client"          // resolved on the client (compiles to a client tool)
-  | "approval-gated"  // requires approval before execute (AI SDK needsApproval path)
-  | "durable-pause"   // long-running; parks the turn (execute/codemode path)
-  | "delegated-agent";// delegates to a sub-agent (agent-tool path)
+  | "server" // runs server-side; ledger-protected; default
+  | "client" // resolved on the client (compiles to a client tool)
+  | "approval-gated" // requires approval before execute (AI SDK needsApproval path)
+  | "durable-pause" // long-running; parks the turn (execute/codemode path)
+  | "delegated-agent"; // delegates to a sub-agent (agent-tool path)
 
 interface ActionConfig<Input, Output> {
   /** Defaults to the registration key when registered via getActions(). */
@@ -121,14 +121,21 @@ interface ActionConfig<Input, Output> {
   outputSchema?: StandardSchemaV1<Output> | ZodType<Output>;
 
   /** Declarative permission scopes required to run. */
-  permissions?: string[] | ((args: { input: Input; ctx: ActionContext }) => string[]);
+  permissions?:
+    | string[]
+    | ((args: { input: Input; ctx: ActionContext }) => string[]);
 
   /**
    * Approval policy. `true` always requires approval; a predicate decides per
    * input. Compiles to AI SDK `needsApproval` for "approval-gated", or to the
    * durable-pause path for long-running server work.
    */
-  approval?: boolean | ((args: { input: Input; ctx: ActionContext }) => boolean | Promise<boolean>);
+  approval?:
+    | boolean
+    | ((args: {
+        input: Input;
+        ctx: ActionContext;
+      }) => boolean | Promise<boolean>);
 
   /**
    * Stable key for ledger dedup. When omitted, the ledger falls back to the
@@ -197,11 +204,12 @@ In `_runInferenceLoop`, actions are converted and merged into the tool set after
 
 ```ts
 const actionTools = mapValues(this.getActions(), (a, name) =>
-  actionToTool(a, name, this));
+  actionToTool(a, name, this)
+);
 const tools = {
   ...workspaceTools,
-  ...baseTools,            // getTools()
-  ...actionTools,          // getActions()  <-- new
+  ...baseTools, // getTools()
+  ...actionTools, // getActions()  <-- new
   ...extensionTools,
   ...contextTools,
   ...skillTools,
@@ -232,7 +240,7 @@ authoritative order; sections 4–8 detail each step.
    stays the outermost gate).
 2. **Authorization** (`authorizeAction`). Deny -> structured `output-error`,
    skip the rest. Also consulted when deriving `needsApproval` so an
-   *unauthorized* approval-gated action is never prompted (authorize before
+   _unauthorized_ approval-gated action is never prompted (authorize before
    approval, never prompt for something that would be denied).
 3. **Approval.** `approval-gated` gates here via AI SDK `needsApproval` before
    `execute`; `durable-pause` uses the paused path. Denied -> `output-denied`.
@@ -287,8 +295,8 @@ and `attachReply` are the new affordances.
 
 ### 4. Permissions and authorization
 
-Two halves: what an action *requires* (declared on the action), and what the
-caller *has* (resolved per turn).
+Two halves: what an action _requires_ (declared on the action), and what the
+caller _has_ (resolved per turn).
 
 - **Required:** `permissions: string[]` (or a predicate) on the action.
 - **Granted:** an `AuthorizationContext` resolved once per turn via a new
@@ -413,8 +421,8 @@ Reconciliation with existing keyspaces (the "one keyspace" requirement):
   the action is the side effect of a deduped event. The RFC does not auto-couple
   them (that would be surprising); it documents the pattern and provides
   `ctx.requestId`/submission metadata so the key can include them.
-- Transcript first-write-wins (`tool-state.ts`) still applies and is the *model-
-  visible* dedup; the ledger is the *side-effect* dedup. They are complementary:
+- Transcript first-write-wins (`tool-state.ts`) still applies and is the _model-
+  visible_ dedup; the ledger is the _side-effect_ dedup. They are complementary:
   transcript prevents the model from re-calling; the ledger prevents a recovery
   retry from re-executing.
 
@@ -430,13 +438,13 @@ state.
 adapter's `classifyRecoveredTurn` outcomes so one model covers tools and
 channels:
 
-| Kind | On crash mid-flight | Replay safety |
-| --- | --- | --- |
-| `server` | re-run via recovery retry | ledger returns settled result; otherwise re-executes |
-| `client` | client re-resolves | resolved client-side; not server-executed |
-| `approval-gated` | parked (pending interaction → budget-free) | re-executes only after approval; ledger applies post-approval |
-| `durable-pause` | parked; resumes via `approveExecution` | execution id is the dedup anchor |
-| `delegated-agent` | child run reattached, not restarted | child's own ledger/recovery (`agent-tools.md`) |
+| Kind              | On crash mid-flight                        | Replay safety                                                 |
+| ----------------- | ------------------------------------------ | ------------------------------------------------------------- |
+| `server`          | re-run via recovery retry                  | ledger returns settled result; otherwise re-executes          |
+| `client`          | client re-resolves                         | resolved client-side; not server-executed                     |
+| `approval-gated`  | parked (pending interaction → budget-free) | re-executes only after approval; ledger applies post-approval |
+| `durable-pause`   | parked; resumes via `approveExecution`     | execution id is the dedup anchor                              |
+| `delegated-agent` | child run reattached, not restarted        | child's own ledger/recovery (`agent-tools.md`)                |
 
 Kind is inferred when not explicit: `approval` set → `approval-gated`; no server
 `execute` → `client`; delegates to a sub-agent → `delegated-agent`; otherwise
@@ -581,7 +589,7 @@ recovery-visible UI story.
   prompt (step 3): an unauthorized approval-gated action returns `output-error`
   immediately and is never surfaced for approval.
 - **`attachReply` on ledger replay.** A replayed (settled) action returns its
-  stored `result_json` *without* running `execute`, so its `attachReply` side
+  stored `result_json` _without_ running `execute`, so its `attachReply` side
   effect does not re-fire. In v1, attachments are best-effort and guaranteed only
   on the producing attempt (delivery is same-turn). If an attachment must survive
   replay, store it in the ledger alongside `result_json` and re-apply on replay
@@ -594,10 +602,10 @@ recovery-visible UI story.
   we are trying to fix. Rejected.
 - **Use AI SDK `needsApproval` and nothing else.** Covers approval only; no
   stable descriptor, permissions, idempotency, or guardrails. Rejected as
-  insufficient, but reused *as a backend*.
+  insufficient, but reused _as a backend_.
 - **Idempotency keyed only by `toolCallId`.** Simple and crash-safe within one
   turn, but cannot dedup across webhook retries or submissions. Kept as the
-  *fallback* key; explicit `idempotencyKey` is the cross-cutting one.
+  _fallback_ key; explicit `idempotencyKey` is the cross-cutting one.
 - **Auto-derive `idempotencyKey` from an input hash by default.** Dangerous:
   two legitimate identical refunds would collapse. Rejected as a default;
   available by opt-in.

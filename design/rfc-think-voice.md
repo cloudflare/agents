@@ -28,8 +28,8 @@ Think:
   transport.
 - **Its own WS protocol** (`types.ts`, `VOICE_PROTOCOL_VERSION = 1`): client →
   server `hello | start_call | end_call | start_of_speech | end_of_speech |
-  interrupt | text_message`; server → client `welcome | status | audio_config |
-  transcript* | playback_interrupt | metrics | error`; **binary `ArrayBuffer`
+interrupt | text_message`; server → client `welcome | status | audio_config |
+transcript* | playback_interrupt | metrics | error`; **binary `ArrayBuffer`
   frames are audio**.
 - **Its own turn loop**: `onTurn(transcript, ctx): Promise<TextSource>`
   (`voice.ts:338`) — the app returns a string / `AsyncIterable<string>` /
@@ -76,7 +76,7 @@ hard product constraint, so we spike first.
 - De-risk transport coexistence (audio + voice JSON vs `MSG_CHAT_*` on one DO/WS)
   with no frame cross-talk.
 - Validate the loop **STT utterance → `runTurn({ channel: "voice", mode:
-  "stream" })` → text stream → TTS** against Think's real turn engine, and
+"stream" })` → text stream → TTS** against Think's real turn engine, and
   measure first-audio latency vs the inline `onTurn` baseline.
 - Validate persisting voice turns into the **Think Session** (UIMessage parts)
   instead of `cf_voice_messages`.
@@ -105,7 +105,7 @@ the published packages yet**) that is a `Think` subclass which reuses
    `SentenceChunker`, and the protocol types from `@cloudflare/voice`.
 2. **Route the utterance into Think.** On `onUtterance(transcript)` call
    `this.runTurn({ channel: "voice", mode: "stream", input: transcript,
-   callback })` where `callback` is a `StreamCallback` whose `onEvent`
+callback })` where `callback` is a `StreamCallback` whose `onEvent`
    text-deltas feed the sentence-chunked TTS pipeline. This means adapting
    `#streamingTTSPipeline` (`voice.ts:843`) to consume a `StreamCallback` /
    `AsyncIterable<string>` rather than an LLM `textStream` directly.
@@ -203,8 +203,8 @@ parts that do not fit the messenger `post(text)` surface — binary audio and
 interim/streaming semantics — are exactly why the Channels RFC made the delivery
 surface kind-specific and added `DeliveryKind` (`final | interim | notice |
 command`) + `turnEnded`. **Fallback:** if the spike finds the audio transport
-cannot fit the channel delivery-surface contract, voice becomes a *parallel
-surface that reuses turns* (keeps its own transport but still calls `runTurn`).
+cannot fit the channel delivery-surface contract, voice becomes a _parallel
+surface that reuses turns_ (keeps its own transport but still calls `runTurn`).
 The spike decides.
 
 ## Interruption and recovery policy (explicit)
@@ -235,7 +235,7 @@ timing), gaining memory / FTS / compaction / recovery. `cf_voice_messages`
   seam. `DeliveryKind`/`turnEnded` and `deliverNotice` are precisely what voice
   needs for spoken status/approval.
 - **Turns RFC:** utterance → `runTurn({ channel: "voice", mode: "stream",
-  callback })`; barge-in → `cancelChat(requestId)`. Voice uses the stream sink,
+callback })`; barge-in → `cancelChat(requestId)`. Voice uses the stream sink,
   never `ws-broadcast`.
 - **Actions RFC:** approval prompts are spoken via a notice + the stable approval
   descriptor; server actions are preferred over browser client tools in a
