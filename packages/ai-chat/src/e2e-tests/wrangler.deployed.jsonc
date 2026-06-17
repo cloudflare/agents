@@ -1,5 +1,8 @@
 {
-  "name": "chat-recovery-e2e-test",
+  // Dedicated config for the OPT-IN deployed recovery e2e (test:e2e:deployed).
+  // Distinct name so it never collides with a real Worker; the suite deploys it,
+  // drives a mid-turn redeploy to force a real DO eviction, then deletes it.
+  "name": "chat-recovery-e2e-deployed",
   "main": "worker.ts",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],

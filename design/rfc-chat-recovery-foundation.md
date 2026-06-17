@@ -1377,6 +1377,32 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 2 (deployed recovery e2e — real-edge proof)_ — Built the
+  user-requested DEPLOYED recovery e2e (`packages/ai-chat/src/e2e-tests/`):
+  `wrangler.deployed.jsonc` (uniquely-named Worker) + `deployed-recovery.test.ts`
+  + `vitest.deployed.config.ts` + a `test:e2e:deployed` script. Unlike the local
+  SIGKILL suites (which prove the recovery state machine in workerd), this
+  deploys a real Worker, forces a real Durable Object eviction the way production
+  does — a `wrangler deploy` **mid-turn** — then asserts recovery fires on
+  Cloudflare's edge, and ALWAYS deletes the Worker in teardown (verified: the
+  script left no resource behind). Double-gated so it never runs in normal CI:
+  its own config (not in `test`/`test:e2e`) + a `RUN_DEPLOYED_E2E=1` body gate.
+  Three real-edge findings the run surfaced (each fixed): (1) a redeploy takes
+  ~18s to go live — far longer than a finite mock turn (~10s) — so a finite turn
+  COMPLETES before the eviction lands and leaves nothing to recover; fixed by
+  adding `ChatHangingRecoveryAgent` whose turn hangs forever, guaranteeing an
+  in-flight fiber at eviction (no timing race). (2) Back-to-back deploys
+  occasionally hit a transient deploy-API error; `deploy()` now retries with
+  backoff so the slow deploy→evict→recover cycle isn't restarted wholesale. (3)
+  A freshly-created `*.workers.dev` route drops the first WS handshakes during
+  cold start/propagation, and the unguarded `sendChatMessage` rejected the whole
+  test; the turn-start is now a resilient send+check poll. The `#1620`
+  recovering-flag is only logged (not asserted) on the edge — it is
+  timing-sensitive and already asserted deterministically by the local
+  `chat-recovering-status` suite. Validated green twice against
+  `spai@cloudflare.com` (~70-76s/run); typecheck (111) clean; the new DO class +
+  migration `v6` are additive (local `wrangler.jsonc` dry-run validates). _This
+  is the validation vehicle for the behavior-changing slice 2d._
 - _Phase 2 (slice 2c — shared exhaustion-notification core)_ — **Re-scoped from
   the original "move terminal/exhaust sealing behind the engine".** Side-by-side
   reading of both `_exhaustChatRecovery` methods showed the head (build

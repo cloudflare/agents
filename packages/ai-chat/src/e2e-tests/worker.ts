@@ -26,6 +26,7 @@ type Env = {
   ChatNoContinueAgent: DurableObjectNamespace<ChatNoContinueAgent>;
   ChatNoPersistNoContinueAgent: DurableObjectNamespace<ChatNoPersistNoContinueAgent>;
   ChatBufferCleanupAgent: DurableObjectNamespace<ChatBufferCleanupAgent>;
+  ChatHangingRecoveryAgent: DurableObjectNamespace<ChatHangingRecoveryAgent>;
 };
 
 const EXHAUSTED_LOG_KEY = "test:exhausted-log";
@@ -463,6 +464,37 @@ export class ChatNoPersistNoContinueAgent extends ChatRecoveryTestAgent {
   ): Promise<ChatRecoveryOptions> {
     await super.onChatRecovery(ctx);
     return { persist: false, continue: false };
+  }
+}
+
+/**
+ * Deployed-e2e recovery agent. Identical inspection surface to
+ * `ChatRecoveryTestAgent` (records `onChatRecovery` contexts, exposes
+ * `getRecoveryStatus` / `getRecoveringFlag`), but its turn HANGS forever instead
+ * of streaming a finite mock response.
+ *
+ * On the real edge a `wrangler deploy` takes ~15-20s to make the new version
+ * live, far longer than a finite mock turn — so a finite turn would complete
+ * before the redeploy evicts the DO, leaving nothing to recover. A turn that
+ * never completes is guaranteed to still be in-flight when the eviction lands,
+ * which removes that timing race and deterministically produces an orphaned
+ * fiber for restart detection to recover. It inherits `chatRecovery = true` and
+ * the recovery-context recording from `ChatRecoveryTestAgent`.
+ */
+export class ChatHangingRecoveryAgent extends ChatRecoveryTestAgent {
+  override async onChatMessage(
+    _onFinish: unknown,
+    _options?: OnChatMessageOptions
+  ): Promise<Response> {
+    const stream = new ReadableStream<Uint8Array>({
+      start() {
+        // Hang forever: never enqueue, never close. The turn stays in-flight so
+        // a redeploy mid-turn always finds an interruptible fiber.
+      }
+    });
+    return new Response(stream, {
+      headers: { "Content-Type": "text/event-stream" }
+    });
   }
 }
 
