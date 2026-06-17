@@ -1377,6 +1377,22 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 1 (in progress)_ — Wired `AIChatAgent` to the shared engine.
+  `_resolveChatRecoveryConfig`, `_chatRecoveryIncidentId`, and the budget
+  computation inside `_beginChatRecoveryIncident` now delegate to
+  `resolveChatRecoveryConfig` / `chatRecoveryIncidentId` /
+  `evaluateChatRecoveryIncident` (re-exported `@internal` from the `agents/chat`
+  barrel). `AIChatAgent` keeps only the storage I/O, sweep, progress read,
+  pending-interaction predicate, and event emission around the engine call.
+  Removed six now-unused local default constants (defaults live in the engine).
+  Review: persisted incident JSON is byte-identical (verified field-by-field),
+  the sweep-before-read ordering invariant is preserved, the
+  `shouldKeepRecovering` ctx and `[AIChatAgent]`-prefixed error log are
+  preserved, and event payloads/order are unchanged. Gates: full `ai-chat`
+  suite (682) + chat unit suite (280) pass; typecheck (111) and oxlint clean.
+  Deferred: the local `ChatRecoveryIncident`/`ChatRecoveryKind` types and the
+  remaining recovery constants stay duplicated until Phase 4; Think wiring is
+  the next step.
 - _Phase 0 (in progress)_ — Extracted the byte-identical incident-budget state
   machine into a pure, storage-free module
   (`packages/agents/src/chat/recovery-incident.ts`:
@@ -1430,10 +1446,14 @@ Keep them internal unless build constraints require barrel exports.
 
 Work:
 
-- Move config resolution and incident math into pure functions first.
-- Move storage key constants and incident helpers into the engine module.
-- Keep existing `AIChatAgent` and `Think` private methods as callers initially.
-- Add fake-adapter unit tests.
+- [x] Move config resolution and incident math into pure functions first.
+      (`resolveChatRecoveryConfig`, `chatRecoveryIncidentId`,
+      `evaluateChatRecoveryIncident`, `selectStaleIncidentKeys` in
+      `recovery-incident.ts`.)
+- [x] Move storage key constants and incident helpers into the engine module.
+- [~] Keep existing `AIChatAgent` and `Think` private methods as callers
+      initially. (`AIChatAgent` wired; `Think` pending.)
+- [x] Add fake-adapter unit tests. (`recovery-incident.test.ts`.)
 
 Exit criteria:
 

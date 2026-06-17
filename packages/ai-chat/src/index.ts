@@ -51,6 +51,11 @@ import {
   AbortRegistry,
   type ClientToolSchema
 } from "agents/chat";
+import {
+  evaluateChatRecoveryIncident,
+  resolveChatRecoveryConfig,
+  chatRecoveryIncidentId
+} from "agents/chat";
 import type {
   ChatResponseResult,
   ChatRecoveryConfig,
@@ -153,17 +158,10 @@ const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
 // never recomputed from the (compactable) transcript. See
 // `_chatRecoveryProgressMarker`.
 const CHAT_RECOVERY_PROGRESS_KEY = "cf:chat-recovery:progress";
-// Secondary backstop only. The primary recovery bound is the no-progress
-// wall clock below; with alarm debounce this cap rarely binds (it catches a
-// pathological tight alarm-loop). Kept high so the no-progress window seals
-// first under normal deploy cadence (#1637).
-const DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS = 10;
-// Runaway-loop guard default. `Infinity` = no SDK-imposed work cap: a turn that
-// keeps making forward progress is never terminated by the framework on its own
-// (rfc-chat-recovery-work-budget). Integrators bound a content-emitting runaway
-// by setting `maxRecoveryWork` or a `shouldKeepRecovering` predicate.
-const DEFAULT_CHAT_RECOVERY_MAX_WORK = Number.POSITIVE_INFINITY;
-const DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS = 10_000;
+// Recovery budget defaults (maxAttempts, maxRecoveryWork, stableTimeoutMs,
+// terminalMessage, noProgressTimeoutMs, alarm debounce) now live in the shared
+// incident engine (agents/chat) and are applied by `resolveChatRecoveryConfig`
+// / `evaluateChatRecoveryIncident`. See design/rfc-chat-recovery-foundation.md.
 // Auto-continuation barrier (#1649): when the model emits parallel tool calls,
 // the client answers each one independently and sends a tool result with
 // `autoContinue` per result. A fast tool's result must NOT trigger inference
@@ -176,8 +174,6 @@ const AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS = 60_000;
 // Delay before retrying a recovery that timed out waiting for stable state.
 // Gives an actively-churning isolate (e.g. a deploy in flight) time to settle.
 const CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS = 3;
-const DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE =
-  "The assistant was interrupted and could not recover. Please try again.";
 // Durable record of an in-progress recovery so a "recovering…" status (#1620)
 // can be broadcast live and survives the set/clear happening in different
 // isolates (a continuation runs in a later alarm invocation). NOTE: this live
@@ -200,16 +196,6 @@ const CHAT_RECOVERY_INCIDENT_TTL_MS = 60 * 60 * 1000;
 // Max keys per Durable Object KV `delete([...])` call.
 // See https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
 const KV_DELETE_MAX_KEYS = 128;
-// PRIMARY recovery bound (#1637): seal an incident that has made no forward
-// progress for this long. Keyed to `lastProgressAt`, which resets on every
-// progress-bearing attempt — so a turn that keeps producing content survives
-// deploy churn indefinitely, while a genuinely stuck turn dies within 5 min.
-// Overridable per-agent via `chatRecovery.noProgressTimeoutMs`.
-const DEFAULT_CHAT_RECOVERY_NO_PROGRESS_TIMEOUT_MS = 5 * 60 * 1000;
-// Alarm debounce: recovery alarms bunched within this window collapse into a
-// single attempt. A deploy rollout drops/reconnects the socket several times
-// over ~11–22s; without this, one logical deploy would burn several attempts.
-const CHAT_RECOVERY_ALARM_DEBOUNCE_MS = 30 * 1000;
 // Staleness bound for the live "recovering…" flag (#1620). A flag older than
 // this is treated as abandoned (the owning incident died without a terminal,
 // e.g. the DO went idle) so it can neither pin the indicator on forever nor
@@ -3644,39 +3630,10 @@ export class AIChatAgent<
    * @internal
    */
   private _resolveChatRecoveryConfig(): ResolvedChatRecoveryConfig {
-    const raw = this.chatRecovery;
-    const custom = typeof raw === "object" ? raw : undefined;
-    return {
-      enabled: raw !== false,
-      maxAttempts: Math.max(
-        1,
-        Math.floor(custom?.maxAttempts ?? DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS)
-      ),
-      stableTimeoutMs: Math.max(
-        0,
-        Math.floor(
-          custom?.stableTimeoutMs ?? DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS
-        )
-      ),
-      terminalMessage:
-        custom?.terminalMessage ?? DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,
-      noProgressTimeoutMs: Math.max(
-        0,
-        Math.floor(
-          custom?.noProgressTimeoutMs ??
-            DEFAULT_CHAT_RECOVERY_NO_PROGRESS_TIMEOUT_MS
-        )
-      ),
-      maxRecoveryWork:
-        typeof custom?.maxRecoveryWork === "number" &&
-        custom.maxRecoveryWork >= 0
-          ? custom.maxRecoveryWork
-          : DEFAULT_CHAT_RECOVERY_MAX_WORK,
-      ...(custom?.shouldKeepRecovering
-        ? { shouldKeepRecovering: custom.shouldKeepRecovering }
-        : {}),
-      ...(custom?.onExhausted ? { onExhausted: custom.onExhausted } : {})
-    };
+    // Delegates to the shared incident engine (agents/chat) so AIChatAgent and
+    // Think resolve recovery config identically. See
+    // design/rfc-chat-recovery-foundation.md.
+    return resolveChatRecoveryConfig(this.chatRecovery);
   }
 
   private _chatRecoveryIncidentId(input: {
@@ -3686,14 +3643,8 @@ export class AIChatAgent<
     targetAssistantId?: string | null;
     recoveryKind: ChatRecoveryKind;
   }): string {
-    // `recoveryKind` is intentionally NOT part of the identity: a single
-    // interrupted turn can flip between "retry" (no chunks persisted) and
-    // "continue" (partial chunks exist) across restarts, and the attempt
-    // budget must be shared so recovery stays bounded by `maxAttempts`.
-    return [
-      input.recoveryRootRequestId ?? input.requestId,
-      input.latestUserMessageId ?? ""
-    ].join(":");
+    // `recoveryKind` is intentionally NOT part of the identity (shared engine).
+    return chatRecoveryIncidentId(input);
   }
 
   private _chatRecoveryIncidentKey(incidentId: string): string {
@@ -3806,165 +3757,50 @@ export class AIChatAgent<
     config: ResolvedChatRecoveryConfig;
     exhausted: boolean;
   }> {
+    // Incident budget orchestration lives in the shared engine
+    // (agents/chat `evaluateChatRecoveryIncident`); this method owns only the
+    // storage I/O and event emission around it. See
+    // design/rfc-chat-recovery-foundation.md.
     const config = this._resolveChatRecoveryConfig();
     const incidentId = this._chatRecoveryIncidentId(input);
     const key = this._chatRecoveryIncidentKey(incidentId);
     const now = input.nowMs ?? Date.now();
+    // Sweep stale incidents BEFORE reading the existing record: an incident
+    // past the TTL is also past the no-progress window, so sweeping it first
+    // lets a genuinely abandoned identity start fresh rather than resume a dead
+    // budget. (Ordering invariant — must run before the read.)
     await this._sweepStaleChatRecoveryIncidents(now);
-    const existing = await this.ctx.storage.get<ChatRecoveryIncident>(key);
-
-    // Forward-progress detection. A mid-turn deploy resets the Durable Object
-    // ("code was updated"); the interrupted continuation is re-detected on the
-    // next wake. A turn that followed real progress (more durably-produced
-    // content than the last attempt saw) is environmental churn, not a poison
-    // turn.
-    const prevProgress = existing?.progress ?? 0;
+    const existing =
+      (await this.ctx.storage.get<ChatRecoveryIncident>(key)) ?? null;
     const currentProgress = await this._chatRecoveryProgressMarker();
-    const madeProgress = existing != null && currentProgress > prevProgress;
 
-    // A turn parked on a pending CLIENT interaction (an `input-available`
-    // client-tool part or an `approval-requested` part — see
-    // `hasPendingClientInteraction`) is WAITING ON THE HUMAN, not stuck. It
-    // produces no forward progress by design until the client replays the
-    // tool-result / approval after reconnect, which drives a fresh continuation
-    // independently of recovery. Spending the recovery budget on that wait would
-    // seal a perfectly healthy turn whose human is simply slow (e.g. a mid-turn
-    // deploy during a confirmation prompt the user takes longer than
-    // `noProgressTimeoutMs` to answer). So while a client interaction is pending
-    // the turn is budget-free: the no-progress window, attempt cap, work budget,
-    // and caller predicate are all suppressed, and the no-progress clock is kept
-    // fresh so the turn has a full window once the human finally answers.
-    // SERVER-tool orphans are excluded (their `execute` died with the isolate),
-    // so they still recover normally. The recovery continuation additionally
-    // PARKS (skips, no reschedule) on a stable-state timeout while this holds;
-    // see `_chatRecoveryContinue`/`_chatRecoveryRetry`.
-    const awaitingClientInteraction = this.hasPendingClientInteraction();
-
-    // Recovery budget (#1637, rfc-chat-recovery-work-budget). A turn making
-    // genuine forward progress survives unbounded deploy churn — duration is
-    // never a bound. The instruments are decoupled by what they catch:
-    //  • STUCK — no-progress window: `lastProgressAt` resets on every
-    //    progress-bearing attempt, so a turn that keeps producing content
-    //    survives churn indefinitely; a stuck turn is sealed after 5 min.
-    //  • DEBOUNCE — alarms bunched within `ALARM_DEBOUNCE_MS` collapse into one
-    //    attempt, so a single rollout's reconnect storm isn't N attempts.
-    //  • ALARM-LOOP — the attempt cap (resets on progress) catches a tight
-    //    no-progress alarm loop.
-    //  • RUNAWAY — the work budget seals a loop that keeps emitting content but
-    //    never converges. Keyed to WORK done (produced content/tool units since
-    //    the incident opened), not wall-clock, because a healthy long turn and a
-    //    runaway differ by bounded work, not duration. Defaults to no cap.
-    //  • CALLER — `shouldKeepRecovering` lets the integrator express a
-    //    token/cost/step budget the SDK should not hardcode.
-    const lastProgressAt =
-      madeProgress || awaitingClientInteraction
-        ? now
-        : (existing?.lastProgressAt ?? existing?.firstSeenAt ?? now);
-    const noProgressExceeded =
-      existing != null &&
-      !awaitingClientInteraction &&
-      now - lastProgressAt > config.noProgressTimeoutMs;
-    // Reuse the durable progress counter as a work meter. Baseline is captured
-    // when the incident opens; `work` is what the turn produced since.
-    const workBaseline = existing?.workBaseline ?? currentProgress;
-    const progress = Math.max(prevProgress, currentProgress);
-    const work = progress - workBaseline;
-    const workBudgetExceeded =
-      existing != null &&
-      Number.isFinite(config.maxRecoveryWork) &&
-      work > config.maxRecoveryWork;
-    const debounced =
-      existing != null &&
-      !madeProgress &&
-      now - existing.lastAttemptAt < CHAT_RECOVERY_ALARM_DEBOUNCE_MS;
-
-    const attempt = madeProgress
-      ? 1
-      : debounced
-        ? (existing?.attempt ?? 1)
-        : (existing?.attempt ?? 0) + 1;
-
-    // Consult the caller predicate only when no hard bound has already sealed
-    // the incident — a buggy/expensive hook must not run after we've decided,
-    // and a throwing hook must not wedge the turn (log and treat as "continue").
-    let abortedByCaller = false;
-    if (
-      existing != null &&
-      !awaitingClientInteraction &&
-      config.shouldKeepRecovering &&
-      !noProgressExceeded &&
-      !workBudgetExceeded &&
-      attempt <= config.maxAttempts
-    ) {
-      try {
-        const decision = await config.shouldKeepRecovering({
-          incidentId,
-          requestId: input.requestId,
-          recoveryRootRequestId: input.recoveryRootRequestId ?? input.requestId,
-          attempt,
-          maxAttempts: config.maxAttempts,
-          recoveryKind: input.recoveryKind,
-          work,
-          ageMs: now - (existing.firstSeenAt ?? now)
-        });
-        abortedByCaller = decision === false;
-      } catch (error) {
+    const { incident, exhausted, events } = await evaluateChatRecoveryIncident({
+      identity: input,
+      config,
+      existing,
+      currentProgress,
+      // A turn parked on a pending CLIENT interaction is waiting on the human,
+      // not stuck, so the engine keeps it budget-free (no-progress window,
+      // attempt cap, work budget, and caller predicate all suppressed).
+      awaitingClientInteraction: this.hasPendingClientInteraction(),
+      now,
+      onShouldKeepRecoveringError: (error) =>
         console.error(
           "[AIChatAgent] chatRecovery shouldKeepRecovering hook threw",
           error
-        );
-      }
-    }
+        )
+    });
 
-    const exhausted =
-      !awaitingClientInteraction &&
-      (noProgressExceeded ||
-        workBudgetExceeded ||
-        abortedByCaller ||
-        attempt > config.maxAttempts);
-    const incident: ChatRecoveryIncident = {
-      incidentId,
-      requestId: input.requestId,
-      recoveryRootRequestId: input.recoveryRootRequestId ?? input.requestId,
-      recoveryKind: input.recoveryKind,
-      attempt,
-      maxAttempts: config.maxAttempts,
-      status: exhausted ? "exhausted" : "attempting",
-      firstSeenAt: existing?.firstSeenAt ?? now,
-      lastAttemptAt: now,
-      lastProgressAt,
-      progress,
-      workBaseline,
-      ...(exhausted
-        ? {
-            reason: workBudgetExceeded
-              ? "work_budget_exceeded"
-              : noProgressExceeded
-                ? "no_progress_timeout"
-                : abortedByCaller
-                  ? "recovery_aborted"
-                  : "max_attempts_exceeded"
-          }
-        : {})
-    };
     await this.ctx.storage.put(key, incident);
-
-    if (!existing) {
-      this._emit("chat:recovery:detected", {
-        incidentId,
-        requestId: input.requestId,
-        attempt,
-        maxAttempts: config.maxAttempts,
-        recoveryKind: input.recoveryKind
+    for (const event of events) {
+      this._emit(event.type, {
+        incidentId: event.incidentId,
+        requestId: event.requestId,
+        attempt: event.attempt,
+        maxAttempts: event.maxAttempts,
+        recoveryKind: event.recoveryKind
       });
     }
-    this._emit("chat:recovery:attempt", {
-      incidentId,
-      requestId: input.requestId,
-      attempt,
-      maxAttempts: config.maxAttempts,
-      recoveryKind: input.recoveryKind
-    });
 
     return { incident, config, exhausted };
   }

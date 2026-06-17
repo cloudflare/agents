@@ -27,6 +27,7 @@
  */
 
 import type {
+  ChatRecoveryConfig,
   ChatRecoveryProgressContext,
   ResolvedChatRecoveryConfig
 } from "./lifecycle";
@@ -171,56 +172,38 @@ export const CHAT_RECOVERING_FLAG_TTL_MS = 15 * 60 * 1000;
  * engine reasons about. Identical defaulting in both packages today.
  */
 export function resolveChatRecoveryConfig(
-  raw:
-    | ResolvedChatRecoveryConfig
-    | boolean
-    | Record<string, unknown>
-    | undefined
+  raw: ChatRecoveryConfig | undefined
 ): ResolvedChatRecoveryConfig {
   const custom = typeof raw === "object" && raw !== null ? raw : undefined;
-  const customMaxRecoveryWork = custom?.maxRecoveryWork;
   return {
     enabled: raw !== false,
     maxAttempts: Math.max(
       1,
-      Math.floor(
-        (custom?.maxAttempts as number | undefined) ??
-          DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS
-      )
+      Math.floor(custom?.maxAttempts ?? DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS)
     ),
     stableTimeoutMs: Math.max(
       0,
       Math.floor(
-        (custom?.stableTimeoutMs as number | undefined) ??
-          DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS
+        custom?.stableTimeoutMs ?? DEFAULT_CHAT_RECOVERY_STABLE_TIMEOUT_MS
       )
     ),
     terminalMessage:
-      (custom?.terminalMessage as string | undefined) ??
-      DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,
+      custom?.terminalMessage ?? DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,
     noProgressTimeoutMs: Math.max(
       0,
       Math.floor(
-        (custom?.noProgressTimeoutMs as number | undefined) ??
+        custom?.noProgressTimeoutMs ??
           DEFAULT_CHAT_RECOVERY_NO_PROGRESS_TIMEOUT_MS
       )
     ),
     maxRecoveryWork:
-      typeof customMaxRecoveryWork === "number" && customMaxRecoveryWork >= 0
-        ? customMaxRecoveryWork
+      typeof custom?.maxRecoveryWork === "number" && custom.maxRecoveryWork >= 0
+        ? custom.maxRecoveryWork
         : DEFAULT_CHAT_RECOVERY_MAX_WORK,
     ...(custom?.shouldKeepRecovering
-      ? {
-          shouldKeepRecovering:
-            custom.shouldKeepRecovering as ResolvedChatRecoveryConfig["shouldKeepRecovering"]
-        }
+      ? { shouldKeepRecovering: custom.shouldKeepRecovering }
       : {}),
-    ...(custom?.onExhausted
-      ? {
-          onExhausted:
-            custom.onExhausted as ResolvedChatRecoveryConfig["onExhausted"]
-        }
-      : {})
+    ...(custom?.onExhausted ? { onExhausted: custom.onExhausted } : {})
   };
 }
 
