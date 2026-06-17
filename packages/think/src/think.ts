@@ -162,6 +162,8 @@ import {
   resolveChatRecoveryConfig,
   chatRecoverySchedulePolicy,
   ChatRecoveryEngine,
+  buildChatRecoveryExhaustedContext,
+  notifyChatRecoveryExhausted,
   type ChatRecoveryAdapter,
   type ChatRecoveryScheduleCallback
 } from "agents/chat";
@@ -1235,7 +1237,6 @@ import type {
   ChatResponseResult,
   ChatRecoveryConfig,
   ChatRecoveryContext,
-  ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
   MessageConcurrency,
   ResolvedChatRecoveryConfig,
@@ -9767,29 +9768,24 @@ export class Think<
     streamId: string,
     createdAt: number
   ): Promise<void> {
-    const ctx: ChatRecoveryExhaustedContext = {
-      incidentId: incident.incidentId,
-      requestId: incident.requestId,
-      recoveryRootRequestId:
-        incident.recoveryRootRequestId ?? incident.requestId,
-      attempt: incident.attempt,
-      maxAttempts: incident.maxAttempts,
-      recoveryKind: incident.recoveryKind,
-      streamId,
-      createdAt,
+    // Shared notification core (context build + event + onExhausted-swallow)
+    // lives in the engine; the broadcast/terminal ordering below is Think's own
+    // (broadcast-first; see the note below). See
+    // design/rfc-chat-recovery-foundation.md.
+    const ctx = buildChatRecoveryExhaustedContext({
+      incident,
+      config,
       partialText: partial.text,
       partialParts: partial.parts,
-      reason: incident.reason ?? "max_attempts_exceeded",
-      terminalMessage: config.terminalMessage
-    };
-    this._emit("chat:recovery:exhausted", ctx);
-    // A throwing onExhausted hook must not prevent the terminal UX from being
-    // delivered, otherwise the turn wedges with no user-visible resolution.
-    try {
-      await config.onExhausted?.(ctx);
-    } catch (error) {
-      console.error("[Think] chatRecovery onExhausted hook threw", error);
-    }
+      streamId,
+      createdAt
+    });
+    await notifyChatRecoveryExhausted(ctx, {
+      emit: (event) => this._emit("chat:recovery:exhausted", event),
+      onExhausted: config.onExhausted,
+      onError: (error) =>
+        console.error("[Think] chatRecovery onExhausted hook threw", error)
+    });
     // Deliver the user-visible terminal banner BEFORE the bookkeeping storage
     // writes below. A `ctx.storage` write can reject mid-deploy (the exact
     // window recovery exhausts in), and if it threw before this broadcast the

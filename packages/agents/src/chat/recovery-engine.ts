@@ -9,7 +9,10 @@
  * @internal Not a public API.
  */
 
-import type { ResolvedChatRecoveryConfig } from "./lifecycle";
+import type {
+  ChatRecoveryExhaustedContext,
+  ResolvedChatRecoveryConfig
+} from "./lifecycle";
 import {
   chatRecoveryIncidentId,
   chatRecoveryIncidentKey,
@@ -162,5 +165,60 @@ export class ChatRecoveryEngine {
       adapter.emitRecoveryEvent(event);
     }
     return { incident, config, exhausted };
+  }
+}
+
+/**
+ * Build the `ChatRecoveryExhaustedContext` delivered to `onExhausted` and the
+ * `chat:recovery:exhausted` event. Pure field-mapping shared by both packages;
+ * the `reason` falls back to `max_attempts_exceeded` when the incident did not
+ * record a more specific cause.
+ */
+export function buildChatRecoveryExhaustedContext(input: {
+  incident: ChatRecoveryIncident;
+  config: ResolvedChatRecoveryConfig;
+  partialText: string;
+  partialParts: ChatRecoveryExhaustedContext["partialParts"];
+  streamId: string;
+  createdAt: number;
+}): ChatRecoveryExhaustedContext {
+  const { incident, config } = input;
+  return {
+    incidentId: incident.incidentId,
+    requestId: incident.requestId,
+    recoveryRootRequestId: incident.recoveryRootRequestId ?? incident.requestId,
+    attempt: incident.attempt,
+    maxAttempts: incident.maxAttempts,
+    recoveryKind: incident.recoveryKind,
+    streamId: input.streamId,
+    createdAt: input.createdAt,
+    partialText: input.partialText,
+    partialParts: input.partialParts,
+    reason: incident.reason ?? "max_attempts_exceeded",
+    terminalMessage: config.terminalMessage
+  };
+}
+
+/**
+ * Run the shared exhaustion notification: emit `chat:recovery:exhausted`, then
+ * invoke the caller's `onExhausted` hook. A throwing hook is swallowed (and
+ * reported via `onError`) so it can NEVER prevent the caller from delivering
+ * terminal UX — a tested invariant in both packages. The terminal record /
+ * banner / submission writes that follow are intentionally package-owned (their
+ * ordering legitimately diverges), so they are NOT part of this helper.
+ */
+export async function notifyChatRecoveryExhausted(
+  ctx: ChatRecoveryExhaustedContext,
+  hooks: {
+    emit: (ctx: ChatRecoveryExhaustedContext) => void;
+    onExhausted?: (ctx: ChatRecoveryExhaustedContext) => void | Promise<void>;
+    onError: (error: unknown) => void;
+  }
+): Promise<void> {
+  hooks.emit(ctx);
+  try {
+    await hooks.onExhausted?.(ctx);
+  } catch (error) {
+    hooks.onError(error);
   }
 }

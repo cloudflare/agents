@@ -1377,6 +1377,33 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 2 (slice 2c — shared exhaustion-notification core)_ — **Re-scoped from
+  the original "move terminal/exhaust sealing behind the engine".** Side-by-side
+  reading of both `_exhaustChatRecovery` methods showed the head (build
+  `ChatRecoveryExhaustedContext` → emit `chat:recovery:exhausted` → run
+  `onExhausted` with the throw-swallow) is byte-identical (only the log prefix
+  differs), but the tail — the terminal-record / banner-broadcast / submission
+  writes **and their ordering** — is an _intentional, documented divergence_:
+  `@cloudflare/ai-chat` persists-then-broadcasts (#1645 reconnect reliability)
+  while `Think` broadcasts-then-persists (banner resilience under a failing
+  storage write), and Think additionally marks the submission interrupted. Forcing
+  the whole method behind the engine would either flatten that divergence or push
+  a `persist-first | broadcast-first` knob (plus terminal/submission I/O) through
+  the seam — a leaky, UIMessage-shaped adapter exactly of the kind Phase 5 warns
+  about. So slice 2c extracts only the genuinely-shared core: the pure
+  `buildChatRecoveryExhaustedContext` (field map + `reason`/`recoveryRootRequestId`
+  fallbacks) and `notifyChatRecoveryExhausted` (emit → `onExhausted` swallow →
+  `onError` report). Both packages call these two helpers at the top of
+  `_exhaustChatRecovery`, then keep their own divergent terminal I/O in their own
+  order. The "throwing `onExhausted` never blocks terminal UX" invariant now lives
+  in one tested place. Removed the now-unused `ChatRecoveryExhaustedContext`
+  type-import from both packages (kept the public re-export). Added Layer-2 tests
+  pinning the field map, both fallbacks, emit-before-hook order, the swallow +
+  `onError` path, and the no-hook path. Review: behavior byte-identical — the
+  divergent tail is untouched (ai-chat keeps its trailing `_setChatRecovering(false)`,
+  Think keeps broadcast-first + `_markRecoveredSubmissionInterrupted`); only the
+  shared head moved. Gates: chat unit (296, +9), ai-chat workers (682), Think
+  workers (686), typecheck (111), oxlint — all clean.
 - _Phase 2 (slice 2b — Think incident-begin)_ — Wired
   `Think._beginChatRecoveryIncident` to the same `ChatRecoveryEngine`, with its
   hibernation guard implemented as the adapter's `ensureInteractionStateLoaded`
@@ -1634,9 +1661,17 @@ Sliced for safety (this is the riskiest phase — see the working cadence):
       now delegates to the same engine; its hibernation guard is the
       `ensureInteractionStateLoaded` hook (verbatim, same position). Both
       packages are now symmetric for incident-begin. Zero behavior change.
-- [ ] Slice 2c — terminal/exhaust sealing behind the engine.
+- [x] **Slice 2c — shared exhaustion-notification core** (re-scoped from "move
+      terminal/exhaust sealing behind the engine"). Only the byte-identical head
+      moved: `buildChatRecoveryExhaustedContext` (pure field map) +
+      `notifyChatRecoveryExhausted` (emit → `onExhausted`-swallow → `onError`).
+      The terminal-record / banner / submission writes **stay package-owned**
+      because their ordering is an intentional divergence (ai-chat persist-first
+      #1645; Think broadcast-first), which the engine must not flatten. Layer-2
+      tests pin the field map, both fallbacks, and the swallow invariant. Zero
+      behavior change.
 - [ ] Slice 2d — recovering-on-connect convergence for `AIChatAgent` (behavior
-      change + changeset).
+      change + changeset + smoke test + e2e). **First behavior-changing slice.**
 
 Work:
 

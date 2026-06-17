@@ -126,6 +126,8 @@ export {
 export {
   chatRecoverySchedulePolicy,
   ChatRecoveryEngine,
+  buildChatRecoveryExhaustedContext,
+  notifyChatRecoveryExhausted,
   type ChatRecoveryScheduleReason,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryAdapter,

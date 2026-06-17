@@ -55,6 +55,8 @@ import {
   resolveChatRecoveryConfig,
   chatRecoverySchedulePolicy,
   ChatRecoveryEngine,
+  buildChatRecoveryExhaustedContext,
+  notifyChatRecoveryExhausted,
   type ChatRecoveryAdapter,
   type ChatRecoveryScheduleCallback
 } from "agents/chat";
@@ -62,7 +64,6 @@ import type {
   ChatResponseResult,
   ChatRecoveryConfig,
   ChatRecoveryContext,
-  ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
   MessageConcurrency,
   ResolvedChatRecoveryConfig,
@@ -3855,29 +3856,26 @@ export class AIChatAgent<
     streamId: string,
     createdAt: number
   ): Promise<void> {
-    const ctx: ChatRecoveryExhaustedContext = {
-      incidentId: incident.incidentId,
-      requestId: incident.requestId,
-      recoveryRootRequestId:
-        incident.recoveryRootRequestId ?? incident.requestId,
-      attempt: incident.attempt,
-      maxAttempts: incident.maxAttempts,
-      recoveryKind: incident.recoveryKind,
-      streamId,
-      createdAt,
+    // Shared notification core (context build + event + onExhausted-swallow)
+    // lives in the engine; the terminal/broadcast ordering below is ai-chat's
+    // own (persist-first; see #1645). See design/rfc-chat-recovery-foundation.md.
+    const ctx = buildChatRecoveryExhaustedContext({
+      incident,
+      config,
       partialText: partial.text,
       partialParts: partial.parts,
-      reason: incident.reason ?? "max_attempts_exceeded",
-      terminalMessage: config.terminalMessage
-    };
-    this._emit("chat:recovery:exhausted", ctx);
-    // A throwing onExhausted hook must not prevent the terminal UX from being
-    // delivered, otherwise the turn wedges with no user-visible resolution.
-    try {
-      await config.onExhausted?.(ctx);
-    } catch (error) {
-      console.error("[AIChatAgent] chatRecovery onExhausted hook threw", error);
-    }
+      streamId,
+      createdAt
+    });
+    await notifyChatRecoveryExhausted(ctx, {
+      emit: (event) => this._emit("chat:recovery:exhausted", event),
+      onExhausted: config.onExhausted,
+      onError: (error) =>
+        console.error(
+          "[AIChatAgent] chatRecovery onExhausted hook threw",
+          error
+        )
+    });
     // Persist the terminal outcome BEFORE broadcasting it (#1645): the
     // broadcast is transient, so a client disconnected at this moment (a
     // deploy/reconnect storm exhausting recovery) would otherwise never learn

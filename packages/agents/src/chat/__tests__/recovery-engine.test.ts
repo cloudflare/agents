@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   ChatRecoveryEngine,
+  buildChatRecoveryExhaustedContext,
   chatRecoverySchedulePolicy,
+  notifyChatRecoveryExhausted,
   type ChatRecoveryAdapter,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryScheduleReason
 } from "../recovery-engine";
+import type { ChatRecoveryExhaustedContext } from "../lifecycle";
 import {
   chatRecoveryIncidentId,
   chatRecoveryIncidentKey,
@@ -238,5 +241,152 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
     expect(fake.calls).not.toContain("ensureInteractionStateLoaded");
     const expectedKey = chatRecoveryIncidentKey(chatRecoveryIncidentId(input));
     expect(fake.storage.get(expectedKey)).toEqual(result.incident);
+  });
+});
+
+/**
+ * Layer-2 shared exhaustion-notification seam (rfc-chat-recovery-foundation,
+ * Phase 2 slice 2c). Only the context build + event emit + `onExhausted`
+ * hook-swallow are shared; the terminal-record / banner / submission writes (and
+ * their ordering) stay package-owned because that ordering legitimately diverges
+ * (`@cloudflare/ai-chat` persists-first for #1645 reconnect reliability; `Think`
+ * broadcasts-first for banner resilience). These tests pin the shared core.
+ */
+describe("buildChatRecoveryExhaustedContext", () => {
+  const config = resolveChatRecoveryConfig(undefined);
+
+  function makeIncident(
+    overrides: Partial<ChatRecoveryIncident> = {}
+  ): ChatRecoveryIncident {
+    return {
+      incidentId: "inc-1",
+      requestId: "req-1",
+      recoveryRootRequestId: "root-1",
+      recoveryKind: "continue",
+      attempt: 2,
+      maxAttempts: 5,
+      status: "exhausted",
+      firstSeenAt: 1_000,
+      lastAttemptAt: 2_000,
+      reason: "no_progress_timeout",
+      ...overrides
+    };
+  }
+
+  it("maps every incident/config field onto the exhausted context", () => {
+    const ctx = buildChatRecoveryExhaustedContext({
+      incident: makeIncident(),
+      config,
+      partialText: "hello",
+      partialParts: [],
+      streamId: "stream-9",
+      createdAt: 1_500
+    });
+
+    expect(ctx).toEqual({
+      incidentId: "inc-1",
+      requestId: "req-1",
+      recoveryRootRequestId: "root-1",
+      attempt: 2,
+      maxAttempts: 5,
+      recoveryKind: "continue",
+      streamId: "stream-9",
+      createdAt: 1_500,
+      partialText: "hello",
+      partialParts: [],
+      reason: "no_progress_timeout",
+      terminalMessage: config.terminalMessage
+    });
+  });
+
+  it("falls back recoveryRootRequestId to requestId when unset", () => {
+    const ctx = buildChatRecoveryExhaustedContext({
+      incident: makeIncident({ recoveryRootRequestId: undefined }),
+      config,
+      partialText: "",
+      partialParts: [],
+      streamId: "",
+      createdAt: 0
+    });
+
+    expect(ctx.recoveryRootRequestId).toBe("req-1");
+  });
+
+  it("falls back reason to max_attempts_exceeded when the incident has none", () => {
+    const ctx = buildChatRecoveryExhaustedContext({
+      incident: makeIncident({ reason: undefined }),
+      config,
+      partialText: "",
+      partialParts: [],
+      streamId: "",
+      createdAt: 0
+    });
+
+    expect(ctx.reason).toBe("max_attempts_exceeded");
+  });
+});
+
+describe("notifyChatRecoveryExhausted", () => {
+  const ctx: ChatRecoveryExhaustedContext = {
+    incidentId: "inc-1",
+    requestId: "req-1",
+    recoveryRootRequestId: "root-1",
+    attempt: 5,
+    maxAttempts: 5,
+    recoveryKind: "continue",
+    streamId: "stream-1",
+    createdAt: 0,
+    partialText: "",
+    partialParts: [],
+    reason: "max_attempts_exceeded",
+    terminalMessage: "Something went wrong."
+  };
+
+  it("emits the event before invoking the onExhausted hook", async () => {
+    const order: string[] = [];
+    await notifyChatRecoveryExhausted(ctx, {
+      emit: () => order.push("emit"),
+      onExhausted: () => {
+        order.push("onExhausted");
+      },
+      onError: () => order.push("onError")
+    });
+
+    expect(order).toEqual(["emit", "onExhausted"]);
+  });
+
+  it("swallows a throwing onExhausted hook and reports it via onError", async () => {
+    const order: string[] = [];
+    const thrown = new Error("hook boom");
+    let reported: unknown;
+
+    await expect(
+      notifyChatRecoveryExhausted(ctx, {
+        emit: () => order.push("emit"),
+        onExhausted: () => {
+          order.push("onExhausted");
+          throw thrown;
+        },
+        onError: (error) => {
+          order.push("onError");
+          reported = error;
+        }
+      })
+    ).resolves.toBeUndefined();
+
+    // The event still fired (terminal UX is never blocked by a bad hook), and
+    // the error surfaced through onError rather than propagating.
+    expect(order).toEqual(["emit", "onExhausted", "onError"]);
+    expect(reported).toBe(thrown);
+  });
+
+  it("emits even when no onExhausted hook is configured", async () => {
+    const order: string[] = [];
+    await notifyChatRecoveryExhausted(ctx, {
+      emit: () => order.push("emit"),
+      onError: () => order.push("onError")
+    });
+
+    expect(order).toEqual(["emit"]);
   });
 });
