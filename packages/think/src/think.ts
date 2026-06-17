@@ -159,10 +159,10 @@ import {
   wrapChatFiberSnapshot,
   MAX_BOUND_PARAMS,
   buildInClauseStrings,
-  evaluateChatRecoveryIncident,
   resolveChatRecoveryConfig,
-  chatRecoveryIncidentId,
   chatRecoverySchedulePolicy,
+  ChatRecoveryEngine,
+  type ChatRecoveryAdapter,
   type ChatRecoveryScheduleCallback
 } from "agents/chat";
 import type {
@@ -9549,17 +9549,6 @@ export class Think<
     return resolveChatRecoveryConfig(this.chatRecovery);
   }
 
-  private _chatRecoveryIncidentId(input: {
-    requestId: string;
-    recoveryRootRequestId?: string | null;
-    latestUserMessageId?: string | null;
-    targetAssistantId?: string | null;
-    recoveryKind: ChatRecoveryKind;
-  }): string {
-    // `recoveryKind` is intentionally NOT part of the identity (shared engine).
-    return chatRecoveryIncidentId(input);
-  }
-
   private _chatRecoveryIncidentKey(incidentId: string): string {
     return `${CHAT_RECOVERY_INCIDENT_KEY_PREFIX}${encodeURIComponent(incidentId)}`;
   }
@@ -9649,68 +9638,64 @@ export class Think<
     config: ResolvedChatRecoveryConfig;
     exhausted: boolean;
   }> {
-    // Incident budget orchestration lives in the shared engine
-    // (agents/chat `evaluateChatRecoveryIncident`); this method owns only the
-    // storage I/O, client-tool rehydration, and event emission around it. See
-    // design/rfc-chat-recovery-foundation.md.
-    const config = this._resolveChatRecoveryConfig();
-    const incidentId = this._chatRecoveryIncidentId(input);
-    const key = this._chatRecoveryIncidentKey(incidentId);
-    const now = input.nowMs ?? Date.now();
-    // Sweep stale incidents BEFORE reading the existing record: an incident
-    // past the TTL is also past the no-progress window, so sweeping it first
-    // lets a genuinely abandoned identity start fresh. (Ordering invariant.)
-    await this._sweepStaleChatRecoveryIncidents(now);
-    const existing =
-      (await this.ctx.storage.get<ChatRecoveryIncident>(key)) ?? null;
+    // Incident orchestration (sweep -> read -> rehydrate interaction state ->
+    // budget eval -> persist -> emit, with its ordering invariants) lives in the
+    // shared ChatRecoveryEngine; this method is the package's adapter binding.
+    // See design/rfc-chat-recovery-foundation.md.
+    return this._chatRecoveryEngine().beginIncident(input);
+  }
 
-    // Hibernation ordering guard. The budget decision consults
-    // `hasPendingInteraction()` -> `_clientResolvableToolNames()` ->
-    // `_lastClientTools` to keep a HITL turn (parked on a client-tool
-    // `input-available` orphan) budget-free. On a fresh wake the base Agent runs
-    // the boot-recovery path (`_handleInternalFiberRecovery`) BEFORE onStart's
-    // `_restoreClientTools()`, so without this the in-memory cache is empty and
-    // such a turn is misread as "stuck" and wrongly sealed (the slow-human +
-    // deploy-churn case). Re-hydrate from the durable `think_config` store — its
-    // own table, no Session init required, so the read is safe this early; the
-    // guard keeps it idempotent with the later onStart restore and a no-op on
-    // the live-isolate stall path where the tools are already loaded. Must run
-    // BEFORE the engine reads `hasPendingInteraction()` below.
-    if (this._lastClientTools === undefined) {
-      this._restoreClientTools();
-    }
-
-    const currentProgress = await this._chatRecoveryProgressMarker();
-
-    const { incident, exhausted, events } = await evaluateChatRecoveryIncident({
-      identity: input,
-      config,
-      existing,
-      currentProgress,
+  /**
+   * Lazily-built shared recovery engine. The adapter arrows capture `this`, so a
+   * single cached instance is correct across calls (and across future engine
+   * methods).
+   */
+  private _chatRecoveryEngineInstance?: ChatRecoveryEngine;
+  private _chatRecoveryEngine(): ChatRecoveryEngine {
+    return (this._chatRecoveryEngineInstance ??= new ChatRecoveryEngine({
+      resolveConfig: () => this._resolveChatRecoveryConfig(),
+      now: () => Date.now(),
+      sweepStaleIncidents: (now) => this._sweepStaleChatRecoveryIncidents(now),
+      getIncident: async (key) =>
+        (await this.ctx.storage.get<ChatRecoveryIncident>(key)) ?? null,
+      // Hibernation ordering guard. The budget decision consults
+      // `hasPendingInteraction()` -> `_clientResolvableToolNames()` ->
+      // `_lastClientTools` to keep a HITL turn (parked on a client-tool
+      // `input-available` orphan) budget-free. On a fresh wake the base Agent
+      // runs the boot-recovery path (`_handleInternalFiberRecovery`) BEFORE
+      // onStart's `_restoreClientTools()`, so without this the in-memory cache
+      // is empty and such a turn is misread as "stuck" and wrongly sealed (the
+      // slow-human + deploy-churn case). Re-hydrate from the durable
+      // `think_config` store — its own table, no Session init required, so the
+      // read is safe this early; the guard keeps it idempotent with the later
+      // onStart restore and a no-op on the live-isolate stall path where the
+      // tools are already loaded. The engine invokes this BEFORE it reads
+      // `isAwaitingClientInteraction()`.
+      ensureInteractionStateLoaded: () => {
+        if (this._lastClientTools === undefined) {
+          this._restoreClientTools();
+        }
+      },
+      readProgress: () => this._chatRecoveryProgressMarker(),
       // A turn parked on a pending CLIENT interaction is waiting on the human,
       // not stuck, so the engine keeps it budget-free. SERVER-tool orphans are
       // excluded by `hasPendingInteraction` and still recover normally.
-      awaitingClientInteraction: this.hasPendingInteraction(),
-      now,
+      isAwaitingClientInteraction: () => this.hasPendingInteraction(),
+      putIncident: (key, incident) => this.ctx.storage.put(key, incident),
+      emitRecoveryEvent: (event) =>
+        this._emit(event.type, {
+          incidentId: event.incidentId,
+          requestId: event.requestId,
+          attempt: event.attempt,
+          maxAttempts: event.maxAttempts,
+          recoveryKind: event.recoveryKind
+        }),
       onShouldKeepRecoveringError: (error) =>
         console.error(
           "[Think] chatRecovery shouldKeepRecovering hook threw",
           error
         )
-    });
-
-    await this.ctx.storage.put(key, incident);
-    for (const event of events) {
-      this._emit(event.type, {
-        incidentId: event.incidentId,
-        requestId: event.requestId,
-        attempt: event.attempt,
-        maxAttempts: event.maxAttempts,
-        recoveryKind: event.recoveryKind
-      });
-    }
-
-    return { incident, config, exhausted };
+    } satisfies ChatRecoveryAdapter));
   }
 
   private async _updateChatRecoveryIncident(

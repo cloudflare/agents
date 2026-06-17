@@ -1377,6 +1377,19 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 2 (slice 2b — Think incident-begin)_ — Wired
+  `Think._beginChatRecoveryIncident` to the same `ChatRecoveryEngine`, with its
+  hibernation guard implemented as the adapter's `ensureInteractionStateLoaded`
+  hook (the rationale comment moved verbatim onto the hook). Removed the now-dead
+  `_chatRecoveryIncidentId` + the `evaluateChatRecoveryIncident` /
+  `chatRecoveryIncidentId` imports. Both packages are now symmetric for
+  incident-begin (the only divergence is the predicate — `hasPendingInteraction`
+  vs `hasPendingClientInteraction` — and the presence of the hook). Review:
+  engine order (`get → ensureInteractionStateLoaded → readProgress →
+  predicate`) is byte-identical to the old inline order (`get → guard → progress
+  → hasPendingInteraction`); `_restoreClientTools`/`hasPendingInteraction` keep
+  their other callers; key derivation unchanged. Gates: Think workers (686) pass;
+  typecheck (111) and oxlint clean.
 - _Phase 2 (slice 2a — incident-begin orchestration)_ — Added
   `ChatRecoveryEngine` + `ChatRecoveryAdapter` to `recovery-engine.ts`: the
   engine owns the begin-incident sequence (resolve config → derive key → sweep
@@ -1617,9 +1630,10 @@ Sliced for safety (this is the riskiest phase — see the working cadence):
       Think's client-tool rehydration. Layer-2 fake-adapter test pins the
       sequence. Zero behavior change (byte-identical orchestration). _Think
       binding = slice 2b (next)._
-- [ ] Slice 2b — wire `Think._beginChatRecoveryIncident` through the engine
-      (implements the `ensureInteractionStateLoaded` hook for its hibernation
-      guard).
+- [x] **Slice 2b — Think incident-begin.** `Think._beginChatRecoveryIncident`
+      now delegates to the same engine; its hibernation guard is the
+      `ensureInteractionStateLoaded` hook (verbatim, same position). Both
+      packages are now symmetric for incident-begin. Zero behavior change.
 - [ ] Slice 2c — terminal/exhaust sealing behind the engine.
 - [ ] Slice 2d — recovering-on-connect convergence for `AIChatAgent` (behavior
       change + changeset).
