@@ -135,6 +135,11 @@ export {
   type BeginChatRecoveryIncidentResult
 } from "./recovery-engine";
 
+export {
+  ChatStreamStalledError,
+  iterateWithStallWatchdog
+} from "./stall-watchdog";
+
 export type {
   ChatResponseResult,
   ChatRecoveryConfig,

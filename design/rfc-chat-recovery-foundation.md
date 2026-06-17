@@ -1378,6 +1378,32 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Slice 3a (Phase 3 start — shared stall-watchdog primitive)_ — First Phase 3
+  step. The incident lifecycle is already shared for `Think` (2b/2c/2e), so
+  Phase 3 is the deeper `Think`-only surface; per a recovery-surface map (stall
+  watchdog, durable submissions, messenger/workflow fiber ordering, tool
+  rollback, agent-tool child-run reconcile), the **stall watchdog** is the #1
+  convergence-matrix item and the natural foundation. Extracted `Think`'s
+  `_iterateWithStallWatchdog` + `ChatStreamStalledError` **verbatim** into the
+  shared `packages/agents/src/chat/stall-watchdog.ts` and re-exported them
+  (`@internal`) from `agents/chat`. Key enabler: the watchdog generator never
+  referenced `this`, so it lifts to a free function with no seam needed —
+  `Think` now `import`s both, its two stream-loop call sites drop the `this.`
+  prefix, and the two `instanceof ChatStreamStalledError` read-loop catches are
+  unaffected because the thrown error is the very same imported class (so
+  `instanceof` still holds). Review findings: (1) byte-identical body +
+  error-class shape (`isChatStreamStall`, name) → zero behavior change; (2) the
+  `onStall` closures stay inline at `Think`'s call sites (they capture `this`),
+  so the package-specific abort/emit stays package-owned — only the generic
+  race/timeout/cancel mechanics moved; (3) additive barrel export, so `ai-chat`
+  (which doesn't consume it yet) is untouched — confirmed by typecheck +
+  `check:exports`. Tests: 4 Layer-2 unit cases at the shared layer
+  (disabled-passthrough, fast passthrough, stall→throw+`onStall`-once,
+  consumer-break→source-cancel); `Think` 686 + e2e suites still green (existing
+  stall coverage preserved). Repo typecheck 111; `pnpm run check` clean. No
+  changeset (zero behavior change; `@internal` export). Slice 3b wires
+  `AIChatAgent` onto this primitive (the behavior change + changeset).
+
 - _Slice 2e (incident-update transitions behind the engine)_ — The transition
   twin of slice 2a: `ChatRecoveryEngine.updateIncident(incidentId, status,
 reason?)` now owns the incident state-machine transitions both packages
@@ -1820,16 +1846,35 @@ Exit criteria:
 
 ### Phase 3: wire `Think`
 
-Move `Think` recovery orchestration behind the same shared engine.
+Move `Think` recovery orchestration behind the same shared engine. The incident
+lifecycle (begin / update / exhaustion-notification) already routes through the
+engine for `Think` (slices 2b/2c/2e); Phase 3 is the deeper, `Think`-heavy
+surface. Sliced like Phase 2 — lowest-risk extraction first, behavior change
+behind a changeset second:
 
-Work:
-
-- Implement `ThinkRecoveryAdapter`.
-- Preserve Session persistence.
-- Preserve durable submission recovery.
-- Preserve messenger/workflow fiber recovery ordering.
-- Preserve or converge stall watchdog behavior through the shared engine.
-- Preserve tool rollback and agent-tool child-run reconciliation.
+- [x] **Slice 3a — shared stall-watchdog primitive (zero behavior change).**
+      Extracted `Think`'s `_iterateWithStallWatchdog` + `ChatStreamStalledError`
+      verbatim into `packages/agents/src/chat/stall-watchdog.ts` (the function
+      never touched `this`, so it lifts cleanly to a free function). `Think`
+      imports both from `agents/chat`; the two call sites and the two
+      `instanceof ChatStreamStalledError` read-loop catches are unchanged in
+      behavior (the thrown error is the same imported class, so `instanceof`
+      still holds). Layer-2 unit test added (disabled-passthrough, fast-source
+      passthrough, stall→throw+onStall, consumer-break→source-cancel). This is
+      the shared foundation slice 3b wires `AIChatAgent` onto.
+- [ ] **Slice 3b — converge `AIChatAgent` onto the stall watchdog (behavior
+      change + changeset + e2e).** Wire `AIChatAgent`'s stream loops through
+      `iterateWithStallWatchdog`, routing a stall into its incident engine, with
+      a default stall timeout when `chatRecovery` is enabled (convergence-matrix
+      row 1). `AIChatAgent` currently has no stall watchdog, so this is a
+      user-visible behavior change like slice 2d.
+- [ ] Implement remaining `Think` adapter hooks as needed (submissions,
+      messenger/workflow fiber recovery, tool rollback, agent-tool child-run
+      reconciliation) — preserved as adapter-owned `Think` behavior.
+- [ ] Preserve Session persistence.
+- [ ] Preserve durable submission recovery.
+- [ ] Preserve messenger/workflow fiber recovery ordering.
+- [ ] Preserve tool rollback and agent-tool child-run reconciliation.
 
 Exit criteria:
 

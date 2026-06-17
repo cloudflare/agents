@@ -164,6 +164,8 @@ import {
   ChatRecoveryEngine,
   buildChatRecoveryExhaustedContext,
   notifyChatRecoveryExhausted,
+  ChatStreamStalledError,
+  iterateWithStallWatchdog,
   type ChatRecoveryAdapter,
   type ChatRecoveryScheduleCallback
 } from "agents/chat";
@@ -615,21 +617,6 @@ type ChatRecoveryContinueData = {
   lastClientTools?: ClientToolSchema[] | null;
   recoveredRequestId?: string;
 };
-
-/**
- * Thrown by `_iterateWithStallWatchdog` when the inactivity watchdog fires
- * (a model/transport stream that parks without ever throwing). Distinct from
- * in-band model/stream errors so the read-loop catch can route a stall into
- * bounded recovery (#1626) — a transient hang is retried within the existing
- * recovery budget — while genuine errors stay terminal.
- */
-class ChatStreamStalledError extends Error {
-  readonly isChatStreamStall = true;
-  constructor(message: string) {
-    super(message);
-    this.name = "ChatStreamStalledError";
-  }
-}
 
 type ChatRecoveryKind = "retry" | "continue";
 
@@ -8116,7 +8103,7 @@ export class Think<
       this._insideInferenceLoop = true;
       const flushState = { chunksSinceFlush: 0, hasFlushedContent: false };
       try {
-        const guardedStream = this._iterateWithStallWatchdog(
+        const guardedStream = iterateWithStallWatchdog(
           result.toUIMessageStream(),
           stallTimeoutMs,
           () => {
@@ -8468,75 +8455,6 @@ export class Think<
     }
   }
 
-  /**
-   * Wrap a UI-message stream with an inactivity watchdog. If no chunk arrives
-   * within `timeoutMs`, `onStall` runs (aborting the upstream model stream) and
-   * the iterator throws, so the consumer loop exits with a terminal error
-   * instead of parking forever on a hung provider/transport. `timeoutMs <= 0`
-   * passes the source through untouched.
-   */
-  private async *_iterateWithStallWatchdog<T>(
-    source: AsyncIterable<T>,
-    timeoutMs: number,
-    onStall: () => void
-  ): AsyncGenerator<T> {
-    if (!(timeoutMs > 0)) {
-      yield* source;
-      return;
-    }
-    const iterator = source[Symbol.asyncIterator]();
-    // Tracks whether the watchdog itself aborted the upstream. In that case we
-    // must NOT also `iterator.return()` it: cancelling the readable after the
-    // abort makes the AI SDK pipeline write to an already-cancelled readable
-    // ("readable side is no longer readable"). Letting the abort error the
-    // stream is the clean path.
-    let selfAborted = false;
-    try {
-      while (true) {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        let stalled = false;
-        const stall = new Promise<never>((_, reject) => {
-          timer = setTimeout(() => {
-            stalled = true;
-            reject(
-              new ChatStreamStalledError(
-                `Chat stream stalled: no activity for ${timeoutMs}ms; the turn was aborted by the stall watchdog.`
-              )
-            );
-          }, timeoutMs);
-        });
-        const nextPromise = iterator.next();
-        // If the watchdog wins the race we abandon this read; aborting the
-        // upstream stream makes it reject later, so pre-attach a no-op catch to
-        // keep that abandoned rejection from surfacing as an unhandled rejection.
-        nextPromise.catch(() => {});
-        let next: IteratorResult<T>;
-        try {
-          next = await Promise.race([nextPromise, stall]);
-        } catch (err) {
-          if (stalled) {
-            selfAborted = true;
-            onStall();
-          }
-          throw err;
-        } finally {
-          if (timer !== undefined) clearTimeout(timer);
-        }
-        if (next.done) return;
-        yield next.value;
-      }
-    } finally {
-      // Forward early termination (consumer `break`/`throw`, e.g. an in-band
-      // stream error where the abort signal is NOT set) to the source so its
-      // reader is cancelled — otherwise the wrapped source would leak when the
-      // consumer stops reading mid-stream. Skipped after a watchdog stall, which
-      // already aborted the upstream (see `selfAborted` above).
-      if (!selfAborted) {
-        await iterator.return?.(undefined as never).catch(() => {});
-      }
-    }
-  }
-
   private async _streamResult(
     requestId: string,
     result: StreamableResult,
@@ -8590,7 +8508,7 @@ export class Think<
     try {
       this._insideInferenceLoop = true;
       try {
-        const guardedStream = this._iterateWithStallWatchdog(
+        const guardedStream = iterateWithStallWatchdog(
           result.toUIMessageStream(),
           stallTimeoutMs,
           () => {
