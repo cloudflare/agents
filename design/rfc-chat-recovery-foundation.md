@@ -1378,6 +1378,41 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Slice 4b (Phase 4 — centralize the schedule-a-recovery triplet, behavior-preserving)_ —
+  The `updateIncident("scheduled")` + `_emit("chat:recovery:scheduled")` +
+  `schedule(0, callback, data, chatRecoverySchedulePolicy("initial"))` block
+  appeared at 7 call sites (Think: stall + 2 fiber; AIChat: stall + 3 fiber).
+  Collapsed into one engine method `ChatRecoveryEngine.scheduleRecovery({ incident,
+recoveryKind, callback, data, reason? })` driving transition → emit → enqueue in
+  that order, behind a new `ChatRecoveryAdapter.scheduleRecovery(callback, data,
+reason)` hook (each package: `schedule(0, callback, data,
+chatRecoverySchedulePolicy(reason))`). Widened `ChatRecoveryIncidentEvent["type"]`
+  to include `"chat:recovery:scheduled"` so the emit flows through the existing
+  `emitRecoveryEvent` mapping (byte-identical payload). **Byte-equivalence review:**
+  (1) the engine preserves the exact order; (2) `incident.requestId` is what every
+  call site emitted — the budget evaluation rewrites `incident.requestId =
+identity.requestId` on each attempt (`recovery-incident.ts`), so reading it off
+  the incident matches; (3) `recoveryKind` is passed EXPLICITLY (not derived),
+  because AIChat's lost-partial branch opens a `continue` incident but schedules +
+  reports a `retry` — each call site passes the same literal/variable it emitted
+  before; (4) the only structural reorder is Think's stall path, where the pure
+  `recoveredRequestId = _hasRunningSubmission(...)` read now precedes the engine
+  call — it reads the submissions store, independent of the incident-status /
+  recovering-flag that `updateIncident` mutates, so its value is unchanged; (5)
+  the stable-timeout reschedule (`reason:"stable_timeout_retry"`, non-idempotent,
+  direct `storage.put`) is deliberately untouched — that is Slice 4c. Added 4 engine
+  unit tests pinning the order, the explicit-`recoveryKind` override, the default
+  `initial` reason, and verbatim payload/reason forwarding. Tests: engine unit 29 ✅
+  (+4); repo typecheck 111 ✅; `check` (sherif/exports/oxfmt/oxlint) ✅; Think workers
+  686 ✅ and ai-chat workers 686 ✅ (the one transient Think failure was the known
+  SQLite-alarm-timing pool race — clean on rerun, and the scheduling-heavy
+  `fiber`+`submissions` suites passed twice, 53 each); ai-chat real-`wrangler dev`
+  SIGKILL recovery e2e 10/10 ✅ (same engine path, offline-safe). No changeset
+  (internal `@internal` seam, zero behavior). The Think real-edge e2e stays gated on
+  Phase 6: its Workers AI binding is remote and `wrangler` again returned "Failed to
+  establish remote session due to an authentication issue. Your credentials may have
+  expired or been revoked." — re-auth (`wrangler login`) needed at the merge gate.
+
 - _Slice 4a (Phase 4 start — shared types + key/sweep helpers, zero behavior)_ —
   The mechanical band of the dedup map: both packages re-declared the
   `ChatRecoveryIncident` type + `ChatRecoveryKind`, a local
@@ -2055,15 +2090,16 @@ each slice ships with its own review + e2e gate before the next begins:
   (inlines `selectStaleIncidentKeys`). Replace local copies with the shared
   symbols. Pure type/identity/selection — no control-flow change.
 
-- **Slice 4b — centralize the "schedule a recovery callback" triplet.** The block
-  `updateIncident("scheduled")` + `_emit("chat:recovery:scheduled")` +
-  `schedule(callback, …, chatRecoverySchedulePolicy("initial"))` appears ~4× in
-  AIChat and ~3× in Think fiber recovery, plus once in each
-  `_routeStallToBoundedRecovery`. Add one engine method
-  (`engine.scheduleRecovery(incident, callback, data, reason)`) that owns the
-  transition + emit + idempotent schedule, and route every call site through it.
-  Behavior-preserving; collapses the most-copied block first so the later
-  body-collapse is smaller.
+- **Slice 4b — centralize the "schedule a recovery callback" triplet. ✅ DONE.** The
+  block `updateIncident("scheduled")` + `_emit("chat:recovery:scheduled")` +
+  `schedule(callback, …, chatRecoverySchedulePolicy("initial"))` appeared at 7 call
+  sites (AIChat: stall + 3 fiber; Think: stall + 2 fiber). Added one engine method
+  (`engine.scheduleRecovery({ incident, recoveryKind, callback, data, reason? })`)
+  that owns the transition + emit + idempotent schedule behind a new
+  `ChatRecoveryAdapter.scheduleRecovery` hook, and routed every call site through it.
+  `recoveryKind` is explicit (AIChat's lost-partial branch reports `retry` over a
+  `continue` incident). Behavior-preserving; collapses the most-copied block first so
+  the later body-collapse is smaller. See the Slice 4b progress-log entry.
 
 - **Slice 4c — move stable-timeout incident mutations behind the engine.**
   `_rescheduleRecoveryAfterStableTimeout` (~98% dup) and the give-up seal

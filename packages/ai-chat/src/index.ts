@@ -3749,6 +3749,14 @@ export class AIChatAgent<
           recoveryKind: event.recoveryKind,
           ...(event.reason ? { reason: event.reason } : {})
         }),
+      scheduleRecovery: async (callback, data, reason) => {
+        await this.schedule(
+          0,
+          callback,
+          data,
+          chatRecoverySchedulePolicy(reason)
+        );
+      },
       setRecovering: (active, requestId) =>
         this._setChatRecovering(active, requestId),
       onShouldKeepRecoveringError: (error) =>
@@ -4180,74 +4188,44 @@ export class AIChatAgent<
           : this._findLastAssistantMessage()?.id;
 
       if (shouldRetryPreStream && options.continue !== false) {
-        await this._updateChatRecoveryIncident(
-          incident.incidentId,
-          "scheduled"
-        );
-        this._emit("chat:recovery:scheduled", {
-          incidentId: incident.incidentId,
-          requestId,
-          attempt: incident.attempt,
-          maxAttempts: incident.maxAttempts,
-          recoveryKind
-        });
-        await this.schedule(
-          0,
-          "_chatRecoveryRetry",
-          {
+        await this._chatRecoveryEngine().scheduleRecovery({
+          incident,
+          recoveryKind,
+          callback: "_chatRecoveryRetry",
+          data: {
             targetUserId: recoverySnapshot.latestUserMessageId,
             originalRequestId: recoveryRootRequestId,
             incidentId: incident.incidentId,
             lastBody: recoverySnapshot.lastBody ?? null,
             lastClientTools: recoverySnapshot.lastClientTools ?? null
-          },
-          chatRecoverySchedulePolicy("initial")
-        );
+          }
+        });
       } else if (
         lostPartialUserId !== undefined &&
         options.continue !== false
       ) {
         // Re-run the orphaned new turn fresh instead of continuing (and
-        // merging into) the previous assistant message.
-        await this._updateChatRecoveryIncident(
-          incident.incidentId,
-          "scheduled"
-        );
-        this._emit("chat:recovery:scheduled", {
-          incidentId: incident.incidentId,
-          requestId,
-          attempt: incident.attempt,
-          maxAttempts: incident.maxAttempts,
-          recoveryKind: "retry"
-        });
-        await this.schedule(
-          0,
-          "_chatRecoveryRetry",
-          {
+        // merging into) the previous assistant message. The incident may have
+        // opened as `continue`, but the action (and the reported kind) is a
+        // `retry`.
+        await this._chatRecoveryEngine().scheduleRecovery({
+          incident,
+          recoveryKind: "retry",
+          callback: "_chatRecoveryRetry",
+          data: {
             targetUserId: lostPartialUserId,
             originalRequestId: recoveryRootRequestId,
             incidentId: incident.incidentId,
             lastBody: recoverySnapshot?.lastBody ?? null,
             lastClientTools: recoverySnapshot?.lastClientTools ?? null
-          },
-          chatRecoverySchedulePolicy("initial")
-        );
-      } else if (options.continue !== false) {
-        await this._updateChatRecoveryIncident(
-          incident.incidentId,
-          "scheduled"
-        );
-        this._emit("chat:recovery:scheduled", {
-          incidentId: incident.incidentId,
-          requestId,
-          attempt: incident.attempt,
-          maxAttempts: incident.maxAttempts,
-          recoveryKind
+          }
         });
-        await this.schedule(
-          0,
-          "_chatRecoveryContinue",
-          {
+      } else if (options.continue !== false) {
+        await this._chatRecoveryEngine().scheduleRecovery({
+          incident,
+          recoveryKind,
+          callback: "_chatRecoveryContinue",
+          data: {
             ...(targetId ? { targetAssistantId: targetId } : {}),
             originalRequestId: recoveryRootRequestId,
             incidentId: incident.incidentId,
@@ -4257,9 +4235,8 @@ export class AIChatAgent<
                   lastClientTools: recoverySnapshot.lastClientTools ?? null
                 }
               : {})
-          },
-          chatRecoverySchedulePolicy("initial")
-        );
+          }
+        });
       } else {
         await this._updateChatRecoveryIncident(
           incident.incidentId,
@@ -4458,18 +4435,11 @@ export class AIChatAgent<
       );
       return "exhausted";
     }
-    await this._updateChatRecoveryIncident(incident.incidentId, "scheduled");
-    this._emit("chat:recovery:scheduled", {
-      incidentId: incident.incidentId,
-      requestId: input.requestId,
-      attempt: incident.attempt,
-      maxAttempts: incident.maxAttempts,
-      recoveryKind: "continue"
-    });
-    await this.schedule(
-      0,
-      "_chatRecoveryContinue",
-      {
+    await this._chatRecoveryEngine().scheduleRecovery({
+      incident,
+      recoveryKind: "continue",
+      callback: "_chatRecoveryContinue",
+      data: {
         ...(input.targetAssistantId
           ? { targetAssistantId: input.targetAssistantId }
           : {}),
@@ -4477,9 +4447,8 @@ export class AIChatAgent<
         incidentId: incident.incidentId,
         lastBody: this._lastBody ?? null,
         lastClientTools: this._lastClientTools ?? null
-      },
-      chatRecoverySchedulePolicy("initial")
-    );
+      }
+    });
     return "scheduled";
   }
 

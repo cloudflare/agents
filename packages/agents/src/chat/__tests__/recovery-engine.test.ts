@@ -159,6 +159,10 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
         calls.push("emit");
         events.push(event);
       },
+      scheduleRecovery: () => {
+        calls.push("schedule");
+        return Promise.resolve();
+      },
       setRecovering: (active, requestId) => {
         calls.push("setRecovering");
         recovering.push({ active, requestId });
@@ -295,6 +299,7 @@ describe("ChatRecoveryEngine.updateIncident (fake adapter)", () => {
       emitRecoveryEvent: (event) => {
         events.push(event);
       },
+      scheduleRecovery: () => Promise.resolve(),
       setRecovering: (active, requestId) => {
         recovering.push({ active, requestId });
         return Promise.resolve();
@@ -410,6 +415,182 @@ describe("ChatRecoveryEngine.updateIncident (fake adapter)", () => {
     expect(fake.events).toHaveLength(0);
     expect(fake.recovering).toHaveLength(0);
     expect(fake.storage.size).toBe(0);
+  });
+});
+
+/**
+ * Layer-2 seam test for `ChatRecoveryEngine.scheduleRecovery` (slice 4b) — the
+ * transition + emit + enqueue triplet both packages repeated at every fiber-
+ * recovery / stall-routing decision. Pins: the `scheduled` incident transition
+ * (persist + recovering flag) runs before the `chat:recovery:scheduled` emit,
+ * which runs before the enqueue; the emitted `recoveryKind` is the EXPLICIT one
+ * the caller passed (not the incident's — `AIChatAgent`'s lost-partial branch
+ * opens a `continue` incident but schedules a `retry`); and the schedule reason
+ * selects the idempotency policy (defaulting to `initial`).
+ */
+describe("ChatRecoveryEngine.scheduleRecovery (fake adapter)", () => {
+  type ScheduleCall = {
+    callback: ChatRecoveryScheduleCallback;
+    data: Record<string, unknown>;
+    reason: ChatRecoveryScheduleReason;
+  };
+
+  function makeFakeAdapter() {
+    const storage = new Map<string, ChatRecoveryIncident>();
+    const events: ChatRecoveryIncidentEvent[] = [];
+    const recovering: Array<{ active: boolean; requestId?: string }> = [];
+    const schedules: ScheduleCall[] = [];
+    const order: string[] = [];
+
+    const adapter: ChatRecoveryAdapter = {
+      resolveConfig: () => resolveChatRecoveryConfig(undefined),
+      now: () => 1_000,
+      sweepStaleIncidents: () => Promise.resolve(),
+      getIncident: (key) => Promise.resolve(storage.get(key) ?? null),
+      readProgress: () => Promise.resolve(0),
+      isAwaitingClientInteraction: () => false,
+      putIncident: (key, incident) => {
+        order.push("put");
+        storage.set(key, incident);
+        return Promise.resolve();
+      },
+      deleteIncident: (key) => {
+        storage.delete(key);
+        return Promise.resolve();
+      },
+      emitRecoveryEvent: (event) => {
+        order.push(`emit:${event.type}`);
+        events.push(event);
+      },
+      scheduleRecovery: (callback, data, reason) => {
+        order.push("schedule");
+        schedules.push({ callback, data, reason });
+        return Promise.resolve();
+      },
+      setRecovering: (active, requestId) => {
+        order.push("setRecovering");
+        recovering.push({ active, requestId });
+        return Promise.resolve();
+      },
+      onShouldKeepRecoveringError: () => {}
+    };
+
+    return { adapter, storage, events, recovering, schedules, order };
+  }
+
+  function seedIncident(
+    storage: Map<string, ChatRecoveryIncident>,
+    overrides: Partial<ChatRecoveryIncident> = {}
+  ): ChatRecoveryIncident {
+    const incident: ChatRecoveryIncident = {
+      incidentId: "root-1:user-1",
+      requestId: "req-attempt-2",
+      recoveryRootRequestId: "root-1",
+      recoveryKind: "continue",
+      attempt: 2,
+      maxAttempts: 6,
+      status: "attempting",
+      firstSeenAt: 1_000,
+      lastAttemptAt: 1_000,
+      ...overrides
+    };
+    storage.set(chatRecoveryIncidentKey(incident.incidentId), incident);
+    return incident;
+  }
+
+  it("drives transition -> emit -> enqueue in order", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    const incident = seedIncident(fake.storage);
+
+    await engine.scheduleRecovery({
+      incident,
+      recoveryKind: incident.recoveryKind,
+      callback: "_chatRecoveryContinue",
+      data: { incidentId: incident.incidentId, originalRequestId: "root-1" }
+    });
+
+    // The incident transitions to `scheduled` (persisted + recovering flag set)
+    // BEFORE the scheduled event, which fires BEFORE the enqueue.
+    const putIdx = fake.order.indexOf("put");
+    const recoveringIdx = fake.order.indexOf("setRecovering");
+    const emitIdx = fake.order.indexOf("emit:chat:recovery:scheduled");
+    const scheduleIdx = fake.order.indexOf("schedule");
+    expect(putIdx).toBeGreaterThanOrEqual(0);
+    expect(recoveringIdx).toBeGreaterThan(putIdx);
+    expect(emitIdx).toBeGreaterThan(recoveringIdx);
+    expect(scheduleIdx).toBeGreaterThan(emitIdx);
+
+    expect(
+      fake.storage.get(chatRecoveryIncidentKey(incident.incidentId))?.status
+    ).toBe("scheduled");
+    expect(fake.recovering).toEqual([{ active: true, requestId: "root-1" }]);
+  });
+
+  it("emits the scheduled event with the incident's request id + the EXPLICIT recoveryKind", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    // A `continue` incident scheduled as a `retry` (the lost-partial branch).
+    const incident = seedIncident(fake.storage, { recoveryKind: "continue" });
+
+    await engine.scheduleRecovery({
+      incident,
+      recoveryKind: "retry",
+      callback: "_chatRecoveryRetry",
+      data: {}
+    });
+
+    const scheduled = fake.events.find(
+      (e) => e.type === "chat:recovery:scheduled"
+    );
+    expect(scheduled).toMatchObject({
+      type: "chat:recovery:scheduled",
+      incidentId: incident.incidentId,
+      requestId: "req-attempt-2",
+      attempt: 2,
+      maxAttempts: 6,
+      recoveryKind: "retry"
+    });
+  });
+
+  it("defaults the schedule reason to initial (idempotent dedup)", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    const incident = seedIncident(fake.storage);
+
+    await engine.scheduleRecovery({
+      incident,
+      recoveryKind: incident.recoveryKind,
+      callback: "_chatRecoveryContinue",
+      data: {}
+    });
+
+    expect(fake.schedules).toHaveLength(1);
+    expect(fake.schedules[0]).toMatchObject({
+      callback: "_chatRecoveryContinue",
+      reason: "initial"
+    });
+  });
+
+  it("forwards an explicit reason and the per-callback payload verbatim", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    const incident = seedIncident(fake.storage);
+    const data = { targetUserId: "u-1", originalRequestId: "root-1" };
+
+    await engine.scheduleRecovery({
+      incident,
+      recoveryKind: "retry",
+      callback: "_chatRecoveryRetry",
+      data,
+      reason: "stable_timeout_retry"
+    });
+
+    expect(fake.schedules[0]).toEqual({
+      callback: "_chatRecoveryRetry",
+      data,
+      reason: "stable_timeout_retry"
+    });
   });
 });
 

@@ -135,6 +135,18 @@ export interface ChatRecoveryAdapter {
   /** Broadcast a lifecycle event produced by the evaluation or a transition. */
   emitRecoveryEvent(event: ChatRecoveryIncidentEvent): void;
   /**
+   * Enqueue the recovery continuation/retry callback. A thin pass-through to the
+   * package's `schedule(0, callback, data, chatRecoverySchedulePolicy(reason))`
+   * — the engine owns the surrounding incident transition + event emit (see
+   * {@link ChatRecoveryEngine.scheduleRecovery}); the package owns the actual
+   * Durable Object alarm write and the per-callback payload shape.
+   */
+  scheduleRecovery(
+    callback: ChatRecoveryScheduleCallback,
+    data: Record<string, unknown>,
+    reason: ChatRecoveryScheduleReason
+  ): Promise<void>;
+  /**
    * Set or clear the live "recovering…" status (#1620). The engine calls this on
    * the incident transitions: `scheduled` → active (keyed by the recovery-root
    * request id, falling back to the incident's request id), and
@@ -205,6 +217,47 @@ export class ChatRecoveryEngine {
       adapter.emitRecoveryEvent(event);
     }
     return { incident, config, exhausted };
+  }
+
+  /**
+   * Schedule a recovery continuation/retry: the transition + emit + enqueue
+   * triplet both packages repeat at every fiber-recovery and stall-routing
+   * decision. In order:
+   *
+   * 1. transition the incident to `scheduled` (persist + drive the #1620
+   *    "recovering…" status) via {@link updateIncident};
+   * 2. emit `chat:recovery:scheduled`; and
+   * 3. enqueue the callback through the adapter's idempotent schedule.
+   *
+   * `recoveryKind` is passed explicitly (not read off the incident) because a
+   * caller can legitimately report a different kind than the incident was opened
+   * with — e.g. `AIChatAgent`'s lost-partial branch opens a `continue` incident
+   * but schedules (and reports) a `retry`. `requestId` always matches
+   * `incident.requestId` (the evaluation rewrites it to the current attempt), so
+   * it is read from the incident.
+   */
+  async scheduleRecovery(input: {
+    incident: ChatRecoveryIncident;
+    recoveryKind: ChatRecoveryKind;
+    callback: ChatRecoveryScheduleCallback;
+    data: Record<string, unknown>;
+    reason?: ChatRecoveryScheduleReason;
+  }): Promise<void> {
+    const { incident } = input;
+    await this.updateIncident(incident.incidentId, "scheduled");
+    this.adapter.emitRecoveryEvent({
+      type: "chat:recovery:scheduled",
+      incidentId: incident.incidentId,
+      requestId: incident.requestId,
+      attempt: incident.attempt,
+      maxAttempts: incident.maxAttempts,
+      recoveryKind: input.recoveryKind
+    });
+    await this.adapter.scheduleRecovery(
+      input.callback,
+      input.data,
+      input.reason ?? "initial"
+    );
   }
 
   /**

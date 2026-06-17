@@ -9563,6 +9563,14 @@ export class Think<
           recoveryKind: event.recoveryKind,
           ...(event.reason ? { reason: event.reason } : {})
         }),
+      scheduleRecovery: async (callback, data, reason) => {
+        await this.schedule(
+          0,
+          callback,
+          data,
+          chatRecoverySchedulePolicy(reason)
+        );
+      },
       setRecovering: (active, requestId) =>
         this._setChatRecovering(active, requestId),
       onShouldKeepRecoveringError: (error) =>
@@ -9719,23 +9727,16 @@ export class Think<
       );
       return "exhausted";
     }
-    await this._updateChatRecoveryIncident(incident.incidentId, "scheduled");
-    this._emit("chat:recovery:scheduled", {
-      incidentId: incident.incidentId,
-      requestId: input.requestId,
-      attempt: incident.attempt,
-      maxAttempts: incident.maxAttempts,
-      recoveryKind: "continue"
-    });
     // If a durable submission is running for this turn, the continuation must
     // complete it (otherwise the submission hangs) — same as deploy recovery.
     const recoveredRequestId = this._hasRunningSubmission(recoveryRootRequestId)
       ? recoveryRootRequestId
       : undefined;
-    await this.schedule(
-      0,
-      "_chatRecoveryContinue",
-      {
+    await this._chatRecoveryEngine().scheduleRecovery({
+      incident,
+      recoveryKind: "continue",
+      callback: "_chatRecoveryContinue",
+      data: {
         ...(input.targetAssistantId
           ? { targetAssistantId: input.targetAssistantId }
           : {}),
@@ -9744,9 +9745,8 @@ export class Think<
         lastBody: this._lastBody ?? null,
         lastClientTools: this._lastClientTools ?? null,
         ...(recoveredRequestId ? { recoveredRequestId } : {})
-      },
-      chatRecoverySchedulePolicy("initial")
-    );
+      }
+    });
     return "scheduled";
   }
 
@@ -9936,46 +9936,25 @@ export class Think<
           : undefined;
 
       if (shouldRetry) {
-        await this._updateChatRecoveryIncident(
-          incident.incidentId,
-          "scheduled"
-        );
-        this._emit("chat:recovery:scheduled", {
-          incidentId: incident.incidentId,
-          requestId,
-          attempt: incident.attempt,
-          maxAttempts: incident.maxAttempts,
-          recoveryKind
-        });
-        await this.schedule(
-          0,
-          "_chatRecoveryRetry",
-          {
+        await this._chatRecoveryEngine().scheduleRecovery({
+          incident,
+          recoveryKind,
+          callback: "_chatRecoveryRetry",
+          data: {
             targetUserId: retryTargetUserId,
             originalRequestId: recoveryRootRequestId,
             incidentId: incident.incidentId,
             lastBody: recoverySnapshot?.lastBody ?? null,
             lastClientTools: recoverySnapshot?.lastClientTools ?? null,
             ...(recoveredRequestId ? { recoveredRequestId } : {})
-          },
-          chatRecoverySchedulePolicy("initial")
-        );
-      } else if (canContinue) {
-        await this._updateChatRecoveryIncident(
-          incident.incidentId,
-          "scheduled"
-        );
-        this._emit("chat:recovery:scheduled", {
-          incidentId: incident.incidentId,
-          requestId,
-          attempt: incident.attempt,
-          maxAttempts: incident.maxAttempts,
-          recoveryKind
+          }
         });
-        await this.schedule(
-          0,
-          "_chatRecoveryContinue",
-          {
+      } else if (canContinue) {
+        await this._chatRecoveryEngine().scheduleRecovery({
+          incident,
+          recoveryKind,
+          callback: "_chatRecoveryContinue",
+          data: {
             ...(targetId ? { targetAssistantId: targetId } : {}),
             originalRequestId: recoveryRootRequestId,
             incidentId: incident.incidentId,
@@ -9986,9 +9965,8 @@ export class Think<
                 }
               : {}),
             ...(recoveredRequestId ? { recoveredRequestId } : {})
-          },
-          chatRecoverySchedulePolicy("initial")
-        );
+          }
+        });
       } else if (options.continue === false && !streamIsTerminal) {
         await this._updateChatRecoveryIncident(
           incident.incidentId,
