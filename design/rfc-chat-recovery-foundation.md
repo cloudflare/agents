@@ -1404,6 +1404,40 @@ the change, and the key review findings.
   changeset (zero behavior change; `@internal` export). Slice 3b wires
   `AIChatAgent` onto this primitive (the behavior change + changeset).
 
+- _Slice 3b (converge `AIChatAgent` onto the stall watchdog)_ — Wired
+  `AIChatAgent`'s `_streamSSEReply` read loop through the shared
+  `iterateWithStallWatchdog` behind a new opt-in `chatStreamStallTimeoutMs`
+  field (default `0` = off, matching `Think`; `0` keeps the raw `reader.read()`
+  path untouched). The watchdog wraps the response-body reader in an
+  `AsyncIterable`, and on stall cancels the reader + throws
+  `ChatStreamStalledError`, which `_reply`'s catch routes via a new
+  `_routeStallToBoundedRecovery`: open/reuse the incident under the turn's
+  recovery identity (`id` == `_activeRequestId` during a live turn), then either
+  schedule a `_chatRecoveryContinue` (close the stream cleanly, report
+  `aborted`) or — when the budget is spent — deliver the same terminal UX as
+  deploy-recovery exhaustion. With recovery disabled the route returns
+  `"disabled"` and the stall falls through to the generic terminal stream error
+  (the watchdog's "kill the spinner" guarantee). **Key correctness fix found via
+  the integration test:** the partial must be persisted from the _in-memory_
+  `message` (the unconditional post-stream persistence block), NOT reconstructed
+  via `_persistOrphanedStream` — on a live stall the stored-chunk buffer can lag
+  the in-memory parts, so the orphan reconstructor came back empty and the
+  user's partial would have been lost (the exact #1626 complaint). Routing the
+  partial through the normal `message.id` persistence makes the scheduled
+  continuation re-anchor correctly via `targetAssistantId`. **Decision:** kept
+  the watchdog opt-in in both packages (converge on the mechanism, not a forced
+  default timeout). Tests: 2 new Layer-3 integration cases in
+  `durable-chat-recovery.test.ts` (a hanging-SSE `onChatMessage` mode +
+  `driveStallingTurnForTest` helper) — stall→continue-incident+partial-persisted,
+  and timeout-`0`→watchdog-disabled — stable across repeated runs (the delay-0
+  continuation does not auto-fire in the pool, so the durable incident, not the
+  transient schedule row, is the stable assertion). `ai-chat` 685 green (was
+  683), repo typecheck 111, lint + oxfmt clean. Changeset added
+  (`@cloudflare/ai-chat` minor). No e2e: the watchdog is opt-in and a real
+  hung-provider stall is impractical to provoke on the edge; the existing
+  deploy-eviction e2e already covers the shared continuation machinery the stall
+  routes into.
+
 - _Slice 2e (incident-update transitions behind the engine)_ — The transition
   twin of slice 2a: `ChatRecoveryEngine.updateIncident(incidentId, status,
 reason?)` now owns the incident state-machine transitions both packages
@@ -1862,12 +1896,18 @@ behind a changeset second:
       still holds). Layer-2 unit test added (disabled-passthrough, fast-source
       passthrough, stall→throw+onStall, consumer-break→source-cancel). This is
       the shared foundation slice 3b wires `AIChatAgent` onto.
-- [ ] **Slice 3b — converge `AIChatAgent` onto the stall watchdog (behavior
-      change + changeset + e2e).** Wire `AIChatAgent`'s stream loops through
-      `iterateWithStallWatchdog`, routing a stall into its incident engine, with
-      a default stall timeout when `chatRecovery` is enabled (convergence-matrix
-      row 1). `AIChatAgent` currently has no stall watchdog, so this is a
-      user-visible behavior change like slice 2d.
+- [x] **Slice 3b — converge `AIChatAgent` onto the stall watchdog (behavior
+      change + changeset).** Wired `AIChatAgent`'s SSE stream loop through
+      `iterateWithStallWatchdog` behind a new opt-in `chatStreamStallTimeoutMs`
+      field (default `0` = off, matching `Think`). When a stall fires and
+      `chatRecovery` is enabled, `_routeStallToBoundedRecovery` opens/reuses the
+      incident under the turn's recovery identity and schedules a
+      `_chatRecoveryContinue` (or delivers terminal UX once the budget is spent);
+      with recovery off the stall stays a terminal stream error. **Decision:**
+      kept the watchdog opt-in (off by default) in BOTH packages rather than
+      defaulting it on with recovery — convergence on the _mechanism_, not a
+      forced timeout value users must tune above their slowest legitimate
+      inter-chunk gap. Changeset added (`@cloudflare/ai-chat` minor).
 - [ ] Implement remaining `Think` adapter hooks as needed (submissions,
       messenger/workflow fiber recovery, tool rollback, agent-tool child-run
       reconciliation) — preserved as adapter-owned `Think` behavior.

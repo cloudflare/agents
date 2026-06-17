@@ -53,6 +53,35 @@ function makeSSEChunkResponse(chunks: ReadonlyArray<Record<string, unknown>>) {
   });
 }
 
+/**
+ * An SSE response that streams a partial assistant turn (start + a text delta)
+ * and then HANGS — the stream never closes and never emits another chunk. Used
+ * to exercise the `chatStreamStallTimeoutMs` inactivity watchdog (#1626): the
+ * gap after the last delta trips the watchdog, which aborts the turn into
+ * bounded recovery.
+ */
+function makeHangingSSEResponse() {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const chunk of [
+        { type: "start" },
+        { type: "text-start" },
+        { type: "text-delta", delta: "partial before stall" }
+      ]) {
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
+        );
+      }
+      // Intentionally never enqueue more or close: a hung provider.
+    },
+    cancel() {}
+  });
+  return new Response(stream, {
+    headers: { "Content-Type": "text/event-stream" }
+  });
+}
+
 export type Env = {
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
   CustomSanitizeAgent: DurableObjectNamespace<CustomSanitizeAgent>;
@@ -1647,6 +1676,11 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.onChatMessageBodies.push(ctx?.body);
     this.onChatMessageClientTools.push(ctx?.clientTools);
 
+    if (this._hangTurnsRemaining > 0) {
+      this._hangTurnsRemaining--;
+      return makeHangingSSEResponse();
+    }
+
     if (this._stashData !== null) {
       try {
         this.stash(this._stashData);
@@ -2335,6 +2369,38 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         id: `u-${crypto.randomUUID()}`,
         role: "user",
         parts: [{ type: "text", text: "hello" }]
+      }
+    ]);
+    return result.status;
+  }
+
+  /** Number of upcoming turns whose model stream hangs (see
+   *  {@link makeHangingSSEResponse}) before reverting to the normal response. */
+  private _hangTurnsRemaining = 0;
+
+  /** Configure the live-stream inactivity watchdog (slice 3b, #1626). */
+  setChatStreamStallTimeoutForTest(ms: number): void {
+    this.chatStreamStallTimeoutMs = ms;
+  }
+
+  /**
+   * Drive a turn whose model stream hangs after a partial, with a short stall
+   * timeout configured, so the inactivity watchdog fires and routes the turn
+   * into bounded recovery. `hangTurns` controls how many turns hang (1 = only
+   * the first attempt hangs, so a scheduled continuation would complete).
+   * Returns the server-side turn status (`"aborted"` once the stall is routed).
+   */
+  async driveStallingTurnForTest(options?: {
+    timeoutMs?: number;
+    hangTurns?: number;
+  }): Promise<SaveMessagesResult["status"]> {
+    this.chatStreamStallTimeoutMs = options?.timeoutMs ?? 50;
+    this._hangTurnsRemaining = options?.hangTurns ?? 1;
+    const result = await this.saveMessages([
+      {
+        id: `u-${crypto.randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text: "tell me a long story" }]
       }
     ]);
     return result.status;

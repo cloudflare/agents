@@ -183,6 +183,11 @@ interface ChatRecoveryTestStub {
   driveErroredTurnForTest(
     message: string
   ): Promise<"completed" | "error" | "aborted" | "skipped">;
+  setChatStreamStallTimeoutForTest(ms: number): Promise<void>;
+  driveStallingTurnForTest(options?: {
+    timeoutMs?: number;
+    hangTurns?: number;
+  }): Promise<"completed" | "error" | "aborted" | "skipped">;
 }
 
 async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
@@ -2502,5 +2507,69 @@ describe("onChatRecovery", () => {
     ws.close(1000);
 
     expect(await agentStub.getPendingChatTerminalForTest()).toBeNull();
+  });
+});
+
+// Slice 3b (#1626): the live-stream inactivity watchdog. With
+// `chatStreamStallTimeoutMs > 0`, a model/transport stream that parks between
+// chunks is aborted and routed into the SAME bounded-recovery machinery a
+// deploy/eviction interruption uses, instead of leaving the turn hung forever.
+describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
+  it("routes a stalled live stream into bounded recovery (schedules a continuation)", async () => {
+    const room = `stall-route-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    // The model streams a partial then hangs; the watchdog trips after the gap.
+    const status = await agentStub.driveStallingTurnForTest({
+      timeoutMs: 150,
+      hangTurns: 1
+    });
+
+    // This attempt did not terminalize — the scheduled continuation owns the
+    // real outcome, so the server-side turn reports "aborted".
+    expect(status).toBe("aborted");
+
+    // The stall opened a bounded-recovery incident through the shared engine —
+    // a `continue` incident, exactly like a deploy interruption (rather than
+    // leaking a terminal error). The scheduled `_chatRecoveryContinue` row is
+    // consumed by the delay-0 alarm, so the durable incident (not the transient
+    // schedule row) is the stable evidence the stall was routed.
+    const incidents =
+      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
+        recoveryKind: string;
+        status: string;
+      }>;
+    expect(incidents.length).toBeGreaterThanOrEqual(1);
+    expect(incidents[0].recoveryKind).toBe("continue");
+
+    // The partial generated before the stall was persisted (not lost), so the
+    // continuation re-anchors onto it rather than re-running from scratch.
+    const messages = (await agentStub.getPersistedMessages()) as Array<{
+      role: string;
+      parts: Array<{ type: string; text?: string }>;
+    }>;
+    const assistant = messages.find((m) => m.role === "assistant");
+    expect(assistant, `messages=${JSON.stringify(messages)}`).toBeTruthy();
+    expect(
+      assistant?.parts.some(
+        (p) =>
+          p.type === "text" && (p.text ?? "").includes("partial before stall")
+      )
+    ).toBe(true);
+  });
+
+  it("does not arm the watchdog when the stall timeout is 0 (default, opt-in)", async () => {
+    const room = `stall-off-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    // Timeout 0 => watchdog disabled. A normal (non-hanging) turn completes as
+    // usual with no recovery incident and no continuation scheduled.
+    await agentStub.setChatStreamStallTimeoutForTest(0);
+    expect(await agentStub.driveSuccessfulTurnForTest()).toBe("completed");
+
+    expect(await agentStub.getChatRecoveryIncidentsForTest()).toHaveLength(0);
+    expect(
+      await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
+    ).toBe(0);
   });
 });

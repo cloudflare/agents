@@ -57,6 +57,8 @@ import {
   ChatRecoveryEngine,
   buildChatRecoveryExhaustedContext,
   notifyChatRecoveryExhausted,
+  ChatStreamStalledError,
+  iterateWithStallWatchdog,
   type ChatRecoveryAdapter,
   type ChatRecoveryScheduleCallback
 } from "agents/chat";
@@ -469,6 +471,25 @@ export class AIChatAgent<
    * for the recovery that matters. See {@link ChatRecoveryConfig}.
    */
   chatRecovery: ChatRecoveryConfig = false;
+
+  /**
+   * Inactivity watchdog for the live model/transport stream, in milliseconds.
+   * If more than this many ms elapse between stream chunks, the turn is aborted
+   * and — when {@link chatRecovery} is enabled — routed into bounded recovery
+   * (the same continuation machinery as a deploy/eviction interruption, #1626)
+   * rather than parking forever on a hung provider. With recovery disabled, a
+   * stall instead surfaces as a terminal stream error (kills the spinner).
+   *
+   * Default `0` disables the watchdog (opt-in), matching `@cloudflare/think`.
+   * A value such as `60_000` (60s) is a reasonable starting point; tune it
+   * above your slowest legitimate inter-chunk gap (slow reasoning models, long
+   * tool calls) to avoid aborting healthy turns. Because the watchdog measures
+   * the gap between chunks — not total turn duration — a steadily streaming
+   * turn never trips it regardless of overall length.
+   *
+   * Assign as a class field or in the constructor, like {@link chatRecovery}.
+   */
+  chatStreamStallTimeoutMs = 0;
 
   /** First queued overlap message index for merge strategy, keyed by epoch. */
   private _mergeQueuedUserStartIndexByEpoch = new Map<number, number>();
@@ -4425,6 +4446,88 @@ export class AIChatAgent<
   }
 
   /**
+   * Route a live stream stall (the {@link chatStreamStallTimeoutMs} watchdog
+   * fired) into the same bounded-recovery machinery a deploy/eviction
+   * interruption uses (#1626). Mirrors `@cloudflare/think`'s stall path: open or
+   * reuse the incident under the turn's recovery identity, deliver terminal UX
+   * if the budget is spent, otherwise schedule a `_chatRecoveryContinue`.
+   *
+   * Unlike Think there is no durable-submission layer to complete here, so the
+   * schedule payload carries no `recoveredRequestId`.
+   *
+   * Returns `"disabled"` when chat recovery is off (the caller then surfaces the
+   * stall as a terminal stream error — the watchdog's "kill the spinner"
+   * guarantee), `"exhausted"` when the budget was spent (terminal UX already
+   * delivered), or `"scheduled"` when a continuation was queued.
+   */
+  private async _routeStallToBoundedRecovery(input: {
+    requestId: string;
+    streamId: string;
+    partialParts: MessagePart[];
+    targetAssistantId?: string;
+  }): Promise<"scheduled" | "exhausted" | "disabled"> {
+    // Stall-recovery is automatic only when chat recovery is enabled. With
+    // recovery off there is no budget/continuation machinery to route into, so
+    // the stall stays terminal.
+    if (!this._resolveChatRecoveryConfig().enabled) return "disabled";
+    const recoveryRootRequestId =
+      this._activeChatRecoveryRootRequestId ?? input.requestId;
+    const latestUserMessageId =
+      [...this.messages].reverse().find((m) => m.role === "user")?.id ?? null;
+    const { incident, config, exhausted } =
+      await this._beginChatRecoveryIncident({
+        requestId: input.requestId,
+        recoveryRootRequestId,
+        latestUserMessageId,
+        recoveryKind: "continue"
+      });
+    if (exhausted) {
+      // Budget spent: deliver the SAME terminal UX as deploy-recovery
+      // exhaustion (terminalMessage + onExhausted + chat:recovery:exhausted)
+      // instead of letting the raw stall error leak out. `firstSeenAt` is the
+      // closest available turn-start proxy here.
+      const partialText = input.partialParts
+        .filter(
+          (p): p is { type: "text"; text: string } =>
+            (p as { type?: string }).type === "text"
+        )
+        .map((p) => p.text)
+        .join("");
+      await this._exhaustChatRecovery(
+        incident,
+        config,
+        { text: partialText, parts: input.partialParts },
+        input.streamId,
+        incident.firstSeenAt
+      );
+      return "exhausted";
+    }
+    await this._updateChatRecoveryIncident(incident.incidentId, "scheduled");
+    this._emit("chat:recovery:scheduled", {
+      incidentId: incident.incidentId,
+      requestId: input.requestId,
+      attempt: incident.attempt,
+      maxAttempts: incident.maxAttempts,
+      recoveryKind: "continue"
+    });
+    await this.schedule(
+      0,
+      "_chatRecoveryContinue",
+      {
+        ...(input.targetAssistantId
+          ? { targetAssistantId: input.targetAssistantId }
+          : {}),
+        originalRequestId: recoveryRootRequestId,
+        incidentId: incident.incidentId,
+        lastBody: this._lastBody ?? null,
+        lastClientTools: this._lastClientTools ?? null
+      },
+      chatRecoverySchedulePolicy("initial")
+    );
+    return "scheduled";
+  }
+
+  /**
    * Reschedule a recovery callback that timed out waiting for stable state,
    * consuming one attempt. Returns `true` if rescheduled, `false` if the
    * attempt budget is exhausted (caller should then fail terminally).
@@ -5575,11 +5678,55 @@ export class AIChatAgent<
       );
     }
 
+    // Route reads through the shared inactivity watchdog when a stall timeout is
+    // configured. The watchdog aborts a stream that parks between chunks (a hung
+    // provider/transport) by cancelling the reader and throwing
+    // `ChatStreamStalledError`, which the read-loop catch propagates so `_reply`
+    // can route the stall into bounded recovery (#1626). A `0` timeout (the
+    // default) keeps the raw `reader.read()` path untouched.
+    const stallTimeoutMs = this.chatStreamStallTimeoutMs;
+    let pull: () => Promise<ReadableStreamReadResult<Uint8Array>>;
+    if (stallTimeoutMs > 0) {
+      const byteSource: AsyncIterable<Uint8Array> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next(): Promise<IteratorResult<Uint8Array>> {
+              const { done, value } = await reader.read();
+              return done || value === undefined
+                ? { done: true, value: undefined }
+                : { done: false, value };
+            },
+            async return(): Promise<IteratorResult<Uint8Array>> {
+              await reader.cancel().catch(() => {});
+              return { done: true, value: undefined };
+            }
+          };
+        }
+      };
+      const guarded = iterateWithStallWatchdog(
+        byteSource,
+        stallTimeoutMs,
+        () => {
+          // Unblock the abandoned `reader.read()` so the pipeline unwinds; the
+          // thrown `ChatStreamStalledError` carries the recovery decision.
+          reader.cancel().catch(() => {});
+        }
+      )[Symbol.asyncIterator]();
+      pull = async () => {
+        const next = await guarded.next();
+        return next.done
+          ? { done: true, value: undefined }
+          : { done: false, value: next.value };
+      };
+    } else {
+      pull = () => reader.read();
+    }
+
     while (true) {
       if (abortSignal?.aborted) break;
       let readResult: ReadableStreamReadResult<Uint8Array>;
       try {
-        readResult = await reader.read();
+        readResult = await pull();
       } catch (readError) {
         if (abortSignal?.aborted) break;
         throw readError;
@@ -6191,6 +6338,11 @@ export class AIChatAgent<
         // _approvalPersistedMessageId is set inside _streamSSEReply when a
         // tool enters approval-requested state and the message is persisted early.
         let earlyPersistedId: string | null = null;
+        // Set when a stall watchdog abort was routed into bounded recovery
+        // (#1626): the orphan partial was already persisted and a continuation
+        // (or terminal exhaustion) now owns the turn, so the post-stream
+        // persistence + the success `message:response` emit below are skipped.
+        let stallRouted = false;
 
         try {
           if (isSSE) {
@@ -6216,23 +6368,78 @@ export class AIChatAgent<
             );
           }
         } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
-          streamResult = { status: "error", error: errorMessage };
-          // Mark stream as error if not already completed
-          if (!streamCompleted.value) {
-            this._markStreamError(streamId);
-            // Notify clients of the error
-            this._broadcastChatMessage({
-              body: errorMessage,
-              done: true,
-              error: true,
-              id,
-              type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-              ...(continuation && { continuation: true })
+          // A stall watchdog abort (#1626) is a recoverable interruption, not a
+          // terminal error. Persist the settled partial (so the continuation
+          // re-anchors without re-running completed tool calls, and the user
+          // keeps generated content), then route into bounded recovery; only
+          // fall through to the terminal path once the budget is exhausted or
+          // recovery is disabled.
+          if (
+            error instanceof ChatStreamStalledError &&
+            !streamCompleted.value
+          ) {
+            // The partial generated so far lives on the in-memory `message`; the
+            // unconditional post-stream persistence block below writes it under
+            // `message.id` (the same path a normal turn uses), so the scheduled
+            // continuation re-anchors onto it via `targetAssistantId`. (Unlike a
+            // cold deploy recovery, there is no need to reconstruct from stored
+            // chunks here — the live `message` is authoritative.)
+            const targetAssistantId =
+              message.parts.length > 0 ? message.id : undefined;
+            const outcome = await this._routeStallToBoundedRecovery({
+              requestId: id,
+              streamId,
+              partialParts: message.parts,
+              targetAssistantId
             });
-            this._emit("message:error", { error: errorMessage });
-            streamCompleted.value = true;
+            if (outcome === "scheduled") {
+              // Recovering: close the stream cleanly (no terminal error frame);
+              // the scheduled continuation drives the turn to completion. Report
+              // `aborted` so this attempt does not terminalize the turn.
+              this._completeStream(streamId);
+              this._broadcastChatMessage({
+                body: "",
+                done: true,
+                id,
+                type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                ...(continuation && { continuation: true })
+              });
+              streamResult = { status: "aborted" };
+              streamCompleted.value = true;
+              stallRouted = true;
+            } else if (outcome === "exhausted") {
+              // `_routeStallToBoundedRecovery` already delivered terminal UX
+              // (terminalMessage + done/error frame + onExhausted), identical to
+              // deploy-recovery exhaustion. Finalize the resumable stream and
+              // report `aborted` so the generic terminal path is not re-run.
+              this._markStreamError(streamId);
+              streamResult = { status: "aborted" };
+              streamCompleted.value = true;
+              stallRouted = true;
+            }
+            // outcome === "disabled" (chat recovery off): fall through to the
+            // generic terminal path — the watchdog's "kill the spinner"
+            // guarantee.
+          }
+          if (!stallRouted) {
+            const errorMessage =
+              error instanceof Error ? error.message : String(error);
+            streamResult = { status: "error", error: errorMessage };
+            // Mark stream as error if not already completed
+            if (!streamCompleted.value) {
+              this._markStreamError(streamId);
+              // Notify clients of the error
+              this._broadcastChatMessage({
+                body: errorMessage,
+                done: true,
+                error: true,
+                id,
+                type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                ...(continuation && { continuation: true })
+              });
+              this._emit("message:error", { error: errorMessage });
+              streamCompleted.value = true;
+            }
           }
         } finally {
           reader.releaseLock();
@@ -6248,7 +6455,11 @@ export class AIChatAgent<
           // Only emit observability on success (not on error path).
           if (chatMessageId) {
             this._abortRegistry.remove(chatMessageId);
-            if (streamCompleted.value && streamResult.status !== "error") {
+            if (
+              streamCompleted.value &&
+              streamResult.status !== "error" &&
+              !stallRouted
+            ) {
               this._emit("message:response");
             }
           }
