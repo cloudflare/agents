@@ -1347,6 +1347,50 @@ Reviewer checklist:
 
 ## Implementation plan
 
+### Working cadence (applies to every phase)
+
+This refactor is high-risk and long-running, so every step follows the same
+loop. Do not skip steps; the review-before-advance discipline is the main
+guard against shipping a subtly broken recovery path.
+
+1. **Do the step.** Make the smallest coherent change that advances the current
+   phase.
+2. **Update the plan.** Immediately reflect what changed in this document —
+   tick the relevant phase checklist, record new findings, and note any scope
+   or interface change. The plan is kept live; it always describes reality, not
+   the original intent. The "Progress log" below is the running record.
+3. **Deep-review the change.** Before moving on, audit the change for edge cases
+   and things we might have missed: cutover/round-trip safety, hibernation and
+   wake ordering, budget/idempotency invariants, terminal-before-seal, settled
+   tool results, observability payload compatibility, and behavior parity
+   between `AIChatAgent` and `Think`. Write the findings down (in the commit
+   message and, when they change the design, in this document) so the next step
+   starts from a known-good base. If the review surfaces a problem that could
+   force an interface redesign (see "Open questions"), pause and revisit the
+   seam rather than pushing forward.
+4. **Commit.** Commit the work with a detailed message that states what changed,
+   why, what was reviewed, and what is deliberately deferred. One commit per
+   coherent step keeps the history bisectable across a risky refactor.
+
+### Progress log
+
+Running record of completed steps (newest first). Each entry links the phase,
+the change, and the key review findings.
+
+- _Phase 0 (in progress)_ — Extracted the byte-identical incident-budget state
+  machine into a pure, storage-free module
+  (`packages/agents/src/chat/recovery-incident.ts`:
+  `evaluateChatRecoveryIncident`, `resolveChatRecoveryConfig`,
+  `chatRecoveryIncidentId`, `selectStaleIncidentKeys`, plus the
+  `ChatRecoveryIncident` type and persisted storage-key/budget constants).
+  Added Layer-1 unit tests (`__tests__/recovery-incident.test.ts`) and the
+  golden cutover round-trip gate (`__tests__/recovery-cutover-fixtures.ts` +
+  `recovery-cutover.test.ts`). Both packages still run their inline copies (zero
+  behavior change). Review finding: a pre-cutover incident persisted without
+  `lastProgressAt` is bounded by `firstSeenAt`, so a long-orphaned turn can seal
+  on `no_progress_timeout` immediately on the cutover wake — existing behavior,
+  now explicit and tested.
+
 ### Phase 0: characterization tests
 
 Before moving code, add or tighten tests around existing behavior. The goal is
@@ -1354,14 +1398,18 @@ to make current semantics executable.
 
 Work:
 
-- Add shared incident state-machine tests with fake adapters.
-- Add package adapter contract tests.
-- Add missing `AIChatAgent` tests for recovery callback errors if Think already
-  has stronger coverage.
-- Add `AIChatAgent` tests for reconnect recovering replay if the RFC chooses to
-  converge on Think's better UX.
-- Add tests proving schedule idempotency/non-idempotency invariants.
-- Add tests proving terminal-before-seal behavior.
+- [x] Add shared incident state-machine tests with fake adapters.
+      (`packages/agents/src/chat/__tests__/recovery-incident.test.ts`, backed by
+      the extracted pure `evaluateChatRecoveryIncident`.)
+- [x] Add golden cutover fixtures and a round-trip gate.
+      (`__tests__/recovery-cutover-fixtures.ts` + `recovery-cutover.test.ts`.)
+- [ ] Add package adapter contract tests.
+- [ ] Add missing `AIChatAgent` tests for recovery callback errors if Think
+      already has stronger coverage.
+- [ ] Add `AIChatAgent` tests for reconnect recovering replay if the RFC chooses
+      to converge on Think's better UX.
+- [ ] Add tests proving schedule idempotency/non-idempotency invariants.
+- [ ] Add tests proving terminal-before-seal behavior.
 
 Exit criteria:
 
