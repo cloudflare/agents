@@ -1378,6 +1378,39 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Slice 4c (Phase 4 — centralize the stable-timeout reschedule; re-scoped)_ —
+  `_rescheduleRecoveryAfterStableTimeout` was byte-identical between the packages
+  (100% dup): read the incident → if under the attempt cap, bump `attempt`, persist
+  `status:"scheduled"` + `reason:"stable_timeout_retry"`, and issue a NON-idempotent
+  DELAYED schedule (it runs inside the executing one-shot row that `alarm()` deletes
+  on return, so an idempotent reschedule would dedup onto the doomed row and never
+  fire). Lifted into `ChatRecoveryEngine.rescheduleAfterStableTimeout({ incidentId,
+callback, data, fallbackMaxAttempts })`; each package method is now a one-line
+  delegation. Generalized the `ChatRecoveryAdapter.scheduleRecovery` hook (from 4b)
+  to carry `delaySeconds` — the initial triplet passes `0`, the reschedule passes
+  `CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS` — so a single schedule seam serves both.
+  **Bonus dedup:** both packages also kept a private `CHAT_RECOVERY_STABLE_RETRY_
+DELAY_SECONDS = 3` that shadowed the canonical agents/chat constant; removed both,
+  the engine uses the shared one (byte-identical value). **Byte-equivalence review:**
+  `adapter.getIncident(key)` returns `ctx.storage.get(key) ?? null` (same `!incident`
+  short-circuit, incl. the missing-id case → no key → false); the attempt cap uses
+  `fallbackMaxAttempts === maxAttempts`; the put payload is field-for-field identical;
+  `adapter.now() === Date.now()`; and the hook issues the same delay (3s) +
+  non-idempotent policy. The reschedule deliberately bypasses
+  `evaluateChatRecoveryIncident` (coarse same-turn retry, not a fresh interruption)
+  and `updateIncident` (no `scheduled` event / recovering-flag churn) — unchanged
+  from the originals. **Re-scope:** the give-up seal (`_exhaustRecoveryGiveUp` /
+  `_exhaustRecoveryAfterStableTimeout`, ~80% dup) was deferred from 4c to 4d — its
+  shared spine interleaves package-specific terminalization + stream/partial reads
+  behind #1730/#1645 exactly-once invariants, needing ~5 adapter hooks that are
+  exactly 4d's terminalize + stream surface; building them once (in 4d) avoids
+  inconsistent seams. Added 5 engine unit tests (attempt bump + delayed
+  non-idempotent enqueue, missing id, no record, budget spent, maxAttempts
+  fallback). Tests: engine unit 34 ✅ (+5); typecheck 111 ✅; `check` ✅; Think workers
+  686 ✅ and ai-chat workers 686 ✅ (clean, no flake); ai-chat real-`wrangler dev`
+  SIGKILL e2e 10/10 ✅; Think remote-Workers-AI recovery e2e (`chat-recovery` +
+  `stall-recovery`) 6/6 ✅. No changeset (internal `@internal` seam, zero behavior).
+
 - _Slice 4b (Phase 4 — centralize the schedule-a-recovery triplet, behavior-preserving)_ —
   The `updateIncident("scheduled")` + `_emit("chat:recovery:scheduled")` +
   `schedule(0, callback, data, chatRecoverySchedulePolicy("initial"))` block
@@ -1407,11 +1440,14 @@ identity.requestId` on each attempt (`recovery-incident.ts`), so reading it off
   686 ✅ and ai-chat workers 686 ✅ (the one transient Think failure was the known
   SQLite-alarm-timing pool race — clean on rerun, and the scheduling-heavy
   `fiber`+`submissions` suites passed twice, 53 each); ai-chat real-`wrangler dev`
-  SIGKILL recovery e2e 10/10 ✅ (same engine path, offline-safe). No changeset
-  (internal `@internal` seam, zero behavior). The Think real-edge e2e stays gated on
-  Phase 6: its Workers AI binding is remote and `wrangler` again returned "Failed to
-  establish remote session due to an authentication issue. Your credentials may have
-  expired or been revoked." — re-auth (`wrangler login`) needed at the merge gate.
+  SIGKILL recovery e2e 10/10 ✅ (same engine path, offline-safe). **Both real-edge
+  paths validated:** after re-auth, the Think remote-Workers-AI recovery e2e
+  (`chat-recovery` + `stall-recovery`) ran green 6/6 ✅ (157s) — the routed
+  `engine.scheduleRecovery` continuation/retry path exercised end-to-end against
+  real Workers AI with simulated eviction/recovery. (An earlier attempt on stale
+  credentials failed at "establish remote session due to an authentication issue";
+  `wrangler login` cleared it.) No changeset (internal `@internal` seam, zero
+  behavior).
 
 - _Slice 4a (Phase 4 start — shared types + key/sweep helpers, zero behavior)_ —
   The mechanical band of the dedup map: both packages re-declared the
@@ -2101,26 +2137,43 @@ each slice ships with its own review + e2e gate before the next begins:
   `continue` incident). Behavior-preserving; collapses the most-copied block first so
   the later body-collapse is smaller. See the Slice 4b progress-log entry.
 
-- **Slice 4c — move stable-timeout incident mutations behind the engine.**
-  `_rescheduleRecoveryAfterStableTimeout` (~98% dup) and the give-up seal
-  (`_exhaustRecoveryGiveUp` / `_exhaustRecoveryAfterStableTimeout`, ~90% dup)
-  currently bypass `updateIncident`/`evaluateChatRecoveryIncident` with direct
-  `storage.put`s carrying `reason:"stable_timeout_retry"` and a non-idempotent
-  schedule. Lift the shared mutation into the engine while keeping each package's
-  `_exhaustChatRecovery` terminal-UX ordering (Think broadcast-first vs AIChat
-  persist-first) package-owned.
+- **Slice 4c — move the stable-timeout RESCHEDULE behind the engine. ✅ DONE
+  (re-scoped).** `_rescheduleRecoveryAfterStableTimeout` is byte-identical between
+  the packages (100% dup): read incident → if under the attempt cap, bump
+  `attempt`, set `status:"scheduled"` + `reason:"stable_timeout_retry"`, and issue a
+  non-idempotent delayed schedule. Lifted into `engine.rescheduleAfterStableTimeout`,
+  with the `ChatRecoveryAdapter.scheduleRecovery` hook generalized to carry a
+  `delaySeconds` (the 4b triplet now passes `0`; the reschedule passes
+  `CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS`). **Re-scope note:** the original 4c
+  also bundled the give-up seal (`_exhaustRecoveryGiveUp` /
+  `_exhaustRecoveryAfterStableTimeout`, ~80% dup). That spine interleaves
+  package-specific terminalization (`_exhaustChatRecovery`), stream-id resolution,
+  and partial-text reads behind subtle exactly-once/ordering invariants
+  (#1730/#1645). Lifting it needs ~5 new adapter hooks that are _exactly_ the
+  terminalize + stream surface Slice 4d already builds for the body-collapse —
+  building them twice risks inconsistent seams — so the give-up spine moves to 4d
+  (below), where those hooks live. Same judgment as the Phase 3 re-scope: defer an
+  entangled item to where its seam naturally belongs.
 
-- **Slice 4d — grow the engine fiber-recovery dispatch skeleton (the big one).**
-  The two `_handleInternalFiberRecovery` bodies (`think.ts:9811–10097` ~287 lines;
-  `index.ts:4056–4332` ~277 lines) are ~70% structurally identical (fiber gate,
-  requestId parse, begin-incident, exhausted→exhaust, onChatRecovery, settled-tool
-  persist invariant #1631, retry/continue/skip decision, catch→failed). Collapse
-  the shared spine into the engine, leaving package hooks ONLY for the genuinely
-  package-specific pieces the map flagged: snapshot key + turn kind, streamStatus
-  read (Think) vs not (AIChat), recovery-kind detection, stream-completion API,
-  Think submission lifecycle + terminal record ordering + session-leaf vs
-  flat-messages leaf check, AIChat's lost-partial third retry branch, and Think's
-  `_handleRecoveryCallbackError`. Highest risk (the wake path) — its own e2e gate.
+- **Slice 4d — grow the engine fiber-recovery dispatch skeleton + lift the give-up
+  spine (the big one).** The two `_handleInternalFiberRecovery` bodies
+  (`think.ts:9811–10097` ~287 lines; `index.ts:4056–4332` ~277 lines) are ~70%
+  structurally identical (fiber gate, requestId parse, begin-incident,
+  exhausted→exhaust, onChatRecovery, settled-tool persist invariant #1631,
+  retry/continue/skip decision, catch→failed). Collapse the shared spine into the
+  engine, leaving package hooks ONLY for the genuinely package-specific pieces the
+  map flagged: snapshot key + turn kind, streamStatus read (Think) vs not (AIChat),
+  recovery-kind detection, stream-completion API, Think submission lifecycle +
+  terminal record ordering + session-leaf vs flat-messages leaf check, AIChat's
+  lost-partial third retry branch, and Think's `_handleRecoveryCallbackError`. **Also
+  lifts the give-up spine deferred from 4c** (`_exhaustRecoveryGiveUp` /
+  `_exhaustRecoveryAfterStableTimeout`): the read→re-entry-guard→build-exhausted-
+  incident→terminalize→seal sequence is shared; its terminalize + `resolveStreamId`
+  - `getPartialStreamText` hooks are the same package surface this slice already
+    introduces (Think keeps the `recoveredRequestId` root-id chain + the `reason` param
+    for its error give-up; AIChat hardcodes `stable_timeout` and never sets
+    `recoveredRequestId`, so a unified chain collapses identically there). Highest risk
+    (the wake + terminal-UX paths) — its own e2e gate.
 
 Each slice: deep review for edge cases, run the local + (where auth permits) real
 e2e suites, commit with a detailed message. Slice 4d does not start until 4a–4c

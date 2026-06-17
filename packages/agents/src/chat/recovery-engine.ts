@@ -15,6 +15,7 @@ import type {
   ResolvedChatRecoveryConfig
 } from "./lifecycle";
 import {
+  CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
   chatRecoveryIncidentId,
   chatRecoveryIncidentKey,
   evaluateChatRecoveryIncident
@@ -135,16 +136,21 @@ export interface ChatRecoveryAdapter {
   /** Broadcast a lifecycle event produced by the evaluation or a transition. */
   emitRecoveryEvent(event: ChatRecoveryIncidentEvent): void;
   /**
-   * Enqueue the recovery continuation/retry callback. A thin pass-through to the
-   * package's `schedule(0, callback, data, chatRecoverySchedulePolicy(reason))`
-   * — the engine owns the surrounding incident transition + event emit (see
-   * {@link ChatRecoveryEngine.scheduleRecovery}); the package owns the actual
-   * Durable Object alarm write and the per-callback payload shape.
+   * Enqueue a recovery callback. A thin pass-through to the package's
+   * `schedule(delaySeconds, callback, data, chatRecoverySchedulePolicy(reason))`
+   * — the engine owns the surrounding orchestration (the transition + emit for
+   * the initial schedule in {@link ChatRecoveryEngine.scheduleRecovery}, the
+   * attempt bump for {@link ChatRecoveryEngine.rescheduleAfterStableTimeout});
+   * the package owns the Durable Object alarm write and the payload shape.
+   * `reason` selects the idempotency policy and `delaySeconds` the alarm delay
+   * (`0` for the initial enqueue, `CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS` for
+   * a stable-timeout reschedule).
    */
   scheduleRecovery(
     callback: ChatRecoveryScheduleCallback,
     data: Record<string, unknown>,
-    reason: ChatRecoveryScheduleReason
+    reason: ChatRecoveryScheduleReason,
+    delaySeconds: number
   ): Promise<void>;
   /**
    * Set or clear the live "recovering…" status (#1620). The engine calls this on
@@ -256,8 +262,56 @@ export class ChatRecoveryEngine {
     await this.adapter.scheduleRecovery(
       input.callback,
       input.data,
-      input.reason ?? "initial"
+      input.reason ?? "initial",
+      0
     );
+  }
+
+  /**
+   * Reschedule a recovery continuation/retry that timed out waiting for stable
+   * state, INSIDE the currently-executing one-shot schedule row. Reads the
+   * incident; if it is still under the attempt cap, bumps `attempt`, marks it
+   * `scheduled` with `reason:"stable_timeout_retry"`, and issues a delayed,
+   * NON-idempotent schedule (`alarm()` deletes the executing row only after this
+   * returns, so an idempotent reschedule would dedup onto that doomed row and
+   * never fire — see {@link chatRecoverySchedulePolicy}).
+   *
+   * Returns `true` when a retry was scheduled, `false` when there is no incident
+   * (no id / record gone) or the attempt budget is already spent — in which case
+   * the caller falls through to the give-up path. Deliberately bypasses the
+   * `evaluateChatRecoveryIncident` budget (this is a coarse stable-state retry,
+   * not a fresh interruption) and {@link updateIncident} (no `scheduled` event /
+   * recovering-flag churn on a same-turn reschedule).
+   */
+  async rescheduleAfterStableTimeout(input: {
+    incidentId: string | undefined;
+    callback: ChatRecoveryScheduleCallback;
+    data: Record<string, unknown> | undefined;
+    fallbackMaxAttempts: number;
+  }): Promise<boolean> {
+    const { adapter } = this;
+    if (!input.incidentId) return false;
+    const key = chatRecoveryIncidentKey(input.incidentId);
+    const incident = await adapter.getIncident(key);
+    if (!incident) return false;
+    const attempt = incident.attempt ?? 0;
+    if (attempt >= (incident.maxAttempts ?? input.fallbackMaxAttempts)) {
+      return false;
+    }
+    await adapter.putIncident(key, {
+      ...incident,
+      attempt: attempt + 1,
+      status: "scheduled",
+      lastAttemptAt: adapter.now(),
+      reason: "stable_timeout_retry"
+    });
+    await adapter.scheduleRecovery(
+      input.callback,
+      input.data ?? {},
+      "stable_timeout_retry",
+      CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
+    );
+    return true;
   }
 
   /**

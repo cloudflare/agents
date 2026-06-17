@@ -135,9 +135,8 @@ const CHAT_RECOVERY_PROGRESS_KEY = "cf:chat-recovery:progress";
 // this timeout so a genuinely orphaned tool call (e.g. the client disconnected
 // mid-batch) still falls through instead of pinning the continuation open.
 const AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS = 60_000;
-// Delay before retrying a recovery that timed out waiting for stable state.
-// Gives an actively-churning isolate (e.g. a deploy in flight) time to settle.
-const CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS = 3;
+// (Stable-state retry delay `CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS` now lives
+// in agents/chat; the reschedule that consumes it is owned by the shared engine.)
 // Durable record of an in-progress recovery so a "recovering…" status (#1620)
 // can be broadcast live and survives the set/clear happening in different
 // isolates (a continuation runs in a later alarm invocation). The status is
@@ -3749,9 +3748,9 @@ export class AIChatAgent<
           recoveryKind: event.recoveryKind,
           ...(event.reason ? { reason: event.reason } : {})
         }),
-      scheduleRecovery: async (callback, data, reason) => {
+      scheduleRecovery: async (callback, data, reason, delaySeconds) => {
         await this.schedule(
-          0,
+          delaySeconds,
           callback,
           data,
           chatRecoverySchedulePolicy(reason)
@@ -4462,33 +4461,16 @@ export class AIChatAgent<
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
     maxAttempts: number
   ): Promise<boolean> {
-    const incidentKey = data?.incidentId
-      ? chatRecoveryIncidentKey(data.incidentId)
-      : null;
-    const incident = incidentKey
-      ? await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)
-      : null;
-    if (!incident || !incidentKey) return false;
-    const attempt = incident.attempt ?? 0;
-    if (attempt >= (incident.maxAttempts ?? maxAttempts)) return false;
-    await this.ctx.storage.put(incidentKey, {
-      ...incident,
-      attempt: attempt + 1,
-      status: "scheduled",
-      lastAttemptAt: Date.now(),
-      reason: "stable_timeout_retry"
-    });
-    // Non-idempotent (`"stable_timeout_retry"`): this runs inside the
-    // currently-executing one-shot schedule row, which `alarm()` deletes only
-    // after we return — an idempotent reschedule would dedup onto that doomed
-    // row and never fire. See `chatRecoverySchedulePolicy`.
-    await this.schedule(
-      CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+    // The attempt-bump + scheduled/stable_timeout_retry persist + delayed
+    // non-idempotent reschedule live in the shared ChatRecoveryEngine; this
+    // method is the package's adapter binding, symmetric with `Think`. See
+    // design/rfc-chat-recovery-foundation.md.
+    return this._chatRecoveryEngine().rescheduleAfterStableTimeout({
+      incidentId: data?.incidentId,
       callback,
-      data ?? {},
-      chatRecoverySchedulePolicy("stable_timeout_retry")
-    );
-    return true;
+      data,
+      fallbackMaxAttempts: maxAttempts
+    });
   }
 
   /**

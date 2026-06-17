@@ -658,11 +658,10 @@ const CHAT_RECOVERY_PROGRESS_KEY = "cf:chat-recovery:progress";
 // human-in-the-loop tool with no `execute`, an unbounded RPC) never fires
 // through to a spurious error, and a true orphan (a sibling that never arrives)
 // simply never auto-continues — the isolate is not pinned waiting for it.
-// Delay before retrying a continuation that timed out waiting for stable state.
-// Gives an actively-churning isolate (e.g. a deploy in flight) time to settle.
-const CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS = 3;
-// (Incident sweep TTL now lives in the shared `selectStaleIncidentKeys` /
-// `CHAT_RECOVERY_INCIDENT_TTL_MS` from agents/chat.)
+// (Stable-state retry delay `CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS` and the
+// incident sweep TTL `CHAT_RECOVERY_INCIDENT_TTL_MS` now live in agents/chat;
+// the reschedule + sweep that consume them are owned by the shared engine /
+// `selectStaleIncidentKeys`.)
 // Max keys per Durable Object KV `delete([...])` call.
 // See https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
 const KV_DELETE_MAX_KEYS = 128;
@@ -9563,9 +9562,9 @@ export class Think<
           recoveryKind: event.recoveryKind,
           ...(event.reason ? { reason: event.reason } : {})
         }),
-      scheduleRecovery: async (callback, data, reason) => {
+      scheduleRecovery: async (callback, data, reason, delaySeconds) => {
         await this.schedule(
-          0,
+          delaySeconds,
           callback,
           data,
           chatRecoverySchedulePolicy(reason)
@@ -10102,33 +10101,16 @@ export class Think<
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
     maxAttempts: number
   ): Promise<boolean> {
-    const incidentKey = data?.incidentId
-      ? chatRecoveryIncidentKey(data.incidentId)
-      : null;
-    const incident = incidentKey
-      ? await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)
-      : null;
-    if (!incident || !incidentKey) return false;
-    const attempt = incident.attempt ?? 0;
-    if (attempt >= (incident.maxAttempts ?? maxAttempts)) return false;
-    await this.ctx.storage.put(incidentKey, {
-      ...incident,
-      attempt: attempt + 1,
-      status: "scheduled",
-      lastAttemptAt: Date.now(),
-      reason: "stable_timeout_retry"
-    });
-    // Non-idempotent (`"stable_timeout_retry"`): this runs INSIDE the
-    // currently-executing one-shot schedule row, which `alarm()` deletes only
-    // after we return — an idempotent reschedule would dedup onto that doomed
-    // row and never fire, stalling the turn. See `chatRecoverySchedulePolicy`.
-    await this.schedule(
-      CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
+    // The attempt-bump + scheduled/stable_timeout_retry persist + delayed
+    // non-idempotent reschedule live in the shared ChatRecoveryEngine; this
+    // method is the package's adapter binding, symmetric with `AIChatAgent`.
+    // See design/rfc-chat-recovery-foundation.md.
+    return this._chatRecoveryEngine().rescheduleAfterStableTimeout({
+      incidentId: data?.incidentId,
       callback,
-      data ?? {},
-      chatRecoverySchedulePolicy("stable_timeout_retry")
-    );
-    return true;
+      data,
+      fallbackMaxAttempts: maxAttempts
+    });
   }
 
   /**

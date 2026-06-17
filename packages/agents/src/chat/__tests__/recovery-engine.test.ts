@@ -11,6 +11,7 @@ import {
 import type { ChatRecoveryExhaustedContext } from "../lifecycle";
 import type { FiberRecoveryContext } from "../../index";
 import {
+  CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
   chatRecoveryIncidentId,
   chatRecoveryIncidentKey,
   resolveChatRecoveryConfig,
@@ -433,6 +434,7 @@ describe("ChatRecoveryEngine.scheduleRecovery (fake adapter)", () => {
     callback: ChatRecoveryScheduleCallback;
     data: Record<string, unknown>;
     reason: ChatRecoveryScheduleReason;
+    delaySeconds: number;
   };
 
   function makeFakeAdapter() {
@@ -462,9 +464,9 @@ describe("ChatRecoveryEngine.scheduleRecovery (fake adapter)", () => {
         order.push(`emit:${event.type}`);
         events.push(event);
       },
-      scheduleRecovery: (callback, data, reason) => {
+      scheduleRecovery: (callback, data, reason, delaySeconds) => {
         order.push("schedule");
-        schedules.push({ callback, data, reason });
+        schedules.push({ callback, data, reason, delaySeconds });
         return Promise.resolve();
       },
       setRecovering: (active, requestId) => {
@@ -566,13 +568,15 @@ describe("ChatRecoveryEngine.scheduleRecovery (fake adapter)", () => {
     });
 
     expect(fake.schedules).toHaveLength(1);
+    // The initial triplet always enqueues with delay 0.
     expect(fake.schedules[0]).toMatchObject({
       callback: "_chatRecoveryContinue",
-      reason: "initial"
+      reason: "initial",
+      delaySeconds: 0
     });
   });
 
-  it("forwards an explicit reason and the per-callback payload verbatim", async () => {
+  it("forwards an explicit reason and the per-callback payload verbatim (delay 0)", async () => {
     const fake = makeFakeAdapter();
     const engine = new ChatRecoveryEngine(fake.adapter);
     const incident = seedIncident(fake.storage);
@@ -589,8 +593,192 @@ describe("ChatRecoveryEngine.scheduleRecovery (fake adapter)", () => {
     expect(fake.schedules[0]).toEqual({
       callback: "_chatRecoveryRetry",
       data,
-      reason: "stable_timeout_retry"
+      reason: "stable_timeout_retry",
+      delaySeconds: 0
     });
+  });
+});
+
+/**
+ * Layer-2 seam test for `ChatRecoveryEngine.rescheduleAfterStableTimeout` (slice
+ * 4c) — the byte-identical stable-state-timeout reschedule both packages ran via
+ * a direct `storage.put` + non-idempotent delayed `schedule`. Pins: the attempt
+ * bump + `scheduled`/`stable_timeout_retry` persist, the delayed
+ * `stable_timeout_retry` (non-idempotent) enqueue, and the two short-circuits
+ * (no incident, budget spent) that route the caller to the give-up path. Unlike
+ * the `scheduled` transition this does NOT emit or touch the recovering flag.
+ */
+describe("ChatRecoveryEngine.rescheduleAfterStableTimeout (fake adapter)", () => {
+  type ScheduleCall = {
+    callback: ChatRecoveryScheduleCallback;
+    data: Record<string, unknown>;
+    reason: ChatRecoveryScheduleReason;
+    delaySeconds: number;
+  };
+
+  function makeFakeAdapter() {
+    const storage = new Map<string, ChatRecoveryIncident>();
+    const events: ChatRecoveryIncidentEvent[] = [];
+    const recovering: Array<{ active: boolean; requestId?: string }> = [];
+    const schedules: ScheduleCall[] = [];
+
+    const adapter: ChatRecoveryAdapter = {
+      resolveConfig: () => resolveChatRecoveryConfig(undefined),
+      now: () => 9_999,
+      sweepStaleIncidents: () => Promise.resolve(),
+      getIncident: (key) => Promise.resolve(storage.get(key) ?? null),
+      readProgress: () => Promise.resolve(0),
+      isAwaitingClientInteraction: () => false,
+      putIncident: (key, incident) => {
+        storage.set(key, incident);
+        return Promise.resolve();
+      },
+      deleteIncident: (key) => {
+        storage.delete(key);
+        return Promise.resolve();
+      },
+      emitRecoveryEvent: (event) => {
+        events.push(event);
+      },
+      scheduleRecovery: (callback, data, reason, delaySeconds) => {
+        schedules.push({ callback, data, reason, delaySeconds });
+        return Promise.resolve();
+      },
+      setRecovering: (active, requestId) => {
+        recovering.push({ active, requestId });
+        return Promise.resolve();
+      },
+      onShouldKeepRecoveringError: () => {}
+    };
+
+    return { adapter, storage, events, recovering, schedules };
+  }
+
+  function seed(
+    storage: Map<string, ChatRecoveryIncident>,
+    overrides: Partial<ChatRecoveryIncident> = {}
+  ): ChatRecoveryIncident {
+    const incident: ChatRecoveryIncident = {
+      incidentId: "root-1:user-1",
+      requestId: "req-1",
+      recoveryRootRequestId: "root-1",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "attempting",
+      firstSeenAt: 1_000,
+      lastAttemptAt: 1_000,
+      ...overrides
+    };
+    storage.set(chatRecoveryIncidentKey(incident.incidentId), incident);
+    return incident;
+  }
+
+  it("bumps the attempt, persists scheduled/stable_timeout_retry, and enqueues a delayed non-idempotent retry", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    const incident = seed(fake.storage, { attempt: 2 });
+
+    const rescheduled = await engine.rescheduleAfterStableTimeout({
+      incidentId: incident.incidentId,
+      callback: "_chatRecoveryContinue",
+      data: { incidentId: incident.incidentId, originalRequestId: "root-1" },
+      fallbackMaxAttempts: 6
+    });
+
+    expect(rescheduled).toBe(true);
+    const stored = fake.storage.get(
+      chatRecoveryIncidentKey(incident.incidentId)
+    );
+    expect(stored).toMatchObject({
+      attempt: 3,
+      status: "scheduled",
+      reason: "stable_timeout_retry",
+      lastAttemptAt: 9_999
+    });
+    // No scheduled event / recovering churn on a same-turn reschedule.
+    expect(fake.events).toHaveLength(0);
+    expect(fake.recovering).toHaveLength(0);
+    // Delayed + non-idempotent (survives the executing one-shot row deletion).
+    expect(fake.schedules).toHaveLength(1);
+    expect(fake.schedules[0]).toMatchObject({
+      callback: "_chatRecoveryContinue",
+      reason: "stable_timeout_retry",
+      delaySeconds: CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
+    });
+    expect(
+      chatRecoverySchedulePolicy(fake.schedules[0].reason).idempotent
+    ).toBe(false);
+  });
+
+  it("returns false (caller gives up) when the incident id is missing", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+
+    const rescheduled = await engine.rescheduleAfterStableTimeout({
+      incidentId: undefined,
+      callback: "_chatRecoveryContinue",
+      data: {},
+      fallbackMaxAttempts: 6
+    });
+
+    expect(rescheduled).toBe(false);
+    expect(fake.schedules).toHaveLength(0);
+  });
+
+  it("returns false when no incident record exists", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+
+    const rescheduled = await engine.rescheduleAfterStableTimeout({
+      incidentId: "gone:incident",
+      callback: "_chatRecoveryRetry",
+      data: {},
+      fallbackMaxAttempts: 6
+    });
+
+    expect(rescheduled).toBe(false);
+    expect(fake.schedules).toHaveLength(0);
+  });
+
+  it("returns false without scheduling when the attempt budget is spent", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    const incident = seed(fake.storage, { attempt: 6, maxAttempts: 6 });
+
+    const rescheduled = await engine.rescheduleAfterStableTimeout({
+      incidentId: incident.incidentId,
+      callback: "_chatRecoveryContinue",
+      data: {},
+      fallbackMaxAttempts: 6
+    });
+
+    expect(rescheduled).toBe(false);
+    expect(fake.schedules).toHaveLength(0);
+    // Incident left untouched (no attempt bump on a budget-spent give-up).
+    expect(
+      fake.storage.get(chatRecoveryIncidentKey(incident.incidentId))?.attempt
+    ).toBe(6);
+  });
+
+  it("falls back to fallbackMaxAttempts when the incident omits maxAttempts", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    // maxAttempts cast away to model a legacy record without the field.
+    const incident = seed(fake.storage, { attempt: 3 });
+    delete (incident as { maxAttempts?: number }).maxAttempts;
+    fake.storage.set(chatRecoveryIncidentKey(incident.incidentId), incident);
+
+    const rescheduled = await engine.rescheduleAfterStableTimeout({
+      incidentId: incident.incidentId,
+      callback: "_chatRecoveryContinue",
+      data: {},
+      fallbackMaxAttempts: 3
+    });
+
+    // attempt (3) >= fallback (3) → give up.
+    expect(rescheduled).toBe(false);
+    expect(fake.schedules).toHaveLength(0);
   });
 });
 
