@@ -1377,6 +1377,21 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 0 breadth (audit, no new tests)_ — Audited the existing `ai-chat` and
+  `think` suites against the Phase 0 breadth items (schedule idempotency,
+  terminal-before-seal, callback-error coverage, recovering replay) instead of
+  reflexively adding tests. Finding: the high-risk invariants are already
+  characterized symmetrically in both packages, so adding more would duplicate
+  (the cadence warns against over-testing). Recorded the invariant→test map as
+  the verified Phase 2 safety net (see "Phase 0 breadth audit") and resolved the
+  checklist: idempotency + terminal-before-seal + callback-errors =
+  already-covered (cited); adapter-contract + direct `{ idempotent }` flag
+  assertion = deferred to the Phase 2 engine/adapter seam; ai-chat
+  recovering-on-connect hydration = confirmed asymmetry vs Think, deferred to
+  Phase 2 as an intentional convergence (changeset). Decision rationale (why
+  this over Phase 2): converging behavior before the safety net is verified
+  contradicts the cadence; the audit makes the net explicit so Phase 2 lands
+  against a known-good base. Docs-only; no code/test changes.
 - _Phase 1 (incident-math wiring complete)_ — Wired `Think` to the shared
   engine the same way as `AIChatAgent`: `_resolveChatRecoveryConfig`,
   `_chatRecoveryIncidentId`, and the `_beginChatRecoveryIncident` budget
@@ -1433,19 +1448,84 @@ Work:
       the extracted pure `evaluateChatRecoveryIncident`.)
 - [x] Add golden cutover fixtures and a round-trip gate.
       (`__tests__/recovery-cutover-fixtures.ts` + `recovery-cutover.test.ts`.)
-- [ ] Add package adapter contract tests.
-- [ ] Add missing `AIChatAgent` tests for recovery callback errors if Think
-      already has stronger coverage.
-- [ ] Add `AIChatAgent` tests for reconnect recovering replay if the RFC chooses
-      to converge on Think's better UX.
-- [ ] Add tests proving schedule idempotency/non-idempotency invariants.
-- [ ] Add tests proving terminal-before-seal behavior.
+- [→] Add package adapter contract tests. **Deferred to Phase 2** — these test
+      the engine↔adapter seam (fake scheduler/storage/clock), which does not
+      exist yet. The current package behavior they would assert is already
+      covered behaviorally (see the coverage map below); the seam-level versions
+      are written when the seam lands. Building the seam now just to test it
+      would be Phase 2 work mislabeled as Phase 0.
+- [x] Add missing `AIChatAgent` tests for recovery callback errors if Think
+      already has stronger coverage. **Already symmetric** — `onChatRecovery`
+      throw (`durable-chat-recovery.test.ts` "marks the incident failed when
+      onChatRecovery throws"), `onExhausted` throw ("still delivers terminal UX
+      when onExhausted throws"), and `shouldKeepRecovering` throw (shared
+      `recovery-incident.test.ts`). No gap to close.
+- [→] Add `AIChatAgent` tests for reconnect recovering replay if the RFC chooses
+      to converge on Think's better UX. **Deferred to Phase 2 (convergence).**
+      Confirmed asymmetry: Think hydrates the live "recovering…" status on a
+      mid-recovery (re)connect (`think-session.test.ts` "broadcasts + hydrates a
+      'recovering…' status"); `AIChatAgent` broadcasts it live but does NOT
+      replay it on connect — its own code says so
+      (`ai-chat/src/index.ts` `_setChatRecovering`: "the live 'recovering…'
+      signal is still not replayed on connect — only the terminal outcome is").
+      A characterization test asserting on-connect hydration would assert
+      behavior ai-chat does not yet have, so it ships WITH the convergence in
+      Phase 2 (changeset), tracked as an intentional behavior change.
+- [x] Add tests proving schedule idempotency/non-idempotency invariants.
+      **Already symmetric** — non-idempotent stable-timeout reschedule is pinned
+      by the 2-row tests in both packages (`durable-chat-recovery.test.ts`
+      "reschedules a continuation that times out… (NEW row, 2 total)" and the
+      retry twin; `think-session.test.ts` equivalents). Initial-schedule
+      storm-dedup is pinned by the fiber-row-deletion "double recovery" tests
+      ("should not double-recover when _checkRunFibers runs from both onStart and
+      alarm" + Think equivalent). The only thing not directly asserted is the
+      `{ idempotent }` flag VALUE per scheduling reason — that becomes a precise
+      fake-scheduler assertion at the Phase 2 seam (see coverage map).
+- [x] Add tests proving terminal-before-seal behavior. **Already symmetric** —
+      `#1730` defer-on-transient tests in both packages ("defers a give-up whose
+      terminal write hits a platform transient instead of half-sealing, then
+      seals fully on the re-run") plus the seal-write-best-effort and
+      terminal-replay-on-reconnect (`#1645`) tests. No gap to close.
+
+See the **Phase 0 breadth audit** below for the full invariant→test map.
 
 Exit criteria:
 
 - The desired shared behavior is described by failing or passing tests before
   extraction begins.
 - Known intentional behavior changes are identified and tracked.
+
+#### Phase 0 breadth audit — verified Phase 2 safety net
+
+Goal of this audit: before converging behavior in Phase 2/3, confirm the
+high-risk invariants are already executable as tests in BOTH packages, so any
+convergence regression fails loudly. Finding: they are. This codebase is already
+densely and symmetrically tested for the recovery surface; the right move is to
+treat the existing suites as the Phase 2 safety net (do not regress them) rather
+than add redundant tests. Map below (ai-chat / think test homes):
+
+| Invariant | Guarding tests (both packages) |
+| --- | --- |
+| Non-idempotent stable-timeout reschedule (fresh row, not dedup onto the executing one-shot) | `durable-chat-recovery.test.ts` "reschedules a continuation that times out…" + retry twin; `think-session.test.ts` continue/retry reschedule tests |
+| Initial-schedule storm-dedup (re-detection does not re-run/duplicate) | `durable-chat-recovery.test.ts` "should not double-recover when _checkRunFibers runs from both onStart and alarm"; Think equivalent (primary mechanism = orphaned fiber-row deletion after handling) |
+| HITL park: no reschedule, no budget spent, incident parked `skipped` | `durable-chat-recovery.test.ts` "PARKS a continuation/retry…"; Think PARK tests |
+| Terminal-before-seal: terminal durably recorded/delivered before the incident is sealed; a transient on the terminal write defers (does not half-seal) | `#1730` "defers a give-up whose terminal write hits a platform transient…" in both packages |
+| Seal write is best-effort after terminal delivery (no re-deliver if only the seal fails) | `durable-chat-recovery.test.ts` "does not defer/replay… when the post-terminal incident seal write fails" |
+| Terminal replay on reconnect (`#1645`); cleared when a later turn supersedes | `durable-chat-recovery.test.ts` terminal-reconnect/cleared/aborted/error tests; Think `cf:chat:last-terminal` tests |
+| Recovering-flag set on schedule, cleared on terminal (`#1620`) | `durable-chat-recovery.test.ts` "tracks a durable 'recovering…' record…"; `think-session.test.ts` "broadcasts + hydrates a 'recovering…' status…" |
+| Callback hooks throwing do not wedge the turn | `onChatRecovery`/`onExhausted` throw tests (ai-chat); `shouldKeepRecovering` throw (shared engine unit test) |
+
+Confirmed gaps, both deferred (NOT Phase 0 current-behavior pins):
+
+1. **Recovering-status on-connect hydration** — Think hydrates on (re)connect;
+   ai-chat does not (live broadcast only). Phase 2 convergence + changeset.
+2. **Direct `{ idempotent }` flag-value assertion** per scheduling reason —
+   today only the row-count EFFECT is asserted. When Phase 2 routes scheduling
+   through `adapter.schedule(delay, cb, data, { idempotent })`, add a
+   fake-scheduler unit test asserting `idempotent: true` for the initial
+   schedule and `idempotent: false` for the stable-timeout reschedule. This is
+   the most valuable seam-level test and is the first Layer-2 test to write in
+   Phase 2.
 
 ### Phase 1: introduce internal engine scaffolding
 
