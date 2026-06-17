@@ -55,7 +55,8 @@ import {
   evaluateChatRecoveryIncident,
   resolveChatRecoveryConfig,
   chatRecoveryIncidentId,
-  chatRecoverySchedulePolicy
+  chatRecoverySchedulePolicy,
+  type ChatRecoveryScheduleCallback
 } from "agents/chat";
 import type {
   ChatResponseResult,
@@ -4441,7 +4442,7 @@ export class AIChatAgent<
    * attempt budget is exhausted (caller should then fail terminally).
    */
   private async _rescheduleRecoveryAfterStableTimeout(
-    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
+    callback: ChatRecoveryScheduleCallback,
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
     maxAttempts: number
   ): Promise<boolean> {
@@ -4561,7 +4562,7 @@ export class AIChatAgent<
    *    unlikely.
    */
   private async _exhaustRecoveryAfterStableTimeout(
-    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
+    callback: ChatRecoveryScheduleCallback,
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
   ): Promise<void> {
     const config = this._resolveChatRecoveryConfig();

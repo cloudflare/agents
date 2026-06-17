@@ -162,7 +162,8 @@ import {
   evaluateChatRecoveryIncident,
   resolveChatRecoveryConfig,
   chatRecoveryIncidentId,
-  chatRecoverySchedulePolicy
+  chatRecoverySchedulePolicy,
+  type ChatRecoveryScheduleCallback
 } from "agents/chat";
 import type {
   StreamChunkData,
@@ -10304,7 +10305,7 @@ export class Think<
    * `@cloudflare/ai-chat`.
    */
   private async _rescheduleRecoveryAfterStableTimeout(
-    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
+    callback: ChatRecoveryScheduleCallback,
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
     maxAttempts: number
   ): Promise<boolean> {
@@ -10460,7 +10461,7 @@ export class Think<
    *    (the terminal writes themselves are idempotent).
    */
   private async _exhaustRecoveryGiveUp(
-    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
+    callback: ChatRecoveryScheduleCallback,
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
     reason: string
   ): Promise<void> {
@@ -10574,7 +10575,7 @@ export class Think<
    * `stable_timeout`.
    */
   private _exhaustRecoveryAfterStableTimeout(
-    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
+    callback: ChatRecoveryScheduleCallback,
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
   ): Promise<void> {
     return this._exhaustRecoveryGiveUp(callback, data, "stable_timeout");
@@ -10608,7 +10609,7 @@ export class Think<
    *   message until they send something new).
    */
   private async _handleRecoveryCallbackError(
-    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
+    callback: ChatRecoveryScheduleCallback,
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
     error: unknown
   ): Promise<void> {
