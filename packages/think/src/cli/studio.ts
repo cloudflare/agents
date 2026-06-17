@@ -158,15 +158,27 @@ export async function studioCommand(
 
     const serve = (filePath: string) => {
       const ext = path.extname(filePath).toLowerCase();
-      res.writeHead(200, {
-        "content-type": CONTENT_TYPES[ext] ?? "application/octet-stream"
-      });
-      createReadStream(filePath)
-        .on("error", () => {
+      const stream = createReadStream(filePath);
+      stream.on("error", () => {
+        // The stream can fail to open (file deleted after stat(), permissions)
+        // or fault mid-read. Only send a 500 if we haven't already committed
+        // the 200 status line; otherwise the headers are gone and the only
+        // correct action is to tear down the (now-corrupt) response.
+        if (res.headersSent) {
+          res.destroy();
+        } else {
           res.writeHead(500);
           res.end("Internal error");
-        })
-        .pipe(res);
+        }
+      });
+      // Defer the 200 until the file actually opens, so an open error can still
+      // produce a clean 500 instead of throwing ERR_HTTP_HEADERS_SENT.
+      stream.once("open", () => {
+        res.writeHead(200, {
+          "content-type": CONTENT_TYPES[ext] ?? "application/octet-stream"
+        });
+        stream.pipe(res);
+      });
     };
 
     if (!candidate) {
