@@ -59,8 +59,13 @@ import {
   notifyChatRecoveryExhausted,
   ChatStreamStalledError,
   iterateWithStallWatchdog,
+  chatRecoveryIncidentKey,
+  selectStaleIncidentKeys,
+  CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   type ChatRecoveryAdapter,
-  type ChatRecoveryScheduleCallback
+  type ChatRecoveryScheduleCallback,
+  type ChatRecoveryIncident,
+  type ChatRecoveryKind
 } from "agents/chat";
 import type {
   ChatResponseResult,
@@ -106,57 +111,11 @@ type ChatRecoveryContinueData = {
   lastClientTools?: ClientToolSchema[] | null;
 };
 
-type ChatRecoveryKind = "retry" | "continue";
+// `ChatRecoveryIncident` / `ChatRecoveryKind` / `CHAT_RECOVERY_INCIDENT_KEY_PREFIX`
+// are the canonical shared symbols from `agents/chat` (imported above); the
+// persisted incident shape and key prefix are owned by the engine package so
+// both consumers round-trip the same record across the deploy that ships them.
 
-type ChatRecoveryIncident = {
-  incidentId: string;
-  requestId: string;
-  /** Stable request ID for the whole continuation chain (the recovery root). */
-  recoveryRootRequestId?: string;
-  recoveryKind: ChatRecoveryKind;
-  attempt: number;
-  maxAttempts: number;
-  status:
-    | "detected"
-    | "scheduled"
-    | "attempting"
-    | "completed"
-    | "skipped"
-    | "exhausted"
-    | "failed";
-  firstSeenAt: number;
-  lastAttemptAt: number;
-  /**
-   * Epoch ms of the last attempt that observed forward progress. The recovery
-   * budget is keyed to this (`now - lastProgressAt > NO_PROGRESS_WINDOW`), so a
-   * turn that keeps producing content survives churn indefinitely while a
-   * genuinely stuck turn is sealed within the window (#1637). Optional for
-   * backward-compat — falls back to `firstSeenAt`.
-   */
-  lastProgressAt?: number;
-  reason?: string;
-  /**
-   * High-water mark of the durable, monotonic recovery-progress counter (see
-   * `_chatRecoveryProgressMarker`) observed for this incident. Used to
-   * distinguish a turn that is making forward progress but keeps getting
-   * interrupted by isolate resets (deploys) — which should NOT exhaust the
-   * budget — from one that genuinely fails to advance. Sourced from a persisted
-   * counter rather than the live transcript so compaction cannot lower it
-   * (#1628).
-   */
-  progress?: number;
-  /**
-   * Value of the durable progress counter when this incident first opened. The
-   * runaway-loop work budget is `progress - workBaseline` (work produced since
-   * the incident began); compared against `maxRecoveryWork`. Optional for
-   * backward-compat with incidents persisted before this field existed — a
-   * missing baseline is treated as the current marker (zero work so far), so an
-   * in-flight incident from an older build is never falsely sealed.
-   */
-  workBaseline?: number;
-};
-
-const CHAT_RECOVERY_INCIDENT_KEY_PREFIX = "cf:chat-recovery:incident:";
 // Durable, monotonic forward-progress counter for recovery budget resets.
 // Bumped at production time when new content is streamed (`_storeStreamChunk`),
 // so it reflects genuinely new content and is immune to reconnects/re-persists;
@@ -195,9 +154,8 @@ const CHAT_RECOVERING_KEY = "cf:chat:recovering";
 // reconnect via the resume handshake (`_replayTerminalOnResume`); cleared when
 // a later turn supersedes it.
 const CHAT_LAST_TERMINAL_KEY = "cf:chat:last-terminal";
-// Incidents that have not seen a new attempt within this window are assumed
-// abandoned and swept so durable storage does not grow without bound.
-const CHAT_RECOVERY_INCIDENT_TTL_MS = 60 * 60 * 1000;
+// (Incident sweep TTL now lives in the shared `selectStaleIncidentKeys` /
+// `CHAT_RECOVERY_INCIDENT_TTL_MS` from agents/chat.)
 // Max keys per Durable Object KV `delete([...])` call.
 // See https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
 const KV_DELETE_MAX_KEYS = 128;
@@ -3673,10 +3631,6 @@ export class AIChatAgent<
     return resolveChatRecoveryConfig(this.chatRecovery);
   }
 
-  private _chatRecoveryIncidentKey(incidentId: string): string {
-    return `${CHAT_RECOVERY_INCIDENT_KEY_PREFIX}${encodeURIComponent(incidentId)}`;
-  }
-
   /**
    * Monotonic forward-progress signal for recovery budget resets.
    *
@@ -3756,13 +3710,7 @@ export class AIChatAgent<
     const entries = await this.ctx.storage.list<ChatRecoveryIncident>({
       prefix: CHAT_RECOVERY_INCIDENT_KEY_PREFIX
     });
-    const staleKeys: string[] = [];
-    for (const [key, incident] of entries) {
-      const lastActive = incident?.lastAttemptAt ?? incident?.firstSeenAt ?? 0;
-      if (now - lastActive > CHAT_RECOVERY_INCIDENT_TTL_MS) {
-        staleKeys.push(key);
-      }
-    }
+    const staleKeys = selectStaleIncidentKeys(entries, now);
     // Batch deletes — the DO storage KV delete accepts up to 128 keys per call,
     // collapsing N awaited round-trips into ceil(N / 128).
     for (let i = 0; i < staleKeys.length; i += KV_DELETE_MAX_KEYS) {
@@ -4546,7 +4494,7 @@ export class AIChatAgent<
     maxAttempts: number
   ): Promise<boolean> {
     const incidentKey = data?.incidentId
-      ? this._chatRecoveryIncidentKey(data.incidentId)
+      ? chatRecoveryIncidentKey(data.incidentId)
       : null;
     const incident = incidentKey
       ? await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)
@@ -4666,7 +4614,7 @@ export class AIChatAgent<
   ): Promise<void> {
     const config = this._resolveChatRecoveryConfig();
     const incidentKey = data?.incidentId
-      ? this._chatRecoveryIncidentKey(data.incidentId)
+      ? chatRecoveryIncidentKey(data.incidentId)
       : null;
     let stored: ChatRecoveryIncident | null = null;
     if (incidentKey) {

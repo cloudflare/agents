@@ -1378,6 +1378,30 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Slice 4a (Phase 4 start — shared types + key/sweep helpers, zero behavior)_ —
+  The mechanical band of the dedup map: both packages re-declared the
+  `ChatRecoveryIncident` type + `ChatRecoveryKind`, a local
+  `CHAT_RECOVERY_INCIDENT_KEY_PREFIX`, a `_chatRecoveryIncidentKey` method (100%
+  dup), and an inline stale-key loop inside `_sweepStaleChatRecoveryIncidents`,
+  all of which already exist canonically in `agents/chat`
+  (`recovery-incident.ts`). Replaced the local copies with the shared symbols in
+  both `think.ts` and `ai-chat/src/index.ts`: import `type ChatRecoveryIncident`,
+  `type ChatRecoveryKind`, `chatRecoveryIncidentKey`, `selectStaleIncidentKeys`,
+  `CHAT_RECOVERY_INCIDENT_KEY_PREFIX`; delete the local type/kind/prefix; route
+  the two stable-timeout call sites through `chatRecoveryIncidentKey(...)`; and
+  collapse the sweep's loop to `selectStaleIncidentKeys(entries, now)`. **Zero
+  behavior:** the canonical type is byte-identical to both local copies; the
+  prefix string matches (`"cf:chat-recovery:incident:"`); and the sweep TTL the
+  shared helper applies (`CHAT_RECOVERY_INCIDENT_TTL_MS = 60*60*1000`) is
+  identical to the local constant it replaced (verified before deleting the now
+  -unused local). Both packages' local `CHAT_RECOVERY_INCIDENT_TTL_MS` consts
+  removed. Tests: repo typecheck 111 ✅; full Think workers 686 ✅ and ai-chat
+  workers 608 ✅ (unchanged counts); ai-chat real-`wrangler dev` SIGKILL recovery
+  e2e re-run green (offline-safe — no remote AI binding). No changeset (internal
+  `@internal` seam, zero behavior). The Think real-edge e2e stays gated on the
+  Phase 6 merge gate (its Workers AI binding needs a stable remote session, not
+  available on the current connection).
+
 - _Phase 3 confidence pass (deep review + real e2e)_ — Before starting Phase 4,
   re-verified 3a/3b/3c with a fresh review and the real-`wrangler dev` suites.
   **Review findings:** (1) `_routeStallToBoundedRecovery` in `AIChatAgent` is
