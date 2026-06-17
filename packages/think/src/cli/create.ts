@@ -1,8 +1,55 @@
 import yargs from "yargs";
+import type { Argv } from "yargs";
 import { hideBin } from "yargs/helpers";
 import { initCommand } from "./init";
 import { inspectCommand } from "./inspect";
+import { stateCommand } from "./state";
+import { studioCommand } from "./studio";
 import { typesCommand } from "./types";
+
+function connectionOptions<T>(cmd: Argv<T>) {
+  return cmd
+    .positional("agent", {
+      type: "string",
+      describe: "Agent id/alias (from the manifest) or a raw route segment"
+    })
+    .positional("instance", {
+      type: "string",
+      describe: "Agent instance name",
+      default: "default"
+    })
+    .option("url", {
+      type: "string",
+      describe: "Remote origin, e.g. https://app.example.com (implies wss)"
+    })
+    .option("host", {
+      type: "string",
+      describe: "Local host[:port] (default: localhost:5173)"
+    })
+    .option("protocol", {
+      type: "string",
+      choices: ["ws", "wss"] as const,
+      describe: "Override the WebSocket protocol"
+    })
+    .option("token", {
+      type: "string",
+      describe: "Auth token, sent as the `token` query param"
+    })
+    .option("query", {
+      type: "string",
+      array: true,
+      describe: "Extra query params as key=value (repeatable)"
+    })
+    .option("root", {
+      type: "string",
+      describe: "Project root used to discover the Think manifest",
+      default: process.cwd()
+    })
+    .option("route-prefix", {
+      type: "string",
+      describe: "Override the Think route prefix"
+    });
+}
 
 export function createCli(argv = process.argv) {
   return yargs(hideBin(argv))
@@ -154,6 +201,68 @@ export function createCli(argv = process.argv) {
           dryRun: args.dryRun,
           check: args.check,
           wranglerArgs: Array.isArray(args["--"]) ? args["--"].map(String) : []
+        });
+      }
+    )
+    .command(
+      "studio [agent] [instance]",
+      "Launch Think Studio — a local web app to chat with and inspect a running Think instance (local or remote)",
+      (cmd) =>
+        connectionOptions(cmd)
+          .option("port", {
+            type: "number",
+            describe: "Port for the local Studio server",
+            default: 4321
+          })
+          .option("open", {
+            type: "boolean",
+            describe: "Open the browser automatically",
+            default: true
+          }),
+      async (args) => {
+        await studioCommand({
+          agent: args.agent as string | undefined,
+          instance: args.instance,
+          url: args.url,
+          host: args.host,
+          protocol: args.protocol,
+          token: args.token,
+          query: args.query,
+          root: args.root,
+          routePrefix: args.routePrefix,
+          port: args.port,
+          open: args.open
+        });
+      }
+    )
+    .command(
+      "state <agent> [instance]",
+      "Print a running Think agent's identity, state, and recent history (read-only)",
+      (cmd) =>
+        connectionOptions(cmd)
+          .option("json", {
+            type: "boolean",
+            describe: "Print machine-readable JSON output",
+            default: false
+          })
+          .option("limit", {
+            type: "number",
+            describe: "Number of recent messages to include",
+            default: 10
+          }),
+      async (args) => {
+        await stateCommand({
+          agent: args.agent as string,
+          instance: args.instance,
+          url: args.url,
+          host: args.host,
+          protocol: args.protocol,
+          token: args.token,
+          query: args.query,
+          root: args.root,
+          routePrefix: args.routePrefix,
+          json: args.json,
+          limit: args.limit
         });
       }
     )

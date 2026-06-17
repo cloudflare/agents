@@ -1,5 +1,13 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { build } from "tsdown";
+import { build as viteBuild } from "vite";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
+
+const packageRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  ".."
+);
 
 async function main() {
   await build({
@@ -33,6 +41,15 @@ async function main() {
 
   // then run oxfmt on the generated .d.ts files
   formatDeclarationFiles();
+
+  // Build the Think Studio SPA into dist/studio. The app's deps (react, vite,
+  // kumo, ai-chat, …) are build-time devDependencies; only the prebuilt static
+  // bundle ships, and the `think studio` runtime serves it with `node:http`.
+  await viteBuild({
+    root: path.join(packageRoot, "studio"),
+    configFile: path.join(packageRoot, "studio/vite.config.ts"),
+    logLevel: "warn"
+  });
 
   process.exit(0);
 }

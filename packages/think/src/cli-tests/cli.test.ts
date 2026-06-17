@@ -675,6 +675,20 @@ describe("think CLI", () => {
     expect(output).toContain("init");
     expect(output).toContain("inspect");
     expect(output).toContain("types");
+    expect(output).toContain("studio");
+    expect(output).toContain("state");
+  });
+
+  it("documents studio connection flags", async () => {
+    const cli = createCli(["node", "think", "studio", "--help"]);
+
+    await cli.exitProcess(false).parse();
+
+    const output = [...consoleOutput, ...consoleError].join("\n");
+    expect(output).toContain("--url");
+    expect(output).toContain("--token");
+    expect(output).toContain("--route-prefix");
+    expect(output).toContain("--port");
   });
 });
 
