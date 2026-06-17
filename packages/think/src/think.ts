@@ -161,7 +161,8 @@ import {
   buildInClauseStrings,
   evaluateChatRecoveryIncident,
   resolveChatRecoveryConfig,
-  chatRecoveryIncidentId
+  chatRecoveryIncidentId,
+  chatRecoverySchedulePolicy
 } from "agents/chat";
 import type {
   StreamChunkData,
@@ -9931,7 +9932,7 @@ export class Think<
         lastClientTools: this._lastClientTools ?? null,
         ...(recoveredRequestId ? { recoveredRequestId } : {})
       },
-      { idempotent: true }
+      chatRecoverySchedulePolicy("initial")
     );
     return "scheduled";
   }
@@ -10141,7 +10142,7 @@ export class Think<
             lastClientTools: recoverySnapshot?.lastClientTools ?? null,
             ...(recoveredRequestId ? { recoveredRequestId } : {})
           },
-          { idempotent: true }
+          chatRecoverySchedulePolicy("initial")
         );
       } else if (canContinue) {
         await this._updateChatRecoveryIncident(
@@ -10170,7 +10171,7 @@ export class Think<
               : {}),
             ...(recoveredRequestId ? { recoveredRequestId } : {})
           },
-          { idempotent: true }
+          chatRecoverySchedulePolicy("initial")
         );
       } else if (options.continue === false && !streamIsTerminal) {
         await this._updateChatRecoveryIncident(
@@ -10323,16 +10324,15 @@ export class Think<
       lastAttemptAt: Date.now(),
       reason: "stable_timeout_retry"
     });
-    // Must NOT be idempotent: this runs INSIDE the currently-executing one-shot
-    // schedule row (which `alarm()` deletes only after we return). An idempotent
-    // reschedule would dedup onto that row and then be deleted with it — the
-    // retry would silently never fire, stalling the turn. A fresh delayed row
-    // survives the deletion.
+    // Non-idempotent (`"stable_timeout_retry"`): this runs INSIDE the
+    // currently-executing one-shot schedule row, which `alarm()` deletes only
+    // after we return — an idempotent reschedule would dedup onto that doomed
+    // row and never fire, stalling the turn. See `chatRecoverySchedulePolicy`.
     await this.schedule(
       CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
       callback,
       data ?? {},
-      { idempotent: false }
+      chatRecoverySchedulePolicy("stable_timeout_retry")
     );
     return true;
   }

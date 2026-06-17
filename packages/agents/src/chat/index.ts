@@ -123,6 +123,12 @@ export {
   type EvaluateChatRecoveryIncidentResult
 } from "./recovery-incident";
 
+export {
+  chatRecoverySchedulePolicy,
+  type ChatRecoveryScheduleReason,
+  type ChatRecoveryScheduleCallback
+} from "./recovery-engine";
+
 export type {
   ChatResponseResult,
   ChatRecoveryConfig,

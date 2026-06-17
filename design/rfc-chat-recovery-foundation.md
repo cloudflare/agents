@@ -1377,6 +1377,24 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 2 (slice 1 — scheduling-idempotency policy)_ — Introduced the first
+  engine-seam file `packages/agents/src/chat/recovery-engine.ts` with
+  `chatRecoverySchedulePolicy(reason)`, the single source of truth for the
+  `schedule()` idempotency flag (`"initial"` → idempotent, deploy-storm dedup;
+  `"stable_timeout_retry"` → non-idempotent, survives the executing one-shot
+  row's deletion). Re-exported `@internal` from the `agents/chat` barrel. Wired
+  all eight recovery schedule sites — `AIChatAgent` (3 initial + 1 reschedule)
+  and `Think` (3 initial + 1 reschedule) — to source the flag from the policy;
+  per-site rationale comments now point to the policy. Added the deferred
+  Layer-2 seam test (`__tests__/recovery-engine.test.ts`): pins both reasons
+  directly and through a fake scheduler exercised the way the packages call
+  `schedule()`. Review: byte-identical behavior (policy returns the same literal
+  each site used); the four remaining `{ idempotent }` literals are confirmed
+  non-recovery subsystems (stream-buffer cleanup, scheduled tasks, submission
+  drain) and intentionally left alone — folding them in would be a false
+  coupling. Gates: ai-chat workers (604) + think workers (686) + shared engine
+  unit (34) pass; typecheck (111) and oxlint clean. This closes the Phase 0
+  "direct `{ idempotent }` flag assertion" deferral.
 - _Phase 0 breadth (audit, no new tests)_ — Audited the existing `ai-chat` and
   `think` suites against the Phase 0 breadth items (schedule idempotency,
   terminal-before-seal, callback-error coverage, recovering replay) instead of
@@ -1559,6 +1577,16 @@ Exit criteria:
 ### Phase 2: wire `AIChatAgent`
 
 Move `AIChatAgent` recovery orchestration behind the shared engine.
+
+Sliced for safety (this is the riskiest phase — see the working cadence):
+
+- [x] **Slice 1 — scheduling-idempotency policy.** `recovery-engine.ts` ·
+      `chatRecoverySchedulePolicy` is the single source of truth for the
+      `schedule()` idempotency flag; both packages' eight recovery schedule
+      sites source it; Layer-2 fake-scheduler test pins both reasons. Zero
+      behavior change. (Lands the Phase 0 "direct flag assertion" deferral.)
+- [ ] Slice 2+ — move incident-begin orchestration, terminal/exhaust sealing,
+      and the recovering-on-connect convergence behind the engine/adapter.
 
 Work:
 

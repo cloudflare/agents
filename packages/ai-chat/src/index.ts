@@ -54,7 +54,8 @@ import {
 import {
   evaluateChatRecoveryIncident,
   resolveChatRecoveryConfig,
-  chatRecoveryIncidentId
+  chatRecoveryIncidentId,
+  chatRecoverySchedulePolicy
 } from "agents/chat";
 import type {
   ChatResponseResult,
@@ -4234,7 +4235,7 @@ export class AIChatAgent<
             lastBody: recoverySnapshot.lastBody ?? null,
             lastClientTools: recoverySnapshot.lastClientTools ?? null
           },
-          { idempotent: true }
+          chatRecoverySchedulePolicy("initial")
         );
       } else if (
         lostPartialUserId !== undefined &&
@@ -4263,7 +4264,7 @@ export class AIChatAgent<
             lastBody: recoverySnapshot?.lastBody ?? null,
             lastClientTools: recoverySnapshot?.lastClientTools ?? null
           },
-          { idempotent: true }
+          chatRecoverySchedulePolicy("initial")
         );
       } else if (options.continue !== false) {
         await this._updateChatRecoveryIncident(
@@ -4291,7 +4292,7 @@ export class AIChatAgent<
                 }
               : {})
           },
-          { idempotent: true }
+          chatRecoverySchedulePolicy("initial")
         );
       } else {
         await this._updateChatRecoveryIncident(
@@ -4460,15 +4461,15 @@ export class AIChatAgent<
       lastAttemptAt: Date.now(),
       reason: "stable_timeout_retry"
     });
-    // Must NOT be idempotent: this runs inside the currently-executing one-shot
-    // schedule row (deleted by `alarm()` only after we return). An idempotent
-    // reschedule would dedup onto that row and be deleted with it — the retry
-    // would never fire. A fresh delayed row survives.
+    // Non-idempotent (`"stable_timeout_retry"`): this runs inside the
+    // currently-executing one-shot schedule row, which `alarm()` deletes only
+    // after we return — an idempotent reschedule would dedup onto that doomed
+    // row and never fire. See `chatRecoverySchedulePolicy`.
     await this.schedule(
       CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
       callback,
       data ?? {},
-      { idempotent: false }
+      chatRecoverySchedulePolicy("stable_timeout_retry")
     );
     return true;
   }
