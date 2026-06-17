@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { EventEmitter } from "node:events";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -282,6 +283,50 @@ describe("Think Vite plugin", () => {
     ]);
   });
 
+  it("registers a Think Studio dev-server shortcut once the server is listening", () => {
+    const plugins = flattenThinkPlugins(think({ files }));
+    const frameworkPlugin = plugins.find(
+      (plugin): plugin is Plugin => plugin.name === "@cloudflare/think"
+    );
+    if (!frameworkPlugin) throw new Error("Think framework plugin not found");
+
+    const calls: Array<{ customShortcuts?: Array<{ key: string }> }> = [];
+    const { server, httpServer } = makeFakeServer(calls);
+    const configureServer = frameworkPlugin.configureServer as unknown as (
+      server: unknown
+    ) => void;
+    configureServer(server);
+
+    // `bindCLIShortcuts` is gated on the http server listening.
+    expect(calls).toHaveLength(0);
+    httpServer.emit("listening");
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].customShortcuts).toEqual([
+      expect.objectContaining({ key: "s", description: "open Think Studio" })
+    ]);
+  });
+
+  it("omits the Studio shortcut when studioShortcut is false", () => {
+    const plugins = flattenThinkPlugins(
+      think({ files, studioShortcut: false })
+    );
+    const frameworkPlugin = plugins.find(
+      (plugin): plugin is Plugin => plugin.name === "@cloudflare/think"
+    );
+    if (!frameworkPlugin) throw new Error("Think framework plugin not found");
+
+    const calls: unknown[] = [];
+    const { server, httpServer } = makeFakeServer(calls);
+    const configureServer = frameworkPlugin.configureServer as unknown as (
+      server: unknown
+    ) => void;
+    configureServer(server);
+    httpServer.emit("listening");
+
+    expect(calls).toHaveLength(0);
+  });
+
   it("generates host-style custom server fallthrough", async () => {
     const plugins = flattenThinkPlugins(
       think({
@@ -351,6 +396,24 @@ const minimalPluginContext = {
   setAssetSource() {},
   warn(_message?: unknown) {}
 };
+
+function makeFakeServer(bindCalls: unknown[]) {
+  const noop = () => {};
+  const httpServer = new EventEmitter();
+  const server = {
+    bindCLIShortcuts(options: unknown) {
+      bindCalls.push(options);
+    },
+    config: {
+      root: "/app",
+      logger: { info: noop, warn: noop, error: noop },
+      server: { port: 5173 }
+    },
+    httpServer,
+    resolvedUrls: { local: ["http://localhost:5173/"] }
+  };
+  return { server, httpServer };
+}
 
 function flattenThinkPlugins(options: ReturnType<typeof think>): Plugin[] {
   const plugins: Plugin[] = [];
