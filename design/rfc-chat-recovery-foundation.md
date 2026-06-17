@@ -1378,6 +1378,31 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Smoke test (slice 2d, manual) + deferred follow-up_ — Verified recovery +
+  recovering-on-connect end-to-end in `examples/ai-chat` (which needed
+  `chatRecovery = true` added — `AIChatAgent` defaults it `false`; the example is
+  a minimal showcase). Killing `wrangler dev` mid-story then refreshing now shows
+  the "recovering…" status on reconnect and the turn resumes from its persisted
+  partial. **Deferred follow-up (pre-existing, NOT introduced here; user opted to
+  track, not fix now):** on the recovery *continue* path with a reasoning model,
+  if the model emits NEW reasoning after a partial text, the live stream briefly
+  renders that reasoning as a second block *under* the content, then it "jumps"
+  back on top when the final persisted message replaces the live stream. Root
+  cause: the continuation merge in `AIChatAgent` (`index.ts`, the
+  `continuationReasoningResumed` branch, ~L5660-5708) fully suppresses
+  `text-start` (so text merges seamlessly) but can only *skip the server apply*
+  for `reasoning-start` while still forwarding it to the client — AI SDK v6
+  requires a `reasoning-start` before any `reasoning-delta`, and the client's
+  active part at that moment is the text, not the earlier reasoning block. So the
+  client appends a new reasoning part (under content) while the server merges into
+  the top reasoning part (`continue-last-turn.test.ts` "should merge reasoning
+  into existing reasoning part during continuation" pins the merge-to-top). The
+  two representations are irreconcilable mid-stream in the v6 protocol. The clean
+  fix is to stop merging later-than-text reasoning (chronological order, live ==
+  final, matches the repo's "render parts in array order" guidance) and update
+  that test; it self-corrects on finish today, so it is cosmetic. Tracked here as
+  a recovery-UX follow-up, independent of the engine convergence slices.
+
 - _Slice 2d (recovering-on-connect convergence — first behavior change)_ —
   `AIChatAgent` now replays the live "recovering…" status on connect, matching
   `@cloudflare/think`. Before this, ai-chat only broadcast `cf_agent_chat_recovering`
