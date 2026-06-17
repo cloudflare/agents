@@ -1377,6 +1377,20 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 1 (incident-math wiring complete)_ — Wired `Think` to the shared
+  engine the same way as `AIChatAgent`: `_resolveChatRecoveryConfig`,
+  `_chatRecoveryIncidentId`, and the `_beginChatRecoveryIncident` budget
+  computation now delegate to the shared functions, and the six now-unused
+  default constants were removed. Both packages now share one incident state
+  machine. Review: Think's package-specific seams are preserved — the
+  `_restoreClientTools()` hibernation guard still runs BEFORE the engine reads
+  `hasPendingInteraction()` (the guard statement executes before the
+  `evaluateChatRecoveryIncident` argument object is built), the predicate is
+  Think's `hasPendingInteraction()` (server-tool orphans excluded), and the
+  error log keeps the `[Think]` prefix. Gates: Think workers suite (686) passes;
+  typecheck (111) and oxlint clean. (Note: `vitest run` without a per-suite
+  `-c` config wrongly picks up the React/CLI/e2e suites and fails in the wrong
+  runner — use `pnpm run test:workers` for the recovery path.)
 - _Phase 1 (in progress)_ — Wired `AIChatAgent` to the shared engine.
   `_resolveChatRecoveryConfig`, `_chatRecoveryIncidentId`, and the budget
   computation inside `_beginChatRecoveryIncident` now delegate to
@@ -1451,8 +1465,10 @@ Work:
       `evaluateChatRecoveryIncident`, `selectStaleIncidentKeys` in
       `recovery-incident.ts`.)
 - [x] Move storage key constants and incident helpers into the engine module.
-- [~] Keep existing `AIChatAgent` and `Think` private methods as callers
-      initially. (`AIChatAgent` wired; `Think` pending.)
+- [x] Keep existing `AIChatAgent` and `Think` private methods as callers
+      initially. (Both packages' `_beginChatRecoveryIncident` /
+      `_resolveChatRecoveryConfig` / `_chatRecoveryIncidentId` now delegate to
+      the shared engine.)
 - [x] Add fake-adapter unit tests. (`recovery-incident.test.ts`.)
 
 Exit criteria:
