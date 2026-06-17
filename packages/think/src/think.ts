@@ -166,7 +166,6 @@ import {
   notifyChatRecoveryExhausted,
   ChatStreamStalledError,
   iterateWithStallWatchdog,
-  chatRecoveryIncidentKey,
   selectStaleIncidentKeys,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   type ChatRecoveryAdapter,
@@ -9576,6 +9575,26 @@ export class Think<
         console.error(
           "[Think] chatRecovery shouldKeepRecovering hook threw",
           error
+        ),
+      exhaustChatRecovery: (incident, config, partial, streamId, createdAt) =>
+        this._exhaustChatRecovery(
+          incident,
+          config,
+          partial,
+          streamId,
+          createdAt
+        ),
+      resolveRecoveryStreamId: (requestId) =>
+        this._resolveRecoveryStreamId(requestId),
+      getPartialStreamText: (streamId) => this._getPartialStreamText(streamId),
+      activeChatRecoveryRootRequestId: () =>
+        this._activeChatRecoveryRootRequestId,
+      onGiveUpBookkeepingError: (phase, error) =>
+        console.error(
+          phase === "read"
+            ? "[Think] failed to read recovery incident during give-up; synthesizing"
+            : "[Think] failed to persist sealed recovery incident during give-up",
+          error
         )
     } satisfies ChatRecoveryAdapter));
   }
@@ -10235,113 +10254,24 @@ export class Think<
    *    broadcast — the deferred re-run re-fires `onExhausted` + the banner
    *    (the terminal writes themselves are idempotent).
    */
-  private async _exhaustRecoveryGiveUp(
+  private _exhaustRecoveryGiveUp(
     callback: ChatRecoveryScheduleCallback,
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
     reason: string
   ): Promise<void> {
-    const config = this._resolveChatRecoveryConfig();
-    const incidentKey = data?.incidentId
-      ? chatRecoveryIncidentKey(data.incidentId)
-      : null;
-    // The incident read/write below are best-effort: they back the re-entry
-    // guard, not the terminal UX. Under deploy storage stress they can reject,
-    // but terminalization MUST still fire — a failed bookkeeping op here is
-    // exactly what used to drop the turn silently. So tolerate a failed read
-    // (synthesize the incident) and a failed write (accept a possible second
-    // banner) rather than letting either abort `_exhaustChatRecovery`.
-    let stored: ChatRecoveryIncident | null = null;
-    if (incidentKey) {
-      try {
-        stored =
-          (await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)) ??
-          null;
-      } catch (readError) {
-        console.error(
-          "[Think] failed to read recovery incident during give-up; synthesizing",
-          readError
-        );
-      }
-    }
-
-    // Re-entry guard #1 (see method doc): a sealed incident means
-    // terminalization already happened, so a duplicate stale alarm must not
-    // re-fire `onExhausted` / re-broadcast the banner.
-    if (stored?.status === "exhausted") return;
-
-    const rootRequestId =
-      data?.originalRequestId ??
-      data?.recoveredRequestId ??
-      this._activeChatRecoveryRootRequestId ??
-      stored?.recoveryRootRequestId ??
-      stored?.requestId ??
-      "";
-
-    const incident: ChatRecoveryIncident = stored
-      ? { ...stored, status: "exhausted", reason }
-      : {
-          // Silent-drop guard: the incident record is gone (no `incidentId`, or
-          // it was swept/deleted before this stale alarm fired). Synthesize a
-          // minimal incident so the turn STILL terminalizes through
-          // `onExhausted` instead of being dropped with no terminal UX — the
-          // exact "eternal spinner" failure mode this fix closes.
-          incidentId: data?.incidentId ?? crypto.randomUUID(),
-          requestId: rootRequestId,
-          recoveryRootRequestId: rootRequestId,
-          recoveryKind:
-            callback === "_chatRecoveryRetry" ? "retry" : "continue",
-          attempt: config.maxAttempts,
-          maxAttempts: config.maxAttempts,
-          status: "exhausted",
-          firstSeenAt: Date.now(),
-          lastAttemptAt: Date.now(),
-          reason
-        };
-
-    const streamId = this._resolveRecoveryStreamId(
-      incident.recoveryRootRequestId ?? incident.requestId
-    );
-    const partial = streamId
-      ? this._getPartialStreamText(streamId)
-      : { text: "", parts: [] as MessagePart[] };
-
-    // Terminalize BEFORE sealing the incident. The terminal writes inside
-    // `_exhaustChatRecovery` (`_recordTerminalChatStatus`,
-    // `_markRecoveredSubmissionInterrupted`) hit storage and can reject with a
-    // platform transient in exactly the window a give-up tends to run in
-    // (#1730: deploy reset / storage outage). Letting that throw propagate is
-    // deliberate: the recovery callback's caller (`Agent._executeScheduleCallback`)
-    // defers the one-shot row on a platform transient, so the WHOLE give-up
-    // re-runs on a healthy isolate instead of half-sealing. Sealing first
-    // would arm the re-entry guard above and turn that re-run into a no-op —
-    // dropping the durable terminal record and the submission's terminal
-    // state. The re-run is idempotent: `_recordTerminalChatStatus` overwrites
-    // the same key and `_markRecoveredSubmissionInterrupted` is gated on
-    // `status = 'running'`; `onExhausted` + the banner may fire again — the
-    // documented at-least-once edge ("deliver a second banner" ≫ "silently
-    // drop the turn").
-    await this._exhaustChatRecovery(
-      incident,
-      config,
-      partial,
-      streamId,
-      incident.firstSeenAt
-    );
-
-    // Persist the sealed incident (retained for inspection / TTL sweep) so the
-    // re-entry guard above sees `exhausted` if a duplicate stale alarm fires.
-    // Best-effort: terminalization already fully succeeded, so a failed seal
-    // write costs at most a re-delivered banner on a duplicate alarm.
-    if (incidentKey) {
-      try {
-        await this.ctx.storage.put(incidentKey, incident);
-      } catch (writeError) {
-        console.error(
-          "[Think] failed to persist sealed recovery incident during give-up",
-          writeError
-        );
-      }
-    }
+    // The give-up spine (read → re-entry-guard → build-exhausted-incident →
+    // terminalize-before-seal → best-effort seal) lives in the shared
+    // ChatRecoveryEngine; this is the package binding, symmetric with
+    // `AIChatAgent`. Think keeps the `reason` parameter (its callers pass
+    // `stable_timeout` | `recovery_error`) and the `recoveredRequestId` link in
+    // the engine's root-id chain (supplied via the schedule payload). The
+    // terminalize + stream/partial hooks are wired on the adapter above. See
+    // design/rfc-chat-recovery-foundation.md.
+    return this._chatRecoveryEngine().exhaustRecoveryGiveUp({
+      callback,
+      data,
+      reason
+    });
   }
 
   /**

@@ -6,9 +6,13 @@ import {
   notifyChatRecoveryExhausted,
   type ChatRecoveryAdapter,
   type ChatRecoveryScheduleCallback,
-  type ChatRecoveryScheduleReason
+  type ChatRecoveryScheduleReason,
+  type RecoveryPartial
 } from "../recovery-engine";
-import type { ChatRecoveryExhaustedContext } from "../lifecycle";
+import type {
+  ChatRecoveryExhaustedContext,
+  ResolvedChatRecoveryConfig
+} from "../lifecycle";
 import type { FiberRecoveryContext } from "../../index";
 import {
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
@@ -171,7 +175,12 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
       },
       onShouldKeepRecoveringError: () => {
         calls.push("shouldKeepRecoveringError");
-      }
+      },
+      exhaustChatRecovery: () => Promise.resolve(),
+      resolveRecoveryStreamId: () => "",
+      getPartialStreamText: () => ({ text: "", parts: [] }),
+      activeChatRecoveryRootRequestId: () => undefined,
+      onGiveUpBookkeepingError: () => {}
     };
 
     if (options.withInteractionHook !== false) {
@@ -305,7 +314,12 @@ describe("ChatRecoveryEngine.updateIncident (fake adapter)", () => {
         recovering.push({ active, requestId });
         return Promise.resolve();
       },
-      onShouldKeepRecoveringError: () => {}
+      onShouldKeepRecoveringError: () => {},
+      exhaustChatRecovery: () => Promise.resolve(),
+      resolveRecoveryStreamId: () => "",
+      getPartialStreamText: () => ({ text: "", parts: [] }),
+      activeChatRecoveryRootRequestId: () => undefined,
+      onGiveUpBookkeepingError: () => {}
     };
 
     return { adapter, storage, events, recovering };
@@ -474,7 +488,12 @@ describe("ChatRecoveryEngine.scheduleRecovery (fake adapter)", () => {
         recovering.push({ active, requestId });
         return Promise.resolve();
       },
-      onShouldKeepRecoveringError: () => {}
+      onShouldKeepRecoveringError: () => {},
+      exhaustChatRecovery: () => Promise.resolve(),
+      resolveRecoveryStreamId: () => "",
+      getPartialStreamText: () => ({ text: "", parts: [] }),
+      activeChatRecoveryRootRequestId: () => undefined,
+      onGiveUpBookkeepingError: () => {}
     };
 
     return { adapter, storage, events, recovering, schedules, order };
@@ -648,7 +667,12 @@ describe("ChatRecoveryEngine.rescheduleAfterStableTimeout (fake adapter)", () =>
         recovering.push({ active, requestId });
         return Promise.resolve();
       },
-      onShouldKeepRecoveringError: () => {}
+      onShouldKeepRecoveringError: () => {},
+      exhaustChatRecovery: () => Promise.resolve(),
+      resolveRecoveryStreamId: () => "",
+      getPartialStreamText: () => ({ text: "", parts: [] }),
+      activeChatRecoveryRootRequestId: () => undefined,
+      onGiveUpBookkeepingError: () => {}
     };
 
     return { adapter, storage, events, recovering, schedules };
@@ -779,6 +803,281 @@ describe("ChatRecoveryEngine.rescheduleAfterStableTimeout (fake adapter)", () =>
     // attempt (3) >= fallback (3) → give up.
     expect(rescheduled).toBe(false);
     expect(fake.schedules).toHaveLength(0);
+  });
+});
+
+/**
+ * Layer-2 seam test for `ChatRecoveryEngine.exhaustRecoveryGiveUp` (slice 4d-1)
+ * — the give-up spine both packages ran verbatim to terminalize a turn whose
+ * retry budget drained (#1645). Pins the sequence + its invariants: best-effort
+ * read (tolerated failure → synthesize), the `exhausted` re-entry guard, the
+ * synthesized-incident root-id chain, terminalize-BEFORE-seal (so a transient in
+ * the terminal write re-runs the WHOLE give-up instead of half-sealing #1730),
+ * and the tolerated best-effort seal. The only package divergences (`reason`,
+ * the `recoveredRequestId` link in the root chain) are caller parameters here.
+ */
+describe("ChatRecoveryEngine.exhaustRecoveryGiveUp (fake adapter)", () => {
+  type ExhaustCall = {
+    incident: ChatRecoveryIncident;
+    config: ResolvedChatRecoveryConfig;
+    partial: RecoveryPartial;
+    streamId: string;
+    createdAt: number;
+  };
+
+  type GiveUpOptions = {
+    getThrows?: boolean;
+    putThrows?: boolean;
+    streamId?: string;
+    partial?: RecoveryPartial;
+    activeRoot?: string;
+  };
+
+  function makeFakeAdapter(options: GiveUpOptions = {}) {
+    const storage = new Map<string, ChatRecoveryIncident>();
+    const exhausts: ExhaustCall[] = [];
+    const bookkeeping: Array<{ phase: "read" | "seal"; error: unknown }> = [];
+    const order: string[] = [];
+    const streamIdArgs: string[] = [];
+    const partialArgs: string[] = [];
+
+    const adapter: ChatRecoveryAdapter = {
+      resolveConfig: () => resolveChatRecoveryConfig(undefined),
+      now: () => 7_777,
+      sweepStaleIncidents: () => Promise.resolve(),
+      getIncident: (key) => {
+        if (options.getThrows) return Promise.reject(new Error("read boom"));
+        return Promise.resolve(storage.get(key) ?? null);
+      },
+      readProgress: () => Promise.resolve(0),
+      isAwaitingClientInteraction: () => false,
+      putIncident: (key, incident) => {
+        if (options.putThrows) return Promise.reject(new Error("seal boom"));
+        order.push("seal");
+        storage.set(key, incident);
+        return Promise.resolve();
+      },
+      deleteIncident: (key) => {
+        storage.delete(key);
+        return Promise.resolve();
+      },
+      emitRecoveryEvent: () => {},
+      scheduleRecovery: () => Promise.resolve(),
+      setRecovering: () => Promise.resolve(),
+      onShouldKeepRecoveringError: () => {},
+      exhaustChatRecovery: (incident, config, partial, streamId, createdAt) => {
+        order.push("exhaust");
+        exhausts.push({ incident, config, partial, streamId, createdAt });
+        return Promise.resolve();
+      },
+      resolveRecoveryStreamId: (requestId) => {
+        streamIdArgs.push(requestId);
+        return options.streamId ?? "";
+      },
+      getPartialStreamText: (streamId) => {
+        partialArgs.push(streamId);
+        return options.partial ?? { text: "", parts: [] };
+      },
+      activeChatRecoveryRootRequestId: () => options.activeRoot,
+      onGiveUpBookkeepingError: (phase, error) => {
+        bookkeeping.push({ phase, error });
+      }
+    };
+
+    return {
+      adapter,
+      storage,
+      exhausts,
+      bookkeeping,
+      order,
+      streamIdArgs,
+      partialArgs
+    };
+  }
+
+  function seed(
+    storage: Map<string, ChatRecoveryIncident>,
+    overrides: Partial<ChatRecoveryIncident> = {}
+  ): { incidentId: string; key: string } {
+    const incident: ChatRecoveryIncident = {
+      incidentId: "root-1:user-1",
+      requestId: "req-1",
+      recoveryRootRequestId: "root-1",
+      recoveryKind: "continue",
+      attempt: 6,
+      maxAttempts: 6,
+      status: "attempting",
+      firstSeenAt: 1_000,
+      lastAttemptAt: 2_000,
+      ...overrides
+    };
+    const key = chatRecoveryIncidentKey(incident.incidentId);
+    storage.set(key, incident);
+    return { incidentId: incident.incidentId, key };
+  }
+
+  it("terminalizes a stored incident BEFORE sealing it, threading the reason", async () => {
+    const fake = makeFakeAdapter({
+      streamId: "stream-1",
+      partial: { text: "hi", parts: [] }
+    });
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    const { incidentId, key } = seed(fake.storage);
+
+    await engine.exhaustRecoveryGiveUp({
+      callback: "_chatRecoveryContinue",
+      data: { incidentId, originalRequestId: "root-1" },
+      reason: "recovery_error"
+    });
+
+    // Terminalize before seal: a transient terminal write must re-run the whole
+    // give-up rather than be no-op'd by an already-armed re-entry guard (#1730).
+    expect(fake.order).toEqual(["exhaust", "seal"]);
+    expect(fake.exhausts).toHaveLength(1);
+    const call = fake.exhausts[0];
+    expect(call.incident).toMatchObject({
+      incidentId,
+      status: "exhausted",
+      reason: "recovery_error"
+    });
+    // createdAt is the (preserved) firstSeenAt of the stored incident.
+    expect(call.createdAt).toBe(1_000);
+    expect(call.streamId).toBe("stream-1");
+    expect(call.partial).toEqual({ text: "hi", parts: [] });
+    // Stream id resolved from the recovery ROOT; partial read for that stream.
+    expect(fake.streamIdArgs).toEqual(["root-1"]);
+    expect(fake.partialArgs).toEqual(["stream-1"]);
+    // The sealed record is persisted as exhausted (arms the re-entry guard).
+    expect(fake.storage.get(key)).toMatchObject({
+      status: "exhausted",
+      reason: "recovery_error"
+    });
+  });
+
+  it("re-entry guard: an already-exhausted record terminalizes nothing", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    const { incidentId } = seed(fake.storage, { status: "exhausted" });
+
+    await engine.exhaustRecoveryGiveUp({
+      callback: "_chatRecoveryContinue",
+      data: { incidentId },
+      reason: "stable_timeout"
+    });
+
+    expect(fake.exhausts).toHaveLength(0);
+    expect(fake.order).toHaveLength(0);
+  });
+
+  it("tolerates a failed incident read and synthesizes (still terminalizes)", async () => {
+    const fake = makeFakeAdapter({ getThrows: true });
+    const engine = new ChatRecoveryEngine(fake.adapter);
+
+    await engine.exhaustRecoveryGiveUp({
+      callback: "_chatRecoveryRetry",
+      data: { incidentId: "lost:incident", originalRequestId: "root-9" },
+      reason: "stable_timeout"
+    });
+
+    expect(fake.bookkeeping).toEqual([
+      { phase: "read", error: expect.any(Error) }
+    ]);
+    expect(fake.exhausts).toHaveLength(1);
+    const cfg = resolveChatRecoveryConfig(undefined);
+    expect(fake.exhausts[0].incident).toMatchObject({
+      incidentId: "lost:incident",
+      requestId: "root-9",
+      recoveryRootRequestId: "root-9",
+      recoveryKind: "retry",
+      attempt: cfg.maxAttempts,
+      maxAttempts: cfg.maxAttempts,
+      status: "exhausted",
+      reason: "stable_timeout"
+    });
+  });
+
+  it("tolerates a failed seal write AFTER terminalizing", async () => {
+    const fake = makeFakeAdapter({ putThrows: true });
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    const { incidentId } = seed(fake.storage);
+
+    await expect(
+      engine.exhaustRecoveryGiveUp({
+        callback: "_chatRecoveryContinue",
+        data: { incidentId },
+        reason: "stable_timeout"
+      })
+    ).resolves.toBeUndefined();
+
+    // Terminalization happened; only the best-effort seal failed.
+    expect(fake.exhausts).toHaveLength(1);
+    expect(fake.bookkeeping).toEqual([
+      { phase: "seal", error: expect.any(Error) }
+    ]);
+  });
+
+  it("root-id chain: recoveredRequestId beats activeRoot when no originalRequestId", async () => {
+    const fake = makeFakeAdapter({ activeRoot: "active-root", streamId: "s" });
+    const engine = new ChatRecoveryEngine(fake.adapter);
+
+    await engine.exhaustRecoveryGiveUp({
+      callback: "_chatRecoveryContinue",
+      data: { incidentId: "i:1", recoveredRequestId: "recovered-root" },
+      reason: "stable_timeout"
+    });
+
+    expect(fake.exhausts[0].incident).toMatchObject({
+      requestId: "recovered-root",
+      recoveryRootRequestId: "recovered-root"
+    });
+    expect(fake.streamIdArgs).toEqual(["recovered-root"]);
+  });
+
+  it("root-id chain: falls back to the active recovery root when the payload omits both", async () => {
+    const fake = makeFakeAdapter({ activeRoot: "active-root" });
+    const engine = new ChatRecoveryEngine(fake.adapter);
+
+    await engine.exhaustRecoveryGiveUp({
+      callback: "_chatRecoveryContinue",
+      data: { incidentId: "i:1" },
+      reason: "stable_timeout"
+    });
+
+    expect(fake.exhausts[0].incident.recoveryRootRequestId).toBe("active-root");
+  });
+
+  it("synthesizes a uuid incident and never reads/seals when the payload has no incidentId", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+
+    await engine.exhaustRecoveryGiveUp({
+      callback: "_chatRecoveryRetry",
+      data: undefined,
+      reason: "stable_timeout"
+    });
+
+    expect(fake.exhausts).toHaveLength(1);
+    expect(fake.exhausts[0].incident.incidentId.length).toBeGreaterThan(0);
+    expect(fake.exhausts[0].incident.recoveryKind).toBe("retry");
+    // No incident key → no read, no seal, nothing persisted.
+    expect(fake.bookkeeping).toHaveLength(0);
+    expect(fake.storage.size).toBe(0);
+    expect(fake.order).toEqual(["exhaust"]);
+  });
+
+  it("skips the partial read when no orphaned stream survives", async () => {
+    const fake = makeFakeAdapter({ streamId: "" });
+    const engine = new ChatRecoveryEngine(fake.adapter);
+
+    await engine.exhaustRecoveryGiveUp({
+      callback: "_chatRecoveryContinue",
+      data: { incidentId: "i:1", originalRequestId: "r" },
+      reason: "stable_timeout"
+    });
+
+    expect(fake.partialArgs).toHaveLength(0);
+    expect(fake.exhausts[0].streamId).toBe("");
+    expect(fake.exhausts[0].partial).toEqual({ text: "", parts: [] });
   });
 });
 

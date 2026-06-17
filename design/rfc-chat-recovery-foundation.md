@@ -1378,6 +1378,50 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Slice 4d-1 (Phase 4 — lift the give-up spine; the part deferred from 4c)_ —
+  Reading both `_handleInternalFiberRecovery` bodies in full first re-shaped 4d
+  (recorded in the slice plan): the bodies are ~70% structurally similar but the
+  similar part is mostly control flow, while the meaty logic (stream-status
+  tracking, recovery-kind detection, persist gates, stream-completion API, and
+  the retry/continue/skip decision) has legitimately DIVERGED — even
+  `_partialHasSettledToolResults` has drifted between the packages. So 4d split:
+  4d-1 lifts the genuinely-shared give-up spine here; 4d-2 (the wake-frame
+  collapse for Phase 5 genericity) is gated behind a seam-design review.
+  `Think._exhaustRecoveryGiveUp` and `AIChatAgent._exhaustRecoveryAfterStableTimeout`
+  were ~80% identical: resolve config → key from `data.incidentId` → best-effort
+  read `stored` (tolerate failure → synthesize) → `stored.status==="exhausted"`
+  re-entry guard → build the exhausted incident → resolve streamId + partial →
+  `_exhaustChatRecovery` (terminalize) BEFORE the best-effort seal write. Lifted
+  into `ChatRecoveryEngine.exhaustRecoveryGiveUp({ callback, data, reason })`
+  behind 5 adapter hooks (`exhaustChatRecovery`, `resolveRecoveryStreamId`,
+  `getPartialStreamText`, `activeChatRecoveryRootRequestId`,
+  `onGiveUpBookkeepingError`); each package method is now a one-line delegation.
+  **Byte-equivalence review:** the unified root-id chain (`originalRequestId ??
+  recoveredRequestId ?? activeRoot ?? stored.root ?? stored.requestId ?? ""`)
+  reproduces Think verbatim and collapses to AIChat's chain because AIChat's
+  payload type has no `recoveredRequestId` (always `undefined` → skipped);
+  `reason` is the only behavioral parameter (Think `stable_timeout` |
+  `recovery_error`, AIChat always `stable_timeout`); synthesized
+  `attempt`/`maxAttempts` = `config.maxAttempts`, `recoveryKind` from the
+  callback, `firstSeenAt`/`lastAttemptAt` = `adapter.now()` (= `Date.now()`),
+  `crypto.randomUUID()` id; `createdAt` passed as `incident.firstSeenAt`; both
+  read and seal stay best-effort with the original `[Think]`/`[AIChatAgent]` log
+  prefixes via `onGiveUpBookkeepingError`. The terminalize-BEFORE-seal ordering
+  (#1730/#1645 — a transient terminal write must re-run the WHOLE give-up, not be
+  no-op'd by an armed re-entry guard) is preserved and pinned by a test. The
+  give-up's terminalize + stream/partial hooks are exactly the surface 4d-2 will
+  reuse, so 4d-1 de-risks 4d-2. Added 9 engine unit tests (terminalize→seal
+  order + reason threading, re-entry guard, read-fail synth, seal-fail tolerance,
+  root-id precedence ×2, no-incidentId uuid synth/no-seal, empty-stream partial
+  skip) and back-filled the 5 hooks into the four pre-existing fake adapters.
+  Tests: engine unit 42 ✅ (+9); typecheck 111 ✅; `check` ✅; ai-chat workers 686
+  ✅ and Think recovery workers 285 ✅ (fiber/submissions/stream + think-session +
+  messengers; benign SQLite-alarm harness log only); Think remote-Workers-AI
+  give-up e2e (`stall-recovery` + `chat-recovery`) 6/6 ✅; ai-chat real-`wrangler
+  dev` SIGKILL give-up e2e (`chat-recovery-exhaustion` + `chat-recovery` +
+  `chat-recovering-status`) 9/9 ✅. No changeset (internal `@internal` seam, zero
+  behavior change).
+
 - _Slice 4c (Phase 4 — centralize the stable-timeout reschedule; re-scoped)_ —
   `_rescheduleRecoveryAfterStableTimeout` was byte-identical between the packages
   (100% dup): read the incident → if under the attempt cap, bump `attempt`, persist
@@ -2155,25 +2199,55 @@ each slice ships with its own review + e2e gate before the next begins:
   (below), where those hooks live. Same judgment as the Phase 3 re-scope: defer an
   entangled item to where its seam naturally belongs.
 
-- **Slice 4d — grow the engine fiber-recovery dispatch skeleton + lift the give-up
-  spine (the big one).** The two `_handleInternalFiberRecovery` bodies
-  (`think.ts:9811–10097` ~287 lines; `index.ts:4056–4332` ~277 lines) are ~70%
-  structurally identical (fiber gate, requestId parse, begin-incident,
-  exhausted→exhaust, onChatRecovery, settled-tool persist invariant #1631,
-  retry/continue/skip decision, catch→failed). Collapse the shared spine into the
-  engine, leaving package hooks ONLY for the genuinely package-specific pieces the
-  map flagged: snapshot key + turn kind, streamStatus read (Think) vs not (AIChat),
-  recovery-kind detection, stream-completion API, Think submission lifecycle +
-  terminal record ordering + session-leaf vs flat-messages leaf check, AIChat's
-  lost-partial third retry branch, and Think's `_handleRecoveryCallbackError`. **Also
-  lifts the give-up spine deferred from 4c** (`_exhaustRecoveryGiveUp` /
-  `_exhaustRecoveryAfterStableTimeout`): the read→re-entry-guard→build-exhausted-
-  incident→terminalize→seal sequence is shared; its terminalize + `resolveStreamId`
-  - `getPartialStreamText` hooks are the same package surface this slice already
-    introduces (Think keeps the `recoveredRequestId` root-id chain + the `reason` param
-    for its error give-up; AIChat hardcodes `stable_timeout` and never sets
-    `recoveredRequestId`, so a unified chain collapses identically there). Highest risk
-    (the wake + terminal-UX paths) — its own e2e gate.
+- **Slice 4d — the wake + terminal-UX paths (the big one), split in two after a
+  full read of both bodies.** Reading the two `_handleInternalFiberRecovery` bodies
+  in full (think.ts ~265 lines; index.ts ~245 lines) changed the picture: they are
+  ~70% structurally similar, but the similar part is mostly _control flow_ (chat
+  gate, requestId parse, snapshot unwrap, begin-incident, exhausted→exhaust,
+  onChatRecovery invocation, catch→failed) while the meaty logic has legitimately
+  DIVERGED — streamStatus tracking (Think) vs not (AIChat); different recovery-kind
+  detection helpers; different persist gates; different stream-completion APIs; and
+  especially the retry/continue/skip decision (Think's submission lifecycle +
+  terminal-record + session-leaf vs AIChat's flat-messages leaf + lost-partial third
+  branch). Even the `_partialHasSettledToolResults` helper has drifted (Think
+  delegates to `_toolPartHasSettledResult`; AIChat inlines a different state check).
+  So 4d splits:
+  - **Slice 4d-1 — lift the give-up spine (the part deferred from 4c). ✅ DONE.**
+    `_exhaustRecoveryGiveUp` / `_exhaustRecoveryAfterStableTimeout` are ~80%
+    identical: resolve config → key from `data.incidentId` → best-effort read
+    `stored` (tolerate failure, synthesize) → re-entry guard
+    (`stored.status==="exhausted"` ⇒ return) → build the exhausted incident →
+    resolve streamId + partial → `_exhaustChatRecovery` (terminalize) → best-effort
+    seal write. Lift this spine into `ChatRecoveryEngine.exhaustRecoveryGiveUp({
+callback, data, reason })` behind hooks `exhaustChatRecovery`,
+    `resolveRecoveryStreamId`, `getPartialStreamText`, `activeChatRecoveryRootRequestId`,
+    and `onGiveUpBookkeepingError`. Divergences parameterize cleanly: Think passes
+    `reason` (`stable_timeout` | `recovery_error`) and its root-id chain includes
+    `recoveredRequestId`; AIChat hardcodes `stable_timeout` and never sets
+    `recoveredRequestId` (so a unified chain — `originalRequestId ?? recoveredRequestId
+?? activeRoot ?? stored.root ?? stored.requestId ?? ""` — collapses identically
+    there). Moderate risk; its hooks are exactly what 4d-2 needs, so this lands first
+    and de-risks 4d-2.
+
+  - **Slice 4d-2 — collapse the fiber-recovery frame (the genericity seam).** Owns
+    the Phase 5 goal: a third (pi) adapter must drive deploy/crash recovery through
+    the SAME engine, which means the wake dispatch frame has to live in the engine,
+    not be re-implemented per package. Engine owns the frame (chat gate, requestId
+    parse, snapshot-unwrap dispatch, stream/partial resolution invocation,
+    begin-incident, exhausted-check, onChatRecovery invocation, persist + complete
+    invocation, catch→failed); package hooks own the divergent organs the map flagged
+    (snapshot key + turn kind, stream/status resolution, recovery-kind detection,
+    persist gate, stream-completion API, and the whole retry/continue/skip decision —
+    Think submission lifecycle + terminal record ordering + session-leaf vs
+    flat-messages leaf, AIChat lost-partial branch, Think `_handleRecoveryCallbackError`).
+    Highest risk (the wake path; #1631/#1691/#1645 + submission-completion correctness)
+    — its own e2e gate, and the seam design is reviewed before the wake path is
+    touched. If the hook surface needed to keep both bodies faithful proves to make
+    the engine LESS readable than two self-contained methods (a real risk given how
+    much has diverged), 4d-2 may land as a smaller shared-helper extraction
+    (`_partialHasSettledToolResults`, the `onChatRecovery` ctx builder) plus a
+    documented decision to keep the per-package decision bodies — recorded here either
+    way.
 
 Each slice: deep review for edge cases, run the local + (where auth permits) real
 e2e suites, commit with a detailed message. Slice 4d does not start until 4a–4c

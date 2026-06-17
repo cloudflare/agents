@@ -14,6 +14,7 @@ import type {
   ChatRecoveryExhaustedContext,
   ResolvedChatRecoveryConfig
 } from "./lifecycle";
+import type { MessagePart } from "./message-builder";
 import {
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
   chatRecoveryIncidentId,
@@ -49,6 +50,9 @@ export type ChatRecoveryScheduleCallback =
  *   survives the deletion.
  */
 export type ChatRecoveryScheduleReason = "initial" | "stable_timeout_retry";
+
+/** A reconstructed orphaned-stream partial (buffered text + message parts). */
+export type RecoveryPartial = { text: string; parts: MessagePart[] };
 
 /**
  * Resolve the `schedule()` idempotency option for a recovery schedule. Single
@@ -162,6 +166,44 @@ export interface ChatRecoveryAdapter {
   setRecovering(active: boolean, requestId?: string): Promise<void>;
   /** Report a throw from the caller's `shouldKeepRecovering` hook. */
   onShouldKeepRecoveringError(error: unknown): void;
+  /**
+   * Terminalize a given-up recovery turn: deliver the exhaustion notification
+   * plus the package-owned terminal record / banner / submission writes. A thin
+   * pass-through to the package's `_exhaustChatRecovery`. Driven by
+   * {@link ChatRecoveryEngine.exhaustRecoveryGiveUp}; the engine owns the
+   * surrounding read → re-entry-guard → build → terminalize → seal sequence, the
+   * package owns the (legitimately divergent) terminal/broadcast ordering.
+   */
+  exhaustChatRecovery(
+    incident: ChatRecoveryIncident,
+    config: ResolvedChatRecoveryConfig,
+    partial: RecoveryPartial,
+    streamId: string,
+    createdAt: number
+  ): Promise<void>;
+  /**
+   * Resolve the orphaned stream id for a (recovery-root) request id, or `""`
+   * when no stream metadata survives. A thin pass-through to the package's
+   * `_resolveRecoveryStreamId`.
+   */
+  resolveRecoveryStreamId(requestId: string): string;
+  /** Reconstruct the partial text/parts buffered for `streamId`. */
+  getPartialStreamText(streamId: string): RecoveryPartial;
+  /**
+   * The in-flight recovery-root request id, consulted as a fallback in the
+   * give-up root-id chain when the payload carries no `originalRequestId` /
+   * `recoveredRequestId` and no incident record survives. `undefined` when no
+   * recovery chain is active. (`AIChatAgent` and `Think` both back this with
+   * `_activeChatRecoveryRootRequestId`.)
+   */
+  activeChatRecoveryRootRequestId(): string | undefined;
+  /**
+   * Report a tolerated best-effort bookkeeping failure during give-up: the
+   * incident `"read"` (before synthesizing) or the sealing `"seal"` write
+   * (after terminalization). Neither aborts terminalization — see
+   * {@link ChatRecoveryEngine.exhaustRecoveryGiveUp}.
+   */
+  onGiveUpBookkeepingError(phase: "read" | "seal", error: unknown): void;
 }
 
 /**
@@ -312,6 +354,124 @@ export class ChatRecoveryEngine {
       CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS
     );
     return true;
+  }
+
+  /**
+   * Give up on a recovery turn whose retry budget drained, terminalizing it so
+   * it can never become an eternal spinner (#1645). The shared spine both
+   * packages repeated verbatim:
+   *
+   * 1. resolve config + the incident key from `data.incidentId`;
+   * 2. best-effort READ the stored incident — a failed read is tolerated
+   *    (reported via `onGiveUpBookkeepingError("read", …)`) and the incident is
+   *    synthesized, because the read backs only the re-entry guard, not the
+   *    terminal UX;
+   * 3. re-entry guard: a `stored.status === "exhausted"` record means
+   *    terminalization already fired, so a duplicate stale alarm returns without
+   *    re-broadcasting the banner;
+   * 4. build the exhausted incident (reuse `stored`, or synthesize a minimal one
+   *    so a swept/missing record STILL terminalizes through `onExhausted`);
+   * 5. resolve the orphaned stream id + partial;
+   * 6. terminalize via `exhaustChatRecovery` — BEFORE sealing. The terminal
+   *    writes can reject with a platform transient in the deploy/storage window
+   *    a give-up runs in (#1730); letting that throw propagate is deliberate, so
+   *    `Agent._executeScheduleCallback` defers the one-shot row and the WHOLE
+   *    give-up re-runs on a healthy isolate. Sealing first would arm the
+   *    re-entry guard and turn that re-run into a no-op, dropping the durable
+   *    terminal record. The re-run is idempotent (terminal writes overwrite the
+   *    same key); a second banner is the documented at-least-once edge; and
+   * 7. best-effort SEAL write so the re-entry guard sees `exhausted` on a
+   *    duplicate alarm — a failed seal (reported via
+   *    `onGiveUpBookkeepingError("seal", …)`) costs at most one re-delivered
+   *    banner.
+   *
+   * The two packages diverged only in parameters the caller supplies:
+   * `reason` (`Think` passes `stable_timeout` | `recovery_error`; `AIChatAgent`
+   * always `stable_timeout`) and the root-id chain (`Think` includes
+   * `recoveredRequestId`; `AIChatAgent` never sets it, so the unified chain
+   * collapses identically). Exactly-once terminalization rests on the re-entry
+   * guard alone in `AIChatAgent`; `Think` additionally short-circuits duplicate
+   * alarms earlier in its durable-submission layer.
+   */
+  async exhaustRecoveryGiveUp(input: {
+    callback: ChatRecoveryScheduleCallback;
+    data:
+      | {
+          incidentId?: string;
+          originalRequestId?: string;
+          recoveredRequestId?: string;
+        }
+      | undefined;
+    reason: string;
+  }): Promise<void> {
+    const { adapter } = this;
+    const config = adapter.resolveConfig();
+    const incidentKey = input.data?.incidentId
+      ? chatRecoveryIncidentKey(input.data.incidentId)
+      : null;
+
+    let stored: ChatRecoveryIncident | null = null;
+    if (incidentKey) {
+      try {
+        stored = await adapter.getIncident(incidentKey);
+      } catch (readError) {
+        adapter.onGiveUpBookkeepingError("read", readError);
+      }
+    }
+
+    // Re-entry guard: a sealed incident means terminalization already happened,
+    // so a duplicate stale alarm must not re-fire `onExhausted` / the banner.
+    if (stored?.status === "exhausted") return;
+
+    const rootRequestId =
+      input.data?.originalRequestId ??
+      input.data?.recoveredRequestId ??
+      adapter.activeChatRecoveryRootRequestId() ??
+      stored?.recoveryRootRequestId ??
+      stored?.requestId ??
+      "";
+
+    const incident: ChatRecoveryIncident = stored
+      ? { ...stored, status: "exhausted", reason: input.reason }
+      : {
+          // Silent-drop guard: the record is gone (no `incidentId`, or it was
+          // swept/deleted before this stale alarm). Synthesize a minimal
+          // incident so the turn STILL terminalizes instead of vanishing.
+          incidentId: input.data?.incidentId ?? crypto.randomUUID(),
+          requestId: rootRequestId,
+          recoveryRootRequestId: rootRequestId,
+          recoveryKind:
+            input.callback === "_chatRecoveryRetry" ? "retry" : "continue",
+          attempt: config.maxAttempts,
+          maxAttempts: config.maxAttempts,
+          status: "exhausted",
+          firstSeenAt: adapter.now(),
+          lastAttemptAt: adapter.now(),
+          reason: input.reason
+        };
+
+    const streamId = adapter.resolveRecoveryStreamId(
+      incident.recoveryRootRequestId ?? incident.requestId
+    );
+    const partial = streamId
+      ? adapter.getPartialStreamText(streamId)
+      : { text: "", parts: [] as MessagePart[] };
+
+    await adapter.exhaustChatRecovery(
+      incident,
+      config,
+      partial,
+      streamId,
+      incident.firstSeenAt
+    );
+
+    if (incidentKey) {
+      try {
+        await adapter.putIncident(incidentKey, incident);
+      } catch (writeError) {
+        adapter.onGiveUpBookkeepingError("seal", writeError);
+      }
+    }
   }
 
   /**

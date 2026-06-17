@@ -59,7 +59,6 @@ import {
   notifyChatRecoveryExhausted,
   ChatStreamStalledError,
   iterateWithStallWatchdog,
-  chatRecoveryIncidentKey,
   selectStaleIncidentKeys,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   type ChatRecoveryAdapter,
@@ -3762,6 +3761,26 @@ export class AIChatAgent<
         console.error(
           "[AIChatAgent] chatRecovery shouldKeepRecovering hook threw",
           error
+        ),
+      exhaustChatRecovery: (incident, config, partial, streamId, createdAt) =>
+        this._exhaustChatRecovery(
+          incident,
+          config,
+          partial,
+          streamId,
+          createdAt
+        ),
+      resolveRecoveryStreamId: (requestId) =>
+        this._resolveRecoveryStreamId(requestId),
+      getPartialStreamText: (streamId) => this._getPartialStreamText(streamId),
+      activeChatRecoveryRootRequestId: () =>
+        this._activeChatRecoveryRootRequestId,
+      onGiveUpBookkeepingError: (phase, error) =>
+        console.error(
+          phase === "read"
+            ? "[AIChatAgent] failed to read recovery incident during give-up; synthesizing"
+            : "[AIChatAgent] failed to persist sealed recovery incident during give-up",
+          error
         )
     } satisfies ChatRecoveryAdapter));
   }
@@ -4559,102 +4578,23 @@ export class AIChatAgent<
    *    the first, so this needs a second independent sweep) — vanishingly
    *    unlikely.
    */
-  private async _exhaustRecoveryAfterStableTimeout(
+  private _exhaustRecoveryAfterStableTimeout(
     callback: ChatRecoveryScheduleCallback,
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined
   ): Promise<void> {
-    const config = this._resolveChatRecoveryConfig();
-    const incidentKey = data?.incidentId
-      ? chatRecoveryIncidentKey(data.incidentId)
-      : null;
-    let stored: ChatRecoveryIncident | null = null;
-    if (incidentKey) {
-      try {
-        stored =
-          (await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)) ??
-          null;
-      } catch (readError) {
-        console.error(
-          "[AIChatAgent] failed to read recovery incident during give-up; synthesizing",
-          readError
-        );
-      }
-    }
-
-    // Re-entry guard (see method doc): a sealed incident means terminalization
-    // already happened, so a duplicate stale alarm must not re-fire
-    // `onExhausted` / re-broadcast the banner. This is ai-chat's ONLY guard.
-    if (stored?.status === "exhausted") return;
-
-    const rootRequestId =
-      data?.originalRequestId ??
-      this._activeChatRecoveryRootRequestId ??
-      stored?.recoveryRootRequestId ??
-      stored?.requestId ??
-      "";
-
-    // `stable_timeout` distinguishes a give-up driven by repeated stable-state
-    // timeouts from the generic max-attempts / no-progress exhaustion reasons.
-    const incident: ChatRecoveryIncident = stored
-      ? { ...stored, status: "exhausted", reason: "stable_timeout" }
-      : {
-          // Silent-drop guard: the incident record is gone (no `incidentId`, or
-          // it was swept/deleted before this stale alarm fired). Synthesize a
-          // minimal incident so the turn STILL terminalizes through
-          // `onExhausted` instead of being dropped with no terminal UX.
-          incidentId: data?.incidentId ?? crypto.randomUUID(),
-          requestId: rootRequestId,
-          recoveryRootRequestId: rootRequestId,
-          recoveryKind:
-            callback === "_chatRecoveryRetry" ? "retry" : "continue",
-          attempt: config.maxAttempts,
-          maxAttempts: config.maxAttempts,
-          status: "exhausted",
-          firstSeenAt: Date.now(),
-          lastAttemptAt: Date.now(),
-          reason: "stable_timeout"
-        };
-
-    const streamId = this._resolveRecoveryStreamId(
-      incident.recoveryRootRequestId ?? incident.requestId
-    );
-    const partial = streamId
-      ? this._getPartialStreamText(streamId)
-      : { text: "", parts: [] as MessagePart[] };
-
-    // Terminalize BEFORE sealing the incident. The terminal write inside
-    // `_exhaustChatRecovery` (`_recordChatTerminal`) hits storage and can
-    // reject with a platform transient in exactly the window a give-up tends
-    // to run in (#1730: deploy reset / storage outage). Letting that throw
-    // propagate is deliberate: `Agent._executeScheduleCallback` defers the
-    // one-shot row on a platform transient, so the WHOLE give-up re-runs on a
-    // healthy isolate instead of half-sealing. Sealing first would arm the
-    // re-entry guard above and turn that re-run into a no-op — dropping the
-    // durable terminal record (#1645). The re-run is idempotent
-    // (`_recordChatTerminal` overwrites the same key); `onExhausted` + the
-    // banner may fire again — the documented at-least-once edge.
-    await this._exhaustChatRecovery(
-      incident,
-      config,
-      partial,
-      streamId,
-      incident.firstSeenAt
-    );
-
-    // Persist the sealed incident (retained for inspection / TTL sweep) so the
-    // re-entry guard above sees `exhausted` if a duplicate stale alarm fires.
-    // Best-effort: terminalization already fully succeeded, so a failed seal
-    // write costs at most a re-delivered banner on a duplicate alarm.
-    if (incidentKey) {
-      try {
-        await this.ctx.storage.put(incidentKey, incident);
-      } catch (writeError) {
-        console.error(
-          "[AIChatAgent] failed to persist sealed recovery incident during give-up",
-          writeError
-        );
-      }
-    }
+    // The give-up spine (read → re-entry-guard → build-exhausted-incident →
+    // terminalize-before-seal → best-effort seal) lives in the shared
+    // ChatRecoveryEngine; this is the package binding, symmetric with `Think`.
+    // `AIChatAgent` always gives up with `stable_timeout` (its only give-up
+    // trigger) and never sets `recoveredRequestId`, so the engine's unified
+    // root-id chain collapses to `originalRequestId ?? activeRoot ?? stored…`
+    // exactly as before. The terminalize + stream/partial hooks are wired on
+    // the adapter above. See design/rfc-chat-recovery-foundation.md.
+    return this._chatRecoveryEngine().exhaustRecoveryGiveUp({
+      callback,
+      data,
+      reason: "stable_timeout"
+    });
   }
 
   private _shouldRetryRecoveredPreStreamTurn(
