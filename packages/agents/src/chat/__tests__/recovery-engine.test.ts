@@ -119,6 +119,7 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
     const storage = new Map<string, ChatRecoveryIncident>();
     const events: ChatRecoveryIncidentEvent[] = [];
     const calls: string[] = [];
+    const recovering: Array<{ active: boolean; requestId?: string }> = [];
     let nowCalls = 0;
 
     const adapter: ChatRecoveryAdapter = {
@@ -148,9 +149,19 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
         storage.set(key, incident);
         return Promise.resolve();
       },
+      deleteIncident: (key) => {
+        calls.push("delete");
+        storage.delete(key);
+        return Promise.resolve();
+      },
       emitRecoveryEvent: (event) => {
         calls.push("emit");
         events.push(event);
+      },
+      setRecovering: (active, requestId) => {
+        calls.push("setRecovering");
+        recovering.push({ active, requestId });
+        return Promise.resolve();
       },
       onShouldKeepRecoveringError: () => {
         calls.push("shouldKeepRecoveringError");
@@ -163,7 +174,14 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
       };
     }
 
-    return { adapter, storage, events, calls, nowCalls: () => nowCalls };
+    return {
+      adapter,
+      storage,
+      events,
+      calls,
+      recovering,
+      nowCalls: () => nowCalls
+    };
   }
 
   const input = {
@@ -241,6 +259,156 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
     expect(fake.calls).not.toContain("ensureInteractionStateLoaded");
     const expectedKey = chatRecoveryIncidentKey(chatRecoveryIncidentId(input));
     expect(fake.storage.get(expectedKey)).toEqual(result.incident);
+  });
+});
+
+/**
+ * Layer-2 transition seam test for `ChatRecoveryEngine.updateIncident` — the
+ * twin of `beginIncident` that both `AIChatAgent` and `Think` now delegate to.
+ * Pins the state-machine shape: completed drops the record, other states
+ * persist; completed/skipped/failed emit the matching lifecycle event (with the
+ * cause for skipped/failed); and the #1620 "recovering…" status is set on
+ * `scheduled` and cleared on every terminal state.
+ */
+describe("ChatRecoveryEngine.updateIncident (fake adapter)", () => {
+  function makeFakeAdapter() {
+    const storage = new Map<string, ChatRecoveryIncident>();
+    const events: ChatRecoveryIncidentEvent[] = [];
+    const recovering: Array<{ active: boolean; requestId?: string }> = [];
+
+    const adapter: ChatRecoveryAdapter = {
+      resolveConfig: () => resolveChatRecoveryConfig(undefined),
+      now: () => 1_000,
+      sweepStaleIncidents: () => Promise.resolve(),
+      getIncident: (key) => Promise.resolve(storage.get(key) ?? null),
+      readProgress: () => Promise.resolve(0),
+      isAwaitingClientInteraction: () => false,
+      putIncident: (key, incident) => {
+        storage.set(key, incident);
+        return Promise.resolve();
+      },
+      deleteIncident: (key) => {
+        storage.delete(key);
+        return Promise.resolve();
+      },
+      emitRecoveryEvent: (event) => {
+        events.push(event);
+      },
+      setRecovering: (active, requestId) => {
+        recovering.push({ active, requestId });
+        return Promise.resolve();
+      },
+      onShouldKeepRecoveringError: () => {}
+    };
+
+    return { adapter, storage, events, recovering };
+  }
+
+  function seedIncident(
+    storage: Map<string, ChatRecoveryIncident>,
+    overrides: Partial<ChatRecoveryIncident> = {}
+  ): { incidentId: string; key: string; incident: ChatRecoveryIncident } {
+    const incident: ChatRecoveryIncident = {
+      incidentId: "root-1:user-1",
+      requestId: "req-1",
+      recoveryRootRequestId: "root-1",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "attempting",
+      firstSeenAt: 1_000,
+      lastAttemptAt: 1_000,
+      ...overrides
+    };
+    const key = chatRecoveryIncidentKey(incident.incidentId);
+    storage.set(key, incident);
+    return { incidentId: incident.incidentId, key, incident };
+  }
+
+  it("marks the turn recovering on a scheduled transition (no terminal event)", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    const { incidentId, key } = seedIncident(fake.storage);
+
+    await engine.updateIncident(incidentId, "scheduled");
+
+    // Persisted with the new status (not deleted).
+    expect(fake.storage.get(key)?.status).toBe("scheduled");
+    // Recovering set, keyed by the recovery-root request id.
+    expect(fake.recovering).toEqual([{ active: true, requestId: "root-1" }]);
+    // No completed/skipped/failed event for a scheduled transition.
+    expect(fake.events).toHaveLength(0);
+  });
+
+  it("drops the record, emits completed, and clears recovering on completed", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    const { incidentId, key } = seedIncident(fake.storage);
+
+    await engine.updateIncident(incidentId, "completed");
+
+    // A completed recovery is terminal — the record is dropped, not retained.
+    expect(fake.storage.has(key)).toBe(false);
+    expect(fake.events).toHaveLength(1);
+    expect(fake.events[0]).toMatchObject({
+      type: "chat:recovery:completed",
+      incidentId,
+      requestId: "req-1"
+    });
+    expect(fake.events[0].reason).toBeUndefined();
+    expect(fake.recovering).toEqual([{ active: false, requestId: undefined }]);
+  });
+
+  it("persists, emits failed WITH the cause, and clears recovering on failed", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    const { incidentId, key } = seedIncident(fake.storage);
+
+    await engine.updateIncident(incidentId, "failed", "boom");
+
+    // Non-completed terminal states are retained (budget survives restarts).
+    expect(fake.storage.get(key)?.status).toBe("failed");
+    expect(fake.storage.get(key)?.reason).toBe("boom");
+    expect(fake.events[0]).toMatchObject({
+      type: "chat:recovery:failed",
+      reason: "boom"
+    });
+    expect(fake.recovering).toEqual([{ active: false, requestId: undefined }]);
+  });
+
+  it("emits skipped (with cause) and clears recovering on skipped", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+    const { incidentId } = seedIncident(fake.storage);
+
+    await engine.updateIncident(incidentId, "skipped", "conversation_changed");
+
+    expect(fake.events[0]).toMatchObject({
+      type: "chat:recovery:skipped",
+      reason: "conversation_changed"
+    });
+    expect(fake.recovering).toEqual([{ active: false, requestId: undefined }]);
+  });
+
+  it("is a no-op when the incident id is undefined", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+
+    await engine.updateIncident(undefined, "completed");
+
+    expect(fake.events).toHaveLength(0);
+    expect(fake.recovering).toHaveLength(0);
+  });
+
+  it("is a no-op when no record exists for the incident", async () => {
+    const fake = makeFakeAdapter();
+    const engine = new ChatRecoveryEngine(fake.adapter);
+
+    await engine.updateIncident("missing:incident", "failed", "boom");
+
+    expect(fake.events).toHaveLength(0);
+    expect(fake.recovering).toHaveLength(0);
+    expect(fake.storage.size).toBe(0);
   });
 });
 

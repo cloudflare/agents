@@ -1378,19 +1378,47 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Slice 2e (incident-update transitions behind the engine)_ — The transition
+  twin of slice 2a: `ChatRecoveryEngine.updateIncident(incidentId, status,
+reason?)` now owns the incident state-machine transitions both packages
+  duplicated near byte-for-byte (`completed` → delete the record; other states →
+  persist; emit the `completed`/`skipped`/`failed` lifecycle event; drive the
+  #1620 "recovering…" status — set on `scheduled`, cleared on every terminal).
+  Two new adapter hooks carry the package-owned I/O: `deleteIncident(key)` and
+  `setRecovering(active, requestId?)` (the latter delegates to each package's
+  existing `_setChatRecovering`, so its staleness/idempotency/broadcast logic
+  stays package-owned). `ChatRecoveryIncidentEvent` widened to the five recovery
+  event types with an optional `reason`; `emitRecoveryEvent` forwards the cause
+  for `skipped`/`failed`. Both `_updateChatRecoveryIncident` methods are now thin
+  adapter bindings (~50 lines deleted from each package). Review findings: (1)
+  key derivation verified byte-identical (`chatRecoveryIncidentKey` ==
+  `_chatRecoveryIncidentKey`), so the engine computing the key itself is safe;
+  (2) `getIncident` normalizes `undefined`→`null` and the engine's truthy guard
+  handles both, matching the old `storage.get<T>` undefined check; (3)
+  `_emit`'s payload is an untyped `Record`, so widening the event union carries
+  no per-type payload risk; (4) `_chatRecoveryIncidentKey` stays referenced by
+  the resume-handshake paths in both packages — not dead code; (5)
+  `deleteIncident` discards `storage.delete`'s `Promise<boolean>` to satisfy the
+  `Promise<void>` hook (the one typecheck catch, fixed). Tests: 6 new
+  `updateIncident` fake-adapter cases (scheduled→set+persist+no-event,
+  completed→delete+emit+clear, failed/skipped→persist+emit-with-cause+clear, and
+  both no-op guards) — agents `chat` project 22 green. Validation: ai-chat 683 +
+  think (workers + react) suites green; repo typecheck 111; `pnpm run check`
+  clean (sherif/exports/oxfmt/oxlint). Zero behavior change.
+
 - _Smoke test (slice 2d, manual) + deferred follow-up_ — Verified recovery +
   recovering-on-connect end-to-end in `examples/ai-chat` (which needed
   `chatRecovery = true` added — `AIChatAgent` defaults it `false`; the example is
   a minimal showcase). Killing `wrangler dev` mid-story then refreshing now shows
   the "recovering…" status on reconnect and the turn resumes from its persisted
   partial. **Deferred follow-up (pre-existing, NOT introduced here; user opted to
-  track, not fix now):** on the recovery *continue* path with a reasoning model,
+  track, not fix now):** on the recovery _continue_ path with a reasoning model,
   if the model emits NEW reasoning after a partial text, the live stream briefly
-  renders that reasoning as a second block *under* the content, then it "jumps"
+  renders that reasoning as a second block _under_ the content, then it "jumps"
   back on top when the final persisted message replaces the live stream. Root
   cause: the continuation merge in `AIChatAgent` (`index.ts`, the
   `continuationReasoningResumed` branch, ~L5660-5708) fully suppresses
-  `text-start` (so text merges seamlessly) but can only *skip the server apply*
+  `text-start` (so text merges seamlessly) but can only _skip the server apply_
   for `reasoning-start` while still forwarding it to the client — AI SDK v6
   requires a `reasoning-start` before any `reasoning-delta`, and the client's
   active part at that moment is the text, not the earlier reasoning block. So the
@@ -1765,6 +1793,15 @@ Sliced for safety (this is the riskiest phase — see the working cadence):
       `durable-chat-recovery` unit test (`getRecoveringConnectFrameForTest`);
       real-socket exercise: `chat-recovering-status` e2e (opportunistic, since
       the replay window is timing-bound). Minor changeset shipped.
+- [x] **Slice 2e — incident-update transitions.** `recovery-engine.ts` ·
+      `ChatRecoveryEngine.updateIncident` (the transition twin of `beginIncident`)
+      now owns the delete-on-completed / persist / event-emit / #1620-flag
+      state-machine both packages duplicated; two new adapter hooks
+      (`deleteIncident`, `setRecovering`) carry the package-owned I/O.
+      `ChatRecoveryIncidentEvent` widened to the five recovery event types +
+      optional `reason`. Both `_updateChatRecoveryIncident` are thin bindings now
+      (~50 lines deleted each). Layer-2 fake-adapter test pins all transitions +
+      both no-op guards. Zero behavior change.
 
 Work:
 

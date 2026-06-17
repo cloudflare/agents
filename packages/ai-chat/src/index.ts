@@ -3768,14 +3768,20 @@ export class AIChatAgent<
       // not stuck, so the engine keeps it budget-free.
       isAwaitingClientInteraction: () => this.hasPendingClientInteraction(),
       putIncident: (key, incident) => this.ctx.storage.put(key, incident),
+      deleteIncident: async (key) => {
+        await this.ctx.storage.delete(key);
+      },
       emitRecoveryEvent: (event) =>
         this._emit(event.type, {
           incidentId: event.incidentId,
           requestId: event.requestId,
           attempt: event.attempt,
           maxAttempts: event.maxAttempts,
-          recoveryKind: event.recoveryKind
+          recoveryKind: event.recoveryKind,
+          ...(event.reason ? { reason: event.reason } : {})
         }),
+      setRecovering: (active, requestId) =>
+        this._setChatRecovering(active, requestId),
       onShouldKeepRecoveringError: (error) =>
         console.error(
           "[AIChatAgent] chatRecovery shouldKeepRecovering hook threw",
@@ -3809,57 +3815,15 @@ export class AIChatAgent<
     status: ChatRecoveryIncident["status"],
     reason?: string
   ): Promise<void> {
-    if (!incidentId) return;
-    const key = this._chatRecoveryIncidentKey(incidentId);
-    const incident = await this.ctx.storage.get<ChatRecoveryIncident>(key);
-    if (!incident) return;
-    // A completed recovery is terminal and will not be retried, so drop the
-    // record instead of leaving it in storage forever. Non-completed states
-    // (scheduled/skipped/failed) are retained so the attempt budget survives
-    // across restarts; the TTL sweep eventually reclaims abandoned ones.
-    if (status === "completed") {
-      await this.ctx.storage.delete(key);
-    } else {
-      const updated: ChatRecoveryIncident = {
-        ...incident,
-        status,
-        ...(reason ? { reason } : {})
-      };
-      await this.ctx.storage.put(key, updated);
-    }
-    const eventType =
-      status === "completed"
-        ? "chat:recovery:completed"
-        : status === "skipped"
-          ? "chat:recovery:skipped"
-          : status === "failed"
-            ? "chat:recovery:failed"
-            : undefined;
-    if (eventType) {
-      this._emit(eventType, {
-        incidentId,
-        requestId: incident.requestId,
-        attempt: incident.attempt,
-        maxAttempts: incident.maxAttempts,
-        recoveryKind: incident.recoveryKind,
-        ...(reason ? { reason } : {})
-      });
-    }
-
-    // Live "recovering…" status (#1620): a scheduled continuation/retry means
-    // recovery is in progress; a terminal incident state resolves it.
-    if (status === "scheduled") {
-      await this._setChatRecovering(
-        true,
-        incident.recoveryRootRequestId ?? incident.requestId
-      );
-    } else if (
-      status === "completed" ||
-      status === "skipped" ||
-      status === "failed"
-    ) {
-      await this._setChatRecovering(false);
-    }
+    // Incident state-machine transitions (delete-on-completed vs persist, the
+    // completed/skipped/failed event emit, and the #1620 recovering-flag) live
+    // in the shared ChatRecoveryEngine; this method is the package's adapter
+    // binding. See design/rfc-chat-recovery-foundation.md.
+    return this._chatRecoveryEngine().updateIncident(
+      incidentId,
+      status,
+      reason
+    );
   }
 
   private async _exhaustChatRecovery(

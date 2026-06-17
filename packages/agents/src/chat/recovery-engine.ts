@@ -112,8 +112,22 @@ export interface ChatRecoveryAdapter {
   isAwaitingClientInteraction(): boolean;
   /** Persist the evaluated incident under `key`. */
   putIncident(key: string, incident: ChatRecoveryIncident): Promise<void>;
-  /** Broadcast a lifecycle event produced by the budget evaluation. */
+  /**
+   * Delete the incident record under `key`. The engine calls this on the
+   * terminal `completed` transition (a completed recovery is never retried, so
+   * its record is dropped rather than left in storage forever).
+   */
+  deleteIncident(key: string): Promise<void>;
+  /** Broadcast a lifecycle event produced by the evaluation or a transition. */
   emitRecoveryEvent(event: ChatRecoveryIncidentEvent): void;
+  /**
+   * Set or clear the live "recovering…" status (#1620). The engine calls this on
+   * the incident transitions: `scheduled` → active (keyed by the recovery-root
+   * request id, falling back to the incident's request id), and
+   * `completed`/`skipped`/`failed` → cleared. The package owns the underlying
+   * staleness / idempotency / broadcast I/O.
+   */
+  setRecovering(active: boolean, requestId?: string): Promise<void>;
   /** Report a throw from the caller's `shouldKeepRecovering` hook. */
   onShouldKeepRecoveringError(error: unknown): void;
 }
@@ -165,6 +179,75 @@ export class ChatRecoveryEngine {
       adapter.emitRecoveryEvent(event);
     }
     return { incident, config, exhausted };
+  }
+
+  /**
+   * Apply a status transition to the recovery incident `incidentId`:
+   *
+   * - `completed` → drop the record (terminal, never retried);
+   * - any other status → persist the new status (and `reason`), so the attempt
+   *   budget survives restarts until the TTL sweep reclaims it;
+   * - emit the matching `completed`/`skipped`/`failed` lifecycle event; and
+   * - drive the live "recovering…" status (#1620): `scheduled` marks it active
+   *   (keyed by the recovery-root request id), terminal states clear it.
+   *
+   * No-op when `incidentId` is undefined or the record is already gone. This is
+   * the transition twin of {@link beginIncident}: all I/O is adapter-owned, the
+   * engine owns only the state-machine shape.
+   */
+  async updateIncident(
+    incidentId: string | undefined,
+    status: ChatRecoveryIncident["status"],
+    reason?: string
+  ): Promise<void> {
+    if (!incidentId) return;
+    const { adapter } = this;
+    const key = chatRecoveryIncidentKey(incidentId);
+    const incident = await adapter.getIncident(key);
+    if (!incident) return;
+
+    if (status === "completed") {
+      await adapter.deleteIncident(key);
+    } else {
+      await adapter.putIncident(key, {
+        ...incident,
+        status,
+        ...(reason ? { reason } : {})
+      });
+    }
+
+    const eventType =
+      status === "completed"
+        ? "chat:recovery:completed"
+        : status === "skipped"
+          ? "chat:recovery:skipped"
+          : status === "failed"
+            ? "chat:recovery:failed"
+            : undefined;
+    if (eventType) {
+      adapter.emitRecoveryEvent({
+        type: eventType,
+        incidentId,
+        requestId: incident.requestId,
+        attempt: incident.attempt,
+        maxAttempts: incident.maxAttempts,
+        recoveryKind: incident.recoveryKind,
+        ...(reason ? { reason } : {})
+      });
+    }
+
+    if (status === "scheduled") {
+      await adapter.setRecovering(
+        true,
+        incident.recoveryRootRequestId ?? incident.requestId
+      );
+    } else if (
+      status === "completed" ||
+      status === "skipped" ||
+      status === "failed"
+    ) {
+      await adapter.setRecovering(false);
+    }
   }
 }
 

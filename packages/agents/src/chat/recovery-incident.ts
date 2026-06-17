@@ -253,14 +253,26 @@ export function selectStaleIncidentKeys(
 
 // ── Incident budget evaluation ─────────────────────────────────────────────
 
-/** Observability event produced by an incident evaluation, emitted by the caller. */
+/**
+ * Observability event produced by an incident evaluation or a status
+ * transition, emitted by the caller. The `detected`/`attempt` events come from
+ * the budget evaluation (begin path); the `completed`/`skipped`/`failed` events
+ * come from `ChatRecoveryEngine.updateIncident`. `reason` is carried only by the
+ * `skipped`/`failed` transitions that record a cause.
+ */
 export type ChatRecoveryIncidentEvent = {
-  type: "chat:recovery:detected" | "chat:recovery:attempt";
+  type:
+    | "chat:recovery:detected"
+    | "chat:recovery:attempt"
+    | "chat:recovery:completed"
+    | "chat:recovery:skipped"
+    | "chat:recovery:failed";
   incidentId: string;
   requestId: string;
   attempt: number;
   maxAttempts: number;
   recoveryKind: ChatRecoveryKind;
+  reason?: string;
 };
 
 export type EvaluateChatRecoveryIncidentInput = {
