@@ -10,6 +10,35 @@ Related:
 - [think-vs-aichat.md](./think-vs-aichat.md) — boundary with AIChatAgent
 - Strategy plan: `think_api_strategy` (the parent plan this RFC implements)
 
+## Status and dependencies (read first)
+
+This is one of three sibling API RFCs (turns, actions, channels) meant to be
+picked up in **separate** sessions. Build them in this order — **Turns →
+Actions → Channels** — because the later two depend on seams this RFC defines:
+
+- **Actions RFC** needs the `TurnContext`/recovery taxonomy and the
+  `recovery-continue`/`recovery-retry` triggers defined here, and authorizes at
+  `_admitTurn` time.
+- **Channels RFC** needs `TurnSpec.channelContext`, `runTurn({ channel })`, and
+  `addMessages()` (for `informModel`).
+
+What is already built vs. still open in **this** RFC:
+
+- ✅ **`addMessages()` — SHIPPED** (`packages/think/src/think.ts`, method
+  `addMessages` ~`think.ts:6986`; `AddMessagesOptions` exported ~`think.ts:913`).
+  Section 3 below is the spec it shipped against; it is kept for context and as
+  the upsert/append/idempotency contract — **do not re-implement it.** Any
+  divergence found in code is the source of truth, not this section.
+- ⛔ **`runTurn()` + `TurnSpec`/`_admitTurn` — NOT BUILT.** This is the remaining
+  scope of this RFC and what a fresh session should implement.
+
+Recovery-RFC gate (see "Coordination with the chat-recovery RFC"): the
+`runTurn` *facade* (suggested order step 2) can land anytime, but the
+`_admitTurn`/`TurnSpec` *extraction* should follow chat-recovery RFC Phases 0–1
+(ideally Phase 3) so it targets `ThinkRecoveryAdapter`
+(`classifyRecoveredTurn`/`resolveStreamForRecovery`) rather than the
+pre-refactor private methods.
+
 ## The problem
 
 Every model turn in Think converges on one private method,
@@ -92,12 +121,12 @@ turn.
 
 ## The proposal
 
-Three additions, in order of importance:
+Three additions, in order of importance (#3 is already shipped — see Status):
 
-1. `runTurn(options)` — public unifying turn API.
+1. `runTurn(options)` — public unifying turn API. **(not built)**
 2. `TurnSpec` + an internal `_admitTurn(spec)` routine — the shared admission
-   path the existing methods delegate to.
-3. `addMessages(...)` — public no-turn transcript write.
+   path the existing methods delegate to. **(not built)**
+3. `addMessages(...)` — public no-turn transcript write. **(✅ shipped)**
 
 ### 1. `runTurn(options)`
 
@@ -389,7 +418,12 @@ plus a call to `_admitTurn`. No public signature changes.
 This table is the contract for "did the extraction drop a path?" — every row
 must remain behavior-identical (see Testing).
 
-### 3. `addMessages(...)` — no-turn transcript write
+### 3. `addMessages(...)` — no-turn transcript write — ✅ SHIPPED
+
+> **Shipped** in `packages/think/src/think.ts` (`addMessages` ~`think.ts:6986`,
+> `AddMessagesOptions` exported ~`think.ts:913`). This section is the spec it was
+> built against; treat the code as source of truth. Listed here so the `runTurn`
+> work has the full picture of the no-turn write it complements.
 
 Public method to add messages to history **without** starting a model turn.
 Distinct name from AIChatAgent's `persistMessages()` to avoid a
@@ -671,8 +705,9 @@ Where things live:
 
 Suggested implementation order (decouples from the recovery RFC's timeline):
 
-1. `addMessages()` — has no dependency on the admission refactor; ship first
-   and close the `persistMessages` doc gap (quick wins `qw-docs` + `qw-addmessages`).
+1. ✅ `addMessages()` — **done** (shipped ahead of the admission refactor; it has
+   no dependency on it, and closed the `persistMessages` doc gap). Remaining work
+   starts at step 2.
 2. `runTurn()` as a thin facade delegating to the existing
    `chat`/`saveMessages`/`submitMessages`/`continueLastTurn`. User-facing "smaller
    to learn" win with zero internal churn; safe even if the recovery RFC slips.

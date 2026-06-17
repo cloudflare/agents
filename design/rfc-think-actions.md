@@ -10,6 +10,28 @@ Related:
 - [agent-tools.md](./agent-tools.md) — sub-agent orchestration (the `delegated-agent` action kind)
 - Strategy plan: `think_api_strategy`
 
+## Status and dependencies (read first)
+
+Second of three sibling API RFCs (turns, actions, channels) to be picked up in
+**separate** sessions. Recommended order: **Turns → Actions → Channels.**
+
+- ⛔ **Nothing in this RFC is built yet** — confirmed absent from
+  `packages/think/src/think.ts` (`getActions`, `action()`, `attachReply`,
+  `cf_think_action_ledger` do not exist).
+- **Depends on the Turns RFC** for `TurnContext`, the `recovery-continue`/
+  `recovery-retry` triggers, and `_admitTurn` (authorization resolves once per
+  turn at admission). Build Turns first.
+- **Depends on the chat-recovery RFC** for the ledger's replay-safety: the
+  recovery-replay tests and the §7 recovery taxonomy reconcile with
+  `classifyRecoveredTurn` and should be sequenced **after** chat-recovery RFC
+  Phase 3.
+- **Partial early win available:** suggested-order step 1 (the `action()`
+  descriptor + `actionToTool` guardrails, no permissions/ledger) is purely
+  additive and can land before Turns/recovery; the ledger (§6) and recovery
+  taxonomy (§7) are the parts that gate on them.
+- **Produces a seam the Channels RFC consumes:** `ctx.attachReply()` (§9) is
+  inert until Channels/Voice render it.
+
 ## The problem
 
 Think tools today are plain AI SDK tools returned from `getTools(): ToolSet`

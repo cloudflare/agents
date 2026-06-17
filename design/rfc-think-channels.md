@@ -10,6 +10,29 @@ Related:
 - [think.md](./think.md) — Think design doc
 - Strategy plan: `think_api_strategy`
 
+## Status and dependencies (read first)
+
+Third of three sibling API RFCs (turns, actions, channels) to be picked up in
+**separate** sessions. Recommended order: **Turns → Actions → Channels** — this
+one lands last because it consumes seams from both.
+
+- ⛔ **Nothing in this RFC is built yet** — confirmed absent from
+  `packages/think/src/think.ts` (`configureChannels`, `deliverNotice` do not
+  exist). The messenger runtime it generalizes (`packages/think/src/messengers/`)
+  is fully built and unchanged.
+- **Depends on the Turns RFC** for `TurnSpec.channelContext`,
+  `runTurn({ channel })`, and `addMessages()` (the `informModel` write —
+  `addMessages` is already shipped).
+- **Depends on the Actions RFC** for `ctx.attachReply()` (consumed at delivery,
+  §6) — but only suggested-order step 5 needs it.
+- **Depends on the chat-recovery RFC** to preserve `tryHandleNonChatFiberRecovery`
+  and the messenger-reply snapshot contract, and to keep notices out of the
+  incident path.
+- **Partial early win available:** suggested-order step 1
+  (`deliverNotice()` + `informModel`) only needs the already-shipped
+  `addMessages()` plus the existing web/messenger delivery surfaces, so it can
+  ship independently of the larger messengers→channels rename.
+
 ## The problem
 
 Think already has a working multi-surface runtime, but it is named and shaped as
