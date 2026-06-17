@@ -111,7 +111,15 @@ function openBrowser(url: string): void {
 
 /** Resolve a file under `root`, guarding against path traversal. */
 function safeResolve(root: string, urlPath: string): string | null {
-  const decoded = decodeURIComponent(urlPath.split("?")[0]);
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(urlPath.split("?")[0]);
+  } catch {
+    // Malformed percent-encoding (e.g. `/%` or `/%zz`) makes decodeURIComponent
+    // throw. Treat it as unresolvable (404) rather than letting the URIError
+    // escape the request handler and crash the server.
+    return null;
+  }
   const resolved = path.resolve(root, `.${decoded}`);
   if (resolved !== root && !resolved.startsWith(root + path.sep)) return null;
   return resolved;
