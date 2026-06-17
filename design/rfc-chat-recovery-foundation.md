@@ -2017,6 +2017,55 @@ Once both packages are wired through the engine:
   entry points, or adapter behavior.
 - Update comments that currently say helpers mirror the other package.
 
+#### Slice plan (low-risk → high-risk; map: see Phase 4 dedup analysis)
+
+The Phase 4 surface was mapped precisely before any code change. The duplication
+falls into four bands, ordered here from mechanical/safe to behavioral/risky so
+each slice ships with its own review + e2e gate before the next begins:
+
+- **Slice 4a — shared types + pure key/sweep helpers (mechanical, zero behavior).**
+  Both packages re-declare the `ChatRecoveryIncident` type (`think.ts:623–675`,
+  `index.ts:111–157`) when a canonical one exists in
+  `agents/chat/recovery-incident.ts`; both re-implement `_chatRecoveryIncidentKey`
+  (100% dup of `chatRecoveryIncidentKey`) and `_sweepStaleChatRecoveryIncidents`
+  (inlines `selectStaleIncidentKeys`). Replace local copies with the shared
+  symbols. Pure type/identity/selection — no control-flow change.
+
+- **Slice 4b — centralize the "schedule a recovery callback" triplet.** The block
+  `updateIncident("scheduled")` + `_emit("chat:recovery:scheduled")` +
+  `schedule(callback, …, chatRecoverySchedulePolicy("initial"))` appears ~4× in
+  AIChat and ~3× in Think fiber recovery, plus once in each
+  `_routeStallToBoundedRecovery`. Add one engine method
+  (`engine.scheduleRecovery(incident, callback, data, reason)`) that owns the
+  transition + emit + idempotent schedule, and route every call site through it.
+  Behavior-preserving; collapses the most-copied block first so the later
+  body-collapse is smaller.
+
+- **Slice 4c — move stable-timeout incident mutations behind the engine.**
+  `_rescheduleRecoveryAfterStableTimeout` (~98% dup) and the give-up seal
+  (`_exhaustRecoveryGiveUp` / `_exhaustRecoveryAfterStableTimeout`, ~90% dup)
+  currently bypass `updateIncident`/`evaluateChatRecoveryIncident` with direct
+  `storage.put`s carrying `reason:"stable_timeout_retry"` and a non-idempotent
+  schedule. Lift the shared mutation into the engine while keeping each package's
+  `_exhaustChatRecovery` terminal-UX ordering (Think broadcast-first vs AIChat
+  persist-first) package-owned.
+
+- **Slice 4d — grow the engine fiber-recovery dispatch skeleton (the big one).**
+  The two `_handleInternalFiberRecovery` bodies (`think.ts:9811–10097` ~287 lines;
+  `index.ts:4056–4332` ~277 lines) are ~70% structurally identical (fiber gate,
+  requestId parse, begin-incident, exhausted→exhaust, onChatRecovery, settled-tool
+  persist invariant #1631, retry/continue/skip decision, catch→failed). Collapse
+  the shared spine into the engine, leaving package hooks ONLY for the genuinely
+  package-specific pieces the map flagged: snapshot key + turn kind, streamStatus
+  read (Think) vs not (AIChat), recovery-kind detection, stream-completion API,
+  Think submission lifecycle + terminal record ordering + session-leaf vs
+  flat-messages leaf check, AIChat's lost-partial third retry branch, and Think's
+  `_handleRecoveryCallbackError`. Highest risk (the wake path) — its own e2e gate.
+
+Each slice: deep review for edge cases, run the local + (where auth permits) real
+e2e suites, commit with a detailed message. Slice 4d does not start until 4a–4c
+are green.
+
 Exit criteria:
 
 - Code search shows no duplicated `_beginChatRecoveryIncident` style engines in
