@@ -62,6 +62,10 @@ import {
   selectStaleIncidentKeys,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   type ChatRecoveryAdapter,
+  type ChatFiberWakeHooks,
+  type ResolvedRecoveryStream,
+  type ClassifyRecoveredTurnInput,
+  type DispatchRecoveredTurnInput,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryIncident,
   type ChatRecoveryKind
@@ -109,6 +113,14 @@ type ChatRecoveryContinueData = {
   lastBody?: Record<string, unknown> | null;
   lastClientTools?: ClientToolSchema[] | null;
 };
+
+/**
+ * `AIChatAgent`'s `classifyRecoveredTurn` detail (the {@link ChatFiberWakeHooks}
+ * generic). `shouldRetryPreStream` is the only classification bit the dispatch
+ * decision needs that it cannot cheaply recompute post-persist; the lost-partial
+ * branch is re-derived in `_dispatchRecoveredChatTurn` from the (now-updated) leaf.
+ */
+type AIChatRecoveryClassification = { shouldRetryPreStream: boolean };
 
 // `ChatRecoveryIncident` / `ChatRecoveryKind` / `CHAT_RECOVERY_INCIDENT_KEY_PREFIX`
 // are the canonical shared symbols from `agents/chat` (imported above); the
@@ -3688,21 +3700,6 @@ export class AIChatAgent<
    *  `{ persist: false }` recovery return would silently discard.
    *  `convertToModelMessages` treats `output-available` / `output-error` /
    *  `output-denied` (or a part carrying `output`/`result`) as settled. */
-  private _partialHasSettledToolResults(parts: MessagePart[]): boolean {
-    return parts.some((part) => {
-      const record = part as Record<string, unknown>;
-      const type = typeof record.type === "string" ? record.type : "";
-      if (!(type.startsWith("tool-") || type === "dynamic-tool")) return false;
-      if ("output" in record || "result" in record) return true;
-      const state = typeof record.state === "string" ? record.state : "";
-      return (
-        state === "output-available" ||
-        state === "output-error" ||
-        state === "output-denied"
-      );
-    });
-  }
-
   /** Sweep recovery incidents that have been inactive past the TTL. */
   private async _sweepStaleChatRecoveryIncidents(now: number): Promise<void> {
     const entries = await this.ctx.storage.list<ChatRecoveryIncident>({
@@ -4030,28 +4027,71 @@ export class AIChatAgent<
   protected override async _handleInternalFiberRecovery(
     ctx: FiberRecoveryContext
   ): Promise<boolean> {
-    // Shared non-chat fiber dispatch seam (symmetric with `Think`). `AIChatAgent`
-    // has no non-chat fibers, so its adapter omits the hook and this is always a
-    // no-op (`false`) — but routing through the engine keeps both packages on the
-    // identical recovery entry structure.
-    if (await this._chatRecoveryEngine().handleNonChatFiber(ctx)) {
-      return true;
-    }
+    // The wake-recovery lifecycle (non-chat dispatch → chat gate → unwrap →
+    // stream/partial → classify → begin-incident → exhausted-branch →
+    // onChatRecovery → persist → complete → dispatch → catch→failed) lives in the
+    // shared ChatRecoveryEngine; this binds the divergent organs as wake hooks,
+    // symmetric with `Think`. `AIChatAgent` tracks no terminal stream status
+    // (`streamStatus: undefined`, so every terminal-stream branch is dead) and
+    // has no submission layer, so its dispatch is a leaf-only retry/continue/skip.
+    // See design/rfc-chat-recovery-foundation.md.
+    return this._chatRecoveryEngine().handleChatFiberRecovery(ctx, {
+      chatFiberPrefix: () =>
+        (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME + ":",
+      unwrapRecoverySnapshot: (fiber) => {
+        const { snapshot, user } = unwrapChatFiberSnapshot<"ai-chat-turn">(
+          "__cfAIChatFiberSnapshot",
+          fiber.snapshot,
+          "ai-chat-turn"
+        );
+        return { snapshot, recoveryData: user };
+      },
+      resolveRecoveryStream: (requestId) =>
+        this._resolveAIChatRecoveryStream(requestId),
+      classifyRecoveredTurn: (input) => this._classifyRecoveredChatTurn(input),
+      invokeOnChatRecovery: (input) =>
+        this.onChatRecovery({
+          incidentId: input.incident.incidentId,
+          recoveryRootRequestId: input.recoveryRootRequestId,
+          attempt: input.incident.attempt,
+          maxAttempts: input.incident.maxAttempts,
+          recoveryKind: input.recoveryKind,
+          streamId: input.streamId,
+          requestId: input.requestId,
+          partialText: input.partial.text,
+          partialParts: input.partial.parts,
+          recoveryData: input.recoveryData,
+          messages: [...this.messages],
+          lastBody: input.snapshot?.lastBody ?? this._lastBody,
+          lastClientTools:
+            input.snapshot?.lastClientTools ?? this._lastClientTools,
+          createdAt: input.createdAt
+        }),
+      // Only persist while the stream is still active. The ACK handler (client
+      // reconnect → replayChunks) may have already persisted + completed the
+      // orphaned stream before fiber recovery runs; persisting again on the same
+      // chunks would double the assistant message's parts. (The engine ANDs this
+      // with the shared never-drop-settled-work clause.)
+      shouldPersistOrphanedPartial: (input) => input.streamStillActive,
+      persistOrphanedStream: (streamId) =>
+        this._persistOrphanedStream(streamId),
+      completeRecoveredStream: (streamId) => {
+        this._resumableStream.complete(streamId);
+        void this._ensureStreamCleanupScheduled();
+      },
+      dispatchRecoveredTurn: (input) => this._dispatchRecoveredChatTurn(input)
+    } satisfies ChatFiberWakeHooks<AIChatRecoveryClassification>);
+  }
 
-    const chatPrefix =
-      (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME + ":";
-    if (!ctx.name.startsWith(chatPrefix)) {
-      return false;
-    }
-
-    const requestId = ctx.name.slice(chatPrefix.length);
-    const { snapshot: recoverySnapshot, user: recoveryData } =
-      unwrapChatFiberSnapshot<"ai-chat-turn">(
-        "__cfAIChatFiberSnapshot",
-        ctx.snapshot,
-        "ai-chat-turn"
-      );
-
+  /**
+   * Resolve the orphaned stream for a recovered chat turn. `AIChatAgent` does not
+   * model terminal stream status, so `streamStatus` is left `undefined` (keeping
+   * the engine's terminal-stream branches dead here) — see the "substrate
+   * capabilities are optional" decision in the RFC.
+   */
+  private _resolveAIChatRecoveryStream(
+    requestId: string
+  ): ResolvedRecoveryStream {
     let streamId = "";
     if (requestId) {
       const rows = this.sql<{ id: string }>`
@@ -4066,211 +4106,129 @@ export class AIChatAgent<
     if (!streamId && this._resumableStream.hasActiveStream()) {
       streamId = this._resumableStream.activeStreamId ?? "";
     }
-
-    const partial = streamId
-      ? this._getPartialStreamText(streamId)
-      : { text: "", parts: [] as MessagePart[] };
-
-    // Only persist while the stream is still active. The ACK handler (client
-    // reconnect → replayChunks) may have already persisted + completed the
-    // orphaned stream before fiber recovery runs; persisting again on the same
-    // chunks would double the assistant message's parts.
-    const streamStillActive =
+    const streamStillActive = Boolean(
       streamId &&
       this._resumableStream.hasActiveStream() &&
-      this._resumableStream.activeStreamId === streamId;
-
-    const shouldRetryPreStream = this._shouldRetryRecoveredPreStreamTurn(
-      recoverySnapshot,
-      streamId ?? "",
-      partial
+      this._resumableStream.activeStreamId === streamId
     );
-    // A new turn whose stream produced no assistant partial at all (interrupted
-    // before the first chunk materialized) will be re-run fresh rather than
-    // continued (#1691) — and that is knowable *before* `onChatRecovery`,
-    // because an empty partial persists nothing and leaves the conversation
-    // leaf at the user message regardless of what the hook returns. Report it
-    // as "retry" so the hook and the incident match the action that follows.
-    // The sibling `persist: false` case (a NON-empty partial the hook chooses
-    // to discard) only becomes a retry based on the hook's own return value, so
-    // it cannot be pre-detected here — the hook still sees "continue" there and
-    // only the `chat:recovery:scheduled` event reflects the final "retry".
+    return { streamId, streamStillActive };
+  }
+
+  /**
+   * Classify a recovered turn as `retry` or `continue`. The `shouldRetryPreStream`
+   * detail is threaded to the dispatch decision; `emptyPartialNewTurn` only
+   * influences the reported kind (an empty partial persists nothing, so a new turn
+   * is re-run fresh rather than merged into the previous assistant — #1691). The
+   * `persist: false` discard case stays "continue" here and only surfaces as
+   * "retry" on the `chat:recovery:scheduled` event, decided in dispatch.
+   */
+  private _classifyRecoveredChatTurn(input: ClassifyRecoveredTurnInput): {
+    recoveryKind: ChatRecoveryKind;
+    detail: AIChatRecoveryClassification;
+  } {
+    const shouldRetryPreStream = this._shouldRetryRecoveredPreStreamTurn(
+      input.snapshot,
+      input.streamId,
+      input.partial
+    );
     const preStreamLeaf =
       this.messages.length > 0
         ? this.messages[this.messages.length - 1]
         : undefined;
     const emptyPartialNewTurn =
-      !!streamId &&
-      recoverySnapshot?.continuation === false &&
-      !!recoverySnapshot.latestUserMessageId &&
-      partial.text === "" &&
-      partial.parts.length === 0 &&
+      !!input.streamId &&
+      input.snapshot?.continuation === false &&
+      !!input.snapshot.latestUserMessageId &&
+      input.partial.text === "" &&
+      input.partial.parts.length === 0 &&
       preStreamLeaf?.role === "user" &&
-      preStreamLeaf.id === recoverySnapshot.latestUserMessageId;
+      preStreamLeaf.id === input.snapshot.latestUserMessageId;
     const recoveryKind: ChatRecoveryKind =
       shouldRetryPreStream || emptyPartialNewTurn ? "retry" : "continue";
-    const recoveryRootRequestId =
-      recoverySnapshot?.recoveryRootRequestId ?? requestId;
-    const { incident, config, exhausted } =
-      await this._beginChatRecoveryIncident({
-        requestId,
-        recoveryRootRequestId,
-        latestUserMessageId: recoverySnapshot?.latestUserMessageId,
-        recoveryKind
-      });
+    return { recoveryKind, detail: { shouldRetryPreStream } };
+  }
 
-    if (exhausted) {
-      // Preserve the settled partial before sealing the turn. Exhaustion is
-      // decided BEFORE `onChatRecovery` is consulted, so without this the
-      // settled (often non-idempotent) tool results the turn already produced
-      // are discarded and the model re-runs them on the next message (#1631).
-      if (streamStillActive) {
-        await this._persistOrphanedStream(streamId);
-      }
-      await this._exhaustChatRecovery(
+  /**
+   * The retry/continue/skip decision for a recovered chat turn, run after the
+   * partial is persisted and the stream completed. A NEW turn that left no
+   * persisted assistant partial (the leaf is still the user message) is re-run
+   * fresh instead of continued (which would clone + merge into the previous
+   * assistant turn — #1691); this lost-partial check is re-derived here from the
+   * now-updated leaf rather than carried from classify.
+   */
+  private async _dispatchRecoveredChatTurn(
+    input: DispatchRecoveredTurnInput<AIChatRecoveryClassification>
+  ): Promise<void> {
+    const { incident, options, snapshot, recoveryRootRequestId } = input;
+    const leaf =
+      this.messages.length > 0
+        ? this.messages[this.messages.length - 1]
+        : undefined;
+    const lostPartialUserId =
+      snapshot?.continuation === false &&
+      snapshot.latestUserMessageId &&
+      leaf?.role === "user" &&
+      leaf.id === snapshot.latestUserMessageId
+        ? snapshot.latestUserMessageId
+        : undefined;
+
+    const targetId =
+      input.detail.shouldRetryPreStream || lostPartialUserId !== undefined
+        ? undefined
+        : this._findLastAssistantMessage()?.id;
+
+    if (input.detail.shouldRetryPreStream && options.continue !== false) {
+      await this._chatRecoveryEngine().scheduleRecovery({
         incident,
-        config,
-        partial,
-        streamId,
-        ctx.createdAt
-      );
-      return true;
-    }
-
-    // Any throw after the incident is opened (user `onChatRecovery`, orphan
-    // persistence, scheduling) must flip the incident to a terminal `failed`
-    // state and emit, otherwise it leaks in `attempting` and is never
-    // observable as a stuck turn.
-    try {
-      const options =
-        (await this.onChatRecovery({
+        recoveryKind: input.recoveryKind,
+        callback: "_chatRecoveryRetry",
+        data: {
+          targetUserId: snapshot?.latestUserMessageId,
+          originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
-          recoveryRootRequestId,
-          attempt: incident.attempt,
-          maxAttempts: incident.maxAttempts,
-          recoveryKind,
-          streamId: streamId ?? "",
-          requestId,
-          partialText: partial.text,
-          partialParts: partial.parts,
-          recoveryData,
-          messages: [...this.messages],
-          lastBody: recoverySnapshot?.lastBody ?? this._lastBody,
-          lastClientTools:
-            recoverySnapshot?.lastClientTools ?? this._lastClientTools,
-          createdAt: ctx.createdAt
-        })) ?? {};
-
-      // Settled work — completed, often non-idempotent tool results — is NEVER
-      // dropped by recovery. `persist: false` only suppresses persistence of a
-      // partial that has nothing settled to lose; a partial carrying settled
-      // tool results is persisted regardless, so an app can never accidentally
-      // discard completed work (and never needs `{ persist: true }` just to be
-      // safe). A safe default beats a warning about an unsafe one (#1631).
-      if (
-        streamStillActive &&
-        (options.persist !== false ||
-          this._partialHasSettledToolResults(partial.parts))
-      ) {
-        await this._persistOrphanedStream(streamId);
-      }
-
-      if (streamStillActive) {
-        this._resumableStream.complete(streamId);
-        void this._ensureStreamCleanupScheduled();
-      }
-
-      // A NEW turn (not a continuation) that produced no persisted assistant
-      // partial — interrupted before any part materialized, or `persist: false`
-      // discarded it — leaves the conversation leaf at the user message.
-      // Continuing here would clone the PREVIOUS assistant turn (the most recent
-      // assistant message, found by walking back past the trailing user
-      // message) and merge this turn into it (#1691). Re-run the user turn fresh
-      // instead, so it becomes its own message. Checked AFTER the persist step,
-      // so a partial that WAS persisted (now the assistant leaf) still continues.
-      const leaf =
-        this.messages.length > 0
-          ? this.messages[this.messages.length - 1]
-          : undefined;
-      const lostPartialUserId =
-        recoverySnapshot?.continuation === false &&
-        recoverySnapshot.latestUserMessageId &&
-        leaf?.role === "user" &&
-        leaf.id === recoverySnapshot.latestUserMessageId
-          ? recoverySnapshot.latestUserMessageId
-          : undefined;
-
-      const targetId =
-        shouldRetryPreStream || lostPartialUserId !== undefined
-          ? undefined
-          : this._findLastAssistantMessage()?.id;
-
-      if (shouldRetryPreStream && options.continue !== false) {
-        await this._chatRecoveryEngine().scheduleRecovery({
-          incident,
-          recoveryKind,
-          callback: "_chatRecoveryRetry",
-          data: {
-            targetUserId: recoverySnapshot.latestUserMessageId,
-            originalRequestId: recoveryRootRequestId,
-            incidentId: incident.incidentId,
-            lastBody: recoverySnapshot.lastBody ?? null,
-            lastClientTools: recoverySnapshot.lastClientTools ?? null
-          }
-        });
-      } else if (
-        lostPartialUserId !== undefined &&
-        options.continue !== false
-      ) {
-        // Re-run the orphaned new turn fresh instead of continuing (and
-        // merging into) the previous assistant message. The incident may have
-        // opened as `continue`, but the action (and the reported kind) is a
-        // `retry`.
-        await this._chatRecoveryEngine().scheduleRecovery({
-          incident,
-          recoveryKind: "retry",
-          callback: "_chatRecoveryRetry",
-          data: {
-            targetUserId: lostPartialUserId,
-            originalRequestId: recoveryRootRequestId,
-            incidentId: incident.incidentId,
-            lastBody: recoverySnapshot?.lastBody ?? null,
-            lastClientTools: recoverySnapshot?.lastClientTools ?? null
-          }
-        });
-      } else if (options.continue !== false) {
-        await this._chatRecoveryEngine().scheduleRecovery({
-          incident,
-          recoveryKind,
-          callback: "_chatRecoveryContinue",
-          data: {
-            ...(targetId ? { targetAssistantId: targetId } : {}),
-            originalRequestId: recoveryRootRequestId,
-            incidentId: incident.incidentId,
-            ...(recoverySnapshot
-              ? {
-                  lastBody: recoverySnapshot.lastBody ?? null,
-                  lastClientTools: recoverySnapshot.lastClientTools ?? null
-                }
-              : {})
-          }
-        });
-      } else {
-        await this._updateChatRecoveryIncident(
-          incident.incidentId,
-          "skipped",
-          "continue_disabled"
-        );
-      }
-
-      return true;
-    } catch (error) {
+          lastBody: snapshot?.lastBody ?? null,
+          lastClientTools: snapshot?.lastClientTools ?? null
+        }
+      });
+    } else if (lostPartialUserId !== undefined && options.continue !== false) {
+      // Re-run the orphaned new turn fresh instead of continuing (and merging
+      // into) the previous assistant message. The incident may have opened as
+      // `continue`, but the action (and the reported kind) is a `retry`.
+      await this._chatRecoveryEngine().scheduleRecovery({
+        incident,
+        recoveryKind: "retry",
+        callback: "_chatRecoveryRetry",
+        data: {
+          targetUserId: lostPartialUserId,
+          originalRequestId: recoveryRootRequestId,
+          incidentId: incident.incidentId,
+          lastBody: snapshot?.lastBody ?? null,
+          lastClientTools: snapshot?.lastClientTools ?? null
+        }
+      });
+    } else if (options.continue !== false) {
+      await this._chatRecoveryEngine().scheduleRecovery({
+        incident,
+        recoveryKind: input.recoveryKind,
+        callback: "_chatRecoveryContinue",
+        data: {
+          ...(targetId ? { targetAssistantId: targetId } : {}),
+          originalRequestId: recoveryRootRequestId,
+          incidentId: incident.incidentId,
+          ...(snapshot
+            ? {
+                lastBody: snapshot.lastBody ?? null,
+                lastClientTools: snapshot.lastClientTools ?? null
+              }
+            : {})
+        }
+      });
+    } else {
       await this._updateChatRecoveryIncident(
         incident.incidentId,
-        "failed",
-        error instanceof Error ? error.message : String(error)
+        "skipped",
+        "continue_disabled"
       );
-      throw error;
     }
   }
 
@@ -4598,10 +4556,10 @@ export class AIChatAgent<
   }
 
   private _shouldRetryRecoveredPreStreamTurn(
-    snapshot: ChatFiberSnapshot<"ai-chat-turn"> | null,
+    snapshot: ChatFiberSnapshot | null,
     streamId: string,
     partial: { text: string; parts: MessagePart[] }
-  ): snapshot is ChatFiberSnapshot<"ai-chat-turn"> & {
+  ): snapshot is ChatFiberSnapshot & {
     latestUserMessageId: string;
   } {
     if (

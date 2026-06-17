@@ -1027,6 +1027,46 @@ without `UIMessage`-shaped assumptions leaking through, the seam is wrong and we
 fix it before declaring the foundation done. Building the second harness is the
 only credible proof that the abstraction is not accidentally AI-SDK-only.
 
+### Decision: substrate capabilities are optional, not shared requirements
+
+A recurring question (most concretely: "should `AIChatAgent` grow a submission
+layer so the wake-recovery bodies fully converge?") resolves to **no**, and this is
+a load-bearing design decision for Slice 4d-2 and the pi adapter.
+
+`Think`'s durable **submission layer** (`cf_think_submissions`, see
+[think-durable-submissions.md](./think-durable-submissions.md)) and its
+**Session-tree leaf** model (see [think-sessions.md](./think-sessions.md)) are
+_product substrates_, not recovery primitives. Submissions exist to give external
+RPC callers (webhooks, scheduled tasks, workflow `step.prompt`) a durable
+`accepted` boundary with idempotency; `AIChatAgent` — a flat-table protocol adapter
+(see [think-vs-aichat.md](./think-vs-aichat.md)) — has none of those entry points,
+and the documented roadmap is for `Think` to eventually subsume `AIChatAgent`, not
+for `AIChatAgent` to grow `Think`'s machinery. Recovery merely _leverages_ whichever
+substrate a host has.
+
+Therefore the engine treats substrate-coupled behavior as an **absent capability**,
+not a shared requirement: the wake frame (Slice 4d-2) owns the lifecycle, but the
+retry/continue/skip **decision is a package-owned seam** (`classifyRecoveredTurn` +
+`dispatchRecoveredTurn`). `Think` implements it with its submission lifecycle +
+session leaf; `AIChatAgent` implements a leaf-only version over its flat message
+array (no submission ops); a pi adapter implements it on its own substrate. Forcing
+every adapter to grow `Think`'s substrate to participate would be the abstraction
+dictating the product — the exact inversion the adapter seam exists to prevent, and
+it would also break the pi-adapter genericity proof (pi will not have submissions
+either).
+
+This decision is also the coordination point with the sibling Think API RFCs:
+[rfc-think-turns.md](./rfc-think-turns.md) (`_admitTurn` / `TurnSpec`, the
+`recovery-continue` / `recovery-retry` triggers) and
+[rfc-think-actions.md](./rfc-think-actions.md) (the durable action ledger consulted
+on recovery re-entry) both _target_ this package-owned decision seam — i.e. `Think`'s
+recovery decision is on a path to become _more_ substrate-specific, not less, so the
+seam must stay package-owned. (Naming note: those RFCs were written against an
+assumed `ThinkRecoveryAdapter` with `classifyRecoveredTurn` / `resolveStreamForRecovery`;
+the implemented seam is `ChatRecoveryAdapter` in `agents/chat`. 4d-2 should reconcile
+the decision-hook names with the Turns/Actions expectations, or update those RFCs to
+the real names.)
+
 ## Testing strategy
 
 This refactor should leave the test suite in a better place than today. The
@@ -1378,6 +1418,55 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Slice 4d-2 (Phase 4 — lift the wake FRAME into the engine; the genericity seam)_
+  — Implemented the reviewed seam. Added `ChatRecoveryEngine.handleChatFiberRecovery(ctx, wake)`
+  owning the wake lifecycle (chat-fiber gate → requestId parse → snapshot unwrap →
+  stream/partial resolution → recovery-kind classification → `beginIncident` →
+  exhausted branch → `onChatRecovery` → persist + complete → decision →
+  `catch → updateIncident("failed") → rethrow`), with the package-specific decision
+  living behind a method-scoped `ChatFiberWakeHooks<TClassify>` object passed as the
+  second arg (NOT bolted onto `ChatRecoveryAdapter`, keeping its five give-up-spine
+  test fakes focused). Lifted the byte-identical `_partialHasSettledToolResults` into
+  one shared pure `partialHasSettledToolResults(parts)` in `agents/chat`; both
+  packages dropped their private copy (real dedup, zero behavior change). `Think` and
+  `AIChatAgent` each collapsed `_handleInternalFiberRecovery` to a one-line delegation
+  and implemented the hooks as private methods — `Think` keeps its submission
+  lifecycle + session-leaf + `_handleRecoveryCallbackError` inside
+  `dispatchRecoveredTurn`; `AIChatAgent` is leaf-only and returns
+  `streamStatus: undefined` (terminal-stream handling stays absent, per the
+  "substrate capabilities are optional" decision — reading status would be a behavior
+  _change_). Verified: full `pnpm run check` (sherif + exports + oxfmt + oxlint +
+  typecheck) green; `agents` 1989 passed, `@cloudflare/ai-chat` 686 passed, `think`
+  full suite chain green; new engine unit tests for `handleChatFiberRecovery` +
+  `partialHasSettledToolResults`; local `wrangler dev` SIGKILL e2e — ai-chat 10/10,
+  think 26 passed + 4 skipped. The only e2e red is `reattach-budget.test.ts`, the
+  documented expected-RED regression gate for the unrelated wall-clock re-attach-budget
+  bug (manual `think-e2e` project, not the CI gate) — untouched by this slice.
+
+- _Slice 4d-2 design (Phase 4 — seam design + decision record; docs only, no code)_
+  — Before touching the wake path (the highest-risk surface in this RFC), recorded
+  the seam design and the load-bearing decision it rests on. **Decision: substrate
+  capabilities are optional, not shared requirements** (new subsection under
+  Genericity) — `Think`'s submission layer and Session-tree leaf are _product
+  substrates_, not recovery primitives, so `AIChatAgent` does NOT grow a submission
+  layer to converge the wake bodies; instead the wake-recovery DECISION is a
+  package-owned seam (`classifyRecoveredTurn` + `dispatchRecoveredTurn`) that each
+  host implements on its own substrate, while the engine owns only the wake FRAME.
+  This is the inversion-prevention rule (abstraction must not dictate the product)
+  and the pi-genericity guarantee (pi has no submissions either). Rewrote the 4d-2
+  slice bullet into a concrete seam: engine `handleChatFiberRecovery(ctx, wake)`
+  lifecycle (gate → parse → unwrap → stream/partial → classify → beginIncident →
+  exhausted-branch → onChatRecovery → persist+complete → decision → catch→failed) +
+  a named `ChatFiberWakeHooks<TClassify>` surface, with explicit convergence-onto-Think
+  items (shared `partialHasSettledToolResults`, `streamStatus` read, `onChatRecovery`
+  ctx builder) and a recorded fallback (helper-extraction-only if the hook surface
+  hurts engine readability). Added name-reconciliation notes to
+  [rfc-think-turns.md](./rfc-think-turns.md) and
+  [rfc-think-actions.md](./rfc-think-actions.md) pointing their assumed
+  `ThinkRecoveryAdapter` / `classifyRecoveredTurn` / `resolveStreamForRecovery` seam at
+  the real `ChatRecoveryAdapter`. No code, no tests, no changeset — design gate only;
+  implementation is blocked on review (see "what I need from you").
+
 - _Slice 4d-1 (Phase 4 — lift the give-up spine; the part deferred from 4c)_ —
   Reading both `_handleInternalFiberRecovery` bodies in full first re-shaped 4d
   (recorded in the slice plan): the bodies are ~70% structurally similar but the
@@ -1397,7 +1486,7 @@ the change, and the key review findings.
   `getPartialStreamText`, `activeChatRecoveryRootRequestId`,
   `onGiveUpBookkeepingError`); each package method is now a one-line delegation.
   **Byte-equivalence review:** the unified root-id chain (`originalRequestId ??
-  recoveredRequestId ?? activeRoot ?? stored.root ?? stored.requestId ?? ""`)
+recoveredRequestId ?? activeRoot ?? stored.root ?? stored.requestId ?? ""`)
   reproduces Think verbatim and collapses to AIChat's chain because AIChat's
   payload type has no `recoveredRequestId` (always `undefined` → skipped);
   `reason` is the only behavioral parameter (Think `stable_timeout` |
@@ -1418,7 +1507,7 @@ the change, and the key review findings.
   ✅ and Think recovery workers 285 ✅ (fiber/submissions/stream + think-session +
   messengers; benign SQLite-alarm harness log only); Think remote-Workers-AI
   give-up e2e (`stall-recovery` + `chat-recovery`) 6/6 ✅; ai-chat real-`wrangler
-  dev` SIGKILL give-up e2e (`chat-recovery-exhaustion` + `chat-recovery` +
+dev` SIGKILL give-up e2e (`chat-recovery-exhaustion` + `chat-recovery` +
   `chat-recovering-status`) 9/9 ✅. No changeset (internal `@internal` seam, zero
   behavior change).
 
@@ -2229,25 +2318,87 @@ callback, data, reason })` behind hooks `exhaustChatRecovery`,
     there). Moderate risk; its hooks are exactly what 4d-2 needs, so this lands first
     and de-risks 4d-2.
 
-  - **Slice 4d-2 — collapse the fiber-recovery frame (the genericity seam).** Owns
-    the Phase 5 goal: a third (pi) adapter must drive deploy/crash recovery through
-    the SAME engine, which means the wake dispatch frame has to live in the engine,
-    not be re-implemented per package. Engine owns the frame (chat gate, requestId
-    parse, snapshot-unwrap dispatch, stream/partial resolution invocation,
-    begin-incident, exhausted-check, onChatRecovery invocation, persist + complete
-    invocation, catch→failed); package hooks own the divergent organs the map flagged
-    (snapshot key + turn kind, stream/status resolution, recovery-kind detection,
-    persist gate, stream-completion API, and the whole retry/continue/skip decision —
-    Think submission lifecycle + terminal record ordering + session-leaf vs
-    flat-messages leaf, AIChat lost-partial branch, Think `_handleRecoveryCallbackError`).
-    Highest risk (the wake path; #1631/#1691/#1645 + submission-completion correctness)
-    — its own e2e gate, and the seam design is reviewed before the wake path is
-    touched. If the hook surface needed to keep both bodies faithful proves to make
-    the engine LESS readable than two self-contained methods (a real risk given how
-    much has diverged), 4d-2 may land as a smaller shared-helper extraction
-    (`_partialHasSettledToolResults`, the `onChatRecovery` ctx builder) plus a
-    documented decision to keep the per-package decision bodies — recorded here either
-    way.
+  - **Slice 4d-2 — lift the wake FRAME, keep the decision a package-owned seam (the
+    genericity seam).** Owns the Phase 5 goal: a third (pi) adapter must drive
+    deploy/crash recovery through the SAME engine, so the wake dispatch frame has to
+    live in the engine, not be re-implemented per package. The value here is
+    **genericity, not dedup** — the bulk of the logic stays package-owned in the
+    decision hook; what the engine gains is a single, reusable wake lifecycle.
+
+    Engine frame: `ChatRecoveryEngine.handleChatFiberRecovery(ctx, wake)`, called by
+    each package's `_handleInternalFiberRecovery` right after `handleNonChatFiber`.
+    Lifecycle: chat-fiber gate, requestId parse, snapshot unwrap, stream/partial
+    resolution, recovery-kind classification, `beginIncident`, exhausted branch
+    (persist-gate + `exhaustChatRecovery`), `onChatRecovery` invocation, persist +
+    complete, decision, then `catch → updateIncident("failed") → rethrow`. The engine
+    owns the control flow, incident lifecycle, and exactly-once ordering invariants;
+    it does NOT own the decision.
+
+    Hook surface: cohesive hooks named for responsibility, not micro-hooks. They live
+    on a SEPARATE `ChatFiberWakeHooks<TClassify>` object passed as the second arg to
+    `handleChatFiberRecovery(ctx, wake)`, NOT bolted onto the base
+    `ChatRecoveryAdapter` — that keeps the incident/give-up adapter (and its five
+    existing unit-test fakes) focused, and the classification detail is a
+    method-scoped generic `TClassify` inferred from `wake` (no class-level generic, no
+    `any`/`unknown` casts). The hooks:
+    - `chatFiberPrefix()` — the fiber-name prefix that gates the chat path.
+    - `unwrapRecoverySnapshot(ctx)` — returns `{ snapshot, recoveryData }`.
+    - `resolveRecoveryStream(requestId)` — returns
+      `{ streamId, streamStillActive, streamStatus? }`.
+    - `classifyRecoveredTurn(input)` — returns `{ recoveryKind, detail: TClassify }`.
+    - `invokeOnChatRecovery(...)` — builds the package's `onChatRecovery` ctx and
+      calls the user hook.
+    - `shouldPersistOrphanedPartial(...)` — the base persist gate; the engine owns the
+      shared `options.persist !== false || partialHasSettledToolResults` clause.
+    - `persistOrphanedStream(streamId)` and `completeRecoveredStream(streamId)`.
+    - `dispatchRecoveredTurn({ ..., detail: TClassify })` — the decision hook; the
+      whole retry/continue/skip body. Think runs its submission lifecycle +
+      terminal-record + session-leaf logic and `_handleRecoveryCallbackError`; AIChat
+      runs its flat-messages leaf + lost-partial branch; pi runs its own.
+
+    `partialHasSettledToolResults`, reconstructed-from-give-up, and
+    `exhaustChatRecovery` stay on the base adapter (shared with the give-up spine).
+    The classify/dispatch pair is named to line up with the Turns/Actions RFCs'
+    `classifyRecoveredTurn` seam: their `recovery-continue` / `recovery-retry`
+    re-entry runs through `dispatchRecoveredTurn`, which for Think will eventually
+    delegate to `_admitTurn`.
+
+    Converge only where the difference is provably incidental (refined after the full
+    code read): the drifted `_partialHasSettledToolResults` is behaviorally identical
+    across the packages (AIChat inlines exactly what Think's `_toolPartHasSettledResult`
+    checks: `output`/`result` present, or state in `output-available` /
+    `output-error` / `output-denied`), so it lifts to one shared pure
+    `partialHasSettledToolResults(parts)` in `agents/chat` — both packages drop their
+    private copy, a real dedup with zero behavior change. NOT converged:
+    `streamStatus` / terminal-stream handling stays absent for AIChat (its
+    `resolveRecoveryStream` returns `streamStatus: undefined`, so the terminal
+    branches are dead there) — making AIChat read status would be a behavior _change_,
+    the exact inversion the "substrate capabilities are optional" decision forbids.
+    The submission-coupled / Session-leaf parts are NOT converged — see that decision
+    under Genericity.
+
+    Highest risk (the wake path; #1631/#1691/#1645 + submission-completion
+    correctness) — its own e2e gate, and the seam above is reviewed before the wake
+    path is touched. Success criterion: the engine frame reads as a linear lifecycle
+    and each hook is cohesive; AIChat's `dispatchRecoveredTurn` is leaf-only (no
+    submission ops); pi can implement every hook. Fallback (recorded either way): if
+    the hook surface still makes the engine LESS readable than two self-contained
+    methods, land only the shared pure-helper extraction (`partialHasSettledToolResults`,
+    the `onChatRecovery` ctx builder) plus a documented decision to keep the
+    per-package decision bodies.
+
+    Locked decisions (2026-06 review, before implementation):
+    1. _Ambition:_ attempt the full frame-lift; drop to helper-extraction-only ONLY if
+       the hook surface measurably hurts engine readability.
+    2. _Hook names:_ align with the Think Turns/Actions RFCs — `classifyRecoveredTurn`
+       (recovery-kind) + `dispatchRecoveredTurn` (the retry/continue/skip decision);
+       `resolveRecoveryStream` for stream/status. So `_admitTurn` (Turns RFC) and the
+       action ledger (Actions RFC) attach to these exact names; the only correction to
+       those RFCs is the adapter _type_ (`ChatRecoveryAdapter`, not
+       `ThinkRecoveryAdapter`).
+    3. _Gate:_ does not start until this seam is human-reviewed (in progress).
+    4. _Phase 5 pi:_ validated via an internal `experimental/` fixture scaffolded from
+       the pi shape in "Genericity and future harnesses" — sequenced after 4d-2.
 
 Each slice: deep review for edge cases, run the local + (where auth permits) real
 e2e suites, commit with a detailed message. Slice 4d does not start until 4a–4c

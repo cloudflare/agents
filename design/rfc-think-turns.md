@@ -39,6 +39,17 @@ Recovery-RFC gate (see "Coordination with the chat-recovery RFC"): the
 (`classifyRecoveredTurn`/`resolveStreamForRecovery`) rather than the
 pre-refactor private methods.
 
+> **Name reconciliation (2026-06, chat-recovery Phase 4).** The recovery seam shipped
+> as **`ChatRecoveryAdapter`** in `agents/chat` (not `ThinkRecoveryAdapter`). Phases
+> 0–4 are done; the wake-path decision is being lifted in Slice 4d-2 as a package-owned
+> hook pair — a `classifyRecoveredTurn`-shaped classifier plus a `dispatchRecoveredTurn`
+> decision — which is exactly the seam `_admitTurn` should target via the
+> `recovery-continue` / `recovery-retry` triggers. The chat-recovery RFC's
+> "Substrate capabilities are optional" decision guarantees `Think`'s recovery decision
+> stays package-owned (submission lifecycle + Session leaf live in `Think`), so this
+> RFC's extraction is unblocked. When implementing, use the real names or update them
+> here in the same change — don't leave both drifting.
+
 ## The problem
 
 Every model turn in Think converges on one private method,

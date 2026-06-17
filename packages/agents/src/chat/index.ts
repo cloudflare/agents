@@ -128,9 +128,18 @@ export {
   ChatRecoveryEngine,
   buildChatRecoveryExhaustedContext,
   notifyChatRecoveryExhausted,
+  partialHasSettledToolResults,
   type ChatRecoveryScheduleReason,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryAdapter,
+  type ChatFiberWakeHooks,
+  type ChatStreamStatus,
+  type ResolvedRecoveryStream,
+  type ClassifyRecoveredTurnInput,
+  type InvokeOnChatRecoveryInput,
+  type PersistOrphanedPartialInput,
+  type DispatchRecoveredTurnInput,
+  type RecoveryPartial,
   type BeginChatRecoveryIncidentInput,
   type BeginChatRecoveryIncidentResult
 } from "./recovery-engine";

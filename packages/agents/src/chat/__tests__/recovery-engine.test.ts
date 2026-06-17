@@ -4,15 +4,21 @@ import {
   buildChatRecoveryExhaustedContext,
   chatRecoverySchedulePolicy,
   notifyChatRecoveryExhausted,
+  partialHasSettledToolResults,
   type ChatRecoveryAdapter,
+  type ChatFiberWakeHooks,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryScheduleReason,
-  type RecoveryPartial
+  type DispatchRecoveredTurnInput,
+  type RecoveryPartial,
+  type ResolvedRecoveryStream
 } from "../recovery-engine";
 import type {
   ChatRecoveryExhaustedContext,
+  ChatRecoveryOptions,
   ResolvedChatRecoveryConfig
 } from "../lifecycle";
+import type { ChatFiberSnapshot } from "../recovery";
 import type { FiberRecoveryContext } from "../../index";
 import {
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
@@ -1274,5 +1280,357 @@ describe("ChatRecoveryEngine.handleNonChatFiber (fake adapter)", () => {
   it("returns false when the adapter omits the hook (AIChatAgent shape)", async () => {
     const engine = engineWithHook(undefined);
     expect(await engine.handleNonChatFiber(ctx)).toBe(false);
+  });
+});
+
+/**
+ * Shared settled-tool-results predicate (slice 4d-2). Both packages' private
+ * copies were byte-equivalent; this pins the lifted single source of truth that
+ * the engine's persist gate now consults.
+ */
+describe("partialHasSettledToolResults", () => {
+  it("is true for a tool part carrying output/result", () => {
+    expect(
+      partialHasSettledToolResults([
+        { type: "tool-foo", output: { ok: true } } as never
+      ])
+    ).toBe(true);
+    expect(
+      partialHasSettledToolResults([
+        { type: "dynamic-tool", result: 1 } as never
+      ])
+    ).toBe(true);
+  });
+
+  it("is true for a tool part in a terminal output-* state", () => {
+    for (const state of ["output-available", "output-error", "output-denied"]) {
+      expect(
+        partialHasSettledToolResults([{ type: "tool-foo", state } as never])
+      ).toBe(true);
+    }
+  });
+
+  it("is false for non-tool parts and unsettled tool parts", () => {
+    expect(
+      partialHasSettledToolResults([{ type: "text", text: "hi" } as never])
+    ).toBe(false);
+    expect(
+      partialHasSettledToolResults([
+        { type: "tool-foo", state: "input-available" } as never
+      ])
+    ).toBe(false);
+    expect(partialHasSettledToolResults([])).toBe(false);
+  });
+});
+
+/**
+ * Layer-2 seam test for the wake-recovery lifecycle (slice 4d-2). The engine owns
+ * the FRAME (non-chat dispatch → chat gate → unwrap → stream/partial → classify →
+ * begin-incident → exhausted-branch → onChatRecovery → persist → complete →
+ * dispatch → catch→failed) and the shared persist clause; the {@link
+ * ChatFiberWakeHooks} own the divergent organs. These tests pin the ordering, the
+ * shared `base && (persist !== false || settled)` gate, the exhausted
+ * short-circuit, and the failed-on-throw guard — the exact contract `AIChatAgent`
+ * and `Think` now delegate.
+ */
+describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)", () => {
+  type TestDetail = { tag: string };
+
+  type HarnessOptions = {
+    name?: string;
+    /** When set, the adapter's non-chat hook consumes the fiber first. */
+    nonChatHandled?: boolean;
+    snapshot?: ChatFiberSnapshot | null;
+    stream?: ResolvedRecoveryStream;
+    partial?: RecoveryPartial;
+    recoveryKind?: "retry" | "continue";
+    detail?: TestDetail;
+    onChatRecovery?: ChatRecoveryOptions | void;
+    basePersist?: boolean;
+    dispatchThrows?: boolean;
+    seedExhausted?: boolean;
+  };
+
+  const NOW = 10_000_000;
+
+  function makeHarness(options: HarnessOptions = {}) {
+    const calls: string[] = [];
+    const storage = new Map<string, ChatRecoveryIncident>();
+    const events: ChatRecoveryIncidentEvent[] = [];
+    const dispatched: DispatchRecoveredTurnInput<TestDetail>[] = [];
+    const persisted: string[] = [];
+    const completed: string[] = [];
+    const exhausted: Array<{ streamId: string; createdAt: number }> = [];
+    const config = resolveChatRecoveryConfig(undefined);
+
+    const partial: RecoveryPartial = options.partial ?? { text: "", parts: [] };
+    const stream: ResolvedRecoveryStream = options.stream ?? {
+      streamId: "s1",
+      streamStillActive: true
+    };
+
+    const adapter: ChatRecoveryAdapter = {
+      resolveConfig: () => config,
+      now: () => NOW,
+      ...(options.nonChatHandled
+        ? {
+            tryHandleNonChatFiberRecovery: () => {
+              calls.push("nonChat");
+              return Promise.resolve(true);
+            }
+          }
+        : {}),
+      sweepStaleIncidents: () => {
+        calls.push("sweep");
+        return Promise.resolve();
+      },
+      getIncident: (key) => {
+        calls.push("get");
+        return Promise.resolve(storage.get(key) ?? null);
+      },
+      readProgress: () => Promise.resolve(0),
+      isAwaitingClientInteraction: () => false,
+      putIncident: (key, incident) => {
+        calls.push("put");
+        storage.set(key, incident);
+        return Promise.resolve();
+      },
+      deleteIncident: (key) => {
+        storage.delete(key);
+        return Promise.resolve();
+      },
+      emitRecoveryEvent: (event) => events.push(event),
+      scheduleRecovery: () => Promise.resolve(),
+      setRecovering: () => Promise.resolve(),
+      onShouldKeepRecoveringError: () => {},
+      exhaustChatRecovery: (
+        _incident,
+        _config,
+        _partial,
+        streamId,
+        createdAt
+      ) => {
+        calls.push("exhaust");
+        exhausted.push({ streamId, createdAt });
+        return Promise.resolve();
+      },
+      resolveRecoveryStreamId: () => "",
+      getPartialStreamText: (streamId) => {
+        calls.push(`getPartial:${streamId}`);
+        return partial;
+      },
+      activeChatRecoveryRootRequestId: () => undefined,
+      onGiveUpBookkeepingError: () => {}
+    };
+
+    const wake: ChatFiberWakeHooks<TestDetail> = {
+      chatFiberPrefix: () => "chat:",
+      unwrapRecoverySnapshot: () => {
+        calls.push("unwrap");
+        return { snapshot: options.snapshot ?? null, recoveryData: null };
+      },
+      resolveRecoveryStream: () => {
+        calls.push("resolveStream");
+        return stream;
+      },
+      classifyRecoveredTurn: () => {
+        calls.push("classify");
+        return {
+          recoveryKind: options.recoveryKind ?? "continue",
+          detail: options.detail ?? { tag: "d" }
+        };
+      },
+      invokeOnChatRecovery: () => {
+        calls.push("invokeOnChatRecovery");
+        return Promise.resolve(options.onChatRecovery);
+      },
+      shouldPersistOrphanedPartial: () => {
+        calls.push("shouldPersist");
+        return options.basePersist ?? true;
+      },
+      persistOrphanedStream: (streamId) => {
+        calls.push("persist");
+        persisted.push(streamId);
+        return Promise.resolve();
+      },
+      completeRecoveredStream: (streamId) => {
+        calls.push("complete");
+        completed.push(streamId);
+      },
+      dispatchRecoveredTurn: (dispatchInput) => {
+        calls.push("dispatch");
+        dispatched.push(dispatchInput);
+        if (options.dispatchThrows) {
+          return Promise.reject(new Error("dispatch boom"));
+        }
+        return Promise.resolve();
+      }
+    };
+
+    if (options.seedExhausted) {
+      // Seed an at-cap, long-stale incident so `beginIncident` evaluates as
+      // exhausted (both the no-progress and attempt-cap bounds trip at NOW).
+      const incidentId = chatRecoveryIncidentId({
+        requestId: "req-1",
+        recoveryRootRequestId:
+          options.snapshot?.recoveryRootRequestId ?? "req-1",
+        latestUserMessageId: options.snapshot?.latestUserMessageId ?? null,
+        recoveryKind: options.recoveryKind ?? "continue"
+      });
+      storage.set(chatRecoveryIncidentKey(incidentId), {
+        incidentId,
+        requestId: "req-1",
+        recoveryRootRequestId: "req-1",
+        recoveryKind: options.recoveryKind ?? "continue",
+        attempt: config.maxAttempts,
+        maxAttempts: config.maxAttempts,
+        status: "attempting",
+        firstSeenAt: 0,
+        lastAttemptAt: 0,
+        lastProgressAt: 0,
+        progress: 0
+      });
+    }
+
+    const ctx: FiberRecoveryContext = {
+      id: "fiber-1",
+      name: options.name ?? "chat:req-1",
+      snapshot: null,
+      createdAt: 4242,
+      recoveryReason: "interrupted"
+    };
+
+    return {
+      engine: new ChatRecoveryEngine(adapter),
+      ctx,
+      wake,
+      calls,
+      events,
+      dispatched,
+      persisted,
+      completed,
+      exhausted,
+      config
+    };
+  }
+
+  it("dispatches a non-chat fiber first and skips chat processing", async () => {
+    const h = makeHarness({ nonChatHandled: true });
+
+    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
+    // The non-chat hook ran; the chat path never did.
+    expect(h.calls).toContain("nonChat");
+    expect(h.calls).not.toContain("classify");
+    expect(h.calls).not.toContain("dispatch");
+  });
+
+  it("returns false (not a chat fiber) when the name lacks the prefix", async () => {
+    const h = makeHarness({ name: "think:messenger-reply" });
+    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(false);
+    expect(h.calls).not.toContain("classify");
+    expect(h.calls).not.toContain("put");
+  });
+
+  it("drives the wake lifecycle in order and threads the classification detail", async () => {
+    const detail: TestDetail = { tag: "carry-me" };
+    const h = makeHarness({ recoveryKind: "retry", detail });
+
+    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
+
+    const order = (label: string) => h.calls.indexOf(label);
+    // unwrap → resolveStream → getPartial → classify → begin(put) →
+    // onChatRecovery → shouldPersist → complete → dispatch.
+    expect(order("unwrap")).toBeLessThan(order("resolveStream"));
+    expect(order("resolveStream")).toBeLessThan(order("classify"));
+    expect(order("classify")).toBeLessThan(order("put"));
+    expect(order("put")).toBeLessThan(order("invokeOnChatRecovery"));
+    expect(order("invokeOnChatRecovery")).toBeLessThan(order("shouldPersist"));
+    expect(order("shouldPersist")).toBeLessThan(order("complete"));
+    expect(order("complete")).toBeLessThan(order("dispatch"));
+
+    // Dispatch receives the classify detail + the reported kind verbatim.
+    expect(h.dispatched).toHaveLength(1);
+    expect(h.dispatched[0].detail).toBe(detail);
+    expect(h.dispatched[0].recoveryKind).toBe("retry");
+    expect(h.dispatched[0].requestId).toBe("req-1");
+  });
+
+  it("persists with the default clause (persist undefined) when the base gate is open", async () => {
+    const h = makeHarness({ basePersist: true, onChatRecovery: {} });
+    await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
+    expect(h.persisted).toEqual(["s1"]);
+  });
+
+  it("does NOT persist a settle-free partial the hook discarded (persist:false)", async () => {
+    const h = makeHarness({
+      basePersist: true,
+      onChatRecovery: { persist: false },
+      partial: { text: "hi", parts: [{ type: "text", text: "hi" } as never] }
+    });
+    await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
+    expect(h.persisted).toEqual([]);
+  });
+
+  it("ALWAYS persists settled tool results even when the hook returns persist:false (#1631)", async () => {
+    const h = makeHarness({
+      basePersist: true,
+      onChatRecovery: { persist: false },
+      partial: {
+        text: "",
+        parts: [{ type: "tool-foo", state: "output-available" } as never]
+      }
+    });
+    await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
+    expect(h.persisted).toEqual(["s1"]);
+  });
+
+  it("never persists when the base gate is closed, even with settled work", async () => {
+    const h = makeHarness({
+      basePersist: false,
+      onChatRecovery: {},
+      partial: {
+        text: "",
+        parts: [{ type: "tool-foo", state: "output-available" } as never]
+      }
+    });
+    await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
+    expect(h.persisted).toEqual([]);
+  });
+
+  it("completes the stream only while it is still active", async () => {
+    const h = makeHarness({
+      stream: { streamId: "s1", streamStillActive: false }
+    });
+    await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
+    expect(h.completed).toEqual([]);
+    // Dispatch still runs (the decision owns the not-active case).
+    expect(h.calls).toContain("dispatch");
+  });
+
+  it("terminalizes the exhausted budget BEFORE onChatRecovery and skips dispatch", async () => {
+    const h = makeHarness({ seedExhausted: true });
+
+    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
+
+    // Exhausted path: persist gate (no options) + exhaustChatRecovery, with the
+    // fiber's createdAt; never consults onChatRecovery or dispatch.
+    expect(h.calls).toContain("exhaust");
+    expect(h.exhausted[0]?.createdAt).toBe(4242);
+    expect(h.calls).not.toContain("invokeOnChatRecovery");
+    expect(h.calls).not.toContain("dispatch");
+  });
+
+  it("flips the incident to failed and rethrows when dispatch throws", async () => {
+    const h = makeHarness({ dispatchThrows: true });
+
+    await expect(
+      h.engine.handleChatFiberRecovery(h.ctx, h.wake)
+    ).rejects.toThrow("dispatch boom");
+
+    // The incident was sealed `failed` (not left leaking in `attempting`).
+    const sealed = [...h.events]
+      .reverse()
+      .find((e) => e.type === "chat:recovery:failed");
+    expect(sealed?.reason).toBe("dispatch boom");
   });
 });

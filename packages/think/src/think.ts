@@ -169,6 +169,10 @@ import {
   selectStaleIncidentKeys,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   type ChatRecoveryAdapter,
+  type ChatFiberWakeHooks,
+  type ResolvedRecoveryStream,
+  type ClassifyRecoveredTurnInput,
+  type DispatchRecoveredTurnInput,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryIncident,
   type ChatRecoveryKind
@@ -621,6 +625,14 @@ type ChatRecoveryContinueData = {
   lastClientTools?: ClientToolSchema[] | null;
   recoveredRequestId?: string;
 };
+
+/**
+ * `Think`'s `classifyRecoveredTurn` detail (the {@link ChatFiberWakeHooks}
+ * generic). `retryTargetUserId` is the pre-stream user message the turn re-runs
+ * when it had no partial; the dispatch decision re-derives `streamIsTerminal` from
+ * `streamStatus` rather than carrying it here.
+ */
+type ThinkRecoveryClassification = { retryTargetUserId: string | null };
 
 // `ChatRecoveryIncident` / `ChatRecoveryKind` / `CHAT_RECOVERY_INCIDENT_KEY_PREFIX`
 // are the canonical shared symbols from `agents/chat` (imported above); the
@@ -9771,26 +9783,66 @@ export class Think<
   protected override async _handleInternalFiberRecovery(
     ctx: FiberRecoveryContext
   ): Promise<boolean> {
-    // Non-chat (messenger/workflow) fibers are dispatched through the shared
-    // engine seam before the chat-fiber gate — the engine owns the ordering
-    // invariant, the messenger runtime (wired via the adapter) owns behavior.
-    if (await this._chatRecoveryEngine().handleNonChatFiber(ctx)) {
-      return true;
-    }
+    // The wake-recovery lifecycle (non-chat dispatch → chat gate → unwrap →
+    // stream/partial → classify → begin-incident → exhausted-branch →
+    // onChatRecovery → persist → complete → dispatch → catch→failed) lives in the
+    // shared ChatRecoveryEngine; this binds the divergent organs as wake hooks,
+    // symmetric with `AIChatAgent`. `Think` tracks terminal stream status and a
+    // durable submission layer + session leaf, so its dispatch owns the
+    // terminal-skip / submission-completion / interrupted-broadcast branches the
+    // engine frame stays out of. See design/rfc-chat-recovery-foundation.md.
+    return this._chatRecoveryEngine().handleChatFiberRecovery(ctx, {
+      chatFiberPrefix: () =>
+        (this.constructor as typeof Think).CHAT_FIBER_NAME + ":",
+      unwrapRecoverySnapshot: (fiber) => {
+        const { snapshot, user } = unwrapChatFiberSnapshot<"think-chat-turn">(
+          "__cfThinkChatFiberSnapshot",
+          fiber.snapshot,
+          "think-chat-turn"
+        );
+        return { snapshot, recoveryData: user };
+      },
+      resolveRecoveryStream: (requestId) =>
+        this._resolveThinkRecoveryStream(requestId),
+      classifyRecoveredTurn: (input) => this._classifyRecoveredThinkTurn(input),
+      invokeOnChatRecovery: (input) =>
+        this.onChatRecovery({
+          incidentId: input.incident.incidentId,
+          recoveryRootRequestId: input.recoveryRootRequestId,
+          attempt: input.incident.attempt,
+          maxAttempts: input.incident.maxAttempts,
+          recoveryKind: input.recoveryKind,
+          streamId: input.streamId,
+          requestId: input.requestId,
+          partialText: input.partial.text,
+          partialParts: input.partial.parts,
+          recoveryData: input.recoveryData,
+          messages: [...this.messages],
+          lastBody: input.snapshot?.lastBody ?? this._lastBody,
+          lastClientTools:
+            input.snapshot?.lastClientTools ?? this._lastClientTools,
+          createdAt: input.createdAt
+        }),
+      shouldPersistOrphanedPartial: (input) =>
+        this._shouldPersistOrphanedPartial(input.streamId, {
+          streamStillActive: input.streamStillActive,
+          streamIsTerminal:
+            input.streamStatus === "completed" ||
+            input.streamStatus === "error",
+          snapshot: input.snapshot
+        }),
+      persistOrphanedStream: (streamId) =>
+        this._persistOrphanedStream(streamId),
+      completeRecoveredStream: (streamId) =>
+        this._completeResumableStream(streamId),
+      dispatchRecoveredTurn: (input) => this._dispatchRecoveredThinkTurn(input)
+    } satisfies ChatFiberWakeHooks<ThinkRecoveryClassification>);
+  }
 
-    const chatPrefix = (this.constructor as typeof Think).CHAT_FIBER_NAME + ":";
-    if (!ctx.name.startsWith(chatPrefix)) {
-      return false;
-    }
-
-    const requestId = ctx.name.slice(chatPrefix.length);
-    const { snapshot: recoverySnapshot, user: recoveryData } =
-      unwrapChatFiberSnapshot<"think-chat-turn">(
-        "__cfThinkChatFiberSnapshot",
-        ctx.snapshot,
-        "think-chat-turn"
-      );
-
+  /** Resolve the orphaned stream + its terminal status for a recovered chat turn. */
+  private _resolveThinkRecoveryStream(
+    requestId: string
+  ): ResolvedRecoveryStream {
     let streamId = "";
     let streamStatus: "streaming" | "completed" | "error" | undefined;
     if (requestId) {
@@ -9811,231 +9863,172 @@ export class Think<
       streamId = this._resumableStream.activeStreamId ?? "";
       streamStatus = "streaming";
     }
-
-    const partial = streamId
-      ? this._getPartialStreamText(streamId)
-      : { text: "", parts: [] as MessagePart[] };
-
-    const streamStillActive =
+    const streamStillActive = Boolean(
       streamId &&
       this._resumableStream.hasActiveStream() &&
-      this._resumableStream.activeStreamId === streamId;
+      this._resumableStream.activeStreamId === streamId
+    );
+    return { streamId, streamStillActive, streamStatus };
+  }
 
+  /**
+   * Classify a recovered turn as `retry` or `continue`. A pre-stream turn with no
+   * partial re-runs its user message (`retryTargetUserId`), unless the stream is
+   * already terminal — a terminal stream is never retried (it completed), only
+   * its submission is reconciled in dispatch.
+   */
+  private async _classifyRecoveredThinkTurn(
+    input: ClassifyRecoveredTurnInput
+  ): Promise<{
+    recoveryKind: ChatRecoveryKind;
+    detail: ThinkRecoveryClassification;
+  }> {
     const streamIsTerminal =
-      streamStatus === "completed" || streamStatus === "error";
-
+      input.streamStatus === "completed" || input.streamStatus === "error";
     const retryTargetUserId = await this._recoverablePreStreamUserId(
-      recoverySnapshot,
-      streamId ?? "",
-      partial
+      input.snapshot,
+      input.streamId,
+      input.partial
     );
     const shouldRetryBase = retryTargetUserId !== null && !streamIsTerminal;
     const recoveryKind: ChatRecoveryKind = shouldRetryBase
       ? "retry"
       : "continue";
-    const recoveryRootRequestId =
-      recoverySnapshot?.recoveryRootRequestId ?? requestId;
-    const { incident, config, exhausted } =
-      await this._beginChatRecoveryIncident({
-        requestId,
-        recoveryRootRequestId,
-        latestUserMessageId: recoverySnapshot?.latestUserMessageId,
-        recoveryKind
-      });
+    return { recoveryKind, detail: { retryTargetUserId } };
+  }
 
-    if (exhausted) {
-      // Preserve the settled partial before sealing the turn. Exhaustion is
-      // decided BEFORE `onChatRecovery` is consulted, so without this the
-      // settled (often non-idempotent) tool results the turn already produced
-      // are discarded and the model re-runs them on the next message (#1631).
-      // Same gating as the normal path below so an already-persisted partial is
-      // never duplicated.
-      if (
-        await this._shouldPersistOrphanedPartial(streamId, {
-          streamStillActive: Boolean(streamStillActive),
-          streamIsTerminal,
-          snapshot: recoverySnapshot
-        })
-      ) {
-        await this._persistOrphanedStream(streamId);
-      }
-      await this._exhaustChatRecovery(
-        incident,
-        config,
-        partial,
-        streamId ?? "",
-        ctx.createdAt
+  /**
+   * The retry/continue/skip decision for a recovered chat turn, run after the
+   * partial is persisted and the stream completed. Owns `Think`'s substrate
+   * behavior the engine frame stays out of: a terminal stream reconciles the
+   * durable submission (and is never retried/continued), and a `continue: false`
+   * abandonment marks the submission interrupted + records a terminal status +
+   * broadcasts so a reconnecting client is not frozen.
+   */
+  private async _dispatchRecoveredThinkTurn(
+    input: DispatchRecoveredTurnInput<ThinkRecoveryClassification>
+  ): Promise<void> {
+    const {
+      incident,
+      options,
+      snapshot,
+      requestId,
+      recoveryRootRequestId,
+      streamStatus
+    } = input;
+    const { retryTargetUserId } = input.detail;
+    const streamIsTerminal =
+      streamStatus === "completed" || streamStatus === "error";
+
+    const shouldRetry =
+      retryTargetUserId !== null &&
+      options.continue !== false &&
+      !streamIsTerminal;
+    const lastLeaf = shouldRetry ? null : await this.session.getLatestLeaf();
+    const targetId =
+      lastLeaf?.role === "assistant" && !streamIsTerminal
+        ? lastLeaf.id
+        : undefined;
+    const canContinue =
+      !shouldRetry && options.continue !== false && !streamIsTerminal;
+    // The durable submission is keyed by the recovery ROOT request id (stable
+    // across the whole continuation chain), not this turn's per-continuation
+    // requestId. Keying off `requestId` loses the link on every chained
+    // continuation, so the continuation that finally completes the turn can no
+    // longer mark the submission done (see investigate/recovery-* findings).
+    const hasRunningSubmission = this._hasRunningSubmission(
+      recoveryRootRequestId
+    );
+
+    if (streamIsTerminal && hasRunningSubmission) {
+      await this._completeRecoveredSubmission(
+        recoveryRootRequestId,
+        streamStatus === "completed" ? "completed" : "error",
+        requestId,
+        streamStatus === "completed"
+          ? null
+          : "Recovered chat stream had already errored."
       );
-      return true;
     }
 
-    // Any throw after the incident is opened (user `onChatRecovery`, orphan
-    // persistence, scheduling) must flip the incident to a terminal `failed`
-    // state and emit, otherwise it leaks in `attempting` and is never
-    // observable as a stuck turn.
-    try {
-      const options =
-        (await this.onChatRecovery({
+    const recoveredRequestId =
+      (canContinue || shouldRetry) && hasRunningSubmission
+        ? recoveryRootRequestId
+        : undefined;
+
+    if (shouldRetry) {
+      await this._chatRecoveryEngine().scheduleRecovery({
+        incident,
+        recoveryKind: input.recoveryKind,
+        callback: "_chatRecoveryRetry",
+        data: {
+          targetUserId: retryTargetUserId,
+          originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
-          recoveryRootRequestId,
-          attempt: incident.attempt,
-          maxAttempts: incident.maxAttempts,
-          recoveryKind,
-          streamId: streamId ?? "",
-          requestId,
-          partialText: partial.text,
-          partialParts: partial.parts,
-          recoveryData,
-          messages: [...this.messages],
-          lastBody: recoverySnapshot?.lastBody ?? this._lastBody,
-          lastClientTools:
-            recoverySnapshot?.lastClientTools ?? this._lastClientTools,
-          createdAt: ctx.createdAt
-        })) ?? {};
-
-      const shouldPersist = await this._shouldPersistOrphanedPartial(streamId, {
-        streamStillActive: Boolean(streamStillActive),
-        streamIsTerminal,
-        snapshot: recoverySnapshot
+          lastBody: snapshot?.lastBody ?? null,
+          lastClientTools: snapshot?.lastClientTools ?? null,
+          ...(recoveredRequestId ? { recoveredRequestId } : {})
+        }
       });
-
-      // Settled work — completed, often non-idempotent tool results — is NEVER
-      // dropped by recovery. `persist: false` only suppresses persistence of a
-      // partial that has nothing settled to lose; a partial carrying settled
-      // tool results is persisted regardless, so an app can never accidentally
-      // discard completed work (and never needs `{ persist: true }` just to be
-      // safe). A safe default beats a warning about an unsafe one (#1631).
-      if (
-        shouldPersist &&
-        (options.persist !== false ||
-          this._partialHasSettledToolResults(partial.parts))
-      ) {
-        await this._persistOrphanedStream(streamId);
-      }
-
-      if (streamStillActive) {
-        this._completeResumableStream(streamId);
-      }
-
-      const shouldRetry =
-        retryTargetUserId !== null &&
-        options.continue !== false &&
-        !streamIsTerminal;
-      const lastLeaf = shouldRetry ? null : await this.session.getLatestLeaf();
-      const targetId =
-        lastLeaf?.role === "assistant" && !streamIsTerminal
-          ? lastLeaf.id
-          : undefined;
-      const canContinue =
-        !shouldRetry && options.continue !== false && !streamIsTerminal;
-      // The durable submission is keyed by the recovery ROOT request id (stable
-      // across the whole continuation chain), not this turn's per-continuation
-      // requestId. Keying off `requestId` loses the link on every chained
-      // continuation, so the continuation that finally completes the turn can no
-      // longer mark the submission done (see investigate/recovery-* findings).
-      const hasRunningSubmission = this._hasRunningSubmission(
-        recoveryRootRequestId
-      );
-
-      if (streamIsTerminal && hasRunningSubmission) {
-        await this._completeRecoveredSubmission(
-          recoveryRootRequestId,
-          streamStatus === "completed" ? "completed" : "error",
-          requestId,
-          streamStatus === "completed"
-            ? null
-            : "Recovered chat stream had already errored."
-        );
-      }
-
-      const recoveredRequestId =
-        (canContinue || shouldRetry) && hasRunningSubmission
-          ? recoveryRootRequestId
-          : undefined;
-
-      if (shouldRetry) {
-        await this._chatRecoveryEngine().scheduleRecovery({
-          incident,
-          recoveryKind,
-          callback: "_chatRecoveryRetry",
-          data: {
-            targetUserId: retryTargetUserId,
-            originalRequestId: recoveryRootRequestId,
-            incidentId: incident.incidentId,
-            lastBody: recoverySnapshot?.lastBody ?? null,
-            lastClientTools: recoverySnapshot?.lastClientTools ?? null,
-            ...(recoveredRequestId ? { recoveredRequestId } : {})
-          }
-        });
-      } else if (canContinue) {
-        await this._chatRecoveryEngine().scheduleRecovery({
-          incident,
-          recoveryKind,
-          callback: "_chatRecoveryContinue",
-          data: {
-            ...(targetId ? { targetAssistantId: targetId } : {}),
-            originalRequestId: recoveryRootRequestId,
-            incidentId: incident.incidentId,
-            ...(recoverySnapshot
-              ? {
-                  lastBody: recoverySnapshot.lastBody ?? null,
-                  lastClientTools: recoverySnapshot.lastClientTools ?? null
-                }
-              : {}),
-            ...(recoveredRequestId ? { recoveredRequestId } : {})
-          }
-        });
-      } else if (options.continue === false && !streamIsTerminal) {
-        await this._updateChatRecoveryIncident(
-          incident.incidentId,
-          "skipped",
-          "continue_disabled"
-        );
-        const disabledMessage =
-          "Submission was interrupted and chat recovery was disabled.";
-        // Key off the recovery ROOT, not this continuation's `requestId` — a
-        // chained submission's row still carries the root id, so passing the
-        // per-continuation id would miss it and leave it stuck `running`.
-        await this._markRecoveredSubmissionInterrupted(
-          recoveryRootRequestId,
-          disabledMessage
-        );
-        // Unlike `conversation_changed` (a newer turn owns the UI, so silence
-        // is correct), disabling recovery abandons the turn with no superseding
-        // turn. Surface it like exhaustion so a reconnecting client isn't frozen.
-        await this._recordTerminalChatStatus(
-          "interrupted",
-          requestId,
-          disabledMessage
-        );
-        this._broadcastChat({
-          type: MSG_CHAT_RESPONSE,
-          id: requestId,
-          body: disabledMessage,
-          done: true,
-          error: true
-        });
-      } else {
-        await this._updateChatRecoveryIncident(
-          incident.incidentId,
-          "skipped",
-          streamIsTerminal ? "stream_terminal" : "not_recoverable"
-        );
-      }
-
-      return true;
-    } catch (error) {
+    } else if (canContinue) {
+      await this._chatRecoveryEngine().scheduleRecovery({
+        incident,
+        recoveryKind: input.recoveryKind,
+        callback: "_chatRecoveryContinue",
+        data: {
+          ...(targetId ? { targetAssistantId: targetId } : {}),
+          originalRequestId: recoveryRootRequestId,
+          incidentId: incident.incidentId,
+          ...(snapshot
+            ? {
+                lastBody: snapshot.lastBody ?? null,
+                lastClientTools: snapshot.lastClientTools ?? null
+              }
+            : {}),
+          ...(recoveredRequestId ? { recoveredRequestId } : {})
+        }
+      });
+    } else if (options.continue === false && !streamIsTerminal) {
       await this._updateChatRecoveryIncident(
         incident.incidentId,
-        "failed",
-        error instanceof Error ? error.message : String(error)
+        "skipped",
+        "continue_disabled"
       );
-      throw error;
+      const disabledMessage =
+        "Submission was interrupted and chat recovery was disabled.";
+      // Key off the recovery ROOT, not this continuation's `requestId` — a
+      // chained submission's row still carries the root id, so passing the
+      // per-continuation id would miss it and leave it stuck `running`.
+      await this._markRecoveredSubmissionInterrupted(
+        recoveryRootRequestId,
+        disabledMessage
+      );
+      // Unlike `conversation_changed` (a newer turn owns the UI, so silence is
+      // correct), disabling recovery abandons the turn with no superseding turn.
+      // Surface it like exhaustion so a reconnecting client isn't frozen.
+      await this._recordTerminalChatStatus(
+        "interrupted",
+        requestId,
+        disabledMessage
+      );
+      this._broadcastChat({
+        type: MSG_CHAT_RESPONSE,
+        id: requestId,
+        body: disabledMessage,
+        done: true,
+        error: true
+      });
+    } else {
+      await this._updateChatRecoveryIncident(
+        incident.incidentId,
+        "skipped",
+        streamIsTerminal ? "stream_terminal" : "not_recoverable"
+      );
     }
   }
 
   private async _recoverablePreStreamUserId(
-    snapshot: ChatFiberSnapshot<"think-chat-turn"> | null,
+    snapshot: ChatFiberSnapshot | null,
     streamId: string,
     partial: { text: string; parts: MessagePart[] }
   ): Promise<string | null> {
@@ -10058,7 +10051,7 @@ export class Think<
   }
 
   private async _hasPersistedRecoveredAssistant(
-    snapshot: ChatFiberSnapshot<"think-chat-turn"> | null
+    snapshot: ChatFiberSnapshot | null
   ): Promise<boolean> {
     const lastLeaf = await this.session.getLatestLeaf();
     return (
@@ -10079,7 +10072,7 @@ export class Think<
     opts: {
       streamStillActive: boolean;
       streamIsTerminal: boolean;
-      snapshot: ChatFiberSnapshot<"think-chat-turn"> | null;
+      snapshot: ChatFiberSnapshot | null;
     }
   ): Promise<boolean> {
     if (!streamId) return false;
@@ -10089,20 +10082,6 @@ export class Think<
     return (
       opts.streamStillActive || (opts.streamIsTerminal && !alreadyPersisted)
     );
-  }
-
-  /** Whether a reconstructed partial carries any settled (provider-accepted)
-   *  tool result — the completed, often non-idempotent work that a
-   *  `{ persist: false }` recovery return would silently discard. */
-  private _partialHasSettledToolResults(parts: MessagePart[]): boolean {
-    return parts.some((part) => {
-      const record = part as Record<string, unknown>;
-      const type = typeof record.type === "string" ? record.type : "";
-      return (
-        (type.startsWith("tool-") || type === "dynamic-tool") &&
-        this._toolPartHasSettledResult(record)
-      );
-    });
   }
 
   /**

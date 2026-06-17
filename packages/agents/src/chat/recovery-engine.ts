@@ -12,9 +12,11 @@
 import type { FiberRecoveryContext } from "../index";
 import type {
   ChatRecoveryExhaustedContext,
+  ChatRecoveryOptions,
   ResolvedChatRecoveryConfig
 } from "./lifecycle";
 import type { MessagePart } from "./message-builder";
+import type { ChatFiberSnapshot } from "./recovery";
 import {
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
   chatRecoveryIncidentId,
@@ -53,6 +55,36 @@ export type ChatRecoveryScheduleReason = "initial" | "stable_timeout_retry";
 
 /** A reconstructed orphaned-stream partial (buffered text + message parts). */
 export type RecoveryPartial = { text: string; parts: MessagePart[] };
+
+/** Lifecycle status of a recovered stream's metadata row. */
+export type ChatStreamStatus = "streaming" | "completed" | "error";
+
+/**
+ * Whether a reconstructed partial carries any settled (provider-accepted) tool
+ * result — the completed, often non-idempotent work that a `{ persist: false }`
+ * recovery return would silently discard (#1631). A part counts as settled when
+ * it is a tool part (`tool-*` / `dynamic-tool`) carrying an `output`/`result`,
+ * or whose state reached a terminal `output-{available,error,denied}`.
+ *
+ * Single source of truth for the recovery persist gate in both packages: the
+ * `AIChatAgent` and `Think` copies were byte-equivalent (Think only factored the
+ * inner predicate into `_toolPartHasSettledResult`), so this pure lift is a true
+ * dedup with no behavior change.
+ */
+export function partialHasSettledToolResults(parts: MessagePart[]): boolean {
+  return parts.some((part) => {
+    const record = part as Record<string, unknown>;
+    const type = typeof record.type === "string" ? record.type : "";
+    if (!(type.startsWith("tool-") || type === "dynamic-tool")) return false;
+    if ("output" in record || "result" in record) return true;
+    const state = typeof record.state === "string" ? record.state : "";
+    return (
+      state === "output-available" ||
+      state === "output-error" ||
+      state === "output-denied"
+    );
+  });
+}
 
 /**
  * Resolve the `schedule()` idempotency option for a recovery schedule. Single
@@ -206,6 +238,137 @@ export interface ChatRecoveryAdapter {
   onGiveUpBookkeepingError(phase: "read" | "seal", error: unknown): void;
 }
 
+/** Resolved orphaned-stream identity for a recovered chat turn. */
+export interface ResolvedRecoveryStream {
+  /** The orphaned stream id, or `""` when no stream metadata survives. */
+  streamId: string;
+  /**
+   * Whether the orphaned stream is still the live in-flight stream (so its
+   * partial has not already been persisted + completed by an ACK-driven
+   * reconnect). Gates persistence and stream completion.
+   */
+  streamStillActive: boolean;
+  /**
+   * The stream metadata row's lifecycle status, when the host tracks it
+   * (`Think`). `undefined` for hosts that do not model terminal streams
+   * (`AIChatAgent`) — those keep every terminal-stream branch dead, per the
+   * "substrate capabilities are optional" decision in the RFC.
+   */
+  streamStatus?: ChatStreamStatus;
+}
+
+/** Input to {@link ChatFiberWakeHooks.classifyRecoveredTurn}. */
+export interface ClassifyRecoveredTurnInput {
+  snapshot: ChatFiberSnapshot | null;
+  requestId: string;
+  streamId: string;
+  partial: RecoveryPartial;
+  streamStillActive: boolean;
+  streamStatus?: ChatStreamStatus;
+}
+
+/** Input to {@link ChatFiberWakeHooks.invokeOnChatRecovery}. */
+export interface InvokeOnChatRecoveryInput {
+  incident: ChatRecoveryIncident;
+  recoveryKind: ChatRecoveryKind;
+  recoveryRootRequestId: string;
+  requestId: string;
+  streamId: string;
+  partial: RecoveryPartial;
+  snapshot: ChatFiberSnapshot | null;
+  recoveryData: unknown;
+  createdAt: number;
+}
+
+/** Input to {@link ChatFiberWakeHooks.shouldPersistOrphanedPartial}. */
+export interface PersistOrphanedPartialInput {
+  streamId: string;
+  streamStillActive: boolean;
+  streamStatus?: ChatStreamStatus;
+  snapshot: ChatFiberSnapshot | null;
+}
+
+/** Input to {@link ChatFiberWakeHooks.dispatchRecoveredTurn}. */
+export interface DispatchRecoveredTurnInput<TClassify> {
+  incident: ChatRecoveryIncident;
+  config: ResolvedChatRecoveryConfig;
+  recoveryKind: ChatRecoveryKind;
+  options: ChatRecoveryOptions;
+  snapshot: ChatFiberSnapshot | null;
+  requestId: string;
+  recoveryRootRequestId: string;
+  streamId: string;
+  streamStatus?: ChatStreamStatus;
+  /** The package-specific classification detail produced by `classifyRecoveredTurn`. */
+  detail: TClassify;
+}
+
+/**
+ * The wake-dispatch host operations the engine drives when an interrupted CHAT
+ * fiber is detected on restart — the divergent organs the frame-collapse map
+ * flagged. Kept SEPARATE from {@link ChatRecoveryAdapter} (and passed per call to
+ * {@link ChatRecoveryEngine.handleChatFiberRecovery}) so the incident/give-up
+ * adapter stays focused, and generic over `TClassify` so the
+ * `classifyRecoveredTurn` → `dispatchRecoveredTurn` handoff is type-safe without a
+ * class-level generic.
+ *
+ * The engine owns the wake LIFECYCLE (gate → parse → unwrap → stream → partial →
+ * classify → begin-incident → exhausted-branch → onChatRecovery → persist →
+ * complete → dispatch → catch→failed) and the shared persist clause; these hooks
+ * own the package-specific I/O and the retry/continue/skip decision.
+ */
+export interface ChatFiberWakeHooks<TClassify> {
+  /** The chat-fiber name prefix (`CHAT_FIBER_NAME + ":"`) gating the wake path. */
+  chatFiberPrefix(): string;
+  /** Decode the fiber snapshot into the recovery snapshot + checkpointed user data. */
+  unwrapRecoverySnapshot(ctx: FiberRecoveryContext): {
+    snapshot: ChatFiberSnapshot | null;
+    recoveryData: unknown;
+  };
+  /** Resolve the orphaned stream identity for this turn's request id. */
+  resolveRecoveryStream(requestId: string): ResolvedRecoveryStream;
+  /**
+   * Classify the recovered turn as a `retry` or `continue` and return any
+   * package-specific detail the dispatch decision needs (e.g. the pre-stream
+   * retry target id). Runs before the incident is opened.
+   */
+  classifyRecoveredTurn(
+    input: ClassifyRecoveredTurnInput
+  ):
+    | { recoveryKind: ChatRecoveryKind; detail: TClassify }
+    | Promise<{ recoveryKind: ChatRecoveryKind; detail: TClassify }>;
+  /**
+   * Build the package's `ChatRecoveryContext` and invoke the user `onChatRecovery`
+   * hook, returning its (defaulted) options. The engine wraps this in the
+   * incident `failed`-on-throw guard.
+   */
+  invokeOnChatRecovery(
+    input: InvokeOnChatRecoveryInput
+  ): Promise<ChatRecoveryOptions | void>;
+  /**
+   * The BASE persist gate: whether the orphaned partial is eligible to be
+   * materialized at all (live stream, or terminal-but-not-yet-persisted). The
+   * engine ANDs this with the shared `options.persist !== false ||
+   * partialHasSettledToolResults(...)` clause, so settled work is never dropped.
+   */
+  shouldPersistOrphanedPartial(
+    input: PersistOrphanedPartialInput
+  ): boolean | Promise<boolean>;
+  /** Materialize the orphaned stream's partial into a persisted assistant message. */
+  persistOrphanedStream(streamId: string): Promise<void>;
+  /** Mark the (still-active) recovered stream complete and schedule cleanup. */
+  completeRecoveredStream(streamId: string): void | Promise<void>;
+  /**
+   * The retry/continue/skip DECISION — the package-owned core. Runs after persist
+   * + complete; owns the leaf/submission computation, the schedule calls (via
+   * {@link ChatRecoveryEngine.scheduleRecovery}), the skip transitions, and any
+   * package-specific terminal/broadcast writes.
+   */
+  dispatchRecoveredTurn(
+    input: DispatchRecoveredTurnInput<TClassify>
+  ): Promise<void>;
+}
+
 /**
  * Drives the shared recovery orchestration over a {@link ChatRecoveryAdapter}.
  * The incident *budget math* lives in the pure `evaluateChatRecoveryIncident`;
@@ -229,6 +392,183 @@ export class ChatRecoveryEngine {
    */
   async handleNonChatFiber(ctx: FiberRecoveryContext): Promise<boolean> {
     return (await this.adapter.tryHandleNonChatFiberRecovery?.(ctx)) ?? false;
+  }
+
+  /**
+   * The shared wake-recovery LIFECYCLE for an interrupted chat fiber. Both
+   * packages drove this exact frame; the divergent organs are the
+   * {@link ChatFiberWakeHooks}. In order:
+   *
+   * 1. non-chat dispatch ({@link handleNonChatFiber}) FIRST, then the chat-fiber
+   *    name gate — a non-chat fiber is never misread as an orphaned chat turn;
+   * 2. parse the request id, unwrap the snapshot, resolve the orphaned stream +
+   *    reconstruct its partial;
+   * 3. classify the turn (retry/continue + package detail) and open the incident;
+   * 4. if the budget is already exhausted, persist the settled partial (so
+   *    non-idempotent tool results are not discarded — #1631) and terminalize
+   *    BEFORE consulting `onChatRecovery`;
+   * 5. otherwise, inside a `failed`-on-throw guard: invoke `onChatRecovery`,
+   *    apply the shared persist gate (base eligibility AND `persist !== false ||
+   *    settled tool results`), complete the live stream, then hand the
+   *    retry/continue/skip DECISION to {@link ChatFiberWakeHooks.dispatchRecoveredTurn}.
+   *
+   * Returns `true` when the fiber was a chat (or non-chat) recovery the engine
+   * handled, `false` when it was not a chat fiber (the caller keeps looking). Any
+   * throw after the incident opens flips it to `failed` so it is never left
+   * leaking in `attempting`.
+   */
+  async handleChatFiberRecovery<TClassify>(
+    ctx: FiberRecoveryContext,
+    wake: ChatFiberWakeHooks<TClassify>
+  ): Promise<boolean> {
+    const { adapter } = this;
+
+    // Ordering invariant: non-chat (messenger/workflow) fibers dispatch BEFORE
+    // the chat-fiber gate.
+    if (await this.handleNonChatFiber(ctx)) return true;
+
+    const chatPrefix = wake.chatFiberPrefix();
+    if (!ctx.name.startsWith(chatPrefix)) return false;
+
+    const requestId = ctx.name.slice(chatPrefix.length);
+    const { snapshot, recoveryData } = wake.unwrapRecoverySnapshot(ctx);
+    const stream = wake.resolveRecoveryStream(requestId);
+    const { streamId, streamStillActive, streamStatus } = stream;
+    const partial = streamId
+      ? adapter.getPartialStreamText(streamId)
+      : { text: "", parts: [] as MessagePart[] };
+
+    const { recoveryKind, detail } = await wake.classifyRecoveredTurn({
+      snapshot,
+      requestId,
+      streamId,
+      partial,
+      streamStillActive,
+      streamStatus
+    });
+    const recoveryRootRequestId = snapshot?.recoveryRootRequestId ?? requestId;
+
+    const { incident, config, exhausted } = await this.beginIncident({
+      requestId,
+      recoveryRootRequestId,
+      latestUserMessageId: snapshot?.latestUserMessageId,
+      recoveryKind
+    });
+
+    if (exhausted) {
+      // Preserve the settled partial before sealing. Exhaustion is decided BEFORE
+      // `onChatRecovery`, so without this the settled (often non-idempotent) tool
+      // results the turn already produced are discarded and the model re-runs
+      // them on the next message (#1631). Same gating as the normal path (with no
+      // `options`, so the persist clause collapses to base eligibility) — never
+      // duplicating a partial an earlier attempt already saved.
+      if (
+        await this._shouldPersistOrphanedPartial(wake, {
+          streamId,
+          streamStillActive,
+          streamStatus,
+          snapshot,
+          options: undefined,
+          partial
+        })
+      ) {
+        await wake.persistOrphanedStream(streamId);
+      }
+      await adapter.exhaustChatRecovery(
+        incident,
+        config,
+        partial,
+        streamId,
+        ctx.createdAt
+      );
+      return true;
+    }
+
+    // Any throw after the incident opens (user `onChatRecovery`, orphan
+    // persistence, scheduling) must flip the incident to terminal `failed` and
+    // emit, otherwise it leaks in `attempting` and is never observable as stuck.
+    try {
+      const options =
+        (await wake.invokeOnChatRecovery({
+          incident,
+          recoveryKind,
+          recoveryRootRequestId,
+          requestId,
+          streamId,
+          partial,
+          snapshot,
+          recoveryData,
+          createdAt: ctx.createdAt
+        })) ?? {};
+
+      if (
+        await this._shouldPersistOrphanedPartial(wake, {
+          streamId,
+          streamStillActive,
+          streamStatus,
+          snapshot,
+          options,
+          partial
+        })
+      ) {
+        await wake.persistOrphanedStream(streamId);
+      }
+
+      if (streamStillActive) {
+        await wake.completeRecoveredStream(streamId);
+      }
+
+      await wake.dispatchRecoveredTurn({
+        incident,
+        config,
+        recoveryKind,
+        options,
+        snapshot,
+        requestId,
+        recoveryRootRequestId,
+        streamId,
+        streamStatus,
+        detail
+      });
+
+      return true;
+    } catch (error) {
+      await this.updateIncident(
+        incident.incidentId,
+        "failed",
+        error instanceof Error ? error.message : String(error)
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * The shared persist gate: base eligibility (the package's
+   * {@link ChatFiberWakeHooks.shouldPersistOrphanedPartial}) AND the
+   * never-drop-settled-work clause `options.persist !== false ||
+   * partialHasSettledToolResults(...)`. `options: undefined` (the exhausted
+   * branch) collapses the clause to the base gate. The clause lives here — not in
+   * each package — because settled-work preservation is a cross-package invariant
+   * (#1631), and `partialHasSettledToolResults` is now a single shared predicate.
+   */
+  private async _shouldPersistOrphanedPartial<TClassify>(
+    wake: ChatFiberWakeHooks<TClassify>,
+    input: PersistOrphanedPartialInput & {
+      options: ChatRecoveryOptions | undefined;
+      partial: RecoveryPartial;
+    }
+  ): Promise<boolean> {
+    const base = await wake.shouldPersistOrphanedPartial({
+      streamId: input.streamId,
+      streamStillActive: input.streamStillActive,
+      streamStatus: input.streamStatus,
+      snapshot: input.snapshot
+    });
+    return (
+      base &&
+      (input.options?.persist !== false ||
+        partialHasSettledToolResults(input.partial.parts))
+    );
   }
 
   async beginIncident(
