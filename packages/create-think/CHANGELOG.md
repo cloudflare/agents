@@ -1,5 +1,18 @@
 # create-think
 
+## 0.1.0
+
+### Minor Changes
+
+- [#1770](https://github.com/cloudflare/agents/pull/1770) [`718634f`](https://github.com/cloudflare/agents/commit/718634f9664a14fd5d666c63964e9723e073911f) Thanks [@threepointone](https://github.com/threepointone)! - Add `webhook-agent` and `business-workflow` starter templates.
+
+  `webhook-agent` scaffolds an agent fed by inbound webhooks through durable,
+  idempotent submissions (a custom `src/server.ts` entry + `submitMessages`).
+  `business-workflow` scaffolds a back-office operations agent with
+  human-in-the-loop approval gates (`needsApproval` + an approval UI) and a
+  scheduled digest. Every starter now also ships a `start.md` you can paste into an
+  AI coding agent for guided setup.
+
 ## 0.0.4
 
 ### Patch Changes

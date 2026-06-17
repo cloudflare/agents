@@ -1,5 +1,23 @@
 # @cloudflare/agents
 
+## 0.16.2
+
+### Patch Changes
+
+- [#1767](https://github.com/cloudflare/agents/pull/1767) [`f03dee6`](https://github.com/cloudflare/agents/commit/f03dee651392381303630014a81bdc291e4a4722) Thanks [@threepointone](https://github.com/threepointone)! - Reduce Think Durable Object SQLite reads during normal wakes and text-only turns.
+
+  Think now avoids automatic media-eviction scans until hydration has been windowed or an oversized appended message has been observed. The shared resumable stream buffer also avoids per-wake metadata-column introspection by creating new tables with the current columns and lazily migrating legacy tables only when a stream write needs it.
+
+- [#1722](https://github.com/cloudflare/agents/pull/1722) [`9f8e14b`](https://github.com/cloudflare/agents/commit/9f8e14b019eb56bafa8b78d9dce5a02a15a6635f) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Fix two MCP client OAuth bugs found by the new conformance suite, and add MCP conformance testing.
+
+  - `MCPClientConnection` now finishes OAuth on the transport that received the 401. A fresh transport loses the resource metadata URL from the `WWW-Authenticate` header, so token exchange fell back to the default `/token` path and failed against authorization servers at non-default locations.
+  - `MCPClientConnection.init()` detaches the previous transport before reconnecting. Re-authorizing after a mid-session 401 (scope step-up, token revocation) previously failed permanently with "Already connected to a transport".
+  - Added the official `@modelcontextprotocol/conformance` suite (as used by the MCP TypeScript SDK) running against the MCP client (`Agent` + `MCPClientManager`), `McpAgent`, and `createMcpHandler` + `WorkerTransport` — all hosted in workerd via `wrangler dev`. See `packages/agents/conformance/README.md`.
+
+- [#1767](https://github.com/cloudflare/agents/pull/1767) [`f03dee6`](https://github.com/cloudflare/agents/commit/f03dee651392381303630014a81bdc291e4a4722) Thanks [@threepointone](https://github.com/threepointone)! - Cache the active branch tip in `AgentSessionProvider` so finding the latest leaf no longer scans the whole session on every read and append.
+
+  `latestLeafRow()` previously ran an anti-join over every message row (O(rows)) to locate the branch tip — on each hydration AND each auto-parent append, so on long transcripts it dominated a wake's read cost. The tip is now maintained in place on append/delete/clear; a cached tip is re-validated on read with an O(1) existence + still-childless check (so it self-heals if another writer deletes the tip or gives it a child), and the full scan only runs when that check fails or the cache is cold. Per-hydration and per-append tip lookups drop from O(rows) to O(1), and the full scan never runs more often than before.
+
 ## 0.16.1
 
 ### Patch Changes

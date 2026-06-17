@@ -1,5 +1,30 @@
 # @cloudflare/think
 
+## 0.10.0
+
+### Minor Changes
+
+- [#1770](https://github.com/cloudflare/agents/pull/1770) [`718634f`](https://github.com/cloudflare/agents/commit/718634f9664a14fd5d666c63964e9723e073911f) Thanks [@threepointone](https://github.com/threepointone)! - Add a runtime CLI: `think studio` and `think state`.
+
+  `think studio [agent] [instance]` launches Think Studio — a bundled local web app that connects (over WebSocket) to any running Think instance, local dev server or deployed Worker. Studio provides streaming chat (with tool calls and inline approve/reject for `needsApproval` tools) plus a read-only inspector showing the agent's identity, connection status, live state, recent history, and a turn/recovery status badge. The CLI serves the prebuilt SPA from a tiny `node:http` static server and opens the browser (`--port`, `--no-open`); the browser talks to the agent directly. `think state <agent> [instance]` prints the agent's identity, live state, and a recent history snapshot (`--json`, `--limit`).
+
+  Both commands share connection flags (`--url`, `--host`, `--protocol`, `--token`, `--query`, `--route-prefix`, `--root`), resolve friendly agent ids from the local manifest, and send the token as a query parameter (WebSocket upgrades can't set headers). Chatting in Studio drives a real, persisted turn against the live Durable Object.
+
+  The Think Vite plugin also registers an `s` dev-server shortcut (alongside Vite's built-in `r`/`u`/`o`/`c`/`q`) that launches Studio against the running `pnpm dev` server. Disable it with `studioShortcut: false`.
+
+- [#1770](https://github.com/cloudflare/agents/pull/1770) [`718634f`](https://github.com/cloudflare/agents/commit/718634f9664a14fd5d666c63964e9723e073911f) Thanks [@threepointone](https://github.com/threepointone)! - Add `addMessages()` for writing to the transcript without starting a model turn.
+
+  `addMessages(messages, options?)` appends (or upserts, via `{ mode: "upsert" }`) into the Session tree without running inference or entering the turn queue, so it is safe to call from inside a tool `execute`. Array entries are appended linearly into one path; appends are idempotent by message id; `parentId` controls the attach point (latest committed leaf by default, `null` for root, and an unknown id fails fast). This is distinct from `saveMessages()` (which runs a turn) and from `AIChatAgent`'s `persistMessages()` (which replaces/reconciles a flat array). Fixes the Think docs that previously pointed to a nonexistent `persistMessages()` on Think.
+
+### Patch Changes
+
+- [#1767](https://github.com/cloudflare/agents/pull/1767) [`f03dee6`](https://github.com/cloudflare/agents/commit/f03dee651392381303630014a81bdc291e4a4722) Thanks [@threepointone](https://github.com/threepointone)! - Reduce Think Durable Object SQLite reads during normal wakes and text-only turns.
+
+  Think now avoids automatic media-eviction scans until hydration has been windowed or an oversized appended message has been observed. The shared resumable stream buffer also avoids per-wake metadata-column introspection by creating new tables with the current columns and lazily migrating legacy tables only when a stream write needs it.
+
+- Updated dependencies [[`718634f`](https://github.com/cloudflare/agents/commit/718634f9664a14fd5d666c63964e9723e073911f)]:
+  - create-think@0.1.0
+
 ## 0.9.1
 
 ### Patch Changes
