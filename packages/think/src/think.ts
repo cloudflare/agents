@@ -9595,6 +9595,14 @@ export class Think<
           this._restoreClientTools();
         }
       },
+      // Messenger/workflow reply fibers (`think:messenger-reply`) are NOT chat
+      // turns; the messenger runtime owns their recovery. The engine dispatches
+      // this before the chat-fiber gate so such a fiber is never misread as an
+      // orphaned chat turn. `Promise.resolve(false)` when no messenger runtime
+      // is initialized (e.g. a child facet).
+      tryHandleNonChatFiberRecovery: (ctx) =>
+        this._messengerRuntime?.handleFiberRecovery(ctx) ??
+        Promise.resolve(false),
       readProgress: () => this._chatRecoveryProgressMarker(),
       // A turn parked on a pending CLIENT interaction is waiting on the human,
       // not stuck, so the engine keeps it budget-free. SERVER-tool orphans are
@@ -9803,7 +9811,10 @@ export class Think<
   protected override async _handleInternalFiberRecovery(
     ctx: FiberRecoveryContext
   ): Promise<boolean> {
-    if (await this._messengerRuntime?.handleFiberRecovery(ctx)) {
+    // Non-chat (messenger/workflow) fibers are dispatched through the shared
+    // engine seam before the chat-fiber gate — the engine owns the ordering
+    // invariant, the messenger runtime (wired via the adapter) owns behavior.
+    if (await this._chatRecoveryEngine().handleNonChatFiber(ctx)) {
       return true;
     }
 

@@ -4056,6 +4056,14 @@ export class AIChatAgent<
   protected override async _handleInternalFiberRecovery(
     ctx: FiberRecoveryContext
   ): Promise<boolean> {
+    // Shared non-chat fiber dispatch seam (symmetric with `Think`). `AIChatAgent`
+    // has no non-chat fibers, so its adapter omits the hook and this is always a
+    // no-op (`false`) — but routing through the engine keeps both packages on the
+    // identical recovery entry structure.
+    if (await this._chatRecoveryEngine().handleNonChatFiber(ctx)) {
+      return true;
+    }
+
     const chatPrefix =
       (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME + ":";
     if (!ctx.name.startsWith(chatPrefix)) {

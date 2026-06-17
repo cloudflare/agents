@@ -1438,6 +1438,34 @@ the change, and the key review findings.
   deploy-eviction e2e already covers the shared continuation machinery the stall
   routes into.
 
+- _Slice 3c (shared non-chat fiber dispatch seam)_ — Before writing more code, a
+  deep map of the remaining Think recovery surface (via a thorough explore pass)
+  reframed Phase 3: of the five remaining surfaces, only the **non-chat fiber
+  dispatch** is genuinely additive seam work — durable submissions, agent-tool
+  child-run reconcile, and resume-ACK orphan persist are ALREADY correctly
+  adapter-owned and invoked at the right points, so their convergence is Phase 4
+  _deduplication_, not new seams (forcing seams now adds indirection without
+  removing duplication, and touches the riskiest wake path for no payoff). The
+  map also corrected a doc/reality gap: `tryHandleNonChatFiberRecovery` existed
+  only in this RFC — Think actually called `_messengerRuntime.handleFiberRecovery`
+  directly. Slice 3c makes that seam real: a new optional
+  `tryHandleNonChatFiberRecovery(ctx)` adapter hook + `engine.handleNonChatFiber`,
+  with Think routing its messenger dispatch through the engine and `AIChatAgent`
+  calling the same seam as a structural no-op (omits the hook → every fiber stays
+  a chat candidate). The engine now owns the ordering invariant (non-chat
+  dispatch before the chat-fiber gate); the behavior stays adapter-owned.
+  Behavior is byte-equivalent: previously `if (await
+_messengerRuntime?.handleFiberRecovery(ctx))`, now `if (await
+engine.handleNonChatFiber(ctx))` which is `(await
+adapter.tryHandleNonChatFiberRecovery?.(ctx)) ?? false` — same truthiness, same
+  `undefined`→skip when no messenger runtime (child facet). `FiberRecoveryContext`
+  imports `import type` from `../index` (same package, erased — no cycle). Tests:
+  3 Layer-2 fake-adapter cases (consume→true, decline→false, omitted→false);
+  agents `chat` project 25 green (was 22), Think 686 + e2e green, ai-chat 685
+  green, repo typecheck 111, `pnpm run check` clean. No changeset (zero behavior
+  change; `@internal` seam). Decision (user-confirmed): do 3c now, move surfaces
+  3/4/5 into Phase 4 dedup.
+
 - _Slice 2e (incident-update transitions behind the engine)_ — The transition
   twin of slice 2a: `ChatRecoveryEngine.updateIncident(incidentId, status,
 reason?)` now owns the incident state-machine transitions both packages
@@ -1908,20 +1936,44 @@ behind a changeset second:
       defaulting it on with recovery — convergence on the _mechanism_, not a
       forced timeout value users must tune above their slowest legitimate
       inter-chunk gap. Changeset added (`@cloudflare/ai-chat` minor).
-- [ ] Implement remaining `Think` adapter hooks as needed (submissions,
-      messenger/workflow fiber recovery, tool rollback, agent-tool child-run
-      reconciliation) — preserved as adapter-owned `Think` behavior.
-- [ ] Preserve Session persistence.
-- [ ] Preserve durable submission recovery.
-- [ ] Preserve messenger/workflow fiber recovery ordering.
-- [ ] Preserve tool rollback and agent-tool child-run reconciliation.
+- [x] **Slice 3c — shared non-chat fiber dispatch seam (zero behavior change).**
+      Added the optional `tryHandleNonChatFiberRecovery(ctx)` adapter hook +
+      `ChatRecoveryEngine.handleNonChatFiber(ctx)`. `Think` now routes its
+      messenger/workflow reply-fiber dispatch
+      (`_messengerRuntime.handleFiberRecovery`) through the engine seam at the
+      top of `_handleInternalFiberRecovery` instead of calling the runtime
+      directly; `AIChatAgent` calls the same seam (a structural no-op — it omits
+      the hook, so every fiber stays a chat candidate). The engine now owns the
+      ordering invariant (non-chat dispatch BEFORE the chat-fiber gate); the
+      behavior stays adapter-owned. 3 Layer-2 fake-adapter tests (hook
+      consumes → `true`; hook declines → `false`; hook omitted → `false`).
+      `FiberRecoveryContext` is imported `import type` from `../index` (same
+      package, erased — no cycle). This is the structural precondition for a
+      future shared fiber-recovery dispatch skeleton.
+- [ ] **(Deferred to Phase 4 — these are already correctly adapter-owned; the
+      remaining value is _deduplication_, not new seams.)** The deep surface map
+      (Phase 3 mid-point) confirmed durable submissions, agent-tool child-run
+      reconcile, and resume-ACK orphan persist are each already package-private
+      and invoked at the right points (submission drain in onStart; reconcile in
+      the recovery-callback `finally`; orphan persist on the reconnect-ACK path).
+      Forcing them behind engine seams now would add indirection without removing
+      duplication, so they move to Phase 4 where the engine grows the
+      fiber-recovery dispatch skeleton and the duplicated bodies collapse:
+  - [ ] Durable submission lifecycle hooks (engine provides; `AIChatAgent`
+        no-ops) — _preserved_ today, deduped in Phase 4.
+  - [ ] Agent-tool child-run reconcile after recovery completes — _preserved_
+        today (both call it in the callback `finally`), deduped in Phase 4.
+  - [ ] Resume-ACK orphan persist sharing the adapter orphan writer with fiber
+        recovery — _preserved_ today, unified in Phase 4.
+  - [ ] Tool rollback — _preserved_ (Think-owned), no seam needed.
+  - [ ] Session persistence — _preserved_ (Think-owned), no seam needed.
 
 Exit criteria:
 
-- Existing Think recovery tests pass.
-- Durable submissions still recover correctly.
-- Stall recovery still works.
-- Tool rollback tests still pass.
+- Existing Think recovery tests pass. ✅ (686 + e2e green after 3a/3b/3c)
+- Durable submissions still recover correctly. ✅ (unchanged; covered by suite)
+- Stall recovery still works. ✅ (3a/3b; existing Think stall coverage preserved)
+- Tool rollback tests still pass. ✅ (unchanged)
 
 ### Phase 4: delete duplicate private logic
 

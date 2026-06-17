@@ -9,6 +9,7 @@ import {
   type ChatRecoveryScheduleReason
 } from "../recovery-engine";
 import type { ChatRecoveryExhaustedContext } from "../lifecycle";
+import type { FiberRecoveryContext } from "../../index";
 import {
   chatRecoveryIncidentId,
   chatRecoveryIncidentKey,
@@ -556,5 +557,54 @@ describe("notifyChatRecoveryExhausted", () => {
     });
 
     expect(order).toEqual(["emit"]);
+  });
+});
+
+/**
+ * Layer-2 seam test for the non-chat fiber dispatch (slice 3c). `Think` routes
+ * its messenger/workflow reply fibers through `tryHandleNonChatFiberRecovery`
+ * before chat recovery; `AIChatAgent` omits the hook (every fiber is a chat
+ * candidate). The engine owns only the dispatch + the "handled? skip chat
+ * recovery" contract.
+ */
+describe("ChatRecoveryEngine.handleNonChatFiber (fake adapter)", () => {
+  // A minimal subset of the adapter — `handleNonChatFiber` only touches the one
+  // hook, so the other methods are never called here.
+  function engineWithHook(
+    hook?: ChatRecoveryAdapter["tryHandleNonChatFiberRecovery"]
+  ) {
+    const adapter = {
+      tryHandleNonChatFiberRecovery: hook
+    } as unknown as ChatRecoveryAdapter;
+    return new ChatRecoveryEngine(adapter);
+  }
+
+  const ctx: FiberRecoveryContext = {
+    id: "fiber-1",
+    name: "think:messenger-reply",
+    snapshot: null,
+    createdAt: 0,
+    recoveryReason: "interrupted"
+  };
+
+  it("returns true when the package's hook consumes the fiber", async () => {
+    const seen: FiberRecoveryContext[] = [];
+    const engine = engineWithHook(async (c) => {
+      seen.push(c);
+      return true;
+    });
+
+    expect(await engine.handleNonChatFiber(ctx)).toBe(true);
+    expect(seen).toEqual([ctx]);
+  });
+
+  it("returns false when the hook declines the fiber (falls through to chat recovery)", async () => {
+    const engine = engineWithHook(async () => false);
+    expect(await engine.handleNonChatFiber(ctx)).toBe(false);
+  });
+
+  it("returns false when the adapter omits the hook (AIChatAgent shape)", async () => {
+    const engine = engineWithHook(undefined);
+    expect(await engine.handleNonChatFiber(ctx)).toBe(false);
   });
 });

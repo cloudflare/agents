@@ -9,6 +9,7 @@
  * @internal Not a public API.
  */
 
+import type { FiberRecoveryContext } from "../index";
 import type {
   ChatRecoveryExhaustedContext,
   ResolvedChatRecoveryConfig
@@ -103,6 +104,19 @@ export interface ChatRecoveryAdapter {
    * has no such state and omits it.
    */
   ensureInteractionStateLoaded?(): void;
+  /**
+   * Optional: give the package a chance to handle a NON-chat fiber before chat
+   * recovery inspects it. Returns `true` if the package fully consumed the
+   * fiber, in which case the engine tells the caller to skip chat-recovery
+   * processing for it. `Think` uses this for its messenger/workflow reply fibers
+   * (`think:messenger-reply`); `AIChatAgent` has no non-chat fibers and omits it
+   * (the engine then treats every recovered fiber as a chat-recovery candidate).
+   *
+   * Ordering invariant: the engine dispatches this FIRST, before the
+   * chat-fiber-name gate, so a non-chat fiber is never misclassified as an
+   * orphaned chat turn.
+   */
+  tryHandleNonChatFiberRecovery?(ctx: FiberRecoveryContext): Promise<boolean>;
   /** Monotonic forward-progress marker for the no-progress budget. */
   readProgress(): Promise<number>;
   /**
@@ -145,6 +159,18 @@ export class ChatRecoveryEngine {
    * and broadcast its lifecycle events. Returns the incident, the resolved
    * config, and whether the budget is now exhausted.
    */
+  /**
+   * Dispatch a recovered fiber to the package's non-chat handler (the
+   * messenger/workflow seam) before any chat-recovery processing. Returns `true`
+   * when the package consumed the fiber — the caller must then skip chat
+   * recovery for it. The engine owns the *ordering* (this runs before the
+   * chat-fiber gate); the *behavior* is adapter-owned. No-op (`false`) when the
+   * adapter omits {@link ChatRecoveryAdapter.tryHandleNonChatFiberRecovery}.
+   */
+  async handleNonChatFiber(ctx: FiberRecoveryContext): Promise<boolean> {
+    return (await this.adapter.tryHandleNonChatFiberRecovery?.(ctx)) ?? false;
+  }
+
   async beginIncident(
     input: BeginChatRecoveryIncidentInput
   ): Promise<BeginChatRecoveryIncidentResult> {
