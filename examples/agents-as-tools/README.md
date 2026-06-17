@@ -17,7 +17,7 @@ This example now uses the shipped primitives:
 - `clearAgentToolRuns()` to delete retained child facets when the chat is
   cleared.
 
-For the general API guide, see [`docs/agent-tools.md`](../../docs/agent-tools.md).
+For the general API guide, see [`docs/agents/agent-tools.md`](../../docs/agents/agent-tools.md).
 
 ## Run
 

@@ -58,7 +58,7 @@ policy. `submitMessages()` owns Think's conversation admission; managed fibers
 own external side effects around that turn.
 
 For Think-specific guidance that also compares raw child `chat()` calls with
-agent tools, see [Choosing a turn API](./think/index.md#choosing-a-turn-api).
+agent tools, see [Choosing a turn API](https://github.com/cloudflare/agents/blob/main/docs/think/index.md#choosing-a-turn-api).
 
 ### When to use `saveMessages` vs `onChatResponse`
 

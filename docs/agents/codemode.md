@@ -319,7 +319,7 @@ agnostic about where those tools come from.
 
 If you need approval-gated tools, use the standard `needsApproval` +
 `useAgentChat` approval flow described in
-[Human in the Loop](./human-in-the-loop.md). Codemode currently excludes tools
+[Human in the Loop](https://github.com/cloudflare/agents/blob/main/docs/agents/human-in-the-loop.md). Codemode currently excludes tools
 with `needsApproval` instead of pausing execution for approval.
 
 ## The Executor interface
@@ -434,7 +434,7 @@ sanitizeToolName("delete"); // "delete_"
 
 ## Example
 
-See [`examples/codemode/`](../examples/codemode/) for a full working example — a project management assistant that uses codemode to orchestrate tasks, sprints, and comments via SQLite.
+See [`examples/codemode/`](https://github.com/cloudflare/agents/tree/main/examples/codemode) for a full working example — a project management assistant that uses codemode to orchestrate tasks, sprints, and comments via SQLite.
 
-See [`examples/codemode-browser/`](../examples/codemode-browser/) for a browser
+See [`examples/codemode-browser/`](https://github.com/cloudflare/agents/tree/main/examples/codemode-browser) for a browser
 iframe executor example with dynamic client tools.

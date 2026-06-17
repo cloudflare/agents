@@ -129,6 +129,6 @@ Requires `OPENAI_API_KEY` in `.env`.
 
 ### Learn More
 
-- [Human in the Loop docs](../../docs/human-in-the-loop.md)
-- [Client Tools & Auto-Continuation](../../docs/client-tools-continuation.md)
+- [Human in the Loop docs](../../docs/agents/human-in-the-loop.md)
+- [Client Tools & Auto-Continuation](../../docs/agents/client-tools-continuation.md)
 - [@cloudflare/ai-chat README](../../packages/ai-chat/README.md)

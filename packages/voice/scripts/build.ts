@@ -1,4 +1,5 @@
 import { build } from "tsdown";
+import { copyPackageDocs } from "../../../scripts/copy-package-docs";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
 
 async function main() {
@@ -15,6 +16,8 @@ async function main() {
 
   // then run oxfmt on the generated .d.ts files
   formatDeclarationFiles();
+
+  copyPackageDocs(import.meta.url, "voice");
 
   process.exit(0);
 }

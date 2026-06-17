@@ -1006,7 +1006,7 @@
   }
   ```
 
-  No behavior change for existing callers. See `docs/chat-agents.md` (new "Guarding against stale recoveries" section) for the full recipe, including a loop-protection pattern using `onChatResponse`.
+  No behavior change for existing callers. See `docs/agents/chat-agents.md` (new "Guarding against stale recoveries" section) for the full recipe, including a loop-protection pattern using `onChatResponse`.
 
 ## 0.11.2
 
@@ -1871,7 +1871,7 @@ async onWorkflowError(workflowName, workflowId, error) {}
 async onWorkflowEvent(workflowName, workflowId, event) {}
 ```
 
-See `docs/workflows.md` for full documentation.
+See `docs/agents/workflows.md` for full documentation.
 
 ---
 
@@ -2163,7 +2163,7 @@ await generateObject({
   - Optional `metadata` field for queryable key-value data
   - Params/output NOT stored by default (could be large)
 
-  See `docs/workflows.md` for full documentation.
+  See `docs/agents/workflows.md` for full documentation.
 
 - [#812](https://github.com/cloudflare/agents/pull/812) [`6218541`](https://github.com/cloudflare/agents/commit/6218541e9c1e40ccbaa25b2d9d93858c0ad81ffa) Thanks [@threepointone](https://github.com/threepointone)! - # Bug Fixes
 
@@ -2579,7 +2579,7 @@ await generateObject({
   - For inbound mail: use `createAddressBasedEmailResolver(agentName)`
   - For reply flows: use `createSecureReplyEmailResolver(secret)` with signed headers
 
-  See https://github.com/cloudflare/agents/blob/main/docs/email.md for details.
+  See https://github.com/cloudflare/agents/blob/main/docs/agents/email.md for details.
 
   **`EmailSendOptions` type removed**: This type was unused and has been removed.
 

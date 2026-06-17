@@ -178,4 +178,4 @@ minute or two, so run observability queries after the churn run completes.
 - `packages/ai-chat/src/e2e-tests/chat-recovery.test.ts` — kill/restart recovery.
 - `packages/ai-chat` — `chatRecovery`, `onChatRecovery`, the
   `_chatRecoveryContinue` alarm path, and `maxAttempts` (default 6).
-- `docs/durable-execution.md` — eviction causes (incl. code updates).
+- `docs/agents/durable-execution.md` — eviction causes (incl. code updates).

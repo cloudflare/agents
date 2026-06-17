@@ -275,7 +275,7 @@ export function createHeaderBasedEmailResolver<Env>(): EmailResolver<Env> {
       "Migration options:\n" +
       "  - For inbound mail: use createAddressBasedEmailResolver(agentName)\n" +
       "  - For reply flows: use createSecureReplyEmailResolver(secret) with signed headers\n\n" +
-      "See https://github.com/cloudflare/agents/blob/main/docs/email.md for details."
+      "See https://github.com/cloudflare/agents/blob/main/docs/agents/email.md for details."
   );
 }
 

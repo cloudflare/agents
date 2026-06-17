@@ -229,7 +229,7 @@ Now the model sees a `MEMORY` section in its system prompt and gets a `set_conte
 
 When you use `configureSession`, the system prompt is built from context blocks rather than `getSystemPrompt()`. The `"soul"` block above acts as the system identity — it is read-only and always appears first. The `"memory"` block is writable, and the model proactively updates it when it learns something useful.
 
-See the [Sessions documentation](../sessions.md) for context blocks, compaction, search, skills, and multi-session support.
+See the [Sessions documentation](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) for context blocks, compaction, search, skills, and multi-session support.
 
 ## 7. Add custom tools
 
@@ -311,4 +311,4 @@ See [Lifecycle Hooks](./lifecycle-hooks.md) for the full reference.
 - [Tools](./tools.md) — workspace tools, code execution, extensions
 - [Client Tools](./client-tools.md) — browser-side tools, approval flows, concurrency
 - [Sub-agents and Programmatic Turns](./sub-agents.md) — RPC streaming, scheduled turns, recovery
-- [Sessions](../sessions.md) — context blocks, compaction, search, multi-session
+- [Sessions](https://github.com/cloudflare/agents/blob/main/docs/agents/sessions.md) — context blocks, compaction, search, multi-session

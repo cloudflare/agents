@@ -293,5 +293,5 @@ into a channel notice.
 ## Related
 
 - [Tools](./tools.md) — workspace tools, code execution, and extensions.
-- [Human in the Loop](../human-in-the-loop.md) — the approval flow end to end.
+- [Human in the Loop](https://github.com/cloudflare/agents/blob/main/docs/agents/human-in-the-loop.md) — the approval flow end to end.
 - [Channels](./channels.md) — deliver attachments and out-of-band notices.

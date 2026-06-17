@@ -231,5 +231,5 @@ AI evaluation suite (scheduling accuracy, etc.). Requires API keys in `.env`.
 
 ## Related
 
-- **User-facing docs** for the SDK live in `/docs` (see `/docs/AGENTS.md` for writing guidelines)
+- **User-facing docs** for the SDK live in `/docs/agents` (see `/docs/AGENTS.md` for writing guidelines)
 - **Design decisions** about the SDK live in `/design` (see `/design/AGENTS.md`)

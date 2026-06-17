@@ -184,4 +184,4 @@ const unsubscribe = subscribe("channel", (event) => {
 
 - [Messengers](./messengers.md) — Chat SDK webhook setup and delivery in depth.
 - [Actions](./actions.md) — record reply attachments for `renderAttachment()`.
-- [Voice Agents](../voice.md) — real-time speech surfaces.
+- [Voice Agents](https://github.com/cloudflare/agents/blob/main/docs/voice/index.md) — real-time speech surfaces.

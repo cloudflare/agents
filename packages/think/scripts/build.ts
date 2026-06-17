@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "tsdown";
 import { build as viteBuild } from "vite";
+import { copyPackageDocs } from "../../../scripts/copy-package-docs";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
 
 const packageRoot = path.resolve(
@@ -51,6 +52,8 @@ async function main() {
     configFile: path.join(packageRoot, "studio/vite.config.ts"),
     logLevel: "warn"
   });
+
+  copyPackageDocs(import.meta.url, "think");
 
   process.exit(0);
 }

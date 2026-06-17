@@ -16,7 +16,7 @@ For Think children, prefer agent tools when the parent model or workflow
 delegates work and you want retained child runs, event replay, abort bridging,
 and UI drill-in. Use raw `subAgent(...).chat()` only for lower-level streaming
 RPC where your code owns forwarding, cancellation, and replay policy. For the
-full comparison, see [Choosing a turn API](./think/index.md#choosing-a-turn-api).
+full comparison, see [Choosing a turn API](https://github.com/cloudflare/agents/blob/main/docs/think/index.md#choosing-a-turn-api).
 
 ## Use an Agent as an AI SDK tool
 

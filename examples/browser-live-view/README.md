@@ -85,4 +85,4 @@ Worker Loader (`LOADER`) for the sandboxed `execute` tool.
 - [`examples/ai-chat`](../ai-chat/) — browser tools on `AIChatAgent`
 - [`examples/assistant`](../assistant/) — Think + `createExecuteTool` with a
   workspace and GitHub auth
-- [Browse the Web](../../docs/browse-the-web.md) — the browser tools guide
+- [Browse the Web](../../docs/agents/browse-the-web.md) — the browser tools guide

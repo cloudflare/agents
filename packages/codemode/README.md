@@ -4,6 +4,8 @@ Instead of asking LLMs to call tools directly, Code Mode lets them write executa
 
 Code Mode generates TypeScript type definitions from your tools for LLM context, and executes the generated JavaScript in secure, isolated sandboxes with millisecond startup times.
 
+The published package includes the Codemode guides at `docs/index.md`.
+
 > **Experimental** — may have breaking changes. Use with caution in production.
 
 ## Installation

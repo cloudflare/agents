@@ -1,6 +1,7 @@
 import { build } from "tsdown";
 import { globSync } from "glob";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { copyPackageDocs } from "../../../scripts/copy-package-docs";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
 
 const entries = [
@@ -74,6 +75,8 @@ async function main() {
   formatDeclarationFiles();
 
   injectSkillsTypeReference();
+
+  copyPackageDocs(import.meta.url, "agents");
 
   process.exit(0);
 }

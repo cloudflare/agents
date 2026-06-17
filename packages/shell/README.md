@@ -4,6 +4,8 @@
 
 Sandboxed JavaScript execution and filesystem runtime for Cloudflare Workers agents.
 
+The published package includes the Workspace guide at `docs/index.md`.
+
 Instead of parsing shell syntax, `@cloudflare/shell` runs JavaScript inside an isolated Worker and exposes a typed `state` object for operating on a filesystem backend. It is designed for agent workflows that need structured state operations, predictable semantics, and coarse host-side filesystem primitives.
 
 ## What it is

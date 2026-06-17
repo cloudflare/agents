@@ -49,4 +49,4 @@ Try asking the AI to add numbers to the counter or check who you are.
 ## Related
 
 - [MCP Client](../mcp-client) -- connecting to remote MCP servers with OAuth
-- [MCP Transports docs](../../docs/mcp-transports.md) -- all transport options
+- [MCP Transports docs](../../docs/agents/mcp-transports.md) -- all transport options

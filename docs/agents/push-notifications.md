@@ -364,4 +364,4 @@ try {
 
 ## Full Example
 
-See the complete working example at [`examples/push-notifications/`](../examples/push-notifications/) — includes the agent, service worker, and a React client with subscription management, reminder creation, and real-time state sync.
+See the complete working example at [`examples/push-notifications/`](https://github.com/cloudflare/agents/tree/main/examples/push-notifications) — includes the agent, service worker, and a React client with subscription management, reminder creation, and real-time state sync.

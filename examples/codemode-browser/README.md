@@ -36,7 +36,7 @@ npm start     # from this directory
 Uses Workers AI through the `AI` binding.
 
 For security details and current browser iframe limitations, see
-[`docs/codemode.md`](../../docs/codemode.md#security-considerations).
+[`docs/agents/codemode.md`](../../docs/agents/codemode.md#security-considerations).
 
 ## Try it
 
