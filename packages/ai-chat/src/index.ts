@@ -179,12 +179,12 @@ const AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS = 60_000;
 const CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS = 3;
 // Durable record of an in-progress recovery so a "recovering…" status (#1620)
 // can be broadcast live and survives the set/clear happening in different
-// isolates (a continuation runs in a later alarm invocation). NOTE: this live
-// "recovering…" status is NOT replayed on connect — only the terminal outcome
-// is (#1645, via the resume handshake; see `CHAT_LAST_TERMINAL_KEY`). A client
-// that connects mid-recovery isn't re-told it's recovering, but the live
-// broadcast + reliable clear work regardless, and any terminal outcome is
-// surfaced on reconnect.
+// isolates (a continuation runs in a later alarm invocation). The status is
+// both broadcast live AND replayed on connect (`_buildRecoveringConnectFrame`),
+// so a client that connects mid-recovery (between attempts) is re-told the turn
+// is recovering rather than left looking frozen. The terminal outcome is
+// surfaced separately on reconnect (#1645, via the resume handshake; see
+// `CHAT_LAST_TERMINAL_KEY`).
 const CHAT_RECOVERING_KEY = "cf:chat:recovering";
 // Durable record of the last turn that ended in a terminal error / abandoned
 // recovery (#1645). The terminal `CF_AGENT_USE_CHAT_RESPONSE` broadcast is
@@ -765,6 +765,19 @@ export class AIChatAgent<
       // Notify client about active streams that can be resumed
       if (this._resumableStream.hasActiveStream()) {
         this._notifyStreamResuming(connection);
+      } else {
+        // No active stream to resume: if a recovery is in progress (between
+        // attempts — the interrupted stream ended and the continuation hasn't
+        // started yet), replay the live "recovering…" status so a client that
+        // connects mid-recovery reads the turn as working rather than frozen
+        // (#1620). This converges `AIChatAgent` onto `@cloudflare/think`'s
+        // behavior. Unlike the terminal outcome (which must go through the
+        // resume handshake to reach the client's stream reader), the recovering
+        // frame is a plain status the client reflects directly into state.
+        const recoveringFrame = await this._buildRecoveringConnectFrame();
+        if (recoveringFrame) {
+          sendIfOpen(connection, JSON.stringify(recoveringFrame));
+        }
       }
       // Call consumer's onConnect
       return _onConnect(connection, ctx);
@@ -3987,11 +4000,41 @@ export class AIChatAgent<
   }
 
   /**
+   * Build the on-connect "recovering…" replay frame (#1620), or `null` when no
+   * (non-stale) recovery is in progress. A client that connects between recovery
+   * attempts (no active stream) reads the turn as working rather than frozen.
+   * A record older than the flag TTL is treated as abandoned (its terminal-clear
+   * never ran) and skipped, so a dead recovery can't show "recovering…" forever.
+   * Mirrors `@cloudflare/think`'s `_buildIdleConnectMessages` recovering replay.
+   */
+  private async _buildRecoveringConnectFrame(): Promise<Record<
+    string,
+    unknown
+  > | null> {
+    const recovering = await this.ctx.storage.get<{
+      requestId?: string;
+      at?: number;
+    }>(CHAT_RECOVERING_KEY);
+    if (
+      !recovering ||
+      Date.now() - (recovering.at ?? 0) >= CHAT_RECOVERING_FLAG_TTL_MS
+    ) {
+      return null;
+    }
+    return {
+      type: MessageType.CF_AGENT_CHAT_RECOVERING,
+      recovering: true,
+      ...(recovering.requestId ? { id: recovering.requestId } : {})
+    };
+  }
+
+  /**
    * Set or clear the live "recovering…" status (#1620). Persists a durable
    * record (so set/clear stay consistent across the isolates a recovery spans)
    * and broadcasts a `CF_AGENT_CHAT_RECOVERING` frame on a genuine transition.
-   * NOTE: the live "recovering…" signal is still not replayed on connect — only
-   * the terminal outcome is (#1645, via the resume handshake).
+   * The status is also replayed on connect (`_buildRecoveringConnectFrame`) so a
+   * client connecting mid-recovery isn't left looking frozen; the terminal
+   * outcome is surfaced separately over the resume handshake (#1645).
    */
   private async _setChatRecovering(
     active: boolean,

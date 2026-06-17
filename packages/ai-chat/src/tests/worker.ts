@@ -2303,6 +2303,16 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     );
   }
 
+  /** Build the on-connect "recovering…" replay frame (#1620), exactly as
+   *  `onConnect` does when no stream is active. `null` when nothing (or only a
+   *  stale record) is pending. Used to assert the on-connect convergence. */
+  getRecoveringConnectFrameForTest(): Promise<Record<string, unknown> | null> {
+    const self = this as unknown as {
+      _buildRecoveringConnectFrame(): Promise<Record<string, unknown> | null>;
+    };
+    return self._buildRecoveringConnectFrame();
+  }
+
   /** Read the durable terminal record (#1645) so tests can assert it is
    *  recorded on exhaustion and cleared once a later turn succeeds. */
   async getPendingChatTerminalForTest(): Promise<{

@@ -129,7 +129,8 @@ Important differences today include:
   does not have equivalent protection.
 - `Think` defaults `chatRecovery` to `true`; `AIChatAgent` defaults it to
   `false`.
-- `Think` replays recovering state on connect; `AIChatAgent` currently does not.
+- `Think` replays recovering state on connect; `AIChatAgent` did not — converged
+  in slice 2d (`AIChatAgent` now replays it too; see the progress log).
 - `Think` has stronger recovery callback error handling.
 - `Think` has durable submission recovery and must complete, skip, or park
   submissions correctly.
@@ -570,18 +571,18 @@ should converge on that behavior intentionally.
 
 ### Convergence matrix
 
-| Area                           | Current `AIChatAgent`                        | Current `Think`                                            | Proposed shared behavior                                                                                                                                                            |
-| ------------------------------ | -------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Durable recovery default       | `chatRecovery = false`                       | `chatRecovery = true`                                      | Keep defaults per package unless a separate semver-visible RFC changes them. The engine does not own defaults.                                                                      |
-| Live stalled stream            | No bounded stall watchdog                    | Routes stalls into bounded recovery                        | Adopt shared stall recovery in both packages, enabled by default when `chatRecovery` is on. `AIChatAgent` gains a default stall timeout. Changeset required.                        |
-| Recovery callback errors       | Less complete handling                       | Stronger callback-error handling                           | Adopt Think's stronger behavior for both packages: app errors terminalize or mark failed consistently; platform transients can defer.                                               |
-| Recovering state on reconnect  | Not replayed on connect                      | Replayed on connect                                        | Prefer Think's better UX for both packages. Treat as a user-visible `AIChatAgent` behavior change.                                                                                  |
-| Terminal delivery              | Resume handshake, persist-first in main path | Resume handshake, some broadcast-first resilience          | Keep resume-handshake delivery. Converge on terminal-before-seal ordering (durably record/deliver before sealing the incident); duplicate delivery tolerated, lost delivery is not. |
-| Pending interaction predicates | Split stable wait vs client-budget predicate | More client-focused predicate                              | Converge on split predicates so server-tool stability and client/HITL budget exemption are not conflated.                                                                           |
-| Durable submissions            | Not applicable                               | Must recover, park, complete, skip, or exhaust submissions | Keep as adapter-owned Think behavior. The engine provides hooks; `AIChatAgent` adapter no-ops.                                                                                      |
-| Message reconciliation         | Required for AI SDK client IDs               | Session persistence avoids much of it                      | Keep adapter-owned. Do not force Think into ai-chat reconciliation.                                                                                                                 |
-| Progress accounting            | Meaningful chunk types                       | Durable flush/tool-output oriented                         | Converge on one progress policy: bump only on new forward work at production time, never on replay/re-persist. Land with budget tests proving no regressions.                       |
-| Terminal exhausted callback    | Existing public hook                         | Existing public hook plus durable-work effects             | Shared engine invokes hook, but adapter owns durable side effects.                                                                                                                  |
+| Area                           | Current `AIChatAgent`                             | Current `Think`                                            | Proposed shared behavior                                                                                                                                                            |
+| ------------------------------ | ------------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Durable recovery default       | `chatRecovery = false`                            | `chatRecovery = true`                                      | Keep defaults per package unless a separate semver-visible RFC changes them. The engine does not own defaults.                                                                      |
+| Live stalled stream            | No bounded stall watchdog                         | Routes stalls into bounded recovery                        | Adopt shared stall recovery in both packages, enabled by default when `chatRecovery` is on. `AIChatAgent` gains a default stall timeout. Changeset required.                        |
+| Recovery callback errors       | Less complete handling                            | Stronger callback-error handling                           | Adopt Think's stronger behavior for both packages: app errors terminalize or mark failed consistently; platform transients can defer.                                               |
+| Recovering state on reconnect  | Not replayed on connect → now replayed (slice 2d) | Replayed on connect                                        | DONE (slice 2d): `AIChatAgent` converged onto Think's replay-on-connect UX; shipped as a user-visible behavior change (minor changeset).                                            |
+| Terminal delivery              | Resume handshake, persist-first in main path      | Resume handshake, some broadcast-first resilience          | Keep resume-handshake delivery. Converge on terminal-before-seal ordering (durably record/deliver before sealing the incident); duplicate delivery tolerated, lost delivery is not. |
+| Pending interaction predicates | Split stable wait vs client-budget predicate      | More client-focused predicate                              | Converge on split predicates so server-tool stability and client/HITL budget exemption are not conflated.                                                                           |
+| Durable submissions            | Not applicable                                    | Must recover, park, complete, skip, or exhaust submissions | Keep as adapter-owned Think behavior. The engine provides hooks; `AIChatAgent` adapter no-ops.                                                                                      |
+| Message reconciliation         | Required for AI SDK client IDs                    | Session persistence avoids much of it                      | Keep adapter-owned. Do not force Think into ai-chat reconciliation.                                                                                                                 |
+| Progress accounting            | Meaningful chunk types                            | Durable flush/tool-output oriented                         | Converge on one progress policy: bump only on new forward work at production time, never on replay/re-persist. Land with budget tests proving no regressions.                       |
+| Terminal exhausted callback    | Existing public hook                              | Existing public hook plus durable-work effects             | Shared engine invokes hook, but adapter owns durable side effects.                                                                                                                  |
 
 ### Behavior decisions
 
@@ -1377,32 +1378,64 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Slice 2d (recovering-on-connect convergence — first behavior change)_ —
+  `AIChatAgent` now replays the live "recovering…" status on connect, matching
+  `@cloudflare/think`. Before this, ai-chat only broadcast `cf_agent_chat_recovering`
+  live, so a client that connected during the gap between a scheduled
+  continuation and its first chunk saw nothing and looked frozen (its own code
+  said so: "the live 'recovering…' signal is still not replayed on connect").
+  Implementation: a new private `_buildRecoveringConnectFrame()` reads the
+  durable `cf:chat:recovering` record (skipping stale ones past the flag TTL) and
+  returns the frame, which `onConnect` sends on the **no-active-stream branch**
+  only — an actively-streaming continuation still gets `STREAM_RESUMING`, so the
+  two signals never collide and the client never double-renders. This mirrors
+  Think's `_buildIdleConnectMessages` recovering replay exactly. Review findings:
+  (1) terminal/recovering are mutually exclusive in storage (every terminal
+  clears recovering), so a reconnecting client never gets both; (2) the client
+  was already wired for it — `react.tsx` `isRecovering` handles the frame whenever
+  it arrives and its doc already said the status is "replayed on connect" (for
+  Think), so no client change was needed; (3) unlike `STREAM_RESUMING` (which
+  needs the client's resume-protocol readiness and is therefore re-driven by a
+  client-initiated request), the recovering frame is a fire-and-forget status the
+  client reflects directly into state, so a direct on-connect send is the right
+  channel; (4) the extra storage read happens only on idle connects, symmetric
+  with Think. Tests: deterministic unit coverage via
+  `getRecoveringConnectFrameForTest` (`durable-chat-recovery.test.ts`) asserting
+  the frame appears once scheduled and disappears on terminal; the
+  `chat-recovering-status` local e2e doc/comment was corrected (it previously
+  documented the OLD "not replayed on connect" behavior) and now opportunistically
+  observes the on-connect replay over a real socket (opportunistic because the
+  no-active-stream replay window is timing-bound). Validation: 683 ai-chat unit
+  tests green; full local e2e suite 10/10 green (no regression in the hot connect
+  path); deployed real-edge e2e green (self-cleaning). Repo typecheck (111) +
+  oxlint clean. Minor changeset shipped (user-visible client state change).
+
 - _Phase 2 (deployed recovery e2e — real-edge proof)_ — Built the
   user-requested DEPLOYED recovery e2e (`packages/ai-chat/src/e2e-tests/`):
   `wrangler.deployed.jsonc` (uniquely-named Worker) + `deployed-recovery.test.ts`
-  + `vitest.deployed.config.ts` + a `test:e2e:deployed` script. Unlike the local
-  SIGKILL suites (which prove the recovery state machine in workerd), this
-  deploys a real Worker, forces a real Durable Object eviction the way production
-  does — a `wrangler deploy` **mid-turn** — then asserts recovery fires on
-  Cloudflare's edge, and ALWAYS deletes the Worker in teardown (verified: the
-  script left no resource behind). Double-gated so it never runs in normal CI:
-  its own config (not in `test`/`test:e2e`) + a `RUN_DEPLOYED_E2E=1` body gate.
-  Three real-edge findings the run surfaced (each fixed): (1) a redeploy takes
-  ~18s to go live — far longer than a finite mock turn (~10s) — so a finite turn
-  COMPLETES before the eviction lands and leaves nothing to recover; fixed by
-  adding `ChatHangingRecoveryAgent` whose turn hangs forever, guaranteeing an
-  in-flight fiber at eviction (no timing race). (2) Back-to-back deploys
-  occasionally hit a transient deploy-API error; `deploy()` now retries with
-  backoff so the slow deploy→evict→recover cycle isn't restarted wholesale. (3)
-  A freshly-created `*.workers.dev` route drops the first WS handshakes during
-  cold start/propagation, and the unguarded `sendChatMessage` rejected the whole
-  test; the turn-start is now a resilient send+check poll. The `#1620`
-  recovering-flag is only logged (not asserted) on the edge — it is
-  timing-sensitive and already asserted deterministically by the local
-  `chat-recovering-status` suite. Validated green twice against
-  `spai@cloudflare.com` (~70-76s/run); typecheck (111) clean; the new DO class +
-  migration `v6` are additive (local `wrangler.jsonc` dry-run validates). _This
-  is the validation vehicle for the behavior-changing slice 2d._
+  - `vitest.deployed.config.ts` + a `test:e2e:deployed` script. Unlike the local
+    SIGKILL suites (which prove the recovery state machine in workerd), this
+    deploys a real Worker, forces a real Durable Object eviction the way production
+    does — a `wrangler deploy` **mid-turn** — then asserts recovery fires on
+    Cloudflare's edge, and ALWAYS deletes the Worker in teardown (verified: the
+    script left no resource behind). Double-gated so it never runs in normal CI:
+    its own config (not in `test`/`test:e2e`) + a `RUN_DEPLOYED_E2E=1` body gate.
+    Three real-edge findings the run surfaced (each fixed): (1) a redeploy takes
+    ~18s to go live — far longer than a finite mock turn (~10s) — so a finite turn
+    COMPLETES before the eviction lands and leaves nothing to recover; fixed by
+    adding `ChatHangingRecoveryAgent` whose turn hangs forever, guaranteeing an
+    in-flight fiber at eviction (no timing race). (2) Back-to-back deploys
+    occasionally hit a transient deploy-API error; `deploy()` now retries with
+    backoff so the slow deploy→evict→recover cycle isn't restarted wholesale. (3)
+    A freshly-created `*.workers.dev` route drops the first WS handshakes during
+    cold start/propagation, and the unguarded `sendChatMessage` rejected the whole
+    test; the turn-start is now a resilient send+check poll. The `#1620`
+    recovering-flag is only logged (not asserted) on the edge — it is
+    timing-sensitive and already asserted deterministically by the local
+    `chat-recovering-status` suite. Validated green twice against
+    `spai@cloudflare.com` (~70-76s/run); typecheck (111) clean; the new DO class +
+    migration `v6` are additive (local `wrangler.jsonc` dry-run validates). _This
+    is the validation vehicle for the behavior-changing slice 2d._
 - _Phase 2 (slice 2c — shared exhaustion-notification core)_ — **Re-scoped from
   the original "move terminal/exhaust sealing behind the engine".** Side-by-side
   reading of both `_exhaustChatRecovery` methods showed the head (build
@@ -1439,8 +1472,8 @@ the change, and the key review findings.
   incident-begin (the only divergence is the predicate — `hasPendingInteraction`
   vs `hasPendingClientInteraction` — and the presence of the hook). Review:
   engine order (`get → ensureInteractionStateLoaded → readProgress →
-  predicate`) is byte-identical to the old inline order (`get → guard → progress
-  → hasPendingInteraction`); `_restoreClientTools`/`hasPendingInteraction` keep
+predicate`) is byte-identical to the old inline order (`get → guard → progress
+→ hasPendingInteraction`); `_restoreClientTools`/`hasPendingInteraction` keep
   their other callers; key derivation unchanged. Gates: Think workers (686) pass;
   typecheck (111) and oxlint clean.
 - _Phase 2 (slice 2a — incident-begin orchestration)_ — Added
@@ -1555,11 +1588,11 @@ Work:
 - [x] Add golden cutover fixtures and a round-trip gate.
       (`__tests__/recovery-cutover-fixtures.ts` + `recovery-cutover.test.ts`.)
 - [→] Add package adapter contract tests. **Deferred to Phase 2** — these test
-      the engine↔adapter seam (fake scheduler/storage/clock), which does not
-      exist yet. The current package behavior they would assert is already
-      covered behaviorally (see the coverage map below); the seam-level versions
-      are written when the seam lands. Building the seam now just to test it
-      would be Phase 2 work mislabeled as Phase 0.
+  the engine↔adapter seam (fake scheduler/storage/clock), which does not
+  exist yet. The current package behavior they would assert is already
+  covered behaviorally (see the coverage map below); the seam-level versions
+  are written when the seam lands. Building the seam now just to test it
+  would be Phase 2 work mislabeled as Phase 0.
 - [x] Add missing `AIChatAgent` tests for recovery callback errors if Think
       already has stronger coverage. **Already symmetric** — `onChatRecovery`
       throw (`durable-chat-recovery.test.ts` "marks the incident failed when
@@ -1567,23 +1600,23 @@ Work:
       when onExhausted throws"), and `shouldKeepRecovering` throw (shared
       `recovery-incident.test.ts`). No gap to close.
 - [→] Add `AIChatAgent` tests for reconnect recovering replay if the RFC chooses
-      to converge on Think's better UX. **Deferred to Phase 2 (convergence).**
-      Confirmed asymmetry: Think hydrates the live "recovering…" status on a
-      mid-recovery (re)connect (`think-session.test.ts` "broadcasts + hydrates a
-      'recovering…' status"); `AIChatAgent` broadcasts it live but does NOT
-      replay it on connect — its own code says so
-      (`ai-chat/src/index.ts` `_setChatRecovering`: "the live 'recovering…'
-      signal is still not replayed on connect — only the terminal outcome is").
-      A characterization test asserting on-connect hydration would assert
-      behavior ai-chat does not yet have, so it ships WITH the convergence in
-      Phase 2 (changeset), tracked as an intentional behavior change.
+  to converge on Think's better UX. **Deferred to Phase 2 (convergence).**
+  Confirmed asymmetry: Think hydrates the live "recovering…" status on a
+  mid-recovery (re)connect (`think-session.test.ts` "broadcasts + hydrates a
+  'recovering…' status"); `AIChatAgent` broadcasts it live but does NOT
+  replay it on connect — its own code says so
+  (`ai-chat/src/index.ts` `_setChatRecovering`: "the live 'recovering…'
+  signal is still not replayed on connect — only the terminal outcome is").
+  A characterization test asserting on-connect hydration would assert
+  behavior ai-chat does not yet have, so it ships WITH the convergence in
+  Phase 2 (changeset), tracked as an intentional behavior change.
 - [x] Add tests proving schedule idempotency/non-idempotency invariants.
       **Already symmetric** — non-idempotent stable-timeout reschedule is pinned
       by the 2-row tests in both packages (`durable-chat-recovery.test.ts`
       "reschedules a continuation that times out… (NEW row, 2 total)" and the
       retry twin; `think-session.test.ts` equivalents). Initial-schedule
       storm-dedup is pinned by the fiber-row-deletion "double recovery" tests
-      ("should not double-recover when _checkRunFibers runs from both onStart and
+      ("should not double-recover when \_checkRunFibers runs from both onStart and
       alarm" + Think equivalent). The only thing not directly asserted is the
       `{ idempotent }` flag VALUE per scheduling reason — that becomes a precise
       fake-scheduler assertion at the Phase 2 seam (see coverage map).
@@ -1610,16 +1643,16 @@ densely and symmetrically tested for the recovery surface; the right move is to
 treat the existing suites as the Phase 2 safety net (do not regress them) rather
 than add redundant tests. Map below (ai-chat / think test homes):
 
-| Invariant | Guarding tests (both packages) |
-| --- | --- |
-| Non-idempotent stable-timeout reschedule (fresh row, not dedup onto the executing one-shot) | `durable-chat-recovery.test.ts` "reschedules a continuation that times out…" + retry twin; `think-session.test.ts` continue/retry reschedule tests |
-| Initial-schedule storm-dedup (re-detection does not re-run/duplicate) | `durable-chat-recovery.test.ts` "should not double-recover when _checkRunFibers runs from both onStart and alarm"; Think equivalent (primary mechanism = orphaned fiber-row deletion after handling) |
-| HITL park: no reschedule, no budget spent, incident parked `skipped` | `durable-chat-recovery.test.ts` "PARKS a continuation/retry…"; Think PARK tests |
-| Terminal-before-seal: terminal durably recorded/delivered before the incident is sealed; a transient on the terminal write defers (does not half-seal) | `#1730` "defers a give-up whose terminal write hits a platform transient…" in both packages |
-| Seal write is best-effort after terminal delivery (no re-deliver if only the seal fails) | `durable-chat-recovery.test.ts` "does not defer/replay… when the post-terminal incident seal write fails" |
-| Terminal replay on reconnect (`#1645`); cleared when a later turn supersedes | `durable-chat-recovery.test.ts` terminal-reconnect/cleared/aborted/error tests; Think `cf:chat:last-terminal` tests |
-| Recovering-flag set on schedule, cleared on terminal (`#1620`) | `durable-chat-recovery.test.ts` "tracks a durable 'recovering…' record…"; `think-session.test.ts` "broadcasts + hydrates a 'recovering…' status…" |
-| Callback hooks throwing do not wedge the turn | `onChatRecovery`/`onExhausted` throw tests (ai-chat); `shouldKeepRecovering` throw (shared engine unit test) |
+| Invariant                                                                                                                                              | Guarding tests (both packages)                                                                                                                                                                        |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Non-idempotent stable-timeout reschedule (fresh row, not dedup onto the executing one-shot)                                                            | `durable-chat-recovery.test.ts` "reschedules a continuation that times out…" + retry twin; `think-session.test.ts` continue/retry reschedule tests                                                    |
+| Initial-schedule storm-dedup (re-detection does not re-run/duplicate)                                                                                  | `durable-chat-recovery.test.ts` "should not double-recover when \_checkRunFibers runs from both onStart and alarm"; Think equivalent (primary mechanism = orphaned fiber-row deletion after handling) |
+| HITL park: no reschedule, no budget spent, incident parked `skipped`                                                                                   | `durable-chat-recovery.test.ts` "PARKS a continuation/retry…"; Think PARK tests                                                                                                                       |
+| Terminal-before-seal: terminal durably recorded/delivered before the incident is sealed; a transient on the terminal write defers (does not half-seal) | `#1730` "defers a give-up whose terminal write hits a platform transient…" in both packages                                                                                                           |
+| Seal write is best-effort after terminal delivery (no re-deliver if only the seal fails)                                                               | `durable-chat-recovery.test.ts` "does not defer/replay… when the post-terminal incident seal write fails"                                                                                             |
+| Terminal replay on reconnect (`#1645`); cleared when a later turn supersedes                                                                           | `durable-chat-recovery.test.ts` terminal-reconnect/cleared/aborted/error tests; Think `cf:chat:last-terminal` tests                                                                                   |
+| Recovering-flag set on schedule, cleared on terminal (`#1620`)                                                                                         | `durable-chat-recovery.test.ts` "tracks a durable 'recovering…' record…"; `think-session.test.ts` "broadcasts + hydrates a 'recovering…' status…"                                                     |
+| Callback hooks throwing do not wedge the turn                                                                                                          | `onChatRecovery`/`onExhausted` throw tests (ai-chat); `shouldKeepRecovering` throw (shared engine unit test)                                                                                          |
 
 Confirmed gaps, both deferred (NOT Phase 0 current-behavior pins):
 
@@ -1696,8 +1729,17 @@ Sliced for safety (this is the riskiest phase — see the working cadence):
       #1645; Think broadcast-first), which the engine must not flatten. Layer-2
       tests pin the field map, both fallbacks, and the swallow invariant. Zero
       behavior change.
-- [ ] Slice 2d — recovering-on-connect convergence for `AIChatAgent` (behavior
-      change + changeset + smoke test + e2e). **First behavior-changing slice.**
+- [x] **Slice 2d — recovering-on-connect convergence for `AIChatAgent`**
+      (behavior change + changeset + e2e). **First behavior-changing slice.**
+      `AIChatAgent.onConnect` now replays the live "recovering…" status on
+      connect via `_buildRecoveringConnectFrame` (no-active-stream branch only,
+      so an actively-streaming continuation still gets `STREAM_RESUMING`),
+      mirroring Think's `_buildIdleConnectMessages`. Stale records (older than
+      the flag TTL) are skipped; terminal outcomes still clear it. Client already
+      handled the frame (`react.tsx` `isRecovering`). Deterministic guarantee:
+      `durable-chat-recovery` unit test (`getRecoveringConnectFrameForTest`);
+      real-socket exercise: `chat-recovering-status` e2e (opportunistic, since
+      the replay window is timing-bound). Minor changeset shipped.
 
 Work:
 

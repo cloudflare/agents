@@ -7,16 +7,18 @@
  * connected clients can render a "recovering…" indicator. The flag/frame is
  * cleared on the terminal outcome (the continuation completing).
  *
- * DETERMINISM NOTE: ai-chat broadcasts the recovering frame LIVE and does NOT
- * replay it on connect (only the terminal outcome is replayed on the resume
- * handshake). A collector that connects after the `true` transition therefore
- * cannot observe it. So the active→cleared TRANSITION is asserted
- * deterministically against the durable flag (read via a @callable that returns
- * the framework's `cf:chat:recovering` storage key). A live frame collector,
- * connected immediately after restart, additionally asserts the real broadcast
- * path: it reliably observes the `recovering:false` CLEAR frame (it is connected
- * for the whole ~10s continuation), and verifies the shape of the `true` frame
- * when timing lets it observe it.
+ * ai-chat broadcasts the recovering frame LIVE and (since the Phase 2 #1620
+ * convergence onto @cloudflare/think) also REPLAYS it on connect — but only when
+ * no stream is active (between the scheduled continuation and its first chunk).
+ * Once the continuation is streaming, a fresh connect gets STREAM_RESUMING
+ * instead, so the on-connect replay window is timing-dependent and asserted
+ * deterministically by the `durable-chat-recovery` unit test
+ * (`getRecoveringConnectFrameForTest`). Here the active→cleared TRANSITION is
+ * asserted deterministically against the durable flag (a @callable returning the
+ * framework's `cf:chat:recovering` key), a live collector reliably observes the
+ * `recovering:false` CLEAR frame, and a freshly-connected collector
+ * opportunistically observes the on-connect `true` replay when it lands in the
+ * no-active-stream window.
  */
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { type ChildProcess } from "node:child_process";
@@ -122,6 +124,33 @@ describe("chat recovering-status broadcast e2e (#1620)", () => {
       );
       expect(active).not.toBe(null);
       expect(typeof active?.at).toBe("number");
+
+      // ON-CONNECT REPLAY (#1620 convergence): a client that connects while
+      // recovery is in progress is re-told the turn is recovering rather than
+      // left frozen. A connect that lands in the no-active-stream window
+      // receives the replayed `recovering:true` frame directly on connect
+      // (deterministic guarantee lives in the unit test; this exercises the real
+      // socket path). Best-effort because the continuation may already be
+      // streaming, in which case the connect gets STREAM_RESUMING instead.
+      const replayCollector = createFrameCollector(agentUrl);
+      try {
+        await replayCollector.ready();
+        const replayed = await replayCollector
+          .waitForFrame(
+            RECOVERING_FRAME,
+            (frame) => frame.recovering === true,
+            4000
+          )
+          .catch(() => null);
+        if (replayed) {
+          expect(replayed.recovering).toBe(true);
+          expect(
+            typeof replayed.id === "string" || replayed.id === undefined
+          ).toBe(true);
+        }
+      } finally {
+        replayCollector.close();
+      }
 
       // DETERMINISTIC: the flag is cleared once the continuation reaches its
       // terminal (completed) outcome.

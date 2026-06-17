@@ -157,6 +157,7 @@ interface ChatRecoveryTestStub {
     reason?: string;
   } | null>;
   getChatRecoveringForTest(): Promise<{ requestId?: string } | null>;
+  getRecoveringConnectFrameForTest(): Promise<Record<string, unknown> | null>;
   enableExhaustedCaptureForTest(
     maxAttempts: number,
     terminalMessage?: string
@@ -2140,6 +2141,34 @@ describe("onChatRecovery", () => {
     // A terminal outcome clears it so the indicator can't spin forever.
     await agentStub.updateIncidentForTest(begun.incidentId, "failed", "boom");
     expect(await agentStub.getChatRecoveringForTest()).toBeNull();
+  });
+
+  it("replays the 'recovering…' status on connect, cleared on terminal (#1620 convergence)", async () => {
+    const agentStub = await getTestAgent(
+      `recovering-connect-${crypto.randomUUID()}`
+    );
+    const begun = await agentStub.beginIncidentForTest({
+      requestId: "root-rec",
+      recoveryRootRequestId: "root-rec",
+      latestUserMessageId: "u1",
+      recoveryKind: "continue"
+    });
+
+    // Before a continuation is scheduled there is no recovering status to replay.
+    expect(await agentStub.getRecoveringConnectFrameForTest()).toBeNull();
+
+    // Scheduling marks the turn "recovering"; a client connecting mid-recovery
+    // (no active stream) now learns the turn is working, not frozen — matching
+    // @cloudflare/think. (Previously AIChatAgent only broadcast it live.)
+    await agentStub.updateIncidentForTest(begun.incidentId, "scheduled");
+    const frame = await agentStub.getRecoveringConnectFrameForTest();
+    expect(frame?.type).toBe("cf_agent_chat_recovering");
+    expect(frame?.recovering).toBe(true);
+    expect(frame?.id).toBe("root-rec");
+
+    // A terminal outcome clears it so the on-connect replay can't spin forever.
+    await agentStub.updateIncidentForTest(begun.incidentId, "failed", "boom");
+    expect(await agentStub.getRecoveringConnectFrameForTest()).toBeNull();
   });
 
   // #1645: a recovery that exhausts while NO client is connected currently
