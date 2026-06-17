@@ -1377,6 +1377,28 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 2 (slice 2a — incident-begin orchestration)_ — Added
+  `ChatRecoveryEngine` + `ChatRecoveryAdapter` to `recovery-engine.ts`: the
+  engine owns the begin-incident sequence (resolve config → derive key → sweep
+  stale → read existing → rehydrate interaction state → read progress → budget
+  eval → persist → emit) and its two ordering invariants (sweep-before-read;
+  interaction-state-before-predicate). Wired `AIChatAgent._beginChatRecoveryIncident`
+  to a cached engine over an inline adapter; removed the now-dead
+  `_chatRecoveryIncidentId` and `evaluateChatRecoveryIncident` import (engine
+  derives id/key via the pure fns). Added a Layer-2 fake-adapter test pinning
+  the sequence + both invariants + the optional-hook-absent (ai-chat) shape.
+  Review: orchestration is byte-identical — the pure `chatRecoveryIncidentKey`
+  matches the removed private method character-for-character (incl.
+  `encodeURIComponent`); ai-chat omits `ensureInteractionStateLoaded` so that
+  step is a no-op; the cached engine is safe because the adapter arrows capture
+  `this` and `this.ctx`/storage are stable per DO instance, while `resolveConfig`
+  still runs per-incident. Gates: ai-chat workers (604) + engine unit (10) pass;
+  typecheck (111) and oxlint clean. Think binding deferred to slice 2b.
+- _Phase 2 (cleanup — shared callback union)_ — Replaced the six inline
+  `"_chatRecoveryContinue" | "_chatRecoveryRetry"` unions in the recovery helper
+  signatures (AIChatAgent ×2, Think ×4) with the shared
+  `ChatRecoveryScheduleCallback` type, giving the slice-1 export a real consumer.
+  Pure type-alias substitution; typecheck (111) + oxlint clean.
 - _Phase 2 (slice 1 — scheduling-idempotency policy)_ — Introduced the first
   engine-seam file `packages/agents/src/chat/recovery-engine.ts` with
   `chatRecoverySchedulePolicy(reason)`, the single source of truth for the
@@ -1585,8 +1607,22 @@ Sliced for safety (this is the riskiest phase — see the working cadence):
       `schedule()` idempotency flag; both packages' eight recovery schedule
       sites source it; Layer-2 fake-scheduler test pins both reasons. Zero
       behavior change. (Lands the Phase 0 "direct flag assertion" deferral.)
-- [ ] Slice 2+ — move incident-begin orchestration, terminal/exhaust sealing,
-      and the recovering-on-connect convergence behind the engine/adapter.
+- [x] **Cleanup — shared callback union.** The six inline
+      `"_chatRecoveryContinue" | "_chatRecoveryRetry"` unions now use the shared
+      `ChatRecoveryScheduleCallback` type (gives the slice-1 export a consumer).
+- [x] **Slice 2a — incident-begin orchestration.** `ChatRecoveryEngine` +
+      `ChatRecoveryAdapter` own the begin sequence (sweep → read → budget eval →
+      persist → emit) and its two ordering invariants; `AIChatAgent` is now a
+      thin adapter binding. Optional `ensureInteractionStateLoaded` hook reserves
+      Think's client-tool rehydration. Layer-2 fake-adapter test pins the
+      sequence. Zero behavior change (byte-identical orchestration). _Think
+      binding = slice 2b (next)._
+- [ ] Slice 2b — wire `Think._beginChatRecoveryIncident` through the engine
+      (implements the `ensureInteractionStateLoaded` hook for its hibernation
+      guard).
+- [ ] Slice 2c — terminal/exhaust sealing behind the engine.
+- [ ] Slice 2d — recovering-on-connect convergence for `AIChatAgent` (behavior
+      change + changeset).
 
 Work:
 

@@ -125,8 +125,12 @@ export {
 
 export {
   chatRecoverySchedulePolicy,
+  ChatRecoveryEngine,
   type ChatRecoveryScheduleReason,
-  type ChatRecoveryScheduleCallback
+  type ChatRecoveryScheduleCallback,
+  type ChatRecoveryAdapter,
+  type BeginChatRecoveryIncidentInput,
+  type BeginChatRecoveryIncidentResult
 } from "./recovery-engine";
 
 export type {

@@ -52,10 +52,10 @@ import {
   type ClientToolSchema
 } from "agents/chat";
 import {
-  evaluateChatRecoveryIncident,
   resolveChatRecoveryConfig,
-  chatRecoveryIncidentId,
   chatRecoverySchedulePolicy,
+  ChatRecoveryEngine,
+  type ChatRecoveryAdapter,
   type ChatRecoveryScheduleCallback
 } from "agents/chat";
 import type {
@@ -3638,17 +3638,6 @@ export class AIChatAgent<
     return resolveChatRecoveryConfig(this.chatRecovery);
   }
 
-  private _chatRecoveryIncidentId(input: {
-    requestId: string;
-    recoveryRootRequestId?: string | null;
-    latestUserMessageId?: string | null;
-    targetAssistantId?: string | null;
-    recoveryKind: ChatRecoveryKind;
-  }): string {
-    // `recoveryKind` is intentionally NOT part of the identity (shared engine).
-    return chatRecoveryIncidentId(input);
-  }
-
   private _chatRecoveryIncidentKey(incidentId: string): string {
     return `${CHAT_RECOVERY_INCIDENT_KEY_PREFIX}${encodeURIComponent(incidentId)}`;
   }
@@ -3746,6 +3735,41 @@ export class AIChatAgent<
     }
   }
 
+  /**
+   * Lazily-built shared recovery engine. The adapter arrows capture `this`, so a
+   * single cached instance is correct across calls (and across future engine
+   * methods). `AIChatAgent` has no interaction state to rehydrate, so it omits
+   * the optional `ensureInteractionStateLoaded` hook.
+   */
+  private _chatRecoveryEngineInstance?: ChatRecoveryEngine;
+  private _chatRecoveryEngine(): ChatRecoveryEngine {
+    return (this._chatRecoveryEngineInstance ??= new ChatRecoveryEngine({
+      resolveConfig: () => this._resolveChatRecoveryConfig(),
+      now: () => Date.now(),
+      sweepStaleIncidents: (now) => this._sweepStaleChatRecoveryIncidents(now),
+      getIncident: async (key) =>
+        (await this.ctx.storage.get<ChatRecoveryIncident>(key)) ?? null,
+      readProgress: () => this._chatRecoveryProgressMarker(),
+      // A turn parked on a pending CLIENT interaction is waiting on the human,
+      // not stuck, so the engine keeps it budget-free.
+      isAwaitingClientInteraction: () => this.hasPendingClientInteraction(),
+      putIncident: (key, incident) => this.ctx.storage.put(key, incident),
+      emitRecoveryEvent: (event) =>
+        this._emit(event.type, {
+          incidentId: event.incidentId,
+          requestId: event.requestId,
+          attempt: event.attempt,
+          maxAttempts: event.maxAttempts,
+          recoveryKind: event.recoveryKind
+        }),
+      onShouldKeepRecoveringError: (error) =>
+        console.error(
+          "[AIChatAgent] chatRecovery shouldKeepRecovering hook threw",
+          error
+        )
+    } satisfies ChatRecoveryAdapter));
+  }
+
   private async _beginChatRecoveryIncident(input: {
     requestId: string;
     recoveryRootRequestId?: string | null;
@@ -3759,52 +3783,11 @@ export class AIChatAgent<
     config: ResolvedChatRecoveryConfig;
     exhausted: boolean;
   }> {
-    // Incident budget orchestration lives in the shared engine
-    // (agents/chat `evaluateChatRecoveryIncident`); this method owns only the
-    // storage I/O and event emission around it. See
+    // Incident orchestration (sweep -> read -> budget eval -> persist -> emit,
+    // with its ordering invariants) lives in the shared ChatRecoveryEngine; this
+    // method is the package's adapter binding. See
     // design/rfc-chat-recovery-foundation.md.
-    const config = this._resolveChatRecoveryConfig();
-    const incidentId = this._chatRecoveryIncidentId(input);
-    const key = this._chatRecoveryIncidentKey(incidentId);
-    const now = input.nowMs ?? Date.now();
-    // Sweep stale incidents BEFORE reading the existing record: an incident
-    // past the TTL is also past the no-progress window, so sweeping it first
-    // lets a genuinely abandoned identity start fresh rather than resume a dead
-    // budget. (Ordering invariant — must run before the read.)
-    await this._sweepStaleChatRecoveryIncidents(now);
-    const existing =
-      (await this.ctx.storage.get<ChatRecoveryIncident>(key)) ?? null;
-    const currentProgress = await this._chatRecoveryProgressMarker();
-
-    const { incident, exhausted, events } = await evaluateChatRecoveryIncident({
-      identity: input,
-      config,
-      existing,
-      currentProgress,
-      // A turn parked on a pending CLIENT interaction is waiting on the human,
-      // not stuck, so the engine keeps it budget-free (no-progress window,
-      // attempt cap, work budget, and caller predicate all suppressed).
-      awaitingClientInteraction: this.hasPendingClientInteraction(),
-      now,
-      onShouldKeepRecoveringError: (error) =>
-        console.error(
-          "[AIChatAgent] chatRecovery shouldKeepRecovering hook threw",
-          error
-        )
-    });
-
-    await this.ctx.storage.put(key, incident);
-    for (const event of events) {
-      this._emit(event.type, {
-        incidentId: event.incidentId,
-        requestId: event.requestId,
-        attempt: event.attempt,
-        maxAttempts: event.maxAttempts,
-        recoveryKind: event.recoveryKind
-      });
-    }
-
-    return { incident, config, exhausted };
+    return this._chatRecoveryEngine().beginIncident(input);
   }
 
   private async _updateChatRecoveryIncident(
