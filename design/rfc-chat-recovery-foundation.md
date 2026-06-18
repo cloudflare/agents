@@ -1637,6 +1637,52 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 5 / P5-1 (genericity proof — REAL pi adapter on the shared engine; no
+  package behavior change, no changeset)_ — Built `experimental/pi-recovery/`, a
+  runnable Worker that drives the **real** `@earendil-works/pi-agent-core` `Agent`
+  (real loop, real `continue()`, real `Message[]`/`AgentEvent` vocabulary) on the
+  SAME `ChatRecoveryEngine` as `AIChatAgent`/`Think`. **Uses the real published
+  package, not a synthetic stand-in** — an initial hand-rolled `text`/`end`
+  vocabulary was scrapped because validating the engine against a strawman shaped
+  to fit it is a circular proof. **Workers-compat (the load-bearing risk):** the
+  real `Agent` value pulls `@earendil-works/pi-ai`, whose barrel eagerly registers
+  every provider (`@smithy/node-http-handler`, proxy-agents, Anthropic/AWS/Google/
+  Mistral/OpenAI SDKs). Inference said "won't bundle"; **the empirical test said it
+  does** — `wrangler deploy --dry-run` bundles at 841 KiB gzip and the `Agent`
+  constructs + runs in `workerd` under `nodejs_compat` (esbuild tree-shakes, and
+  `canvas` is only a pi-ai _devDependency_ so it never enters the runtime tree).
+  Deterministic streaming uses pi-ai's built-in `registerFauxProvider`
+  (`tokensPerSecond` low) so the turn streams through pi's REAL stream path with no
+  LLM/network — interruptible mid-flight. **As-built seam wiring:** `PiAgent` (a base
+  `Agent` DO) persists its transcript to `pi_messages`, buffers pi's `AgentEvent`
+  stream into the shared `ResumableStream`, and reconstructs partials via
+  `PiRecoveryCodec` over pi's real `message_update`/`message_end` events
+  (`text_delta` accumulation) — feeding the engine the identical `{ text, parts }`
+  `RecoveryPartial` the AI SDK codec does, so the engine never sees the wire
+  vocabulary. **Recorded Tier-2 seam difference (exit criterion #4):** a text-only
+  pi turn has no settled tool results and no mid-assistant resume, so recovery
+  **regenerates** the unanswered user turn via pi's real `continue()` rather than
+  merging the orphaned partial (the AI SDK adapter merges). Concretely the wake
+  hooks set `classifyRecoveredTurn → "retry"` and `shouldPersistOrphanedPartial →
+false`; the engine supported this with **no engine-side change**, and the
+  `createChatFiberSnapshot` input was already generalized off `UIMessage` to
+  `SnapshotMessage` (prior slice) so the snapshot builder stayed wire-agnostic — the
+  two together are the genericity proof. **e2e (the P5-1 exit criterion):** a real
+  `wrangler dev` SIGKILL crash-mid-stream test (`e2e/recovery.test.ts`) — start a
+  turn, confirm it is in-flight (orphaned fiber row, no committed assistant), SIGKILL
+  mid-stream, restart on the same persist dir, and assert the shared engine
+  regenerates the turn (assistant commits, fiber row reclaimed). **Tooling note:**
+  the pi deps tripped pnpm's `verifyDepsBeforeRun` build-script gate (blocking all
+  repo commands); resolved by pinning `@google/genai`/`protobufjs` to
+  `allowBuilds: false` (the faux path never invokes them). The shared Tier-2
+  _extraction_ (lifting the resume handshake + streaming codec into `agents/chat`
+  behind adapters, then folding corrections back into the AI SDK adapter) is the
+  remaining Phase-5 work; P5-1 establishes the proof and the second-consumer harness
+  that extraction will be driven against. Tests: pi SIGKILL e2e 1/1 ✅; `pnpm run
+check` ✅ (112 projects); agents workers 1996 ✅, ai-chat ✅, Think ✅ (the
+  `SnapshotMessage` widening is type-only — all three consume `agents/chat`
+  unchanged at runtime). No changeset (no `packages/` runtime behavior change; the
+  fixture is `experimental/` and unpublished).
 - _Auto-continuation convergence (post-Slice-4f — adopt Think's event-driven barrier in
   `AIChatAgent`; user-visible, `@cloudflare/ai-chat` minor changeset)_ — Replaced
   ai-chat's in-turn, 60s-polling parallel-tool barrier (#1649) with Think's
@@ -3093,6 +3139,21 @@ Exit criteria:
 - Any seam corrections are folded back into the AI SDK adapter and codec.
 - If a Tier-2 seam could not be cleanly shared for pi, the reason is recorded (it
   signals the seam shape is wrong) rather than forced.
+
+**Status — P5-1 DONE (proof + harness); Tier-2 extraction is follow-up.** The
+`experimental/pi-recovery/` fixture drives the **real** `@earendil-works/pi-agent-core`
+`Agent` (verified to bundle + run in `workerd`; deterministic via pi-ai's
+`registerFauxProvider`) on the shared engine, and a real `wrangler dev` SIGKILL
+crash-mid-stream e2e passes: the engine regenerates the turn through pi's real
+`continue()` with no `UIMessage` assumption (the snapshot builder was generalized off
+`UIMessage` to `SnapshotMessage`). **Recorded seam difference:** a text-only pi turn
+has no settled tool results and no mid-assistant resume, so recovery _regenerates_ the
+unanswered user turn (`classifyRecoveredTurn → "retry"`, `shouldPersistOrphanedPartial
+→ false`) rather than merging the orphaned partial as the AI SDK adapter does — the
+engine supported this with no engine-side change. Still open: lifting the resume
+handshake + streaming codec into `agents/chat` behind shared adapters (driven against
+this harness), then folding corrections back into the AI SDK adapter. See the Progress
+log entry.
 
 ### Phase 6: confidence and e2e hardening
 

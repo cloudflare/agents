@@ -14,6 +14,10 @@ patchedDependencies:
   "@chonkiejs/chunk@0.9.3": patches/@chonkiejs+chunk+0.9.3.patch
   vitest-browser-react@2.2.0: patches/vitest-browser-react+2.2.0.patch
 allowBuilds:
+  # pi-recovery fixture deps (@earendil-works/pi-ai); the faux provider path
+  # never invokes these, so their postinstall/native builds are not needed.
+  "@google/genai": false
+  protobufjs: false
   "@mongodb-js/zstd": true
   autoevals: set this to true or false
   better-sqlite3: true

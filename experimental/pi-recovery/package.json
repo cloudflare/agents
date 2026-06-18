@@ -1,0 +1,24 @@
+{
+  "name": "@cloudflare/agents-pi-recovery",
+  "description": "Internal genericity harness: a non-AI-SDK 'pi' adapter driving the shared chat-recovery engine (rfc-chat-recovery-foundation, Phase 5)",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "test:e2e": "vitest run --config e2e/vitest.config.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^0.79.6",
+    "@earendil-works/pi-ai": "^0.79.6",
+    "agents": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260612.1",
+    "typescript": "^6.0.3",
+    "vitest": "4.1.8",
+    "wrangler": "^4.100.0"
+  }
+}

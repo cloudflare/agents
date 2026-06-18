@@ -104,7 +104,8 @@ export {
   createChatFiberSnapshot,
   wrapChatFiberSnapshot,
   unwrapChatFiberSnapshot,
-  type ChatFiberSnapshot
+  type ChatFiberSnapshot,
+  type SnapshotMessage
 } from "./recovery";
 
 /**
