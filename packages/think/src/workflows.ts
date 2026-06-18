@@ -30,12 +30,22 @@ type ThinkPromptEventPayload = {
 
 const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
 
+export type ThinkPromptRetryOptions = {
+  /** Total number of attempts (including the first). Default: 1 */
+  maxAttempts?: number;
+  /** Base delay in ms for exponential backoff. Default: 500 */
+  baseDelayMs?: number;
+  /** Maximum delay cap in ms. Default: 5000 */
+  maxDelayMs?: number;
+};
+
 export type ThinkPromptOptions<Schema extends ZodObject> = {
   prompt: string;
   output: Schema;
   timeout?: WorkflowSleepDuration;
   key?: string;
   cancelOnTimeout?: boolean;
+  retries?: ThinkPromptRetryOptions;
 };
 
 export interface ThinkWorkflowStep extends AgentWorkflowStep {
@@ -117,11 +127,6 @@ export class ThinkWorkflow<
     _event: WorkflowEvent<Params>
   ): Promise<z.infer<Schema>> {
     const outputSchema = toJSONSchema(options.output);
-    const eventType = await this._eventTypeForPrompt(stepName, options.key);
-    const idempotencyKey = await this._idempotencyKeyForPrompt(
-      stepName,
-      options.key
-    );
     const fingerprint = await this._hashString(
       JSON.stringify({
         prompt: options.prompt,
@@ -129,44 +134,98 @@ export class ThinkWorkflow<
       })
     );
 
-    const submission = (await step.do(`${stepName}:submit`, async () => {
-      const submissionResult = (await this.agent.submitMessages(
-        [
+    const maxAttempts = options.retries?.maxAttempts ?? 1;
+    const baseDelayMs = options.retries?.baseDelayMs ?? 500;
+    const maxDelayMs = options.retries?.maxDelayMs ?? 5000;
+
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const attemptKey =
+        attempt === 0 ? options.key : `${options.key ?? ""}:attempt-${attempt}`;
+      try {
+        return await this._promptStepAttempt(
+          stepName,
+          options,
+          outputSchema,
+          fingerprint,
+          attempt,
+          attemptKey,
+          step
+        );
+      } catch (err) {
+        lastError = err;
+        if (attempt === maxAttempts - 1) {
+          throw err;
+        }
+        const delayMs = this._promptRetryDelayMs(
+          attempt,
+          baseDelayMs,
+          maxDelayMs
+        );
+        await step.sleep(`${stepName}:retry-${attempt}`, delayMs);
+      }
+    }
+
+    throw lastError;
+  }
+
+  private async _promptStepAttempt<Schema extends ZodObject>(
+    stepName: string,
+    options: ThinkPromptOptions<Schema>,
+    outputSchema: object,
+    fingerprint: string,
+    attempt: number,
+    attemptKey: string | undefined,
+    step: AgentWorkflowStep
+  ): Promise<z.infer<Schema>> {
+    const eventType = await this._eventTypeForPrompt(stepName, attemptKey);
+    const idempotencyKey = await this._idempotencyKeyForPrompt(
+      stepName,
+      attemptKey
+    );
+
+    const submission = (await step.do(
+      `${stepName}:submit-${attempt}`,
+      async () => {
+        const submissionResult = (await this.agent.submitMessages(
+          [
+            {
+              id: crypto.randomUUID(),
+              role: "user",
+              parts: [{ type: "text", text: options.prompt }]
+            } satisfies UIMessage
+          ],
           {
-            id: crypto.randomUUID(),
-            role: "user",
-            parts: [{ type: "text", text: options.prompt }]
-          } satisfies UIMessage
-        ],
-        {
-          idempotencyKey,
-          metadata: {
-            [THINK_WORKFLOW_PROMPT_METADATA_KEY]: {
-              workflow: {
-                name: this.workflowName,
-                id: this.workflowId,
-                stepName,
-                eventType
-              },
-              output: {
-                schema: outputSchema
-              },
-              fingerprint
+            idempotencyKey,
+            metadata: {
+              [THINK_WORKFLOW_PROMPT_METADATA_KEY]: {
+                workflow: {
+                  name: this.workflowName,
+                  id: this.workflowId,
+                  stepName,
+                  eventType
+                },
+                output: {
+                  schema: outputSchema
+                },
+                fingerprint
+              }
             }
           }
-        }
-      )) as SubmitMessagesResult;
+        )) as SubmitMessagesResult;
 
-      try {
-        return { submissionId: submissionResult.submissionId };
-      } finally {
-        disposeIfPresent(submissionResult);
+        try {
+          return { submissionId: submissionResult.submissionId };
+        } finally {
+          disposeIfPresent(submissionResult);
+        }
       }
-    })) as Pick<SubmitMessagesResult, "submissionId">;
+    )) as Pick<SubmitMessagesResult, "submissionId">;
 
     const event = await this._waitForPromptEvent(
       step,
-      `${stepName}:wait`,
+      `${stepName}:wait-${attempt}`,
       eventType,
       options.timeout,
       options.cancelOnTimeout,
@@ -235,6 +294,15 @@ export class ThinkWorkflow<
       payload.submissionId,
       payload.status
     );
+  }
+
+  private _promptRetryDelayMs(
+    attempt: number,
+    baseDelayMs: number,
+    maxDelayMs: number
+  ): number {
+    const upperBoundMs = Math.min(2 ** attempt * baseDelayMs, maxDelayMs);
+    return Math.floor(Math.random() * upperBoundMs);
   }
 
   private async _idempotencyKeyForPrompt(

@@ -14,6 +14,11 @@ type PromptStepRunner = {
       timeout?: string;
       key?: string;
       cancelOnTimeout?: boolean;
+      retries?: {
+        maxAttempts?: number;
+        baseDelayMs?: number;
+        maxDelayMs?: number;
+      };
     },
     step: AgentWorkflowStep,
     event: WorkflowEvent<unknown>
@@ -95,7 +100,8 @@ describe("ThinkWorkflow", () => {
           submitStepResult = await callback();
           return submitStepResult;
         },
-        waitForEvent: async () => waitEvent
+        waitForEvent: async () => waitEvent,
+        sleep: async () => {}
       } as unknown as AgentWorkflowStep;
 
       const workflow = createWorkflow(agent);
@@ -155,7 +161,8 @@ describe("ThinkWorkflow", () => {
         do: async (_name: string, callback: () => Promise<unknown>) => {
           return callback();
         },
-        waitForEvent: async () => waitEvent
+        waitForEvent: async () => waitEvent,
+        sleep: async () => {}
       } as unknown as AgentWorkflowStep;
 
       const workflow = createWorkflow(agent);
@@ -199,7 +206,8 @@ describe("ThinkWorkflow", () => {
         },
         waitForEvent: async () => {
           throw new Error("timed out");
-        }
+        },
+        sleep: async () => {}
       } as unknown as AgentWorkflowStep;
 
       const workflow = createWorkflow(agent);
@@ -224,6 +232,123 @@ describe("ThinkWorkflow", () => {
           reason: "Workflow prompt wait timed out"
         }
       ]);
+    });
+
+    it("retries transient prompt errors with backoff and fresh submissions", async () => {
+      let submitCount = 0;
+      const sleepCalls: Array<{ name: string; duration: number }> = [];
+
+      const agent: FakeThinkAgent = {
+        async submitMessages() {
+          submitCount++;
+          return createSubmissionResult(`submission-${submitCount}`, () => {});
+        },
+        async cancelSubmission() {
+          throw new Error("cancelSubmission should not be called");
+        }
+      };
+
+      const step = {
+        do: async (_name: string, callback: () => Promise<unknown>) => {
+          return callback();
+        },
+        waitForEvent: async () => {
+          if (submitCount < 3) {
+            return {
+              payload: {
+                submissionId: `submission-${submitCount}`,
+                status: "error",
+                error: "3040: Capacity temporarily exceeded"
+              },
+              [Symbol.dispose]: () => {}
+            };
+          }
+          return {
+            payload: {
+              submissionId: `submission-${submitCount}`,
+              status: "completed",
+              output: { answer: "finally" }
+            },
+            [Symbol.dispose]: () => {}
+          };
+        },
+        sleep: async (name: string, duration: number) => {
+          sleepCalls.push({ name, duration });
+        }
+      } as unknown as AgentWorkflowStep;
+
+      const workflow = createWorkflow(agent);
+      const output = await workflow._promptStep(
+        "structure",
+        {
+          prompt: "Return structured output",
+          output: z.object({ answer: z.string() }),
+          retries: { maxAttempts: 3, baseDelayMs: 100, maxDelayMs: 1000 }
+        },
+        step,
+        createEvent()
+      );
+
+      expect(output).toEqual({ answer: "finally" });
+      expect(submitCount).toBe(3);
+      expect(sleepCalls.length).toBe(2);
+      expect(sleepCalls[0].name).toBe("structure:retry-0");
+      expect(sleepCalls[1].name).toBe("structure:retry-1");
+      expect(sleepCalls[0].duration).toBeGreaterThanOrEqual(0);
+      expect(sleepCalls[0].duration).toBeLessThanOrEqual(100);
+      expect(sleepCalls[1].duration).toBeGreaterThanOrEqual(0);
+      expect(sleepCalls[1].duration).toBeLessThanOrEqual(200);
+    });
+
+    it("retries any prompt error, including validation failures", async () => {
+      let attempt = 0;
+      const sleepCalls: Array<{ name: string; duration: number }> = [];
+
+      const agent: FakeThinkAgent = {
+        async submitMessages() {
+          attempt++;
+          return createSubmissionResult(`submission-${attempt}`, () => {});
+        },
+        async cancelSubmission() {
+          /* best-effort */
+        }
+      };
+
+      const step = {
+        do: async (_name: string, callback: () => Promise<unknown>) => {
+          return callback();
+        },
+        waitForEvent: async () => {
+          return {
+            payload: {
+              submissionId: `submission-${attempt}`,
+              status: "completed",
+              output: attempt < 2 ? { unexpected: "shape" } : { answer: "ok" }
+            },
+            [Symbol.dispose]: () => {}
+          };
+        },
+        sleep: async (name: string, duration: number) => {
+          sleepCalls.push({ name, duration });
+        }
+      } as unknown as AgentWorkflowStep;
+
+      const workflow = createWorkflow(agent);
+      const output = await workflow._promptStep(
+        "structure",
+        {
+          prompt: "Return structured output",
+          output: z.object({ answer: z.string() }),
+          retries: { maxAttempts: 3 }
+        },
+        step,
+        createEvent()
+      );
+
+      expect(output).toEqual({ answer: "ok" });
+      expect(attempt).toBe(2);
+      expect(sleepCalls.length).toBe(1);
+      expect(sleepCalls[0].name).toBe("structure:retry-0");
     });
   });
 });
