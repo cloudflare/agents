@@ -1628,6 +1628,43 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Slice 4f-ii(a) (Phase 4 — `enforceRowSizeLimit` convergence; user-visible, changeset
+  on both packages)_ — Ran the verify-first gate on ai-chat's `_enforceRowSizeLimit`
+  vs the shared `enforceRowSizeLimit` (Think's). **Not** a byte-identical lift — they
+  had drifted in two independent, observable ways, so this was treated as a convergence
+  (not a 4f-i leaf lift), with the correct behavior decided and written up under the
+  4f-ii bucket. (1) **Tool-output compaction shape:** ai-chat replaced oversized tool
+  outputs with a flat english summary string (`"…too large to persist… Preview: …"`),
+  discarding shape; Think used the structured, shape-preserving `truncateToolOutput`.
+  Decided **structured wins** (a model can keep reasoning about a shape-preserving
+  truncation; the flat string is strictly lossier) — ai-chat now uses `truncateToolOutput`
+  and its summary string is gone. (2) **Compaction annotations + warnings:** ai-chat
+  annotated `metadata.compactedToolOutputs` / `compactedTextParts` and `console.warn`ed;
+  Think did neither. Decided **annotate + warn on both** (additive metadata lets a client
+  tell a row was compacted) — Think now emits them too. Implemented by extending the
+  shared `enforceRowSizeLimit` to own both the structured compaction and the annotations,
+  plus an optional `warn` hook (`EnforceRowSizeLimitOptions`) so each package keeps its
+  own log prefix (`[AIChatAgent]` / `[Think]`). Both call sites are now thin bindings:
+  ai-chat's `_enforceRowSizeLimit` and a new Think `_rowSafe` helper (folds in the
+  `sanitizeMessage` it always pairs with, dedups three identical call sites + the
+  submission-serializer). **Deep review:** truncation thresholds matched already (both
+  compact tool outputs > 1KB, both truncate text parts oldest→newest until they fit, both
+  use the same 1.8MB `ROW_MAX_BYTES` byte-length guard incl. multibyte UTF-8); the only
+  value-level change is ai-chat's tool-output text (summary string → structured marker)
+  and Think's newly-present annotations; non-assistant (user/system) messages still fall
+  straight to text truncation; metadata is merged (spread over existing), never clobbered;
+  the engine/recovery, hibernation/wake order, terminal-before-seal, and settled tool
+  results are untouched (this is a pure pre-storage serialization step). Tests: ai-chat
+  `row-size-guard.test.ts` assertions that pinned the old summary string were repointed at
+  the structured `... [truncated N chars]` marker (the `compactedToolOutputs` metadata
+  assertion was already correct); Think's row-size tests were already structure-shaped and
+  needed no change. `pnpm run check` ✅ (111 projects); agents workers 1996 ✅, ai-chat
+  workers 686 ✅, Think workers 686 ✅; ai-chat SIGKILL e2e 10/10 ✅; Think SIGKILL e2e
+  11 files / 26 tests ✅ with the expected-RED `reattach-budget` gate (unrelated
+  wall-clock budget) left untouched. Two changesets (`@cloudflare/ai-chat` minor —
+  structured tool-output compaction; `@cloudflare/think` minor — compaction
+  annotations/warnings).
+
 - _Slice 4f-i (Phase 4 — byte-verified pure leaf lifts; zero behavior, no changeset)_
   — Ran the verify-first gate at execution time on all eight 4f-i items (line numbers
   from 2026-06 had drifted; re-diffed by method name) and confirmed each
@@ -2868,15 +2905,30 @@ callback, data, reason })` behind hooks `exhaustChatRecovery`,
   the zero-behavior bucket).** These look like dedup but are not pure lifts; each is a
   convergence that can change observable output and so gets its own slice, review, and
   (where output changes) a changeset.
-  - **ai-chat's local `enforceRowSizeLimit`** (`_enforceRowSizeLimit`,
-    `index.ts:4997–5106`, ~110 lines) vs the shared `enforceRowSizeLimit`
-    (`agents/chat/sanitize.ts:124`, which Think uses). This is NOT a byte-identical
-    lift: ai-chat's version adds `metadata.compactedToolOutputs` / `compactedTextParts`
-    annotations and console warnings, and may differ in truncation thresholds/order.
-    Converging changes what gets persisted, so: first diff the truncation behavior; if
-    it differs, decide the correct behavior and ship a changeset (persisted-row shape
-    is user-observable). Extend the shared fn with an optional annotate/`onTruncate`
-    param rather than forking. Treat as its own slice, not a leaf lift.
+  - **ai-chat's local `enforceRowSizeLimit`** (`_enforceRowSizeLimit`) vs the shared
+    `enforceRowSizeLimit` (`agents/chat/sanitize.ts`, which Think uses). ✅ DONE
+    (Slice 4f-ii(a)). The verify-first diff confirmed this was not a byte-identical
+    lift: the two had drifted in two independent ways and we converged each onto the
+    better behavior (changeset on both packages). (a) _Tool-output compaction shape_ —
+    ai-chat replaced an oversized tool output with a flat english summary string
+    (`"This tool output was too large to persist… Preview: …"`), discarding shape,
+    while the shared fn (Think) used the structured, shape-preserving
+    `truncateToolOutput`; structured wins (a model can keep reasoning about a
+    shape-preserving truncation, and a flat string is strictly lossier), so ai-chat now
+    uses `truncateToolOutput` and its old summary string is gone (user-visible
+    persisted-row change → ai-chat changeset). (b) _Compaction annotations + warnings_ —
+    ai-chat annotated `metadata.compactedToolOutputs` / `compactedTextParts` and
+    `console.warn`ed while Think did neither; annotate + warn on both (the annotations
+    let a client tell a stored message was compacted, and are cheap/additive), so Think
+    now emits them too (additive metadata + a warn → Think changeset). Implemented by
+    extending the shared `enforceRowSizeLimit` to own both the structured compaction and
+    the annotations, plus an optional `warn` hook so each package keeps its own log
+    prefix (`[AIChatAgent]` / `[Think]`); both packages are now thin bindings (ai-chat's
+    `_enforceRowSizeLimit`; Think's `_rowSafe`). ai-chat's `row-size-guard.test.ts`
+    assertions that pinned the old summary string were repointed at the structured
+    `... [truncated N chars]` marker; Think's row-size tests were already
+    structure-shaped and unchanged. See the Slice 4f-ii(a) progress-log entry.
+
   - **ai-chat's inline protocol parse vs the shared `parseProtocolMessage`**
     (`agents/chat/parse-protocol.ts`). ai-chat inlines equivalent `MessageType` switch
     checks in `onMessage` (`index.ts:794–801`+); Think routes through

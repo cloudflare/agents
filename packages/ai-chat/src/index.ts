@@ -35,9 +35,8 @@ import {
   getPartialStreamText,
   isReplayChunk,
   sanitizeMessage,
+  enforceRowSizeLimit,
   sendIfOpen,
-  byteLength as chatByteLength,
-  ROW_MAX_BYTES,
   TurnQueue,
   SubmitConcurrencyController,
   hasIncompleteToolBatch,
@@ -4852,114 +4851,9 @@ export class AIChatAgent<
    * @returns The message, compacted if necessary
    */
   private _enforceRowSizeLimit(message: UIMessage): UIMessage {
-    let json = JSON.stringify(message);
-    let size = chatByteLength(json);
-    if (size <= ROW_MAX_BYTES) return message;
-
-    if (message.role !== "assistant") {
-      // Non-assistant messages (user/system) are harder to compact safely.
-      // Truncate the entire message JSON as a last resort.
-      console.warn(
-        `[AIChatAgent] Non-assistant message ${message.id} is ${size} bytes, ` +
-          `exceeds row limit. Truncating text parts.`
-      );
-      return this._truncateTextParts(message);
-    }
-
-    console.warn(
-      `[AIChatAgent] Message ${message.id} is ${size} bytes, ` +
-        `compacting tool outputs to fit SQLite row limit`
-    );
-
-    // Pass 1: compact tool outputs
-    const compactedToolCallIds: string[] = [];
-    const compactedParts = message.parts.map((part) => {
-      if (
-        "output" in part &&
-        "toolCallId" in part &&
-        "state" in part &&
-        part.state === "output-available"
-      ) {
-        const outputJson = JSON.stringify((part as { output: unknown }).output);
-        if (outputJson.length > 1000) {
-          compactedToolCallIds.push(part.toolCallId as string);
-          return {
-            ...part,
-            output:
-              "This tool output was too large to persist in storage " +
-              `(${outputJson.length} bytes). ` +
-              "If the user asks about this data, suggest re-running the tool. " +
-              `Preview: ${outputJson.slice(0, 500)}...`
-          };
-        }
-      }
-      return part;
-    }) as UIMessage["parts"];
-
-    let result: UIMessage = {
-      ...message,
-      parts: compactedParts
-    };
-
-    if (compactedToolCallIds.length > 0) {
-      result.metadata = {
-        ...(result.metadata ?? {}),
-        compactedToolOutputs: compactedToolCallIds
-      };
-    }
-
-    // Check if tool compaction was enough
-    json = JSON.stringify(result);
-    size = chatByteLength(json);
-    if (size <= ROW_MAX_BYTES) return result;
-
-    // Pass 2: truncate text parts
-    console.warn(
-      `[AIChatAgent] Message ${message.id} still ${size} bytes after tool compaction, truncating text parts`
-    );
-    return this._truncateTextParts(result);
-  }
-
-  /**
-   * Truncates text parts in a message to fit within the row size limit.
-   * Truncates from the first text part forward, keeping the last text part
-   * as intact as possible (it is usually the most relevant).
-   */
-  private _truncateTextParts(message: UIMessage): UIMessage {
-    const compactedTextPartIndices: number[] = [];
-    const parts = [...message.parts];
-
-    // Truncate text parts from oldest to newest until we fit
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      if (part.type === "text" && "text" in part) {
-        const text = (part as { text: string }).text;
-        if (text.length > 1000) {
-          compactedTextPartIndices.push(i);
-          parts[i] = {
-            ...part,
-            text:
-              `[Text truncated for storage (${text.length} chars). ` +
-              `First 500 chars: ${text.slice(0, 500)}...]`
-          } as UIMessage["parts"][number];
-
-          // Check if we fit now
-          const candidate = { ...message, parts };
-          if (chatByteLength(JSON.stringify(candidate)) <= ROW_MAX_BYTES) {
-            break;
-          }
-        }
-      }
-    }
-
-    const result: UIMessage = { ...message, parts };
-    if (compactedTextPartIndices.length > 0) {
-      result.metadata = {
-        ...(result.metadata ?? {}),
-        compactedTextParts: compactedTextPartIndices
-      };
-    }
-    return result;
+    return enforceRowSizeLimit(message, {
+      warn: (m) => console.warn(`[AIChatAgent] ${m}`)
+    });
   }
 
   /**

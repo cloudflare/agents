@@ -193,11 +193,12 @@ describe("Row Size Guard and Incremental Persistence", () => {
         (await agentStub.getPersistedMessages()) as ChatMessage[];
       expect(persisted.length).toBe(1);
 
-      // Output should be compacted (not the original huge string)
+      // Output should be compacted (not the original huge string), keeping the
+      // structured truncation marker rather than a flat summary string.
       const part = persisted[0].parts[0] as { output: unknown };
       const outputStr = part.output as string;
-      expect(outputStr).toContain("too large to persist");
-      expect(outputStr).toContain("bytes");
+      expect(outputStr).toContain("[truncated");
+      expect(outputStr).toContain("chars]");
       expect(outputStr.length).toBeLessThan(hugeOutput.length);
 
       ws.close(1000);
@@ -305,7 +306,7 @@ describe("Row Size Guard and Incremental Persistence", () => {
       const part = persisted[0].parts[0] as { output: unknown };
       expect(typeof part.output).toBe("string");
       expect((part.output as string).length).toBeLessThan(cjkOutput.length);
-      expect(part.output as string).toContain("too large to persist");
+      expect(part.output as string).toContain("[truncated");
 
       ws.close(1000);
     });

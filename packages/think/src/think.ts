@@ -2546,11 +2546,18 @@ export class Think<
     }
   }
 
+  /** Sanitize + row-size-compact a message before it touches storage. */
+  private _rowSafe(message: UIMessage): UIMessage {
+    return enforceRowSizeLimit(sanitizeMessage(message), {
+      warn: (m) => console.warn(`[Think] ${m}`)
+    });
+  }
+
   private async _appendMessageToHistory(
     message: UIMessage,
     parentId?: string | null
   ): Promise<UIMessage> {
-    const safe = enforceRowSizeLimit(sanitizeMessage(message));
+    const safe = this._rowSafe(message);
     await this.session.appendMessage(safe, parentId);
     return safe;
   }
@@ -2558,7 +2565,7 @@ export class Think<
   private async _updateMessageInHistory(
     message: UIMessage
   ): Promise<UIMessage> {
-    const safe = enforceRowSizeLimit(sanitizeMessage(message));
+    const safe = this._rowSafe(message);
     await this.session.updateMessage(safe);
     return safe;
   }
@@ -2567,7 +2574,7 @@ export class Think<
     message: UIMessage,
     parentId?: string | null
   ): Promise<UIMessage> {
-    const safe = enforceRowSizeLimit(sanitizeMessage(message));
+    const safe = this._rowSafe(message);
     const existing = await this.session.getMessage(safe.id);
     if (existing) {
       await this.session.updateMessage(safe);
@@ -5931,9 +5938,7 @@ export class Think<
   }
 
   private _serializeSubmissionMessages(messages: UIMessage[]): string {
-    return JSON.stringify(
-      messages.map((message) => enforceRowSizeLimit(sanitizeMessage(message)))
-    );
+    return JSON.stringify(messages.map((message) => this._rowSafe(message)));
   }
 
   private _serializeMetadata(

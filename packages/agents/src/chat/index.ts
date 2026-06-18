@@ -18,7 +18,8 @@ export {
   sanitizeMessage,
   enforceRowSizeLimit,
   byteLength,
-  ROW_MAX_BYTES
+  ROW_MAX_BYTES,
+  type EnforceRowSizeLimitOptions
 } from "./sanitize";
 
 export {
