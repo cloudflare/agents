@@ -6,7 +6,7 @@ import type {
 } from "agents";
 import { getAgentByName } from "agents";
 import type { Adapter } from "chat";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   chatSdkMessenger,
   defaultChatSdkEvent,
@@ -28,6 +28,7 @@ import {
   textDeltaFromStreamChunk,
   ThinkMessengerRuntime,
   toMessengerUserMessage,
+  type MessengerBackgroundContext,
   type MessengerEvent,
   type MessengerThinkHost
 } from "../messengers";
@@ -161,6 +162,168 @@ describe("think messengers core", () => {
     ).toThrow("requires verifyWebhook");
   });
 
+  it("rejects path false without background ingress", () => {
+    expect(() =>
+      normalizeMessengers({
+        dead: chatSdkMessenger({
+          adapter: fakeAdapter(),
+          path: false,
+          provider: "fake",
+          userName: "fake_bot"
+        })
+      })
+    ).toThrow("requires background ingress");
+  });
+
+  it("allows background-only messengers without webhook verification", async () => {
+    const starts: Array<{
+      messengerId: string;
+      path: string | false;
+    }> = [];
+    const started = deferred<void>();
+    const messengers = defineMessengers({
+      gateway: chatSdkMessenger({
+        adapter: fakeAdapter(),
+        background: {
+          start(context: MessengerBackgroundContext) {
+            starts.push({
+              messengerId: context.messengerId,
+              path: context.definition.path
+            });
+            started.resolve();
+          }
+        },
+        path: false,
+        provider: "fake",
+        userName: "fake_bot"
+      })
+    });
+    const [definition] = normalizeMessengers(messengers);
+
+    expect(definition?.path).toBe(false);
+    expect(definition?.verifyWebhook).toBe(false);
+
+    const runtime = new ThinkMessengerRuntime(messengers, fakeHost([]));
+    runtime.initialize();
+    await started.promise;
+
+    expect(starts).toEqual([{ messengerId: "gateway", path: false }]);
+    await expect(
+      runtime.handleRequest(
+        new Request("https://example.com/messengers/gateway/webhook", {
+          method: "POST"
+        })
+      )
+    ).resolves.toBeUndefined();
+  });
+
+  it("starts background ingress once when the shared Chat runtime is created", async () => {
+    const starts: string[] = [];
+    const started = deferred<void>();
+    const adapter = fakeAdapter({
+      initialize() {
+        starts.push("adapter-initialize");
+        return Promise.resolve();
+      }
+    });
+    const runtime = new ThinkMessengerRuntime(
+      defineMessengers({
+        fake: chatSdkMessenger({
+          adapter,
+          background: {
+            start(context: MessengerBackgroundContext) {
+              starts.push(context.messengerId);
+              started.resolve();
+            }
+          },
+          provider: "fake",
+          userName: "fake_bot",
+          verifyWebhook: false
+        })
+      }),
+      fakeHost([])
+    );
+
+    await runtime.handleRequest(
+      new Request("https://example.com/messengers/fake/webhook", {
+        method: "POST"
+      })
+    );
+    await started.promise;
+    await runtime.handleRequest(
+      new Request("https://example.com/messengers/fake/webhook", {
+        method: "POST"
+      })
+    );
+
+    expect(starts).toEqual(["adapter-initialize", "fake"]);
+  });
+
+  it("retries background ingress after a failed start", async () => {
+    const starts: string[] = [];
+    const firstStart = deferred<void>();
+    const secondStart = deferred<void>();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const runtime = new ThinkMessengerRuntime(
+        defineMessengers({
+          fake: chatSdkMessenger({
+            adapter: fakeAdapter(),
+            background: {
+              start() {
+                starts.push("start");
+                if (starts.length === 1) {
+                  firstStart.resolve();
+                  throw new Error("temporary failure");
+                }
+                secondStart.resolve();
+              }
+            },
+            provider: "fake",
+            userName: "fake_bot",
+            verifyWebhook: false
+          })
+        }),
+        fakeHost([])
+      );
+
+      runtime.initialize();
+      await firstStart.promise;
+      await waitFor(() => error.mock.calls.length === 1);
+      runtime.initialize();
+      await secondStart.promise;
+
+      expect(starts).toEqual(["start", "start"]);
+      expect(error).toHaveBeenCalledOnce();
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("does not start background ingress on sub-agent hosts", () => {
+    const starts: string[] = [];
+    const runtime = new ThinkMessengerRuntime(
+      defineMessengers({
+        fake: chatSdkMessenger({
+          adapter: fakeAdapter(),
+          background: {
+            start(context: MessengerBackgroundContext) {
+              starts.push(context.messengerId);
+            }
+          },
+          provider: "fake",
+          userName: "fake_bot",
+          verifyWebhook: false
+        })
+      }),
+      fakeHost([], [{ className: "Parent", name: "parent" }])
+    );
+
+    runtime.initialize();
+
+    expect(starts).toEqual([]);
+  });
+
   it("honors custom webhook verifier responses before Chat SDK handling", async () => {
     const runtime = new ThinkMessengerRuntime(
       defineMessengers({
@@ -273,6 +436,37 @@ describe("think messengers core", () => {
         }
       })
     ).not.toBe(idempotencyKeyForEvent(actionEvent));
+
+    const commandEvent: MessengerEvent = {
+      ...baseEvent,
+      kind: "command",
+      message: undefined,
+      command: {
+        command: "/ask",
+        providerCommandId: "interaction-1",
+        raw: { id: "interaction-1" },
+        text: "status",
+        user: { userId: "user-1" }
+      }
+    };
+    expect(idempotencyKeyForEvent(commandEvent)).toBe(
+      "messenger:telegram:message:telegram:-100123:42:command:interaction-1:_ask:user-1:status"
+    );
+
+    const reactionEvent: MessengerEvent = {
+      ...baseEvent,
+      kind: "reaction",
+      message: undefined,
+      reaction: {
+        added: true,
+        emoji: "thumbs_up",
+        messageId: "source-message",
+        user: { userId: "user-1" }
+      }
+    };
+    expect(idempotencyKeyForEvent(reactionEvent)).toBe(
+      "messenger:telegram:message:telegram:-100123:42:reaction:source-message:thumbs_up:user-1:added"
+    );
   });
 
   it("converts messenger events to Think user messages with attachments", () => {
@@ -336,6 +530,166 @@ describe("think messengers core", () => {
         text: [
           "Ada Lovelace: Action selected: approve",
           "Value: ship-it",
+          "Source message: source-message"
+        ].join("\n")
+      }
+    ]);
+  });
+
+  it("converts messenger commands to Think user messages", () => {
+    const event = defaultChatSdkEvent(
+      normalizeMessengers({
+        fake: chatSdkMessenger({
+          adapter: fakeAdapter(),
+          provider: "fake",
+          userName: "fake_bot",
+          verifyWebhook: false
+        })
+      })[0]!,
+      {
+        channel: fakeChannel("fake:channel"),
+        command: {
+          adapter: fakeAdapter(),
+          channel: fakeChannel("fake:channel"),
+          command: "/ask",
+          raw: { id: "interaction-1" },
+          text: "status please",
+          user: {
+            fullName: "Ada Lovelace",
+            isBot: false,
+            isMe: false,
+            userId: "fake:user",
+            userName: "ada"
+          }
+        } as never,
+        eventKind: "command"
+      }
+    );
+
+    expect(event.thread).toMatchObject({
+      id: "fake:channel",
+      providerThreadId: "fake:channel"
+    });
+    expect(event.command).toMatchObject({
+      command: "/ask",
+      text: "status please"
+    });
+    expect(toMessengerUserMessage(event).parts).toEqual([
+      {
+        type: "text",
+        text: ["Ada Lovelace: Slash command: /ask", "Text: status please"].join(
+          "\n"
+        )
+      }
+    ]);
+    expect(toMessengerUserMessage(event).id).toBe(
+      "fake:command:fake:channel:interaction-1:/ask:fake:user:status_please"
+    );
+  });
+
+  it("keeps command user message IDs stable after recovery serialization", () => {
+    const event = defaultChatSdkEvent(
+      normalizeMessengers({
+        fake: chatSdkMessenger({
+          adapter: fakeAdapter(),
+          provider: "fake",
+          userName: "fake_bot",
+          verifyWebhook: false
+        })
+      })[0]!,
+      {
+        channel: fakeChannel("fake:channel"),
+        command: {
+          adapter: fakeAdapter(),
+          channel: fakeChannel("fake:channel"),
+          command: "/ask",
+          raw: { id: "interaction-1" },
+          text: "status please",
+          user: {
+            fullName: "Ada Lovelace",
+            isBot: false,
+            isMe: false,
+            userId: "fake:user",
+            userName: "ada"
+          }
+        } as never,
+        eventKind: "command"
+      }
+    );
+    const restored = serializableMessengerEvent(event);
+
+    expect(restored.command?.raw).toBeUndefined();
+    expect(restored.command?.providerCommandId).toBe("interaction-1");
+    expect(toMessengerUserMessage(restored).id).toBe(
+      toMessengerUserMessage(event).id
+    );
+  });
+
+  it("bounds command user message IDs when provider ids are unavailable", () => {
+    const event: MessengerEvent = {
+      ...baseEvent,
+      kind: "command",
+      message: undefined,
+      command: {
+        command: "/ask",
+        text: "x".repeat(500),
+        user: { userId: "fake:user" }
+      },
+      messengerId: "fake",
+      provider: "fake",
+      thread: {
+        id: "fake:channel",
+        isDirectMessage: false,
+        providerThreadId: "fake:channel"
+      }
+    };
+
+    expect(toMessengerUserMessage(event).id.length).toBeLessThan(180);
+  });
+
+  it("converts messenger reactions to Think user messages", () => {
+    const event = defaultChatSdkEvent(
+      normalizeMessengers({
+        fake: chatSdkMessenger({
+          adapter: fakeAdapter(),
+          provider: "fake",
+          userName: "fake_bot",
+          verifyWebhook: false
+        })
+      })[0]!,
+      {
+        eventKind: "reaction",
+        reaction: {
+          adapter: fakeAdapter(),
+          added: true,
+          emoji: { name: "thumbs_up" },
+          messageId: "source-message",
+          raw: { event: true },
+          rawEmoji: "👍",
+          thread: fakeThread("fake:thread"),
+          threadId: "fake:thread",
+          user: {
+            fullName: "Ada Lovelace",
+            isBot: false,
+            isMe: false,
+            userId: "fake:user",
+            userName: "ada"
+          }
+        } as never,
+        thread: fakeThread("fake:thread")
+      }
+    );
+
+    expect(event.reaction).toMatchObject({
+      added: true,
+      emoji: "thumbs_up",
+      messageId: "source-message"
+    });
+    expect(toMessengerUserMessage(event).parts).toEqual([
+      {
+        type: "text",
+        text: [
+          "Ada Lovelace: Reaction added: thumbs_up",
           "Source message: source-message"
         ].join("\n")
       }
@@ -822,7 +1176,32 @@ function isAsyncIterable(value: unknown): value is AsyncIterable<string> {
   );
 }
 
-function fakeHost(resolved: FiberRecoveryResult[]): MessengerThinkHost {
+function deferred<T>(): {
+  promise: Promise<T>;
+  reject: (reason?: unknown) => void;
+  resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  throw new Error("Timed out waiting for condition");
+}
+
+function fakeHost(
+  resolved: FiberRecoveryResult[],
+  parentPath: ReadonlyArray<{ className: string; name: string }> = []
+): MessengerThinkHost {
   return {
     cancelChat() {
       return Promise.resolve(true);
@@ -832,7 +1211,7 @@ function fakeHost(resolved: FiberRecoveryResult[]): MessengerThinkHost {
     },
     constructor: { name: "FakeHost" },
     name: "fake-host",
-    parentPath: [],
+    parentPath,
     resolveFiber(_id, result) {
       resolved.push(result);
       return Promise.resolve(true);
@@ -904,5 +1283,13 @@ function fakeThread(id: string) {
     channelId: id,
     id,
     isDM: false
+  } as never;
+}
+
+function fakeChannel(id: string) {
+  return {
+    id,
+    isDM: false,
+    name: "Fake"
   } as never;
 }

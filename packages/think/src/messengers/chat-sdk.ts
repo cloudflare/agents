@@ -4,8 +4,11 @@ import type {
   ActionEvent as ChatActionEvent,
   Attachment as ChatAttachment,
   Author as ChatAuthor,
+  Channel as ChatChannel,
   ChatConfig,
   Message as ChatMessage,
+  ReactionEvent as ChatReactionEvent,
+  SlashCommandEvent as ChatSlashCommandEvent,
   Thread as ChatThread
 } from "chat";
 import { Chat } from "chat";
@@ -27,9 +30,11 @@ import type {
   MessengerAction,
   MessengerAuthor,
   MessengerCapabilities,
+  MessengerCommand,
   MessengerEvent,
   MessengerEventKind,
   MessengerMessage,
+  MessengerReaction,
   MessengerThread
 } from "./events";
 import { serializableMessengerEvent, toMessengerUserMessage } from "./events";
@@ -46,10 +51,27 @@ import {
 
 export class ThinkMessengerStateAgent extends ChatSdkStateAgent {}
 
+interface ChatThreadReference {
+  channel: { name: string | null };
+  channelId: string;
+  id: string;
+  isDM: boolean;
+  toJSON(): unknown;
+}
+
+interface ChatChannelReference {
+  id: string;
+  isDM: boolean;
+  name: string | null;
+  toJSON(): unknown;
+}
+
 export type MessengerRespondTo =
   | "action"
+  | "command"
   | "direct-message"
   | "mention"
+  | "reaction"
   | "subscribed-thread";
 
 export type MessengerConversationMode = "self" | "thread";
@@ -66,14 +88,26 @@ export type MessengerConversationResolver = (
   event: MessengerEvent
 ) => MessengerConversationTarget | Promise<MessengerConversationTarget>;
 
+export interface MessengerBackgroundContext {
+  chat: Chat<Record<string, Adapter>>;
+  definition: NormalizedMessengerDefinition;
+  host: MessengerThinkHost;
+  messengerId: string;
+}
+
+export interface MessengerBackgroundIngress {
+  start(context: MessengerBackgroundContext): Promise<void> | void;
+}
+
 export interface MessengerDefinition {
   adapter: Adapter;
   adapterName: string;
+  background?: MessengerBackgroundIngress;
   capabilities?: MessengerCapabilities;
   conversation?: MessengerConversationMode | MessengerConversationResolver;
   delivery?: MessengerDeliveryPolicy;
   keyShard?: ChatSdkStateAdapterOptions["keyShard"];
-  path?: string;
+  path?: string | false;
   provider: string;
   respondTo?: readonly MessengerRespondTo[];
   shardKey?: ChatSdkStateAdapterOptions["shardKey"];
@@ -91,7 +125,7 @@ export type ThinkMessengers = Record<string, MessengerDefinition>;
 
 export interface NormalizedMessengerDefinition extends MessengerDefinition {
   id: string;
-  path: string;
+  path: string | false;
   respondTo: readonly MessengerRespondTo[];
   subscribeOnMention: boolean;
   verifyWebhook:
@@ -108,10 +142,13 @@ export interface ChatSdkMessengerOptions extends Omit<
 
 export interface ChatSdkMessengerEventInput {
   action?: ChatActionEvent;
+  channel?: ChatChannel;
+  command?: ChatSlashCommandEvent;
   eventKind: MessengerEventKind;
   message?: ChatMessage;
   raw?: unknown;
-  thread: ChatThread;
+  reaction?: ChatReactionEvent;
+  thread?: ChatThread;
 }
 
 export interface MessengerThinkTarget {
@@ -167,6 +204,7 @@ export function chatSdkMessenger(
 }
 
 export class ThinkMessengerRuntime {
+  private readonly backgroundStartTasks = new Map<string, Promise<void>>();
   private chat?: Chat<Record<string, Adapter>>;
   private readonly definitionsByAdapterName = new Map<
     string,
@@ -198,7 +236,7 @@ export class ThinkMessengerRuntime {
       return;
     }
 
-    this.chat = this.createChat();
+    void this.startBackgroundIngress(this.getOrCreateChat());
   }
 
   async handleRequest(request: Request): Promise<Response | undefined> {
@@ -208,7 +246,7 @@ export class ThinkMessengerRuntime {
 
     const url = new URL(request.url);
     const definition = this.definitions.find(
-      (candidate) => candidate.path === url.pathname
+      (candidate) => candidate.path !== false && candidate.path === url.pathname
     );
     if (!definition) {
       return undefined;
@@ -230,8 +268,8 @@ export class ThinkMessengerRuntime {
       }
     }
 
-    const chat = this.chat ?? this.createChat();
-    this.chat = chat;
+    const chat = this.getOrCreateChat();
+    void this.startBackgroundIngress(chat);
     return chat.webhooks[definition.adapterName](request);
   }
 
@@ -252,14 +290,17 @@ export class ThinkMessengerRuntime {
       );
     }
 
-    const thread = this.reviveChatObject<ChatThread>(snapshot.thread);
+    const surface = this.reviveChatObject<MessengerDeliverySurface>(
+      snapshot.thread
+    );
     const mode = messengerReplyRecoveryMode(snapshot);
 
     if (mode === "answer") {
       await this.answer(
         definition,
         snapshot.event,
-        thread,
+        surface,
+        snapshot.thread,
         undefined,
         snapshot.event,
         async (nextSnapshot) => {
@@ -274,7 +315,7 @@ export class ThinkMessengerRuntime {
     }
 
     if (mode === "apologize") {
-      await thread.post(
+      await surface.post(
         definition.delivery?.interruptedResponseText ??
           "Sorry, my reply was interrupted. Please send your message again if you'd like me to retry."
       );
@@ -306,7 +347,7 @@ export class ThinkMessengerRuntime {
     } satisfies ChatConfig<Record<string, Adapter>>);
 
     chat.onDirectMessage(async (thread, message) => {
-      const definition = this.definitionForThread(thread);
+      const definition = this.definitionForChatObject(thread);
       if (!definition) return;
       if (definition.respondTo.includes("direct-message")) {
         await this.enqueueReply(
@@ -316,13 +357,14 @@ export class ThinkMessengerRuntime {
             message,
             thread
           }),
-          thread
+          thread,
+          thread.toJSON()
         );
       }
     });
 
     chat.onNewMention(async (thread, message) => {
-      const definition = this.definitionForThread(thread);
+      const definition = this.definitionForChatObject(thread);
       if (!definition) return;
       if (definition.subscribeOnMention) {
         await thread.subscribe();
@@ -335,13 +377,14 @@ export class ThinkMessengerRuntime {
             message,
             thread
           }),
-          thread
+          thread,
+          thread.toJSON()
         );
       }
     });
 
     chat.onSubscribedMessage(async (thread, message) => {
-      const definition = this.definitionForThread(thread);
+      const definition = this.definitionForChatObject(thread);
       if (!definition) return;
       if (
         definition.respondTo.includes("subscribed-thread") ||
@@ -354,7 +397,8 @@ export class ThinkMessengerRuntime {
             message,
             thread
           }),
-          thread
+          thread,
+          thread.toJSON()
         );
       }
     });
@@ -362,7 +406,7 @@ export class ThinkMessengerRuntime {
     chat.onAction(async (event) => {
       if (!event.thread) return;
       const thread = event.thread as ChatThread;
-      const definition = this.definitionForThread(thread);
+      const definition = this.definitionForChatObject(thread);
       if (!definition) return;
       if (definition.respondTo.includes("action")) {
         await this.enqueueReply(
@@ -373,7 +417,46 @@ export class ThinkMessengerRuntime {
             raw: event.raw,
             thread
           }),
-          thread
+          thread,
+          thread.toJSON()
+        );
+      }
+    });
+
+    chat.onSlashCommand(async (event) => {
+      const definition = this.definitionForChatObject(event.channel);
+      if (!definition) return;
+      if (definition.respondTo.includes("command")) {
+        const channel = event.channel as MessengerDeliverySurface;
+        await this.enqueueReply(
+          definition,
+          await this.toEvent(definition, {
+            channel: event.channel,
+            command: event,
+            eventKind: "command",
+            raw: event.raw
+          }),
+          channel,
+          event.channel.toJSON()
+        );
+      }
+    });
+
+    chat.onReaction(async (event) => {
+      const thread = event.thread as ChatThread;
+      const definition = this.definitionForChatObject(thread);
+      if (!definition) return;
+      if (definition.respondTo.includes("reaction")) {
+        await this.enqueueReply(
+          definition,
+          await this.toEvent(definition, {
+            eventKind: "reaction",
+            raw: event.raw,
+            reaction: event,
+            thread
+          }),
+          thread,
+          thread.toJSON()
         );
       }
     });
@@ -384,17 +467,24 @@ export class ThinkMessengerRuntime {
   private async enqueueReply(
     definition: NormalizedMessengerDefinition,
     event: MessengerEvent,
-    thread: ChatThread
+    surface: MessengerDeliverySurface,
+    snapshotSurface: unknown
   ): Promise<void> {
     const snapshotEvent = serializableMessengerEvent(event);
-    const snapshotThread = thread.toJSON();
     const result = await this.host.startFiber(
       MESSENGER_REPLY_FIBER_NAME,
       async (fiber) => {
         fiber.stash(
-          messengerReplySnapshot("accepted", snapshotEvent, snapshotThread)
+          messengerReplySnapshot("accepted", snapshotEvent, snapshotSurface)
         );
-        await this.answer(definition, event, thread, fiber, snapshotEvent);
+        await this.answer(
+          definition,
+          event,
+          surface,
+          snapshotSurface,
+          fiber,
+          snapshotEvent
+        );
       },
       {
         idempotencyKey: idempotencyKeyForEvent(event),
@@ -422,7 +512,8 @@ export class ThinkMessengerRuntime {
       await this.answer(
         definition,
         snapshot.event,
-        thread,
+        surface,
+        snapshotSurface,
         undefined,
         snapshot.event,
         async (nextSnapshot) => {
@@ -437,7 +528,7 @@ export class ThinkMessengerRuntime {
     }
 
     if (mode === "apologize") {
-      await thread
+      await surface
         .post(
           definition.delivery?.interruptedResponseText ??
             "Sorry, my reply was interrupted. Please send your message again if you'd like me to retry."
@@ -450,7 +541,8 @@ export class ThinkMessengerRuntime {
   private async answer(
     definition: NormalizedMessengerDefinition,
     event: MessengerEvent,
-    thread: ChatThread,
+    surface: MessengerDeliverySurface,
+    snapshotSurface: unknown,
     fiber?: FiberContext,
     snapshotEvent = serializableMessengerEvent(event),
     checkpoint?: (
@@ -464,8 +556,8 @@ export class ThinkMessengerRuntime {
       fiber,
       policy: definition.delivery,
       snapshotEvent,
-      snapshotThread: thread.toJSON(),
-      surface: thread satisfies MessengerDeliverySurface,
+      snapshotThread: snapshotSurface,
+      surface,
       target,
       userMessage: toMessengerUserMessage(event)
     });
@@ -501,13 +593,22 @@ export class ThinkMessengerRuntime {
     )) as unknown as MessengerDeliveryTarget;
   }
 
-  private definitionForThread(
-    thread: ChatThread
+  private definitionForChatObject(
+    chatObject: ChatThreadReference | ChatChannelReference
   ): NormalizedMessengerDefinition | undefined {
+    const serialized = chatObject.toJSON() as { adapterName?: unknown };
+    const adapterName =
+      typeof serialized.adapterName === "string"
+        ? serialized.adapterName
+        : undefined;
     return (
-      this.definitionsByAdapterName.get(thread.toJSON().adapterName) ??
-      this.definitionForThreadId(thread.id) ??
-      this.definitionForThreadId(thread.channelId)
+      (adapterName
+        ? this.definitionsByAdapterName.get(adapterName)
+        : undefined) ??
+      this.definitionForThreadId(chatObject.id) ??
+      this.definitionForThreadId(
+        "channelId" in chatObject ? chatObject.channelId : undefined
+      )
     );
   }
 
@@ -567,9 +668,59 @@ export class ThinkMessengerRuntime {
         "Messenger recovery snapshot is missing chat object data"
       );
     }
+    const chat = this.getOrCreateChat();
+    void this.startBackgroundIngress(chat);
+    return JSON.parse(JSON.stringify(value), chat.reviver()) as T;
+  }
+
+  private getOrCreateChat(): Chat<Record<string, Adapter>> {
     const chat = this.chat ?? this.createChat();
     this.chat = chat;
-    return JSON.parse(JSON.stringify(value), chat.reviver()) as T;
+    return chat;
+  }
+
+  private async startBackgroundIngress(
+    chat: Chat<Record<string, Adapter>>
+  ): Promise<void> {
+    if (this.host.parentPath.length > 0) return;
+    for (const definition of this.definitions) {
+      if (!definition.background) {
+        continue;
+      }
+
+      void this.startBackgroundDefinition(chat, definition);
+    }
+  }
+
+  private startBackgroundDefinition(
+    chat: Chat<Record<string, Adapter>>,
+    definition: NormalizedMessengerDefinition
+  ): Promise<void> {
+    const existing = this.backgroundStartTasks.get(definition.id);
+    if (existing) {
+      return existing;
+    }
+
+    const task = (async () => {
+      try {
+        await chat.initialize();
+        await definition.background?.start({
+          chat,
+          definition,
+          host: this.host,
+          messengerId: definition.id
+        });
+      } catch (error) {
+        this.backgroundStartTasks.delete(definition.id);
+        console.error(
+          `Messenger ${definition.id} background ingress failed`,
+          error
+        );
+      }
+    })();
+
+    this.backgroundStartTasks.set(definition.id, task);
+    return task;
   }
 
   private async toEvent(
@@ -598,23 +749,32 @@ export function normalizeMessengers(
     ids.add(id);
 
     const path = definition.path ?? `/messengers/${id}/webhook`;
-    validatePath(path, id);
-    if (definition.verifyWebhook === undefined) {
+    if (path === false && !definition.background) {
+      throw new Error(
+        `Messenger ${id} with path: false requires background ingress`
+      );
+    }
+    if (path !== false) {
+      validatePath(path, id);
+    }
+    if (path !== false && definition.verifyWebhook === undefined) {
       throw new Error(
         `Messenger ${id} requires verifyWebhook, or verifyWebhook: false to opt out explicitly`
       );
     }
-    const verifyWebhook = definition.verifyWebhook;
+    const verifyWebhook = path === false ? false : definition.verifyWebhook!;
     if (adapterNames.has(definition.adapterName)) {
       throw new Error(
         `Duplicate messenger adapter name: ${definition.adapterName}`
       );
     }
     adapterNames.add(definition.adapterName);
-    if (paths.has(path)) {
+    if (path !== false && paths.has(path)) {
       throw new Error(`Duplicate messenger path: ${path}`);
     }
-    paths.add(path);
+    if (path !== false) {
+      paths.add(path);
+    }
 
     normalized.push({
       ...definition,
@@ -648,6 +808,20 @@ function idempotencyEventPart(event: MessengerEvent): string {
     return event.message.id;
   }
 
+  if (event.command) {
+    return [
+      "command",
+      stableNamePart(
+        event.command.providerCommandId ??
+          providerRawId(event.command.raw) ??
+          event.command.command
+      ),
+      stableNamePart(event.command.command),
+      stableNamePart(event.command.user?.userId ?? "unknown-user"),
+      stableNamePart(event.command.text ?? "no-text")
+    ].join(":");
+  }
+
   if (event.action) {
     return [
       "action",
@@ -658,6 +832,16 @@ function idempotencyEventPart(event: MessengerEvent): string {
     ].join(":");
   }
 
+  if (event.reaction) {
+    return [
+      "reaction",
+      stableNamePart(event.reaction.messageId),
+      stableNamePart(event.reaction.emoji),
+      stableNamePart(event.reaction.user?.userId ?? "unknown-user"),
+      event.reaction.added ? "added" : "removed"
+    ].join(":");
+  }
+
   return event.kind;
 }
 
@@ -665,15 +849,35 @@ export function defaultChatSdkEvent(
   definition: NormalizedMessengerDefinition,
   input: ChatSdkMessengerEventInput
 ): MessengerEvent {
+  const thread = input.thread
+    ? toMessengerThread(input.thread)
+    : input.channel
+      ? toMessengerThreadFromChannel(input.channel)
+      : input.command
+        ? toMessengerThreadFromChannel(input.command.channel)
+        : input.reaction
+          ? toMessengerThread(input.reaction.thread)
+          : undefined;
+  if (!thread) {
+    throw new Error(`Messenger event ${input.eventKind} is missing a surface`);
+  }
+
   return {
     capabilities: definition.capabilities ?? {},
     action: input.action && toMessengerAction(input.action),
+    command: input.command && toMessengerCommand(input.command),
     kind: input.eventKind,
     message: input.message && toMessengerMessage(input.message),
     messengerId: definition.id,
     provider: definition.provider,
-    raw: input.raw ?? input.message?.raw,
-    thread: toMessengerThread(input.thread)
+    raw:
+      input.raw ??
+      input.message?.raw ??
+      input.action?.raw ??
+      input.command?.raw ??
+      input.reaction?.raw,
+    reaction: input.reaction && toMessengerReaction(input.reaction),
+    thread
   };
 }
 
@@ -687,13 +891,51 @@ export function toMessengerAction(action: ChatActionEvent): MessengerAction {
   };
 }
 
-export function toMessengerThread(thread: ChatThread): MessengerThread {
+export function toMessengerCommand(
+  command: ChatSlashCommandEvent
+): MessengerCommand {
+  return {
+    command: command.command,
+    providerCommandId: providerRawId(command.raw),
+    raw: command.raw,
+    text: command.text || undefined,
+    user: toMessengerAuthor(command.user)
+  };
+}
+
+export function toMessengerReaction(
+  reaction: ChatReactionEvent
+): MessengerReaction {
+  return {
+    added: reaction.added,
+    emoji: reaction.emoji.name || reaction.rawEmoji,
+    messageId: reaction.messageId,
+    raw: reaction.raw,
+    user: toMessengerAuthor(reaction.user)
+  };
+}
+
+export function toMessengerThread(
+  thread: ChatThreadReference
+): MessengerThread {
   return {
     channelId: thread.channelId,
     channelName: thread.channel.name ?? undefined,
     id: thread.id,
     isDirectMessage: thread.isDM,
     providerThreadId: thread.id
+  };
+}
+
+export function toMessengerThreadFromChannel(
+  channel: ChatChannelReference
+): MessengerThread {
+  return {
+    channelId: channel.id,
+    channelName: channel.name ?? undefined,
+    id: channel.id,
+    isDirectMessage: channel.isDM,
+    providerThreadId: channel.id
   };
 }
 
@@ -743,6 +985,15 @@ export function toMessengerAttachment(
     size: attachment.size,
     url: attachment.url
   };
+}
+
+function providerRawId(raw: unknown): string | undefined {
+  if (raw === null || typeof raw !== "object") {
+    return undefined;
+  }
+
+  const candidate = raw as { id?: unknown };
+  return typeof candidate.id === "string" ? candidate.id : undefined;
 }
 
 function stableNamePart(value: string): string {
