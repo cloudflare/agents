@@ -151,6 +151,7 @@ function ToolCard({
   state,
   input: toolInput,
   output,
+  errorText,
   approvalId,
   onApprove,
   onReject
@@ -159,6 +160,7 @@ function ToolCard({
   state: string;
   input?: unknown;
   output?: unknown;
+  errorText?: string;
   approvalId?: string;
   onApprove?: (id: string) => void;
   onReject?: (id: string) => void;
@@ -224,6 +226,12 @@ function ToolCard({
         {isDone && output != null && (
           <pre className="font-mono text-xs text-kumo-subtle overflow-x-auto bg-green-500/5 rounded p-2 border border-green-500/20">
             {JSON.stringify(output, null, 2)}
+          </pre>
+        )}
+
+        {isError && (
+          <pre className="font-mono text-xs text-red-400 overflow-x-auto bg-red-500/10 rounded p-2 border border-red-500/20">
+            {errorText ?? "Tool execution failed."}
           </pre>
         )}
 
@@ -454,6 +462,11 @@ function ToolsUI() {
                         output={
                           part.state === "output-available"
                             ? part.output
+                            : undefined
+                        }
+                        errorText={
+                          part.state === "output-error"
+                            ? (part as { errorText?: string }).errorText
                             : undefined
                         }
                         approvalId={approvalId}

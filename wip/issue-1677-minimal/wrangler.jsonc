@@ -2,7 +2,7 @@
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "facet-ws-native-io-minimal-1677",
   "main": "src/index.ts",
-  "compatibility_date": "2026-03-02",
+  "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "observability": {
     "enabled": true,

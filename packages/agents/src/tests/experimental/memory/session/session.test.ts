@@ -2005,3 +2005,234 @@ describe("Session.create with SessionProvider", () => {
     expect(Object.keys(tools)).toHaveLength(0);
   });
 });
+
+// ── Bounded init reads (#1710) ────────────────────────────────────
+//
+// The init-time loaded-skill restore used to read the FULL history on
+// every wake, bypassing byte-budgeted hydration. It must be skipped when
+// no skill provider is configured, and memory-bounded (row stats + one
+// message at a time) when one is.
+
+/** Counting stub provider with optional row-stats support. */
+function createCountingProvider(seed: SessionMessage[], rowStats: boolean) {
+  const messages = [...seed];
+  const counts = {
+    getHistory: 0,
+    getHistoryRowStats: 0,
+    getMessage: 0,
+    updateMessage: 0
+  };
+  const provider: SessionProvider = {
+    getMessage: (id) => {
+      counts.getMessage++;
+      return messages.find((m) => m.id === id) ?? null;
+    },
+    getHistory: () => {
+      counts.getHistory++;
+      return messages;
+    },
+    getLatestLeaf: () => messages[messages.length - 1] ?? null,
+    getBranches: () => [],
+    getPathLength: () => messages.length,
+    appendMessage: (msg) => {
+      messages.push(msg);
+    },
+    updateMessage: (msg) => {
+      counts.updateMessage++;
+      const idx = messages.findIndex((m) => m.id === msg.id);
+      if (idx !== -1) messages[idx] = msg;
+    },
+    deleteMessages: () => {},
+    clearMessages: () => {
+      messages.length = 0;
+    },
+    addCompaction: () => ({
+      id: "",
+      summary: "",
+      fromMessageId: "",
+      toMessageId: "",
+      createdAt: ""
+    }),
+    getCompactions: () => []
+  };
+  if (rowStats) {
+    provider.getHistoryRowStats = () => {
+      counts.getHistoryRowStats++;
+      return messages.map((m) => ({
+        id: m.id,
+        role: m.role,
+        bytes: JSON.stringify(m).length
+      }));
+    };
+  }
+  return { provider, counts, messages };
+}
+
+function loadContextMessage(id: string, label: string, key: string) {
+  return {
+    id,
+    role: "assistant",
+    parts: [
+      {
+        type: "tool-load_context",
+        toolName: "load_context",
+        toolCallId: `${id}-call`,
+        state: "output-available",
+        input: { label, key },
+        output: "skill content"
+      }
+    ]
+  } as unknown as SessionMessage;
+}
+
+class StubSkillProvider implements SkillProvider {
+  async get() {
+    return "pirate: talk like a pirate";
+  }
+  async load() {
+    return "Arr";
+  }
+}
+
+describe("Session init reads are bounded (#1710)", () => {
+  const seed = (): SessionMessage[] => [
+    { id: "u1", role: "user", parts: [{ type: "text", text: "hi" }] },
+    loadContextMessage("a1", "skills", "pirate"),
+    { id: "u2", role: "user", parts: [{ type: "text", text: "more" }] }
+  ];
+
+  it("skips the skill-restore history scan when no skill provider is configured", async () => {
+    const { provider, counts } = createCountingProvider(seed(), false);
+    const session = Session.create(provider).withContext("memory", {
+      provider: { get: async () => "notes", set: async () => {} }
+    });
+
+    // Drive init via a budgeted read — the only getHistory call must be
+    // the fallback read itself (provider lacks getRecentHistory), with NO
+    // additional full read from the skill-restore scan.
+    await session.getRecentHistory(1024);
+    expect(counts.getHistory).toBe(1);
+
+    // And a provider WITH budgeted-read support never reads full history.
+    const withStats = createCountingProvider(seed(), true);
+    withStats.provider.getRecentHistory = (_leaf, _max) => ({
+      messages: [],
+      truncated: false,
+      totalContentBytes: 0
+    });
+    const session2 = Session.create(withStats.provider);
+    await session2.getRecentHistory(1024);
+    expect(withStats.counts.getHistory).toBe(0);
+  });
+
+  it("restores loaded skills via row stats + per-message reads when supported", async () => {
+    const { provider, counts } = createCountingProvider(seed(), true);
+    const session = Session.create(provider).withContext("skills", {
+      provider: new StubSkillProvider()
+    });
+
+    const tools = await session.tools();
+    // The restore scan saw the load_context result — the skill is tracked
+    // as loaded again after "hibernation".
+    const desc = (tools.unload_context as { description: string }).description;
+    expect(desc).toContain("skills:pirate");
+
+    // Bounded path: row stats enumerated, only the ASSISTANT row fetched
+    // individually — never a full-history materialization.
+    expect(counts.getHistory).toBe(0);
+    expect(counts.getHistoryRowStats).toBe(1);
+    expect(counts.getMessage).toBe(1);
+  });
+
+  it("falls back to a full read for skill restore when row stats are unsupported", async () => {
+    const { provider, counts } = createCountingProvider(seed(), false);
+    const session = Session.create(provider).withContext("skills", {
+      provider: new StubSkillProvider()
+    });
+
+    const tools = await session.tools();
+    const desc = (tools.unload_context as { description: string }).description;
+    expect(desc).toContain("skills:pirate");
+    expect(counts.getHistory).toBe(1);
+  });
+
+  it("a skill block added later via addContext triggers the restore scan", async () => {
+    const { provider, counts } = createCountingProvider(seed(), true);
+    const session = Session.create(provider);
+
+    // No skill providers at init — no scan.
+    await session.getHistory();
+    expect(counts.getHistoryRowStats).toBe(0);
+
+    await session.addContext("skills", {
+      provider: new StubSkillProvider()
+    });
+    expect(counts.getHistoryRowStats).toBe(1);
+
+    const tools = await session.tools();
+    const desc = (tools.unload_context as { description: string }).description;
+    expect(desc).toContain("skills:pirate");
+  });
+});
+
+describe("Session.getRecentHistory fallback (#1710)", () => {
+  it("reports honest metadata when the provider lacks budgeted reads", async () => {
+    const { provider } = createCountingProvider(
+      [
+        { id: "m1", role: "user", parts: [{ type: "text", text: "hello" }] },
+        { id: "m2", role: "assistant", parts: [{ type: "text", text: "hi" }] }
+      ],
+      false
+    );
+    const session = Session.create(provider);
+
+    const result = await session.getRecentHistory(1);
+    // Nothing was actually truncated (the FULL history was loaded), and
+    // the reported size reflects the real serialized footprint instead of
+    // a misleading 0.
+    expect(result.truncated).toBe(false);
+    expect(result.messages.map((m) => m.id)).toEqual(["m1", "m2"]);
+    expect(result.totalContentBytes).toBe(
+      result.messages.reduce((sum, m) => sum + JSON.stringify(m).length, 0)
+    );
+  });
+});
+
+describe("Session.internal_rewriteMessage (#1710)", () => {
+  it("writes storage and notifies the listener without a status broadcast", async () => {
+    const { sql } = createSqlStub();
+    const frames: string[] = [];
+    const session = Session.create({
+      sql,
+      broadcast: (msg: string | ArrayBufferLike) => {
+        if (typeof msg === "string") frames.push(msg);
+      }
+    } as Parameters<typeof Session.create>[0]);
+
+    const events: string[] = [];
+    session.internal_onMessagesChanged((event) => {
+      events.push(event.type);
+    });
+
+    const message: SessionMessage = {
+      id: "m1",
+      role: "assistant",
+      parts: [{ type: "text", text: "rewritten" }]
+    };
+
+    // Public update — emits a cf_agent_session status frame (with its
+    // full-history token estimate).
+    await session.updateMessage(message);
+    const statusFrames = () =>
+      frames.filter((f) => f.includes("cf_agent_session")).length;
+    const afterPublic = statusFrames();
+    expect(afterPublic).toBeGreaterThan(0);
+    expect(events).toContain("update");
+
+    // Maintenance rewrite — storage write + listener, NO status frame.
+    events.length = 0;
+    await session.internal_rewriteMessage(message);
+    expect(statusFrames()).toBe(afterPublic);
+    expect(events).toEqual(["update"]);
+  });
+});

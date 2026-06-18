@@ -397,7 +397,7 @@ const result = await createApp({
 const worker = env.LOADER.get(loaderId, () => ({
   mainModule: result.mainModule,
   modules: result.modules,
-  compatibilityDate: "2026-01-28"
+  compatibilityDate: "2026-06-11"
 }));
 
 // Mount as a facet for persistent storage

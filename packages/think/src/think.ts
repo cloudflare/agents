@@ -48,7 +48,7 @@
  *
  * export class MyAgent extends Think<Env> {
  *   getModel() {
- *     return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.6");
+ *     return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.7-code");
  *   }
  *
  *   getSystemPrompt() {
@@ -120,6 +120,9 @@ export { skills };
 export type { SkillRunContext, SkillSource } from "agents/skills";
 import {
   Agent,
+  callable,
+  getCurrentAgent,
+  isPlatformTransientError,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
 } from "agents";
 
@@ -145,6 +148,7 @@ import {
   toolResultUpdate,
   crossMessageToolResultUpdate,
   toolApprovalUpdate,
+  pausedExecutionUpdate,
   parseProtocolMessage,
   applyChunkToParts,
   normalizeToolInput,
@@ -159,14 +163,36 @@ import {
 import type {
   StreamChunkData,
   ClientToolSchema,
+  ClientToolExecutor,
   MessagePart,
   SubmitConcurrencyDecision,
   ChatFiberSnapshot
 } from "agents/chat";
 import { Session } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
+import {
+  evictLargeMediaFromMessage,
+  resolveMediaEvictionConfig,
+  type MediaEvictionConfig,
+  type ResolvedMediaEvictionConfig
+} from "./media-eviction";
+
+/**
+ * The recent-message span the model sees at FULL fidelity each turn —
+ * `truncateOlderMessages`' default `keepRecent` (see `_assembleModelMessages`).
+ *
+ * Both memory bounds are anchored to this window (#1710):
+ * - budgeted hydration never shrinks `this.messages` below it (the floor
+ *   passed to `session.getRecentHistory`), so windowing cannot starve the
+ *   model's context;
+ * - media eviction never rewrites messages inside it (the
+ *   `keepRecentMessages` clamp), so content the model still replays at full
+ *   fidelity is never replaced with markers.
+ */
+const MODEL_RECENT_WINDOW = 4;
 import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "./tools/workspace";
+import { truncatePausedExecutionOutput } from "./tools/execute";
 import { ExtensionManager, sanitizeName } from "./extensions/manager";
 import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
 import type {
@@ -729,6 +755,16 @@ const CHAT_RECOVERING_FLAG_TTL_MS = 15 * 60 * 1000;
 // child output registers forward progress.
 const AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS = 5_000;
 
+// How far ahead to schedule the resumable-stream buffer cleanup alarm. Set to
+// ResumableStream's short completion-grace window (COMPLETED_RETENTION_MS, 10m)
+// so a finished buffer is reclaimed promptly. The re-arm-while-reclaimable loop
+// (see _cleanupStreamBuffers) revisits any longer-lived rows — e.g. an
+// abandoned in-flight buffer on its 1h window — by waking again each interval
+// until they age out, then stops. Driving cleanup from an alarm (rather than
+// only piggybacking on the next stream completion) ensures idle/one-off chat
+// DOs still reclaim their buffers without waking forever (#1706).
+const STREAM_CLEANUP_DELAY_SECONDS = 10 * 60;
+
 // Ephemeral user message appended when a model request would otherwise end in
 // an assistant message (see `ensureValidContinueCheckpoint`).
 const CONTINUE_CHECKPOINT_PROMPT =
@@ -765,6 +801,29 @@ const CHAT_LAST_TERMINAL_KEY = "cf:chat:last-terminal";
 // terminal outcome (completed/skipped/failed/exhausted) so the indicator can't
 // spin forever.
 const CHAT_RECOVERING_KEY = "cf:chat:recovering";
+
+/**
+ * A best-effort internal `onStart` step that failed on this wake and was
+ * skipped so the agent could still come up (#1710).
+ *
+ * - `transcript-hydration` — reading the persisted conversation into the
+ *   in-memory message cache failed (e.g. `SQLITE_NOMEM` on an oversized,
+ *   media-heavy transcript). The agent starts with an empty in-memory view;
+ *   persisted history is untouched and the next safe-boundary sync retries.
+ * - `scheduled-task-reconcile` — declarative scheduled tasks were not
+ *   reconciled on this wake; the next successful wake reconciles them.
+ * - `durable-work-recovery` — pending submissions / workflow notifications
+ *   were not recovered or drained on this wake.
+ */
+export interface OnStartDegradation {
+  step:
+    | "transcript-hydration"
+    | "scheduled-task-reconcile"
+    | "durable-work-recovery";
+  error: unknown;
+}
+
+export type { MediaEvictionConfig } from "./media-eviction";
 
 /**
  * Callback interface for streaming chat events from a Think sub-agent.
@@ -827,6 +886,58 @@ export interface StreamableResult {
  */
 export interface ChatOptions {
   signal?: AbortSignal;
+  /**
+   * Client-defined tool schemas to expose to the model for this turn, mirroring
+   * the `clientTools` carried over the WebSocket chat protocol. Use this when a
+   * parent agent delegates to a Think sub-agent over RPC but the sub-agent still
+   * needs access to tools the client (or parent) defines at runtime.
+   *
+   * On their own these are execute-less — the model's call surfaces as a tool
+   * call through the stream callback. Provide {@link ChatOptions.onClientToolCall}
+   * to also resolve those calls inline so the turn can continue to completion.
+   */
+  clientTools?: ClientToolSchema[];
+  /**
+   * Executes a client tool call and returns its output, completing the
+   * round trip for {@link ChatOptions.clientTools} within the same turn.
+   *
+   * Without this, a client-tool call has no result and the turn ends with a
+   * dangling tool call (the RPC stream callback has no inbound result channel).
+   * With it, the model can call a client tool, receive the result, and keep
+   * going — the same multi-step behavior the WebSocket path gets from
+   * `cf_agent_tool_result` messages.
+   */
+  onClientToolCall?: ClientToolExecutor;
+}
+
+/** Options for {@link Think.addMessages}. */
+export interface AddMessagesOptions {
+  /**
+   * Parent to attach the first message under. Omitted (`undefined`) attaches to
+   * the latest committed leaf at call time; `null` attaches at the root. An
+   * explicit id that does not exist throws (fail fast rather than silently
+   * misattaching). Subsequent messages in an array chain under the previous one.
+   */
+  parentId?: string | null;
+  /**
+   * `"append"` (default) inserts new rows, idempotent by message id.
+   * `"upsert"` inserts, or updates in place when the id already exists (in which
+   * case `parentId` is ignored — re-parenting is not supported).
+   *
+   * Idempotency is by id against the whole session tree, not just the target
+   * path: if a message id already exists *anywhere* in history, `"append"` is a
+   * no-op for it (no new row, no re-parent) and `"upsert"` updates it in place
+   * wherever it lives. In both modes the next message in the array chains under
+   * that existing id, so passing already-present ids mid-array threads new
+   * messages onto the existing branch rather than forking a new one.
+   */
+  mode?: "append" | "upsert";
+  /**
+   * Broadcast the change to connected clients. Default `true`. Has no effect
+   * when called from inside an active turn (e.g. a tool `execute`), where the
+   * live view is intentionally not touched until the next turn's sync.
+   */
+  broadcast?: boolean;
 }
 
 type AgentToolChildRunStatus =
@@ -1171,6 +1282,13 @@ export interface TurnInput {
   signal?: AbortSignal;
   /** Client-provided tool schemas for dynamic tool registration. */
   clientTools?: ClientToolSchema[];
+  /**
+   * Executor that resolves client-tool calls inline (RPC `chat()` path). When
+   * present, `clientTools` are built WITH an `execute` that delegates to it, so
+   * the turn completes the tool round trip itself instead of surfacing a
+   * dangling tool call. Not persisted — recovery cannot replay a live executor.
+   */
+  clientToolExecutor?: ClientToolExecutor;
   /** Custom body fields from the client request. */
   body?: Record<string, unknown>;
   /** Internal workflow prompt configuration, never sourced from client body. */
@@ -1271,6 +1389,16 @@ export interface TurnConfig {
   experimental_telemetry?: Parameters<
     typeof streamText
   >[0]["experimental_telemetry"];
+  /**
+   * Optional AI SDK stream transform(s) for this turn (`experimental_transform`).
+   * Forwarded to `streamText` so callers can inspect/rewrite the stream — e.g.
+   * detecting tool results that carry `{ content, sources }` and enqueuing
+   * additional `source` parts via the transform's controller. Accepts a single
+   * transform or an array applied in order.
+   */
+  experimental_transform?: Parameters<
+    typeof streamText
+  >[0]["experimental_transform"];
   /**
    * Optional structured-output specification (AI SDK `output`).
    * Forwarded to `streamText` so the model's final response is parsed
@@ -1678,6 +1806,67 @@ export class Think<
   messageConcurrency: MessageConcurrency = "queue";
 
   /**
+   * Byte budget for hydrating the persisted transcript into the in-memory
+   * message cache (`this.messages`).
+   *
+   * Hydration runs on every wake (and at safe boundaries during a session).
+   * Without a budget it materializes the ENTIRE stored conversation — for
+   * long-lived, media-heavy sessions that footprint approaches the isolate's
+   * 128MB memory budget and the next SQLite allocation fails with
+   * `SQLITE_NOMEM`, permanently bricking the DO (#1710).
+   *
+   * When the stored path exceeds the budget, only the most recent messages
+   * that fit are hydrated — never fewer than the recent window the model
+   * sees at full fidelity (the `truncateOlderMessages` default of 4), even
+   * when those messages alone exceed the budget — a
+   * `chat:hydration:windowed` observability event is emitted, and
+   * `this.messages` exposes the bounded window. Durable storage is never
+   * truncated by this — `session.getHistory()` still reads the full path.
+   * The model-facing context is unaffected: older content is already
+   * truncated at read time before each turn, and the hydration floor
+   * guarantees the full-fidelity span is always present.
+   *
+   * The default (24MB) leaves headroom for the ~2-3x amplification between
+   * stored JSON and parsed in-memory messages. Set to
+   * `Number.POSITIVE_INFINITY` (or any non-positive value) to disable
+   * windowing and always hydrate the full transcript.
+   *
+   * @default 24 * 1024 * 1024
+   */
+  hydrationByteBudget: number = 24 * 1024 * 1024;
+
+  /**
+   * Bound the PERSISTED transcript footprint by evicting oversized inline
+   * media (base64 data-URL attachments, large strings inside tool outputs)
+   * from messages that have aged out of the recent window.
+   *
+   * Read-time truncation already hides aged media from the model, but the
+   * bytes stay in storage forever and are rehydrated on every wake — the
+   * boot footprint grows with every image a session ever produced until
+   * SQLite's allocator fails with `SQLITE_NOMEM` (#1710). Eviction passes
+   * run in the background after the agent starts and as the conversation
+   * grows; each pass processes a bounded number of oversized rows.
+   *
+   * By default evicted values are preserved as workspace files under
+   * `/attachments/evicted/` (same Durable Object storage, but outside the
+   * hydration path) and the in-message marker records the file path.
+   * Pass a {@link MediaEvictionConfig} with `externalizeToWorkspace: false`
+   * to drop the bytes instead of preserving them. Set this field to
+   * `false` to disable eviction entirely.
+   *
+   * `keepRecentMessages` is clamped to at least the recent window the model
+   * replays at full fidelity (4 messages), so eviction can never rewrite
+   * content the model still sees.
+   *
+   * Requires a SessionProvider that implements `getHistoryRowStats`
+   * (the default DO SQLite provider does); otherwise eviction is a no-op
+   * and a warning is logged once.
+   *
+   * @default true
+   */
+  mediaEviction: MediaEvictionConfig | boolean = true;
+
+  /**
    * When true, chat turns are wrapped in `runFiber` for durable execution.
    * Enables `onChatRecovery` hook and `this.stash()` during streaming.
    *
@@ -1702,6 +1891,28 @@ export class Think<
 
   /** Cached messages — kept in sync with session storage. */
   private _cachedMessages: UIMessage[] = [];
+
+  /**
+   * Internal onStart steps that failed on this wake and were skipped so the
+   * agent could still come up.
+   *
+   * onStart failures are terminal: partyserver resets its init state and
+   * rethrows, so every subsequent wake — including platform alarm retries —
+   * re-runs the failing onStart. A data-driven failure (e.g. SQLITE_NOMEM
+   * hydrating an oversized transcript) would otherwise permanently brick the
+   * DO and drive an unbounded alarm-retry loop (#1710).
+   */
+  protected _onStartDegradations: OnStartDegradation[] = [];
+
+  /**
+   * Internal onStart steps that failed on this wake and were skipped so the
+   * agent could still come up (see {@link OnStartDegradation}). Empty when
+   * boot was clean. Lets hosts and operators surface degraded boots —
+   * e.g. via a health RPC — without subclassing.
+   */
+  getOnStartDegradations(): ReadonlyArray<OnStartDegradation> {
+    return [...this._onStartDegradations];
+  }
 
   private _activeMessengerContext?: MessengerContext;
 
@@ -1743,6 +1954,15 @@ export class Think<
   workspace!: WorkspaceLike;
 
   /**
+   * The codemode runtime behind the execute tool, when one has been created
+   * via `createExecuteRuntime(this)` / `createExecuteTool(this)` (from
+   * `@cloudflare/think/tools/execute`). Gives callables and lifecycle hooks
+   * access to approvals (`approve`/`reject`/`pending`), the audit trail
+   * (`executions`), `expirePaused`, and snippets.
+   */
+  codemode?: import("@cloudflare/codemode").CodemodeRuntimeHandle;
+
+  /**
    * Include the default workspace Bash tool. Enabled by default so models can
    * run shell-style multi-file workflows against the workspace. Set to `false`
    * to omit it from the built-in workspace tools.
@@ -1775,6 +1995,11 @@ export class Think<
             } else {
               this._upsertCachedMessage(event.message as UIMessage);
             }
+            // The conversation grew — older messages may have aged out of
+            // the keep-recent window. Only schedule the maintenance scan once
+            // this session has actually observed oversized media; otherwise a
+            // normal text-only chat would pay a row-stat read after every turn.
+            this._scheduleMediaEvictionAfterAppend(event.message as UIMessage);
             break;
           case "update":
             this._patchCachedMessage(event.message as UIMessage);
@@ -1794,7 +2019,27 @@ export class Think<
       // Force Session to initialize its tables (assistant_messages,
       // assistant_compactions, assistant_config, etc.) so that subsequent
       // config reads work.
-      await this._syncMessages();
+      //
+      // Hydration is bounded by `hydrationByteBudget` (a byte-budgeted
+      // recent window on oversized transcripts), but even the budgeted read
+      // can fail — and that failure must not escape onStart, or the DO is
+      // bricked (#1710). Degrade to an empty in-memory view; persisted
+      // history is untouched and the next safe-boundary `_syncMessages()`
+      // retries.
+      this._onStartDegradations = [];
+      const hydrated = await this._runBestEffortOnStartStep(
+        "transcript-hydration",
+        () => this._syncMessages(),
+        "The agent is starting with an empty in-memory message view; " +
+          "persisted history is untouched. If the error is SQLITE_NOMEM, " +
+          "the stored transcript is too large to hydrate (often inline " +
+          "base64 media in tool results) — compact or clear the session " +
+          "to recover."
+      );
+      if (!hydrated) {
+        this._replaceCachedMessages([]);
+      }
+      this._refreshMediaEvictionSignalFromCache();
 
       // 3-6. Extension initialization (if extensionLoader is set)
       if (this.extensionLoader) {
@@ -1813,17 +2058,40 @@ export class Think<
 
       // 9. Declarative scheduled tasks are code-defined and should reconcile
       // before draining any recovered programmatic work they may enqueue.
-      await this._reconcileDeclaredScheduledTasks();
+      // Best-effort: reconcile runs after the agent is otherwise functional,
+      // and a failure (user getScheduledTasks() throwing, storage pressure)
+      // must not brick the DO (#1710).
+      await this._runBestEffortOnStartStep(
+        "scheduled-task-reconcile",
+        () => this._reconcileDeclaredScheduledTasks(),
+        "Declared scheduled tasks were not reconciled on this wake; the " +
+          "next successful wake will reconcile them."
+      );
 
       // 10. Durable submissions may run user-defined model/hooks, so start them
-      // after subclass initialization has completed.
-      await this._recoverSubmissionsOnStart();
-      this._recoverWorkflowNotifications();
-      if (this._hasPendingSubmissions()) {
-        this._startSubmissionDrain();
-      }
-      if (this._hasPendingWorkflowNotifications()) {
-        this._startWorkflowNotificationDrain();
+      // after subclass initialization has completed. Best-effort for the same
+      // reason as step 9.
+      await this._runBestEffortOnStartStep(
+        "durable-work-recovery",
+        async () => {
+          await this._recoverSubmissionsOnStart();
+          this._recoverWorkflowNotifications();
+          if (this._hasPendingSubmissions()) {
+            this._startSubmissionDrain();
+          }
+          if (this._hasPendingWorkflowNotifications()) {
+            this._startWorkflowNotificationDrain();
+          }
+        },
+        "Pending submissions / workflow notifications were not recovered on " +
+          "this wake; the next successful wake will recover them."
+      );
+
+      // 11. Background bound on the persisted transcript: if hydration was
+      // windowed, evict aged inline media so the footprint can converge down
+      // (#1710). Runs after `blockConcurrencyWhile` releases — no boot cost.
+      if (this._lastHydration?.truncated) {
+        this._scheduleMediaEvictionPass({ force: true });
       }
     };
   }
@@ -1835,12 +2103,35 @@ export class Think<
    * through this cache so in-flight turns, tool updates, and recovery state all
    * observe the same message list. Use `_syncMessages()` only at safe
    * boundaries where a full storage reread cannot drop in-flight state.
+   *
+   * When the stored transcript exceeds `hydrationByteBudget`, this view is a
+   * bounded window of the most recent messages (see `_lastHydration`); the
+   * full history remains readable via `session.getHistory()`.
    */
   get messages(): UIMessage[] {
     return this._cachedMessages;
   }
 
-  /** Read the durable message path from session storage. */
+  /**
+   * Read the durable message path from session storage.
+   *
+   * Intentionally UNBUDGETED — unlike the cache refresh in `_syncMessages`,
+   * which routes through `session.getRecentHistory(hydrationByteBudget)`, this
+   * returns the full active path. Callers (message reconciliation, tool-update
+   * application) must see every message: reconciliation diffs incoming client
+   * messages against the complete server transcript, and a tool result can
+   * target any message on the path, so a windowed read would drop rows and
+   * corrupt the result.
+   *
+   * These full reads are not the unbounded boot-time hydration that bricked the
+   * DO in #1710: they run during a live turn (never in `onStart`), so an
+   * `SQLITE_NOMEM` here surfaces as a recoverable turn-level error rather than a
+   * partyserver init-reset/alarm-retry loop. They also inherit step 1's
+   * mitigation — `session.getHistory()` now fetches content in bounded chunks
+   * (`messagesByPathIds`) instead of carrying blobs through the recursive CTE
+   * and its `ORDER BY` sorter — and background media eviction shrinks the stored
+   * footprint over time, so the steady-state read size converges down.
+   */
   private async _readMessagesFromStorage(): Promise<UIMessage[]> {
     return (await this.session.getHistory()) as UIMessage[];
   }
@@ -2063,15 +2354,296 @@ export class Think<
     return repair.messages;
   }
 
+  /**
+   * Run a best-effort internal onStart step, degrading on failure instead of
+   * throwing.
+   *
+   * Throwing out of `onStart` is terminal: partyserver resets its init state
+   * and rethrows, so every wake — including platform alarm retries — re-runs
+   * the failing `onStart` and fails again. A data-driven failure (oversized
+   * transcript, bad declared-task config) would permanently brick the DO and
+   * drive an unbounded alarm-retry loop (#1710). Instead, record the
+   * degradation, emit `chat:onstart:degraded`, and let the agent come up so
+   * it stays reachable for remediation (compaction, clearing, redeploy).
+   *
+   * Returns `true` when the step succeeded.
+   */
+  private async _runBestEffortOnStartStep(
+    step: OnStartDegradation["step"],
+    fn: () => unknown | Promise<unknown>,
+    hint: string
+  ): Promise<boolean> {
+    try {
+      await fn();
+      return true;
+    } catch (error) {
+      this._onStartDegradations.push({ step, error });
+      console.error(
+        `[Think] onStart step "${step}" failed; continuing with degraded state. ${hint}`,
+        error
+      );
+      this._emit("chat:onstart:degraded", {
+        step,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return false;
+    }
+  }
+
+  private _mediaEvictionRunning = false;
+  private _mediaEvictionScheduled = false;
+  private _mediaEvictionObservedOversized = false;
+
+  /**
+   * Schedule a background media-eviction pass (see `mediaEviction`).
+   * Coalesces repeated requests; the timer fires after the current
+   * event-loop work (and after `onStart`'s `blockConcurrencyWhile`), so
+   * boot and turn latency are unaffected.
+   */
+  private _scheduleMediaEvictionPass(options?: { force?: boolean }): void {
+    if (this._mediaEvictionScheduled || this._mediaEvictionRunning) return;
+    const config = resolveMediaEvictionConfig(this.mediaEviction);
+    if (!config) return;
+    if (!options?.force && !this._mediaEvictionObservedOversized) return;
+    this._mediaEvictionScheduled = true;
+    setTimeout(() => {
+      this._mediaEvictionScheduled = false;
+      void this._evictAgedMediaBestEffort();
+    }, 0);
+  }
+
+  private _scheduleMediaEvictionAfterAppend(message: UIMessage): void {
+    const config = resolveMediaEvictionConfig(this.mediaEviction);
+    if (!config) return;
+    if (!this._mediaEvictionObservedOversized) {
+      this._mediaEvictionObservedOversized = this._messageMayNeedMediaEviction(
+        message,
+        config
+      );
+    }
+    if (!this._mediaEvictionObservedOversized) return;
+
+    const keepRecent = Math.max(config.keepRecentMessages, MODEL_RECENT_WINDOW);
+    if (this._cachedMessages.length > keepRecent) {
+      this._scheduleMediaEvictionPass({ force: true });
+    }
+  }
+
+  private _refreshMediaEvictionSignalFromCache(): void {
+    const config = resolveMediaEvictionConfig(this.mediaEviction);
+    if (!config) {
+      this._mediaEvictionObservedOversized = false;
+      return;
+    }
+    this._mediaEvictionObservedOversized = this._cachedMessages.some(
+      (message) => this._messageMayNeedMediaEviction(message, config)
+    );
+  }
+
+  private _messageMayNeedMediaEviction(
+    message: UIMessage,
+    config: ResolvedMediaEvictionConfig
+  ): boolean {
+    return JSON.stringify(message).length >= config.minPartBytes;
+  }
+
+  private _warnedEvictionUnsupported = false;
+
+  /**
+   * Evict oversized inline media from aged stored messages (#1710).
+   *
+   * Memory-bounded by design: row sizes come from `getHistoryRowStats()`
+   * (no content loaded), only rows large enough to contain an evictable
+   * part are parsed, and they are processed one at a time via
+   * `session.internal_rewriteMessage` — the maintenance write path that
+   * skips the full-history token-estimate broadcast a public
+   * `updateMessage` performs per row. Evicted values are written to the
+   * workspace BEFORE the row is rewritten, so a failed pass never loses
+   * data. Best-effort: failures are logged and the next pass retries.
+   *
+   * The aged cutoff is `keepRecentMessages` clamped to at least
+   * `MODEL_RECENT_WINDOW`: messages the model still replays at full
+   * fidelity each turn are never rewritten, regardless of configuration.
+   *
+   * When a pass stops at `maxRowsPerPass` with eligible rows remaining,
+   * another pass is scheduled automatically so a large backlog drains
+   * without waiting for new appends. Termination is guaranteed: every
+   * rewritten row drops below `minPartBytes` and is skipped by later
+   * passes, so the eligible set strictly shrinks.
+   *
+   * Returns the pass totals, or `null` when eviction is disabled, already
+   * running, or the provider cannot enumerate row sizes (warned once).
+   */
+  protected async _evictAgedMediaBestEffort(): Promise<{
+    messages: number;
+    parts: number;
+    bytes: number;
+    externalizedBytes: number;
+  } | null> {
+    if (this._mediaEvictionRunning) return null;
+    const config = resolveMediaEvictionConfig(this.mediaEviction);
+    if (!config) return null;
+    this._mediaEvictionRunning = true;
+    let backlogRemains = false;
+    try {
+      const stats = await this.session.getHistoryRowStats();
+      if (!stats) {
+        if (!this._warnedEvictionUnsupported) {
+          this._warnedEvictionUnsupported = true;
+          console.warn(
+            "[Think] mediaEviction is enabled but the configured " +
+              "SessionProvider does not implement getHistoryRowStats; " +
+              "media eviction is a no-op for this agent."
+          );
+        }
+        return null;
+      }
+      const keepRecent = Math.max(
+        config.keepRecentMessages,
+        MODEL_RECENT_WINDOW
+      );
+      const aged = stats.slice(0, Math.max(0, stats.length - keepRecent));
+
+      let processed = 0;
+      const totals = { messages: 0, parts: 0, bytes: 0, externalizedBytes: 0 };
+      for (const row of aged) {
+        // A row smaller than the part threshold cannot contain an
+        // evictable value — skip without parsing. Rewritten rows shrink
+        // below the threshold, so later passes skip them here too.
+        if (row.bytes < config.minPartBytes) continue;
+        if (processed >= config.maxRowsPerPass) {
+          backlogRemains = true;
+          break;
+        }
+        processed++;
+
+        const message = (await this.session.getMessage(
+          row.id
+        )) as UIMessage | null;
+        if (!message) continue;
+
+        const result = evictLargeMediaFromMessage(message, {
+          minPartBytes: config.minPartBytes,
+          externalize: config.externalizeToWorkspace,
+          pathFor: (index, extension) =>
+            `/attachments/evicted/${message.id}-${index}.${extension}`
+        });
+        if (!result.changed) continue;
+
+        for (const blob of result.blobs) {
+          await this.workspace.writeFile(blob.path, blob.data);
+          totals.externalizedBytes += blob.data.length;
+        }
+        await this.session.internal_rewriteMessage(
+          sanitizeMessage(result.message)
+        );
+        totals.messages++;
+        totals.parts += result.parts;
+        totals.bytes += result.bytes;
+      }
+
+      if (totals.messages > 0) {
+        this._emit("chat:media:evicted", totals);
+      }
+      return totals;
+    } catch (error) {
+      console.error(
+        "[Think] media eviction pass failed; a later pass will retry.",
+        error
+      );
+      return null;
+    } finally {
+      this._mediaEvictionRunning = false;
+      if (backlogRemains) this._scheduleMediaEvictionPass({ force: true });
+    }
+  }
+
   /** Replace the live cache with a durable storage snapshot. */
   private _replaceCachedMessages(messages: UIMessage[]): UIMessage[] {
     this._cachedMessages = messages;
     return this._cachedMessages;
   }
 
-  /** Refresh the live cache from durable storage at a safe boundary. */
+  /**
+   * Result of the most recent cache refresh when `hydrationByteBudget` is
+   * active. `truncated` means `this.messages` is a bounded recent window of
+   * a larger stored transcript.
+   */
+  protected _lastHydration: {
+    truncated: boolean;
+    totalContentBytes: number;
+    hydratedMessages: number;
+  } | null = null;
+
+  private _warnedHydrationWindowed = false;
+
+  /**
+   * Snapshot of the last `chat:hydration:windowed` emit, used to emit on
+   * CHANGE rather than on every safe-boundary sync — a chronically
+   * oversized session syncs many times per turn and would otherwise spam
+   * identical events.
+   */
+  private _lastWindowedEmit: {
+    totalContentBytes: number;
+    hydratedMessages: number;
+  } | null = null;
+
+  /**
+   * Refresh the live cache from durable storage at a safe boundary.
+   *
+   * Bounded by `hydrationByteBudget`: oversized transcripts hydrate as a
+   * recent window instead of exhausting the isolate's memory (#1710). The
+   * window never shrinks below `MODEL_RECENT_WINDOW` messages, so budgeted
+   * hydration cannot starve the model-facing context assembly (which keeps
+   * that many recent messages at full fidelity).
+   */
   private async _syncMessages(): Promise<UIMessage[]> {
-    return this._replaceCachedMessages(await this._readMessagesFromStorage());
+    const budget = this.hydrationByteBudget;
+    if (!Number.isFinite(budget) || budget <= 0) {
+      this._lastHydration = null;
+      this._lastWindowedEmit = null;
+      return this._replaceCachedMessages(await this._readMessagesFromStorage());
+    }
+
+    const recent = await this.session.getRecentHistory(
+      budget,
+      MODEL_RECENT_WINDOW
+    );
+    this._lastHydration = {
+      truncated: recent.truncated,
+      totalContentBytes: recent.totalContentBytes,
+      hydratedMessages: recent.messages.length
+    };
+    if (recent.truncated) {
+      if (!this._warnedHydrationWindowed) {
+        this._warnedHydrationWindowed = true;
+        console.warn(
+          `[Think] Stored transcript (${recent.totalContentBytes} bytes) ` +
+            `exceeds hydrationByteBudget (${budget} bytes); hydrated the ` +
+            `most recent ${recent.messages.length} message(s) instead of ` +
+            "the full history. Durable storage is untouched. Compact the " +
+            "session (or enable media eviction) to shrink it."
+        );
+      }
+      const changed =
+        this._lastWindowedEmit === null ||
+        this._lastWindowedEmit.totalContentBytes !== recent.totalContentBytes ||
+        this._lastWindowedEmit.hydratedMessages !== recent.messages.length;
+      if (changed) {
+        this._lastWindowedEmit = {
+          totalContentBytes: recent.totalContentBytes,
+          hydratedMessages: recent.messages.length
+        };
+        this._emit("chat:hydration:windowed", {
+          totalContentBytes: recent.totalContentBytes,
+          budgetBytes: budget,
+          hydratedMessages: recent.messages.length
+        });
+      }
+    } else {
+      this._lastWindowedEmit = null;
+    }
+    return this._replaceCachedMessages(recent.messages as UIMessage[]);
   }
 
   /** Patch or append one message in the live cache after a durable write. */
@@ -2196,6 +2768,15 @@ export class Think<
   private _agentToolLastErrors = new Map<string, string>();
   private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
   private _agentToolLiveSequences = new Map<string, number>();
+  /**
+   * Request id → run id for in-flight agent-tool turns (null = resolved as
+   * not an agent-tool turn, cached so unrelated turns don't re-query SQLite
+   * per frame). Drives frame attribution in {@link broadcast}: a frame
+   * belongs to a run iff it carries that run's turn request id, so an error
+   * in an unrelated turn or a concurrent run can never leak into another
+   * run's state (#1575).
+   */
+  private _agentToolRunsByRequestId = new Map<string, string | null>();
   private _submissionTableEnsured = false;
   private _workflowNotificationTableEnsured = false;
   private _declaredScheduledTasksTableEnsured = false;
@@ -2209,27 +2790,47 @@ export class Think<
     msg: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): void {
-    if (this._agentToolForwarders.size > 0 && typeof msg === "string") {
+    // Inspect frames while any agent-tool run is in flight (live sequences
+    // exist for the run's whole lifecycle), not only while a tailer is
+    // attached — error capture must not depend on tailer timing (#1575).
+    if (
+      (this._agentToolForwarders.size > 0 ||
+        this._agentToolLiveSequences.size > 0) &&
+      typeof msg === "string"
+    ) {
       try {
         const parsed = JSON.parse(msg) as {
           type?: unknown;
           body?: unknown;
           error?: unknown;
+          id?: unknown;
         };
-        if (parsed.type === MSG_CHAT_RESPONSE) {
-          if (parsed.error === true && typeof parsed.body === "string") {
-            for (const runId of this._agentToolForwarders.keys()) {
+        if (
+          parsed.type === MSG_CHAT_RESPONSE &&
+          typeof parsed.id === "string"
+        ) {
+          // A frame belongs to a run iff it carries that run's turn request
+          // id. Frames from unrelated turns (a user-driven turn on this
+          // agent, or another run's turn) resolve to a different — or no —
+          // run and are left alone, so concurrent runs cannot
+          // cross-contaminate each other's progress or error state (#1575).
+          const runId = this._agentToolRunForRequest(parsed.id);
+          if (runId !== null) {
+            if (parsed.error === true && typeof parsed.body === "string") {
               this._agentToolLastErrors.set(runId, parsed.body);
-            }
-          } else if (
-            typeof parsed.body === "string" &&
-            parsed.body.length > 0
-          ) {
-            for (const [runId, forwarders] of this._agentToolForwarders) {
+            } else if (
+              typeof parsed.body === "string" &&
+              parsed.body.length > 0
+            ) {
+              // Advance the live sequence even with no tailer attached so a
+              // tailer registering mid-run resumes at the right offset.
               const sequence = this._agentToolLiveSequences.get(runId) ?? 0;
               this._agentToolLiveSequences.set(runId, sequence + 1);
               const chunk = { sequence, body: parsed.body };
-              for (const forward of forwarders) forward(chunk);
+              const forwarders = this._agentToolForwarders.get(runId);
+              if (forwarders) {
+                for (const forward of forwarders) forward(chunk);
+              }
             }
           }
         }
@@ -2238,6 +2839,26 @@ export class Think<
       }
     }
     super.broadcast(msg, without);
+  }
+
+  /**
+   * Resolve the agent-tool run whose turn owns a request id, or null when the
+   * request is not an agent-tool turn. Falls back to the persisted child-run
+   * row (whose `request_id` is written when the run's turn is bound, see
+   * `startAgentToolRun`) so attribution survives a DO restart mid-run; either
+   * outcome is cached.
+   */
+  private _agentToolRunForRequest(requestId: string): string | null {
+    const cached = this._agentToolRunsByRequestId.get(requestId);
+    if (cached !== undefined) return cached;
+    const rows = this.sql<{ run_id: string }>`
+      SELECT run_id FROM cf_agent_tool_child_runs
+      WHERE request_id = ${requestId} AND completed_at IS NULL
+      LIMIT 1
+    `;
+    const runId = rows[0]?.run_id ?? null;
+    this._agentToolRunsByRequestId.set(requestId, runId);
+    return runId;
   }
 
   override async alarm(): Promise<void> {
@@ -3321,7 +3942,12 @@ export class Think<
     await this._refreshSkillsIfChanged();
     const contextTools = await this.session.tools();
     const skillTools = this._skillRegistry?.tools() ?? {};
-    const clientToolSet = createToolsFromClientSchemas(input.clientTools);
+    const clientToolSet = createToolsFromClientSchemas(
+      input.clientTools,
+      input.clientToolExecutor
+        ? { execute: input.clientToolExecutor }
+        : undefined
+    );
     const tools: ToolSet = {
       ...workspaceTools,
       ...baseTools,
@@ -3498,6 +4124,10 @@ export class Think<
         | Parameters<typeof streamText>[0]["providerOptions"]
         | undefined,
       experimental_telemetry: config.experimental_telemetry,
+      // Forward the per-turn stream transform(s) from TurnConfig so callers
+      // can inspect/rewrite the stream (e.g. emit `source` parts derived from
+      // tool results) without owning the stream pipeline themselves.
+      experimental_transform: config.experimental_transform,
       // Forward the per-turn structured-output spec from TurnConfig so
       // callers can use AI SDK `Output.object({ schema })` / `Output.text()`
       // on the terminal turn without dropping tools at model construction.
@@ -4111,6 +4741,23 @@ export class Think<
       );
     }
 
+    // Client tools supplied by the caller (e.g. a parent agent delegating to
+    // this sub-agent). Both the schemas and the `onClientToolCall` executor are
+    // forwarded per-turn only — deliberately NOT persisted into
+    // `_lastClientTools`. The executor is a live RPC ref that dies with the
+    // isolate, so unlike the WebSocket path there is no SPA that could ever
+    // replay a `tool-result` after an eviction. Persisting the names would put
+    // them in `_clientResolvableToolNames()`, causing recovery to misclassify a
+    // dangling `input-available` orphan as a pending human interaction and park
+    // forever. Keeping them per-turn lets such an orphan recover like a server
+    // tool: `continueLastTurn`'s transcript repair errors it and the model
+    // proceeds. `_runInferenceLoop` sources client tools from `input.clientTools`
+    // (not `_lastClientTools`), so the live turn is unaffected.
+    const clientTools = options?.clientTools?.length
+      ? options.clientTools
+      : undefined;
+    const clientToolExecutor = options?.onClientToolCall;
+
     try {
       await callback.onStart({ requestId });
       await this.keepAliveWhile(async () => {
@@ -4148,6 +4795,8 @@ export class Think<
                   () =>
                     this._runInferenceLoop({
                       signal: abortSignal,
+                      clientTools,
+                      clientToolExecutor,
                       continuation: false
                     })
                 );
@@ -4355,7 +5004,20 @@ export class Think<
           SET status = 'running'
           WHERE run_id = ${options.runId} AND status = 'starting'
         `;
-        const result = await this.saveMessages(
+        // Bind the run to its turn's request id BEFORE the turn starts —
+        // in memory for live frame attribution in `broadcast`, and on the
+        // child-run row so attribution survives a DO restart mid-run
+        // (#1575). `saveMessages` would generate the id internally, so call
+        // the inner turn runner with a pre-generated one instead.
+        const requestId = crypto.randomUUID();
+        this._agentToolRunsByRequestId.set(requestId, options.runId);
+        this.sql`
+          UPDATE cf_agent_tool_child_runs
+          SET request_id = ${requestId}
+          WHERE run_id = ${options.runId}
+        `;
+        const result = await this._runProgrammaticMessagesTurn(
+          requestId,
           [this.formatAgentToolInput(input)],
           {
             signal: controller.signal
@@ -4408,6 +5070,19 @@ export class Think<
         this._agentToolAbortControllers.delete(options.runId);
         this._agentToolForwarders.delete(options.runId);
         this._agentToolLiveSequences.delete(options.runId);
+        // Drop this run's request-id mappings. When no runs remain in flight
+        // clear the whole map, so negatively-cached (null) entries for
+        // unrelated turns can't accumulate for the DO's lifetime — the map is
+        // only consulted while a run is active (#1575).
+        if (this._agentToolAbortControllers.size === 0) {
+          this._agentToolRunsByRequestId.clear();
+        } else {
+          for (const [reqId, runId] of this._agentToolRunsByRequestId) {
+            if (runId === options.runId) {
+              this._agentToolRunsByRequestId.delete(reqId);
+            }
+          }
+        }
         this._agentToolLastErrors.delete(options.runId);
         this._agentToolPreTurnAssistantIds.delete(options.runId);
         for (const close of this._agentToolClosers.get(options.runId) ?? []) {
@@ -5572,6 +6247,7 @@ export class Think<
   }
 
   private _startWorkflowNotificationDrain(): void {
+    if (!this._hasPendingWorkflowNotifications()) return;
     void this.keepAliveWhile(() => this._drainWorkflowNotifications()).catch(
       (error) => {
         console.error("[Think] Failed to drain workflow notifications", error);
@@ -5997,6 +6673,8 @@ export class Think<
           captureOutput: Boolean(workflowPrompt?.output),
           workflowPrompt: workflowPrompt ?? undefined,
           maxRetries,
+          shouldApplyMessages: () =>
+            this._readSubmission(row.submission_id)?.status === "running",
           onMessagesApplied: () => {
             this.sql`
               UPDATE cf_think_submissions
@@ -6032,17 +6710,13 @@ export class Think<
           WHERE submission_id = ${row.submission_id}
             AND status = 'running'
         `;
-        this._insertWorkflowNotification(
-          {
-            ...this._inspectionFromSubmissionRow(claimed),
-            requestId: result.requestId,
-            status: finalStatus,
-            error:
-              finalStatus === "error" ? (errorMessage ?? undefined) : undefined,
-            completedAt
-          },
-          output
-        );
+        const finalized = this._readSubmission(row.submission_id);
+        if (finalized && this._isTerminalSubmissionStatus(finalized.status)) {
+          this._insertWorkflowNotification(
+            this._inspectionFromSubmissionRow(finalized),
+            output
+          );
+        }
       });
     } catch (error) {
       const errorMessage =
@@ -6057,12 +6731,12 @@ export class Think<
           WHERE submission_id = ${row.submission_id}
             AND status = 'running'
         `;
-        this._insertWorkflowNotification({
-          ...this._inspectionFromSubmissionRow(claimed),
-          status: "error",
-          error: errorMessage,
-          completedAt
-        });
+        const finalized = this._readSubmission(row.submission_id);
+        if (finalized && this._isTerminalSubmissionStatus(finalized.status)) {
+          this._insertWorkflowNotification(
+            this._inspectionFromSubmissionRow(finalized)
+          );
+        }
       });
     } finally {
       this._programmaticStreamErrors.delete(requestId);
@@ -6326,6 +7000,88 @@ export class Think<
     return this._runProgrammaticMessagesTurn(requestId, messages, options);
   }
 
+  /**
+   * Add messages to history WITHOUT starting a model turn.
+   *
+   * Distinct from {@link Think.saveMessages} (which runs a turn) and from
+   * AIChatAgent's `persistMessages()` (which replaces/reconciles a flat array):
+   * `addMessages` appends or upserts into the Session tree and never enqueues a
+   * turn. Because it bypasses the turn queue, it never deadlocks — including
+   * when called from inside a tool `execute` during an active turn.
+   *
+   * Array entries are appended **linearly**: the first attaches under the
+   * resolved parent (the latest committed leaf by default, or `parentId`), and
+   * each subsequent message attaches under the previous one, so imported history
+   * stays a single path rather than a fan-out of siblings. Appends are
+   * idempotent by message id; pass `{ mode: "upsert" }` to update an existing
+   * message in place instead (upsert never re-parents). Any role may be written;
+   * an `assistant` message added this way is inert transcript data (it does not
+   * mark a completed turn or trigger auto-continuation).
+   *
+   * The live message cache stays coherent automatically (the Session keeps it
+   * in sync on every write, branches included). Broadcast behaviour depends on
+   * whether a turn is running:
+   *
+   * - **Out of a turn** (the supported pattern — "add context, then run a
+   *   turn"): the new messages are broadcast to connected clients immediately
+   *   (unless `broadcast: false`).
+   * - **Inside a turn** (e.g. from a tool `execute`): no broadcast is sent, so a
+   *   full snapshot can't clobber the in-progress streamed message; the injected
+   *   messages ride along on the turn's next broadcast. The write is still
+   *   durable and visible to the running turn's next sync.
+   */
+  async addMessages(
+    messages:
+      | UIMessage[]
+      | ((currentMessages: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>),
+    options?: AddMessagesOptions
+  ): Promise<void> {
+    const resolved =
+      typeof messages === "function" ? await messages(this.messages) : messages;
+    if (resolved.length === 0) return;
+
+    const mode = options?.mode ?? "append";
+
+    // Validate an explicit parentId up front. The Session provider silently
+    // falls back to the root for an unknown parent; fail fast instead so a
+    // typo'd id surfaces as an error rather than a misattached message.
+    if (typeof options?.parentId === "string") {
+      const parent = await this.session.getMessage(options.parentId);
+      if (!parent) {
+        throw new Error(
+          `addMessages: parentId "${options.parentId}" does not exist in this session`
+        );
+      }
+    }
+
+    let parentId = options?.parentId;
+    for (const message of resolved) {
+      const existing = await this.session.getMessage(message.id);
+      if (existing) {
+        // Append mode is idempotent by id (existing id → no-op); upsert updates
+        // the content in place. Neither path re-parents an existing message.
+        if (mode === "upsert") await this._updateMessageInHistory(message);
+        parentId = message.id;
+      } else {
+        const stored = await this._appendMessageToHistory(message, parentId);
+        parentId = stored.id;
+      }
+    }
+
+    // The live cache is kept coherent automatically by the Session change
+    // listener wired in `onStart` (`internal_onMessagesChanged`), which handles
+    // both linear appends and branches (an explicit `parentId` triggers a full
+    // resync). So `addMessages` only owns the broadcast — and suppresses it
+    // mid-turn: pushing a full `MSG_CHAT_MESSAGES` snapshot while a turn streams
+    // would clobber the in-progress assistant message on connected clients (the
+    // same reason the streaming path defers its snapshot). The injected messages
+    // ride along on the turn's next broadcast.
+    if (this._insideInferenceLoop) return;
+    if (options?.broadcast !== false) {
+      this._broadcastMessages();
+    }
+  }
+
   private async _runProgrammaticMessagesTurn(
     requestId: string,
     messages:
@@ -6338,6 +7094,7 @@ export class Think<
       body?: Record<string, unknown>;
       workflowPrompt?: ThinkWorkflowPromptContext;
       maxRetries?: number;
+      shouldApplyMessages?: () => boolean | Promise<boolean>;
     }
   ): Promise<ProgrammaticMessagesResult> {
     const clientTools = this._lastClientTools;
@@ -6350,6 +7107,19 @@ export class Think<
 
     await this.keepAliveWhile(async () => {
       await this._turnQueue.enqueue(requestId, async () => {
+        if (this._turnQueue.generation !== epoch) {
+          status = "skipped";
+          return;
+        }
+
+        if (
+          options?.shouldApplyMessages &&
+          !(await options.shouldApplyMessages())
+        ) {
+          status = "aborted";
+          return;
+        }
+
         const resolved =
           typeof messages === "function"
             ? await messages(this.messages)
@@ -6357,6 +7127,14 @@ export class Think<
 
         if (this._turnQueue.generation !== epoch) {
           status = "skipped";
+          return;
+        }
+
+        if (
+          options?.shouldApplyMessages &&
+          !(await options.shouldApplyMessages())
+        ) {
+          status = "aborted";
           return;
         }
 
@@ -7326,6 +8104,29 @@ export class Think<
     );
   }
 
+  /**
+   * Stamp the allocated assistant id onto a new turn's `start` chunk so a chat
+   * client builds the live-streamed message under the SAME id this agent
+   * persists under. Providers that emit no `start.messageId` (e.g. Workers AI)
+   * otherwise leave the client to generate its own id; the live stream and the
+   * persisted message broadcast then can't reconcile by id, and the originating
+   * tab briefly renders the turn twice before collapsing. Mirrors the fix in
+   * `@cloudflare/ai-chat`. Continuations are skipped — they reuse the existing
+   * assistant message via the `continuation` frame flag, so the id must not
+   * change mid-message. The orphan-recovery path inherits the id from the
+   * stored chunk, so it needs no separate stamping.
+   */
+  private _alignStreamStartId(
+    chunk: StreamChunkData,
+    action: { type: string; messageId?: string } | undefined,
+    accumulator: StreamAccumulator,
+    continuation: boolean
+  ): void {
+    if (action?.type === "start" && action.messageId == null && !continuation) {
+      (chunk as { messageId?: string }).messageId = accumulator.messageId;
+    }
+  }
+
   private async _streamResultToRpcCallback(
     requestId: string,
     result: StreamableResult,
@@ -7345,7 +8146,7 @@ export class Think<
     status: "completed" | "error" | "aborted" | "overflow_retry";
     error?: string;
   }> {
-    const streamId = this._resumableStream.start(requestId);
+    const streamId = this._startResumableStream(requestId);
     const accumulator = new StreamAccumulator({
       messageId: crypto.randomUUID()
     });
@@ -7439,6 +8240,8 @@ export class Think<
             break;
           }
 
+          this._alignStreamStartId(streamChunk, action, accumulator, false);
+
           const chunkBody = JSON.stringify(chunk);
           await this._storeChunkDurably(
             streamId,
@@ -7471,15 +8274,15 @@ export class Think<
       // The live-streamed chunks already reached clients; the driver's
       // post-retry `_broadcastMessages()` reconciles them to the real answer.
       if (overflowRetry) {
-        this._resumableStream.complete(streamId);
+        this._completeResumableStream(streamId);
         streamFinalized = true;
         return { status: "overflow_retry", error: streamError };
       }
 
       if (streamError) {
-        this._resumableStream.markError(streamId);
+        this._errorResumableStream(streamId);
       } else {
-        this._resumableStream.complete(streamId);
+        this._completeResumableStream(streamId);
       }
       streamFinalized = true;
       this._broadcastChat({
@@ -7540,7 +8343,7 @@ export class Think<
         });
         if (outcome === "scheduled") {
           if (!streamFinalized) {
-            this._resumableStream.complete(streamId);
+            this._completeResumableStream(streamId);
             streamFinalized = true;
           }
           if (!doneSent) {
@@ -7567,7 +8370,7 @@ export class Think<
           // Finalize the stream and return WITHOUT the generic terminal path,
           // which would otherwise re-broadcast the raw stall error.
           if (!streamFinalized) {
-            this._resumableStream.markError(streamId);
+            this._errorResumableStream(streamId);
             streamFinalized = true;
           }
           doneSent = true;
@@ -7583,7 +8386,7 @@ export class Think<
         // generic terminal path below (unchanged watchdog behavior).
       }
       if (!streamFinalized) {
-        this._resumableStream.markError(streamId);
+        this._errorResumableStream(streamId);
         streamFinalized = true;
       }
       if (!doneSent) {
@@ -7816,7 +8619,7 @@ export class Think<
     }
   ): Promise<StreamResultStatus> {
     const clearGen = this._turnQueue.generation;
-    const streamId = this._resumableStream.start(requestId);
+    const streamId = this._startResumableStream(requestId);
     const continuation = options?.continuation ?? false;
     const parentId = options?.parentId;
 
@@ -7934,6 +8737,13 @@ export class Think<
             break;
           }
 
+          this._alignStreamStartId(
+            streamChunk,
+            action,
+            accumulator,
+            continuation
+          );
+
           const chunkBody = JSON.stringify(chunk);
           await this._storeChunkDurably(
             streamId,
@@ -7969,7 +8779,7 @@ export class Think<
       // The live-streamed chunks already reached clients; the retry's
       // `_broadcastMessages()` reconciles them to the real answer.
       if (overflowRetry && options?.overflowRecovery) {
-        this._resumableStream.complete(streamId);
+        this._completeResumableStream(streamId);
         this._pendingResumeConnections.clear();
         doneSent = true;
         options.overflowRecovery.onRetry(streamError);
@@ -7978,9 +8788,9 @@ export class Think<
       }
 
       if (streamError) {
-        this._resumableStream.markError(streamId);
+        this._errorResumableStream(streamId);
       } else {
-        this._resumableStream.complete(streamId);
+        this._completeResumableStream(streamId);
       }
       this._pendingResumeConnections.clear();
       this._broadcastChat({
@@ -8018,7 +8828,7 @@ export class Think<
           // Recovering: close the stream cleanly (no terminal error frame); the
           // scheduled continuation drives the turn to completion. Report
           // `aborted` so the caller does not terminalize the turn.
-          this._resumableStream.complete(streamId);
+          this._completeResumableStream(streamId);
           this._pendingResumeConnections.clear();
           if (!doneSent) {
             this._broadcastChat({
@@ -8045,7 +8855,7 @@ export class Think<
           // submission interrupted), identical to deploy-recovery exhaustion.
           // Finalize the stream and report `aborted` (not `error`) so the caller
           // does not re-run the generic terminal path on top of it.
-          this._resumableStream.markError(streamId);
+          this._errorResumableStream(streamId);
           this._pendingResumeConnections.clear();
           doneSent = true;
           this._streamingAssistant = null;
@@ -8059,7 +8869,7 @@ export class Think<
       if (options?.captureProgrammaticStreamError) {
         this._programmaticStreamErrors.set(requestId, streamError);
       }
-      this._resumableStream.markError(streamId);
+      this._errorResumableStream(streamId);
       this._pendingResumeConnections.clear();
       if (!doneSent) {
         this._broadcastChat({
@@ -8074,7 +8884,7 @@ export class Think<
       }
     } finally {
       if (!doneSent) {
-        this._resumableStream.markError(streamId);
+        this._errorResumableStream(streamId);
         this._pendingResumeConnections.clear();
         this._broadcastChat({
           type: MSG_CHAT_RESPONSE,
@@ -8313,6 +9123,257 @@ export class Think<
   ): Promise<void> {
     const update = toolApprovalUpdate(toolCallId, approved);
     await this._applyToolUpdateToMessages(update);
+  }
+
+  // ── Durable execution approvals (codemode HITL) ──────────────────
+  //
+  // A `requiresApproval` connector call inside the execute tool pauses the
+  // run *durably*: the tool returns `{ status: "paused", executionId,
+  // pending }` as a normal output, the model narrates what it needs, and the
+  // turn ends. These callables are the resume path: approve/reject the
+  // pending action on the codemode runtime, replace the paused output in the
+  // transcript with the new outcome, and auto-continue so the model sees it.
+
+  /**
+   * The codemode runtime handle behind the execute tool. `this.codemode` is
+   * assigned when `createExecuteRuntime(this)` / `createExecuteTool(this)`
+   * runs (normally at turn start, via `getTools()`); after a DO restart no
+   * turn may have run yet, so fall back to building the tools once.
+   */
+  private _codemodeRuntime():
+    | import("@cloudflare/codemode").CodemodeRuntimeHandle
+    | undefined {
+    if (!this.codemode) {
+      try {
+        this.getTools();
+      } catch {
+        // getTools may require turn-time context; without it there is
+        // simply no runtime to resolve.
+      }
+    }
+    return this.codemode;
+  }
+
+  /**
+   * Pending (awaiting-approval) actions across paused executions of the
+   * execute tool's codemode runtime — `{ executionId, seq, connector,
+   * method, args }` each, with FULL args (the transcript copy is truncated).
+   * Clients reconcile approval cards against this on load.
+   *
+   * Client-callable (registered below — see the `callable()` calls after the
+   * class body).
+   */
+  async pendingExecutions(
+    executionId?: string
+  ): Promise<import("@cloudflare/codemode").PendingAction[]> {
+    const runtime = this._codemodeRuntime();
+    if (!runtime) return [];
+    return runtime.pending(executionId);
+  }
+
+  /**
+   * Approve a paused execution and resume it. The run continues from where
+   * it stopped (replaying logged work, executing the approved call); the
+   * outcome — completed, errored, or paused again on the NEXT gated call —
+   * replaces the paused tool output in the transcript and the chat
+   * auto-continues so the model can act on it.
+   *
+   * Approving an execution that is no longer pending (already settled,
+   * expired, or unknown) returns `{ status: "error" }` with an explanatory
+   * message — it never throws.
+   *
+   * Client-callable.
+   */
+  async approveExecution(executionId: string): Promise<unknown> {
+    const runtime = this._codemodeRuntime();
+    if (!runtime) {
+      return {
+        status: "error",
+        executionId,
+        error:
+          "No codemode runtime is configured — the execute tool was never " +
+          "created on this agent."
+      };
+    }
+    const output = truncatePausedExecutionOutput(
+      await runtime.approve({ executionId })
+    );
+    await this._applyExecutionOutcome(executionId, output);
+    return output;
+  }
+
+  /**
+   * Reject a paused execution's pending action, ending the run. The
+   * transcript's paused output is replaced with
+   * `{ status: "rejected", executionId, reason }` and the chat
+   * auto-continues so the model can adapt (or explain) instead of erroring.
+   *
+   * Client-callable.
+   */
+  async rejectExecution(
+    executionId: string,
+    reason?: string
+  ): Promise<unknown> {
+    const runtime = this._codemodeRuntime();
+    if (!runtime) {
+      return {
+        status: "error",
+        executionId,
+        error:
+          "No codemode runtime is configured — the execute tool was never " +
+          "created on this agent."
+      };
+    }
+    const pending = await runtime.pending(executionId);
+    if (pending.length === 0) {
+      return {
+        status: "error",
+        executionId,
+        error: `Execution "${executionId}" is no longer pending.`
+      };
+    }
+    // `reject` reports whether it actually terminated the run. A `false`
+    // means the action was resolved between our `pending()` check and the
+    // reject (approve/reject interleave across facet RPC awaits — input
+    // gates only cover storage). Writing "rejected" then would clobber a
+    // paused part whose real outcome (e.g. an in-flight approval) is still
+    // coming, so surface an error instead.
+    const terminated = await runtime.reject({
+      executionId,
+      seq: pending[0].seq
+    });
+    if (!terminated) {
+      return {
+        status: "error",
+        executionId,
+        error: `Execution "${executionId}" is no longer pending — it was approved or rejected elsewhere.`
+      };
+    }
+    const output = {
+      status: "rejected",
+      executionId,
+      reason: reason ?? "Rejected by user"
+    };
+    await this._applyExecutionOutcome(executionId, output);
+    return output;
+  }
+
+  /**
+   * Replace a paused execute-tool output in the transcript with the
+   * execution's new outcome and kick the auto-continuation so the model sees
+   * it.
+   *
+   * When no paused part carries `executionId` — the output was already
+   * replaced from another tab, or compaction summarized the part away — the
+   * runtime has still durably applied the approval/rejection, so the outcome
+   * must not be dropped: it is appended as a system note instead, and the
+   * continuation still fires so the model can act on it.
+   */
+  private async _applyExecutionOutcome(
+    executionId: string,
+    output: unknown
+  ): Promise<boolean> {
+    const toolCallId = this._findPausedExecutionToolCall(executionId);
+    if (!toolCallId) {
+      // Already resolved in place (e.g. approved from another tab)? Then the
+      // transcript has the outcome and nothing more is needed.
+      if (this._findExecutionToolCall(executionId) != null) return false;
+      let summary: string;
+      try {
+        summary = JSON.stringify(output)?.slice(0, 4_000) ?? String(output);
+      } catch {
+        summary = String(output);
+      }
+      await this._appendMessageToHistory({
+        id: `exec-outcome-${executionId}-${crypto.randomUUID()}`,
+        role: "system",
+        parts: [
+          {
+            type: "text",
+            text:
+              `[execute tool] The paused execution "${executionId}" was ` +
+              `resolved, but its tool call is no longer in the transcript ` +
+              `(it may have been compacted). Outcome: ${summary}`
+          }
+        ]
+      } as UIMessage);
+    } else {
+      await this._enqueueInteractionApply(() =>
+        this._applyToolUpdateToMessages(
+          pausedExecutionUpdate(toolCallId, executionId, output)
+        )
+      );
+    }
+    // Continue on the approving connection when there is one (WS callable),
+    // else any open connection (DO-stub approval with clients attached).
+    const { connection } = getCurrentAgent();
+    let target = connection;
+    if (!target) {
+      for (const open of this.getConnections()) {
+        target = open;
+        break;
+      }
+    }
+    if (target) {
+      this._scheduleAutoContinuation(target);
+    }
+    return true;
+  }
+
+  /**
+   * Find the tool part holding the paused output of `executionId` — in the
+   * in-flight streaming accumulator first (an approval can land while a new
+   * turn streams), then the persisted transcript, newest message first.
+   */
+  private _findPausedExecutionToolCall(executionId: string): string | null {
+    return this._findExecutionToolCall(executionId, true);
+  }
+
+  /**
+   * Find the tool part carrying `executionId` in its output. With
+   * `pausedOnly`, only a still-paused output matches — used to locate the
+   * part an approval outcome should replace. Without it, any settled output
+   * matches — used to distinguish "already resolved elsewhere" from "the
+   * part is gone from the transcript" (e.g. compacted away).
+   */
+  private _findExecutionToolCall(
+    executionId: string,
+    pausedOnly = false
+  ): string | null {
+    const matches = (part: Record<string, unknown>): boolean => {
+      if (part.state !== "output-available") return false;
+      if (typeof part.toolCallId !== "string") return false;
+      const output = part.output as
+        | { status?: unknown; executionId?: unknown }
+        | null
+        | undefined;
+      return (
+        output != null &&
+        typeof output === "object" &&
+        (!pausedOnly || output.status === "paused") &&
+        output.executionId === executionId
+      );
+    };
+
+    const streaming = this._streamingAssistant;
+    if (streaming) {
+      for (const part of streaming.parts as unknown as Array<
+        Record<string, unknown>
+      >) {
+        if (matches(part)) return part.toolCallId as string;
+      }
+    }
+
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const message = this.messages[i];
+      if (message.role !== "assistant") continue;
+      for (const part of message.parts as unknown as Array<
+        Record<string, unknown>
+      >) {
+        if (matches(part)) return part.toolCallId as string;
+      }
+    }
+    return null;
   }
 
   private async _applyToolUpdateToMessages(update: {
@@ -9233,7 +10294,7 @@ export class Think<
       }
 
       if (streamStillActive) {
-        this._resumableStream.complete(streamId);
+        this._completeResumableStream(streamId);
       }
 
       const shouldRetry =
@@ -9583,31 +10644,35 @@ export class Think<
    * completed the recovered submission as `error`, which bypassed
    * `_exhaustChatRecovery` entirely — so an app relying on `onExhausted` for the
    * terminal banner regressed to an eternal spinner when recovery gave up under
-   * extreme churn. The error path matters just as much: a non-reset throw in a
-   * recovery callback is SWALLOWED by `Agent._executeScheduleCallback` (only a
-   * code-update reset is re-thrown to preserve the one-shot row), so without
-   * routing it here the alarm row is deleted with no terminal UX at all — the
-   * half-finished message wedges silently. Shared by `_chatRecoveryRetry` and
-   * `_chatRecoveryContinue`.
+   * extreme churn. The error path matters just as much: a non-transient throw
+   * in a recovery callback is SWALLOWED by `Agent._executeScheduleCallback`
+   * (only a platform transient is re-thrown to preserve the one-shot row), so
+   * without routing it here the alarm row is deleted with no terminal UX at
+   * all — the half-finished message wedges silently. Shared by
+   * `_chatRecoveryRetry` and `_chatRecoveryContinue`.
    *
    * Exactly-once terminalization is defended by two independent guards:
    *  1. The `stored?.status === "exhausted"` re-entry guard below — once an
    *     incident is sealed, a duplicate stale alarm (or retried callback)
-   *     returns before re-firing. The sealed incident is re-persisted even when
-   *     the record was found missing, so a swept record is re-armed for the
-   *     guard on the next alarm.
+   *     returns before re-firing. The seal is persisted only AFTER the
+   *     terminal writes in `_exhaustChatRecovery` succeed (see the ordering
+   *     note at the call below), so a give-up interrupted by a platform
+   *     transient re-runs in full instead of being half-sealed.
    *  2. The durable-submission paths additionally short-circuit earlier at the
    *     `submission_not_running` check (the submission is already `error` after
    *     the first give-up). This is the ONLY guard `@cloudflare/ai-chat` lacks
    *     (no submission layer), so guard #1 carries it there.
    *
-   * Two residual at-least-once edges, both deliberately accepted as "deliver a
+   * Residual at-least-once edges, all deliberately accepted as "deliver a
    * second banner" ≫ "silently drop the turn":
    *  • No `incidentId` at all in the payload (only reachable via a direct/test
    *    invocation — every production scheduler carries one): the synthesized
    *    incident can't be persisted (no key), so guard #1 can't arm.
    *  • The record is swept AGAIN between two alarms (guard #1 re-persists on the
    *    first, so this needs a second independent sweep) — vanishingly unlikely.
+   *  • A platform transient interrupts `_exhaustChatRecovery` after the banner
+   *    broadcast — the deferred re-run re-fires `onExhausted` + the banner
+   *    (the terminal writes themselves are idempotent).
    */
   private async _exhaustRecoveryGiveUp(
     callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
@@ -9672,9 +10737,40 @@ export class Think<
           reason
         };
 
+    const streamId = this._resolveRecoveryStreamId(
+      incident.recoveryRootRequestId ?? incident.requestId
+    );
+    const partial = streamId
+      ? this._getPartialStreamText(streamId)
+      : { text: "", parts: [] as MessagePart[] };
+
+    // Terminalize BEFORE sealing the incident. The terminal writes inside
+    // `_exhaustChatRecovery` (`_recordTerminalChatStatus`,
+    // `_markRecoveredSubmissionInterrupted`) hit storage and can reject with a
+    // platform transient in exactly the window a give-up tends to run in
+    // (#1730: deploy reset / storage outage). Letting that throw propagate is
+    // deliberate: the recovery callback's caller (`Agent._executeScheduleCallback`)
+    // defers the one-shot row on a platform transient, so the WHOLE give-up
+    // re-runs on a healthy isolate instead of half-sealing. Sealing first
+    // would arm the re-entry guard above and turn that re-run into a no-op —
+    // dropping the durable terminal record and the submission's terminal
+    // state. The re-run is idempotent: `_recordTerminalChatStatus` overwrites
+    // the same key and `_markRecoveredSubmissionInterrupted` is gated on
+    // `status = 'running'`; `onExhausted` + the banner may fire again — the
+    // documented at-least-once edge ("deliver a second banner" ≫ "silently
+    // drop the turn").
+    await this._exhaustChatRecovery(
+      incident,
+      config,
+      partial,
+      streamId,
+      incident.firstSeenAt
+    );
+
     // Persist the sealed incident (retained for inspection / TTL sweep) so the
     // re-entry guard above sees `exhausted` if a duplicate stale alarm fires.
-    // Best-effort: a failed persist must not block terminalization below.
+    // Best-effort: terminalization already fully succeeded, so a failed seal
+    // write costs at most a re-delivered banner on a duplicate alarm.
     if (incidentKey) {
       try {
         await this.ctx.storage.put(incidentKey, incident);
@@ -9685,21 +10781,6 @@ export class Think<
         );
       }
     }
-
-    const streamId = this._resolveRecoveryStreamId(
-      incident.recoveryRootRequestId ?? incident.requestId
-    );
-    const partial = streamId
-      ? this._getPartialStreamText(streamId)
-      : { text: "", parts: [] as MessagePart[] };
-
-    await this._exhaustChatRecovery(
-      incident,
-      config,
-      partial,
-      streamId,
-      incident.firstSeenAt
-    );
   }
 
   /**
@@ -9715,76 +10796,60 @@ export class Think<
   }
 
   /**
-   * Whether an error is a transient "superseded isolate" failure — a deploy /
-   * code update replaced the isolate mid-invocation. Mirrors the base `Agent`
-   * check (`isDurableObjectCodeUpdateReset`) and MUST stay in lockstep with it:
-   * the base `_executeScheduleCallback` re-throws this class for a one-shot row
-   * (preserving it so the platform re-runs on the new code), so a recovery
-   * callback must also re-throw — NOT terminalize — since recovery will re-run
-   * and succeed on the fresh isolate. The matched family (kept identical to the
-   * base):
-   *   - "Durable Object reset because its code was updated." (deploy bounce)
-   *   - "This script has been upgraded. Please send a new request to connect to
-   *     the new version." (a stub/connection to a superseded script)
-   * "Network connection lost." is intentionally excluded (a connection error,
-   * not an isolate replacement — see the base helper's note). The match stays
-   * close to the verbatim platform strings so an ordinary error mentioning
-   * those words isn't misclassified as a supersede.
-   */
-  private _isDeployCodeUpdateReset(error: unknown): boolean {
-    const message =
-      error instanceof Error
-        ? error.message
-        : typeof error === "string"
-          ? error
-          : "";
-    return /reset because its code was updated|this script has been upgraded/i.test(
-      message
-    );
-  }
-
-  /**
    * Handle an error thrown by `_chatRecoveryContinue` / `_chatRecoveryRetry`
    * after the incident was opened.
    *
-   * - A deploy code-update reset is re-thrown (after marking the incident
-   *   `failed` for observability) so `Agent._executeScheduleCallback` preserves
-   *   the one-shot alarm row and the platform re-runs recovery on the fresh
-   *   isolate — the turn can still recover, so it must NOT terminalize.
-   * - Any OTHER error is terminalized through the give-up path
+   * - A platform transient (`isPlatformTransientError` from `agents` — a
+   *   deploy code-update reset / script supersede, a `retryable`-flagged
+   *   platform error, or "Network connection lost.", looking through wrappers
+   *   like `SqlError` via the `cause` chain) is re-thrown (after best-effort
+   *   marking the incident `failed` for observability) so
+   *   `Agent._executeScheduleCallback` preserves the one-shot alarm row and
+   *   the platform re-runs recovery once it is healthy again — the turn can
+   *   still recover, so it must NOT terminalize. Terminalizing here was the
+   *   #1730 freeze: the give-up's own seal needs the very storage that is
+   *   down, so it throws too, burns the in-process retry budget inside the
+   *   same reset window, and the row is consumed milliseconds before storage
+   *   recovers. The submission is deliberately left `running` — the deferred
+   *   re-run reads it via `_readRunningSubmissionByRequestId`, so marking it
+   *   terminal here would turn the preserved row into a guaranteed
+   *   `submission_not_running` no-op skip (a self-defeating defer).
+   * - Any OTHER (application) error is terminalized through the give-up path
    *   (`onExhausted` + the `terminalMessage` banner) and NOT re-thrown. This is
    *   the fix for the silent-seal failure mode: `_executeScheduleCallback`
-   *   swallows a non-reset throw and then `alarm()` deletes the one-shot row, so
-   *   without terminalizing here the half-finished turn is dropped with no
-   *   terminal event and no banner (the user stares at a frozen message until
-   *   they send something new).
+   *   swallows a non-transient throw and then `alarm()` deletes the one-shot
+   *   row, so without terminalizing here the half-finished turn is dropped
+   *   with no terminal event and no banner (the user stares at a frozen
+   *   message until they send something new).
    */
   private async _handleRecoveryCallbackError(
     callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
     data: ChatRecoveryContinueData | ChatRecoveryRetryData | undefined,
     error: unknown
   ): Promise<void> {
-    if (this._isDeployCodeUpdateReset(error)) {
+    if (isPlatformTransientError(error)) {
       const message = error instanceof Error ? error.message : String(error);
-      await this._updateChatRecoveryIncident(
-        data?.incidentId,
-        "failed",
-        message
-      );
-      if (data?.recoveredRequestId) {
-        await this._completeRecoveredSubmission(
-          data.recoveredRequestId,
-          "error",
-          null,
+      try {
+        await this._updateChatRecoveryIncident(
+          data?.incidentId,
+          "failed",
           message
+        );
+      } catch (bookkeepingError) {
+        // Best-effort observability only — in the exact window this branch
+        // fires (deploy reset / storage outage) the incident write itself can
+        // reject; that must not replace the deferral with its own error.
+        console.error(
+          "[Think] failed to mark recovery incident failed before deferring",
+          bookkeepingError
         );
       }
       throw error;
     }
     // Preserve the underlying error for operators — the give-up path records
     // only the `recovery_error` category on the incident / `onExhausted` ctx,
-    // so without this log the actual cause (e.g. a transient storage reject)
-    // would be lost. Mirrors `Agent._executeScheduleCallback`'s own logging.
+    // so without this log the actual cause would be lost. Mirrors
+    // `Agent._executeScheduleCallback`'s own logging.
     console.error(
       `[Think] ${callback} threw during recovery; terminalizing instead of leaving the turn wedged`,
       error
@@ -10675,6 +11740,19 @@ export class Think<
   ): Promise<boolean> {
     const pending = await this._pendingChatTerminal();
     if (!pending || pending.requestId !== requestId) return false;
+    // Replay any partial content the errored stream produced before the
+    // error, so the reconnecting client observes the same sequence a live
+    // client did — content chunks, then the terminal error (#1575). If the
+    // connection drops mid-replay, skip the terminal frame; the record is
+    // retained, so the next reconnect retries the whole sequence.
+    if (
+      !this._resumableStream.replayErroredChunksByRequestId(
+        connection,
+        pending.requestId
+      )
+    ) {
+      return true;
+    }
     sendIfOpen(
       connection,
       JSON.stringify({
@@ -10788,6 +11866,86 @@ export class Think<
     }
   }
 
+  /**
+   * Start a resumable stream and arm buffer cleanup. Wrapper around
+   * `ResumableStream.start`: arming on START as well as finish guarantees a
+   * stream whose DO is evicted mid-flight and never reaches a finish still gets
+   * a future sweep instead of leaking its buffer.
+   *
+   * When a turn runs inside `runFiber` (durable recovery), the DO already
+   * self-heals: `runFiber` holds `keepAlive`, which leaves a durable alarm in
+   * storage that survives eviction, fires within ~keepAliveIntervalMs, and runs
+   * the fiber-recovery scan — finalizing the stream (which arms cleanup) without
+   * any client reconnect. Arming here is the safety net for any non-fiber stream
+   * path, where no such alarm exists. The last-activity sweep threshold prevents
+   * an actively streaming run from being reclaimed before it goes quiet (#1706).
+   */
+  protected _startResumableStream(
+    requestId: string,
+    options?: { messageId?: string }
+  ): string {
+    const streamId = this._resumableStream.start(requestId, options);
+    void this._ensureStreamCleanupScheduled();
+    return streamId;
+  }
+
+  /**
+   * Mark a resumable stream completed and arm buffer cleanup. Wrapper around
+   * `ResumableStream.complete` so every stream-finish path also schedules the
+   * cleanup alarm (#1706).
+   */
+  protected _completeResumableStream(streamId: string): void {
+    this._resumableStream.complete(streamId);
+    void this._ensureStreamCleanupScheduled();
+  }
+
+  /**
+   * Mark a resumable stream errored and arm buffer cleanup. Wrapper around
+   * `ResumableStream.markError` — see {@link _completeResumableStream}.
+   */
+  protected _errorResumableStream(streamId: string): void {
+    this._resumableStream.markError(streamId);
+    void this._ensureStreamCleanupScheduled();
+  }
+
+  /**
+   * Ensure a single cleanup alarm is pending for this DO's resumable-stream
+   * buffers. Armed whenever a stream finishes so that idle/one-off chat DOs
+   * still reclaim their buffers — the lazy sweep in {@link ResumableStream}
+   * only fires when a *subsequent* stream completes, which never happens for a
+   * chat that receives a single turn (#1706).
+   *
+   * `idempotent` dedupes on (callback, payload, owner) so repeated finishes
+   * collapse onto one pending alarm rather than stacking.
+   */
+  protected async _ensureStreamCleanupScheduled({
+    idempotent = true
+  }: { idempotent?: boolean } = {}): Promise<void> {
+    await this.schedule(
+      STREAM_CLEANUP_DELAY_SECONDS,
+      "_cleanupStreamBuffers",
+      undefined,
+      { idempotent }
+    );
+  }
+
+  /**
+   * Alarm callback: sweep aged stream buffers, then re-arm only while rows
+   * remain so a fully-swept DO stops waking itself.
+   */
+  async _cleanupStreamBuffers(): Promise<void> {
+    this._resumableStream.cleanup();
+    if (this._resumableStream.hasReclaimableStreams()) {
+      // Must NOT be idempotent: this runs INSIDE the currently-executing
+      // one-shot schedule row, which `alarm()` deletes only after we return. An
+      // idempotent reschedule would dedup onto that row and then be deleted with
+      // it — the re-arm would silently never fire, leaving buffers that survived
+      // this sweep (e.g. a younger turn) uncollected. A fresh delayed row
+      // survives the deletion (mirrors the chat-recovery reschedule).
+      await this._ensureStreamCleanupScheduled({ idempotent: false });
+    }
+  }
+
   private async _persistOrphanedStream(streamId: string): Promise<void> {
     this._resumableStream.flushBuffer();
     const chunks = this._resumableStream.getStreamChunks(streamId);
@@ -10831,4 +11989,16 @@ export class Think<
       exclude
     );
   }
+}
+
+// Register the HITL methods as client-callable. Imperative registration
+// (rather than `@callable()` decorator syntax on the methods) because TC39
+// decorators don't survive every consumer toolchain that compiles this file
+// from source (e.g. esbuild targeting ES2021).
+for (const method of [
+  Think.prototype.pendingExecutions,
+  Think.prototype.approveExecution,
+  Think.prototype.rejectExecution
+]) {
+  callable()(method, undefined as unknown as ClassMethodDecoratorContext);
 }

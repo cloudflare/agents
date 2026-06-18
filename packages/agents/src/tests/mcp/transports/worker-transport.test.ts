@@ -730,6 +730,69 @@ describe("WorkerTransport", () => {
       expect(storedState?.initialized).toBe(true);
     });
 
+    it("persists state once on initialize, not on every subsequent request", async () => {
+      const server = createTestServer();
+      let storedState: TransportState | undefined;
+      let setCalls = 0;
+
+      const mockStorage = {
+        get: async () => storedState,
+        set: async (state: TransportState) => {
+          setCalls++;
+          storedState = state;
+        }
+      };
+
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "persistent-session",
+        storage: mockStorage,
+        enableJsonResponse: true
+      });
+
+      // Initialize — this is the only point session state changes, so it's
+      // the only request that should write to storage.
+      const initResponse = await transport.handleRequest(
+        new Request("http://example.com/", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream"
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "1",
+            method: "initialize",
+            params: {
+              capabilities: {},
+              clientInfo: { name: "test", version: "1.0" },
+              protocolVersion: "2025-06-18"
+            }
+          })
+        })
+      );
+      await initResponse.json();
+
+      expect(setCalls).toBe(1);
+
+      // A subsequent notification must not trigger another storage write.
+      await transport.handleRequest(
+        new Request("http://example.com/", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+            "mcp-session-id": "persistent-session"
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            method: "notifications/initialized"
+          })
+        })
+      );
+
+      expect(setCalls).toBe(1);
+    });
+
     it("should negotiate down to latest supported version when client requests unsupported version", async () => {
       const server = createTestServer();
       const transport = await setupTransport(server, {
@@ -800,6 +863,38 @@ describe("WorkerTransport", () => {
       expect(response.status).toBe(202);
     });
 
+    it("should not make storage-only transports require mcp-session-id", async () => {
+      const server = createTestServer();
+      const mockStorage = {
+        get: async () => ({
+          sessionId: "restored-session",
+          initialized: true
+        }),
+        set: async () => {}
+      };
+
+      const transport = await setupTransport(server, {
+        storage: mockStorage
+      });
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "MCP-Protocol-Version": "2025-06-18"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "notifications/initialized"
+        })
+      });
+
+      const response = await transport.handleRequest(request);
+
+      expect(response.status).toBe(202);
+    });
+
     it("should handle storage with no existing state", async () => {
       const server = createTestServer();
       const mockStorage = {
@@ -852,27 +947,119 @@ describe("WorkerTransport", () => {
       };
 
       const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "restored-session",
         storage: mockStorage
       });
 
       // Make multiple requests
-      const request = new Request("http://example.com/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json, text/event-stream",
-          "mcp-session-id": "restored-session"
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method: "notifications/initialized"
-        })
-      });
+      const createRequest = () =>
+        new Request("http://example.com/", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+            "mcp-session-id": "restored-session"
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            method: "notifications/initialized"
+          })
+        });
 
-      await transport.handleRequest(request);
-      await transport.handleRequest(request);
+      await transport.handleRequest(createRequest());
+      await transport.handleRequest(createRequest());
 
       expect(getCalls).toBe(1);
+    });
+
+    // Behaviour change introduced by extending the SDK transport: the SDK
+    // refuses to reuse a *stateless* transport (no `sessionIdGenerator`)
+    // across requests, because reuse causes JSON-RPC id collisions between
+    // clients. The pre-refactor hand-rolled WorkerTransport silently allowed
+    // it. `createMcpHandler` is unaffected (it builds a transport per
+    // request); this only bites callers that hold a single stateless
+    // transport and call `handleRequest` more than once.
+    it("throws when a stateless transport is reused across requests", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        enableJsonResponse: true
+      });
+
+      const createInitRequest = () =>
+        new Request("http://example.com/", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream"
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "1",
+            method: "initialize",
+            params: {
+              capabilities: {},
+              clientInfo: { name: "test", version: "1.0" },
+              protocolVersion: "2025-03-26"
+            }
+          })
+        });
+
+      const first = await transport.handleRequest(createInitRequest());
+      expect(first.status).toBe(200);
+
+      await expect(
+        transport.handleRequest(createInitRequest())
+      ).rejects.toThrow("Stateless transport cannot be reused across requests");
+    });
+
+    it("retries restoreState after a transient storage read failure", async () => {
+      const server = createTestServer();
+      let getCalls = 0;
+
+      const mockStorage = {
+        get: async () => {
+          getCalls++;
+          if (getCalls === 1) {
+            throw new Error("transient storage error");
+          }
+          return {
+            sessionId: "restored-session",
+            initialized: true
+          };
+        },
+        set: async () => {}
+      };
+
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "restored-session",
+        storage: mockStorage
+      });
+
+      const createRequest = () =>
+        new Request("http://example.com/", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+            "mcp-session-id": "restored-session"
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            method: "notifications/initialized"
+          })
+        });
+
+      // First request: storage.get() throws, the error propagates and the
+      // restore guard is cleared so a later request can try again.
+      await expect(transport.handleRequest(createRequest())).rejects.toThrow(
+        "transient storage error"
+      );
+
+      // Second request: restore is retried and succeeds.
+      const response = await transport.handleRequest(createRequest());
+      expect(response.status).toBe(202);
+      expect(transport.sessionId).toBe("restored-session");
+      expect(getCalls).toBe(2);
     });
   });
 
@@ -1389,33 +1576,55 @@ describe("WorkerTransport", () => {
 
   describe("relatedRequestId Routing", () => {
     let transport: WorkerTransport;
-    let postStreamWriter: WritableStreamDefaultWriter<Uint8Array>;
-    let getStreamWriter: WritableStreamDefaultWriter<Uint8Array>;
+    let postStreamController: ReadableStreamDefaultController<Uint8Array>;
+    let getStreamController: ReadableStreamDefaultController<Uint8Array>;
+    type WriterSink = { write: (chunk: Uint8Array) => void };
+    let postStreamWriter: WriterSink & { write: ReturnType<typeof vi.fn> };
+    let getStreamWriter: WriterSink & { write: ReturnType<typeof vi.fn> };
     let postStreamData: string[] = [];
     let getStreamData: string[] = [];
 
-    // Type for accessing private properties during testing (whitebox testing)
+    // Type for accessing private properties during testing (whitebox testing).
+    // These map directly onto the SDK's `_streamMapping` /
+    // `_requestToStreamMapping` fields, so the test helpers below remain in
+    // lock-step with the SDK transport that `WorkerTransport` extends.
     type TransportInternal = {
-      streamMapping: Map<string, unknown>;
-      requestToStreamMapping: Map<string | number, string>;
+      _streamMapping: Map<string, unknown>;
+      _requestToStreamMapping: Map<string | number, string>;
     };
 
     /**
      * Helper to set up mock streams on the transport for testing.
      * This is whitebox testing that accesses private fields via type assertion.
+     *
+     * The SDK transport stores streams as `{ controller, encoder }` where
+     * `controller` is a `ReadableStreamDefaultController`. The mock controller
+     * we build captures `enqueue` calls so tests can inspect the bytes that
+     * the transport tried to send.
      */
     const setupMockStream = (
       transport: WorkerTransport,
       streamId: string,
-      writer: WritableStreamDefaultWriter<Uint8Array>,
-      encoder: TextEncoder
+      sink: WriterSink,
+      encoder: TextEncoder,
+      data: string[]
     ) => {
+      const controller = {
+        enqueue: (chunk: Uint8Array) => {
+          data.push(new TextDecoder().decode(chunk));
+          sink.write(chunk);
+        },
+        close: vi.fn(),
+        error: vi.fn(),
+        desiredSize: 1
+      } as unknown as ReadableStreamDefaultController<Uint8Array>;
       const transportInternal = transport as unknown as TransportInternal;
-      transportInternal.streamMapping.set(streamId, {
-        writer,
+      transportInternal._streamMapping.set(streamId, {
+        controller,
         encoder,
         cleanup: vi.fn()
       });
+      return controller;
     };
 
     /**
@@ -1427,7 +1636,7 @@ describe("WorkerTransport", () => {
       streamId: string
     ) => {
       const transportInternal = transport as unknown as TransportInternal;
-      transportInternal.requestToStreamMapping.set(requestId, streamId);
+      transportInternal._requestToStreamMapping.set(requestId, streamId);
     };
 
     /**
@@ -1435,7 +1644,7 @@ describe("WorkerTransport", () => {
      */
     const deleteStream = (transport: WorkerTransport, streamId: string) => {
       const transportInternal = transport as unknown as TransportInternal;
-      transportInternal.streamMapping.delete(streamId);
+      transportInternal._streamMapping.delete(streamId);
     };
 
     beforeEach(() => {
@@ -1447,38 +1656,38 @@ describe("WorkerTransport", () => {
       transport = new WorkerTransport({
         sessionIdGenerator: () => "test-session"
       });
+      // The SDK refuses to route messages until the transport's `_started`
+      // flag is set (normally set by `Server.connect()` -> `start()`).
+      (transport as unknown as { _started: boolean })._started = true;
 
-      // Mock the stream mappings manually
       const postEncoder = new TextEncoder();
       const getEncoder = new TextEncoder();
 
-      // Create mock writers that capture data
       postStreamWriter = {
-        write: vi.fn(async (chunk: Uint8Array) => {
-          postStreamData.push(new TextDecoder().decode(chunk));
-        }),
-        close: vi.fn(),
-        abort: vi.fn(),
-        releaseLock: vi.fn()
-      } as unknown as WritableStreamDefaultWriter<Uint8Array>;
-
+        write: vi.fn() as unknown as WriterSink["write"] &
+          ReturnType<typeof vi.fn>
+      };
       getStreamWriter = {
-        write: vi.fn(async (chunk: Uint8Array) => {
-          getStreamData.push(new TextDecoder().decode(chunk));
-        }),
-        close: vi.fn(),
-        abort: vi.fn(),
-        releaseLock: vi.fn()
-      } as unknown as WritableStreamDefaultWriter<Uint8Array>;
+        write: vi.fn() as unknown as WriterSink["write"] &
+          ReturnType<typeof vi.fn>
+      };
 
-      // Set up the stream mappings using helpers
-      setupMockStream(
+      postStreamController = setupMockStream(
         transport,
         "post-stream-1",
         postStreamWriter,
-        postEncoder
+        postEncoder,
+        postStreamData
       );
-      setupMockStream(transport, "_GET_stream", getStreamWriter, getEncoder);
+      getStreamController = setupMockStream(
+        transport,
+        "_GET_stream",
+        getStreamWriter,
+        getEncoder,
+        getStreamData
+      );
+      void postStreamController;
+      void getStreamController;
       mapRequestToStream(transport, "req-1", "post-stream-1");
     });
 
@@ -1516,20 +1725,16 @@ describe("WorkerTransport", () => {
 
       it("should route multiple messages to their respective streams based on relatedRequestId", async () => {
         // Add another POST stream
-        const postStreamWriter2: WritableStreamDefaultWriter<Uint8Array> = {
-          write: vi.fn(async (_chunk: Uint8Array) => {}),
-          close: vi.fn(),
-          abort: vi.fn(),
-          releaseLock: vi.fn()
-        } as unknown as WritableStreamDefaultWriter<Uint8Array>;
-
+        const postStreamWriter2 = { write: vi.fn() };
+        const postStreamData2: string[] = [];
         const postEncoder2 = new TextEncoder();
 
         setupMockStream(
           transport,
           "post-stream-2",
           postStreamWriter2,
-          postEncoder2
+          postEncoder2,
+          postStreamData2
         );
         mapRequestToStream(transport, "req-2", "post-stream-2");
 
@@ -1647,18 +1852,14 @@ describe("WorkerTransport", () => {
     describe("Edge cases", () => {
       it("should use message.id for responses even when relatedRequestId matches a different mapped request", async () => {
         // Set up: req-1 -> post-stream-1, req-2 -> post-stream-2
-        const postStreamWriter2: WritableStreamDefaultWriter<Uint8Array> = {
-          write: vi.fn(async (_chunk: Uint8Array) => {}),
-          close: vi.fn(),
-          abort: vi.fn(),
-          releaseLock: vi.fn()
-        } as unknown as WritableStreamDefaultWriter<Uint8Array>;
-
+        const postStreamWriter2 = { write: vi.fn() };
+        const postStreamData2: string[] = [];
         setupMockStream(
           transport,
           "post-stream-2",
           postStreamWriter2,
-          new TextEncoder()
+          new TextEncoder(),
+          postStreamData2
         );
         mapRequestToStream(transport, "req-2", "post-stream-2");
 
@@ -1705,7 +1906,8 @@ describe("WorkerTransport", () => {
       });
 
       it("should handle relatedRequestId that points to a closed stream differently than missing stream", async () => {
-        // Map req-2 to a stream, then delete the stream (simulating closure)
+        // Map req-2 to a stream id, but never register the stream itself
+        // (simulating a connection that was closed mid-flight).
         mapRequestToStream(transport, "req-2", "closed-stream");
 
         const message: JSONRPCRequest = {
@@ -1715,10 +1917,15 @@ describe("WorkerTransport", () => {
           params: {}
         };
 
-        // Should throw because stream is mapped but doesn't exist
+        // The SDK's contract: silently drop the message when the stream is
+        // gone but the request id mapping survived. This is a deliberate
+        // change from the old hand-rolled WorkerTransport, which threw — the
+        // SDK opted for resilience against the inherent close-during-send race.
         await expect(
           transport.send(message, { relatedRequestId: "req-2" })
-        ).rejects.toThrow(/No connection established/);
+        ).resolves.toBeUndefined();
+        expect(postStreamWriter.write).not.toHaveBeenCalled();
+        expect(getStreamWriter.write).not.toHaveBeenCalled();
       });
     });
   });
@@ -2085,6 +2292,44 @@ describe("WorkerTransport", () => {
       // The stream should be closed - subsequent operations on this request should fail
       // (The actual behavior depends on timing, but the stream cleanup should have been triggered)
     });
+
+    it("silently swallows sends arriving after closeSSEStream() (race resilience)", async () => {
+      // Regression test: when a request's stream has been deliberately torn
+      // down via `closeSSEStream`, any send() the protocol layer still has
+      // in-flight should noop rather than throw "No connection established".
+      // The pre-refactor `WorkerTransport` returned silently in this case;
+      // the SDK base class throws — we restore the silent behaviour in our
+      // wrapper so the late send doesn't bubble as an unhandled rejection.
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "close-race-session"
+      });
+
+      transport.closeSSEStream("orphan-request");
+
+      // Result responses and notifications keyed to the closed id are
+      // both swallowed, regardless of whether the id arrives via
+      // `message.id` or `relatedRequestId`.
+      await expect(
+        transport.send({
+          jsonrpc: "2.0",
+          id: "orphan-request",
+          result: { content: [] }
+        })
+      ).resolves.toBeUndefined();
+
+      await expect(
+        transport.send(
+          {
+            jsonrpc: "2.0",
+            id: "unrelated-notification-id",
+            method: "notifications/progress",
+            params: {}
+          } as unknown as JSONRPCRequest,
+          { relatedRequestId: "orphan-request" }
+        )
+      ).resolves.toBeUndefined();
+    });
   });
 
   describe("Unsupported HTTP Methods", () => {
@@ -2318,6 +2563,42 @@ describe("WorkerTransport", () => {
       expect(body.error.message).toContain(
         "must accept both application/json and text/event-stream"
       );
+    });
+  });
+
+  describe("Parsed body handling", () => {
+    it("should accept the SDK handleRequest(request, { parsedBody }) signature", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        enableJsonResponse: true
+      });
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        }
+      });
+
+      const response = await transport.handleRequest(request, {
+        parsedBody: {
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        }
+      });
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        result?: { protocolVersion: string };
+      };
+      expect(body.result?.protocolVersion).toBeDefined();
     });
   });
 

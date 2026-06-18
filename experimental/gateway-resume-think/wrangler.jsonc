@@ -1,0 +1,29 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "gateway-resume-think",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+      "head_sampling_rate": 1
+    }
+  },
+  "ai": { "binding": "AI" },
+  "vars": {
+    // The AI Gateway id resume runs are issued under (must have unified billing
+    // or BYOK configured for the model vendors below).
+    "GATEWAY": "default",
+    // "<vendor>/<model>" routed through the gateway run API (resume-capable).
+    "MODEL": "openai/gpt-5.4"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "GatewayResumeAgent", "class_name": "GatewayResumeAgent" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GatewayResumeAgent"] }]
+}

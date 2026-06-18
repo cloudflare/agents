@@ -1,5 +1,31 @@
 # Agents Documentation
 
+Build stateful AI agents on Cloudflare Workers. Every agent is a Durable Object — an addressable, hibernatable actor with its own SQLite database, WebSockets, and scheduling — so you can afford one durable agent per user, account, task, or conversation, with near-zero cost while idle.
+
+## Choose your path
+
+Pick the base class that matches what you are building. They share the same Durable Object foundation, so you can start small and move up without re-platforming.
+
+| You are building...                                            | Use                               | Why                                                                                                                    |
+| -------------------------------------------------------------- | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Stateful backend logic, real-time sync, custom protocols       | [`Agent`](./agent-class.md)       | The core class: state, WebSockets, scheduling, SQL, and sub-agents. No opinions about chat or LLMs.                    |
+| A chat UI where you own the loop, the stream, and the response | [`AIChatAgent`](./chat-agents.md) | A thin chat-protocol adapter for `useAgentChat`. Bring your own agentic loop and custom streaming.                     |
+| A durable, general-purpose reasoning agent                     | [`Think`](./think/index.md)       | Opinionated runtime: agentic loop, sessions, tools, memory, compaction, recovery, and multi-channel delivery built in. |
+| A voice agent (speech in, speech out)                          | [Voice mixins](./voice.md)        | `withVoice` adds real-time STT/TTS, interruption and barge-in, and conversation persistence to an agent.               |
+| Durable multi-step processes (not chat)                        | [Workflows](./workflows.md)       | Long-running, retryable step orchestration with Cloudflare Workflows.                                                  |
+
+Not sure? Start with [`Agent`](./agent-class.md) for raw building blocks, or [`Think`](./think/index.md) if you want a chat or reasoning agent that already handles the hard parts.
+
+## What makes these production-grade
+
+The differentiator is not "we have durable state" — it is what happens when a turn is interrupted. Agents built on this SDK keep their promises across Durable Object eviction, deploys, client disconnects, and human waits:
+
+- **Turn recovery** — an in-flight LLM turn survives Durable Object eviction and resumes instead of silently dying. See [Chat & Fiber Recovery](./chat-agents.md#stream-recovery) and [Durable Execution](./durable-execution.md).
+- **Resumable streams** — a disconnected client rejoins the same stream rather than losing the response. See [Resumable Streaming](./resumable-streaming.md).
+- **Recovery-aware delivery** — Think snapshots channel delivery as `accepted`, `streaming`, or `completed`, so a restart replays a not-yet-streamed answer but posts a safe interruption notice rather than risking a duplicate partial reply. See [Messengers — Delivery and Recovery](./think/messengers.md#delivery-and-recovery).
+- **Durable submissions** — webhooks and RPC callers submit a turn with an idempotency key and check status later, instead of holding a request open. See [Programmatic Submissions](./think/programmatic-submissions.md).
+- **Human-in-the-loop without hangs** — a turn can pause for approval and resume later. A human wait is a first-class state, not a stuck request. See [Human in the Loop](./human-in-the-loop.md).
+
 ## Getting Started
 
 - [Getting Started](./getting-started.md) - Quick start guide for new users

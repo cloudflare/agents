@@ -1,5 +1,224 @@
 # @cloudflare/think
 
+## 0.10.0
+
+### Minor Changes
+
+- [#1770](https://github.com/cloudflare/agents/pull/1770) [`718634f`](https://github.com/cloudflare/agents/commit/718634f9664a14fd5d666c63964e9723e073911f) Thanks [@threepointone](https://github.com/threepointone)! - Add a runtime CLI: `think studio` and `think state`.
+
+  `think studio [agent] [instance]` launches Think Studio — a bundled local web app that connects (over WebSocket) to any running Think instance, local dev server or deployed Worker. Studio provides streaming chat (with tool calls and inline approve/reject for `needsApproval` tools) plus a read-only inspector showing the agent's identity, connection status, live state, recent history, and a turn/recovery status badge. The CLI serves the prebuilt SPA from a tiny `node:http` static server and opens the browser (`--port`, `--no-open`); the browser talks to the agent directly. `think state <agent> [instance]` prints the agent's identity, live state, and a recent history snapshot (`--json`, `--limit`).
+
+  Both commands share connection flags (`--url`, `--host`, `--protocol`, `--token`, `--query`, `--route-prefix`, `--root`), resolve friendly agent ids from the local manifest, and send the token as a query parameter (WebSocket upgrades can't set headers). Chatting in Studio drives a real, persisted turn against the live Durable Object.
+
+  The Think Vite plugin also registers an `s` dev-server shortcut (alongside Vite's built-in `r`/`u`/`o`/`c`/`q`) that launches Studio against the running `pnpm dev` server. Disable it with `studioShortcut: false`.
+
+- [#1770](https://github.com/cloudflare/agents/pull/1770) [`718634f`](https://github.com/cloudflare/agents/commit/718634f9664a14fd5d666c63964e9723e073911f) Thanks [@threepointone](https://github.com/threepointone)! - Add `addMessages()` for writing to the transcript without starting a model turn.
+
+  `addMessages(messages, options?)` appends (or upserts, via `{ mode: "upsert" }`) into the Session tree without running inference or entering the turn queue, so it is safe to call from inside a tool `execute`. Array entries are appended linearly into one path; appends are idempotent by message id; `parentId` controls the attach point (latest committed leaf by default, `null` for root, and an unknown id fails fast). This is distinct from `saveMessages()` (which runs a turn) and from `AIChatAgent`'s `persistMessages()` (which replaces/reconciles a flat array). Fixes the Think docs that previously pointed to a nonexistent `persistMessages()` on Think.
+
+### Patch Changes
+
+- [#1767](https://github.com/cloudflare/agents/pull/1767) [`f03dee6`](https://github.com/cloudflare/agents/commit/f03dee651392381303630014a81bdc291e4a4722) Thanks [@threepointone](https://github.com/threepointone)! - Reduce Think Durable Object SQLite reads during normal wakes and text-only turns.
+
+  Think now avoids automatic media-eviction scans until hydration has been windowed or an oversized appended message has been observed. The shared resumable stream buffer also avoids per-wake metadata-column introspection by creating new tables with the current columns and lazily migrating legacy tables only when a stream write needs it.
+
+- Updated dependencies [[`718634f`](https://github.com/cloudflare/agents/commit/718634f9664a14fd5d666c63964e9723e073911f)]:
+  - create-think@0.1.0
+
+## 0.9.1
+
+### Patch Changes
+
+- [#1754](https://github.com/cloudflare/agents/pull/1754) [`151d457`](https://github.com/cloudflare/agents/commit/151d457d320fccc9852fccbf168edfc54d72d9a3) Thanks [@threepointone](https://github.com/threepointone)! - Add Browser Run Quick Actions to the browser tools: stateless, one-shot
+  browsing that needs only the `browser` binding — no Durable Object, loader, or
+  sandbox. New primitives in `agents/browser` (`browserMarkdown`,
+  `browserExtract`, `browserLinks`, `browserScrape`, `browserContent`,
+  `browserSnapshot`, `browserScreenshot`, `browserPdf`, plus `runQuickAction`)
+  wrap the `quickAction()` binding and unwrap its `{ success, result }` envelope.
+  A new `createQuickActionTools({ browser })` (from `agents/browser/ai`) returns
+  AI SDK tools (`browser_markdown`, `browser_extract`, `browser_links`,
+  `browser_scrape`, opt-in `browser_content`) so an agent can read a page as
+  Markdown, extract structured data with AI, or list/scrape elements in a single
+  call. Every result is bounded to `maxChars` (text truncated, oversized
+  arrays/objects summarized) to protect the context window, and host-only request
+  options (`cookies`, `authenticate`, `gotoOptions`, `viewport`, …) can be passed
+  once via `options` for authenticated or JavaScript-heavy pages without exposing
+  them to the model. `createBrowserTools`/`createBrowserRuntime` now expose these tools alongside the
+  durable `browser_execute` tool **by default** whenever a `browser` binding is
+  present (pass `quickActions: false` to opt out), and they resolve `ctx` from the
+  current Agent via `getCurrentAgent()` so `ctx` no longer has to be passed
+  explicitly from inside an Agent. Result bounding is shape-stable — arrays stay
+  arrays (trimmed), so the model sees a consistent type, except when even the
+  first element overflows the budget, where the result degrades to the
+  truncated-preview summary rather than a misleading empty array.
+  `runQuickAction`'s `params` are now typed per action. `@cloudflare/think/tools/browser` re-exports
+  `createQuickActionTools` and the Quick Action primitives/types so a Think agent
+  can expose them from `getTools()` with a single import. Quick Actions require a
+  Worker `compatibility_date` of `2026-03-24`+ and `remote: true` on the browser
+  binding for local `wrangler dev`.
+
+- [#1754](https://github.com/cloudflare/agents/pull/1754) [`151d457`](https://github.com/cloudflare/agents/commit/151d457d320fccc9852fccbf168edfc54d72d9a3) Thanks [@threepointone](https://github.com/threepointone)! - Align the streamed assistant message id with the persisted id during chat streaming. Providers that emit no `start.messageId` (e.g. Workers AI) previously left the client to generate its own id, so the live stream and the persisted message broadcast couldn't reconcile by id and the originating tab briefly rendered the turn twice before collapsing. The `start` chunk is now stamped with the allocated assistant id for new turns (continuations are unaffected). Mirrors the same fix in `@cloudflare/ai-chat`.
+
+- [#1754](https://github.com/cloudflare/agents/pull/1754) [`151d457`](https://github.com/cloudflare/agents/commit/151d457d320fccc9852fccbf168edfc54d72d9a3) Thanks [@threepointone](https://github.com/threepointone)! - Bump the default `compatibility_date` used when generating a Think app's Worker
+  config (`createThinkWorkerConfig`) from `2026-01-28` to `2026-06-11`. Apps that
+  set `compatibility_date` in their own `wrangler.jsonc` are unaffected; this only
+  changes the fallback used when none is specified.
+
+## 0.9.0
+
+### Minor Changes
+
+- [#1656](https://github.com/cloudflare/agents/pull/1656) [`4c2d1a7`](https://github.com/cloudflare/agents/commit/4c2d1a7f7f337bf426b0b35e3c9e8e4901c6360b) Thanks [@cjol](https://github.com/cjol)! - Rebuild the Think execute tool on the codemode connector runtime, with built-in human-in-the-loop approvals.
+
+  **Unified execute tool.** `createExecuteTool` now builds on `createCodemodeRuntime` with connectors instead of a bare executor: `state.*` (the agent's workspace filesystem via `@cloudflare/shell`'s `StateConnector`), `cdp.*` (browser automation via `agents/browser`'s `BrowserConnector`, included automatically when `env.BROWSER` is bound), and `tools.*` (any AI SDK `ToolSet` adapted via `@cloudflare/codemode`'s `ToolSetConnector`). Executions are durable — recorded on a `CodemodeRuntime` facet with abort-and-replay — and completed results are truncated for the model while the full value stays on the execution record.
+  - **Agent one-liner** — `createExecuteTool(this)` infers `ctx`, `env.LOADER`, `env.BROWSER`, and the workspace-backed state backend from the Think agent, and accepts an overrides object for custom tools and options. `createExecuteRuntime(this)` returns the underlying `{ runtime, connectors, tool }` for host-side wiring. The runtime handle is exposed on the agent as `this.codemode`.
+  - **Human-in-the-loop.** Tools with `needsApproval: true` pause the execution durably. The paused tool output (with bounded pending-call args) flows to the model, which reports and waits. Think gains built-in callables — `pendingExecutions()`, `approveExecution(executionId)`, `rejectExecution(executionId, reason?)` — that resolve the pause on the codemode runtime, replace the paused output in the transcript via `pausedExecutionUpdate`, and auto-continue the conversation so the model sees the outcome. Approval UIs must render args from `pendingExecutions()` (authoritative, full) rather than the transcript's `pending` (a truncated preview bounded for model context). Approvals survive Durable Object restarts and are safe against double-approval, expiry (`expirePaused`), and stale UIs. If the paused tool part is no longer in the transcript when the approval lands (e.g. compacted away), the outcome is appended as a system note instead of being dropped.
+  - The Think framework's generated worker entry exports the `CodemodeRuntime` facet class automatically (also re-exported from `@cloudflare/think/server-entry`).
+  - Think's `createBrowserTools` follows the rebuilt `agents/browser` connector model (single durable `browser_execute` tool, session modes, stable attach handles) — see the `agents` changeset.
+  - **Model-facing guidance.** `createExecuteTool` now renders per-namespace usage hints in the execute tool description (`state.*` object-argument filesystem calls, the actual `tools.*` method names, `cdp.*`), so models stop inventing a `host.*`/`fs.*` API. The `load_extension` description clarifies that its `host` bridge exists only inside extension source. The workspace `bash` tool description now states the workspace is mounted at `/` (no `/workspace`), and the bash sandbox no longer persists its synthetic `/bin`, `/usr`, `/dev`, `/proc` paths into the workspace (previously the first bash call wrote ~160 shell-builtin stubs into the user's workspace and flooded `changedFiles`).
+
+### Patch Changes
+
+- [#1740](https://github.com/cloudflare/agents/pull/1740) [`6c9de59`](https://github.com/cloudflare/agents/commit/6c9de59a08ba151d62e7eb50a1f3d36eac2eafc4) Thanks [@threepointone](https://github.com/threepointone)! - Defer one-shot scheduled callbacks (and chat-recovery give-ups) on platform transients instead of consuming them mid-deploy ([#1730](https://github.com/cloudflare/agents/issues/1730)).
+
+  A mid-execution Durable Object code-update reset surfaces storage failures in two shapes: the verbatim reset/supersede messages (already deferred) and `SqlError: SQL query failed: Network connection lost.` — a wrapper that drops the CF `retryable` flag and dodges the reset matcher. The second shape burned the in-process retry budget inside the same few-seconds reset window (which outlasts the retry schedule by design) and then consumed the one-shot row on exhaustion, freezing the turn for minutes until incident re-detection — in the reported production capture, storage was healthy again 15 ms after the final attempt.
+  - **`agents`** — new cause-aware `isPlatformTransientError` classifier (exported, alongside `isDurableObjectCodeUpdateReset`): reset/supersede messages, `retryable`-flagged platform errors (excluding overloaded), and "Network connection lost.", looked up through wrapper `cause` chains. `_executeScheduleCallback` keeps in-process retries for connection-lost transients (a genuine blip heals fast) but on exhaustion of a one-shot row it now re-throws instead of swallowing, so the row survives and the alarm re-runs it in the healthy window that follows. Genuine application errors are still abandoned after `maxAttempts` exactly as before.
+  - **`@cloudflare/think`** — `_handleRecoveryCallbackError` now defers (re-throws) on any platform transient instead of terminalizing through a give-up whose own seal needs the storage that is down; the bookkeeping write on the defer path is best-effort. The defer path no longer marks the recovered submission `error` (which made the deferred re-run skip with `submission_not_running` — a self-defeating defer); it stays `running` for the re-run to pick up. The give-up now seals the incident `exhausted` only after the terminal writes succeed, so a transient mid-seal defers the whole give-up for an idempotent re-run instead of half-sealing.
+  - **`@cloudflare/ai-chat`** — same give-up seal ordering: the incident is sealed only after `_exhaustChatRecovery` (incl. the durable terminal record) succeeds, so a transient mid-seal preserves the one-shot row and the give-up re-runs in full on a healthy isolate.
+
+- [#1737](https://github.com/cloudflare/agents/pull/1737) [`bc43133`](https://github.com/cloudflare/agents/commit/bc43133824f87da86e6d62a15ee2f183ed1a3f84) Thanks [@cjol](https://github.com/cjol)! - Fix the two remaining [#1575](https://github.com/cloudflare/agents/issues/1575) gaps in how in-band stream errors (`{type: "error", errorText}` chunks inside an otherwise-healthy provider stream) are observed after the fact.
+
+  **Errored-stream replay (partial content was lost on reconnect).** A client reconnecting after an in-band error received the terminal error frame ([#1645](https://github.com/cloudflare/agents/issues/1645)) but not the content the model streamed before the error — the replay path only served `status = 'completed'` streams, so an errored stream's buffered chunks were unreachable, and the server pushes no messages on connect. `ResumableStream` gains `replayErroredChunksByRequestId`, and the resume-ACK terminal replay (`_replayTerminalOnAck` in both AIChatAgent and Think) now replays the errored stream's stored chunks before the `done: true, error: true` frame, so a reconnecting client observes the same sequence a live client did. No wire-format or schema changes: replayed chunks reuse the existing `replay: true` frame shape and the error text still comes from the durable terminal record.
+
+  **Agent-tool error attribution (cross-run contamination).** When an in-band error frame was broadcast on a child agent and the active run was unknown, the error was stamped onto every tailed run — so an unrelated turn's failure (or one of several overlapping runs) could mark healthy runs as `error`, and capture depended on a tailer being attached at the right moment. Frames are now attributed by the request id they carry: each agent-tool run is bound to its turn's request id when the turn starts (persisted on the run row at start rather than at terminal, so attribution survives a DO restart mid-run), and only the owning run's error/progress state is updated. Frame inspection also no longer requires an attached tailer, so error capture is independent of tailer timing.
+
+- [#1712](https://github.com/cloudflare/agents/pull/1712) [`835e7b0`](https://github.com/cloudflare/agents/commit/835e7b0e0b7bb06c57b35ca3b330e4e962ccffed) Thanks [@threepointone](https://github.com/threepointone)! - Reclaim resumable-stream buffers from an alarm so idle chats don't leak storage ([#1706](https://github.com/cloudflare/agents/issues/1706))
+
+  Resumable-stream chunk buffers (`cf_ai_chat_stream_*`) were only swept lazily when a _subsequent_ stream completed. A chat that received a single turn and then went idle never triggered that sweep, so its buffers lingered in the Durable Object's SQLite for the lifetime of the DO.
+
+  `AIChatAgent` and `Think` now arm a scheduled cleanup alarm whenever a stream starts and whenever it finishes (completes or errors). Arming on start guarantees that a stream whose DO is evicted mid-flight and never reaches a finish still gets a future sweep instead of leaking. This is the safety net for the non-durable path (e.g. `chatRecovery: false`, the `AIChatAgent` default): those turns don't run inside `runFiber`, so there's no leftover `keepAlive` alarm and no fiber-recovery scan, and if the client never reconnects nothing else wakes the DO. (Durable `runFiber` turns already self-heal — the `keepAlive` alarm survives eviction, wakes the DO, and recovery finalizes the stream, which arms cleanup — so arming on start is belt-and-suspenders there.) The alarm sweeps aged buffers via the retention windows below and re-arms only while reclaimable rows remain, so a fully-swept DO stops waking itself. Arming is idempotent so high-turn-count chats never accumulate cleanup schedules; the in-callback re-arm uses a fresh (non-idempotent) row so it survives the one-shot deletion of the firing schedule. No per-turn Durable Object and no change to the session DO lifecycle are required.
+
+  Retention is now split into two short, purpose-specific windows instead of a single 24h threshold: completed/errored buffers are kept for a brief **10-minute** reconnect-and-replay grace (the assistant message is persisted separately, so the buffer is only needed to replay a just-finished stream or deliver a terminal error frame to a reconnecting client), while abandoned in-flight (`streaming`) rows are kept for **1 hour** so an interrupted turn has ample time to be resumed or recovered before its buffer is presumed dead. The abandoned-row sweep keys off **last chunk activity** rather than stream start time, so a long-running stream that is still emitting chunks is never reclaimed mid-flight.
+
+  `ResumableStream` gains `cleanup(now?)` (force a sweep, bypassing the lazy interval gate) and `hasReclaimableStreams()` to support alarm-driven cleanup.
+
+- [#1741](https://github.com/cloudflare/agents/pull/1741) [`1d8641d`](https://github.com/cloudflare/agents/commit/1d8641df1954b9fcf490bcb9360e23ed5b636562) Thanks [@threepointone](https://github.com/threepointone)! - Prevent cancelled durable submissions from appending their messages when they were already claimed but still waiting behind an active turn.
+
+- [#1713](https://github.com/cloudflare/agents/pull/1713) [`18c438b`](https://github.com/cloudflare/agents/commit/18c438b05fbc95787b40b6d1c849e569aa253bb9) Thanks [@threepointone](https://github.com/threepointone)! - Support client tools on the Think sub-agent `chat()` RPC path ([#1709](https://github.com/cloudflare/agents/issues/1709))
+
+  `ChatOptions` now accepts `clientTools` (the same `ClientToolSchema[]` carried over the WebSocket chat protocol) and an `onClientToolCall` executor. This lets a parent agent that drives a Think sub-agent over `chat()` expose client-defined tools to the sub-agent and complete the tool round trip within the same turn:
+
+  ```ts
+  await child.chat(message, callback, {
+    signal,
+    clientTools: [
+      { name: "get_user_timezone", parameters: { type: "object" } }
+    ],
+    onClientToolCall: async ({ toolName, input }) =>
+      runClientTool(toolName, input)
+  });
+  ```
+
+  Without `onClientToolCall`, the schemas are still registered and the model's call is surfaced through the stream callback (execute-less), matching the WebSocket behavior. With it, the call is resolved inline so the turn can continue to completion — the RPC stream callback has no inbound result channel of its own.
+
+  Unlike the WebSocket path, the schemas and executor are kept per-turn and are NOT persisted: the executor is a live RPC reference that cannot survive an eviction, and there is no SPA to replay a `tool-result`. This keeps chat recovery correct — an eviction-interrupted client-tool call is repaired like a server tool (the model proceeds) rather than being mistaken for a pending human interaction and parking forever.
+
+  `agents/chat`'s `createToolsFromClientSchemas` gains an optional `{ execute }` delegate (and exports a new `ClientToolExecutor` type) to build the executable variant. Both additions are backward-compatible.
+
+- [#1724](https://github.com/cloudflare/agents/pull/1724) [`c18a446`](https://github.com/cloudflare/agents/commit/c18a446daa4547b886bf01ecd9719a23bf7905fc) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Stop oversized sessions from permanently bricking the Durable Object with `SQLITE_NOMEM` on wake ([#1710](https://github.com/cloudflare/agents/issues/1710)).
+
+  A throw out of `onStart` is terminal: partyserver resets its init state and rethrows, so every wake — including platform alarm retries — re-runs the failing `onStart` forever, and the failure survives redeploys because it is driven by stored data. Long-lived media-heavy sessions hit exactly this once eager full-transcript hydration approached the isolate's memory budget. Four changes:
+  - **`onStart` degrades instead of throwing.** Transcript hydration, declared scheduled-task reconciliation, and durable submission/workflow recovery are now best-effort: failures are recorded (readable via the new public `getOnStartDegradations()`), logged with remediation hints, and emitted as `chat:onstart:degraded` observability events, and the agent comes up reachable. The user-defined `onStart()` is intentionally NOT guarded.
+  - **`hydrationByteBudget` (default 24MB).** Cache refreshes hydrate at most this many stored bytes; an oversized transcript boots as a bounded window of the most recent messages — never fewer than the read-time truncation span the model sees at full fidelity (4 messages), so windowing cannot starve the model's context — and emits `chat:hydration:windowed` (on change, not on every sync). Durable storage is never truncated by this; `session.getHistory()` still reads the full path. Set to `Infinity` to restore unbounded hydration.
+  - **`mediaEviction` (default on).** Background passes rewrite oversized inline media — large `data:` URL file parts and large strings nested in tool outputs — in messages that have aged out of the recent window, replacing them with size/path markers. By default the original bytes are preserved as workspace files under `/attachments/evicted/` (written BEFORE the row is rewritten, so no pass can lose data); set `externalizeToWorkspace: false` to drop them or `false` to disable. Passes are memory-bounded: row sizes come from `getHistoryRowStats()`, only rows large enough to contain an evictable value are parsed, one at a time, and rewrites use the session's silent maintenance path so no per-row full-history token estimate runs. When a pass stops at `maxRowsPerPass` with a backlog, the next pass is scheduled automatically. Providers without row-stats support log a one-time warning instead of silently no-opping.
+  - Plain `text` parts are never evicted, and `keepRecentMessages` is clamped to at least the read-time truncation window (4) so eviction can never rewrite content the model still sees at full fidelity.
+
+- [#1715](https://github.com/cloudflare/agents/pull/1715) [`5f6003f`](https://github.com/cloudflare/agents/commit/5f6003fd5e7a309ec40d021b72324747ba626701) Thanks [@threepointone](https://github.com/threepointone)! - Support `experimental_transform` on `TurnConfig`. The transform(s) returned from `beforeTurn` are now forwarded to `streamText` in the inference loop, so callers can inspect or rewrite the stream — for example, detecting tool results that carry `{ content, sources }` and enqueuing additional `source` parts via the transform's controller. Accepts a single transform or an array applied in order. Closes [#1714](https://github.com/cloudflare/agents/issues/1714).
+
+- Updated dependencies [[`b2b6762`](https://github.com/cloudflare/agents/commit/b2b67623deab327042b99344d8ee530ae37a71b2), [`4c2d1a7`](https://github.com/cloudflare/agents/commit/4c2d1a7f7f337bf426b0b35e3c9e8e4901c6360b), [`4c2d1a7`](https://github.com/cloudflare/agents/commit/4c2d1a7f7f337bf426b0b35e3c9e8e4901c6360b), [`7bcd1b1`](https://github.com/cloudflare/agents/commit/7bcd1b1a471ec887b781662747a44bf105593efc), [`4c2d1a7`](https://github.com/cloudflare/agents/commit/4c2d1a7f7f337bf426b0b35e3c9e8e4901c6360b)]:
+  - @cloudflare/codemode@0.4.0
+  - create-think@0.0.4
+  - @cloudflare/shell@0.4.0
+
+## 0.8.8
+
+### Patch Changes
+
+- [#1705](https://github.com/cloudflare/agents/pull/1705) [`611e8c3`](https://github.com/cloudflare/agents/commit/611e8c3417b06ec6b284e38c4a1ba73730530a10) Thanks [@threepointone](https://github.com/threepointone)! - Fix Think agents firing an alarm every 30s forever when they don't use workflow notifications ([#1703](https://github.com/cloudflare/agents/issues/1703)).
+
+  `alarm()` called `_startWorkflowNotificationDrain()` unconditionally, which wrapped its work in `keepAliveWhile(...)`. Acquiring the keepAlive lease armed the 30s keepAlive heartbeat alarm even though there was nothing to drain, and releasing the lease did not pull the alarm back — so the DO re-scheduled itself every 30s and never hibernated.
+
+  `_startWorkflowNotificationDrain()` now returns early when there are no pending notifications, matching its other call sites. Affected DOs self-heal on their next alarm fire after upgrading: `super.alarm()` reschedules to the next legitimate task (or clears the alarm entirely) and the drain no longer re-arms the heartbeat.
+
+## 0.8.7
+
+### Patch Changes
+
+- [#1699](https://github.com/cloudflare/agents/pull/1699) [`b1b8268`](https://github.com/cloudflare/agents/commit/b1b8268e541a29201f2edfaad8e105cda8bc131f) Thanks [@threepointone](https://github.com/threepointone)! - Decouple `create-think` from `@cloudflare/think` for fast project starts.
+
+  `create-think` is now fully standalone — it owns the starter-template scaffolding logic and depends only on `tiged` + `yargs`, so `npm create think` no longer installs the entire framework just to copy a template.
+
+  `think init` now has two modes:
+  - **New project** — when `--template` is given, or when run outside an existing npm project, it delegates to `create-think` to fetch a complete starter template.
+  - **Augment in place** — when run inside an existing npm project with no `--template`, it adds Think framework files (agent, Vite/Wrangler config, generated types) and merges dependencies into the current project.
+
+  The internal `@cloudflare/think/cli` export has been removed (its scaffolding logic now lives in `create-think`).
+
+- Updated dependencies [[`b1b8268`](https://github.com/cloudflare/agents/commit/b1b8268e541a29201f2edfaad8e105cda8bc131f)]:
+  - create-think@0.0.3
+
+## 0.8.6
+
+### Patch Changes
+
+- [#1613](https://github.com/cloudflare/agents/pull/1613) [`124a47a`](https://github.com/cloudflare/agents/commit/124a47a91c8a9db0bcf08ab931a5dd99a2fac663) Thanks [@threepointone](https://github.com/threepointone)! - Introduce the first Think framework layer for convention-driven agent apps.
+
+  This release adds a manifest-driven Vite plugin that discovers agents from the
+  `agents/` directory, generates a Worker entrypoint and virtual framework
+  modules, derives stable Durable Object class names, and merges framework-owned
+  Worker config defaults with user Wrangler config. It also keeps the Think Vite
+  plugin usable directly in normal Vite plugin arrays.
+
+  The framework now supports optional app server entries, manifest-scoped friendly
+  agent and sub-agent routing, deterministic route surfaces, colocated skill
+  detection, Worker Loader requirement diagnostics, and explicit diagnostics for
+  unsupported nested sub-agent conventions. Think currently supports top-level
+  agents and one sub-agent layer; deeper nesting is rejected with guidance so that
+  the routing and lifecycle model can be designed deliberately.
+
+  This framework layer is experimental: both the Vite plugin (once, on build
+  start) and the `think` CLI (on startup) emit a notice that the API may change
+  or be removed in any release. The core Think agent runtime is unchanged.
+
+  The Think CLI now includes `think init`, `think inspect`, and `think types`.
+  `think init` scaffolds a minimal Workers/Vite Think app, safely handles prompted
+  or named target directories, refuses unsafe migrations, and installs npm
+  dependencies by default. `think inspect` exposes manifest/config diagnostics in
+  text or JSON, while `think types` generates Think-owned declarations and can
+  optionally compose with Wrangler type generation.
+
+  This release also adds host-framework coverage for React Router and TanStack
+  Start, updates examples to use the convention-first framework shape, and hardens
+  Agents/worker-bundler virtual modules for bundled skill compatibility.
+
+- [#1695](https://github.com/cloudflare/agents/pull/1695) [`b545e86`](https://github.com/cloudflare/agents/commit/b545e867d8ee559de9aff7b795dfdf7ef90d2185) Thanks [@threepointone](https://github.com/threepointone)! - Add a `--template` flag to `think init` and a programmatic `@cloudflare/think/cli` entry point. `think init` now scaffolds from the repo's starter templates (locally, or via an injected fetcher) instead of generating a single inline app. This is what powers the new `create-think` package.
+
+## 0.8.5
+
+### Patch Changes
+
+- [#1690](https://github.com/cloudflare/agents/pull/1690) [`f6a8bc4`](https://github.com/cloudflare/agents/commit/f6a8bc4a3f1836e214cc9ac984d3bfc2ba0537b2) Thanks [@threepointone](https://github.com/threepointone)! - Surface a terminal chat-recovery outcome to clients that reconnect after it ended ([#1645](https://github.com/cloudflare/agents/issues/1645)).
+
+  When a durable chat turn exhausted recovery (e.g. during a deploy/reconnect storm) while no client was connected, the terminal error was only broadcast transiently, so a client that connected afterward never learned the turn failed and the conversation appeared frozen. The outcome is now persisted durably and replayed over the resume handshake on the next reconnect — `STREAM_RESUMING` → `STREAM_RESUME_ACK` → terminal error frame on the resumed stream — which is the only path that surfaces as `useAgentChat`'s `error` on the real client. (A bare replayed frame is dropped by the client because it never reaches a transport stream reader.) The record is cleared once a later turn supersedes it — on a new client request, and also when any later turn ends in a non-error outcome (completed or aborted, including turns driven server-side via `saveMessages`), so a stale exhaustion can never replay after the conversation has recovered. Terminal non-exhaustion errors (e.g. a provider 500) are now durably recorded too, not just transiently broadcast, so they also replay to a reconnecting client.
+
+  `@cloudflare/think` previously recorded the outcome durably but only replayed it as a bare on-connect frame (dropped by the client); it now uses the same resume-handshake delivery.
+
+- [#1688](https://github.com/cloudflare/agents/pull/1688) [`4d050c7`](https://github.com/cloudflare/agents/commit/4d050c7600d5d763414fc8766a05c23acf3070a4) Thanks [@threepointone](https://github.com/threepointone)! - Fix `ThinkWorkflow` `step.prompt({ output })` failing on Workers AI with `AiError 5023: JSON Schema mode is not supported with stream mode`.
+
+  Structured workflow prompts previously requested output via the AI SDK `Output.object` path, which streams a JSON Schema `response_format` — rejected by some providers (notably Workers AI). `step.prompt()` now runs a full agentic turn that returns its structured result by calling an internal `think_final_answer` tool whose arguments match the schema. This uses ordinary tool calling, so it works across every provider Think supports (verified on Workers AI, OpenAI, and Anthropic), keeps Think's streaming engine (persistence, recovery, resumable streams), and lets the agent use its own tools across multiple steps before producing the final structured answer.
+
+  The `think_final_answer` tool name is reserved; its call and result are stripped from the persisted conversation so the transcript and later turns do not see Think's internal plumbing.
+
 ## 0.8.4
 
 ### Patch Changes

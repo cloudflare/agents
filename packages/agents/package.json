@@ -9,7 +9,7 @@
     "durable objects"
   ],
   "type": "module",
-  "version": "0.14.3",
+  "version": "0.16.2",
   "license": "MIT",
   "repository": {
     "directory": "packages/agents",
@@ -26,37 +26,37 @@
   "dependencies": {
     "@babel/plugin-proposal-decorators": "^7.29.7",
     "@cfworker/json-schema": "^4.1.1",
-    "@cloudflare/codemode": "*",
+    "@cloudflare/codemode": ">=0.4.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@rolldown/plugin-babel": "^0.2.3",
     "cron-schedule": "^6.0.0",
+    "esbuild": "^0.28.1",
     "just-bash": "^3.0.1",
     "mimetext": "^3.0.28",
     "nanoid": "^5.1.11",
-    "partyserver": "^0.5.6",
-    "partysocket": "1.1.19",
+    "partyserver": "^0.5.8",
+    "partysocket": "1.2.0",
     "yaml": "^2.9.0",
     "yargs": "^18.0.0"
   },
   "devDependencies": {
-    "@ai-sdk/react": "^3.0.198",
-    "@cloudflare/worker-bundler": "*",
-    "@tanstack/ai": "^0.27.0",
-    "@types/react": "^19.2.16",
+    "@ai-sdk/react": "^3.0.204",
+    "@modelcontextprotocol/conformance": "0.1.16",
+    "@tanstack/ai": "^0.28.0",
+    "@types/react": "^19.2.17",
     "@types/yargs": "^17.0.35",
     "@vitest/browser-playwright": "^4.1.8",
     "@x402/core": "^2.14.0",
     "@x402/evm": "^2.14.0",
-    "ai": "^6.0.196",
+    "ai": "^6.0.202",
     "chat": "^4.30.0",
-    "glob": "^11.1.0",
+    "glob": "^13.0.6",
     "react": "^19.2.7",
     "vitest-browser-react": "^2.2.0",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "@cloudflare/ai-chat": ">=0.8.0 <1.0.0",
-    "@cloudflare/worker-bundler": ">=0.2.0 <1.0.0",
+    "@cloudflare/ai-chat": ">=0.8.5 <1.0.0",
     "@tanstack/ai": ">=0.10.2 <1.0.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",
@@ -68,9 +68,6 @@
   },
   "peerDependenciesMeta": {
     "@cloudflare/ai-chat": {
-      "optional": true
-    },
-    "@cloudflare/worker-bundler": {
       "optional": true
     },
     "@tanstack/ai": {
@@ -231,6 +228,11 @@
       "types": "./dist/skills/index.d.ts",
       "import": "./dist/skills/index.js",
       "require": "./dist/skills/index.js"
+    },
+    "./skills/compile": {
+      "types": "./dist/skills/compile.d.ts",
+      "import": "./dist/skills/compile.js",
+      "require": "./dist/skills/compile.js"
     }
   },
   "publishConfig": {
@@ -258,6 +260,10 @@
     "test:chat": "vitest --project chat",
     "test:webmcp": "vitest --project webmcp",
     "test:x402": "vitest --project x402",
-    "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts"
+    "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts",
+    "test:conformance": "pnpm run test:conformance:client && pnpm run test:conformance:server:mcp-agent && pnpm run test:conformance:server:handler",
+    "test:conformance:client": "bash conformance/run.sh client --suite all",
+    "test:conformance:server:mcp-agent": "bash conformance/run.sh server-mcp-agent",
+    "test:conformance:server:handler": "bash conformance/run.sh server-handler"
   }
 }

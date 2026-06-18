@@ -469,6 +469,148 @@ describe("AgentClient", () => {
     });
   });
 
+  describe("RPC robustness", () => {
+    it("rejects transmitted calls on a transient disconnect", async () => {
+      const { host, protocol } = getTestWorkerHost();
+
+      client = new AgentClient({
+        agent: "TestCallableAgent",
+        name: `rpc-transmitted-reject-${Date.now()}`,
+        host,
+        protocol
+      });
+
+      await client.ready;
+
+      // Transmitted while OPEN — its response is lost when the
+      // connection drops, so it must reject, not hang.
+      const inFlight = client.call("asyncMethod", [10000]);
+      client.reconnect();
+
+      await expect(inFlight).rejects.toThrow("Connection closed");
+    });
+
+    it("keeps buffered (untransmitted) calls pending across a transient disconnect and flushes them on reconnect", async () => {
+      const { host, protocol } = getTestWorkerHost();
+
+      client = new AgentClient({
+        agent: "TestCallableAgent",
+        name: `rpc-buffered-survive-${Date.now()}`,
+        host,
+        protocol
+      });
+
+      await client.ready;
+
+      // Drop the connection, then issue a call while disconnected — it
+      // sits in PartySocket's send buffer (never transmitted).
+      client.reconnect();
+      const buffered = client.call("add", [1, 2]);
+
+      // A second disconnect fires another close event. Before the fix,
+      // any close rejected ALL pending calls — including this one, whose
+      // request the server never saw. Now untransmitted calls survive
+      // and are flushed once the socket reconnects.
+      client.reconnect();
+
+      await expect(buffered).resolves.toBe(3);
+    });
+
+    it("applies a default timeout to non-streaming calls", async () => {
+      const { host, protocol } = getTestWorkerHost();
+
+      client = new AgentClient({
+        agent: "TestCallableAgent",
+        name: `rpc-default-timeout-${Date.now()}`,
+        host,
+        protocol,
+        defaultCallTimeout: 300
+      });
+
+      await client.ready;
+
+      // `hang` never responds — the default timeout backstop must fire.
+      await expect(client.call("hang")).rejects.toThrow(
+        /timed out after 300ms/
+      );
+    });
+
+    it("lets an explicit timeout of 0 disable the default timeout", async () => {
+      const { host, protocol } = getTestWorkerHost();
+
+      client = new AgentClient({
+        agent: "TestCallableAgent",
+        name: `rpc-timeout-zero-${Date.now()}`,
+        host,
+        protocol,
+        defaultCallTimeout: 100
+      });
+
+      await client.ready;
+
+      // Takes 400ms server-side — longer than defaultCallTimeout, but
+      // timeout: 0 opts this call out of the backstop entirely.
+      await expect(
+        client.call("asyncMethod", [400], { timeout: 0 })
+      ).resolves.toBe("done");
+    });
+
+    it("does not apply the default timeout to streaming calls", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const chunks: unknown[] = [];
+
+      client = new AgentClient({
+        agent: "TestCallableAgent",
+        name: `rpc-stream-no-default-${Date.now()}`,
+        host,
+        protocol,
+        defaultCallTimeout: 150
+      });
+
+      await client.ready;
+
+      // 3 chunks × 100ms = ~300ms total, well past defaultCallTimeout.
+      const result = await client.call("streamWithDelay", [["a", "b"], 100], {
+        stream: { onChunk: (chunk) => chunks.push(chunk) }
+      });
+
+      expect(result).toBe("complete");
+      expect(chunks).toEqual(["a", "b"]);
+    });
+
+    it("warns when a response arrives for a call that already timed out", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const warnSpy = vi.spyOn(console, "warn");
+
+      client = new AgentClient({
+        agent: "TestCallableAgent",
+        name: `rpc-dropped-response-${Date.now()}`,
+        host,
+        protocol
+      });
+
+      await client.ready;
+
+      // Times out client-side after 50ms; the server response arrives
+      // ~300ms later with no matching pending call.
+      await expect(
+        client.call("asyncMethod", [300], { timeout: 50 })
+      ).rejects.toThrow(/timed out/);
+
+      await vi.waitFor(
+        () => {
+          const warned = warnSpy.mock.calls.some((call) =>
+            String(call[0]).includes("Discarded an RPC response")
+          );
+          expect(warned).toBe(true);
+        },
+        { timeout: 5000 }
+      );
+
+      warnSpy.mockRestore();
+    });
+  });
+
   describe("identity change detection", () => {
     it("should detect identity change on reconnect", async () => {
       const { host, protocol } = getTestWorkerHost();

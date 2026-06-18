@@ -7,6 +7,7 @@ const entries = [
   "src/*.ts",
   "src/*.tsx",
   "src/skills/index.ts",
+  "src/skills/compile.ts",
   "src/chat/index.ts",
   "src/chat-sdk/index.ts",
   "src/cli/index.ts",

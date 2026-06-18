@@ -1,0 +1,40 @@
+{
+  "name": "@cloudflare/agents-codemode-connectors-demo",
+  "description": "codemode snippets tool demo — expose MCP servers and snippets through one discovery tool",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/ai-chat": "*",
+    "@cloudflare/codemode": "*",
+    "@cloudflare/kumo": "^2.5.2",
+    "@modelcontextprotocol/sdk": "*",
+    "@phosphor-icons/react": "^2.1.10",
+    "@streamdown/code": "^1.1.1",
+    "agents": "*",
+    "ai": "^6.0.202",
+    "nanoid": "^5.1.11",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "streamdown": "^2.5.0",
+    "workers-ai-provider": "^3.2.0",
+    "zod": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.40.2",
+    "@cloudflare/workers-types": "^4.20260612.1",
+    "@tailwindcss/vite": "^4",
+    "@types/node": "^25.9.3",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "tailwindcss": "^4.3.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16",
+    "wrangler": "^4.100.0"
+  }
+}

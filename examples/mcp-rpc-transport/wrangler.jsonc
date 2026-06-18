@@ -3,7 +3,7 @@
   "name": "mcp-rpc-transport-demo",
   "main": "src/server.ts",
   "ai": { "binding": "AI", "remote": true },
-  "compatibility_date": "2026-01-28",
+  "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "not_found_handling": "single-page-application",

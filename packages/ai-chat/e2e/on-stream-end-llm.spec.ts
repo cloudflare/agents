@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 
 /**
  * E2E tests for onChatResponse + server-initiated streaming with a real LLM.
- * Uses Workers AI (@cf/moonshotai/kimi-k2.5) via the StreamEndLlmAgent.
+ * Uses Workers AI (@cf/moonshotai/kimi-k2.7-code) via the StreamEndLlmAgent.
  *
  * These verify:
  * 1. onChatResponse fires with status "completed" after a real LLM stream

@@ -1,0 +1,26 @@
+{
+  "name": "@cloudflare/agents-gateway-resume-think",
+  "description": "Think Layer-B recipe: re-attach to an AI Gateway run (cf-aig-run-id) on DO eviction instead of regenerating",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "test": "vitest --run",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.83",
+    "@ai-sdk/openai": "^3.0.70",
+    "@ai-sdk/provider": "^3.0.10",
+    "@cloudflare/think": "*",
+    "agents": "*",
+    "ai": "^6.0.202"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260612.1",
+    "typescript": "^6.0.3",
+    "vitest": "4.1.8",
+    "wrangler": "^4.100.0"
+  }
+}

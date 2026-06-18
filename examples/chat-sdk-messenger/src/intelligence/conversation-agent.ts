@@ -5,7 +5,7 @@ import { createWorkersAI } from "workers-ai-provider";
 export class ConversationAgent extends Think {
   override getModel(): LanguageModel {
     const workersai = createWorkersAI({ binding: this.env.AI });
-    return workersai("@cf/moonshotai/kimi-k2.6", {
+    return workersai("@cf/moonshotai/kimi-k2.7-code", {
       sessionAffinity: this.sessionAffinity
     });
   }

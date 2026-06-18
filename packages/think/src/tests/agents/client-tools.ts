@@ -9,7 +9,11 @@ import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
 import { Think } from "../../think";
-import type { ChatResponseResult, MessageConcurrency } from "../../think";
+import type {
+  ChatResponseResult,
+  MessageConcurrency,
+  StreamCallback
+} from "../../think";
 import { StreamAccumulator, type ClientToolSchema } from "agents/chat";
 
 function createClientToolMockModel(): LanguageModel {
@@ -426,6 +430,206 @@ function createSlowMockModel(
   } as LanguageModel;
 }
 
+// Like createClientToolMockModel, but emits a complete `tool-call` chunk so the
+// AI SDK will execute the tool server-side when it has an `execute` (the RPC
+// `chat()` client-tool executor path, #1709). On the continuation step (after a
+// tool result is in the prompt) it emits plain text.
+function createExecutableClientToolMockModel(): LanguageModel {
+  let callCount = 0;
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-executable-client-tool",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream(options: Record<string, unknown>) {
+      callCount++;
+      const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+      const hasToolResult = messages.some(
+        (m: unknown) =>
+          typeof m === "object" &&
+          m !== null &&
+          (m as Record<string, unknown>).role === "tool"
+      );
+
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+
+          if (!hasToolResult && callCount === 1) {
+            const input = JSON.stringify({ action: "do_thing" });
+            controller.enqueue({
+              type: "tool-input-start",
+              id: "tc-client-1",
+              toolName: "client_action"
+            });
+            controller.enqueue({
+              type: "tool-input-delta",
+              id: "tc-client-1",
+              delta: input
+            });
+            controller.enqueue({ type: "tool-input-end", id: "tc-client-1" });
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "tc-client-1",
+              toolName: "client_action",
+              input
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "tool-calls",
+              usage: { inputTokens: 10, outputTokens: 5 }
+            });
+          } else {
+            controller.enqueue({ type: "text-start", id: "t-cont" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-cont",
+              delta: "Continuation after tool"
+            });
+            controller.enqueue({ type: "text-end", id: "t-cont" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "stop",
+              usage: { inputTokens: 20, outputTokens: 10 }
+            });
+          }
+
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+// Emits a complete client-tool call (input-start/delta/end + tool-call) onto a
+// stream controller. Shared by the parallel/multi-step executable mocks below.
+function enqueueClientToolCall(
+  controller: ReadableStreamDefaultController,
+  toolCallId: string,
+  toolName: string,
+  input: Record<string, unknown>
+): void {
+  const json = JSON.stringify(input);
+  controller.enqueue({ type: "tool-input-start", id: toolCallId, toolName });
+  controller.enqueue({ type: "tool-input-delta", id: toolCallId, delta: json });
+  controller.enqueue({ type: "tool-input-end", id: toolCallId });
+  controller.enqueue({ type: "tool-call", toolCallId, toolName, input: json });
+}
+
+// Emits TWO client-tool calls in a single step, then text on the continuation.
+// Exercises parallel server-side execution of caller-supplied client tools.
+function createParallelExecutableClientToolMockModel(): LanguageModel {
+  let callCount = 0;
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-parallel-executable-client-tool",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream() {
+      callCount++;
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (callCount === 1) {
+            enqueueClientToolCall(controller, "tc-par-1", "client_action", {
+              action: "first"
+            });
+            enqueueClientToolCall(controller, "tc-par-2", "client_action_2", {
+              action: "second"
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "tool-calls",
+              usage: { inputTokens: 10, outputTokens: 5 }
+            });
+          } else {
+            controller.enqueue({ type: "text-start", id: "t-par" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-par",
+              delta: "Continuation after parallel tools"
+            });
+            controller.enqueue({ type: "text-end", id: "t-par" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "stop",
+              usage: { inputTokens: 20, outputTokens: 10 }
+            });
+          }
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+// Emits a client-tool call on step 1, a DIFFERENT client-tool call on step 2
+// (after the first result lands), then text on step 3. Exercises the executor
+// being invoked across multiple sequential steps within one chat() turn.
+function createMultiStepExecutableClientToolMockModel(): LanguageModel {
+  let callCount = 0;
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-multistep-executable-client-tool",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream() {
+      callCount++;
+      const step = callCount;
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (step === 1) {
+            enqueueClientToolCall(controller, "tc-ms-1", "client_action", {
+              action: "one"
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "tool-calls",
+              usage: { inputTokens: 10, outputTokens: 5 }
+            });
+          } else if (step === 2) {
+            enqueueClientToolCall(controller, "tc-ms-2", "client_action_2", {
+              action: "two"
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "tool-calls",
+              usage: { inputTokens: 10, outputTokens: 5 }
+            });
+          } else {
+            controller.enqueue({ type: "text-start", id: "t-ms" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-ms",
+              delta: "Done after two steps"
+            });
+            controller.enqueue({ type: "text-end", id: "t-ms" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "stop",
+              usage: { inputTokens: 20, outputTokens: 10 }
+            });
+          }
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
 function createTextOnlyMockModel(): LanguageModel {
   return {
     specificationVersion: "v3",
@@ -472,9 +676,21 @@ export class ThinkClientToolsAgent extends Think {
   private _useServerApprovalTool = false;
   private _serverApprovalToolExecutions = 0;
   private _serverApprovalToolFails = false;
+  private _useExecutableClientTool = false;
+  private _useParallelExecutableClientTool = false;
+  private _useMultiStepExecutableClientTool = false;
   private _slowDelayMs = 40;
   private _slowChunkCount = 4;
   private _responseLog: ChatResponseResult[] = [];
+  private _lastTurnToolNames: string[] = [];
+
+  override beforeTurn(ctx: { tools: ToolSet }): void {
+    this._lastTurnToolNames = Object.keys(ctx.tools);
+  }
+
+  async getLastTurnToolNames(): Promise<string[]> {
+    return this._lastTurnToolNames;
+  }
 
   override onChatResponse(result: ChatResponseResult): void {
     this._responseLog.push(result);
@@ -484,7 +700,19 @@ export class ThinkClientToolsAgent extends Think {
     return this._responseLog;
   }
 
+  // Drive a directly-invoked `chat()` (e.g. a caller passing `onClientToolCall`
+  // over RPC) through the executable client-tool mock.
+  async enableExecutableClientToolForTest(): Promise<void> {
+    this._useExecutableClientTool = true;
+  }
+
   getModel(): LanguageModel {
+    if (this._useParallelExecutableClientTool)
+      return createParallelExecutableClientToolMockModel();
+    if (this._useMultiStepExecutableClientTool)
+      return createMultiStepExecutableClientToolMockModel();
+    if (this._useExecutableClientTool)
+      return createExecutableClientToolMockModel();
     if (this._useSlowStream)
       return createSlowMockModel(this._slowDelayMs, this._slowChunkCount);
     if (this._useSlowClientToolStream)
@@ -693,6 +921,50 @@ export class ThinkClientToolsAgent extends Think {
     )._lastClientTools;
   }
 
+  /**
+   * Recovery-classification probe (#1709). Seeds a persisted assistant message
+   * holding a `client_action` tool part stuck at `input-available` — the orphan
+   * an eviction leaves when the model emitted the call but `execute` never
+   * finished. Returns whether recovery would treat it as a pending CLIENT
+   * interaction (park forever, waiting for an SPA replay) vs a recoverable
+   * orphan (repaired by `continueLastTurn`). When `polluteRegistry` is set it
+   * first writes the tool name into `_lastClientTools`, simulating the (wrong)
+   * behavior of persisting RPC client tools — proving the registry is the lever.
+   */
+  async probeClientToolOrphanPending(opts: {
+    polluteRegistry: boolean;
+  }): Promise<boolean> {
+    const internal = this as unknown as {
+      _lastClientTools: ClientToolSchema[] | undefined;
+      _persistAssistantMessage: (msg: UIMessage) => Promise<void>;
+      hasPendingInteraction: () => boolean;
+    };
+
+    if (opts.polluteRegistry) {
+      internal._lastClientTools = [
+        { name: "client_action", description: "A client tool" }
+      ];
+    } else {
+      internal._lastClientTools = undefined;
+    }
+
+    await internal._persistAssistantMessage({
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-orphan-1",
+          toolName: "client_action",
+          state: "input-available",
+          input: { action: "do_thing" }
+        } as unknown as UIMessage["parts"][number]
+      ]
+    });
+
+    return internal.hasPendingInteraction();
+  }
+
   // Demonstrates the `repairInterruptedToolPart` override: a client-resolved
   // `ask_user` (a question with no server execute) is preserved as a text part
   // carrying the prompt rather than flipped to a generic errored tool result.
@@ -828,5 +1100,115 @@ export class ThinkClientToolsAgent extends Think {
     internal._continuationBarrierActive = false;
     internal._pendingInteractionPromise = null;
     internal._interactionApplyTail = Promise.resolve();
+  }
+
+  /**
+   * Drive the sub-agent RPC `chat()` entry point with client tools (#1709).
+   *
+   * Collects the streamed events through a local StreamCallback and, when
+   * `withExecutor` is set, records each client-tool invocation the model makes
+   * and resolves it inline. Mirrors a parent agent delegating to this sub-agent
+   * over RPC. Returns enough state to assert the round trip completed.
+   */
+  async runChatWithClientTools(
+    message: string,
+    opts?: {
+      withExecutor?: boolean;
+      executorThrows?: boolean;
+      mode?: "single" | "parallel" | "multistep";
+    }
+  ): Promise<{
+    executorCalls: Array<{ toolName: string; inputJson: string }>;
+    done: boolean;
+    error?: string;
+    assistantText: string;
+    toolPartStates: string[];
+    toolCalls: Array<{ toolName: string; state: string }>;
+  }> {
+    const mode = opts?.mode ?? "single";
+    if (mode === "parallel") {
+      this._useParallelExecutableClientTool = true;
+    } else if (mode === "multistep") {
+      this._useMultiStepExecutableClientTool = true;
+    } else {
+      this._useExecutableClientTool = true;
+    }
+
+    const executorCalls: Array<{ toolName: string; inputJson: string }> = [];
+    let done = false;
+    let error: string | undefined;
+    const callback: StreamCallback = {
+      onStart() {},
+      onEvent() {},
+      onDone() {
+        done = true;
+      },
+      onError(e: string) {
+        error = e;
+      }
+    };
+
+    // The parallel/multi-step mocks reference a second client tool; register
+    // both so the model's calls resolve regardless of mode.
+    const clientTools: ClientToolSchema[] = [
+      {
+        name: "client_action",
+        description: "A client tool",
+        parameters: {
+          type: "object",
+          properties: { action: { type: "string" } }
+        }
+      },
+      {
+        name: "client_action_2",
+        description: "A second client tool",
+        parameters: {
+          type: "object",
+          properties: { action: { type: "string" } }
+        }
+      }
+    ];
+
+    await this.chat(message, callback, {
+      clientTools,
+      onClientToolCall: opts?.withExecutor
+        ? ({ toolName, input }: { toolName: string; input: unknown }) => {
+            executorCalls.push({ toolName, inputJson: JSON.stringify(input) });
+            if (opts?.executorThrows) {
+              throw new Error("client tool executor failed");
+            }
+            return { ok: true, echoed: input };
+          }
+        : undefined
+    });
+
+    const messages = (await this.getMessages()) as UIMessage[];
+    const assistantParts = messages
+      .filter((m) => m.role === "assistant")
+      .flatMap((m) => m.parts as Array<Record<string, unknown>>);
+    const assistantText = assistantParts
+      .filter((p) => p.type === "text")
+      .map((p) => p.text as string)
+      .join("");
+    const toolParts = assistantParts.filter(
+      (p) => typeof p.toolCallId === "string"
+    );
+    const toolPartStates = toolParts.map((p) => p.state as string);
+    const toolCalls = toolParts.map((p) => ({
+      toolName:
+        typeof p.type === "string" && p.type.startsWith("tool-")
+          ? p.type.slice("tool-".length)
+          : ((p.toolName as string) ?? ""),
+      state: p.state as string
+    }));
+
+    return {
+      executorCalls,
+      done,
+      error,
+      assistantText,
+      toolPartStates,
+      toolCalls
+    };
   }
 }

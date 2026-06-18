@@ -1,5 +1,28 @@
 # @cloudflare/shell
 
+## 0.4.0
+
+### Minor Changes
+
+- [#1656](https://github.com/cloudflare/agents/pull/1656) [`4c2d1a7`](https://github.com/cloudflare/agents/commit/4c2d1a7f7f337bf426b0b35e3c9e8e4901c6360b) Thanks [@cjol](https://github.com/cjol)! - Add `StateConnector` — the `state.*` filesystem API as a codemode connector.
+
+  `stateConnector(ctx, backend)` (or `new StateConnector(ctx, backend)`) exposes every `StateBackend` method (`readFile`, `writeFile`, `editFile`, `ls`, `find`, `grep`, `readJson`, `mergeJson`, …) as connector tools for `@cloudflare/codemode`'s durable runtime. Tools take a single object argument (`state.writeFile({ path, content })`), which the connector maps to the backend's positional parameters; pure reads are marked `replay: "reexecute"` so large file contents are never stored in the durable log. The legacy provider path (`createStateToolProvider`/`stateTools`) is unchanged and also accepts object-style arguments now, and the `state.*` type declarations and system prompt were updated to the object-argument convention.
+
+### Patch Changes
+
+- Updated dependencies [[`b2b6762`](https://github.com/cloudflare/agents/commit/b2b67623deab327042b99344d8ee530ae37a71b2), [`4c2d1a7`](https://github.com/cloudflare/agents/commit/4c2d1a7f7f337bf426b0b35e3c9e8e4901c6360b), [`4c2d1a7`](https://github.com/cloudflare/agents/commit/4c2d1a7f7f337bf426b0b35e3c9e8e4901c6360b)]:
+  - @cloudflare/codemode@0.4.0
+
+## 0.3.9
+
+### Patch Changes
+
+- [#1613](https://github.com/cloudflare/agents/pull/1613) [`124a47a`](https://github.com/cloudflare/agents/commit/124a47a91c8a9db0bcf08ab931a5dd99a2fac663) Thanks [@threepointone](https://github.com/threepointone)! - Make workspace parent directory creation safe under concurrent writes. When two
+  writes create files in the same missing directory at the same time, the
+  filesystem now creates the implicit parent idempotently without surfacing a
+  SQLite primary-key constraint error, while still emitting a single directory
+  create event.
+
 ## 0.3.8
 
 ### Patch Changes

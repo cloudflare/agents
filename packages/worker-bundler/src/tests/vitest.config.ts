@@ -15,6 +15,8 @@ export default defineConfig({
   test: {
     name: "workers",
     retry: 3,
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     include: [path.join(testsDir, "**/*.test.ts")],
     // Copies esbuild.wasm into src/ before tests, removes after
     globalSetup: [path.join(testsDir, "global-setup.ts")]

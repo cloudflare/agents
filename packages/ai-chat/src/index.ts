@@ -226,6 +226,16 @@ const CHAT_RECOVERING_FLAG_TTL_MS = 15 * 60 * 1000;
 // child output registers forward progress.
 const AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS = 5_000;
 
+// How far ahead to schedule the resumable-stream buffer cleanup alarm. Set to
+// ResumableStream's short completion-grace window (COMPLETED_RETENTION_MS, 10m)
+// so a finished buffer is reclaimed promptly. The re-arm-while-reclaimable loop
+// (see _cleanupStreamBuffers) revisits any longer-lived rows — e.g. an
+// abandoned in-flight buffer on its 1h window — by waking again each interval
+// until they age out, then stops. Driving cleanup from an alarm (rather than
+// only piggybacking on the next stream completion) ensures idle/one-off chat
+// DOs still reclaim their buffers without waking forever (#1706).
+const STREAM_CLEANUP_DELAY_SECONDS = 10 * 60;
+
 type StreamResultStatus = {
   status: Exclude<SaveMessagesResult["status"], "skipped">;
   error?: string;
@@ -501,7 +511,15 @@ export class AIChatAgent<
   private _agentToolLastErrors = new Map<string, string>();
   private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
   private _agentToolLiveSequences = new Map<string, number>();
-  private _agentToolActiveRunId: string | null = null;
+  /**
+   * Request id → run id for in-flight agent-tool turns (null = resolved as
+   * not an agent-tool turn, cached so unrelated turns don't re-query SQLite
+   * per frame). Drives frame attribution in {@link broadcast}: a frame
+   * belongs to a run iff it carries that run's turn request id, so an error
+   * in a user-driven turn or a concurrent run can never leak into another
+   * run's state (#1575).
+   */
+  private _agentToolRunsByRequestId = new Map<string, string | null>();
 
   /**
    * Client tool schemas from the most recent chat request.
@@ -644,42 +662,47 @@ export class AIChatAgent<
     msg: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): void {
-    if (this._agentToolForwarders.size > 0 && typeof msg === "string") {
+    // Inspect frames while any agent-tool run is in flight (live sequences
+    // exist for the run's whole lifecycle), not only while a tailer is
+    // attached — error capture must not depend on tailer timing (#1575).
+    if (
+      (this._agentToolForwarders.size > 0 ||
+        this._agentToolLiveSequences.size > 0) &&
+      typeof msg === "string"
+    ) {
       try {
         const parsed = JSON.parse(msg) as {
           type?: unknown;
           body?: unknown;
           error?: unknown;
+          id?: unknown;
         };
-        if (parsed.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
-          if (parsed.error === true && typeof parsed.body === "string") {
-            const runIds =
-              this._agentToolActiveRunId !== null
-                ? [this._agentToolActiveRunId]
-                : [...this._agentToolForwarders.keys()];
-            for (const runId of runIds) {
+        if (
+          parsed.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          typeof parsed.id === "string"
+        ) {
+          // A frame belongs to a run iff it carries that run's turn request
+          // id. Frames from unrelated turns (a user-driven turn on this
+          // agent, or another run's turn) resolve to a different — or no —
+          // run and are left alone, so concurrent runs cannot
+          // cross-contaminate each other's progress or error state (#1575).
+          const runId = this._agentToolRunForRequest(parsed.id);
+          if (runId !== null) {
+            if (parsed.error === true && typeof parsed.body === "string") {
               this._agentToolLastErrors.set(runId, parsed.body);
-            }
-          } else if (
-            typeof parsed.body === "string" &&
-            parsed.body.length > 0
-          ) {
-            const entries =
-              this._agentToolActiveRunId !== null
-                ? [
-                    [
-                      this._agentToolActiveRunId,
-                      this._agentToolForwarders.get(
-                        this._agentToolActiveRunId
-                      ) ?? new Set<(chunk: AgentToolStoredChunk) => void>()
-                    ] as const
-                  ]
-                : [...this._agentToolForwarders.entries()];
-            for (const [runId, forwarders] of entries) {
+            } else if (
+              typeof parsed.body === "string" &&
+              parsed.body.length > 0
+            ) {
+              // Advance the live sequence even with no tailer attached so a
+              // tailer registering mid-run resumes at the right offset.
               const sequence = this._agentToolLiveSequences.get(runId) ?? 0;
               this._agentToolLiveSequences.set(runId, sequence + 1);
               const chunk = { sequence, body: parsed.body };
-              for (const forward of forwarders) forward(chunk);
+              const forwarders = this._agentToolForwarders.get(runId);
+              if (forwarders) {
+                for (const forward of forwarders) forward(chunk);
+              }
             }
           }
         }
@@ -688,6 +711,25 @@ export class AIChatAgent<
       }
     }
     super.broadcast(msg, without);
+  }
+
+  /**
+   * Resolve the agent-tool run whose turn owns a request id, or null when the
+   * request is not an agent-tool turn. Falls back to the persisted run row
+   * (written when the turn starts, see `_registerAgentToolTurn`) so
+   * attribution survives a DO restart mid-run; either outcome is cached.
+   */
+  private _agentToolRunForRequest(requestId: string): string | null {
+    const cached = this._agentToolRunsByRequestId.get(requestId);
+    if (cached !== undefined) return cached;
+    const rows = this.sql<{ run_id: string }>`
+      select run_id from cf_ai_chat_agent_tool_runs
+      where request_id = ${requestId} and status = 'running'
+      limit 1
+    `;
+    const runId = rows?.[0]?.run_id ?? null;
+    this._agentToolRunsByRequestId.set(requestId, runId);
+    return runId;
   }
 
   constructor(ctx: AgentContext, env: Env) {
@@ -1320,6 +1362,16 @@ export class AIChatAgent<
   /**
    * Notify a connection about an active stream that can be resumed.
    * The client should respond with CF_AGENT_STREAM_RESUME_ACK to receive chunks.
+   *
+   * A connection can legitimately be notified more than once for the same
+   * request — proactively from onConnect AND in response to its
+   * CF_AGENT_STREAM_RESUME_REQUEST (#1733). This is intentional and must NOT
+   * be deduped here: an explicit resume request always deserves a response
+   * (the client's reconnectToStream would otherwise hang until its safety
+   * timeout, with no replay), and the proactive notify is required for
+   * clients that never send a resume request. The notify itself is a single
+   * tiny frame; clients are responsible for deduping the ACK so the full
+   * chunk buffer is not replayed twice.
    * @param connection - The WebSocket connection to notify
    */
   private _notifyStreamResuming(connection: Connection) {
@@ -1357,13 +1409,27 @@ export class AIChatAgent<
   }
 
   /** @internal Delegate to _resumableStream */
-  protected _startStream(requestId: string): string {
-    const streamId = this._resumableStream.start(requestId);
+  protected _startStream(
+    requestId: string,
+    options: { messageId?: string; continuation?: boolean } = {}
+  ): string {
+    const streamId = this._resumableStream.start(requestId, options);
     if (this._continuation.pending?.requestId === requestId) {
       this._continuation.activatePending();
       this._flushAwaitingStreamStartConnections();
       this._activateDeferredAutoContinuation();
     }
+    // Arm on START as well as finish so a stream whose DO is evicted mid-flight
+    // and never reaches a finish still gets a future sweep instead of leaking.
+    // This matters for `chatRecovery: false` (the default): those turns don't
+    // run inside `runFiber`, so there is no durable keepAlive alarm and no
+    // fiber-recovery scan — if the client never reconnects, nothing else ever
+    // wakes the DO to finalize the orphan. (With `chatRecovery: true` the
+    // leftover keepAlive alarm wakes the DO within ~keepAliveIntervalMs and
+    // recovery finalizes the stream, which arms cleanup anyway — so this is
+    // belt-and-suspenders there.) The last-activity sweep threshold keeps an
+    // actively streaming run from being reclaimed before it goes quiet (#1706).
+    void this._ensureStreamCleanupScheduled();
     return streamId;
   }
 
@@ -1375,6 +1441,48 @@ export class AIChatAgent<
     if (completedRequestId === this._continuation.activeRequestId) {
       this._continuation.activeRequestId = null;
       this._continuation.activeConnectionId = null;
+    }
+    void this._ensureStreamCleanupScheduled();
+  }
+
+  /**
+   * Ensure a single cleanup alarm is pending for this DO's resumable-stream
+   * buffers. Armed whenever a stream finishes (completes or errors) so that
+   * idle/one-off chat DOs still reclaim their buffers — the lazy sweep in
+   * {@link ResumableStream} only fires when a *subsequent* stream completes,
+   * which never happens for a chat that receives a single turn (#1706).
+   *
+   * `idempotent` dedupes on (callback, payload, owner) so repeated finishes
+   * collapse onto one pending alarm rather than stacking.
+   * @internal
+   */
+  protected async _ensureStreamCleanupScheduled({
+    idempotent = true
+  }: { idempotent?: boolean } = {}): Promise<void> {
+    await this.schedule(
+      STREAM_CLEANUP_DELAY_SECONDS,
+      "_cleanupStreamBuffers",
+      undefined,
+      { idempotent }
+    );
+  }
+
+  /**
+   * Alarm callback: sweep aged stream buffers, then re-arm only while rows
+   * remain so a fully-swept DO stops waking itself. Public so it is reachable
+   * as a schedule callback.
+   * @internal
+   */
+  async _cleanupStreamBuffers(): Promise<void> {
+    this._resumableStream.cleanup();
+    if (this._resumableStream.hasReclaimableStreams()) {
+      // Must NOT be idempotent: this runs INSIDE the currently-executing
+      // one-shot schedule row, which `alarm()` deletes only after we return. An
+      // idempotent reschedule would dedup onto that row and then be deleted with
+      // it — the re-arm would silently never fire, leaving buffers that survived
+      // this sweep (e.g. a younger turn) uncollected. A fresh delayed row
+      // survives the deletion.
+      await this._ensureStreamCleanupScheduled({ idempotent: false });
     }
   }
 
@@ -1432,6 +1540,7 @@ export class AIChatAgent<
       this._continuation.activeRequestId = null;
       this._continuation.activeConnectionId = null;
     }
+    void this._ensureStreamCleanupScheduled();
   }
 
   /**
@@ -1458,7 +1567,10 @@ export class AIChatAgent<
       try {
         const data = JSON.parse(chunk.body);
 
-        // Capture message ID from the "start" event if present
+        // Capture a provider `start.messageId` if present. The live path adopts
+        // it for new turns (see `_streamSSEReply`'s "start" handling), so
+        // recovery must reuse it to land under the same id a completed live
+        // turn would. Continuations have it stripped before storage (#1229).
         if (data.type === "start" && data.messageId != null) {
           message.id = data.messageId;
         }
@@ -1480,14 +1592,30 @@ export class AIChatAgent<
     }
 
     if (message.parts.length > 0) {
-      // Continuation streams have their messageId stripped (#1229) so the
-      // start chunk won't contain one. Fall back to the last assistant
-      // message — continuations always append to it.
+      // Resolve the id to persist under when the chunks carried no provider
+      // `start.messageId` (the common case — most providers don't emit one, and
+      // continuations have it stripped, #1229). When a provider id WAS present
+      // it was applied above and is kept, since the live path adopts it too.
       if (message.id === fallbackId) {
-        for (let i = this.messages.length - 1; i >= 0; i--) {
-          if (this.messages[i].role === "assistant") {
-            message.id = this.messages[i].id;
-            break;
+        // Preferred: the id allocated when the stream started, recorded in
+        // stream metadata (#1691) — the SAME id the live path persists under
+        // (it only adopts a provider id, never invents one). A new turn stored
+        // its own fresh id, so it becomes its own message; a continuation
+        // stored the cloned last-assistant id, so it merges (via the
+        // existing-index check below). This is what stops a new turn after a
+        // later user message from being folded into the previous assistant
+        // message (the #1691 corruption).
+        const storedId = this._resumableStream.getStreamMessageId(streamId);
+        if (storedId != null) {
+          message.id = storedId;
+        } else {
+          // Legacy row written before the metadata column existed: fall back to
+          // the last assistant message, matching pre-#1691 behavior.
+          for (let i = this.messages.length - 1; i >= 0; i--) {
+            if (this.messages[i].role === "assistant") {
+              message.id = this.messages[i].id;
+              break;
+            }
           }
         }
       }
@@ -1497,9 +1625,25 @@ export class AIChatAgent<
       // the last assistant message). Update in place if so.
       const existingIdx = this.messages.findIndex((m) => m.id === message.id);
       if (existingIdx >= 0) {
-        // Merge: keep existing parts and append new ones from the stream
+        // Merge: keep existing parts and append new ones from the stream.
+        // A tool part is identified by its toolCallId, so a reconstructed part
+        // whose toolCallId already exists is NOT re-appended — otherwise an
+        // early persist (at tool approval) followed by recovery, which replays
+        // the SAME chunks, would leave two parts for one tool call. The kept
+        // (persisted) part is also the one that may have received a tool result
+        // applied in place, so preserving it avoids regressing settled state.
         const existing = this.messages[existingIdx];
-        message.parts = [...existing.parts, ...message.parts];
+        const existingToolCallIds = new Set(
+          existing.parts
+            .filter(
+              (p): p is typeof p & { toolCallId: string } => "toolCallId" in p
+            )
+            .map((p) => p.toolCallId)
+        );
+        const newParts = message.parts.filter(
+          (p) => !("toolCallId" in p && existingToolCallIds.has(p.toolCallId))
+        );
+        message.parts = [...existing.parts, ...newParts];
         if (existing.metadata) {
           message.metadata = message.metadata
             ? { ...existing.metadata, ...message.metadata }
@@ -2700,6 +2844,34 @@ export class AIChatAgent<
     }
   }
 
+  /**
+   * Bind the child turn that is about to stream to its agent-tool run, at
+   * the moment the turn's request id is first knowable (inside the turn,
+   * before any frame is broadcast). The in-memory mapping drives frame
+   * attribution in {@link broadcast}; the run row's `request_id` is
+   * persisted here rather than at terminal so attribution also survives a
+   * DO restart mid-run (#1575).
+   */
+  private _registerAgentToolTurn(runId: string): void {
+    const requestId = this._turnQueue.activeRequestId;
+    if (requestId === null) {
+      // Invariant: this runs inside the turn's enqueued fn, so the turn
+      // queue's active request id is set. If it ever isn't, the run can't be
+      // bound to its frames and its error/progress capture silently degrades
+      // (#1575) — surface it rather than fail quietly.
+      console.warn(
+        `[AIChatAgent] agent-tool run ${runId} has no active request id at turn start; frame attribution will be skipped`
+      );
+      return;
+    }
+    this._agentToolRunsByRequestId.set(requestId, runId);
+    this.sql`
+      update cf_ai_chat_agent_tool_runs
+      set request_id = ${requestId}
+      where run_id = ${runId}
+    `;
+  }
+
   async startAgentToolRun(
     input: unknown,
     options: { runId: string; signal?: AbortSignal }
@@ -2744,7 +2916,7 @@ export class AIChatAgent<
         this._setRequestContext(undefined, { agentToolInput: input });
         const result = await this.saveMessages(
           async (messages) => {
-            this._agentToolActiveRunId = options.runId;
+            this._registerAgentToolTurn(options.runId);
             return [
               ...messages,
               this.formatAgentToolInput(input, { runId: options.runId })
@@ -2834,8 +3006,18 @@ export class AIChatAgent<
         options.signal?.removeEventListener("abort", abortFromParent);
         this._agentToolAbortControllers.delete(options.runId);
         this._agentToolLiveSequences.delete(options.runId);
-        if (this._agentToolActiveRunId === options.runId) {
-          this._agentToolActiveRunId = null;
+        // Drop this run's request-id mappings. When no runs remain in flight
+        // clear the whole map, so negatively-cached (null) entries for
+        // unrelated turns can't accumulate for the DO's lifetime — the map is
+        // only consulted while a run is active (#1575).
+        if (this._agentToolAbortControllers.size === 0) {
+          this._agentToolRunsByRequestId.clear();
+        } else {
+          for (const [reqId, runId] of this._agentToolRunsByRequestId) {
+            if (runId === options.runId) {
+              this._agentToolRunsByRequestId.delete(reqId);
+            }
+          }
         }
         this._agentToolLastErrors.delete(options.runId);
         this._agentToolPreTurnAssistantIds.delete(options.runId);
@@ -3959,6 +4141,19 @@ export class AIChatAgent<
   ): Promise<boolean> {
     const pending = await this._pendingChatTerminal();
     if (!pending || pending.requestId !== requestId) return false;
+    // Replay any partial content the errored stream produced before the
+    // error, so the reconnecting client observes the same sequence a live
+    // client did — content chunks, then the terminal error (#1575). If the
+    // connection drops mid-replay, skip the terminal frame; the record is
+    // retained, so the next reconnect retries the whole sequence.
+    if (
+      !this._resumableStream.replayErroredChunksByRequestId(
+        connection,
+        pending.requestId
+      )
+    ) {
+      return true;
+    }
     sendIfOpen(
       connection,
       JSON.stringify({
@@ -4061,9 +4256,30 @@ export class AIChatAgent<
       streamId ?? "",
       partial
     );
-    const recoveryKind: ChatRecoveryKind = shouldRetryPreStream
-      ? "retry"
-      : "continue";
+    // A new turn whose stream produced no assistant partial at all (interrupted
+    // before the first chunk materialized) will be re-run fresh rather than
+    // continued (#1691) — and that is knowable *before* `onChatRecovery`,
+    // because an empty partial persists nothing and leaves the conversation
+    // leaf at the user message regardless of what the hook returns. Report it
+    // as "retry" so the hook and the incident match the action that follows.
+    // The sibling `persist: false` case (a NON-empty partial the hook chooses
+    // to discard) only becomes a retry based on the hook's own return value, so
+    // it cannot be pre-detected here — the hook still sees "continue" there and
+    // only the `chat:recovery:scheduled` event reflects the final "retry".
+    const preStreamLeaf =
+      this.messages.length > 0
+        ? this.messages[this.messages.length - 1]
+        : undefined;
+    const emptyPartialNewTurn =
+      !!streamId &&
+      recoverySnapshot?.continuation === false &&
+      !!recoverySnapshot.latestUserMessageId &&
+      partial.text === "" &&
+      partial.parts.length === 0 &&
+      preStreamLeaf?.role === "user" &&
+      preStreamLeaf.id === recoverySnapshot.latestUserMessageId;
+    const recoveryKind: ChatRecoveryKind =
+      shouldRetryPreStream || emptyPartialNewTurn ? "retry" : "continue";
     const recoveryRootRequestId =
       recoverySnapshot?.recoveryRootRequestId ?? requestId;
     const { incident, config, exhausted } =
@@ -4132,11 +4348,33 @@ export class AIChatAgent<
 
       if (streamStillActive) {
         this._resumableStream.complete(streamId);
+        void this._ensureStreamCleanupScheduled();
       }
 
-      const targetId = shouldRetryPreStream
-        ? undefined
-        : this._findLastAssistantMessage()?.id;
+      // A NEW turn (not a continuation) that produced no persisted assistant
+      // partial — interrupted before any part materialized, or `persist: false`
+      // discarded it — leaves the conversation leaf at the user message.
+      // Continuing here would clone the PREVIOUS assistant turn (the most recent
+      // assistant message, found by walking back past the trailing user
+      // message) and merge this turn into it (#1691). Re-run the user turn fresh
+      // instead, so it becomes its own message. Checked AFTER the persist step,
+      // so a partial that WAS persisted (now the assistant leaf) still continues.
+      const leaf =
+        this.messages.length > 0
+          ? this.messages[this.messages.length - 1]
+          : undefined;
+      const lostPartialUserId =
+        recoverySnapshot?.continuation === false &&
+        recoverySnapshot.latestUserMessageId &&
+        leaf?.role === "user" &&
+        leaf.id === recoverySnapshot.latestUserMessageId
+          ? recoverySnapshot.latestUserMessageId
+          : undefined;
+
+      const targetId =
+        shouldRetryPreStream || lostPartialUserId !== undefined
+          ? undefined
+          : this._findLastAssistantMessage()?.id;
 
       if (shouldRetryPreStream && options.continue !== false) {
         await this._updateChatRecoveryIncident(
@@ -4159,6 +4397,35 @@ export class AIChatAgent<
             incidentId: incident.incidentId,
             lastBody: recoverySnapshot.lastBody ?? null,
             lastClientTools: recoverySnapshot.lastClientTools ?? null
+          },
+          { idempotent: true }
+        );
+      } else if (
+        lostPartialUserId !== undefined &&
+        options.continue !== false
+      ) {
+        // Re-run the orphaned new turn fresh instead of continuing (and
+        // merging into) the previous assistant message.
+        await this._updateChatRecoveryIncident(
+          incident.incidentId,
+          "scheduled"
+        );
+        this._emit("chat:recovery:scheduled", {
+          incidentId: incident.incidentId,
+          requestId,
+          attempt: incident.attempt,
+          maxAttempts: incident.maxAttempts,
+          recoveryKind: "retry"
+        });
+        await this.schedule(
+          0,
+          "_chatRecoveryRetry",
+          {
+            targetUserId: lostPartialUserId,
+            originalRequestId: recoveryRootRequestId,
+            incidentId: incident.incidentId,
+            lastBody: recoverySnapshot?.lastBody ?? null,
+            lastClientTools: recoverySnapshot?.lastClientTools ?? null
           },
           { idempotent: true }
         );
@@ -4442,9 +4709,10 @@ export class AIChatAgent<
    * Exactly-once terminalization here rests SOLELY on the
    * `stored?.status === "exhausted"` re-entry guard below — unlike
    * `@cloudflare/think`, `@cloudflare/ai-chat` has no durable-submission layer
-   * to short-circuit a duplicate alarm earlier. The sealed incident is
-   * re-persisted even when the record was found missing, so a swept record is
-   * re-armed for the guard on the next alarm.
+   * to short-circuit a duplicate alarm earlier. The incident read/write are
+   * best-effort because they back only that guard, not the terminal UX: a
+   * failed read synthesizes the incident and a failed seal write costs at most
+   * a re-delivered banner on a duplicate alarm.
    *
    * Two residual at-least-once edges, both deliberately accepted as "deliver a
    * second banner" ≫ "silently drop the turn":
@@ -4463,9 +4731,19 @@ export class AIChatAgent<
     const incidentKey = data?.incidentId
       ? this._chatRecoveryIncidentKey(data.incidentId)
       : null;
-    const stored = incidentKey
-      ? await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)
-      : null;
+    let stored: ChatRecoveryIncident | null = null;
+    if (incidentKey) {
+      try {
+        stored =
+          (await this.ctx.storage.get<ChatRecoveryIncident>(incidentKey)) ??
+          null;
+      } catch (readError) {
+        console.error(
+          "[AIChatAgent] failed to read recovery incident during give-up; synthesizing",
+          readError
+        );
+      }
+    }
 
     // Re-entry guard (see method doc): a sealed incident means terminalization
     // already happened, so a duplicate stale alarm must not re-fire
@@ -4501,12 +4779,6 @@ export class AIChatAgent<
           reason: "stable_timeout"
         };
 
-    // Persist the sealed incident (retained for inspection / TTL sweep) so the
-    // re-entry guard above sees `exhausted` if a duplicate stale alarm fires.
-    if (incidentKey) {
-      await this.ctx.storage.put(incidentKey, incident);
-    }
-
     const streamId = this._resolveRecoveryStreamId(
       incident.recoveryRootRequestId ?? incident.requestId
     );
@@ -4514,6 +4786,17 @@ export class AIChatAgent<
       ? this._getPartialStreamText(streamId)
       : { text: "", parts: [] as MessagePart[] };
 
+    // Terminalize BEFORE sealing the incident. The terminal write inside
+    // `_exhaustChatRecovery` (`_recordChatTerminal`) hits storage and can
+    // reject with a platform transient in exactly the window a give-up tends
+    // to run in (#1730: deploy reset / storage outage). Letting that throw
+    // propagate is deliberate: `Agent._executeScheduleCallback` defers the
+    // one-shot row on a platform transient, so the WHOLE give-up re-runs on a
+    // healthy isolate instead of half-sealing. Sealing first would arm the
+    // re-entry guard above and turn that re-run into a no-op — dropping the
+    // durable terminal record (#1645). The re-run is idempotent
+    // (`_recordChatTerminal` overwrites the same key); `onExhausted` + the
+    // banner may fire again — the documented at-least-once edge.
     await this._exhaustChatRecovery(
       incident,
       config,
@@ -4521,6 +4804,21 @@ export class AIChatAgent<
       streamId,
       incident.firstSeenAt
     );
+
+    // Persist the sealed incident (retained for inspection / TTL sweep) so the
+    // re-entry guard above sees `exhausted` if a duplicate stale alarm fires.
+    // Best-effort: terminalization already fully succeeded, so a failed seal
+    // write costs at most a re-delivered banner on a duplicate alarm.
+    if (incidentKey) {
+      try {
+        await this.ctx.storage.put(incidentKey, incident);
+      } catch (writeError) {
+        console.error(
+          "[AIChatAgent] failed to persist sealed recovery incident during give-up",
+          writeError
+        );
+      }
+    }
   }
 
   private _shouldRetryRecoveredPreStreamTurn(
@@ -5761,15 +6059,38 @@ export class AIChatAgent<
             // Rewrite chunks before storing and broadcasting:
             // 1. Strip messageId from continuation start chunks so clients
             //    reuse the existing assistant message (#1229).
-            // 2. Convert the internal "finish" event's finishReason into the
+            // 2. Stamp the allocated assistant id onto a new turn's start chunk
+            //    so the client builds the live message under the SAME id the
+            //    server persists under (see below).
+            // 3. Convert the internal "finish" event's finishReason into the
             //    UIMessageStreamPart messageMetadata format (#677).
             let eventToSend: unknown = data;
-            if (continuation && data.type === "start" && "messageId" in data) {
-              const { messageId: _, ...rest } = data as {
-                messageId: unknown;
-                [key: string]: unknown;
-              };
-              eventToSend = rest;
+            if (data.type === "start") {
+              if (continuation && "messageId" in data) {
+                const { messageId: _, ...rest } = data as {
+                  messageId: unknown;
+                  [key: string]: unknown;
+                };
+                eventToSend = rest;
+              } else if (!continuation) {
+                // Most providers (e.g. Workers AI) emit no `start.messageId`,
+                // so the client's AI SDK would build the streaming assistant
+                // under its own generated id while the server persists under
+                // `message.id`. The two then can't be reconciled by id, and the
+                // originating tab briefly renders the turn twice — the live copy
+                // plus the `CF_AGENT_CHAT_MESSAGES` broadcast — before
+                // collapsing. Stamping the allocated id here makes the common
+                // case behave like the provider-id case the client already
+                // relies on (react.tsx records `start.messageId` to map the
+                // local stream to the persisted message).
+                const startData = data as {
+                  messageId?: unknown;
+                  [key: string]: unknown;
+                };
+                if (startData.messageId == null) {
+                  eventToSend = { ...startData, messageId: message.id };
+                }
+              }
             }
             if (data.type === "finish" && "finishReason" in data) {
               const { finishReason, ...rest } = data as {
@@ -6009,14 +6330,29 @@ export class AIChatAgent<
           return { status: "completed" };
         }
 
-        // Start tracking this stream for resumability
-        const streamId = this._startStream(id);
-
-        const reader = response.body.getReader();
-
         // Parsing state adapted from:
         // https://github.com/vercel/ai/blob/main/packages/ai/src/ui-message-stream/ui-message-chunks.ts#L295
         const message = this._createStreamingAssistantMessage(continuation);
+
+        // Start tracking this stream for resumability. The allocated message id
+        // is persisted in stream metadata so orphan recovery (#1691) can
+        // re-associate reconstructed chunks with the right assistant message —
+        // even when the provider stream carries no `start.messageId`. For a
+        // continuation this is the cloned last-assistant id, so recovery merges
+        // into it; for a new turn it is a fresh id, so recovery keeps it
+        // distinct.
+        // The continuation flag is persisted in stream metadata so replayed
+        // frames carry `continuation: true` exactly like the live broadcast
+        // frames below (#1733) — a reconnecting client needs it to append to
+        // the existing assistant message instead of rebuilding it from
+        // scratch and dropping the pre-continuation parts.
+        const streamId = this._startStream(id, {
+          messageId: message.id,
+          continuation
+        });
+
+        const reader = response.body.getReader();
+
         // Track the streaming message so tool results can be applied before persistence
         this._streamingMessage = message;
 

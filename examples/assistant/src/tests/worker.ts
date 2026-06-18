@@ -19,7 +19,7 @@
  *
  * No AI binding is declared. Tests deliberately don't trigger turns —
  * `MyAssistant.getModel()` is never called. That means we don't have
- * to mock Workers AI or worry about `kimi-k2.6` flakiness, and the
+ * to mock Workers AI or worry about `kimi-k2.7-code` flakiness, and the
  * harness focuses on the plumbing the example owns: directory CRUD,
  * `SharedWorkspace` round-trips, change broadcasts, and the MCP
  * empty-state path. See `shared-mcp.test.ts` for why the deep MCP
@@ -28,9 +28,11 @@
 
 import { routeAgentRequest } from "agents";
 
-export { AssistantDirectory, MyAssistant } from "../server";
+export { AssistantDirectory } from "../../agents/assistant/agent";
+export { MyAssistant } from "../../agents/assistant/agents/my-assistant/agent";
 
-import type { AssistantDirectory, MyAssistant } from "../server";
+import type { AssistantDirectory } from "../../agents/assistant/agent";
+import type { MyAssistant } from "../../agents/assistant/agents/my-assistant/agent";
 
 export type Env = {
   AssistantDirectory: DurableObjectNamespace<AssistantDirectory>;

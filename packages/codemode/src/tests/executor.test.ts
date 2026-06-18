@@ -240,6 +240,17 @@ describe("DynamicWorkerExecutor", () => {
     );
   });
 
+  it("should return a clear error for provider names that shadow harness globals", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    for (const name of ["Promise", "setTimeout", "Error", "console"]) {
+      const result = await executor.execute("async () => 42", [
+        { name, fns: {} }
+      ]);
+      expect(result.error).toBe(`Provider name "${name}" is reserved`);
+    }
+  });
+
   it("should return error when code throws", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
@@ -550,5 +561,85 @@ describe("Multiple providers (namespaces)", () => {
     ]);
 
     expect(result.error).toContain("reserved");
+  });
+
+  it("rejects a provider named __connectors (would shadow the RPC bindings)", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute("async () => 1", [
+      { name: "__connectors", fns: {} }
+    ]);
+
+    expect(result.error).toContain("reserved");
+  });
+});
+
+describe("provider prelude", () => {
+  it("lets a prelude define an own-property fn that shadows the dispatch proxy", async () => {
+    const decide = vi.fn(async (...args: unknown[]) => ({
+      kind: "execute",
+      seq: Number(args[0])
+    }));
+    const record = vi.fn(async () => true);
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const provider: ResolvedProvider = {
+      name: "codemode",
+      fns: { decide, record },
+      // step() wraps a local closure around host decide/record calls.
+      prelude: String.raw`
+        codemode.step = async (seq, fn) => {
+          const d = await codemode.decide(seq);
+          if (d.kind === "replay") return d.result;
+          const value = await fn();
+          await codemode.record(value);
+          return value;
+        };`
+    };
+
+    const result = await executor.execute(
+      `async () => {
+        let ran = 0;
+        const v = await codemode.step(0, async () => { ran++; return 21 * 2; });
+        return { v, ran };
+      }`,
+      [provider]
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toEqual({ v: 42, ran: 1 });
+    expect(decide).toHaveBeenCalledWith(0);
+    expect(record).toHaveBeenCalledWith(42);
+  });
+
+  it("replays a step result without running the closure", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const provider: ResolvedProvider = {
+      name: "codemode",
+      fns: {
+        decide: async () => ({ kind: "replay", result: "cached" }),
+        record: async () => true
+      },
+      prelude: String.raw`
+        codemode.step = async (seq, fn) => {
+          const d = await codemode.decide(seq);
+          if (d.kind === "replay") return d.result;
+          const value = await fn();
+          await codemode.record(value);
+          return value;
+        };`
+    };
+
+    const result = await executor.execute(
+      `async () => {
+        let ran = false;
+        const v = await codemode.step(0, async () => { ran = true; return "fresh"; });
+        return { v, ran };
+      }`,
+      [provider]
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toEqual({ v: "cached", ran: false });
   });
 });

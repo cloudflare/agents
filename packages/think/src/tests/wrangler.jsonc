@@ -1,5 +1,5 @@
 {
-  "compatibility_date": "2026-01-28",
+  "compatibility_date": "2026-06-11",
   "compatibility_flags": [
     "nodejs_compat",
     "enable_nodejs_tty_module",
@@ -106,6 +106,41 @@
       {
         "class_name": "ThinkMessengerRouteTestAgent",
         "name": "ThinkMessengerRouteTestAgent"
+      },
+      {
+        "class_name": "ThinkExecuteToolAgent",
+        "name": "ThinkExecuteToolAgent"
+      },
+      {
+        "class_name": "ThinkExecuteHitlAgent",
+        "name": "ThinkExecuteHitlAgent"
+      },
+      {
+        "class_name": "ThinkOnStartReconcileFailureAgent",
+        "name": "ThinkOnStartReconcileFailureAgent"
+      },
+      {
+        "class_name": "ThinkOnStartHydrationFailureAgent",
+        "name": "ThinkOnStartHydrationFailureAgent"
+      },
+      {
+        "class_name": "ThinkWindowedHydrationAgent",
+        "name": "ThinkWindowedHydrationAgent"
+      },
+      {
+        "class_name": "ThinkMediaEvictionAgent",
+        "name": "ThinkMediaEvictionAgent"
+      },
+      {
+        "class_name": "ThinkMediaEvictionAutoAgent",
+        "name": "ThinkMediaEvictionAutoAgent"
+      },
+      // Facet-only class. vitest-pool-workers needs it listed as a binding so
+      // a facet-compatible class value resolves; it stays out of
+      // new_sqlite_classes below (the host agent owns the SQLite store).
+      {
+        "class_name": "CodemodeRuntime",
+        "name": "CodemodeRuntime"
       }
     ]
   },
@@ -137,7 +172,14 @@
         "ThinkAgentToolParent",
         "StuckThinkAgentToolChild",
         "ThinkExtensionHookAgent",
-        "ThinkMessengerRouteTestAgent"
+        "ThinkMessengerRouteTestAgent",
+        "ThinkExecuteToolAgent",
+        "ThinkExecuteHitlAgent",
+        "ThinkOnStartReconcileFailureAgent",
+        "ThinkOnStartHydrationFailureAgent",
+        "ThinkWindowedHydrationAgent",
+        "ThinkMediaEvictionAgent",
+        "ThinkMediaEvictionAutoAgent"
       ],
       "tag": "v1"
     }

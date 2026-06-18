@@ -1,0 +1,30 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "browser-live-view",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI", "remote": true },
+  // Live View URLs are minted by the real Browser Run service, so the browser
+  // binding runs in remote mode even during local `vite dev`.
+  "browser": { "binding": "BROWSER", "remote": true },
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "LiveViewAgent",
+        "name": "LiveViewAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["LiveViewAgent"],
+      "tag": "v1"
+    }
+  ]
+}

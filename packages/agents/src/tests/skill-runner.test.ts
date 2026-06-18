@@ -38,7 +38,7 @@ function testWorkspace(files: Record<string, string>): SkillWorkspace {
 }
 
 describe("skill script runner", () => {
-  it("runs function-style TypeScript scripts with input, context, and tools", async () => {
+  it("runs function-style JavaScript scripts with input, context, and tools", async () => {
     const runner = skills.runner({
       loader: env.LOADER,
       tools: {
@@ -56,12 +56,9 @@ describe("skill script runner", () => {
           description: "Draft release notes.",
           body: "Use the script."
         },
-        path: "scripts/format.ts",
+        path: "scripts/format.js",
         input: { text: "hello" },
-        source: `export default async function run(
-  input: { text: string },
-  ctx: { skill: { name: string }; tools: { shout(input: unknown): Promise<string> } }
-) {
+        source: `export default async function run(input, ctx) {
   const text = await ctx.tools.shout({ text: input.text });
   return { text, skill: ctx.skill.name };
 }`
@@ -84,7 +81,7 @@ describe("skill script runner", () => {
           description: "Broken skill.",
           body: "Run broken script."
         },
-        path: "scripts/broken.ts",
+        path: "scripts/broken.js",
         input: {},
         source: `export default async function run() {
   console.log("before failure");
@@ -113,11 +110,15 @@ describe("skill script runner", () => {
     ).rejects.toThrow("must `export default`");
   });
 
-  it("runs TypeScript skill files with sibling script imports", async () => {
+  it("rejects an un-precompiled multi-file/TypeScript script with a compile-required error", async () => {
     const runner = skills.runner({
       loader: env.LOADER
     });
 
+    // The runtime ships no in-Worker bundler: a TypeScript / multi-file script
+    // that was not compiled ahead of time cannot run and must surface a clear
+    // "compile first" error (bundled skills are compiled by the Vite plugin;
+    // R2/dynamic skills must be bundled before upload).
     await expect(
       runner.run({
         skill: {
@@ -138,6 +139,128 @@ export default function run(input: { text: string }) {
             encoding: "text",
             content: `export function format(text: string) {
   return text.toUpperCase();
+}`
+          }
+        ]
+      })
+    ).rejects.toThrow("must be compiled to a self-contained JavaScript module");
+  });
+
+  it("runs a precompiled bundled script (esbuild `export { run as default }` form)", async () => {
+    const runner = skills.runner({
+      loader: env.LOADER
+    });
+
+    // Build-time compilation (esbuild) emits the default export as
+    // `export { run as default }` and inlines siblings. The runner must
+    // normalize this form and run it directly, without any bundler.
+    await expect(
+      runner.run({
+        skill: {
+          name: "release-notes",
+          description: "Draft release notes.",
+          body: "Use the script."
+        },
+        path: "scripts/format.ts",
+        input: { text: "hello" },
+        source: `function format(text) {
+  return text.toUpperCase();
+}
+async function run(input) {
+  return format(input.text);
+}
+export {
+  run as default
+};`,
+        resources: [
+          {
+            path: "scripts/format.ts",
+            kind: "script",
+            encoding: "text",
+            precompiled: true,
+            content: `function format(text) {
+  return text.toUpperCase();
+}
+async function run(input) {
+  return format(input.text);
+}
+export {
+  run as default
+};`
+          }
+        ]
+      })
+    ).resolves.toBe("HELLO");
+  });
+
+  it("runs a precompiled script that also has named exports alongside the default", async () => {
+    const runner = skills.runner({
+      loader: env.LOADER
+    });
+
+    // When a script has named exports too, esbuild groups them with the
+    // default: `export { CONSTANT, run as default }`. The runner must still
+    // extract the default binding and run it.
+    const source = `const CONSTANT = "x";
+async function run(input) {
+  return input.text.toUpperCase() + CONSTANT.length;
+}
+export {
+  CONSTANT,
+  run as default
+};`;
+    await expect(
+      runner.run({
+        skill: {
+          name: "release-notes",
+          description: "Draft release notes.",
+          body: "Use the script."
+        },
+        path: "scripts/format.ts",
+        input: { text: "hello" },
+        source,
+        resources: [
+          {
+            path: "scripts/format.ts",
+            kind: "script",
+            encoding: "text",
+            precompiled: true,
+            content: source
+          }
+        ]
+      })
+    ).resolves.toBe("HELLO1");
+  });
+
+  it("runs a precompiled script as-is without invoking the in-Worker bundler", async () => {
+    const runner = skills.runner({
+      loader: env.LOADER
+    });
+
+    // The entry resource is marked `precompiled` (as the Agents Vite plugin
+    // does at build time): the runner must run `source` directly and never
+    // reach for `@cloudflare/worker-bundler`, even though the path is `.ts`
+    // (which would otherwise force the runtime bundler).
+    await expect(
+      runner.run({
+        skill: {
+          name: "precompiled",
+          description: "Precompiled skill.",
+          body: "Run the precompiled script."
+        },
+        path: "scripts/digest.ts",
+        input: { text: "hello" },
+        source: `export default async function run(input) {
+  return input.text.toUpperCase();
+}`,
+        resources: [
+          {
+            path: "scripts/digest.ts",
+            kind: "script",
+            encoding: "text",
+            precompiled: true,
+            content: `export default async function run(input) {
+  return input.text.toUpperCase();
 }`
           }
         ]

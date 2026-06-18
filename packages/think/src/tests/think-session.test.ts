@@ -1799,6 +1799,198 @@ describe("Think — saveMessages", () => {
   });
 });
 
+// ── addMessages ──────────────────────────────────────────────────
+
+describe("Think — addMessages", () => {
+  it("appends without starting a model turn", async () => {
+    const agent = await freshAgent("add-no-turn");
+
+    await agent.addMessages([
+      {
+        id: "add-1",
+        role: "user",
+        parts: [{ type: "text", text: "Context A" }]
+      },
+      {
+        id: "add-2",
+        role: "assistant",
+        parts: [{ type: "text", text: "Context B" }]
+      }
+    ]);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+    expect(messages.map((m) => m.id)).toEqual(["add-1", "add-2"]);
+    // No turn ran: nothing beyond the two messages we added.
+    expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+  });
+
+  it("keeps the live cache coherent", async () => {
+    const agent = await freshAgent("add-cache");
+
+    await agent.addMessages([
+      { id: "cache-1", role: "user", parts: [{ type: "text", text: "Hi" }] }
+    ]);
+
+    const cached = (await agent.getCachedMessagesForTest()) as UIMessage[];
+    expect(cached.map((m) => m.id)).toContain("cache-1");
+  });
+
+  it("is idempotent by message id in append mode", async () => {
+    const agent = await freshAgent("add-idempotent");
+    const msg: UIMessage = {
+      id: "idem-1",
+      role: "user",
+      parts: [{ type: "text", text: "Original" }]
+    };
+
+    await agent.addMessages([msg]);
+    await agent.addMessages([
+      { ...msg, parts: [{ type: "text", text: "Ignored" }] }
+    ]);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(1);
+    expect(JSON.stringify(messages)).toContain("Original");
+    expect(JSON.stringify(messages)).not.toContain("Ignored");
+  });
+
+  it("updates in place in upsert mode", async () => {
+    const agent = await freshAgent("add-upsert");
+
+    await agent.addMessages([
+      { id: "ups-1", role: "user", parts: [{ type: "text", text: "Before" }] }
+    ]);
+    await agent.addMessages(
+      [{ id: "ups-1", role: "user", parts: [{ type: "text", text: "After" }] }],
+      { mode: "upsert" }
+    );
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(1);
+    expect(JSON.stringify(messages)).toContain("After");
+    expect(JSON.stringify(messages)).not.toContain("Before");
+  });
+
+  it("chains an array linearly into one path", async () => {
+    const agent = await freshAgent("add-chain");
+
+    await agent.addMessages([
+      { id: "chain-1", role: "user", parts: [{ type: "text", text: "One" }] },
+      {
+        id: "chain-2",
+        role: "assistant",
+        parts: [{ type: "text", text: "Two" }]
+      },
+      { id: "chain-3", role: "user", parts: [{ type: "text", text: "Three" }] }
+    ]);
+
+    const path = (await agent.getSessionHistoryForTest()) as UIMessage[];
+    expect(path.map((m) => m.id)).toEqual(["chain-1", "chain-2", "chain-3"]);
+  });
+
+  it("throws on an unknown explicit parentId", async () => {
+    const agent = await freshAgent("add-bad-parent");
+
+    const error = await agent.addMessagesExpectingError(
+      [{ id: "orphan", role: "user", parts: [{ type: "text", text: "x" }] }],
+      { parentId: "does-not-exist" }
+    );
+    expect(error).toMatch(/does not exist/);
+
+    // Nothing was persisted before the validation failed.
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(0);
+  });
+
+  it("is a no-op for empty input", async () => {
+    const agent = await freshAgent("add-empty");
+
+    await agent.addMessages([]);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(0);
+  });
+
+  it("is visible to the next turn", async () => {
+    const agent = await freshAgent("add-next-turn");
+
+    await agent.addMessages([
+      {
+        id: "ctx-1",
+        role: "user",
+        parts: [{ type: "text", text: "Remember 42" }]
+      }
+    ]);
+
+    const result = await agent.testChat("And?");
+    expect(result.done).toBe(true);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.map((m) => m.id)).toContain("ctx-1");
+    // ctx-1 + (user + assistant from testChat) = 3
+    expect(messages.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("keeps the live view correct when an explicit parentId branches", async () => {
+    const agent = await freshAgent("add-branch");
+
+    await agent.addMessages([
+      { id: "b-A", role: "user", parts: [{ type: "text", text: "A" }] },
+      { id: "b-B", role: "assistant", parts: [{ type: "text", text: "B" }] },
+      { id: "b-C", role: "user", parts: [{ type: "text", text: "C" }] }
+    ]);
+
+    // Branch a new message off the root A, abandoning B and C.
+    await agent.addMessages(
+      [{ id: "b-D", role: "assistant", parts: [{ type: "text", text: "D" }] }],
+      { parentId: "b-A" }
+    );
+
+    const path = (await agent.getSessionHistoryForTest()) as UIMessage[];
+    const cached = (await agent.getCachedMessagesForTest()) as UIMessage[];
+    // Active path follows the new branch, and the live cache matches it (not a
+    // stale [A,B,C,D]).
+    expect(path.map((m) => m.id)).toEqual(["b-A", "b-D"]);
+    expect(cached.map((m) => m.id)).toEqual(["b-A", "b-D"]);
+  });
+
+  it("does not re-parent on upsert", async () => {
+    const agent = await freshAgent("add-upsert-no-reparent");
+
+    await agent.addMessages([
+      { id: "r-A", role: "user", parts: [{ type: "text", text: "A" }] },
+      { id: "r-B", role: "assistant", parts: [{ type: "text", text: "B" }] }
+    ]);
+
+    // Upsert B with an (existing) parentId; re-parenting is not supported, so B
+    // stays a child of A and the path is unchanged.
+    await agent.addMessages(
+      [{ id: "r-B", role: "assistant", parts: [{ type: "text", text: "B2" }] }],
+      { mode: "upsert", parentId: "r-A" }
+    );
+
+    const path = (await agent.getSessionHistoryForTest()) as UIMessage[];
+    expect(path.map((m) => m.id)).toEqual(["r-A", "r-B"]);
+    expect(JSON.stringify(path)).toContain("B2");
+  });
+
+  it("persists durably and coherently when called mid-turn", async () => {
+    const agent = await freshAgent("add-mid-turn");
+
+    const result = await agent.addMessagesMidTurnForTest([
+      { id: "mt-1", role: "user", parts: [{ type: "text", text: "Mid-turn" }] }
+    ]);
+
+    // Calling from inside an active turn (e.g. a tool `execute`) is safe: the
+    // write is durable and the live cache stays coherent (kept in sync by the
+    // Session listener). The broadcast is suppressed mid-turn so it can't
+    // clobber the in-progress streamed message.
+    expect(result.storedAfter).toBe(1);
+    expect(result.cacheLengthDuring).toBe(1);
+  });
+});
+
 // ── continueLastTurn ─────────────────────────────────────────────
 
 describe("Think — continueLastTurn", () => {
@@ -4354,17 +4546,17 @@ describe("Think — onChatRecovery", () => {
     expect(result.terminalBroadcast).toBe(terminalMessage);
   });
 
-  it("terminalizes a non-reset throw in a recovery callback instead of letting it be swallowed + silently sealed", async () => {
+  it("terminalizes a non-transient (application) throw in a recovery callback instead of letting it be swallowed + silently sealed", async () => {
     const agent = await freshRecoveryAgent("recovery-throw-terminalize");
     const terminalMessage = "The assistant was interrupted. Please try again.";
 
     const result = await agent.testRecoveryCallbackError({
-      errorMessage: "transient storage failure mid-recovery",
+      errorMessage: "model rejected the continuation request",
       maxAttempts: 5,
       terminalMessage
     });
 
-    // The catch must NOT re-throw — re-throwing a non-reset error lets
+    // The catch must NOT re-throw — re-throwing an application error lets
     // Agent._executeScheduleCallback swallow it and delete the one-shot row
     // with no terminal UX (the silent-seal bug).
     expect(result.threw).toBe(false);
@@ -4408,6 +4600,117 @@ describe("Think — onChatRecovery", () => {
     expect(result.exhaustedContexts).toBe(0);
     expect(result.terminalBroadcast).toBeUndefined();
     expect(result.incidentStatus).toBe("failed");
+  });
+
+  it('re-throws "Network connection lost." (storage transient in a deploy-reset window) and does NOT terminalize (#1730)', async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-connection-lost");
+
+    // The production #1730 capture: storage errors during a reset window
+    // surface as connection-lost, not as the verbatim reset message.
+    // Terminalizing here is doomed — the give-up's own seal needs the storage
+    // that's down — so it must defer like a reset.
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage: "Network connection lost.",
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(true);
+    expect(result.exhaustedContexts).toBe(0);
+    expect(result.terminalBroadcast).toBeUndefined();
+    expect(result.incidentStatus).toBe("failed");
+  });
+
+  it("re-throws the SqlError shape (wrapped transient, retryable flag lost) and does NOT terminalize (#1730)", async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-sqlerror");
+
+    // `SqlError: SQL query failed: Network connection lost.` — the wrapper
+    // prefixes the message and keeps the platform error only in `cause`.
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage: "Network connection lost.",
+      errorShape: "sql-wrapped",
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(true);
+    expect(result.exhaustedContexts).toBe(0);
+    expect(result.terminalBroadcast).toBeUndefined();
+    expect(result.incidentStatus).toBe("failed");
+  });
+
+  it("re-throws a retryable-flagged platform error and does NOT terminalize (#1730)", async () => {
+    const agent = await freshRecoveryAgent("recovery-throw-retryable-flag");
+
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage: "internal error",
+      errorShape: "retryable",
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(true);
+    expect(result.exhaustedContexts).toBe(0);
+    expect(result.terminalBroadcast).toBeUndefined();
+    expect(result.incidentStatus).toBe("failed");
+  });
+
+  it("leaves the recovered submission `running` on a deferral so the re-run picks it up (#1730)", async () => {
+    const agent = await freshRecoveryAgent("recovery-defer-keeps-submission");
+
+    // Regression for the self-defeating defer: marking the submission `error`
+    // before re-throwing makes the deferred re-run of `_chatRecoveryContinue`
+    // skip with `submission_not_running` — the preserved row becomes a no-op
+    // and the turn never resumes. A deferral must leave the submission alone.
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage: "Durable Object reset because its code was updated.",
+      seedRunningSubmission: true,
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(true);
+    expect(result.submissionStatus).toBe("running");
+  });
+
+  it("still marks the recovered submission terminal when an application error terminalizes the turn", async () => {
+    const agent = await freshRecoveryAgent("recovery-app-error-submission");
+
+    const result = await agent.testRecoveryCallbackError({
+      errorMessage: "model rejected the continuation request",
+      seedRunningSubmission: true,
+      maxAttempts: 5
+    });
+
+    expect(result.threw).toBe(false);
+    expect(result.incidentStatus).toBe("exhausted");
+    // `_exhaustChatRecovery` → `_markRecoveredSubmissionInterrupted` seals the
+    // submission so it doesn't hang `running` on a turn nobody will finish.
+    expect(result.submissionStatus).toBe("error");
+  });
+
+  it("defers a give-up whose terminal write hits a platform transient instead of half-sealing, then seals fully on the re-run (#1730)", async () => {
+    const agent = await freshRecoveryAgent("recovery-seal-transient-defer");
+    const terminalMessage = "The assistant was interrupted. Please try again.";
+
+    const result = await agent.testGiveUpSealTransientDefer({
+      transientMessage: "Network connection lost.",
+      terminalMessage
+    });
+
+    // First give-up: the terminal write rejects mid-deploy → the transient
+    // propagates (the one-shot row is preserved by the base scheduler) and the
+    // incident is NOT sealed — sealing first would turn the re-run into a
+    // no-op and drop the durable terminal record.
+    expect(result.firstThrew).toBe(true);
+    expect(result.incidentStatusAfterFirst).not.toBe("exhausted");
+    // Second give-up (the deferred re-run on a healthy isolate): terminalizes
+    // fully — banner delivered, incident sealed, no re-throw.
+    expect(result.secondThrew).toBe(false);
+    expect(result.incidentStatusAfterSecond).toBe("exhausted");
+    expect(result.terminalBroadcast).toBe(terminalMessage);
+    // `onExhausted` fired on both passes — the documented at-least-once edge
+    // ("deliver a second banner" ≫ "silently drop the turn").
+    expect(result.exhaustedReasons).toEqual([
+      "recovery_error",
+      "recovery_error"
+    ]);
   });
 });
 

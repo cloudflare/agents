@@ -171,6 +171,32 @@ type ParentStub = DurableObjectStub & {
   }>;
   testPreAbortedForwardStreamReleasesReaderLock(): Promise<boolean>;
   forwardMalformedAgentToolStreamForTest(): Promise<AgentToolEventMessage[]>;
+  runChildWithInjectedUnrelatedError(
+    input: {
+      prompt: string;
+      delayMs?: number;
+      chunkDelayMs?: number;
+      structured?: boolean;
+      streamError?: string;
+    },
+    injectAfterMs: number,
+    runId?: string
+  ): Promise<RunAgentToolResult>;
+  startChildWithoutTailForTest(
+    input: {
+      prompt: string;
+      delayMs?: number;
+      chunkDelayMs?: number;
+      structured?: boolean;
+      streamError?: string;
+    },
+    runId?: string
+  ): Promise<AgentToolRunInspection>;
+  childAgentToolRunsMapSizeForTest(runId: string): Promise<number>;
+  childResolveAfterRestartForTest(
+    runId: string,
+    requestId: string
+  ): Promise<{ running: string | null; unknown: string | null }>;
   childReconcileStaleRunViaRecoveryForTest(
     path: "continue" | "retry",
     withAssistantTurn: boolean
@@ -616,6 +642,100 @@ describe("AIChatAgent as an agent-tool child", () => {
 
     const events = await parent.getEventsForTest();
     expect(events.map((event) => event.event.kind)).toContain("error");
+  });
+
+  it("does not contaminate a run's terminal status with an unrelated turn's error frame (#1575)", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    // While the child run streams, an error frame from an UNRELATED turn (a
+    // request id that belongs to no run) is broadcast on the child. Before
+    // #1575 the error was stamped onto every active forwarder's run and this
+    // healthy run finalized as `error`.
+    const result = await parent.runChildWithInjectedUnrelatedError(
+      { prompt: "stay healthy", chunkDelayMs: 60 },
+      100,
+      runId
+    );
+
+    expect(result).toMatchObject({ runId, status: "completed" });
+  });
+
+  it("does not leak request-id cache entries for unrelated turns (#1575)", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    // The injected unrelated-turn error frame negatively-caches a (null)
+    // entry in the child's request-id map while the run is in flight.
+    const result = await parent.runChildWithInjectedUnrelatedError(
+      { prompt: "stay healthy", chunkDelayMs: 60 },
+      100,
+      runId
+    );
+    expect(result).toMatchObject({ runId, status: "completed" });
+
+    // Once the run ends and no runs remain in flight, the map must be fully
+    // cleared — null entries must not accumulate for the DO's lifetime.
+    expect(await parent.childAgentToolRunsMapSizeForTest(runId)).toBe(0);
+  });
+
+  it("attributes frames via the persisted request id after a DO restart (#1575)", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+
+    // The run row persisted request_id at turn start; after a restart the
+    // in-memory map is empty, so attribution must fall back to SQL.
+    const resolved = await parent.childResolveAfterRestartForTest(
+      runId,
+      requestId
+    );
+
+    expect(resolved.running).toBe(runId);
+    expect(resolved.unknown).toBeNull();
+  });
+
+  it("marks an in-band stream error as error with no tailer attached (#1575)", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    // The run is started directly and never tailed — terminal status must
+    // come from the child turn's own result, not forwarding side effects.
+    const inspection = await parent.startChildWithoutTailForTest(
+      { prompt: "fail untailed", streamError: "untailed failure" },
+      runId
+    );
+
+    expect(inspection).toMatchObject({
+      runId,
+      status: "error",
+      error: "untailed failure"
+    });
+  });
+
+  it("keeps concurrent child runs' error state isolated (#1575)", async () => {
+    const parent = await getParent();
+    const runA = crypto.randomUUID();
+    const runB = crypto.randomUUID();
+
+    const [a, b] = await Promise.all([
+      parent.runChild(
+        {
+          prompt: "failing run",
+          streamError: "run A failed",
+          chunkDelayMs: 40
+        },
+        runA
+      ),
+      parent.runChild({ prompt: "healthy run", chunkDelayMs: 40 }, runB)
+    ]);
+
+    expect(a).toMatchObject({
+      runId: runA,
+      status: "error",
+      error: "run A failed"
+    });
+    expect(b).toMatchObject({ runId: runB, status: "completed" });
   });
 
   it("propagates parent abort signals into AIChatAgent agent-tool runs", async () => {

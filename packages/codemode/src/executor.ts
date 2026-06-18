@@ -8,6 +8,7 @@
 import { RpcTarget } from "cloudflare:workers";
 import type {
   ExecuteResult,
+  ExecuteOptions,
   Executor,
   ResolvedProvider
 } from "./executor-types";
@@ -17,82 +18,22 @@ import type { ToolDescriptors } from "./tool-types";
 import type { ToolSet } from "ai";
 export type {
   ExecuteResult,
+  ExecuteOptions,
   Executor,
+  ConnectorBinding,
   ResolvedProvider
 } from "./executor-types";
+// ConnectorBinding re-exported for public API — used by proxy-tool and runtime.
 
-const BINARY_TAG = "__codemode_binary_v1__";
+import { stringifyForCodemode, parseForCodemode } from "./codec";
 
-type EncodedBinary = {
-  [BINARY_TAG]: "Uint8Array" | "ArrayBuffer" | "ArrayBufferView";
-  data: string;
-};
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.byteLength; i += chunkSize) {
-    binary += String.fromCharCode(
-      ...bytes.subarray(i, Math.min(i + chunkSize, bytes.byteLength))
-    );
-  }
-  return btoa(binary);
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
-function encodeCodemodeValue(value: unknown): unknown {
-  if (value instanceof Uint8Array) {
-    return { [BINARY_TAG]: "Uint8Array", data: bytesToBase64(value) };
-  }
-  if (value instanceof ArrayBuffer) {
-    return {
-      [BINARY_TAG]: "ArrayBuffer",
-      data: bytesToBase64(new Uint8Array(value))
-    };
-  }
-  if (ArrayBuffer.isView(value)) {
-    const view = value as ArrayBufferView;
-    return {
-      [BINARY_TAG]: "ArrayBufferView",
-      data: bytesToBase64(
-        new Uint8Array(view.buffer, view.byteOffset, view.byteLength)
-      )
-    };
-  }
-  return value;
-}
-
-function decodeCodemodeValue(value: unknown): unknown {
-  if (!value || typeof value !== "object" || !(BINARY_TAG in value)) {
-    return value;
-  }
-  const encoded = value as EncodedBinary;
-  if (typeof encoded.data !== "string") return value;
-  const bytes = base64ToBytes(encoded.data);
-  if (encoded[BINARY_TAG] === "ArrayBuffer") {
-    return bytes.buffer.slice(
-      bytes.byteOffset,
-      bytes.byteOffset + bytes.byteLength
-    );
-  }
-  return bytes;
-}
-
-function stringifyForCodemode(value: unknown): string {
-  return JSON.stringify(value, (_key, nested) => encodeCodemodeValue(nested));
-}
-
-function parseForCodemode(json: string): unknown {
-  return JSON.parse(json, (_key, nested) => decodeCodemodeValue(nested));
-}
+// Control protocol between a connector binding (host) and the sandbox proxy.
+// A binding returns `{ [CONNECTOR_CONTROL_KEY]: "pause" }` (awaiting approval /
+// diverged) or `{ [CONNECTOR_CONTROL_KEY]: "error", message }` (the call threw
+// on the host) instead of throwing across RPC; the generated proxy re-throws
+// locally. Keep in sync with proxy-tool.ts (CONTROL_KEY / PAUSE_SENTINEL).
+const CONNECTOR_CONTROL_KEY = "__codemode_control__";
+const PAUSE_SENTINEL_LITERAL = "__CODEMODE_PAUSE__";
 
 const SANDBOX_CODEC = String.raw`
     const __CODEMODE_BINARY_TAG = "__codemode_binary_v1__";
@@ -238,6 +179,14 @@ export interface DynamicWorkerExecutorOptions {
    * Note: the key `"executor.js"` is reserved and will be ignored if provided.
    */
   modules?: Record<string, string>;
+  /**
+   * Additional env bindings injected into the sandbox worker.
+   * Use this to pass ServiceStubs (e.g. CodemodeConnector instances)
+   * so sandbox code can call their RPC methods directly.
+   *
+   * These are available as `env.KEY` inside the sandbox worker.
+   */
+  bindings?: Record<string, unknown>;
 }
 
 /**
@@ -263,6 +212,7 @@ export class DynamicWorkerExecutor implements Executor {
   #timeout: number;
   #globalOutbound: Fetcher | null;
   #modules: Record<string, string>;
+  #bindings: Record<string, unknown>;
 
   constructor(options: DynamicWorkerExecutorOptions) {
     this.#loader = options.loader;
@@ -270,13 +220,15 @@ export class DynamicWorkerExecutor implements Executor {
     this.#globalOutbound = options.globalOutbound ?? null;
     const { "executor.js": _, ...safeModules } = options.modules ?? {};
     this.#modules = safeModules;
+    this.#bindings = options.bindings ?? {};
   }
 
   async execute(
     code: string,
     providersOrFns:
       | ResolvedProvider[]
-      | Record<string, (...args: unknown[]) => Promise<unknown>>
+      | Record<string, (...args: unknown[]) => Promise<unknown>>,
+    options?: ExecuteOptions
   ): Promise<ExecuteResult> {
     // Backwards compat: detect old `execute(code, fns)` signature.
     let providers: ResolvedProvider[];
@@ -293,9 +245,16 @@ export class DynamicWorkerExecutor implements Executor {
     const normalized = normalizeCode(code);
     const timeoutMs = this.#timeout;
 
-    // Validate provider names.
+    // Validate provider names. Each provider is declared as a top-level
+    // `const <name>` inside the generated `evaluate()` body, so a provider
+    // name must not collide with the harness's own locals/imports or with the
+    // JS globals the harness relies on (e.g. `Promise.race`, `setTimeout`,
+    // `new Error`, `console`) — shadowing those would break execution in
+    // confusing ways.
     const RESERVED_NAMES = new Set([
+      // Harness internals (locals/imports/classes in the generated module).
       "__dispatchers",
+      "__connectors",
       "__logs",
       "__CODEMODE_BINARY_TAG",
       "__bytesToBase64",
@@ -303,7 +262,14 @@ export class DynamicWorkerExecutor implements Executor {
       "__encodeCodemodeValue",
       "__decodeCodemodeValue",
       "__stringifyForCodemode",
-      "__parseForCodemode"
+      "__parseForCodemode",
+      "WorkerEntrypoint",
+      "CodeExecutor",
+      // Globals the generated harness code depends on.
+      "Promise",
+      "setTimeout",
+      "Error",
+      "console"
     ]);
     const VALID_IDENT = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
     const seenNames = new Set<string>();
@@ -329,15 +295,86 @@ export class DynamicWorkerExecutor implements Executor {
       seenNames.add(provider.name);
     }
 
-    // Generate a Proxy global for each provider namespace.
-    const proxyInits = providers.map(
-      (p) =>
-        `    const ${p.name} = new Proxy({}, {\n` +
-        `      get: (_, toolName) => async (...args) => {\n` +
-        `        const resJson = await __dispatchers.${p.name}.call(String(toolName), __stringifyForCodemode(args));\n` +
-        `        const data = __parseForCodemode(resJson);\n` +
-        `        if (data.error) throw new Error(data.error);\n` +
-        `        return data.result;\n` +
+    // Connector bindings — passed as env to the sandbox worker.
+    // These use direct RPC (callTool) instead of ToolDispatcher serialization.
+    const connectors = options?.connectors ?? [];
+    const connectorNames = new Set(connectors.map((c) => c.name));
+
+    // Validate connector names don't clash with provider names or reserved
+    // names. RESERVED_NAMES includes the `evaluate(__dispatchers, __connectors)`
+    // parameters, so a connector/provider can't shadow the RPC bindings its own
+    // generated proxy reads from (`__connectors.<name>.callTool(...)`).
+    for (const connector of connectors) {
+      if (RESERVED_NAMES.has(connector.name)) {
+        return {
+          result: undefined,
+          error: `Connector name "${connector.name}" is reserved`
+        };
+      }
+      if (!VALID_IDENT.test(connector.name)) {
+        return {
+          result: undefined,
+          error: `Connector name "${connector.name}" is not a valid JavaScript identifier`
+        };
+      }
+      if (seenNames.has(connector.name)) {
+        return {
+          result: undefined,
+          error: `Duplicate name "${connector.name}" (connector clashes with provider)`
+        };
+      }
+      seenNames.add(connector.name);
+    }
+
+    // Generate Proxy globals for dispatcher-backed providers.
+    // Backed by a real object so a provider's `prelude` can assign real
+    // in-sandbox functions (own properties) that take precedence over dispatch.
+    const proxyInits = providers
+      .filter((p) => !connectorNames.has(p.name))
+      .map(
+        (p) =>
+          `    const ${p.name} = new Proxy({}, {\n` +
+          `      get: (target, toolName) => {\n` +
+          `        if (Object.prototype.hasOwnProperty.call(target, toolName)) return target[toolName];\n` +
+          `        if (typeof toolName !== "string") return undefined;\n` +
+          `        return async (...args) => {\n` +
+          `          const resJson = await __dispatchers.${p.name}.call(String(toolName), __stringifyForCodemode(args));\n` +
+          `          const data = __parseForCodemode(resJson);\n` +
+          `          if (data.error) throw new Error(data.error);\n` +
+          `          return data.result;\n` +
+          `        };\n` +
+          `      }\n` +
+          `    });`
+      );
+
+    // Sandbox-side preludes (e.g. codemode.step) injected after proxy setup.
+    const preludeInits = providers
+      .filter((p) => !connectorNames.has(p.name) && p.prelude)
+      .map((p) => p.prelude as string);
+
+    // Generate Proxy globals for connector-backed namespaces.
+    // These call connector.callTool(method, args) via Workers RPC — no
+    // serialization layer. Connector bindings are passed as an argument to
+    // evaluate() (not via env): live RPC references can be serialized as RPC
+    // call arguments but NOT as Worker `env` config values.
+    //
+    // A binding never throws across RPC (that would leave an unhandled remote
+    // rejection); instead it returns a control marker — "pause" (awaiting
+    // approval) or "error" (the host call threw) — which we turn into a local
+    // throw here, where the sandbox's own try/catch handles it.
+    const connectorProxyInits = connectors.map(
+      (c) =>
+        `    const ${c.name} = new Proxy({}, {\n` +
+        `      get: (_, toolName) => {\n` +
+        `        if (typeof toolName !== "string") return undefined;\n` +
+        `        return async (...args) => {\n` +
+        `          const __r = await __connectors.${c.name}.callTool(toolName, args[0]);\n` +
+        `          if (__r && typeof __r === "object") {\n` +
+        `            if (__r.${CONNECTOR_CONTROL_KEY} === "pause") throw new Error("${PAUSE_SENTINEL_LITERAL}");\n` +
+        `            if (__r.${CONNECTOR_CONTROL_KEY} === "error") throw new Error(String(__r.message));\n` +
+        `          }\n` +
+        `          return __r;\n` +
+        `        };\n` +
         `      }\n` +
         `    });`
     );
@@ -346,13 +383,15 @@ export class DynamicWorkerExecutor implements Executor {
       'import { WorkerEntrypoint } from "cloudflare:workers";',
       "",
       "export default class CodeExecutor extends WorkerEntrypoint {",
-      "  async evaluate(__dispatchers = {}) {",
+      "  async evaluate(__dispatchers = {}, __connectors = {}) {",
       "    const __logs = [];",
       '    console.log = (...a) => { __logs.push(a.map(String).join(" ")); };',
       '    console.warn = (...a) => { __logs.push("[warn] " + a.map(String).join(" ")); };',
       '    console.error = (...a) => { __logs.push("[error] " + a.map(String).join(" ")); };',
       SANDBOX_CODEC,
       ...proxyInits,
+      ...connectorProxyInits,
+      ...preludeInits,
       "",
       "    try {",
       "      const result = await Promise.race([",
@@ -401,7 +440,20 @@ export class DynamicWorkerExecutor implements Executor {
       dispatchers[provider.name] = new ToolDispatcher(sanitizedFns);
     }
 
-    const worker = this.#loader.get(`codemode-${crypto.randomUUID()}`, () => ({
+    // Connector bindings are passed as an evaluate() argument (RPC), not via
+    // env — live RPC references can only be serialized for RPC calls.
+    const connectorBindings: Record<string, unknown> = {};
+    for (const connector of connectors) {
+      connectorBindings[connector.name] = connector.binding;
+    }
+    const env = { ...this.#bindings };
+    const hasEnv = Object.keys(env).length > 0;
+
+    // `load()` (not `get(id, cb)`): every run produces a unique generated
+    // module, so there is nothing to cache by id — `get` with a random id would
+    // only churn the loader's isolate cache. `load()` is the one-shot path the
+    // Worker Loader API provides for exactly this (codemode-style) use.
+    const worker = this.#loader.load({
       compatibilityDate: "2025-06-01",
       compatibilityFlags: ["nodejs_compat"],
       mainModule: "executor.js",
@@ -409,17 +461,21 @@ export class DynamicWorkerExecutor implements Executor {
         ...this.#modules,
         "executor.js": executorModule
       },
-      globalOutbound: this.#globalOutbound
-    }));
+      globalOutbound: this.#globalOutbound,
+      env: hasEnv ? env : undefined
+    });
 
     const entrypoint = worker.getEntrypoint() as unknown as {
-      evaluate(dispatchers: Record<string, ToolDispatcher>): Promise<{
+      evaluate(
+        dispatchers: Record<string, ToolDispatcher>,
+        connectors: Record<string, unknown>
+      ): Promise<{
         result: unknown;
         error?: string;
         logs?: string[];
       }>;
     };
-    const response = await entrypoint.evaluate(dispatchers);
+    const response = await entrypoint.evaluate(dispatchers, connectorBindings);
 
     if (response.error) {
       return { result: undefined, error: response.error, logs: response.logs };

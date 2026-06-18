@@ -46,7 +46,7 @@ export class WorkspaceChatAgent extends AIChatAgent {
 
     const result = streamText({
       abortSignal: options?.abortSignal,
-      model: workersai("@cf/moonshotai/kimi-k2.6", {
+      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
       system: [

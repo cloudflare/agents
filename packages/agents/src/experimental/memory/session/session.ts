@@ -3,7 +3,12 @@
  */
 
 import type { ToolSet } from "ai";
-import type { SessionProvider, StoredCompaction } from "./provider";
+import type {
+  HistoryRowStat,
+  RecentHistoryResult,
+  SessionProvider,
+  StoredCompaction
+} from "./provider";
 import type {
   CompactAfterOptions,
   CompactContext,
@@ -301,14 +306,41 @@ export class Session {
    * for load_context tool results that haven't been unloaded.
    * Runs once per init to survive hibernation / eviction, including for
    * async SessionProviders (e.g. Postgres) where we must `await` history.
+   *
+   * Skipped entirely when no skill-capable provider is configured —
+   * `load_context` results can only exist when a skill block was registered,
+   * and the scan would otherwise read the whole transcript on every wake,
+   * bypassing byte-budgeted hydration (#1710). A skill block added later via
+   * `addContext()` triggers the scan at that point instead.
    */
   private async _restoreLoadedSkills(): Promise<void> {
-    const history = await this.storage.getHistory();
+    if (!this.context.hasSkillCapableConfigs()) return;
+    await this._scanHistoryForLoadedSkills();
+  }
 
+  private _skillScanRan = false;
+
+  /**
+   * Scan stored history for load/unload_context tool results and restore
+   * the loaded-skill tracking set.
+   *
+   * Memory-bounded when the provider supports `getHistoryRowStats`: rows
+   * are enumerated without content, then only assistant rows are fetched
+   * and scanned ONE AT A TIME — peak memory is a single message instead of
+   * the whole transcript. Falls back to a full `getHistory()` read for
+   * providers without row stats (e.g. Postgres).
+   *
+   * Note: the bounded path scans raw path rows, so `load_context` results
+   * inside compacted ranges are still seen (the full-read path hides them
+   * behind compaction overlays). That superset is intentional — the stored
+   * tool result still exists and can be reclaimed by `unloadSkill`.
+   */
+  private async _scanHistoryForLoadedSkills(): Promise<void> {
+    this._skillScanRan = true;
     const loaded = new Set<string>();
 
-    for (const msg of history) {
-      if (msg.role !== "assistant") continue;
+    const scanMessage = (msg: SessionMessage) => {
+      if (msg.role !== "assistant") return;
       for (const part of msg.parts) {
         if (
           part.toolName === "load_context" &&
@@ -339,6 +371,19 @@ export class Session {
             loaded.delete(`${input.label}:${input.key}`);
           }
         }
+      }
+    };
+
+    if (this.storage.getHistoryRowStats) {
+      const stats = await this.storage.getHistoryRowStats();
+      for (const row of stats) {
+        if (row.role !== "assistant") continue;
+        const msg = await this.storage.getMessage(row.id);
+        if (msg) scanMessage(msg);
+      }
+    } else {
+      for (const msg of await this.storage.getHistory()) {
+        scanMessage(msg);
       }
     }
 
@@ -400,6 +445,61 @@ export class Session {
   async getHistory(leafId?: string | null): Promise<SessionMessage[]> {
     await this._ensureRestored();
     return this.storage.getHistory(leafId);
+  }
+
+  private _warnedNoRecentHistorySupport = false;
+
+  /**
+   * Byte-budgeted read of the most recent messages on the active branch
+   * path (always at least the leaf message, and at least
+   * `minRecentMessages` when the path is long enough). Lets hosts hydrate
+   * a bounded window instead of the full transcript so wake-time memory
+   * scales with the budget rather than total session history (#1710).
+   *
+   * Falls back to a full (untruncated) read when the provider doesn't
+   * implement `getRecentHistory`. The fallback reports honest metadata
+   * (`truncated: false` and the real serialized size) and warns once so a
+   * host relying on the budget knows it is not being enforced.
+   */
+  async getRecentHistory(
+    maxContentBytes: number,
+    minRecentMessages = 1
+  ): Promise<RecentHistoryResult> {
+    await this._ensureRestored();
+    if (this.storage.getRecentHistory) {
+      return this.storage.getRecentHistory(
+        null,
+        maxContentBytes,
+        minRecentMessages
+      );
+    }
+    if (!this._warnedNoRecentHistorySupport) {
+      this._warnedNoRecentHistorySupport = true;
+      console.warn(
+        "[Session] The configured SessionProvider does not implement " +
+          "getRecentHistory; the requested byte budget cannot be enforced " +
+          "and the FULL history was loaded. Implement getRecentHistory " +
+          "(and getHistoryRowStats) on the provider to bound hydration."
+      );
+    }
+    const messages = await this.storage.getHistory();
+    let totalContentBytes = 0;
+    for (const message of messages) {
+      totalContentBytes += JSON.stringify(message).length;
+    }
+    return { messages, truncated: false, totalContentBytes };
+  }
+
+  /**
+   * Per-row stored sizes for the active branch path (root → leaf) WITHOUT
+   * loading message content, or `null` when the provider doesn't support it.
+   * Lets hosts find oversized rows (e.g. inline base64 media) and process
+   * them one at a time with bounded memory.
+   */
+  async getHistoryRowStats(): Promise<HistoryRowStat[] | null> {
+    await this._ensureRestored();
+    if (!this.storage.getHistoryRowStats) return null;
+    return this.storage.getHistoryRowStats();
   }
 
   async getMessage(id: string): Promise<SessionMessage | null> {
@@ -581,6 +681,23 @@ export class Session {
     await this._notifyMessagesChanged({ type: "update", message });
   }
 
+  /**
+   * @internal
+   * Rewrite a stored message WITHOUT the public-write side effects: no
+   * token-estimate status broadcast (which reads the FULL history) and no
+   * auto-compaction check. For framework maintenance passes that rewrite
+   * many rows with bounded memory — e.g. media eviction (#1710) — where the
+   * per-row full-history estimate would reintroduce the memory pressure the
+   * pass exists to remove. The message-change listener still fires so a
+   * cache-owning host stays coherent. Application code should use
+   * `updateMessage`.
+   */
+  async internal_rewriteMessage(message: SessionMessage): Promise<void> {
+    await this._ensureRestored();
+    await this.storage.updateMessage(message);
+    await this._notifyMessagesChanged({ type: "update", message });
+  }
+
   async deleteMessages(messageIds: string[]): Promise<void> {
     await this._ensureRestored();
     await this.storage.deleteMessages(messageIds);
@@ -730,12 +847,20 @@ export class Session {
       const key = this._sessionId ? `${label}_${this._sessionId}` : label;
       provider = new AgentContextProvider(this._agent, key);
     }
-    return this.context.addBlock({
+    const block = await this.context.addBlock({
       label,
       description: opts.description,
       maxTokens: opts.maxTokens,
       provider
     });
+    // The init-time skill restore is skipped when no skill provider is
+    // configured (see _restoreLoadedSkills). If a skill block arrives later
+    // (e.g. an extension's onLoad), run the scan now so previously loaded
+    // skills from history are tracked.
+    if (block.isSkill && !this._skillScanRan) {
+      await this._scanHistoryForLoadedSkills();
+    }
+    return block;
   }
 
   /**

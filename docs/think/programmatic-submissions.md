@@ -119,6 +119,10 @@ submitted messages to the conversation `Session` only when the submission starts
 executing. This preserves FIFO turn semantics: later accepted submissions are
 not visible to the model until their own turn starts.
 
+If you cancel a submission before its messages have been applied, including one
+that has been claimed but is still waiting for its turn, those messages are not
+persisted to the conversation.
+
 If the chat is cleared or turn state is reset before a pending submission runs,
 that submission is marked `skipped`.
 

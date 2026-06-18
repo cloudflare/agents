@@ -46,6 +46,21 @@ type ThinkSubmissionTestStub = {
       metadata?: Record<string, unknown>;
     }
   ): Promise<SubmitMessagesResult>;
+  cancelQueuedRunningSubmissionBeforeSlotForTest(options?: {
+    submissionId?: string;
+    metadata?: Record<string, unknown>;
+    messageTexts?: string[];
+  }): Promise<{
+    submission: ThinkSubmissionInspection | null;
+    messages: Array<{ id: string; role: string; parts?: unknown[] }>;
+    responses: Array<{ status: string; requestId: string }>;
+    submissionLog: ThinkSubmissionInspection[];
+    workflowEvents: Array<{
+      workflowName: string;
+      workflowId: string;
+      event: { type: string; payload?: unknown };
+    }>;
+  }>;
   testSubmitMessagesError(
     text: string,
     options?: {
@@ -74,6 +89,10 @@ type ThinkSubmissionTestStub = {
   resetTurnStateForTest(): Promise<void>;
   recoverChatFiberForTest(requestId: string): Promise<void>;
   continueRecoveredChatForTest(requestId: string): Promise<void>;
+  continueRecoveredChatCatchingForTest(
+    requestId: string
+  ): Promise<string | null>;
+  failNextRecoveredContinueForTest(message: string): Promise<void>;
   cancelDuringRecoveredContinuationForTest(
     requestId: string,
     delayMs: number
@@ -180,6 +199,24 @@ async function waitForWorkflowEvent(
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error("Workflow event was not delivered");
+}
+
+function textParts(messages: Array<{ parts?: unknown[] }>): string[] {
+  return messages.flatMap((message) =>
+    (message.parts ?? []).flatMap((part) => {
+      if (
+        part !== null &&
+        typeof part === "object" &&
+        "type" in part &&
+        "text" in part &&
+        part.type === "text" &&
+        typeof part.text === "string"
+      ) {
+        return [part.text];
+      }
+      return [];
+    })
+  );
 }
 
 describe("Think durable submissions", () => {
@@ -440,6 +477,96 @@ describe("Think durable submissions", () => {
     await expect(
       agent.inspectSubmissionForTest(accepted.submissionId)
     ).resolves.toMatchObject({ status: "aborted" });
+  });
+
+  it("does not append a running submission cancelled before its queued turn slot", async () => {
+    const agent = await freshAgent();
+
+    const result = await agent.cancelQueuedRunningSubmissionBeforeSlotForTest({
+      submissionId: "sub-queued-running-cancel"
+    });
+
+    expect(result.submission).toMatchObject({
+      status: "aborted",
+      error: "cancelled before queue slot"
+    });
+    expect(textParts(result.messages)).toContain("active turn");
+    expect(textParts(result.messages)).not.toContain("queued then cancelled");
+    expect(
+      result.messages.filter((message) => message.role === "user")
+    ).toHaveLength(1);
+    expect(
+      result.responses.map((response) => response.requestId)
+    ).not.toContain("sub-queued-running-cancel");
+    expect(result.submissionLog.map((submission) => submission.status)).toEqual(
+      expect.arrayContaining(["pending", "running", "aborted"])
+    );
+  });
+
+  it("does not partially append multi-message submissions cancelled before their queued turn slot", async () => {
+    const agent = await freshAgent();
+
+    const result = await agent.cancelQueuedRunningSubmissionBeforeSlotForTest({
+      submissionId: "sub-queued-running-multi-cancel",
+      messageTexts: [
+        "queued cancelled first",
+        "queued cancelled second",
+        "queued cancelled third"
+      ]
+    });
+
+    const persistedTexts = textParts(result.messages);
+    expect(result.submission).toMatchObject({
+      status: "aborted",
+      error: "cancelled before queue slot"
+    });
+    expect(persistedTexts).toContain("active turn");
+    expect(persistedTexts).not.toContain("queued cancelled first");
+    expect(persistedTexts).not.toContain("queued cancelled second");
+    expect(persistedTexts).not.toContain("queued cancelled third");
+    expect(
+      result.messages.filter((message) => message.role === "user")
+    ).toHaveLength(1);
+  });
+
+  it("emits an aborted workflow notification without appending a queued cancelled prompt", async () => {
+    const agent = await freshAgent();
+
+    const result = await agent.cancelQueuedRunningSubmissionBeforeSlotForTest({
+      submissionId: "sub-queued-workflow-cancel",
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-queued-cancel",
+            stepName: "draft-report",
+            eventType: "think-prompt-queued-cancel"
+          },
+          output: { schema: { type: "object" } },
+          fingerprint: "queued-cancel"
+        }
+      }
+    });
+
+    expect(result.submission).toMatchObject({
+      status: "aborted",
+      error: "cancelled before queue slot"
+    });
+    expect(textParts(result.messages)).not.toContain("queued then cancelled");
+    expect(result.workflowEvents).toContainEqual(
+      expect.objectContaining({
+        workflowName: "TEST_WORKFLOW",
+        workflowId: "workflow-queued-cancel",
+        event: {
+          type: "think-prompt-queued-cancel",
+          payload: {
+            submissionId: "sub-queued-workflow-cancel",
+            status: "aborted",
+            error: "cancelled before queue slot"
+          }
+        }
+      })
+    );
   });
 
   it("aborts a pending submission without running it", async () => {
@@ -958,6 +1085,52 @@ describe("Think durable submissions", () => {
       status: "aborted",
       error: "stop"
     });
+  });
+
+  it("defers a recovered continuation on a platform transient and completes it on the re-run (#1730)", async () => {
+    const agent = await freshAgent();
+    await agent.setDelayedChunkResponse(["seed"], 1);
+    const seed = await agent.testSubmitMessages("seed conversation", {
+      submissionId: "sub-transient-defer-seed"
+    });
+    await waitForSubmission(
+      agent,
+      seed.submissionId,
+      (submission) => submission.status === "completed"
+    );
+
+    await agent.setDelayedChunkResponse(["recovered ", "answer"], 1);
+    await agent.insertSubmissionForTest({
+      submissionId: "sub-transient-defer",
+      requestId: "sub-transient-defer",
+      status: "running",
+      messagesAppliedAt: Date.now()
+    });
+
+    // First continuation lands in a deploy-reset window: storage throws the
+    // `SqlError: SQL query failed: Network connection lost.` shape. The
+    // callback must RE-THROW (so `Agent._executeScheduleCallback` preserves
+    // the one-shot row for the platform to re-run) instead of terminalizing
+    // through a give-up that needs the storage that's down.
+    await agent.failNextRecoveredContinueForTest("Network connection lost.");
+    await expect(
+      agent.continueRecoveredChatCatchingForTest("sub-transient-defer")
+    ).resolves.toMatch(/Network connection lost/);
+
+    // The submission must STILL be running — marking it terminal on the defer
+    // path would make the re-run skip with `submission_not_running` and the
+    // turn would never resume (the self-defeating defer).
+    await expect(
+      agent.inspectSubmissionForTest("sub-transient-defer")
+    ).resolves.toMatchObject({ status: "running" });
+
+    // The deferred re-run (the preserved one-shot row firing on a healthy
+    // isolate): the continuation streams normally and completes the
+    // submission end-to-end.
+    await agent.continueRecoveredChatForTest("sub-transient-defer");
+    await expect(
+      agent.inspectSubmissionForTest("sub-transient-defer")
+    ).resolves.toMatchObject({ status: "completed" });
   });
 
   it("preserves stream error text from recovered continuations", async () => {

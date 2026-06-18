@@ -39,7 +39,7 @@ export default defineConfig({
   testDir: "./e2e",
   testMatch: /.*\.e2e\.ts/,
   // Real-LLM timing — see the comment block above. The example
-  // uses `@cf/moonshotai/kimi-k2.5`, a heavyweight reasoning model.
+  // uses `@cf/moonshotai/kimi-k2.7-code`, a heavyweight reasoning model.
   // A single helper turn pairs a parent-side LLM call (tool
   // selection) with a helper-side LLM call (the helper's own
   // inference loop), so 60-120s per test is realistic. The compare

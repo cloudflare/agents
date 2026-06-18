@@ -4,6 +4,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { Plugin } from "vite";
+import { compileSkillScript, isCompilableSkillScript } from "./skills/compile";
 
 const SKILLS_SPECIFIER = "agents:skills";
 const SKILLS_VIRTUAL_PREFIX = "\0agents:skills:";
@@ -60,6 +61,7 @@ interface SkillFile {
     encoding: "text" | "base64";
     mimeType?: string;
     content: string;
+    precompiled?: boolean;
   }>;
 }
 
@@ -260,14 +262,43 @@ async function readSkill(
     (await collectFiles(skillDir, "", warn)).map(async (file) => {
       const encoding = resourceEncoding(file.path);
       const bytes = await readFile(file.absolutePath);
+      const kind = resourceKind(file.path);
+      let content =
+        encoding === "base64" ? bytes.toString("base64") : bytes.toString();
+      let precompiled = false;
+
+      // Compile text script resources to self-contained JS at build time so the
+      // runtime never needs an in-Worker bundler to run them.
+      let size = file.size;
+      if (
+        kind === "script" &&
+        encoding === "text" &&
+        isCompilableSkillScript(file.path)
+      ) {
+        try {
+          content = (await compileSkillScript(file.absolutePath)).content;
+          precompiled = true;
+          // The compiled bundle (which may inline sibling files and bundled
+          // dependencies) is what actually ships, so report its size for the
+          // bundle-size warnings rather than the raw source size.
+          size = Buffer.byteLength(content);
+        } catch (error) {
+          warn?.(
+            `Failed to compile skill script "${file.path}": ${
+              error instanceof Error ? error.message : String(error)
+            }. Skill scripts must be self-contained, compilable modules to run at runtime.`
+          );
+        }
+      }
+
       return {
         path: file.path,
-        kind: resourceKind(file.path),
-        size: file.size,
+        kind,
+        size,
         encoding,
         mimeType: resourceMimeType(file.path),
-        content:
-          encoding === "base64" ? bytes.toString("base64") : bytes.toString()
+        content,
+        precompiled
       };
     })
   );

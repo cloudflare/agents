@@ -23,6 +23,32 @@ export interface StoredCompaction {
   createdAt: string;
 }
 
+/** Per-row info for the active branch path, root → leaf order. */
+export interface HistoryRowStat {
+  id: string;
+  /** Stored message role (e.g. "user" / "assistant"). */
+  role: string;
+  /** Serialized content size of the stored row in bytes. */
+  bytes: number;
+}
+
+/** Result of a byte-budgeted history read. */
+export interface RecentHistoryResult {
+  /**
+   * The most recent messages on the active branch path whose summed stored
+   * content size fits `maxContentBytes`, root → leaf order, with compaction
+   * overlays applied within the window. The window always covers at least
+   * the leaf row (and `minRecentMessages` rows when requested), but rows
+   * whose stored content fails to parse are skipped — so a corrupt leaf can
+   * yield fewer messages than the window covers.
+   */
+  messages: SessionMessage[];
+  /** True when older messages were left out to satisfy the byte budget. */
+  truncated: boolean;
+  /** Summed stored content size of the FULL path, in bytes. */
+  totalContentBytes: number;
+}
+
 /**
  * Session storage provider.
  * Messages are tree-structured via parentId for branching.
@@ -47,6 +73,34 @@ export interface SessionProvider {
   getBranches(messageId: string): SessionMessage[] | Promise<SessionMessage[]>;
 
   getPathLength(leafId?: string | null): number | Promise<number>;
+
+  /**
+   * Optional: byte-budgeted read of the most recent messages on the active
+   * branch path. Lets hosts hydrate a bounded window instead of the full
+   * transcript, so wake-time memory scales with the budget rather than total
+   * session history (#1710). Providers that don't implement it fall back to
+   * a full `getHistory()` read in `Session.getRecentHistory()`.
+   *
+   * `minRecentMessages` (default 1) is a floor on the window size: the most
+   * recent N rows are always included even when they exceed the byte budget.
+   * Hosts use this to guarantee the window never shrinks below the recent
+   * span their model context assembly expects (rows are individually capped
+   * at write time, so the floor keeps memory bounded).
+   */
+  getRecentHistory?(
+    leafId: string | null | undefined,
+    maxContentBytes: number,
+    minRecentMessages?: number
+  ): RecentHistoryResult | Promise<RecentHistoryResult>;
+
+  /**
+   * Optional: per-row stored sizes for the active branch path (root → leaf),
+   * WITHOUT loading message content. Lets hosts find oversized rows (e.g.
+   * inline base64 media) and process them one at a time with bounded memory.
+   */
+  getHistoryRowStats?(
+    leafId?: string | null
+  ): HistoryRowStat[] | Promise<HistoryRowStat[]>;
 
   // ── Write ──────────────────────────────────────────────────────
 

@@ -62,7 +62,7 @@ export class ChatAgent extends Agent<Env> {
 
   private getAI() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.6",
+      "@cf/moonshotai/kimi-k2.7-code",
       { sessionAffinity: this.sessionAffinity }
     );
   }

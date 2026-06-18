@@ -7,6 +7,31 @@ import {
 import type { Workspace } from "./filesystem";
 import { createWorkspaceStateBackend } from "./workspace";
 import { STATE_TYPES } from "./prompt";
+import { STATE_METHODS, callStateMethod, paramNames } from "./state-methods";
+
+// The advertised sandbox API (STATE_TYPES) is object-args:
+// `state.readFile({ path })`. Detect that shape — a single plain object whose
+// keys are a subset of the method's parameter names — and route it through
+// the shared object→positional mapping. Anything else is treated as the
+// original positional call, so pre-object-args sandbox code keeps working.
+function isObjectArgsCall(
+  method: StateMethodName,
+  args: unknown[]
+): args is [Record<string, unknown>] {
+  if (args.length !== 1) return false;
+  const [first] = args;
+  if (
+    typeof first !== "object" ||
+    first === null ||
+    Array.isArray(first) ||
+    first instanceof Uint8Array
+  ) {
+    return false;
+  }
+  const names = paramNames(STATE_METHODS[method]);
+  const keys = Object.keys(first);
+  return keys.length > 0 && keys.every((key) => names.includes(key));
+}
 
 /**
  * Create state tools from a StateBackend.
@@ -22,8 +47,14 @@ function createStateToolProvider(backend: StateBackend): ToolProvider {
     if (typeof fn !== "function") continue;
 
     tools[method] = {
-      description: `state.${method}`,
-      execute: (fn as (...args: unknown[]) => Promise<unknown>).bind(backend)
+      description: STATE_METHODS[method].description,
+      execute: (...args: unknown[]) =>
+        isObjectArgsCall(method, args)
+          ? callStateMethod(backend, method, args[0])
+          : (fn as (...args: unknown[]) => Promise<unknown>).apply(
+              backend,
+              args
+            )
     };
   }
 
@@ -62,5 +93,14 @@ export function stateTools(workspace: Workspace): ToolProvider {
 export function stateToolsFromBackend(backend: StateBackend): ToolProvider {
   return createStateToolProvider(backend);
 }
+
+// ── Connector model (createCodemodeRuntime) ───────────────────────────
+export { StateConnector, stateConnector } from "./connector";
+export {
+  STATE_METHODS,
+  callStateMethod,
+  objectArgsToPositional,
+  type StateMethodSpec
+} from "./state-methods";
 
 export type { StateBackend, ToolProvider };

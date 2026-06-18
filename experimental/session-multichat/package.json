@@ -10,13 +10,13 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/kumo": "^2.4.1",
+    "@cloudflare/kumo": "^2.5.2",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "ai": "^6.0.196",
+    "ai": "^6.0.202",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "workers-ai-provider": "*"
+    "workers-ai-provider": "^3.2.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",

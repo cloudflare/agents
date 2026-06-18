@@ -1,0 +1,33 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "browser-quick-actions",
+  "main": "src/server.ts",
+  // Quick Actions (`env.BROWSER.quickAction`) require compatibility_date
+  // 2026-03-24 or later — newer than the repo default.
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  // Quick Actions run on the real Browser Run service, so the binding runs in
+  // remote mode even during local `vite dev`.
+  "browser": { "binding": "BROWSER", "remote": true },
+  // Workers AI powers the "Ask AI" action, where the model autonomously calls
+  // the Quick Action tools to answer a question about a page.
+  "ai": { "binding": "AI" },
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "QuickActionsAgent",
+        "name": "QuickActionsAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["QuickActionsAgent"],
+      "tag": "v1"
+    }
+  ]
+}

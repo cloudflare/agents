@@ -20,8 +20,15 @@ export {
   ThinkRecoveryTestAgent,
   ThinkNonRecoveryTestAgent,
   ThinkAgentToolParent,
-  StuckThinkAgentToolChild
+  StuckThinkAgentToolChild,
+  ThinkOnStartReconcileFailureAgent,
+  ThinkOnStartHydrationFailureAgent,
+  ThinkWindowedHydrationAgent,
+  ThinkMediaEvictionAgent,
+  ThinkMediaEvictionAutoAgent
 } from "./think-session";
+export { ThinkExecuteToolAgent } from "./execute-tool";
+export { ThinkExecuteHitlAgent } from "./execute-hitl";
 export { ThinkFiberTestAgent } from "./fiber";
 export { ThinkClientToolsAgent } from "./client-tools";
 export { ThinkExtensionHookAgent } from "./extension-hooks";

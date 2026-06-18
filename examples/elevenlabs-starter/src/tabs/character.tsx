@@ -475,57 +475,63 @@ function ChatPhase({ agent }: { agent: AgentHandle }) {
 
             return (
               <div key={message.id} className="space-y-2">
-                {/* Tool parts */}
-                {message.parts.filter(isToolUIPart).map((part) => {
-                  const toolName = getToolName(part);
-                  return (
-                    <div key={part.toolCallId} className="flex justify-start">
-                      <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
-                        <div className="flex items-center gap-2 mb-1">
-                          <GearIcon
-                            size={14}
-                            className={
-                              part.state === "output-available"
-                                ? "text-kumo-inactive"
-                                : "text-kumo-inactive animate-spin"
-                            }
-                          />
-                          <Text size="xs" variant="secondary" bold>
-                            {toolName}
-                          </Text>
-                          <Badge variant="secondary">
-                            {part.state === "output-available"
-                              ? "Done"
-                              : "Running"}
-                          </Badge>
-                        </div>
-                        {part.state === "output-available" && (
-                          <pre className="text-xs text-kumo-subtle font-mono whitespace-pre-wrap max-h-32 overflow-auto">
-                            {JSON.stringify(part.output, null, 2)}
-                          </pre>
-                        )}
-                      </Surface>
-                    </div>
-                  );
-                })}
+                {/* Parts render in chronological order */}
+                {message.parts.map((part, partIndex) => {
+                  // Tool parts
+                  if (isToolUIPart(part)) {
+                    const toolName = getToolName(part);
+                    const isDone = part.state === "output-available";
+                    const isError = part.state === "output-error";
+                    const errorText = (part as { errorText?: string })
+                      .errorText;
+                    return (
+                      <div key={part.toolCallId} className="flex justify-start">
+                        <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
+                          <div className="flex items-center gap-2 mb-1">
+                            <GearIcon
+                              size={14}
+                              className={
+                                isDone || isError
+                                  ? "text-kumo-inactive"
+                                  : "text-kumo-inactive animate-spin"
+                              }
+                            />
+                            <Text size="xs" variant="secondary" bold>
+                              {toolName}
+                            </Text>
+                            <Badge
+                              variant={isError ? "destructive" : "secondary"}
+                            >
+                              {isError ? "Error" : isDone ? "Done" : "Running"}
+                            </Badge>
+                          </div>
+                          {isDone && (
+                            <pre className="text-xs text-kumo-subtle font-mono whitespace-pre-wrap max-h-32 overflow-auto">
+                              {JSON.stringify(part.output, null, 2)}
+                            </pre>
+                          )}
+                          {isError && errorText && (
+                            <pre className="text-xs text-kumo-danger font-mono whitespace-pre-wrap max-h-32 overflow-auto">
+                              {errorText}
+                            </pre>
+                          )}
+                        </Surface>
+                      </div>
+                    );
+                  }
 
-                {/* Reasoning parts */}
-                {message.parts
-                  .filter(
-                    (p) =>
-                      p.type === "reasoning" &&
-                      (p as { text?: string }).text?.trim()
-                  )
-                  .map((part, i) => {
+                  // Reasoning parts
+                  if (part.type === "reasoning") {
                     const reasoning = part as {
                       type: "reasoning";
                       text: string;
                       state?: "streaming" | "done";
                     };
+                    if (!reasoning.text?.trim()) return null;
                     const isDone = reasoning.state === "done" || !isStreaming;
                     return (
                       <div
-                        key={`reason-${message.id}-${i}`}
+                        key={`reason-${message.id}-${partIndex}`}
                         className="flex justify-start"
                       >
                         <details className="max-w-[85%] w-full" open={!isDone}>
@@ -554,19 +560,17 @@ function ChatPhase({ agent }: { agent: AgentHandle }) {
                         </details>
                       </div>
                     );
-                  })}
+                  }
 
-                {/* Text parts */}
-                {message.parts
-                  .filter((p) => p.type === "text")
-                  .map((part, i) => {
+                  // Text parts
+                  if (part.type === "text") {
                     const text = (part as { text: string }).text;
                     if (!text) return null;
 
                     if (isUser) {
                       return (
                         <div
-                          key={`${message.id}-${i}`}
+                          key={`${message.id}-${partIndex}`}
                           className="flex justify-end"
                         >
                           <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-br-md bg-kumo-contrast text-kumo-inverse">
@@ -578,7 +582,7 @@ function ChatPhase({ agent }: { agent: AgentHandle }) {
 
                     return (
                       <div
-                        key={`${message.id}-${i}`}
+                        key={`${message.id}-${partIndex}`}
                         className="flex justify-start gap-2 items-end"
                       >
                         <div className="max-w-[80%] rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default">
@@ -600,7 +604,10 @@ function ChatPhase({ agent }: { agent: AgentHandle }) {
                         )}
                       </div>
                     );
-                  })}
+                  }
+
+                  return null;
+                })}
               </div>
             );
           })}

@@ -157,3 +157,105 @@ export function isErrorRetryable(err: unknown): boolean {
     !msg.includes("Durable Object is overloaded")
   );
 }
+
+/**
+ * The "superseded isolate" platform messages — the invocation is running on an
+ * isolate the platform has replaced with a new version (a deploy / code
+ * update). For the rest of that invocation every operation throws the same
+ * error (code never reloads mid-invocation), so in-process retries are futile;
+ * but the next fresh invocation runs the new code and succeeds.
+ *
+ * workerd surfaces this as a plain `Error` with one of a few messages, all the
+ * same failure class — a message match is the only signal:
+ *   - "Durable Object reset because its code was updated."  (DO storage op on a
+ *     superseded isolate / deploy bounce)
+ *   - "This script has been upgraded. Please send a new request to connect to
+ *     the new version."  (a stub/connection to a superseded script; the message
+ *     literally instructs the caller to retry on the new version)
+ *
+ * The match stays close to the verbatim platform strings (rather than a loose
+ * "upgraded"/"reset" substring) so an ordinary application error that happens
+ * to mention those words is NOT misclassified as a supersede.
+ */
+const SUPERSEDED_ISOLATE_PATTERN =
+  /reset because its code was updated|this script has been upgraded/i;
+
+/**
+ * The "Network connection lost." platform transient — the connection between
+ * the isolate and its storage (or another DO) dropped. Unlike a supersede this
+ * MAY succeed on an in-process retry (a momentary blip), so it must not skip
+ * the in-process retry budget — but during a deploy-reset window it never
+ * succeeds in-process and surfaces interleaved with the supersede messages
+ * (SQL ops throw `SqlError: SQL query failed: Network connection lost.` while
+ * KV ops throw the reset message), so on retry exhaustion it must be treated
+ * as the platform's failure, not the callback's.
+ */
+const CONNECTION_LOST_PATTERN = /network connection lost/i;
+
+function errorMessageOf(error: unknown): string {
+  return error instanceof Error
+    ? error.message
+    : typeof error === "string"
+      ? error
+      : "";
+}
+
+/**
+ * Iterate an error and its `cause` chain (depth-limited so a cyclic chain
+ * can't spin). Wrappers like `SqlError` carry the original platform error in
+ * `cause` and may not propagate signal properties (e.g. the CF `retryable`
+ * flag), so classification must look through them.
+ */
+function* selfAndCauses(error: unknown): Generator<unknown> {
+  let current = error;
+  for (let depth = 0; depth < 8 && current != null; depth++) {
+    yield current;
+    current =
+      typeof current === "object"
+        ? (current as { cause?: unknown }).cause
+        : undefined;
+  }
+}
+
+/**
+ * Whether an error (or anything in its `cause` chain) is a transient
+ * "superseded isolate" failure — see `SUPERSEDED_ISOLATE_PATTERN`. In-process
+ * retries are futile for this class; the work must be deferred to a fresh
+ * invocation, which runs the new code and succeeds.
+ */
+export function isDurableObjectCodeUpdateReset(error: unknown): boolean {
+  for (const e of selfAndCauses(error)) {
+    if (SUPERSEDED_ISOLATE_PATTERN.test(errorMessageOf(e))) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether an error (or anything in its `cause` chain) is a transient failure
+ * of the PLATFORM rather than of the code that threw it:
+ *
+ *   - a superseded-isolate reset ("reset because its code was updated" /
+ *     "this script has been upgraded") — a deploy replaced the isolate;
+ *   - an error the platform itself flags `retryable: true` (excluding
+ *     overloaded errors, where retrying the same object won't help) — see
+ *     `isErrorRetryable`;
+ *   - "Network connection lost." — the storage/stub connection dropped. The
+ *     CF `retryable` flag does not survive error wrappers (e.g. `SqlError`
+ *     copies only the message + `cause`) and is absent in some local-dev
+ *     shapes, so the verbatim message is matched as well.
+ *
+ * Used to decide whether failed work should be RE-RUN LATER (platform
+ * transient — the same work succeeds once the platform recovers, typically
+ * seconds after a deploy) versus ABANDONED as genuinely failing (application
+ * error — re-running yields the same failure). A genuine application error
+ * carries none of these signals, so it is never misclassified by this check.
+ */
+export function isPlatformTransientError(error: unknown): boolean {
+  for (const e of selfAndCauses(error)) {
+    const message = errorMessageOf(e);
+    if (SUPERSEDED_ISOLATE_PATTERN.test(message)) return true;
+    if (CONNECTION_LOST_PATTERN.test(message)) return true;
+    if (isErrorRetryable(e)) return true;
+  }
+  return false;
+}

@@ -274,9 +274,9 @@ function HelperPartRenderer({ part }: { part: HelperParts[number] }) {
             {JSON.stringify(input, null, 2)}
           </pre>
         )}
-        {isError && errorText && (
+        {isError && (
           <pre className="mt-1 text-[11px] text-red-500 whitespace-pre-wrap wrap-break-word">
-            {errorText}
+            {errorText ?? "Tool execution failed"}
           </pre>
         )}
         {isDone && output != null && (
@@ -457,13 +457,13 @@ function ToolPart({
         </div>
       )}
 
-      {isError && errorText && (
+      {isError && (
         <div className="mt-2">
-          <span className="text-[10px] uppercase tracking-wider text-kumo-inactive font-semibold">
+          <span className="text-[10px] uppercase tracking-wider text-red-500 font-semibold">
             Error
           </span>
-          <pre className="mt-1 text-xs text-kumo-default whitespace-pre-wrap wrap-break-word">
-            {errorText}
+          <pre className="mt-1 text-xs text-red-500 whitespace-pre-wrap wrap-break-word">
+            {errorText ?? "Tool execution failed"}
           </pre>
         </div>
       )}

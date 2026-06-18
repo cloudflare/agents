@@ -231,6 +231,44 @@ export type AgentObservabilityEvent =
       }
     >
   | BaseEvent<
+      "chat:onstart:degraded",
+      {
+        /**
+         * Internal onStart step that failed and was skipped so the agent
+         * could still come up instead of bricking the DO (#1710).
+         */
+        step:
+          | "transcript-hydration"
+          | "scheduled-task-reconcile"
+          | "durable-work-recovery";
+        error: string;
+      }
+    >
+  | BaseEvent<
+      "chat:hydration:windowed",
+      {
+        /** Stored size of the full active path, in bytes. */
+        totalContentBytes: number;
+        /** The configured `hydrationByteBudget`. */
+        budgetBytes: number;
+        /** Number of recent messages hydrated into the in-memory window. */
+        hydratedMessages: number;
+      }
+    >
+  | BaseEvent<
+      "chat:media:evicted",
+      {
+        /** Stored messages rewritten during this eviction pass. */
+        messages: number;
+        /** Individual oversized parts evicted across those messages. */
+        parts: number;
+        /** Total bytes removed from the stored transcript. */
+        bytes: number;
+        /** Bytes preserved as workspace files (≤ `bytes`). */
+        externalizedBytes: number;
+      }
+    >
+  | BaseEvent<
       "chat:stream:stalled",
       {
         requestId: string;

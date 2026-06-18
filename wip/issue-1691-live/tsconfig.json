@@ -1,0 +1,7 @@
+{
+  "extends": "agents/tsconfig",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "node"]
+  },
+  "include": ["src", "scripts"]
+}

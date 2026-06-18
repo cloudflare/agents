@@ -1,7 +1,7 @@
 {
   "name": "fiber-e2e-test",
   "main": "worker.ts",
-  "compatibility_date": "2026-01-28",
+  "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
@@ -18,6 +18,32 @@
       {
         "name": "SubAgentFiberChild",
         "class_name": "SubAgentFiberChild"
+      },
+      {
+        "name": "PoisonRowAgent",
+        "class_name": "PoisonRowAgent"
+      },
+      {
+        "name": "ScanDeadlineAgent",
+        "class_name": "ScanDeadlineAgent"
+      },
+      {
+        "name": "ConcurrentFiberAgent",
+        "class_name": "ConcurrentFiberAgent"
+      },
+      {
+        "name": "PoisonBackoffAgent",
+        "class_name": "PoisonBackoffAgent"
+      },
+      {
+        "name": "FacetRecoveryParent",
+        "class_name": "FacetRecoveryParent"
+      },
+      // Test-harness-only binding (facet child): registered for ctx.exports,
+      // not migrated as its own SQLite class (mirrors SubAgentFiberChild).
+      {
+        "name": "FacetRecoveryChild",
+        "class_name": "FacetRecoveryChild"
       }
     ]
   },
@@ -25,6 +51,18 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["RunFiberTestAgent", "SubAgentFiberParent"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "PoisonRowAgent",
+        "ScanDeadlineAgent",
+        "ConcurrentFiberAgent"
+      ]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["PoisonBackoffAgent", "FacetRecoveryParent"]
     }
   ]
 }

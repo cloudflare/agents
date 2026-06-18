@@ -33,7 +33,7 @@ class DemoToolAgent extends Think<Env> {
 
   override getModel(): LanguageModel {
     const workersai = createWorkersAI({ binding: this.env.AI });
-    return workersai("@cf/moonshotai/kimi-k2.5", {
+    return workersai("@cf/moonshotai/kimi-k2.7-code", {
       sessionAffinity: this.sessionAffinity
     });
   }
@@ -144,7 +144,7 @@ export class Assistant extends Think<Env> {
 
   override getModel(): LanguageModel {
     const workersai = createWorkersAI({ binding: this.env.AI });
-    return workersai("@cf/moonshotai/kimi-k2.5", {
+    return workersai("@cf/moonshotai/kimi-k2.7-code", {
       sessionAffinity: this.sessionAffinity
     });
   }

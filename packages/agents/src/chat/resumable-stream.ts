@@ -28,8 +28,28 @@ const CHUNK_BUFFER_MAX_SIZE = 100;
 const SEGMENT_MAX_BYTES = 512_000;
 /** Default cleanup interval for old streams (ms) - every 10 minutes */
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
-/** Default age threshold for cleaning up completed streams (ms) - 24 hours */
-const CLEANUP_AGE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+/**
+ * Retention for completed/errored stream buffers, measured from completion.
+ *
+ * The assistant message is persisted separately (`cf_ai_chat_agent_messages`),
+ * so once a stream completes its buffer is no longer the source of truth — it
+ * is only a brief reconnect-and-replay grace window: long enough to cover a
+ * client that dropped at the completion boundary and reconnects to replay the
+ * just-finished stream, and to deliver a pending terminal error frame on a
+ * resumed stream (#1645). It is deliberately short (not the chat's lifetime)
+ * so idle/one-off chat DOs don't accumulate stale buffers (#1706).
+ */
+const COMPLETED_RETENTION_MS = 10 * 60 * 1000;
+/**
+ * Retention for abandoned `streaming` rows, measured from LAST chunk activity.
+ *
+ * Generous relative to {@link COMPLETED_RETENTION_MS}: an interrupted turn must
+ * have ample time to be resumed by a reconnecting client or healed by fiber
+ * recovery before its buffer is reaped. Only a stream that has produced no
+ * chunk for this long is treated as truly dead. Keyed off last activity (not
+ * start time) so a long but still-active stream is never swept mid-flight.
+ */
+const ABANDONED_STREAM_RETENTION_MS = 60 * 60 * 1000;
 /** Shared encoder for UTF-8 byte length measurement */
 const textEncoder = new TextEncoder();
 
@@ -70,6 +90,15 @@ function isWebSocketClosedSendError(error: unknown): boolean {
   );
 }
 
+function isMissingMetadataColumnError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    (message.includes("message_id") || message.includes("is_continuation")) &&
+    (message.toLowerCase().includes("no such column") ||
+      message.toLowerCase().includes("has no column named"))
+  );
+}
+
 /**
  * Stored stream chunk for resumable streaming
  */
@@ -90,6 +119,23 @@ type StreamMetadata = {
   status: "streaming" | "completed" | "error";
   created_at: number;
   completed_at: number | null;
+  /**
+   * The assistant message id this stream is producing, captured when the
+   * stream starts. This is the SAME id the live path persists under, so orphan
+   * recovery (#1691) can re-associate reconstructed chunks with the correct
+   * message even when the provider stream carries no `start.messageId`. Null on
+   * legacy rows written before this column existed.
+   */
+  message_id: string | null;
+  /**
+   * Whether this stream is a continuation (appends to the last assistant
+   * message rather than starting a new one). Live broadcast frames carry
+   * `continuation: true`, and replay frames must too (#1733): without it a
+   * reconnecting client treats a replayed continuation as a fresh message
+   * and drops the parts streamed before the continuation. SQLite has no
+   * boolean type — 1/0/null (legacy rows predating the column).
+   */
+  is_continuation: number | null;
 };
 
 /**
@@ -118,6 +164,13 @@ export class ResumableStream {
    */
   private _isLive = false;
 
+  /**
+   * Whether the active stream is a continuation. Mirrors the durable
+   * `is_continuation` column so replay frames can carry the flag without a
+   * per-replay query; restored from SQLite after hibernation in restore().
+   */
+  private _activeIsContinuation = false;
+
   private _chunkBuffer: Array<{ streamId: string; body: string }> = [];
   private _chunkBufferBytes = 0;
   private _isFlushingChunks = false;
@@ -138,7 +191,9 @@ export class ResumableStream {
       request_id text not null,
       status text not null,
       created_at integer not null,
-      completed_at integer
+      completed_at integer,
+      message_id text,
+      is_continuation integer
     )`;
 
     this.sql`create index if not exists idx_stream_chunks_stream_id 
@@ -146,6 +201,32 @@ export class ResumableStream {
 
     // Restore any active stream from a previous session
     this.restore();
+  }
+
+  /**
+   * Add metadata columns for rows created before they existed. Constructors
+   * intentionally do not run this: most wakes never start a stream, so paying a
+   * schema-introspection read every time is wasteful. New tables include these
+   * columns in CREATE TABLE; legacy tables migrate lazily only if a write/read
+   * discovers the columns are missing.
+   */
+  private _migrateMetadataColumns() {
+    const columns =
+      this.sql<{ name: string }>`
+        select name from pragma_table_info('cf_ai_chat_stream_metadata')
+      ` ?? [];
+    const hasMessageId = columns.some((column) => column.name === "message_id");
+    if (!hasMessageId) {
+      this
+        .sql`alter table cf_ai_chat_stream_metadata add column message_id text`;
+    }
+    const hasIsContinuation = columns.some(
+      (column) => column.name === "is_continuation"
+    );
+    if (!hasIsContinuation) {
+      this
+        .sql`alter table cf_ai_chat_stream_metadata add column is_continuation integer`;
+    }
   }
 
   // ── State accessors ────────────────────────────────────────────────
@@ -178,7 +259,10 @@ export class ResumableStream {
    * @param requestId - The unique ID of the chat request
    * @returns The generated stream ID
    */
-  start(requestId: string): string {
+  start(
+    requestId: string,
+    options: { messageId?: string; continuation?: boolean } = {}
+  ): string {
     // Flush any pending chunks from previous streams to prevent mixing
     this.flushBuffer();
 
@@ -187,13 +271,46 @@ export class ResumableStream {
     this._activeRequestId = requestId;
     this._segmentIndex = 0;
     this._isLive = true;
+    this._activeIsContinuation = options.continuation ?? false;
 
-    this.sql`
-      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      values (${streamId}, ${requestId}, 'streaming', ${Date.now()})
-    `;
+    const messageId = options.messageId ?? null;
+
+    try {
+      this.sql`
+        insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, message_id, is_continuation)
+        values (${streamId}, ${requestId}, 'streaming', ${Date.now()}, ${messageId}, ${this._activeIsContinuation ? 1 : 0})
+      `;
+    } catch (error) {
+      if (!isMissingMetadataColumnError(error)) throw error;
+      this._migrateMetadataColumns();
+      this.sql`
+        insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, message_id, is_continuation)
+        values (${streamId}, ${requestId}, 'streaming', ${Date.now()}, ${messageId}, ${this._activeIsContinuation ? 1 : 0})
+      `;
+    }
 
     return streamId;
+  }
+
+  /**
+   * The assistant message id an orphaned stream was producing — the same id the
+   * live path persists under, so recovery re-associates reconstructed chunks
+   * with the correct message (#1691). Returns null when the row is missing or
+   * is a legacy row written before the `message_id` column existed.
+   */
+  getStreamMessageId(streamId: string): string | null {
+    let rows: Array<{ message_id: string | null }>;
+    try {
+      rows = this.sql<{ message_id: string | null }>`
+        select message_id from cf_ai_chat_stream_metadata
+        where id = ${streamId}
+      `;
+    } catch (error) {
+      if (!isMissingMetadataColumnError(error)) throw error;
+      return null;
+    }
+    if (!rows || rows.length === 0) return null;
+    return rows[0].message_id ?? null;
   }
 
   /**
@@ -212,6 +329,7 @@ export class ResumableStream {
     this._activeRequestId = null;
     this._segmentIndex = 0;
     this._isLive = false;
+    this._activeIsContinuation = false;
 
     // Periodically clean up old streams
     this._maybeCleanupOldStreams();
@@ -233,6 +351,7 @@ export class ResumableStream {
     this._activeRequestId = null;
     this._segmentIndex = 0;
     this._isLive = false;
+    this._activeIsContinuation = false;
   }
 
   // ── Chunk storage ──────────────────────────────────────────────────
@@ -353,6 +472,12 @@ export class ResumableStream {
 
     this.flushBuffer();
 
+    // Replay frames must mirror what a live client observed — including the
+    // continuation flag (#1733): a replayed continuation `start` that lacks
+    // it would be treated as a fresh message by the client and drop the
+    // parts streamed before the continuation.
+    const continuation = this._activeIsContinuation;
+
     const chunks = this.sql<StreamChunk>`
       select * from cf_ai_chat_stream_chunks 
       where stream_id = ${streamId} 
@@ -369,7 +494,8 @@ export class ResumableStream {
               done: false,
               id: requestId,
               type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
-              replay: true
+              replay: true,
+              ...(continuation && { continuation: true })
             })
           )
         ) {
@@ -391,7 +517,8 @@ export class ResumableStream {
           done: true,
           id: requestId,
           type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
-          replay: true
+          replay: true,
+          ...(continuation && { continuation: true })
         })
       );
       return null;
@@ -411,7 +538,8 @@ export class ResumableStream {
           done: true,
           id: requestId,
           type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
-          replay: true
+          replay: true,
+          ...(continuation && { continuation: true })
         })
       );
       this.complete(streamId);
@@ -430,7 +558,8 @@ export class ResumableStream {
         id: requestId,
         type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
         replay: true,
-        replayComplete: true
+        replayComplete: true,
+        ...(continuation && { continuation: true })
       })
     );
     return null;
@@ -440,21 +569,90 @@ export class ResumableStream {
     connection: Connection,
     requestId: string
   ): boolean {
+    const stream = this._latestStreamForRequest(requestId, "completed");
+    if (!stream) return false;
+
+    const continuation = stream.is_continuation === 1;
+    if (
+      !this._replayStoredChunks(connection, stream.id, requestId, continuation)
+    ) {
+      return false;
+    }
+
+    return sendIfOpen(
+      connection,
+      JSON.stringify({
+        body: "",
+        done: true,
+        id: requestId,
+        type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+        replay: true,
+        ...(continuation && { continuation: true })
+      })
+    );
+  }
+
+  /**
+   * Replay the stored chunks of an errored stream for a request, WITHOUT a
+   * terminal frame — the caller follows up with the `done: true, error: true`
+   * frame carrying the durable terminal record's error text, mirroring what a
+   * live client observed (content chunks, then the error). Without this, a
+   * client that missed broadcast frames while disconnected has no other
+   * channel to the pre-error partial content: the server does not push
+   * messages on connect, and {@link replayCompletedChunksByRequestId} only
+   * serves `completed` streams (#1575).
+   *
+   * Returns true when the caller should proceed to send its terminal frame:
+   * either no errored stream existed (nothing to replay) or its chunks were
+   * replayed successfully. Returns false only when a send failed mid-replay,
+   * signalling the caller to skip the terminal frame — the connection is gone
+   * and the next reconnect retries the whole sequence.
+   */
+  replayErroredChunksByRequestId(
+    connection: Connection,
+    requestId: string
+  ): boolean {
+    const stream = this._latestStreamForRequest(requestId, "error");
+    if (!stream) return true;
+
+    return this._replayStoredChunks(
+      connection,
+      stream.id,
+      requestId,
+      stream.is_continuation === 1
+    );
+  }
+
+  /** Latest stream row for a request with the given terminal status. */
+  private _latestStreamForRequest(
+    requestId: string,
+    status: "completed" | "error"
+  ): StreamMetadata | undefined {
     this.flushBuffer();
 
     const streams = this.sql<StreamMetadata>`
       select * from cf_ai_chat_stream_metadata
       where request_id = ${requestId}
-      and status = 'completed'
+      and status = ${status}
       order by created_at desc
       limit 1
     `;
-    const stream = streams[0];
-    if (!stream) return false;
+    return streams[0];
+  }
 
+  /**
+   * Send a finished stream's stored chunks to a connection as replay frames.
+   * Returns false if the connection closed mid-replay.
+   */
+  private _replayStoredChunks(
+    connection: Connection,
+    streamId: string,
+    requestId: string,
+    continuation = false
+  ): boolean {
     const chunks = this.sql<StreamChunk>`
       select * from cf_ai_chat_stream_chunks
-      where stream_id = ${stream.id}
+      where stream_id = ${streamId}
       order by chunk_index asc
     `;
 
@@ -468,7 +666,8 @@ export class ResumableStream {
               done: false,
               id: requestId,
               type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
-              replay: true
+              replay: true,
+              ...(continuation && { continuation: true })
             })
           )
         ) {
@@ -477,16 +676,7 @@ export class ResumableStream {
       }
     }
 
-    return sendIfOpen(
-      connection,
-      JSON.stringify({
-        body: "",
-        done: true,
-        id: requestId,
-        type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
-        replay: true
-      })
-    );
+    return true;
   }
 
   // ── Restore / cleanup ──────────────────────────────────────────────
@@ -508,6 +698,10 @@ export class ResumableStream {
       const stream = activeStreams[0];
       this._activeStreamId = stream.id;
       this._activeRequestId = stream.request_id;
+      // Rehydrate the continuation flag so an orphaned continuation stream
+      // replayed after hibernation still carries `continuation: true` on
+      // its frames (#1733). Legacy rows predate the column → null → false.
+      this._activeIsContinuation = stream.is_continuation === 1;
 
       // Resume the segment row-ordering index past the highest stored value.
       const lastChunk = this.sql<{ max_index: number }>`
@@ -533,6 +727,7 @@ export class ResumableStream {
     this._activeStreamId = null;
     this._activeRequestId = null;
     this._segmentIndex = 0;
+    this._activeIsContinuation = false;
   }
 
   /**
@@ -544,6 +739,30 @@ export class ResumableStream {
     this.sql`drop table if exists cf_ai_chat_stream_metadata`;
     this._activeStreamId = null;
     this._activeRequestId = null;
+    this._activeIsContinuation = false;
+  }
+
+  /**
+   * Force a sweep of aged stream buffers now, bypassing the lazy interval
+   * gate used by {@link _maybeCleanupOldStreams}. Intended to be driven by an
+   * alarm so idle/hibernated chat DOs still reclaim buffers even when no
+   * further stream ever completes to trigger the lazy path.
+   */
+  cleanup(now: number = Date.now()): void {
+    this._lastCleanupTime = now;
+    this._sweepOldStreams(now);
+  }
+
+  /**
+   * True if any stream rows remain at all. Used by alarm-driven cleanup to
+   * decide whether to re-arm: once no rows remain there is nothing left to
+   * sweep, so the DO can stop waking itself.
+   */
+  hasReclaimableStreams(): boolean {
+    const rows = this.sql<{ n: number }>`
+      select count(*) as n from cf_ai_chat_stream_metadata
+    `;
+    return (rows?.[0]?.n ?? 0) > 0;
   }
 
   // ── Internal ───────────────────────────────────────────────────────
@@ -554,34 +773,64 @@ export class ResumableStream {
       return;
     }
     this._lastCleanupTime = now;
+    this._sweepOldStreams(now);
+  }
 
-    const cutoff = now - CLEANUP_AGE_THRESHOLD_MS;
+  /** Delete completed/errored buffers past the completion grace window, plus
+   *  abandoned "streaming" rows past the stale-in-flight window. The two use
+   *  different retentions: a completed buffer is redundant with the persisted
+   *  message and needs only a brief replay grace, whereas an in-flight buffer
+   *  must outlive resume/recovery before it is presumed dead. */
+  private _sweepOldStreams(now: number) {
+    const completedCutoff = now - COMPLETED_RETENTION_MS;
     this.sql`
       delete from cf_ai_chat_stream_chunks 
       where stream_id in (
         select id from cf_ai_chat_stream_metadata 
-        where status in ('completed', 'error') and completed_at < ${cutoff}
+        where status in ('completed', 'error') and completed_at < ${completedCutoff}
       )
     `;
     this.sql`
       delete from cf_ai_chat_stream_metadata 
-      where status in ('completed', 'error') and completed_at < ${cutoff}
+      where status in ('completed', 'error') and completed_at < ${completedCutoff}
     `;
 
     // Clean up abandoned "streaming" rows. These are orphaned streams that
     // were never completed or recovered (e.g. non-durable agents that never
     // reconnected). By this point, fiber recovery has already had its chance
     // to claim them — safe to delete.
+    //
+    // "Abandoned" is keyed off LAST ACTIVITY (the most recent chunk write),
+    // not the stream's start time: a long-running stream that is still
+    // actively emitting chunks must never be swept mid-flight just because it
+    // started long ago. A row with no chunks falls back to its start time.
+    // Note `created_at <= max(chunk.created_at)` always (the row is inserted
+    // before any chunk), so this set is stable across the two deletes even
+    // though the first removes the chunks the second's subquery reads.
+    const abandonedCutoff = now - ABANDONED_STREAM_RETENTION_MS;
     this.sql`
       delete from cf_ai_chat_stream_chunks
       where stream_id in (
-        select id from cf_ai_chat_stream_metadata
-        where status = 'streaming' and created_at < ${cutoff}
+        select m.id from cf_ai_chat_stream_metadata m
+        where m.status = 'streaming'
+          and coalesce(
+            (select max(c.created_at) from cf_ai_chat_stream_chunks c
+             where c.stream_id = m.id),
+            m.created_at
+          ) < ${abandonedCutoff}
       )
     `;
     this.sql`
       delete from cf_ai_chat_stream_metadata
-      where status = 'streaming' and created_at < ${cutoff}
+      where id in (
+        select m.id from cf_ai_chat_stream_metadata m
+        where m.status = 'streaming'
+          and coalesce(
+            (select max(c.created_at) from cf_ai_chat_stream_chunks c
+             where c.stream_id = m.id),
+            m.created_at
+          ) < ${abandonedCutoff}
+      )
     `;
   }
 
@@ -648,6 +897,20 @@ export class ResumableStream {
     this.sql`
       insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
       values (${streamId}, ${requestId}, 'streaming', ${createdAt})
+    `;
+  }
+
+  /**
+   * Append a chunk to a stream dated `ageMs` in the past. Used to exercise the
+   * last-activity sweep threshold: a long-running streaming row with a *recent*
+   * chunk must survive even when its start time is older than the cutoff.
+   * @internal For testing only
+   */
+  insertChunkAt(streamId: string, body: string, ageMs: number): void {
+    const createdAt = Date.now() - ageMs;
+    this.sql`
+      insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
+      values (${nanoid()}, ${streamId}, ${body}, 0, ${createdAt})
     `;
   }
 }

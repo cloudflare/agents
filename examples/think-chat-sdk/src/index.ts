@@ -35,7 +35,7 @@ export type TelegramWebhookSetupResult = {
 export class SupportAgent extends Think<Env> {
   override getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.6"
+      "@cf/moonshotai/kimi-k2.7-code"
     );
   }
 

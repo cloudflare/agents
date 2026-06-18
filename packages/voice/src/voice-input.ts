@@ -26,7 +26,11 @@
 import type { Agent, Connection, WSMessage } from "agents";
 import { VOICE_PROTOCOL_VERSION } from "./types";
 import type { Transcriber } from "./types";
-import { AudioConnectionManager, sendVoiceJSON } from "./audio-pipeline";
+import {
+  AudioConnectionManager,
+  runBackground,
+  sendVoiceJSON
+} from "./audio-pipeline";
 
 // --- Mixin ---
 
@@ -164,16 +168,20 @@ export function withVoiceInput<TBase extends AgentLike>(
             case "hello":
               break;
             case "start_call":
-              this.#handleStartCall(connection);
+              runBackground("start_call", () =>
+                this.#handleStartCall(connection)
+              );
               break;
             case "end_call":
-              this.#handleEndCall(connection);
+              runBackground("end_call", () => this.#handleEndCall(connection));
               break;
             case "start_of_speech":
             case "end_of_speech":
               break;
             case "interrupt":
-              this.#handleInterrupt(connection);
+              runBackground("interrupt", () =>
+                this.#handleInterrupt(connection)
+              );
               break;
           }
           return;
@@ -256,7 +264,9 @@ export function withVoiceInput<TBase extends AgentLike>(
           );
         },
         onUtterance: (transcript: string) => {
-          this.#emitTranscript(connection, transcript);
+          runBackground("emitTranscript", () =>
+            this.#emitTranscript(connection, transcript)
+          );
         }
       });
 
@@ -285,7 +295,9 @@ export function withVoiceInput<TBase extends AgentLike>(
         { type: "status", status: "idle" },
         "VoiceInput"
       );
-      this.onCallEnd(connection);
+      // Return the (possibly async) consumer hook so its rejections are
+      // caught by the runBackground wrapper around this handler.
+      return this.onCallEnd(connection);
     }
 
     #handleInterrupt(connection: Connection) {
@@ -296,7 +308,7 @@ export function withVoiceInput<TBase extends AgentLike>(
         { type: "status", status: "listening" },
         "VoiceInput"
       );
-      this.onInterrupt(connection);
+      return this.onInterrupt(connection);
     }
 
     // --- Internal: transcript emission ---

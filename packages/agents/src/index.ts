@@ -39,11 +39,18 @@ import {
   routePartykitRequest
 } from "partyserver";
 import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
+export { camelCaseToKebabCase } from "./utils";
 import {
   type RetryOptions,
   tryN,
+  isDurableObjectCodeUpdateReset,
   isErrorRetryable,
+  isPlatformTransientError,
   validateRetryOptions
+} from "./retries";
+export {
+  isDurableObjectCodeUpdateReset,
+  isPlatformTransientError
 } from "./retries";
 import {
   MCPClientManager,
@@ -199,6 +206,26 @@ export type RPCResponse = {
       error: string;
     }
 );
+
+function isClosedWebSocketSendError(error: unknown): boolean {
+  return (
+    error instanceof TypeError &&
+    error.message.includes("WebSocket send() after close")
+  );
+}
+
+function sendRpcResponseIfOpen(
+  connection: Connection,
+  response: RPCResponse
+): boolean {
+  try {
+    connection.send(JSON.stringify(response));
+    return true;
+  } catch (error) {
+    if (isClosedWebSocketSendError(error)) return false;
+    throw error;
+  }
+}
 
 /**
  * Type guard for RPC request messages
@@ -906,6 +933,42 @@ export type AddRpcMcpServerOptions = {
 const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
 const DEFAULT_AGENT_TOOL_RECOVERY_TIMEOUT_MS = 2_000;
 const DEFAULT_AGENT_TOOL_RECOVERY_TOTAL_TIMEOUT_MS = 5_000;
+// Durable marker that this agent is condemned: written before teardown begins
+// (and by `_cf_scheduleDestroy`, which defers teardown to an alarm invocation
+// with its own execution budget, #1625). The final `deleteAll()` in `destroy()`
+// removes it, so "marker present" always means an unfinished teardown that the
+// next wake must complete instead of resuming normal work.
+//
+// Scope: the marker is only consulted on alarm-driven paths (`alarm()` and
+// `_scheduleNextAlarm()`). It deliberately does NOT gate request entrypoints
+// (`onRequest`/`onMessage`/RPC) — a request that lands between scheduling and
+// the teardown alarm runs normally and `_ensureSchema()` recreates tables. For
+// the MCP session-DELETE use case this is benign: the session id is unique and
+// is never addressed again after DELETE, so no further request reaches a
+// condemned session DO before its teardown alarm fires.
+const DESTROY_PENDING_KEY = "cf_agents_destroy_pending";
+// Delay before the deferred-teardown alarm fires (#1625). `_cf_scheduleDestroy`
+// is awaited by an HTTP handler (the MCP session-DELETE) that then returns its
+// response. The teardown alarm runs `destroy()`, which ends in
+// `ctx.abort("destroyed")` — and an immediate (`Date.now()`) alarm fires and
+// aborts the isolate fast enough to race the still-in-flight RPC response,
+// surfacing to the caller as a 500 instead of the intended 204 (observed
+// against a real deployment; the local test runtime does not exhibit it). A
+// small delay lets the response flush before the abort. Teardown latency of a
+// second is irrelevant for an already-abandoned session.
+const DESTROY_ALARM_DELAY_MS = 1_000;
+// Ceiling for the exponential backoff applied to the runFiber-recovery
+// follow-up alarm. A scan that makes NO forward progress (every pending orphan
+// row's recovery hook threw) but still has work pending backs off so a poison
+// fiber — or a `fiberRecoveryMaxAgeMs: 0` "retain forever" row whose hook keeps
+// throwing — does not wake the DO every `keepAliveIntervalMs` indefinitely (the
+// perpetual-heartbeat hazard #1707 guards against). A scan that DID make
+// progress (recovered ≥1 row, including a scan-deadline yield that drained
+// some) resets the backoff so legitimate multi-pass draining stays prompt.
+const FIBER_RECOVERY_MAX_BACKOFF_MS = 5 * 60_000;
+// Cap the doubling exponent so `base * 2 ** n` never overflows before the
+// `FIBER_RECOVERY_MAX_BACKOFF_MS` clamp applies.
+const FIBER_RECOVERY_BACKOFF_MAX_EXP = 20;
 // Re-attaching to a still-running child agent-tool run (parent recovery /
 // duplicate-runId re-issue) tails it to its REAL terminal result instead of
 // abandoning it as `interrupted` and re-running already-completed child work
@@ -1224,7 +1287,15 @@ export interface AgentStaticOptions {
   /**
    * Maximum age in milliseconds of an unmanaged interrupted-fiber row before
    * recovery stops retrying a repeatedly-throwing `onFiberRecovered()` hook
-   * and discards the row. Set to `0` to retain rows indefinitely.
+   * and discards the row (emitting `fiber:recovery:skipped` with reason
+   * `max_age_exceeded`). Defaults to 24h.
+   *
+   * Set to `0` to retain rows indefinitely. NOTE: with `0`, a hook that keeps
+   * throwing is retried forever — the recovery alarm backs off exponentially
+   * (capped at 5 minutes) so it is not a busy-loop, but the Durable Object
+   * stays warm (never idle-evicts) for as long as the un-recoverable row
+   * exists. Prefer a finite age unless you intend to inspect/clear such rows
+   * yourself.
    */
   fiberRecoveryMaxAgeMs?: number;
   /**
@@ -1280,43 +1351,11 @@ function resolveRetryConfig(
   };
 }
 
-/**
- * Whether an error is a transient "superseded isolate" failure — the invocation
- * is running on an isolate the platform has replaced with a new version (a
- * deploy / code update). For the rest of that invocation every operation throws
- * the same error (code never reloads mid-invocation), so in-process retries are
- * futile; but the next fresh invocation runs the new code and succeeds.
- *
- * workerd surfaces this as a plain `Error` with one of a few messages, all the
- * same failure class — a message match is the only signal:
- *   - "Durable Object reset because its code was updated."  (DO storage op on a
- *     superseded isolate / deploy bounce)
- *   - "This script has been upgraded. Please send a new request to connect to
- *     the new version."  (a stub/connection to a superseded script; the message
- *     literally instructs the caller to retry on the new version)
- *
- * The match stays close to the verbatim platform strings (rather than a loose
- * "upgraded"/"reset" substring) so an ordinary application error that happens
- * to mention those words is NOT misclassified as a supersede — a false positive
- * would defer + re-run a genuinely-failing callback on the platform's alarm
- * retries instead of abandoning it.
- *
- * NOTE: "Network connection lost." is deliberately NOT included — it is a
- * connection error, not an isolate replacement, and may succeed on in-process
- * retry (it is gated by the CF `retryable` property via `isErrorRetryable`),
- * so it stays on the normal retry path rather than the immediate-defer path.
- */
-function isDurableObjectCodeUpdateReset(error: unknown): boolean {
-  const message =
-    error instanceof Error
-      ? error.message
-      : typeof error === "string"
-        ? error
-        : "";
-  return /reset because its code was updated|this script has been upgraded/i.test(
-    message
-  );
-}
+// `isDurableObjectCodeUpdateReset` / `isPlatformTransientError` (used by the
+// scheduler's defer-vs-abandon decisions below) live in ./retries next to
+// `isErrorRetryable`, and are re-exported from the package root so higher
+// layers (e.g. `@cloudflare/think`) classify with the SAME matcher instead of
+// drifting copies.
 
 export function getCurrentAgent<
   T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
@@ -1494,6 +1533,13 @@ export class Agent<
   private _managedFiberTerminalWaiters = new Map<string, Set<() => void>>();
   /** @internal Prevents re-entrant recovery from overlapping alarm ticks. */
   private _runFiberRecoveryInProgress = false;
+  /**
+   * @internal Consecutive runFiber-recovery scans that made NO forward progress
+   * while work was still pending. Drives the exponential backoff of the
+   * recovery follow-up alarm so a repeatedly-throwing recovery hook does not
+   * busy-loop the DO. Reset to 0 whenever a scan recovers anything.
+   */
+  private _recoveryNoProgressScans = 0;
   /** @internal Single-flight background recovery for parent agent-tool rows. */
   private _agentToolRunRecoveryPromise: Promise<void> | undefined;
 
@@ -2184,7 +2230,7 @@ export class Agent<
                 success: true,
                 type: MessageType.RPC
               };
-              connection.send(JSON.stringify(response));
+              sendRpcResponseIfOpen(connection, response);
             } catch (e) {
               // Send error response
               const response: RPCResponse = {
@@ -2194,7 +2240,7 @@ export class Agent<
                 success: false,
                 type: MessageType.RPC
               };
-              connection.send(JSON.stringify(response));
+              sendRpcResponseIfOpen(connection, response);
               console.error("RPC error:", e);
               this._emit("rpc:error", {
                 method: parsed.method,
@@ -2603,6 +2649,37 @@ export class Agent<
    */
   private _ensureConnectionWrapped(connection: Connection) {
     if (this._rawStateAccessors.has(connection)) return;
+
+    // As of compatibility date 2026-03-17 the runtime defaults a server-side
+    // WebSocket's `binaryType` to "blob" (the `websocket_standard_binary_type`
+    // flag), so binary frames arrive as `Blob` instead of `ArrayBuffer`. The
+    // Agent protocol and every downstream consumer (e.g. voice audio frames,
+    // user-defined `onMessage` handlers that do `message instanceof ArrayBuffer`)
+    // have always relied on binary frames being delivered as `ArrayBuffer`.
+    //
+    // For non-hibernating agents (`static options = { hibernate: false }`)
+    // messages are delivered through `addEventListener("message", ...)`, where
+    // this new default applies and would silently break binary handling. Pin
+    // it back to "arraybuffer" so the contract holds regardless of the app's
+    // compatibility date. This first runs in `onConnect` before the client can
+    // send any frame, so it takes effect for every message on the connection.
+    //
+    // This is defense-in-depth: partyserver >= 0.5.7 also pins `binaryType` in
+    // `accept()`, but agents may run against an older partyserver or a custom
+    // connection, so we keep our own pin. It runs once per connection per
+    // isolate lifetime (gated by the `_rawStateAccessors` check above); after a
+    // hibernation wake that in-memory map is empty, so it re-pins on the first
+    // call. The hibernatable `webSocketMessage` handler always delivers
+    // `ArrayBuffer` regardless of this flag, so for hibernating agents this is a
+    // harmless no-op.
+    try {
+      if (connection.binaryType !== "arraybuffer") {
+        connection.binaryType = "arraybuffer";
+      }
+    } catch {
+      // Some connection shims may not expose a settable `binaryType`; the
+      // protocol still works for string frames, so ignore and continue.
+    }
 
     // Determine whether `state` is an accessor (getter) or a data property.
     // partyserver always defines `state` as a getter via Object.defineProperties,
@@ -4425,6 +4502,21 @@ export class Agent<
       if (disposed) return;
       disposed = true;
       this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
+      // When the last lease is released, recompute the alarm from persistent
+      // state so a short-lived keepAlive does not leave a stale
+      // `now + keepAliveIntervalMs` heartbeat armed. The dispose contract is
+      // synchronous, so fire-and-forget the async reschedule via waitUntil
+      // (mirrors `_cf_releaseFacetKeepAlive`).
+      if (this._keepAliveRefs === 0) {
+        this.ctx.waitUntil(
+          this._scheduleNextAlarm().catch((e) => {
+            console.error(
+              "[Agent] Failed to reschedule alarm after keepAlive dispose:",
+              e
+            );
+          })
+        );
+      }
     };
   }
 
@@ -5337,6 +5429,10 @@ export class Agent<
     const scanStartedAt = Date.now();
     const scanDeadlineMs = this._resolvedOptions.fiberRecoveryScanDeadlineMs;
     const fiberRecoveryMaxAgeMs = this._resolvedOptions.fiberRecoveryMaxAgeMs;
+    // Forward progress this scan = at least one fiber was resolved (orphan row
+    // deleted via recovery/age-out/managed-terminal, or a ledger-only managed
+    // fiber finalized). Drives the recovery-alarm backoff in `_scheduleNextAlarm`.
+    let madeProgress = false;
 
     try {
       const rows = this.sql<{
@@ -5382,6 +5478,7 @@ export class Agent<
         if (managedRow) {
           if (this._isTerminalFiberStatus(managedRow.status)) {
             this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
+            madeProgress = true;
             this._notifyManagedFiberTerminal(row.id);
             continue;
           }
@@ -5418,6 +5515,7 @@ export class Agent<
             });
           }
           this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
+          madeProgress = true;
         }
         if (managedRow) {
           this._notifyManagedFiberTerminal(row.id);
@@ -5483,10 +5581,24 @@ export class Agent<
         });
 
         await this._runFiberRecoveryHook(ctx, row);
+        // A ledger-only fiber is finalized this pass regardless of hook outcome
+        // (its ledger row is marked terminal and waiters are notified), so it
+        // will not be pending next scan — that is forward progress.
+        madeProgress = true;
         this._notifyManagedFiberTerminal(row.fiber_id);
       }
     } finally {
       this._runFiberRecoveryInProgress = false;
+      // Update the recovery-alarm backoff streak: reset on any forward progress,
+      // otherwise grow it only while work is still pending (a repeatedly-failing
+      // poison hook). `_scheduleNextAlarm` reads this to space out retries.
+      if (madeProgress) {
+        this._recoveryNoProgressScans = 0;
+      } else {
+        this._recoveryNoProgressScans = this._hasPendingFiberRecovery()
+          ? this._recoveryNoProgressScans + 1
+          : 0;
+      }
     }
   }
 
@@ -5789,10 +5901,24 @@ export class Agent<
         // that transient we skip the doomed retries and re-throw so `alarm()`
         // rejects, the one-shot row survives, and the platform re-runs it on a
         // fresh isolate (= new code) under the at-least-once alarm guarantee.
+        //
+        // Other platform transients ("Network connection lost." / errors the
+        // platform flags `retryable`) MAY succeed on an in-process retry (a
+        // momentary blip), so they keep the normal retry budget — but if the
+        // budget drains while the platform is still unhealthy (#1730: a
+        // deploy-reset window outlasts the few-seconds retry schedule by
+        // design), the row is deferred on exhaustion instead of consumed: the
+        // platform failed, not the callback, and the same work succeeds when
+        // the alarm re-fires in the healthy window that follows. A genuinely
+        // failing callback throws application-shaped errors (none of the
+        // platform signals) and is still abandoned after `maxAttempts` exactly
+        // as before.
         const isOneShotSchedule =
           row.type === "delayed" || row.type === "scheduled";
         const shouldDeferReset = (error: unknown): boolean =>
           isOneShotSchedule && isDurableObjectCodeUpdateReset(error);
+        const shouldDeferOnExhaustion = (error: unknown): boolean =>
+          isOneShotSchedule && isPlatformTransientError(error);
 
         try {
           this._emit("schedule:execute", {
@@ -5831,6 +5957,12 @@ export class Agent<
             );
             throw e;
           }
+          if (shouldDeferOnExhaustion(e)) {
+            console.warn(
+              `Deferring scheduled callback "${row.callback}" after exhausting in-process retries on a transient platform error; the one-shot row is preserved and the alarm will re-run once the platform recovers.`
+            );
+            throw e;
+          }
           console.error(
             `error executing callback "${row.callback}" after ${maxAttempts} attempts`,
             e
@@ -5851,7 +5983,44 @@ export class Agent<
     );
   }
 
+  /**
+   * Whether any runFiber recovery work is still outstanding: orphaned
+   * `cf_agents_runs` rows left by a dead process (excluding fibers currently
+   * executing in memory, which already hold a keepAlive ref) or managed
+   * ledger fibers stuck in a non-terminal state with no live run row.
+   *
+   * Used by `_scheduleNextAlarm` to arm a follow-up alarm so multi-pass
+   * recovery (e.g. after a scan-deadline yield, or while retrying a throwing
+   * recovery hook) resumes instead of starving.
+   * @internal
+   */
+  private _hasPendingFiberRecovery(): boolean {
+    const runRows = this.sql<{ id: string }>`
+      SELECT id FROM cf_agents_runs
+    `;
+    for (const row of runRows) {
+      if (!this._runFiberActiveFibers.has(row.id)) return true;
+    }
+
+    const ledgerOnly = this.sql<{ count: number }>`
+      SELECT COUNT(*) AS count
+      FROM cf_agents_fibers f
+      LEFT JOIN cf_agents_runs r ON r.id = f.fiber_id
+      WHERE f.status IN ('pending', 'running')
+        AND r.id IS NULL
+    `;
+    return (ledgerOnly[0]?.count ?? 0) > 0;
+  }
+
   private async _scheduleNextAlarm() {
+    // A pending destroy (#1625) owns the alarm: keep it armed immediately so
+    // teardown lands, and never let the "no work pending" branch below
+    // delete it out from under `_cf_scheduleDestroy`.
+    if (await this._hasPendingDestroy()) {
+      await this.ctx.storage.setAlarm(Date.now());
+      return;
+    }
+
     const nowMs = Date.now();
     const nowSeconds = Math.floor(nowMs / 1000);
     const hungCutoffSeconds =
@@ -5912,6 +6081,34 @@ export class Agent<
         nextTimeMs === null ? keepAliveMs : Math.min(nextTimeMs, keepAliveMs);
     }
 
+    // Fibers left behind by a dead process (orphaned `cf_agents_runs` rows or
+    // interrupted/pending managed ledger rows) are recovered by the alarm-
+    // driven scan. A single scan can leave work behind — it yields once it
+    // crosses `fiberRecoveryScanDeadlineMs`, and a repeatedly-throwing
+    // unmanaged recovery hook keeps its row until it ages out. Without a
+    // follow-up alarm those leftovers would starve, since the orphans hold no
+    // keepAlive ref. Arm one so recovery resumes.
+    //
+    // The delay backs off exponentially while scans make no forward progress
+    // (a poison hook that keeps throwing, or a `fiberRecoveryMaxAgeMs: 0`
+    // retain-forever row) so the DO is not woken every `keepAliveIntervalMs`
+    // indefinitely. A scan that recovers anything resets the streak (see
+    // `_checkRunFibers`), so legitimate multi-pass draining stays prompt.
+    if (this._hasPendingFiberRecovery()) {
+      const base = this._resolvedOptions.keepAliveIntervalMs;
+      const exp = Math.min(
+        this._recoveryNoProgressScans,
+        FIBER_RECOVERY_BACKOFF_MAX_EXP
+      );
+      const recoveryDelayMs = Math.min(
+        FIBER_RECOVERY_MAX_BACKOFF_MS,
+        base * 2 ** exp
+      );
+      const recoveryMs = nowMs + recoveryDelayMs;
+      nextTimeMs =
+        nextTimeMs === null ? recoveryMs : Math.min(nextTimeMs, recoveryMs);
+    }
+
     const facetRuns = this.sql<{ count: number }>`
       SELECT COUNT(*) as count FROM cf_agents_facet_runs
     `;
@@ -5953,6 +6150,18 @@ export class Agent<
    * See {@link https://developers.cloudflare.com/agents/api-reference/schedule-tasks/}
    */
   async alarm() {
+    // A pending destroy (#1625) pre-empts everything — including
+    // `super.alarm()`'s onStart, which would re-initialize user state on a
+    // condemned agent. This is both the landing point for the deferred
+    // teardown scheduled by `_cf_scheduleDestroy` (which arms an immediate
+    // alarm precisely so teardown runs here, with this invocation's full
+    // execution budget) and the convergence point for a destroy that a
+    // previous invocation started but couldn't finish.
+    if (await this._hasPendingDestroy()) {
+      await this.destroy();
+      return;
+    }
+
     // Ensure PartyServer initialization (name resolution, onStart) runs
     // before processing any scheduled tasks.
     await super.alarm();
@@ -9304,6 +9513,15 @@ export class Agent<
       return;
     }
 
+    // Persist the teardown decision FIRST, so a destroy that gets cut short
+    // (e.g. the runtime cancelling a request-scoped `waitUntil` it was riding
+    // on, #1625) is finished by the next wake — see the `alarm()` preamble —
+    // instead of leaving a half-deleted agent whose tables get silently
+    // recreated by the constructor. The marker is removed by the
+    // `deleteAll()` below, which is also why it is a KV record rather than a
+    // SQL row: it must outlive `_dropInternalTablesForDestroy`.
+    await this.ctx.storage.put(DESTROY_PENDING_KEY, true);
+
     this._dropInternalTablesForDestroy();
 
     // delete all alarms
@@ -9322,6 +9540,60 @@ export class Agent<
     }, 0);
 
     this._emit("destroy");
+  }
+
+  /**
+   * @internal Defer this agent's destruction to its own alarm invocation
+   * instead of running it inline (#1625).
+   *
+   * `destroy()` is a multi-step I/O sequence (drop tables, delete alarm,
+   * delete all storage, dispose connections). Running it on the `waitUntil`
+   * of a request whose client has already disconnected — the MCP
+   * Streamable-HTTP session-DELETE path — gives it little to no
+   * post-invocation grace, so the runtime routinely cancels it mid-flight.
+   * This method instead performs two fast storage writes (a durable
+   * "condemned" marker and an immediate alarm) that the caller can await
+   * before responding; the alarm then fires as a fresh invocation with its
+   * own full execution budget and runs `destroy()` there. If even that
+   * invocation is interrupted, the marker survives and the next wake
+   * finishes teardown — see the `alarm()` preamble.
+   *
+   * Unlike `destroy()`, this method does not abort the isolate, so RPC
+   * callers don't need to swallow an abort error.
+   */
+  async _cf_scheduleDestroy(): Promise<void> {
+    // Hydrate facet state before deciding. `_isFacet` (and the `_parentPath`
+    // /`selfPath` the facet teardown path needs) is only populated by `onStart`
+    // /facet bootstrap, and `destroy()` below branches on the in-memory
+    // `_isFacet`. Without this, an RPC landing before init would see it as
+    // `false`, fall through to `destroy()`'s top-level path, and write the
+    // destroy marker on a facet — which the `alarm()`/`_scheduleNextAlarm()`
+    // guards forbid (only top-level agents write it; facet teardown is
+    // root-coordinated via `ctx.facets.delete`). Mirrors the other internal
+    // RPC entrypoints (`_workflow_*`). We must NOT push this into `destroy()`
+    // itself: the `alarm()` preamble calls `destroy()` precisely to avoid
+    // running `onStart` on a condemned agent.
+    await this.__unsafe_ensureInitialized();
+    if (this._isFacet) {
+      // Facet teardown is coordinated by the root (`ctx.facets.delete` wipes
+      // the facet's storage in one step), so there is nothing to defer.
+      await this.destroy();
+      return;
+    }
+    await this.ctx.storage.put(DESTROY_PENDING_KEY, true);
+    // Future, not immediate: see DESTROY_ALARM_DELAY_MS — an immediate alarm
+    // aborts the isolate fast enough to race this RPC's response back to the
+    // DELETE handler, turning the intended 204 into a 500.
+    await this.ctx.storage.setAlarm(Date.now() + DESTROY_ALARM_DELAY_MS);
+  }
+
+  /**
+   * Whether a (deferred or interrupted) destroy is pending. Reads the
+   * durable marker directly — the in-memory `_isFacet` flag may not be
+   * hydrated yet at the call sites, but facets never write the marker.
+   */
+  private async _hasPendingDestroy(): Promise<boolean> {
+    return (await this.ctx.storage.get<boolean>(DESTROY_PENDING_KEY)) === true;
   }
 
   /** @internal Drop every internal Agents SDK table during top-level destroy. */
@@ -11291,8 +11563,7 @@ export class StreamingResponse {
       success: true,
       type: MessageType.RPC
     };
-    this._connection.send(JSON.stringify(response));
-    return true;
+    return sendRpcResponseIfOpen(this._connection, response);
   }
 
   /**
@@ -11312,8 +11583,7 @@ export class StreamingResponse {
       success: true,
       type: MessageType.RPC
     };
-    this._connection.send(JSON.stringify(response));
-    return true;
+    return sendRpcResponseIfOpen(this._connection, response);
   }
 
   /**
@@ -11332,7 +11602,6 @@ export class StreamingResponse {
       success: false,
       type: MessageType.RPC
     };
-    this._connection.send(JSON.stringify(response));
-    return true;
+    return sendRpcResponseIfOpen(this._connection, response);
   }
 }

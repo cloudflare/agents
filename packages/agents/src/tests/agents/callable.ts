@@ -21,10 +21,24 @@ export class TestCallableAgent extends Agent<
     return "done";
   }
 
+  // Async method used to verify RPC response delivery tolerates disconnects
+  @callable()
+  async delayedThrow(delayMs: number): Promise<never> {
+    await new Promise((r) => setTimeout(r, delayMs));
+    throw new Error("delayed failure");
+  }
+
   // Method that throws an error
   @callable()
   throwError(message: string): never {
     throw new Error(message);
+  }
+
+  // Method that never responds — for client-side timeout tests
+  @callable()
+  async hang(): Promise<string> {
+    await new Promise(() => {});
+    return "unreachable";
   }
 
   // Void return type

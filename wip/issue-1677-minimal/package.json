@@ -1,5 +1,5 @@
 {
-  "name": "facet-ws-native-io-minimal-1677",
+  "name": "@cloudflare/agents-facet-ws-native-io-minimal-1677",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -10,8 +10,8 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260604.1",
+    "@cloudflare/workers-types": "^4.20260612.1",
     "typescript": "^6.0.3",
-    "wrangler": "^4.97.0"
+    "wrangler": "^4.100.0"
   }
 }

@@ -38,6 +38,8 @@ export {
   type SessionManagerOptions
 } from "./manager";
 export type {
+  HistoryRowStat,
+  RecentHistoryResult,
   SearchResult,
   SessionProvider,
   StoredCompaction

@@ -1,7 +1,15 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "think-assistant",
   "ai": { "binding": "AI", "remote": true },
-  "compatibility_date": "2026-01-28",
+  // Browser Rendering powers two surfaces: the execute tool's `cdp.*`
+  // connector (interactive automation) and the stateless Quick Action tools
+  // (browser_markdown/extract/links/scrape). `remote: true` is required for
+  // Quick Actions to work in local `vite dev` (they run on the real Browser
+  // Run service); it also routes `cdp.*` to the real service.
+  "browser": { "binding": "BROWSER", "remote": true },
+  // 2026-03-24+ is the minimum for the Quick Actions binding (`quickAction`).
+  "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "not_found_handling": "single-page-application",
@@ -15,21 +23,25 @@
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "AssistantDirectory",
+        "class_name": "ThinkAgent_Assistant",
         "name": "AssistantDirectory"
       }
     ]
   },
   "worker_loaders": [{ "binding": "LOADER" }],
-  "main": "src/server.ts",
+  "main": "virtual:think/entry",
   "migrations": [
     {
-      "new_sqlite_classes": ["AssistantDirectory"],
+      "new_sqlite_classes": ["ThinkAgent_Assistant"],
       "tag": "v1"
     }
   ],
-  "name": "think-assistant",
-  "secrets": {
-    "required": ["GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"]
+  "vars": {
+    // Optional local-dev escape hatch (see src/server.ts): set DEV_USER in
+    // .env.local to skip GitHub OAuth and act as that user. Blank = disabled.
+    // NOTE: no `secrets.required` allowlist here — it would stop optional
+    // entries like DEV_USER from being read out of .env/.env.local. The
+    // server throws a clear error when the GitHub secrets are missing.
+    "DEV_USER": ""
   }
 }

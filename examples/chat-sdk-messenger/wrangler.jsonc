@@ -3,7 +3,7 @@
   "ai": { "binding": "AI", "remote": true },
   "name": "chat-sdk-messenger",
   "main": "src/index.ts",
-  "compatibility_date": "2026-05-19",
+  "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "not_found_handling": "single-page-application",

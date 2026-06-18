@@ -2,6 +2,9 @@ import { routeAgentRequest } from "agents";
 
 export { HostBridgeLoopback } from "../extensions";
 
+// Facet class behind tools built on createCodemodeRuntime (execute tool).
+export { CodemodeRuntime } from "@cloudflare/codemode";
+
 export {
   TestAssistantToolsAgent,
   TestAssistantAgentAgent,
@@ -26,7 +29,14 @@ export {
   ThinkAgentToolParent,
   StuckThinkAgentToolChild,
   ThinkExtensionHookAgent,
-  ThinkMessengerRouteTestAgent
+  ThinkExecuteToolAgent,
+  ThinkExecuteHitlAgent,
+  ThinkMessengerRouteTestAgent,
+  ThinkOnStartReconcileFailureAgent,
+  ThinkOnStartHydrationFailureAgent,
+  ThinkWindowedHydrationAgent,
+  ThinkMediaEvictionAgent,
+  ThinkMediaEvictionAutoAgent
 } from "./agents";
 
 import type {
@@ -53,7 +63,14 @@ import type {
   ThinkAgentToolParent,
   StuckThinkAgentToolChild,
   ThinkExtensionHookAgent,
-  ThinkMessengerRouteTestAgent
+  ThinkExecuteToolAgent,
+  ThinkExecuteHitlAgent,
+  ThinkMessengerRouteTestAgent,
+  ThinkOnStartReconcileFailureAgent,
+  ThinkOnStartHydrationFailureAgent,
+  ThinkWindowedHydrationAgent,
+  ThinkMediaEvictionAgent,
+  ThinkMediaEvictionAutoAgent
 } from "./agents";
 
 export type Env = {
@@ -81,6 +98,13 @@ export type Env = {
   StuckThinkAgentToolChild: DurableObjectNamespace<StuckThinkAgentToolChild>;
   ThinkExtensionHookAgent: DurableObjectNamespace<ThinkExtensionHookAgent>;
   ThinkMessengerRouteTestAgent: DurableObjectNamespace<ThinkMessengerRouteTestAgent>;
+  ThinkExecuteToolAgent: DurableObjectNamespace<ThinkExecuteToolAgent>;
+  ThinkExecuteHitlAgent: DurableObjectNamespace<ThinkExecuteHitlAgent>;
+  ThinkOnStartReconcileFailureAgent: DurableObjectNamespace<ThinkOnStartReconcileFailureAgent>;
+  ThinkOnStartHydrationFailureAgent: DurableObjectNamespace<ThinkOnStartHydrationFailureAgent>;
+  ThinkWindowedHydrationAgent: DurableObjectNamespace<ThinkWindowedHydrationAgent>;
+  ThinkMediaEvictionAgent: DurableObjectNamespace<ThinkMediaEvictionAgent>;
+  ThinkMediaEvictionAutoAgent: DurableObjectNamespace<ThinkMediaEvictionAutoAgent>;
   LOADER: WorkerLoader;
 };
 

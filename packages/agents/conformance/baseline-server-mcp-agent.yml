@@ -1,0 +1,14 @@
+# Expected failures for the McpAgent server conformance suite.
+# Each entry documents a known gap — remove entries as gaps are fixed.
+server:
+  # The pinned MCP SDK's zod → JSON Schema conversion does not preserve
+  # JSON Schema 2020-12 keywords ($schema, $defs, additionalProperties)
+  # verbatim in tools/list (SEP-1613).
+  - json-schema-2020-12
+  # Localhost Host/Origin validation guards local stdio/loopback servers
+  # against DNS rebinding; Workers deployments sit behind real hostnames.
+  - dns-rebinding-protection
+  # SHOULD-level warnings: McpAgent's internal transport does not implement
+  # SEP-1699 priming events or the retry field. Tracked in
+  # https://github.com/cloudflare/agents/issues/1723
+  - server-sse-polling

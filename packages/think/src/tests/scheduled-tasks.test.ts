@@ -94,6 +94,11 @@ type ThinkScheduledTasksTestStub = {
   listChildSchedulesForTest(
     name: string
   ): Promise<Array<{ id: string; payload: unknown }>>;
+  getKeepAliveRefsForTest(): Promise<number>;
+  runAlarmForTest(): Promise<{
+    keepAliveRefs: number;
+    scheduledAlarm: number | null;
+  }>;
 };
 
 async function freshAgent(
@@ -519,5 +524,21 @@ describe("Think scheduled tasks", () => {
     expect(
       await parent.listChildDeclaredScheduledTaskRowsForTest("beta")
     ).toHaveLength(1);
+  });
+
+  it("does not arm a keepAlive heartbeat on alarm() when no workflow notifications are pending (#1703)", async () => {
+    const agent = await freshAgent();
+
+    // An agent that never uses workflow notifications must not turn alarm()
+    // into a self-perpetuating 30s heartbeat. With no pending notifications
+    // and no other scheduled work, the drain must be a no-op: keepAlive refs
+    // stay at 0 and no near-future alarm is left behind.
+    const before = await agent.getKeepAliveRefsForTest();
+    expect(before).toBe(0);
+
+    const { keepAliveRefs, scheduledAlarm } = await agent.runAlarmForTest();
+
+    expect(keepAliveRefs).toBe(0);
+    expect(scheduledAlarm).toBeNull();
   });
 });

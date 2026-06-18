@@ -69,29 +69,32 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 
 ## Current contents
 
-| File                                    | Type       | Scope                                                                                                    |
-| --------------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------- |
-| `chat-shared-layer.md`                  | design doc | Chat shared layer — streaming, sanitization, and protocol primitives in agents/chat                      |
-| `think.md`                              | design doc | Think — chat agent base class, streaming, client tools, resumable streams, extensions                    |
-| `think-sessions.md`                     | design doc | Think + Session integration design (implemented in Phase 1)                                              |
-| `think-vs-aichat.md`                    | design doc | Think vs AIChatAgent — comparison, use cases, architectural differences                                  |
-| `think-roadmap.md`                      | design doc | Think implementation plan — all 5 phases complete, full AIChatAgent parity                               |
-| `chat-api.md`                           | analysis   | AIChatAgent + useAgentChat API analysis — pain points, improvements, Think influence                     |
-| `chat-improvements.md`                  | design doc | Non-breaking improvements — shared extraction complete, client DX items remain                           |
-| `readonly-connections.md`               | design doc | Readonly connections — enforcement, storage wrapping, caveats                                            |
-| `retries.md`                            | design doc | Retry system — primitives, integration points, backoff strategy, tradeoffs                               |
-| `visuals.md`                            | design doc | UI component library (Kumo), dark mode, custom patterns, routing integration                             |
-| `workspace.md`                          | design doc | Workspace — hybrid SQLite+R2 filesystem, bash, symlinks, observability                                   |
-| `agent-tools.md`                        | design doc | Agent tools — chat sub-agent orchestration, parent registry, event replay                                |
-| `sub-agent-routing.md`                  | design doc | Sub-agent routing as shipped — facets, nested URLs, registry, parent lookup, caveats                     |
-| `rfc-sub-agents.md`                     | RFC        | Sub-agents — child DOs via facets, typed stubs, built into Agent (accepted)                              |
-| `rfc-sub-agent-routing.md`              | RFC        | Sub-agent external addressability — nested URLs, `onBeforeSubAgent`, per-call bridge                     |
-| `rfc-helper-sub-agent-orchestration.md` | RFC        | Agent tool orchestration — `runAgentTool`, `agentTool`, event forwarding                                 |
-| `rfc-think-multi-session.md`            | RFC        | Multi-session Think / Chats pattern — parent directory + per-chat child DOs                              |
-| `rfc-chat-recovery-work-budget.md`      | RFC        | Decouple chat-recovery duration from the runaway guard — work budget + `shouldKeepRecovering` (accepted) |
-| `rfc-ai-chat-maintenance.md`            | RFC        | AIChatAgent first-class stance, shared chat toolkit, multi-session example direction                     |
-| `loopback.md`                           | design doc | Loopback pattern — cross-boundary RPC for sub-agents and dynamic isolates                                |
-| `worker-bundler.md`                     | design doc | Worker bundler — host-side assets, no code generation, mounting is caller's concern                      |
+| File                                    | Type       | Scope                                                                                                       |
+| --------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------- |
+| `chat-shared-layer.md`                  | design doc | Chat shared layer — streaming, sanitization, and protocol primitives in agents/chat                         |
+| `durable-streams-comparison.md`         | analysis   | Durable Streams (ElectricSQL) vs the Agents SDK — layer mapping, what each has, strategic takeaways         |
+| `think.md`                              | design doc | Think — chat agent base class, streaming, client tools, resumable streams, extensions                       |
+| `think-sessions.md`                     | design doc | Think + Session integration design (implemented in Phase 1)                                                 |
+| `think-vs-aichat.md`                    | design doc | Think vs AIChatAgent — comparison, use cases, architectural differences                                     |
+| `think-roadmap.md`                      | design doc | Think implementation plan — all 5 phases complete, full AIChatAgent parity                                  |
+| `chat-api.md`                           | analysis   | AIChatAgent + useAgentChat API analysis — pain points, improvements, Think influence                        |
+| `chat-improvements.md`                  | design doc | Non-breaking improvements — shared extraction complete, client DX items remain                              |
+| `readonly-connections.md`               | design doc | Readonly connections — enforcement, storage wrapping, caveats                                               |
+| `retries.md`                            | design doc | Retry system — primitives, integration points, backoff strategy, tradeoffs                                  |
+| `visuals.md`                            | design doc | UI component library (Kumo), dark mode, custom patterns, routing integration                                |
+| `workspace.md`                          | design doc | Workspace — hybrid SQLite+R2 filesystem, bash, symlinks, observability                                      |
+| `agent-tools.md`                        | design doc | Agent tools — chat sub-agent orchestration, parent registry, event replay                                   |
+| `sub-agent-routing.md`                  | design doc | Sub-agent routing as shipped — facets, nested URLs, registry, parent lookup, caveats                        |
+| `rfc-sub-agents.md`                     | RFC        | Sub-agents — child DOs via facets, typed stubs, built into Agent (accepted)                                 |
+| `rfc-sub-agent-routing.md`              | RFC        | Sub-agent external addressability — nested URLs, `onBeforeSubAgent`, per-call bridge                        |
+| `rfc-helper-sub-agent-orchestration.md` | RFC        | Agent tool orchestration — `runAgentTool`, `agentTool`, event forwarding                                    |
+| `rfc-think-multi-session.md`            | RFC        | Multi-session Think / Chats pattern — parent directory + per-chat child DOs                                 |
+| `rfc-chat-recovery-work-budget.md`      | RFC        | Decouple chat-recovery duration from the runaway guard — work budget + `shouldKeepRecovering` (accepted)    |
+| `rfc-chat-recovery-foundation.md`       | RFC        | Shared chat recovery foundation — internal engine, adapters, behavior convergence, and testing strategy     |
+| `rfc-ai-chat-maintenance.md`            | RFC        | AIChatAgent first-class stance, shared chat toolkit, multi-session example direction                        |
+| `loopback.md`                           | design doc | Loopback pattern — cross-boundary RPC for sub-agents and dynamic isolates                                   |
+| `worker-bundler.md`                     | design doc | Worker bundler — host-side assets, no code generation, mounting is caller's concern                         |
+| `rfc-workers-ai-gateway-merge.md`       | RFC        | Merge ai-gateway-provider into workers-ai-provider — registry routing, universal run API, resume (proposed) |
 
 ## Relationship to `/docs`
 

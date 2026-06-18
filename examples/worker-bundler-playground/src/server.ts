@@ -239,7 +239,7 @@ export class WorkerPlayground extends AIChatAgent<Env> {
       mainModule: result.mainModule,
       modules: result.modules,
       compatibilityDate:
-        result.wranglerConfig?.compatibilityDate ?? "2026-01-28",
+        result.wranglerConfig?.compatibilityDate ?? "2026-06-11",
       compatibilityFlags: result.wranglerConfig?.compatibilityFlags
     }));
 
@@ -332,7 +332,7 @@ export class WorkerPlayground extends AIChatAgent<Env> {
 
     const result = streamText({
       abortSignal: options?.abortSignal,
-      model: workersai("@cf/moonshotai/kimi-k2.6", {
+      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
       system: [

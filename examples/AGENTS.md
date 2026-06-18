@@ -76,7 +76,7 @@ Server-only examples can use Wrangler directly:
 
 - Use `wrangler.jsonc` (not `.toml`)
 - Include `"$schema": "../../node_modules/wrangler/config-schema.json"`
-- `compatibility_date: "2026-01-28"`, `compatibility_flags: ["nodejs_compat"]`
+- `compatibility_date: "2026-06-11"`, `compatibility_flags: ["nodejs_compat"]`
 - Full-stack apps with client routing: add `"assets": { "not_found_handling": "single-page-application" }`
 - Use `"run_worker_first"` to route API/agent paths to the Worker
 - Do not set `"directory"` in assets — the Vite plugin handles this
@@ -206,6 +206,48 @@ Every example should include an info card at the top of the page explaining what
   </div>
 </Surface>
 ```
+
+### Chat message rendering
+
+Any example with a chat UI (`useAgentChat` from `@cloudflare/ai-chat/react`, or `useChat`) must render the full shape of an assistant turn — not just text. Reference implementations: **`examples/ai-chat`** (streamdown + complete tool states) and **`examples/assistant`** (adds reasoning + approvals + branches).
+
+Rules:
+
+1. **Render `message.parts` in array order (chronological).** Walk the parts with a single `message.parts.map(...)` and branch on `part.type` inside it. Never split parts into separate buckets (e.g. all text, then all tools) — that reorders the turn and hides which tool ran between which sentences.
+2. **Assistant text → `streamdown`.** Render assistant text parts with `<Streamdown>` (markdown, code highlighting). User messages stay plain text (`getMessageText(message)`) — user input is rarely markdown.
+3. **Reasoning traces.** Render `part.type === "reasoning"` parts as a distinct, muted "Reasoning"/"Thinking" block (reasoning is on by default for reasoning-capable models).
+4. **Tool parts — render input, output, AND errors:**
+   - **Input** for every tool (not just a `code` field) — render it while the call is still streaming (`input-streaming` / `input-available`) with a running indicator, and after it resolves.
+   - **Output** on `output-available`.
+   - **Errors** on `output-error` — show `part.errorText` in a clearly-distinct (red) block. Don't let failed tools render as nothing.
+   - Handle `approval-requested` / `output-denied` where the example uses tool approval.
+5. **Avoid empty bubbles while streaming.** Text and reasoning parts arrive as `{ state: "streaming", text: "" }` before the first delta — gate on `part.text.length > 0 || part.state === "streaming"`.
+
+#### Streamdown setup
+
+`streamdown` (+ `@streamdown/code`) are already repo dependencies. To add markdown rendering to an example:
+
+```jsonc
+// package.json dependencies
+"streamdown": "^2.5.0",
+"@streamdown/code": "^1.1.1"
+```
+
+```tsx
+import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
+
+<Streamdown
+  className="sd-theme"
+  plugins={{ code }}
+  controls={false}
+  isAnimating={isLastAssistant && isLastTextPart && isStreaming}
+>
+  {part.text}
+</Streamdown>;
+```
+
+Tailwind ignores `node_modules`, so `src/styles.css` needs `@source` lines plus the `.sd-theme` bridge that maps Streamdown's tokens to Kumo. Copy the `@source ".../streamdown/..."` / `@source ".../@streamdown/code/..."` lines and the `.sd-theme { ... }` block from `examples/assistant/src/styles.css` verbatim.
 
 ### Agent communication
 

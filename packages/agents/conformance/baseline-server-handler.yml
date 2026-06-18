@@ -1,0 +1,18 @@
+# Expected failures for the createMcpHandler + WorkerTransport server
+# conformance suite.
+# Each entry documents a known gap — remove entries as gaps are fixed.
+server:
+  # The pinned MCP SDK's zod → JSON Schema conversion does not preserve
+  # JSON Schema 2020-12 keywords ($schema, $defs, additionalProperties)
+  # verbatim in tools/list (SEP-1613).
+  - json-schema-2020-12
+  # Localhost Host/Origin validation guards local stdio/loopback servers
+  # against DNS rebinding; Workers deployments sit behind real hostnames.
+  - dns-rebinding-protection
+  # SHOULD-level warnings only for pre-2025-11-25 clients: the harness
+  # probes with protocol version 2025-03-26, and the pinned MCP SDK
+  # deliberately suppresses SEP-1699 priming events for old clients (they
+  # cannot handle empty SSE data). WorkerTransport does emit priming events
+  # for 2025-11-25 clients. Context in
+  # https://github.com/cloudflare/agents/issues/1723
+  - server-sse-polling

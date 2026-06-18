@@ -4314,6 +4314,289 @@ describe("useAgentChat isServerStreaming / isStreaming (issue #1226)", () => {
       .toHaveTextContent("false");
   });
 
+  it("ACKs a duplicate CF_AGENT_STREAM_RESUMING only once per socket (#1733)", async () => {
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "double-resuming-dedupe",
+      url: "ws://localhost:3000/agents/chat/double-resuming-dedupe?_pk=abc"
+    });
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[]
+      });
+      return (
+        <div data-testid="isServerStreaming">
+          {String(chat.isServerStreaming)}
+        </div>
+      );
+    };
+
+    await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    // Settle the transport's initial resume attempt so the RESUMING frames
+    // below take the fallback path (the one that ACKs directly).
+    await act(async () => {
+      dispatch(target, { type: "cf_agent_stream_resume_none" });
+      await sleep(10);
+    });
+
+    const ackCount = (id: string) =>
+      sentMessages.filter((m) => {
+        try {
+          const parsed = JSON.parse(m);
+          return (
+            parsed.type === "cf_agent_stream_resume_ack" && parsed.id === id
+          );
+        } catch {
+          return false;
+        }
+      }).length;
+
+    // The server notifies the same request from both onConnect and the
+    // RESUME_REQUEST handler — back to back, before any replay chunk.
+    await act(async () => {
+      dispatch(target, { type: "cf_agent_stream_resuming", id: "req-dup" });
+      dispatch(target, { type: "cf_agent_stream_resuming", id: "req-dup" });
+      await sleep(10);
+    });
+
+    // Exactly ONE ACK — the duplicate offer must not trigger a second replay.
+    expect(ackCount("req-dup")).toBe(1);
+
+    // After the socket closes and reconnects, the server's fresh offer for
+    // the (still active) stream must be ACKed again — the dedupe is
+    // per-socket, not per-session.
+    await act(async () => {
+      target.dispatchEvent(new Event("close"));
+      await sleep(10);
+      dispatch(target, { type: "cf_agent_stream_resuming", id: "req-dup" });
+      await sleep(10);
+    });
+
+    expect(ackCount("req-dup")).toBe(2);
+  });
+
+  it("still hands a repeated offer to a waiting transport resolver after a fallback ACK (handoff)", async () => {
+    // A fallback-observed stream must still be able to become
+    // transport-owned: when resumeStream() is waiting on the handshake, a
+    // repeated STREAM_RESUMING for the already-ACKed id goes to the
+    // transport (which ACKs again — its replay is isolated from the
+    // broadcast accumulator), instead of being dropped by the #1733 dedupe.
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "fallback-then-transport-handoff",
+      url: "ws://localhost:3000/agents/chat/fallback-then-transport-handoff?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[]
+      });
+      chatInstance = chat;
+      return (
+        <div data-testid="isServerStreaming">
+          {String(chat.isServerStreaming)}
+        </div>
+      );
+    };
+
+    await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await act(async () => {
+      dispatch(target, { type: "cf_agent_stream_resume_none" });
+      await sleep(10);
+    });
+
+    const ackCount = (id: string) =>
+      sentMessages.filter((m) => {
+        try {
+          const parsed = JSON.parse(m);
+          return (
+            parsed.type === "cf_agent_stream_resume_ack" && parsed.id === id
+          );
+        } catch {
+          return false;
+        }
+      }).length;
+
+    // Fallback-observe the stream (first ACK).
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "req-handoff"
+      });
+      await sleep(10);
+    });
+    expect(ackCount("req-handoff")).toBe(1);
+
+    // While the transport is awaiting the handshake, the repeated offer is
+    // handed to it rather than deduped — second ACK comes from the
+    // transport resolver.
+    await act(async () => {
+      void chatInstance!.resumeStream();
+      await sleep(10);
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "req-handoff"
+      });
+      await sleep(10);
+    });
+    expect(ackCount("req-handoff")).toBe(2);
+  });
+
+  it("does not duplicate text parts when the stream buffer is replayed twice (#1733)", async () => {
+    // Simulates a server (or ordering) that replays the full chunk buffer
+    // twice for the same request. Every replayed `start` must rebuild the
+    // message from scratch instead of stacking a second step/text part.
+    const { agent, target } = createAgentWithTarget({
+      name: "double-replay-idempotent",
+      url: "ws://localhost:3000/agents/chat/double-replay-idempotent?_pk=abc"
+    });
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[]
+      });
+      const assistantMsg = chat.messages.find(
+        (m: UIMessage) => m.role === "assistant"
+      );
+      const textParts =
+        assistantMsg?.parts.filter(
+          (p: UIMessage["parts"][number]) => p.type === "text"
+        ) ?? [];
+      return (
+        <div>
+          <div data-testid="count">{chat.messages.length}</div>
+          <div data-testid="textPartCount">{textParts.length}</div>
+          <div data-testid="text">
+            {(textParts[textParts.length - 1] as { text?: string })?.text ?? ""}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await act(async () => {
+      dispatch(target, { type: "cf_agent_stream_resume_none" });
+      await sleep(10);
+    });
+
+    // Fallback-observe the stream.
+    await act(async () => {
+      dispatch(target, { type: "cf_agent_stream_resuming", id: "req-replay" });
+      await sleep(10);
+    });
+
+    const replayBuffer = (deltas: string[]) => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-replay",
+        body: '{"type":"start","messageId":"m-replay"}',
+        done: false,
+        replay: true
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-replay",
+        body: '{"type":"text-start","id":"t1"}',
+        done: false,
+        replay: true
+      });
+      for (const delta of deltas) {
+        dispatch(target, {
+          type: "cf_agent_use_chat_response",
+          id: "req-replay",
+          body: JSON.stringify({ type: "text-delta", id: "t1", delta }),
+          done: false,
+          replay: true
+        });
+      }
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-replay",
+        body: "",
+        done: false,
+        replay: true,
+        replayComplete: true
+      });
+    };
+
+    // First replay pass.
+    await act(async () => {
+      replayBuffer(["Hello"]);
+      await sleep(10);
+    });
+
+    // Second replay pass of the same (now longer) buffer.
+    await act(async () => {
+      replayBuffer(["Hello", " world"]);
+      await sleep(10);
+    });
+
+    // Live tail + completion.
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-replay",
+        body: '{"type":"text-delta","id":"t1","delta":"!"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-replay",
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+
+    await expect.element(screen.getByTestId("count")).toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("textPartCount"))
+      .toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("text"))
+      .toHaveTextContent("Hello world!");
+  });
+
   it("isServerStreaming resets when a fallback-observed stream later becomes transport-owned", async () => {
     const { agent, target } = createAgentWithTarget({
       name: "server-stream-fallback-to-transport",
@@ -5515,6 +5798,268 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
     await expect
       .element(screen.getByTestId("role-order"))
       .toHaveTextContent("user,assistant,user,user");
+  });
+
+  it("preserves a single-turn streamed assistant when a stale broadcast lands mid-stream", async () => {
+    // Regression: the originating tab rendered a turn's parts, then a
+    // mid-stream full-list broadcast (`cf_agent_chat_messages` — Think emits
+    // one after every tool result) replaced the live-streamed assistant with a
+    // behind-the-stream server snapshot, so its parts briefly vanished. Unlike
+    // the "multiple broadcasts" test above there is NO second submit here, so
+    // the ONLY thing that can arm streaming protection for this turn is the
+    // `start` chunk's messageId. Without that re-arm this clobbers.
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "single-turn-clobber",
+      url: "ws://localhost:3000/agents/chat/single-turn-clobber?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false
+      });
+      chatInstance = chat;
+
+      const assistantMessages = chat.messages.filter(
+        (m) => m.role === "assistant"
+      );
+      const firstAssistantText = assistantMessages[0]?.parts.find(
+        (p) => p.type === "text"
+      ) as { text?: string } | undefined;
+
+      return (
+        <div>
+          <div data-testid="assistant-count">{assistantMessages.length}</div>
+          <div data-testid="first-assistant-text">
+            {firstAssistantText?.text ?? ""}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    let req!: Promise<unknown>;
+    await act(async () => {
+      req = chatInstance!.sendMessage({ text: "A" });
+      await sleep(10);
+    });
+
+    const reqId = sentMessages
+      .map((m) => JSON.parse(m) as Record<string, unknown>)
+      .find((m) => m.type === "cf_agent_use_chat_request")?.id;
+    expect(reqId).toBeTruthy();
+
+    // Stream a new (non-continuation) turn: the `start` chunk carries the
+    // server-allocated id (the message-id alignment fix), then partial text.
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: '{"type":"start","messageId":"assistant-1"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: '{"type":"text-delta","id":"t1","delta":"One"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("first-assistant-text"))
+      .toHaveTextContent("One");
+
+    // Stale full-list broadcast: the assistant exists server-side but has no
+    // parts yet (the live stream is ahead). Must NOT clobber the live text.
+    const user1 = chatInstance!.messages.find((m) => m.role === "user")!;
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_chat_messages",
+        messages: [user1, { id: "assistant-1", role: "assistant", parts: [] }]
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-count"))
+      .toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("first-assistant-text"))
+      .toHaveTextContent("One");
+
+    // Streaming resumes and appends to the SAME message.
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: '{"type":"text-delta","id":"t1","delta":" two"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+    await act(async () => {
+      await req;
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-count"))
+      .toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("first-assistant-text"))
+      .toHaveTextContent("One two");
+  });
+
+  it("preserves an OBSERVED (cross-tab) streamed assistant when a stale broadcast lands mid-stream", async () => {
+    // Cross-tab variant of the single-turn case: this tab never sends the
+    // request, so it builds the in-flight assistant via the broadcast
+    // accumulator (the request id is not in `localRequestIdsRef`). A stale
+    // `cf_agent_chat_messages` snapshot must not wipe the observed parts.
+    const { agent, target } = createAgentWithTarget({
+      name: "observer-clobber",
+      url: "ws://localhost:3000/agents/chat/observer-clobber?_pk=abc"
+    });
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false
+      });
+
+      const assistantMessages = chat.messages.filter(
+        (m) => m.role === "assistant"
+      );
+      const firstAssistantText = assistantMessages[0]?.parts.find(
+        (p) => p.type === "text"
+      ) as { text?: string } | undefined;
+
+      return (
+        <div>
+          <div data-testid="assistant-count">{assistantMessages.length}</div>
+          <div data-testid="role-order">
+            {chat.messages.map((m) => m.role).join(",")}
+          </div>
+          <div data-testid="first-assistant-text">
+            {firstAssistantText?.text ?? ""}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    // Observe a stream owned by another tab: the start chunk carries the
+    // server id, then partial text.
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-from-other-tab",
+        body: '{"type":"start","messageId":"obs-assistant"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-from-other-tab",
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-from-other-tab",
+        body: '{"type":"text-delta","id":"t1","delta":"One"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("first-assistant-text"))
+      .toHaveTextContent("One");
+
+    // Stale full-list snapshot: the assistant exists server-side but with no
+    // parts yet. Must NOT clobber the observed text.
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_chat_messages",
+        messages: [
+          { id: "u1", role: "user", parts: [{ type: "text", text: "Hi" }] },
+          { id: "obs-assistant", role: "assistant", parts: [] }
+        ]
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-count"))
+      .toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("first-assistant-text"))
+      .toHaveTextContent("One");
+
+    // Stream resumes and appends to the SAME observed message.
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-from-other-tab",
+        body: '{"type":"text-delta","id":"t1","delta":" two"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-from-other-tab",
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-count"))
+      .toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("first-assistant-text"))
+      .toHaveTextContent("One two");
   });
 
   it("clears protection when CF_AGENT_CHAT_CLEAR arrives mid-stream", async () => {

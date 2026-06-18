@@ -3,7 +3,8 @@ import {
   applyToolUpdate,
   toolResultUpdate,
   crossMessageToolResultUpdate,
-  toolApprovalUpdate
+  toolApprovalUpdate,
+  pausedExecutionUpdate
 } from "../tool-state";
 
 function makePart(
@@ -166,6 +167,76 @@ describe("crossMessageToolResultUpdate", () => {
     expect(result!.parts[0]).toEqual(
       expect.objectContaining({ state: "output-available", output: { ok: 1 } })
     );
+  });
+});
+
+describe("pausedExecutionUpdate", () => {
+  const pausedPart = (executionId: string) =>
+    makePart("tc1", "output-available", {
+      output: { status: "paused", executionId, pending: [] }
+    });
+
+  it("replaces a paused output with the new outcome", () => {
+    const update = pausedExecutionUpdate("tc1", "exec_1", {
+      status: "completed",
+      executionId: "exec_1",
+      result: 42
+    });
+    expect(update.matchStates).toEqual(["output-available"]);
+
+    const applied = update.apply(pausedPart("exec_1"));
+    expect(applied.output).toEqual({
+      status: "completed",
+      executionId: "exec_1",
+      result: 42
+    });
+    expect(applied.preliminary).toBe(false);
+  });
+
+  it("no-ops (same reference) for a different execution id", () => {
+    const part = pausedPart("exec_other");
+    const update = pausedExecutionUpdate("tc1", "exec_1", {
+      status: "completed"
+    });
+    expect(update.apply(part)).toBe(part);
+  });
+
+  it("no-ops (same reference) when the output is no longer paused", () => {
+    const part = makePart("tc1", "output-available", {
+      output: { status: "completed", executionId: "exec_1", result: 1 }
+    });
+    const update = pausedExecutionUpdate("tc1", "exec_1", {
+      status: "rejected"
+    });
+    expect(update.apply(part)).toBe(part);
+  });
+
+  it("no-ops (same reference) for a non-object output", () => {
+    const part = makePart("tc1", "output-available", { output: "plain text" });
+    const update = pausedExecutionUpdate("tc1", "exec_1", {
+      status: "completed"
+    });
+    expect(update.apply(part)).toBe(part);
+  });
+
+  it("applies via applyToolUpdate only to the matching paused part", () => {
+    const parts = [
+      makePart("tc0", "output-available", {
+        output: { status: "paused", executionId: "exec_0" }
+      }),
+      pausedPart("exec_1")
+    ];
+    const outcome = { status: "completed", executionId: "exec_1", result: 7 };
+    const result = applyToolUpdate(
+      parts,
+      pausedExecutionUpdate("tc1", "exec_1", outcome)
+    );
+    expect(result).not.toBeNull();
+    expect((result!.parts[1] as Record<string, unknown>).output).toEqual(
+      outcome
+    );
+    // The other paused execution is untouched.
+    expect(result!.parts[0]).toBe(parts[0]);
   });
 });
 

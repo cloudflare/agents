@@ -1,0 +1,192 @@
+{
+  "gateway": "default",
+  "prompt": "Write three short sentences about the ocean.",
+  "results": [
+    {
+      "model": "openai/gpt-4o-mini",
+      "ok": true,
+      "runId": "7d5d5b4ab923c846ed52cc0148c296aeeb40366a3f91ce35cb0841479a0815b0",
+      "hasRunId": true,
+      "status": 200,
+      "contentType": "text/event-stream",
+      "totalBytes": 20604,
+      "eventCount": 63,
+      "headers": {
+        "cf-aig-event-id": "e094dc38-ba81-46f2-b9f5-5fa22e47c022",
+        "cf-aig-run-id": "7d5d5b4ab923c846ed52cc0148c296aeeb40366a3f91ce35cb0841479a0815b0",
+        "content-type": "text/event-stream"
+      },
+      "previewHead": "data: {\"id\":\"chatcmpl-DqdjYIeTlOzT0fcnAnoNElHfRDg95\",\"object\":\"chat.completion.chunk\",\"created\":1781438164,\"model\":\"gpt-4o-mini-2024-07-18\",\"service_tier\":\"default\",\"system_fingerprint\":\"fp_3fb44b05a1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":",
+      "resumeFromZero": {
+        "status": 200,
+        "bytes": 20604,
+        "matchesFull": true,
+        "firstDivergence": -1
+      },
+      "midEventIndex": 31,
+      "midByteOffset": 10231,
+      "resumeAsEventIndex": {
+        "status": 200,
+        "bytes": 10373,
+        "matchesTail": true
+      },
+      "resumeAsByteOffset": { "status": 200, "bytes": 0, "matchesTail": false },
+      "fromSemantics": "event-index"
+    },
+    {
+      "model": "openai/gpt-5.4",
+      "ok": true,
+      "runId": "c259abde2702b67a5fe5edc5eb0fe958838b1b04d444b50dc5c1b3e6a0c6cc80",
+      "hasRunId": true,
+      "status": 200,
+      "contentType": "text/event-stream",
+      "totalBytes": 7350,
+      "eventCount": 25,
+      "headers": {
+        "cf-aig-event-id": "38909e76-c5c1-465d-aca2-5dc8c95764f1",
+        "cf-aig-run-id": "c259abde2702b67a5fe5edc5eb0fe958838b1b04d444b50dc5c1b3e6a0c6cc80",
+        "content-type": "text/event-stream"
+      },
+      "previewHead": "data: {\"id\":\"chatcmpl-DqdjaxEHkcscyKRwrDAiWccvbiooN\",\"object\":\"chat.completion.chunk\",\"created\":1781438166,\"model\":\"gpt-5.4-2026-03-05\",\"service_tier\":\"default\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"co",
+      "resumeFromZero": {
+        "status": 200,
+        "bytes": 7350,
+        "matchesFull": true,
+        "firstDivergence": -1
+      },
+      "midEventIndex": 12,
+      "midByteOffset": 3596,
+      "resumeAsEventIndex": {
+        "status": 200,
+        "bytes": 3754,
+        "matchesTail": true
+      },
+      "resumeAsByteOffset": { "status": 200, "bytes": 0, "matchesTail": false },
+      "fromSemantics": "event-index"
+    },
+    {
+      "model": "anthropic/claude-haiku-4.5",
+      "ok": true,
+      "runId": "791e0ddf81aa5372468d5e65d63f380ebb6ee113b10ca913e0b64925a6ce7ee3",
+      "hasRunId": true,
+      "status": 200,
+      "contentType": "text/event-stream",
+      "totalBytes": 1924,
+      "eventCount": 11,
+      "headers": {
+        "cf-aig-event-id": "06177489-8a5b-4b00-9ad5-85d2d81a06cf",
+        "cf-aig-run-id": "791e0ddf81aa5372468d5e65d63f380ebb6ee113b10ca913e0b64925a6ce7ee3",
+        "content-type": "text/event-stream"
+      },
+      "previewHead": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-haiku-4-5-20251001\",\"id\":\"msg_01BE3nHgWzhjTMUyq4XwbfTz\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":nu",
+      "resumeFromZero": {
+        "status": 200,
+        "bytes": 1924,
+        "matchesFull": true,
+        "firstDivergence": -1
+      },
+      "midEventIndex": 5,
+      "midByteOffset": 983,
+      "resumeAsEventIndex": {
+        "status": 200,
+        "bytes": 941,
+        "matchesTail": true
+      },
+      "resumeAsByteOffset": { "status": 200, "bytes": 0, "matchesTail": false },
+      "fromSemantics": "event-index"
+    },
+    {
+      "model": "anthropic/claude-sonnet-4.5",
+      "ok": true,
+      "runId": "4b343996eb35ba49a7e9130a376b9af038297afcaf36a03929a6f03f0fc87f33",
+      "hasRunId": true,
+      "status": 200,
+      "contentType": "text/event-stream",
+      "totalBytes": 1868,
+      "eventCount": 10,
+      "headers": {
+        "cf-aig-event-id": "331fb241-fd4a-4484-b8b1-5e8dc7a0badf",
+        "cf-aig-run-id": "4b343996eb35ba49a7e9130a376b9af038297afcaf36a03929a6f03f0fc87f33",
+        "content-type": "text/event-stream"
+      },
+      "previewHead": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5-20250929\",\"id\":\"msg_015q9tqkdS7wsF6TvGgtiC9x\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":n",
+      "resumeFromZero": {
+        "status": 200,
+        "bytes": 1868,
+        "matchesFull": true,
+        "firstDivergence": -1
+      },
+      "midEventIndex": 5,
+      "midByteOffset": 1016,
+      "resumeAsEventIndex": {
+        "status": 200,
+        "bytes": 852,
+        "matchesTail": true
+      },
+      "resumeAsByteOffset": { "status": 200, "bytes": 0, "matchesTail": false },
+      "fromSemantics": "event-index"
+    },
+    {
+      "model": "google/gemini-3-flash",
+      "ok": true,
+      "runId": "0032ca7f4c0368cf88778fbf53eca7ec5f572f0d9febd23a4df4cfa8e97c561b",
+      "hasRunId": true,
+      "status": 200,
+      "contentType": "text/event-stream",
+      "totalBytes": 2253,
+      "eventCount": 4,
+      "headers": {
+        "cf-aig-event-id": "f5561629-2278-4701-a429-ceed2573a074",
+        "cf-aig-run-id": "0032ca7f4c0368cf88778fbf53eca7ec5f572f0d9febd23a4df4cfa8e97c561b",
+        "content-type": "text/event-stream"
+      },
+      "previewHead": "data: {\"choices\":[{\"delta\":{\"content\":\"The ocean is vast and deep\",\"role\":\"assistant\"},\"index\":0,\"logprobs\":null}],\"created\":1781438172,\"id\":\"3JYuaozDBJKtz_IPx7CToQo\",\"model\":\"google/gemini-3-flash-preview\",\"object\":\"chat.completion.chunk\",",
+      "resumeFromZero": {
+        "status": 200,
+        "bytes": 2253,
+        "matchesFull": true,
+        "firstDivergence": -1
+      },
+      "midEventIndex": 2,
+      "midByteOffset": 602,
+      "resumeAsEventIndex": {
+        "status": 200,
+        "bytes": 1651,
+        "matchesTail": true
+      },
+      "resumeAsByteOffset": { "status": 200, "bytes": 0, "matchesTail": false },
+      "fromSemantics": "event-index"
+    },
+    {
+      "model": "google/gemini-2.5-pro",
+      "ok": true,
+      "runId": "c75a70f81901e43540bd0591df61afe7c66cd4adb894b6d93d2cc8ff2953703c",
+      "hasRunId": true,
+      "status": 200,
+      "contentType": "text/event-stream",
+      "totalBytes": 883,
+      "eventCount": 3,
+      "headers": {
+        "cf-aig-event-id": "2f1d5b92-0201-4092-91c3-89aea1f11196",
+        "cf-aig-run-id": "c75a70f81901e43540bd0591df61afe7c66cd4adb894b6d93d2cc8ff2953703c",
+        "content-type": "text/event-stream"
+      },
+      "previewHead": "data: {\"choices\":[{\"delta\":{\"content\":\"The ocean stretches, vast and blue, to meet the distant horizon. Its waves crash against the shore in a\",\"role\":\"assistant\"},\"index\":0,\"logprobs\":null}],\"created\":1781438174,\"id\":\"3pYuaujyIteJmLAP-Kq5k",
+      "resumeFromZero": {
+        "status": 200,
+        "bytes": 883,
+        "matchesFull": true,
+        "firstDivergence": -1
+      },
+      "midEventIndex": 1,
+      "midByteOffset": 335,
+      "resumeAsEventIndex": {
+        "status": 200,
+        "bytes": 548,
+        "matchesTail": true
+      },
+      "resumeAsByteOffset": { "status": 200, "bytes": 0, "matchesTail": false },
+      "fromSemantics": "event-index"
+    }
+  ]
+}

@@ -42,7 +42,8 @@ export { MAX_BOUND_PARAMS, buildInClauseStrings } from "./sql-batch";
 
 export {
   createToolsFromClientSchemas,
-  type ClientToolSchema
+  type ClientToolSchema,
+  type ClientToolExecutor
 } from "./client-tools";
 
 export { CHAT_MESSAGE_TYPES } from "./protocol";
@@ -70,6 +71,7 @@ export {
   toolResultUpdate,
   crossMessageToolResultUpdate,
   toolApprovalUpdate,
+  pausedExecutionUpdate,
   type ToolPartUpdate
 } from "./tool-state";
 

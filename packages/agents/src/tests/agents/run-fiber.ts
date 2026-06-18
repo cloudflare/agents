@@ -630,4 +630,31 @@ export class TestRunFiberAgent extends Agent {
       this as unknown as { _checkRunFibers(): Promise<void> }
     )._checkRunFibers();
   }
+
+  /** Read the physical DO alarm (epoch ms) or null when none is armed. */
+  async getCurrentAlarm(): Promise<number | null> {
+    return this.ctx.storage.getAlarm();
+  }
+
+  /** Inspect the in-memory recovery backoff streak (white-box for tests). */
+  async getRecoveryNoProgressScans(): Promise<number> {
+    return (this as unknown as { _recoveryNoProgressScans: number })
+      ._recoveryNoProgressScans;
+  }
+
+  /**
+   * Run one housekeeping+reschedule cycle in the same order as `alarm()`
+   * (`_checkRunFibers` then `_scheduleNextAlarm`) and return the resulting
+   * armed alarm time (epoch ms) or null. Lets tests drive multi-pass recovery
+   * deterministically without spawning a real process / waiting on timers.
+   */
+  async simulateAlarmCycle(): Promise<number | null> {
+    const self = this as unknown as {
+      _checkRunFibers(): Promise<void>;
+      _scheduleNextAlarm(): Promise<void>;
+    };
+    await self._checkRunFibers();
+    await self._scheduleNextAlarm();
+    return this.ctx.storage.getAlarm();
+  }
 }

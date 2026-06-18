@@ -24,6 +24,12 @@ type StateDirent = {
   type: StateEntryType;
 };
 
+type StateCapabilities = {
+  chmod: boolean;
+  utimes: boolean;
+  hardLinks: boolean;
+};
+
 // ── Options ───────────────────────────────────────────────────────────────
 type StateMkdirOptions   = { recursive?: boolean };
 type StateRmOptions      = { recursive?: boolean; force?: boolean };
@@ -194,121 +200,125 @@ type StateApplyEditsResult = {
 };
 
 // ── state object ──────────────────────────────────────────────────────────
+// Every method takes a single object argument, e.g. state.readFile({ path }).
 declare const state: {
+  /** Report which optional filesystem features are supported. */
+  getCapabilities(): Promise<StateCapabilities>;
+
   // File I/O
   /** Read a file as text. */
-  readFile(path: string): Promise<string>;
+  readFile(args: { path: string }): Promise<string>;
   /** Read a file as bytes. */
-  readFileBytes(path: string): Promise<Uint8Array>;
+  readFileBytes(args: { path: string }): Promise<Uint8Array>;
   /** Write text to a file, creating parent directories as needed. */
-  writeFile(path: string, content: string): Promise<void>;
+  writeFile(args: { path: string; content: string }): Promise<void>;
   /** Write bytes to a file. */
-  writeFileBytes(path: string, content: Uint8Array): Promise<void>;
+  writeFileBytes(args: { path: string; content: Uint8Array }): Promise<void>;
   /** Append text or bytes to a file. */
-  appendFile(path: string, content: string | Uint8Array): Promise<void>;
+  appendFile(args: { path: string; content: string | Uint8Array }): Promise<void>;
 
   // JSON
   /** Parse a JSON file and return the value. */
-  readJson(path: string): Promise<unknown>;
+  readJson(args: { path: string }): Promise<unknown>;
   /** Write a value as JSON to a file. */
-  writeJson(path: string, value: unknown, options?: StateJsonWriteOptions): Promise<void>;
+  writeJson(args: { path: string; value: unknown; options?: StateJsonWriteOptions }): Promise<void>;
   /** Query a JSON file using dot-path syntax like ".key[0].nested". */
-  queryJson(path: string, query: string): Promise<unknown>;
+  queryJson(args: { path: string; query: string }): Promise<unknown>;
   /** Apply set/delete operations to a JSON file in place. */
-  updateJson(path: string, operations: StateJsonUpdateOperation[]): Promise<StateJsonUpdateResult>;
+  updateJson(args: { path: string; operations: StateJsonUpdateOperation[] }): Promise<StateJsonUpdateResult>;
 
   // Metadata & directories
   /** Return true if the path exists. */
-  exists(path: string): Promise<boolean>;
+  exists(args: { path: string }): Promise<boolean>;
   /** Stat a path, following symlinks. Returns null if not found. */
-  stat(path: string): Promise<StateStat | null>;
+  stat(args: { path: string }): Promise<StateStat | null>;
   /** Stat a path without following symlinks. Returns null if not found. */
-  lstat(path: string): Promise<StateStat | null>;
+  lstat(args: { path: string }): Promise<StateStat | null>;
   /** Create a directory. */
-  mkdir(path: string, options?: StateMkdirOptions): Promise<void>;
+  mkdir(args: { path: string; options?: StateMkdirOptions }): Promise<void>;
   /** List names in a directory. */
-  readdir(path: string): Promise<string[]>;
+  readdir(args: { path: string }): Promise<string[]>;
   /** List directory entries with type information. */
-  readdirWithFileTypes(path: string): Promise<StateDirent[]>;
+  readdirWithFileTypes(args: { path: string }): Promise<StateDirent[]>;
 
   // Tree traversal
   /** Find files/directories matching structured predicates. */
-  find(path: string, options?: StateFindOptions): Promise<StateFindEntry[]>;
+  find(args: { path: string; options?: StateFindOptions }): Promise<StateFindEntry[]>;
   /** Recursively build the directory tree. */
-  walkTree(path: string, options?: StateTreeOptions): Promise<StateTreeNode>;
+  walkTree(args: { path: string; options?: StateTreeOptions }): Promise<StateTreeNode>;
   /** Summarize file counts and sizes in a subtree. */
-  summarizeTree(path: string, options?: StateTreeOptions): Promise<StateTreeSummary>;
+  summarizeTree(args: { path: string; options?: StateTreeOptions }): Promise<StateTreeSummary>;
 
   // Search & replace
   /** Search for matches in a single file. */
-  searchText(path: string, query: string, options?: StateSearchOptions): Promise<StateTextMatch[]>;
+  searchText(args: { path: string; query: string; options?: StateSearchOptions }): Promise<StateTextMatch[]>;
   /** Search for matches across files matching a glob pattern. */
-  searchFiles(pattern: string, query: string, options?: StateSearchOptions): Promise<StateFileSearchResult[]>;
+  searchFiles(args: { pattern: string; query: string; options?: StateSearchOptions }): Promise<StateFileSearchResult[]>;
   /** Replace matches in a single file. */
-  replaceInFile(path: string, search: string, replacement: string, options?: StateSearchOptions): Promise<StateReplaceResult>;
+  replaceInFile(args: { path: string; search: string; replacement: string; options?: StateSearchOptions }): Promise<StateReplaceResult>;
   /** Replace matches across all files matching a glob. Transactional by default. */
-  replaceInFiles(pattern: string, search: string, replacement: string, options?: StateReplaceInFilesOptions): Promise<StateReplaceInFilesResult>;
+  replaceInFiles(args: { pattern: string; search: string; replacement: string; options?: StateReplaceInFilesOptions }): Promise<StateReplaceInFilesResult>;
 
   // File operations
   /** Remove a file or directory. */
-  rm(path: string, options?: StateRmOptions): Promise<void>;
+  rm(args: { path: string; options?: StateRmOptions }): Promise<void>;
   /** Copy a file or directory. */
-  cp(src: string, dest: string, options?: StateCopyOptions): Promise<void>;
+  cp(args: { src: string; dest: string; options?: StateCopyOptions }): Promise<void>;
   /** Move a file or directory. */
-  mv(src: string, dest: string, options?: StateMoveOptions): Promise<void>;
+  mv(args: { src: string; dest: string; options?: StateMoveOptions }): Promise<void>;
   /** Create a symlink. */
-  symlink(target: string, linkPath: string): Promise<void>;
+  symlink(args: { target: string; linkPath: string }): Promise<void>;
   /** Read a symlink target. */
-  readlink(path: string): Promise<string>;
+  readlink(args: { path: string }): Promise<string>;
   /** Resolve all symlinks to a canonical path. */
-  realpath(path: string): Promise<string>;
+  realpath(args: { path: string }): Promise<string>;
   /** Resolve a relative path against a base directory. */
-  resolvePath(base: string, path: string): Promise<string>;
+  resolvePath(args: { base: string; path: string }): Promise<string>;
   /** Find paths matching a glob pattern. */
-  glob(pattern: string): Promise<string[]>;
+  glob(args: { pattern: string }): Promise<string[]>;
   /** Unified diff between two files. */
-  diff(pathA: string, pathB: string): Promise<string>;
+  diff(args: { pathA: string; pathB: string }): Promise<string>;
   /** Unified diff between a file and new content. */
-  diffContent(path: string, newContent: string): Promise<string>;
+  diffContent(args: { path: string; newContent: string }): Promise<string>;
   /** Recursively remove a directory tree. */
-  removeTree(path: string): Promise<void>;
+  removeTree(args: { path: string }): Promise<void>;
   /** Recursively copy a directory tree. */
-  copyTree(src: string, dest: string): Promise<void>;
+  copyTree(args: { src: string; dest: string }): Promise<void>;
   /** Recursively move a directory tree. */
-  moveTree(src: string, dest: string): Promise<void>;
+  moveTree(args: { src: string; dest: string }): Promise<void>;
 
   // Archives & compression
   /** Pack sources into a tar archive. */
-  createArchive(path: string, sources: string[]): Promise<StateArchiveCreateResult>;
+  createArchive(args: { path: string; sources: string[] }): Promise<StateArchiveCreateResult>;
   /** List entries in a tar archive. */
-  listArchive(path: string): Promise<StateArchiveEntry[]>;
+  listArchive(args: { path: string }): Promise<StateArchiveEntry[]>;
   /** Extract a tar archive to a destination directory. */
-  extractArchive(path: string, destination: string): Promise<StateArchiveExtractResult>;
+  extractArchive(args: { path: string; destination: string }): Promise<StateArchiveExtractResult>;
   /** Gzip-compress a file. Default destination is \`path + ".gz"\`. */
-  compressFile(path: string, destination?: string): Promise<StateCompressionResult>;
+  compressFile(args: { path: string; destination?: string }): Promise<StateCompressionResult>;
   /** Gunzip a compressed file. */
-  decompressFile(path: string, destination?: string): Promise<StateCompressionResult>;
+  decompressFile(args: { path: string; destination?: string }): Promise<StateCompressionResult>;
   /** Hash a file and return the hex digest. */
-  hashFile(path: string, options?: StateHashOptions): Promise<string>;
+  hashFile(args: { path: string; options?: StateHashOptions }): Promise<string>;
   /** Detect the MIME type and binary/text nature of a file. */
-  detectFile(path: string): Promise<StateFileDetection>;
+  detectFile(args: { path: string }): Promise<StateFileDetection>;
 
   // Structured edit planning
   /**
    * Plan a batch of edits — compute content + diffs without writing.
    * Instructions: { kind: "write" | "replace" | "writeJson", path, ... }
    */
-  planEdits(instructions: StateEditInstruction[]): Promise<StateEditPlan>;
+  planEdits(args: { instructions: StateEditInstruction[] }): Promise<StateEditPlan>;
   /**
    * Apply a previously computed edit plan to disk.
    * Use dryRun: true to preview without writing.
    */
-  applyEditPlan(plan: StateEditPlan, options?: StateApplyEditsOptions): Promise<StateApplyEditsResult>;
+  applyEditPlan(args: { plan: StateEditPlan; options?: StateApplyEditsOptions }): Promise<StateApplyEditsResult>;
   /**
    * Apply a list of raw { path, content } edits.
    * Transactional by default: rolls back earlier writes if any write fails.
    */
-  applyEdits(edits: StateEdit[], options?: StateApplyEditsOptions): Promise<StateApplyEditsResult>;
+  applyEdits(args: { edits: StateEdit[]; options?: StateApplyEditsOptions }): Promise<StateApplyEditsResult>;
 };
 `.trim();
 
@@ -328,6 +338,7 @@ Rules:
 - Write an async function: \`async () => { ... return result; }\`
 - Do NOT use TypeScript syntax — no type annotations, interfaces, or generics in your code.
 - Do NOT use \`import\` statements — all helpers are available through \`state\`.
+- Every \`state\` method takes a single object argument: \`state.readFile({ path: "/x.txt" })\`.
 - Always \`return\` the final value you want back.
 - For multi-file refactors, prefer \`planEdits()\` + \`applyEditPlan()\` over many individual writes.
 - For search-and-replace across a tree, use \`replaceInFiles()\` — it is transactional by default.

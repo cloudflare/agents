@@ -1,66 +1,75 @@
 import type { ToolSet } from "ai";
 import {
-  createBrowserToolHandlers,
-  SEARCH_DESCRIPTION,
-  EXECUTE_DESCRIPTION
+  createBrowserRuntime,
+  createBrowserTools as createBrowserToolsForAi,
+  createQuickActionTools,
+  type BrowserRuntime,
+  type CreateBrowserToolsOptions,
+  type CreateQuickActionToolsOptions,
+  type QuickActionToolName
+} from "agents/browser/ai";
+
+export {
+  createBrowserRuntime,
+  type BrowserRuntime,
+  type CreateBrowserToolsOptions
+};
+
+// Stateless Quick Action tools — re-exported so a Think agent can expose them
+// from `getTools()` with a single import, including the loader-free path
+// (`createQuickActionTools`) that needs only the `browser` binding.
+export {
+  createQuickActionTools,
+  type CreateQuickActionToolsOptions,
+  type QuickActionToolName
+};
+export {
+  browserContent,
+  browserExtract,
+  browserLinks,
+  browserMarkdown,
+  browserPdf,
+  browserScrape,
+  browserScreenshot,
+  browserSnapshot,
+  runQuickAction,
+  type QuickAction,
+  type QuickActionBinary,
+  type QuickActionBinding,
+  type QuickActionCommonOptions,
+  type QuickActionExtractInput,
+  type QuickActionInput,
+  type QuickActionPage,
+  type QuickActionScrapeInput,
+  type QuickActionScrapeResult,
+  type QuickActionScreenshotInput,
+  type QuickActionSnapshot
 } from "agents/browser";
-import { tool } from "ai";
-import { z } from "zod";
-
-export interface CreateBrowserToolsOptions {
-  /**
-   * Browser Rendering binding (Fetcher).
-   *
-   * This is the primary way to connect — works both locally in
-   * `wrangler dev` and when deployed to Cloudflare Workers.
-   *
-   * Requires `"browser": { "binding": "BROWSER" }` in wrangler.jsonc.
-   */
-  browser?: Fetcher;
-
-  /**
-   * Optional CDP base URL override (e.g. `http://localhost:9222`).
-   *
-   * Use when connecting to a manually managed Chrome instance or
-   * a remote CDP endpoint behind a tunnel.
-   */
-  cdpUrl?: string;
-
-  /**
-   * Headers to send with CDP URL discovery requests.
-   * Useful when the CDP endpoint requires authentication
-   * (e.g. Cloudflare Access headers).
-   */
-  cdpHeaders?: Record<string, string>;
-
-  /**
-   * WorkerLoader binding for sandboxed code execution.
-   *
-   * Requires `"worker_loaders": [{ "binding": "LOADER" }]` in wrangler.jsonc.
-   */
-  loader: WorkerLoader;
-
-  /**
-   * Execution timeout in milliseconds. Defaults to 30000 (30s).
-   */
-  timeout?: number;
-}
 
 /**
  * Create browser automation tools for Think agents.
  *
- * Returns a `ToolSet` with two tools:
+ * Returns the durable `browser_execute` tool backed by a codemode runtime —
+ * the model writes TypeScript against the `cdp` connector (`cdp.send`,
+ * `cdp.attachToTarget`, `cdp.spec`, …); executions are recorded for
+ * abort-and-replay, and browser sessions are keyed by execution (they survive
+ * pauses and, in `reuse`/`dynamic` modes, span executions) — plus the stateless
+ * {@link createQuickActionTools | Quick Action} tools (`browser_markdown`,
+ * `browser_extract`, …) by default whenever a `browser` binding is present.
+ * Pass `quickActions: false` to omit them, or use `createQuickActionTools`
+ * directly for the stateless tools alone (no Worker Loader required).
  *
- * - **`browser_search`** — query the Chrome DevTools Protocol spec
- *   to discover commands, events, and types. The LLM writes JavaScript
- *   that runs against a cached, normalized copy of the protocol.
+ * Setup checklist:
  *
- * - **`browser_execute`** — run CDP commands against a live browser
- *   session. Each call opens a fresh session, exposes a `cdp` helper,
- *   and closes the session on completion.
+ * - `"browser": { "binding": "BROWSER" }` in wrangler.jsonc
+ * - `"worker_loaders": [{ "binding": "LOADER" }]` in wrangler.jsonc
+ * - export the runtime class from your worker entry:
+ *   `export { CodemodeRuntime } from "@cloudflare/codemode"`
+ *   (the `@cloudflare/codemode/vite` plugin does this automatically)
  *
- * Both tools use the code-mode pattern: the LLM writes JavaScript
- * async arrow functions that execute in a sandboxed Worker isolate.
+ * Use {@link createBrowserRuntime} instead when you also need the runtime
+ * handle (approvals, audit, `expirePaused`) or the connector's host-side
+ * session helpers (`sessionInfo`, `closeSession`, `sweep`).
  *
  * @example
  * ```ts
@@ -69,14 +78,16 @@ export interface CreateBrowserToolsOptions {
  *
  * export class MyAgent extends Think<Env> {
  *   getModel() {
- *     return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.6");
+ *     return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.7-code");
  *   }
  *
  *   getTools() {
  *     return {
  *       ...createBrowserTools({
+ *         ctx: this.ctx,
  *         browser: this.env.BROWSER,
  *         loader: this.env.LOADER,
+ *         session: { mode: "dynamic" }
  *       }),
  *     };
  *   }
@@ -86,45 +97,5 @@ export interface CreateBrowserToolsOptions {
 export function createBrowserTools(
   options: CreateBrowserToolsOptions
 ): ToolSet {
-  const handlers = createBrowserToolHandlers({
-    browser: options.browser,
-    cdpUrl: options.cdpUrl,
-    cdpHeaders: options.cdpHeaders,
-    loader: options.loader,
-    timeout: options.timeout
-  });
-
-  return {
-    browser_search: tool({
-      description: SEARCH_DESCRIPTION,
-      inputSchema: z.object({
-        code: z
-          .string()
-          .describe("JavaScript async arrow function that queries the CDP spec")
-      }),
-      execute: async ({ code }) => {
-        const result = await handlers.search(code);
-        if (result.isError) {
-          throw new Error(result.text);
-        }
-        return result.text;
-      }
-    }),
-
-    browser_execute: tool({
-      description: EXECUTE_DESCRIPTION,
-      inputSchema: z.object({
-        code: z
-          .string()
-          .describe("JavaScript async arrow function that uses the cdp helper")
-      }),
-      execute: async ({ code }) => {
-        const result = await handlers.execute(code);
-        if (result.isError) {
-          throw new Error(result.text);
-        }
-        return result.text;
-      }
-    })
-  };
+  return createBrowserToolsForAi(options);
 }

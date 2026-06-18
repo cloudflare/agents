@@ -1,958 +1,521 @@
 /**
- * Based on webStandardStreamableHttp.ts (https://github.com/modelcontextprotocol/typescript-sdk/blob/main/packages/server/src/server/webStandardStreamableHttp.ts)
+ * WorkerTransport
+ *
+ * Thin Cloudflare-Workers wrapper around the official MCP SDK
+ * `WebStandardStreamableHTTPServerTransport`. The wrapper layers a couple of
+ * Workers-specific concerns on top of the SDK transport without forking it:
+ *
+ *  1. **CORS** — preflight handling and response-header injection,
+ *     configurable via `corsOptions`.
+ *  2. **Persistent transport state** — when a `storage` adapter
+ *     (`MCPStorageApi`) is supplied, the wrapper persists
+ *     `{sessionId, initialized, initializeParams}` so that an MCP session can
+ *     survive DO hibernation / eviction. On the first request after a cold
+ *     start, the saved initialize params are replayed through the `Server`
+ *     so client capabilities are re-established.
+ *  3. **SSE keepalive** — SSE responses are wrapped in a TransformStream that
+ *     injects a `: keepalive\n\n` comment frame every 25s so the Cloudflare
+ *     edge ~5min idle-stream watchdog doesn't kill long-running tool calls.
+ *     Disabled on the standalone GET stream when an `eventStore` is
+ *     configured — clients recover idle drops via `Last-Event-ID` instead.
+ *     POST response streams always keepalive (no resumption path during a
+ *     mid-flight tool call). See cloudflare/agents#1583.
+ *
+ * Everything else (session validation, SSE streaming, protocol-version
+ * negotiation, event-store resumability, etc.) is delegated to the SDK
+ * transport.
  */
 
-import type {
-  Transport,
-  TransportSendOptions
-} from "@modelcontextprotocol/sdk/shared/transport.js";
-import type {
-  JSONRPCMessage,
-  RequestId,
-  RequestInfo,
-  MessageExtraInfo,
-  InitializeRequestParams
-} from "@modelcontextprotocol/sdk/types.js";
+import {
+  WebStandardStreamableHTTPServerTransport,
+  type WebStandardStreamableHTTPServerTransportOptions
+} from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
+import type { TransportSendOptions } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   isInitializeRequest,
   isJSONRPCErrorResponse,
-  isJSONRPCRequest,
   isJSONRPCResultResponse,
-  JSONRPCMessageSchema,
-  SUPPORTED_PROTOCOL_VERSIONS
+  type InitializeRequestParams,
+  type JSONRPCMessage,
+  type RequestId
 } from "@modelcontextprotocol/sdk/types.js";
 import type { CORSOptions } from "./types";
-import type {
-  EventStore,
-  EventId
-} from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { startKeepalive } from "./sse-keepalive";
+import { KEEPALIVE_FRAME, KEEPALIVE_INTERVAL_MS } from "./sse-keepalive";
 
-const MCP_PROTOCOL_VERSION_HEADER = "MCP-Protocol-Version";
+/** Sentinel id used when replaying the persisted initialize request. */
+const RESTORE_REQUEST_ID = "__worker_transport_restore__";
 
-const RESTORE_REQUEST_ID = "__restore__";
-
-interface StreamMapping {
-  writer?: WritableStreamDefaultWriter<Uint8Array>;
-  encoder?: TextEncoder;
-  resolveJson?: (response: Response) => void;
-  cleanup: () => void;
-}
-
+/**
+ * Pluggable storage adapter for persisting `WorkerTransport` state across
+ * Durable Object hibernation / restart cycles.
+ *
+ * A typical implementation reads/writes a single key on `this.ctx.storage`
+ * inside a Durable Object or Agent.
+ */
 export interface MCPStorageApi {
   get(): Promise<TransportState | undefined> | TransportState | undefined;
   set(state: TransportState): Promise<void> | void;
 }
 
+/** Shape of the persisted transport state. */
 export interface TransportState {
   sessionId?: string;
   initialized: boolean;
   initializeParams?: InitializeRequestParams;
 }
 
-export interface WorkerTransportOptions {
+const DEFAULT_CORS_OPTIONS: Required<
+  Pick<
+    CORSOptions,
+    "origin" | "headers" | "methods" | "exposeHeaders" | "maxAge"
+  >
+> = {
+  origin: "*",
+  headers:
+    "Content-Type, Accept, Authorization, mcp-session-id, MCP-Protocol-Version",
+  methods: "GET, POST, DELETE, OPTIONS",
+  exposeHeaders: "mcp-session-id",
+  maxAge: 86400
+};
+
+export interface WorkerTransportOptions extends WebStandardStreamableHTTPServerTransportOptions {
   /**
-   * Function that generates a session ID for the transport.
-   * The session ID SHOULD be globally unique and cryptographically secure.
-   * Return undefined to disable session management (stateless mode).
+   * CORS options applied to every response and to OPTIONS preflight.
+   * Defaults: `origin: *`, expose `mcp-session-id`, allow the standard MCP
+   * methods/headers, max-age 86400.
    */
-  sessionIdGenerator?: () => string;
-  /**
-   * Enable traditional Request/Response mode, this will disable streaming.
-   */
-  enableJsonResponse?: boolean;
-  /**
-   * Callback fired when a new session is initialized.
-   */
-  onsessioninitialized?: (sessionId: string) => void;
-  /**
-   * Callback fired when a session is closed via DELETE request.
-   */
-  onsessionclosed?: (sessionId: string) => void;
   corsOptions?: CORSOptions;
   /**
-   * Optional storage api for persisting transport state.
-   * Use this to store session state in Durable Object/Agent storage
-   * so it survives hibernation/restart.
+   * Optional storage adapter for persisting transport state across DO
+   * hibernation / restart. Use this to keep an MCP session alive across
+   * Durable Object wake-ups.
    */
   storage?: MCPStorageApi;
-  /**
-   * Event store for SSE resumability.
-   *
-   * When set, the transport assigns a globally-unique `id:` to each SSE
-   * event and replays missed events when a client reconnects with the
-   * `Last-Event-ID` header. Both GET (standalone listen stream) and POST
-   * (tool response stream) events are stored and replayable per the
-   * MCP 2025-03-26 spec.
-   *
-   * Configuring an event store **disables the server-side keepalive**
-   * on the standalone GET stream — idle drops are recovered by
-   * reconnect rather than prevented by writing bytes. Without an event
-   * store, the GET stream still gets the 25s comment-frame keepalive
-   * so long-lived idle listeners aren't closed by the Cloudflare edge
-   * ~5min watchdog.
-   *
-   * POST response streams always get the keepalive regardless of this
-   * setting: in-progress tool calls have no way to recover
-   * mid-execution without staying connected, so we don't let the
-   * stream drop in the first place.
-   *
-   * Bring your own {@link EventStore} implementation — e.g.
-   * `new DurableObjectEventStore(this.ctx.storage)` when embedding
-   * `WorkerTransport` inside a Durable Object / Agent. See
-   * cloudflare/agents#1583.
-   */
-  eventStore?: EventStore;
-  /**
-   * Retry interval in milliseconds to suggest to clients in SSE retry field.
-   * Controls client reconnection timing for polling behavior.
-   */
-  retryInterval?: number;
 }
 
-export class WorkerTransport implements Transport {
-  started = false;
-  private initialized = false;
-  private sessionIdGenerator?: () => string;
-  private enableJsonResponse = false;
-  private onsessioninitialized?: (sessionId: string) => void;
-  private onsessionclosed?: (sessionId: string) => void;
-  private standaloneSseStreamId = "_GET_stream";
-  private streamMapping = new Map<string, StreamMapping>();
-  private requestToStreamMapping = new Map<RequestId, string>();
-  private requestResponseMap = new Map<RequestId, JSONRPCMessage>();
-  private corsOptions?: CORSOptions;
-  private storage?: MCPStorageApi;
-  private stateRestored = false;
-  private eventStore?: EventStore;
-  private retryInterval?: number;
-  private initializeParams?: TransportState["initializeParams"];
-
-  sessionId?: string;
-  onclose?: () => void;
-  onerror?: (error: Error) => void;
-  onmessage?: (message: JSONRPCMessage, extra?: MessageExtraInfo) => void;
-
-  constructor(options?: WorkerTransportOptions) {
-    this.sessionIdGenerator = options?.sessionIdGenerator;
-    this.enableJsonResponse = options?.enableJsonResponse ?? false;
-    this.onsessioninitialized = options?.onsessioninitialized;
-    this.onsessionclosed = options?.onsessionclosed;
-    this.corsOptions = options?.corsOptions;
-    this.storage = options?.storage;
-    this.eventStore = options?.eventStore;
-    this.retryInterval = options?.retryInterval;
-  }
-
+export class WorkerTransport extends WebStandardStreamableHTTPServerTransport {
+  private readonly _corsOptions?: CORSOptions;
+  private readonly _storage?: MCPStorageApi;
+  private _stateRestored = false;
+  private _capturedInitializeParams?: InitializeRequestParams;
+  private _userOnSessionInitialized?: (
+    sessionId: string
+  ) => void | Promise<void>;
+  private _bridgeInstalled = false;
   /**
-   * Restore transport state from persistent storage.
-   * This is automatically called on start.
+   * Tracks keepalive interval cleanups so we can fire them eagerly when the
+   * SDK closes the underlying SSE stream via `closeSSEStream(requestId)` or
+   * `closeStandaloneSSEStream()`. Keyed by the JSON-RPC request id that
+   * triggered the stream, or the sentinel for the standalone GET stream.
    */
-  private async restoreState() {
-    if (!this.storage || this.stateRestored) {
-      return;
-    }
-
-    const state = await Promise.resolve(this.storage.get());
-
-    if (state) {
-      this.sessionId = state.sessionId;
-      this.initialized = state.initialized;
-
-      // Restore _clientCapabilities on the Server instance by replaying the original initialize request
-      if (state.initializeParams && this.onmessage) {
-        this.onmessage({
-          jsonrpc: "2.0",
-          id: RESTORE_REQUEST_ID,
-          method: "initialize",
-          params: state.initializeParams
-        });
-      }
-    }
-
-    this.stateRestored = true;
-  }
-
+  private readonly _keepaliveCleanups = new Map<
+    RequestId | "_standalone",
+    () => void
+  >();
   /**
-   * Persist current transport state to storage.
+   * Most recent JSON-RPC request id seen on an incoming POST. Used to key
+   * keepalive cleanups when the response is an SSE stream tied to that
+   * request (so `closeSSEStream(id)` can find and clear the interval).
    */
-  private async saveState() {
-    if (!this.storage) {
-      return;
-    }
-
-    const state: TransportState = {
-      sessionId: this.sessionId,
-      initialized: this.initialized,
-      initializeParams: this.initializeParams
-    };
-
-    await Promise.resolve(this.storage.set(state));
-  }
-
-  async start(): Promise<void> {
-    if (this.started) {
-      throw new Error("Transport already started");
-    }
-    this.started = true;
-  }
-
+  private _pendingRequestId?: RequestId;
   /**
-   * Validates the MCP-Protocol-Version header on incoming requests.
-   *
-   * This performs a simple check: if a version header is present, it must be
-   * in the SUPPORTED_PROTOCOL_VERSIONS list. We do not track the negotiated
-   * version or enforce version consistency across requests - the SDK handles
-   * version negotiation during initialization, and we simply reject any
-   * explicitly unsupported versions.
-   *
-   * - Header present and supported: Accept
-   * - Header present and unsupported: 400 Bad Request
-   * - Header missing: Accept (version validation is optional)
+   * Request ids whose SSE stream was deliberately torn down via
+   * `closeSSEStream`. The SDK's `send()` throws "No connection established"
+   * when a request id has no stream — a race that surfaces whenever the
+   * server's tool handler resolves *after* the caller closed the stream
+   * (e.g. polling-style early-close, or test fixtures closing mid-flight).
+   * We swallow `send()` for these ids so the rejection doesn't bubble out
+   * of the protocol layer as an unhandled rejection. Mirrors the
+   * silent-noop behaviour of the pre-refactor `WorkerTransport`.
    */
-  private validateProtocolVersion(request: Request): Response | undefined {
-    const protocolVersion = request.headers.get(MCP_PROTOCOL_VERSION_HEADER);
+  private readonly _closedRequestIds = new Set<RequestId>();
 
-    if (
-      protocolVersion !== null &&
-      !SUPPORTED_PROTOCOL_VERSIONS.includes(protocolVersion)
-    ) {
-      return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: {
-            code: -32000,
-            message: `Bad Request: Unsupported protocol version: ${protocolVersion} (supported versions: ${SUPPORTED_PROTOCOL_VERSIONS.join(", ")})`
-          },
-          id: null
-        }),
-        {
-          status: 400,
-          headers: {
-            "Content-Type": "application/json",
-            ...this.getHeaders()
-          }
-        }
-      );
-    }
-    return undefined;
-  }
+  constructor(options: WorkerTransportOptions = {}) {
+    const { corsOptions, storage, onsessioninitialized, ...sdkOptions } =
+      options;
 
-  private getHeaders({ forPreflight }: { forPreflight?: boolean } = {}): Record<
-    string,
-    string
-  > {
-    const defaults: CORSOptions = {
-      origin: "*",
-      headers:
-        "Content-Type, Accept, Authorization, mcp-session-id, MCP-Protocol-Version",
-      methods: "GET, POST, DELETE, OPTIONS",
-      exposeHeaders: "mcp-session-id",
-      maxAge: 86400
-    };
-
-    const options = { ...defaults, ...this.corsOptions };
-
-    // For OPTIONS preflight, return all CORS headers
-    if (forPreflight) {
-      return {
-        "Access-Control-Allow-Origin": options.origin!,
-        "Access-Control-Allow-Headers": options.headers!,
-        "Access-Control-Allow-Methods": options.methods!,
-        "Access-Control-Max-Age": options.maxAge!.toString()
-      };
-    }
-
-    // For actual requests, only return origin and expose headers
-    return {
-      "Access-Control-Allow-Origin": options.origin!,
-      "Access-Control-Expose-Headers": options.exposeHeaders!
-    };
-  }
-
-  async handleRequest(
-    request: Request,
-    parsedBody?: unknown
-  ): Promise<Response> {
-    await this.restoreState();
-
-    switch (request.method) {
-      case "OPTIONS":
-        return this.handleOptionsRequest(request);
-      case "GET":
-        return this.handleGetRequest(request);
-      case "POST":
-        return this.handlePostRequest(request, parsedBody);
-      case "DELETE":
-        return this.handleDeleteRequest(request);
-      default:
-        return this.handleUnsupportedRequest();
-    }
-  }
-
-  private async handleGetRequest(request: Request): Promise<Response> {
-    const acceptHeader = request.headers.get("Accept");
-    if (!acceptHeader?.includes("text/event-stream")) {
-      return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: {
-            code: -32000,
-            message: "Not Acceptable: Client must accept text/event-stream"
-          },
-          id: null
-        }),
-        {
-          status: 406,
-          headers: {
-            "Content-Type": "application/json",
-            ...this.getHeaders()
-          }
-        }
-      );
-    }
-
-    const sessionError = this.validateSession(request);
-    if (sessionError) {
-      return sessionError;
-    }
-
-    // Validate protocol version on subsequent requests
-    const versionError = this.validateProtocolVersion(request);
-    if (versionError) {
-      return versionError;
-    }
-
-    let streamId = this.standaloneSseStreamId;
-
-    // Check for resumability via Last-Event-ID
-    const lastEventId = request.headers.get("Last-Event-ID");
-    if (lastEventId && this.eventStore) {
-      // Get the stream ID for this event if available
-      const eventStreamId =
-        await this.eventStore.getStreamIdForEventId?.(lastEventId);
-      if (eventStreamId) {
-        streamId = eventStreamId;
-      }
-    }
-
-    if (this.streamMapping.get(streamId) !== undefined) {
-      return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: {
-            code: -32000,
-            message: "Conflict: Only one SSE stream is allowed per session"
-          },
-          id: null
-        }),
-        {
-          status: 409,
-          headers: {
-            "Content-Type": "application/json",
-            ...this.getHeaders()
-          }
-        }
-      );
-    }
-
-    const { readable, writable } = new TransformStream<Uint8Array>();
-    const writer = writable.getWriter();
-    const encoder = new TextEncoder();
-
-    const headers = new Headers({
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-      ...this.getHeaders()
+    // `storage` is intentionally orthogonal to statefulness: stateful-vs-
+    // stateless behaviour is driven solely by the SDK's `sessionIdGenerator`.
+    // `storage` only persists whatever session state exists across DO
+    // hibernation, so it's used alongside a `sessionIdGenerator`.
+    //
+    // We wrap onsessioninitialized so we can persist state to storage as soon
+    // as the SDK transport assigns a session ID. The bridge gets installed
+    // lazily on the first request so `this` is fully constructed when it fires.
+    super({
+      ...sdkOptions,
+      onsessioninitialized: undefined
     });
 
-    if (this.sessionId !== undefined) {
-      headers.set("mcp-session-id", this.sessionId);
-    }
-
-    // Keepalive policy on the standalone GET stream:
-    //   - eventStore configured → no keepalive. Idle drops are
-    //     recovered by clients reconnecting with Last-Event-ID.
-    //   - no eventStore → arm a 25s comment-frame keepalive so the
-    //     stream isn't closed by the Cloudflare edge ~5min idle
-    //     watchdog. Without an event store there is no recovery path,
-    //     so this preserves the pre-fix behaviour for callers who
-    //     haven't opted into resumability.
-    // See cloudflare/agents#1583.
-    const keepAlive = this.eventStore
-      ? undefined
-      : startKeepalive(writer, encoder);
-    // `cleanup` reads `streamId` lazily so it stays correct across the
-    // eventStore remap below.
-    const cleanup = () => {
-      if (keepAlive !== undefined) clearInterval(keepAlive);
-      this.streamMapping.delete(streamId);
-      writer.close().catch(() => {});
-    };
-    this.streamMapping.set(streamId, { writer, encoder, cleanup });
-
-    // Write priming event with retry interval if configured
-    if (this.retryInterval !== undefined) {
-      await writer.write(encoder.encode(`retry: ${this.retryInterval}\n\n`));
-    }
-
-    // Replay events if resuming and eventStore is configured
-    if (lastEventId && this.eventStore) {
-      const replayedStreamId = await this.eventStore.replayEventsAfter(
-        lastEventId,
-        {
-          send: async (eventId: EventId, message: JSONRPCMessage) => {
-            const data = `id: ${eventId}\nevent: message\ndata: ${JSON.stringify(message)}\n\n`;
-            await writer.write(encoder.encode(data));
-          }
-        }
-      );
-      // Update stream ID if different from what we had. Reuse the same
-      // `cleanup` closure as above so any future teardown work (e.g.
-      // tearing down a keepalive) is impossible to leak in this branch.
-      if (replayedStreamId !== streamId) {
-        this.streamMapping.delete(streamId);
-        streamId = replayedStreamId;
-        this.streamMapping.set(streamId, { writer, encoder, cleanup });
-      }
-    }
-
-    return new Response(readable, { headers });
+    this._corsOptions = corsOptions;
+    this._storage = storage;
+    this._userOnSessionInitialized = onsessioninitialized;
   }
 
-  private async handlePostRequest(
+  /**
+   * Backwards-compatible alias for the SDK's internal `_started` flag.
+   * Several callers and tests check `transport.started` directly.
+   */
+  get started(): boolean {
+    return (this as unknown as { _started: boolean })._started;
+  }
+
+  /**
+   * Top-level request entry point. Handles CORS preflight, restores any
+   * persisted state on first invocation, then delegates to the SDK transport
+   * and finally appends CORS headers + keepalive to whatever response comes
+   * back.
+   */
+  override async handleRequest(
     request: Request,
-    parsedBody?: unknown
+    options?: { parsedBody?: unknown; authInfo?: AuthInfo }
   ): Promise<Response> {
-    const acceptHeader = request.headers.get("Accept");
-    if (
-      !acceptHeader?.includes("application/json") ||
-      !acceptHeader?.includes("text/event-stream")
-    ) {
-      return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: {
-            code: -32000,
-            message:
-              "Not Acceptable: Client must accept both application/json and text/event-stream"
-          },
-          id: null
-        }),
-        {
-          status: 406,
-          headers: {
-            "Content-Type": "application/json",
-            ...this.getHeaders()
-          }
-        }
-      );
-    }
-
-    const contentType = request.headers.get("Content-Type");
-    if (!contentType?.includes("application/json")) {
-      return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: {
-            code: -32000,
-            message:
-              "Unsupported Media Type: Content-Type must be application/json"
-          },
-          id: null
-        }),
-        {
-          status: 415,
-          headers: {
-            "Content-Type": "application/json",
-            ...this.getHeaders()
-          }
-        }
-      );
-    }
-
-    let rawMessage = parsedBody;
-    if (rawMessage === undefined) {
-      try {
-        rawMessage = await request.json();
-      } catch {
-        return new Response(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            error: {
-              code: -32700,
-              message: "Parse error: Invalid JSON"
-            },
-            id: null
-          }),
-          {
-            status: 400,
-            headers: {
-              "Content-Type": "application/json",
-              ...this.getHeaders()
-            }
-          }
-        );
-      }
-    }
-
-    let messages: JSONRPCMessage[];
-    try {
-      if (Array.isArray(rawMessage)) {
-        messages = rawMessage.map((msg) => JSONRPCMessageSchema.parse(msg));
-      } else {
-        messages = [JSONRPCMessageSchema.parse(rawMessage)];
-      }
-    } catch {
-      return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: {
-            code: -32700,
-            message: "Parse error: Invalid JSON-RPC message"
-          },
-          id: null
-        }),
-        {
-          status: 400,
-          headers: {
-            "Content-Type": "application/json",
-            ...this.getHeaders()
-          }
-        }
-      );
-    }
-
-    const requestInfo: RequestInfo = {
-      headers: Object.fromEntries(request.headers.entries()),
-      url: new URL(request.url)
-    };
-
-    const isInitializationRequest = messages.some(isInitializeRequest);
-
-    if (isInitializationRequest) {
-      if (this.initialized && this.sessionId !== undefined) {
-        return new Response(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            error: {
-              code: -32600,
-              message: "Invalid Request: Server already initialized"
-            },
-            id: null
-          }),
-          {
-            status: 400,
-            headers: {
-              "Content-Type": "application/json",
-              ...this.getHeaders()
-            }
-          }
-        );
-      }
-
-      if (messages.length > 1) {
-        return new Response(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            error: {
-              code: -32600,
-              message:
-                "Invalid Request: Only one initialization request is allowed"
-            },
-            id: null
-          }),
-          {
-            status: 400,
-            headers: {
-              "Content-Type": "application/json",
-              ...this.getHeaders()
-            }
-          }
-        );
-      }
-
-      this.sessionId = this.sessionIdGenerator?.();
-      this.initialized = true;
-
-      const initMessage = messages.find(isInitializeRequest);
-      if (initMessage && isInitializeRequest(initMessage)) {
-        this.initializeParams = {
-          capabilities: initMessage.params.capabilities,
-          clientInfo: initMessage.params.clientInfo,
-          protocolVersion: initMessage.params.protocolVersion
-        };
-      }
-
-      await this.saveState();
-
-      if (this.sessionId && this.onsessioninitialized) {
-        this.onsessioninitialized(this.sessionId);
-      }
-    }
-
-    if (!isInitializationRequest) {
-      const sessionError = this.validateSession(request);
-      if (sessionError) {
-        return sessionError;
-      }
-
-      // Validate protocol version on subsequent requests
-      const versionError = this.validateProtocolVersion(request);
-      if (versionError) {
-        return versionError;
-      }
-    }
-
-    const hasRequests = messages.some(isJSONRPCRequest);
-
-    if (!hasRequests) {
-      for (const message of messages) {
-        this.onmessage?.(message, { requestInfo });
-      }
+    if (request.method === "OPTIONS") {
       return new Response(null, {
-        status: 202,
-        headers: { ...this.getHeaders() }
+        headers: this.getCorsHeaders({ forPreflight: true })
       });
     }
 
-    const streamId = crypto.randomUUID();
+    await this.restoreState();
+    this.installOnSessionInitializedBridge();
 
-    if (this.enableJsonResponse) {
-      return new Promise<Response>((resolve) => {
-        this.streamMapping.set(streamId, {
-          resolveJson: resolve,
-          cleanup: () => {
-            this.streamMapping.delete(streamId);
-          }
-        });
+    // Capture the initialize params before delegating, so we can persist
+    // them alongside the session id that the SDK assigns inside
+    // handleRequest. Also captures the JSON-RPC request id of any POSTed
+    // request so we can key the keepalive cleanup to it.
+    await this.captureInitializeParams(request, options);
+    const requestIdForKeepalive =
+      request.method === "GET" ? "_standalone" : this._pendingRequestId;
 
-        for (const message of messages) {
-          if (isJSONRPCRequest(message)) {
-            this.requestToStreamMapping.set(message.id, streamId);
-          }
-        }
+    const response = await super.handleRequest(request, options);
 
-        for (const message of messages) {
-          this.onmessage?.(message, { requestInfo });
-        }
-      });
-    }
+    // State is persisted by the `onsessioninitialized` bridge, which the SDK
+    // fires (and awaits) during `super.handleRequest` on the initialize path —
+    // the only point session state actually changes. We deliberately do *not*
+    // snapshot again here: that would write to storage on every request
+    // (notifications, tool calls, GET, DELETE) where nothing changed, matching
+    // neither the pre-refactor behaviour (one write at init) nor the intent of
+    // the storage adapter.
 
-    const { readable, writable } = new TransformStream<Uint8Array>();
-    const writer = writable.getWriter();
-    const encoder = new TextEncoder();
-
-    const headers = new Headers({
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-      ...this.getHeaders()
-    });
-
-    if (this.sessionId !== undefined) {
-      headers.set("mcp-session-id", this.sessionId);
-    }
-
-    // POST response streams are scoped to a request id and can't be
-    // resumed via Last-Event-ID, so we keepalive unconditionally so
-    // long-running tool calls survive the ~5min Cloudflare edge idle
-    // watchdog. See cloudflare/agents#1583.
-    const keepAlive = startKeepalive(writer, encoder);
-    this.streamMapping.set(streamId, {
-      writer,
-      encoder,
-      cleanup: () => {
-        clearInterval(keepAlive);
-        this.streamMapping.delete(streamId);
-        writer.close().catch(() => {});
-      }
-    });
-
-    for (const message of messages) {
-      if (isJSONRPCRequest(message)) {
-        this.requestToStreamMapping.set(message.id, streamId);
-      }
-    }
-
-    for (const message of messages) {
-      this.onmessage?.(message, { requestInfo });
-    }
-
-    return new Response(readable, { headers });
-  }
-
-  private async handleDeleteRequest(request: Request): Promise<Response> {
-    const sessionError = this.validateSession(request);
-    if (sessionError) {
-      return sessionError;
-    }
-
-    // Validate protocol version on subsequent requests
-    const versionError = this.validateProtocolVersion(request);
-    if (versionError) {
-      return versionError;
-    }
-
-    // Capture session ID before closing
-    const closedSessionId = this.sessionId;
-
-    await this.close();
-
-    // Fire onsessionclosed callback if configured
-    if (closedSessionId && this.onsessionclosed) {
-      this.onsessionclosed(closedSessionId);
-    }
-
-    return new Response(null, {
-      status: 200,
-      headers: { ...this.getHeaders() }
-    });
-  }
-
-  private handleOptionsRequest(_request: Request): Response {
-    return new Response(null, {
-      status: 200,
-      headers: { ...this.getHeaders({ forPreflight: true }) }
-    });
-  }
-
-  private handleUnsupportedRequest(): Response {
-    return new Response(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        error: {
-          code: -32000,
-          message: "Method not allowed."
-        },
-        id: null
-      }),
-      {
-        status: 405,
-        headers: {
-          Allow: "GET, POST, DELETE, OPTIONS",
-          "Content-Type": "application/json"
-        }
-      }
+    return this.withCorsHeaders(
+      this.withKeepalive(
+        this.normalizeAllowHeader(response),
+        requestIdForKeepalive
+      )
     );
   }
 
-  private validateSession(request: Request): Response | undefined {
-    if (this.sessionIdGenerator === undefined) {
-      return undefined;
-    }
-
-    if (!this.initialized) {
-      return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: {
-            code: -32000,
-            message: "Bad Request: Server not initialized"
-          },
-          id: null
-        }),
-        {
-          status: 400,
-          headers: {
-            "Content-Type": "application/json",
-            ...this.getHeaders()
-          }
-        }
-      );
-    }
-
-    const sessionId = request.headers.get("mcp-session-id");
-
-    if (!sessionId) {
-      return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: {
-            code: -32000,
-            message: "Bad Request: Mcp-Session-Id header is required"
-          },
-          id: null
-        }),
-        {
-          status: 400,
-          headers: {
-            "Content-Type": "application/json",
-            ...this.getHeaders()
-          }
-        }
-      );
-    }
-
-    if (sessionId !== this.sessionId) {
-      return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: {
-            code: -32001,
-            message: "Session not found"
-          },
-          id: null
-        }),
-        {
-          status: 404,
-          headers: {
-            "Content-Type": "application/json",
-            ...this.getHeaders()
-          }
-        }
-      );
-    }
-
-    return undefined;
+  /**
+   * The SDK's 405 responses advertise `Allow: GET, POST, DELETE` because
+   * OPTIONS is handled outside the SDK. Since our wrapper *does* handle
+   * OPTIONS, advertise it in `Allow` so clients can probe accurately.
+   */
+  private normalizeAllowHeader(response: Response): Response {
+    if (response.status !== 405) return response;
+    const allow = response.headers.get("Allow");
+    if (!allow || allow.includes("OPTIONS")) return response;
+    const headers = new Headers(response.headers);
+    headers.set("Allow", `${allow}, OPTIONS`);
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers
+    });
   }
 
-  async close(): Promise<void> {
-    for (const { cleanup } of this.streamMapping.values()) {
+  override closeSSEStream(requestId: RequestId): void {
+    this._keepaliveCleanups.get(requestId)?.();
+    this._keepaliveCleanups.delete(requestId);
+    this._closedRequestIds.add(requestId);
+    super.closeSSEStream(requestId);
+  }
+
+  override closeStandaloneSSEStream(): void {
+    this._keepaliveCleanups.get("_standalone")?.();
+    this._keepaliveCleanups.delete("_standalone");
+    super.closeStandaloneSSEStream();
+  }
+
+  override async close(): Promise<void> {
+    for (const cleanup of Array.from(this._keepaliveCleanups.values())) {
       cleanup();
     }
-
-    this.streamMapping.clear();
-    this.requestResponseMap.clear();
-    this.onclose?.();
+    this._keepaliveCleanups.clear();
+    this._closedRequestIds.clear();
+    await super.close();
   }
 
   /**
-   * Close an SSE stream for a specific request, triggering client reconnection.
-   * Use this to implement polling behavior during long-running operations -
-   * client will reconnect after the retry interval specified in the priming event.
+   * Swallow two classes of message that would otherwise surface as
+   * unhandled rejections from the SDK transport's `send()`:
+   *
+   *   1. Replayed initialize responses (the `RESTORE_REQUEST_ID` sentinel)
+   *      — we synthesise these in `restoreState()` to rebuild server
+   *      capabilities; there's no real client waiting for the response.
+   *   2. Sends for a request id whose SSE stream has been deliberately
+   *      closed via `closeSSEStream`. The protocol layer's tool-handler
+   *      promise may settle after the close, and the SDK's `send()` throws
+   *      "No connection established" — a race the pre-refactor transport
+   *      silently swallowed.
+   *
+   * Everything else is delegated. We use `await super.send(...)` rather
+   * than `return super.send(...)` so any rejection is observed inside this
+   * async frame; without the await, the test runner's
+   * unhandled-rejection tracker can fire before the caller's own `await`
+   * observes it.
    */
-  closeSSEStream(requestId: RequestId): void {
-    const streamId = this.requestToStreamMapping.get(requestId);
-    if (!streamId) {
-      return;
-    }
-
-    const stream = this.streamMapping.get(streamId);
-    if (stream) {
-      stream.cleanup();
-    }
-
-    // Clean up request mappings for this stream
-    for (const [reqId, sid] of this.requestToStreamMapping.entries()) {
-      if (sid === streamId) {
-        this.requestToStreamMapping.delete(reqId);
-        this.requestResponseMap.delete(reqId);
-      }
-    }
-  }
-
-  async send(
+  override async send(
     message: JSONRPCMessage,
     options?: TransportSendOptions
   ): Promise<void> {
-    // Check relatedRequestId FIRST to route server-to-client requests through the same stream as the originating client request
     let requestId: RequestId | undefined = options?.relatedRequestId;
-
-    // Then override with message.id for responses/errors
     if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
       requestId = message.id;
     }
-
     if (requestId === RESTORE_REQUEST_ID) {
       return;
     }
-
-    if (requestId === undefined) {
-      if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
-        throw new Error(
-          "Cannot send a response on a standalone SSE stream unless resuming a previous client request"
-        );
-      }
-
-      const standaloneSse = this.streamMapping.get(this.standaloneSseStreamId);
-      if (standaloneSse === undefined) {
-        return;
-      }
-
-      if (standaloneSse.writer && standaloneSse.encoder) {
-        // Store event for resumability if eventStore is configured
-        let eventId: EventId | undefined;
-        if (this.eventStore) {
-          eventId = await this.eventStore.storeEvent(
-            this.standaloneSseStreamId,
-            message
-          );
-        }
-
-        const idLine = eventId ? `id: ${eventId}\n` : "";
-        const data = `${idLine}event: message\ndata: ${JSON.stringify(message)}\n\n`;
-        await standaloneSse.writer.write(standaloneSse.encoder.encode(data));
-      }
+    if (requestId !== undefined && this._closedRequestIds.has(requestId)) {
       return;
     }
+    await super.send(message, options);
+  }
 
-    const streamId = this.requestToStreamMapping.get(requestId);
-    if (!streamId) {
-      throw new Error(
-        `No connection established for request ID: ${String(requestId)}`
-      );
+  // ── SSE keepalive ──────────────────────────────────────────────────────
+
+  /**
+   * If the response is an SSE stream, tee the body through a TransformStream
+   * that injects a `: keepalive\n\n` comment frame every 25s. The interval
+   * is cleared when the wrapped stream closes — which happens both when the
+   * SDK ends the underlying stream naturally and when `closeSSEStream` is
+   * called.
+   *
+   * Keepalive policy:
+   *   - POST response streams (`key` is a request id): always keepalive.
+   *     In-progress tool calls have no recovery path — if the stream drops
+   *     mid-execution the result is lost — so we keep it under the
+   *     Cloudflare edge ~5min idle watchdog.
+   *   - Standalone GET stream (`key === "_standalone"`): keepalive only
+   *     when no `eventStore` is configured. When resumability is enabled,
+   *     clients reconnect with `Last-Event-ID` after an idle drop, so we
+   *     skip the keepalive and let the DO hibernate.
+   *
+   * Uses the shared `sse-keepalive` constants so both this wrapper and
+   * `McpAgent.serve()` write identical frames at the same cadence.
+   * See cloudflare/agents#1583.
+   */
+  private withKeepalive(
+    response: Response,
+    key: RequestId | "_standalone" | undefined
+  ): Response {
+    const contentType = response.headers.get("Content-Type") ?? "";
+    if (!contentType.includes("text/event-stream") || !response.body) {
+      return response;
     }
 
-    const response = this.streamMapping.get(streamId);
-    if (!response) {
-      throw new Error(
-        `No connection established for request ID: ${String(requestId)}`
-      );
+    // Skip keepalive on the standalone GET stream when an event store is
+    // configured — the recovery path is Last-Event-ID reconnects, not
+    // bytes-on-the-wire.
+    if (key === "_standalone" && this.eventStoreConfigured()) {
+      return response;
     }
 
-    if (!this.enableJsonResponse) {
-      if (response.writer && response.encoder) {
-        // Store event for resumability if eventStore is configured
-        let eventId: EventId | undefined;
-        if (this.eventStore) {
-          eventId = await this.eventStore.storeEvent(streamId, message);
-        }
+    const encoder = new TextEncoder();
+    let intervalId: ReturnType<typeof setInterval> | undefined;
+    let controllerRef: TransformStreamDefaultController<Uint8Array> | undefined;
 
-        const idLine = eventId ? `id: ${eventId}\n` : "";
-        const data = `${idLine}event: message\ndata: ${JSON.stringify(message)}\n\n`;
-        await response.writer.write(response.encoder.encode(data));
+    const clear = () => {
+      if (intervalId !== undefined) {
+        clearInterval(intervalId);
+        intervalId = undefined;
       }
-    }
+      if (key !== undefined) this._keepaliveCleanups.delete(key);
+    };
 
-    if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
-      this.requestResponseMap.set(requestId, message);
-
-      const relatedIds = Array.from(this.requestToStreamMapping.entries())
-        .filter(([, sid]) => sid === streamId)
-        .map(([id]) => id);
-
-      const allResponsesReady = relatedIds.every((id) =>
-        this.requestResponseMap.has(id)
-      );
-
-      if (allResponsesReady) {
-        if (this.enableJsonResponse && response.resolveJson) {
-          const responses = relatedIds.map(
-            (id) => this.requestResponseMap.get(id)!
-          );
-
-          const headers = new Headers({
-            "Content-Type": "application/json",
-            ...this.getHeaders()
-          });
-
-          if (this.sessionId !== undefined) {
-            headers.set("mcp-session-id", this.sessionId);
+    const transform = new TransformStream<Uint8Array, Uint8Array>({
+      start: (controller) => {
+        controllerRef = controller;
+        intervalId = setInterval(() => {
+          try {
+            controllerRef?.enqueue(encoder.encode(KEEPALIVE_FRAME));
+          } catch {
+            clear();
           }
-
-          const body = responses.length === 1 ? responses[0] : responses;
-          response.resolveJson(new Response(JSON.stringify(body), { headers }));
-        } else {
-          response.cleanup();
-        }
-
-        for (const id of relatedIds) {
-          this.requestResponseMap.delete(id);
-          this.requestToStreamMapping.delete(id);
-        }
+        }, KEEPALIVE_INTERVAL_MS);
+        if (key !== undefined) this._keepaliveCleanups.set(key, clear);
+      },
+      transform(chunk, controller) {
+        controller.enqueue(chunk);
+      },
+      flush() {
+        clear();
+      },
+      cancel() {
+        clear();
       }
+    });
+
+    const piped = response.body.pipeThrough(transform);
+    return new Response(piped, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers
+    });
+  }
+
+  /**
+   * Does the SDK transport have an `eventStore`? Reaches into the SDK's
+   * private field because the option isn't surfaced on the public API —
+   * we only need a yes/no for keepalive policy.
+   */
+  private eventStoreConfigured(): boolean {
+    return (
+      (this as unknown as { _eventStore?: unknown })._eventStore !== undefined
+    );
+  }
+
+  // ── CORS ───────────────────────────────────────────────────────────────
+
+  private getCorsHeaders({
+    forPreflight
+  }: { forPreflight?: boolean } = {}): Record<string, string> {
+    const merged = { ...DEFAULT_CORS_OPTIONS, ...this._corsOptions };
+    if (forPreflight) {
+      return {
+        "Access-Control-Allow-Origin": merged.origin,
+        "Access-Control-Allow-Headers": merged.headers,
+        "Access-Control-Allow-Methods": merged.methods,
+        "Access-Control-Max-Age": String(merged.maxAge)
+      };
     }
+    return {
+      "Access-Control-Allow-Origin": merged.origin,
+      "Access-Control-Expose-Headers": merged.exposeHeaders
+    };
+  }
+
+  private withCorsHeaders(response: Response): Response {
+    const headers = new Headers(response.headers);
+    for (const [k, v] of Object.entries(this.getCorsHeaders())) {
+      headers.set(k, v);
+    }
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers
+    });
+  }
+
+  // ── State persistence ──────────────────────────────────────────────────
+
+  private installOnSessionInitializedBridge(): void {
+    if (this._bridgeInstalled) return;
+    const sdk = this as unknown as {
+      _onsessioninitialized?: (id: string) => void | Promise<void>;
+    };
+    sdk._onsessioninitialized = async (sessionId: string): Promise<void> => {
+      if (this._userOnSessionInitialized) {
+        await Promise.resolve(this._userOnSessionInitialized(sessionId));
+      }
+      await this.saveState();
+    };
+    this._bridgeInstalled = true;
+  }
+
+  private async captureInitializeParams(
+    request: Request,
+    handleOptions?: { parsedBody?: unknown }
+  ): Promise<void> {
+    this._pendingRequestId = undefined;
+    if (request.method !== "POST") return;
+    try {
+      const parsed =
+        handleOptions?.parsedBody ?? (await request.clone().json());
+      const messages = Array.isArray(parsed) ? parsed : [parsed];
+      const init = messages.find(
+        (m): m is JSONRPCMessage =>
+          typeof m === "object" && m !== null && isInitializeRequest(m)
+      );
+      if (init && isInitializeRequest(init)) {
+        this._capturedInitializeParams = {
+          capabilities: init.params.capabilities,
+          clientInfo: init.params.clientInfo,
+          protocolVersion: init.params.protocolVersion
+        };
+      }
+      // Record the first JSON-RPC request id so we can key keepalive cleanup
+      // to it. Batch requests share a single SSE stream in the SDK, so we
+      // pick the first request id we see. Eager cleanup via `closeSSEStream`
+      // only matches that first id; closing any other id in the batch tears
+      // down the same shared stream, and the keepalive interval is cleared by
+      // the TransformStream's flush/cancel when that stream actually closes.
+      const firstRequest = messages.find(
+        (m): m is JSONRPCMessage & { id: RequestId } =>
+          typeof m === "object" && m !== null && "id" in m && "method" in m
+      );
+      if (firstRequest) {
+        this._pendingRequestId = firstRequest.id;
+      }
+    } catch {
+      // Body wasn't JSON or already consumed — the SDK transport will
+      // surface a proper error response.
+    }
+  }
+
+  private async restoreState(): Promise<void> {
+    if (!this._storage || this._stateRestored) return;
+    // Set the guard up-front so a re-entrant call (a second request reaching
+    // this `await` before the first resolves) doesn't restore twice. If the
+    // storage read throws we reset it so a transient failure can be retried
+    // on the next request rather than leaving the session permanently
+    // un-restored for this DO instance's lifetime.
+    this._stateRestored = true;
+
+    let state: TransportState | undefined;
+    try {
+      state = await Promise.resolve(this._storage.get());
+    } catch (error) {
+      this._stateRestored = false;
+      throw error;
+    }
+    if (!state) return;
+
+    // Restore SDK private state. We intentionally reach in here — the SDK
+    // doesn't expose hooks for this, and the alternative (a fresh initialize
+    // round-trip per cold start) would defeat the point of session
+    // persistence.
+    const sdk = this as unknown as {
+      sessionId?: string;
+      _initialized: boolean;
+    };
+    sdk.sessionId = state.sessionId;
+    sdk._initialized = state.initialized;
+    this._capturedInitializeParams = state.initializeParams;
+
+    if (state.initializeParams && this.onmessage) {
+      // Replay through the Server so `_clientCapabilities` etc. are
+      // restored. `send()` filters out the resulting response by request id.
+      this.onmessage({
+        jsonrpc: "2.0",
+        id: RESTORE_REQUEST_ID,
+        method: "initialize",
+        params: state.initializeParams
+      });
+    }
+  }
+
+  private async saveState(): Promise<void> {
+    if (!this._storage) return;
+    const sdk = this as unknown as {
+      sessionId?: string;
+      _initialized: boolean;
+    };
+    const state: TransportState = {
+      sessionId: sdk.sessionId,
+      initialized: sdk._initialized,
+      initializeParams: this._capturedInitializeParams
+    };
+    await Promise.resolve(this._storage.set(state));
   }
 }

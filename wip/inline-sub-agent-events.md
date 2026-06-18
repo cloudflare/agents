@@ -1958,7 +1958,7 @@ helperClassByType]`. Adding a class is one site (the registry):
     `webServer`; `workers: 1` keeps tests serialized so they
     don't fight over Workers AI capacity; `retries: 1` rides out
     occasional 504s; `timeout: 180_000` covers the slow
-    `kimi-k2.5` model. Headed and UI modes are wired via
+    `kimi-k2.7-code` model. Headed and UI modes are wired via
     `npm run test:e2e:headed` / `npm run test:e2e:ui`.
   - Added minimal `data-testid` hooks: `helper-panel` (with
     `data-helper-type` / `data-helper-id` / `data-helper-status`)

@@ -353,7 +353,7 @@ export class SandboxAgent extends AIChatAgent<Env, SandboxState> {
     // Create the dynamic isolate via the Worker Loader.
     // Each execution gets a unique ID so isolates don't collide.
     const worker = this.env.LOADER.get(executionId, () => ({
-      compatibilityDate: "2026-01-28",
+      compatibilityDate: "2026-06-11",
       mainModule: "harness.js",
       modules: {
         "harness.js": CODE_HARNESS,
@@ -417,7 +417,7 @@ export class SandboxAgent extends AIChatAgent<Env, SandboxState> {
     const agent = this;
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.6", {
+      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
         sessionAffinity: this.sessionAffinity
       }),
       system: `You are a helpful assistant that can write and execute JavaScript code to work with a customer database.

@@ -501,13 +501,16 @@ export const createStreamingHttpHandler = (
             { status: 404, headers: corsHeaders(request, options.corsOptions) }
           );
         }
-        // .destroy() passes an uncatchable Error, so we make sure we first return
-        // the response to the client.
-        ctx.waitUntil(
-          agent.destroy().catch(() => {
-            /* This will always throw. We silently catch here */
-          })
-        );
+        // Defer the actual teardown to the agent's own alarm invocation
+        // (#1625). Running `destroy()` on this request's `waitUntil` was
+        // unreliable: the client is usually already gone by the time the
+        // DELETE lands, the runtime gives a canceled request's trailing
+        // work little to no grace, and the multi-step teardown got cut
+        // short — leaving half-deleted session DOs. Scheduling is two fast
+        // storage writes, so it is awaited before responding; the alarm
+        // then runs the real teardown with a fresh execution budget and a
+        // durable marker that survives any further interruption.
+        await agent._cf_scheduleDestroy();
         return new Response(null, {
           status: 204,
           headers: corsHeaders(request, options.corsOptions)

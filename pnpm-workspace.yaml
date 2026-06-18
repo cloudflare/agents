@@ -6,6 +6,8 @@ packages:
   - "experimental/*"
   - "openai-sdk/*"
   - "site/*"
+  - "wip/*"
+  - "think-starters/*"
 linkWorkspacePackages: true
 preferWorkspacePackages: true
 patchedDependencies:
@@ -13,6 +15,7 @@ patchedDependencies:
   vitest-browser-react@2.2.0: patches/vitest-browser-react+2.2.0.patch
 allowBuilds:
   "@mongodb-js/zstd": true
+  autoevals: set this to true or false
   better-sqlite3: true
   core-js-pure: true
   esbuild: true
@@ -23,3 +26,50 @@ allowBuilds:
 minimumReleaseAgeExclude:
   - "@cloudflare/*"
   - "@typescript/*"
+  - "@astrojs/cloudflare@13.7.0"
+  - "@elevenlabs/elevenlabs-js@2.52.0"
+  - astro@6.4.5
+  - autoevals@0.3.0
+  - hono@4.12.25
+  - workerd@1.20260609.1
+  - "@ai-sdk/anthropic@3.0.83"
+  - "@ai-sdk/gateway@3.0.128"
+  - "@ai-sdk/google@3.0.81"
+  - "@ai-sdk/openai@3.0.70"
+  - "@ai-sdk/provider-utils@4.0.28"
+  - "@ai-sdk/react@3.0.204"
+  - "@esbuild/aix-ppc64@0.28.1"
+  - "@esbuild/android-arm64@0.28.1"
+  - "@esbuild/android-arm@0.28.1"
+  - "@esbuild/android-x64@0.28.1"
+  - "@esbuild/darwin-arm64@0.28.1"
+  - "@esbuild/darwin-x64@0.28.1"
+  - "@esbuild/freebsd-arm64@0.28.1"
+  - "@esbuild/freebsd-x64@0.28.1"
+  - "@esbuild/linux-arm64@0.28.1"
+  - "@esbuild/linux-arm@0.28.1"
+  - "@esbuild/linux-ia32@0.28.1"
+  - "@esbuild/linux-loong64@0.28.1"
+  - "@esbuild/linux-mips64el@0.28.1"
+  - "@esbuild/linux-ppc64@0.28.1"
+  - "@esbuild/linux-riscv64@0.28.1"
+  - "@esbuild/linux-s390x@0.28.1"
+  - "@esbuild/linux-x64@0.28.1"
+  - "@esbuild/netbsd-arm64@0.28.1"
+  - "@esbuild/netbsd-x64@0.28.1"
+  - "@esbuild/openbsd-arm64@0.28.1"
+  - "@esbuild/openbsd-x64@0.28.1"
+  - "@esbuild/openharmony-arm64@0.28.1"
+  - "@esbuild/sunos-x64@0.28.1"
+  - "@esbuild/win32-arm64@0.28.1"
+  - "@esbuild/win32-ia32@0.28.1"
+  - "@esbuild/win32-x64@0.28.1"
+  - acorn@8.17.0
+  - ai@6.0.202
+  - esbuild-wasm@0.28.1
+  - esbuild@0.28.1
+  - miniflare@4.20260611.0
+  - partysocket@1.2.0
+  - wrangler@4.100.0
+  - partyserver@0.5.8
+  - workers-ai-provider@3.2.0

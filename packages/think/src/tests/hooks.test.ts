@@ -422,6 +422,20 @@ describe("Think — ToolCallDecision honored by wrapped execute", () => {
     expect(after.length).toBeGreaterThan(0);
     expect(JSON.parse(after[0].outputJson)).toBe("echo: hello");
   });
+
+  it("addMessages from inside a tool execute runs mid-turn and persists", async () => {
+    // Validates the premise the mid-turn broadcast gate relies on: a real tool
+    // `execute` runs with `_insideInferenceLoop === true`, so `addMessages`
+    // suppresses its broadcast there. Also confirms the write is durable the
+    // moment it returns (not deferred to the next turn).
+    const agent = await freshToolAgent("dec-add-messages");
+    await agent.setEchoExecuteMode("add-messages");
+    await agent.testChat("call echo");
+
+    const probe = await agent.getMidTurnAddProbe();
+    expect(probe.insideLoop).toBe(true);
+    expect(probe.persisted).toBe(true);
+  });
 });
 
 // ── Extension hook dispatch ─────────────────────────────────────
@@ -878,6 +892,27 @@ describe("Think — beforeTurn config overrides", () => {
     await agent.setTurnConfigOutputText();
     const result = await agent.testChat("Structured-output turn");
     expect(result.done).toBe(true);
+  });
+
+  it("experimental_transform override is forwarded to streamText and applied", async () => {
+    // #1714 — TurnConfig.experimental_transform should reach streamText so
+    // callers can inspect/rewrite the stream. The transform here upper-cases
+    // every text-delta; we assert the persisted assistant text is upper-cased.
+    const agent = await freshAgent("bt-transform");
+    await agent.setResponse("hello from the assistant");
+    await agent.setTurnConfigTransform();
+
+    const result = await agent.testChat("Transform turn");
+    expect(result.done).toBe(true);
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const assistant = messages.filter((m) => m.role === "assistant");
+    const last = assistant[assistant.length - 1];
+    const text = last.parts
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("");
+    expect(text).toBe("HELLO FROM THE ASSISTANT");
   });
 
   it("sends reasoning chunks by default on the chat() path", async () => {

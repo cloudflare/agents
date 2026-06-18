@@ -24,6 +24,9 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/vite`                | `src/vite.ts`                | Vite plugin — decorator transforms and the `agents:skills` import transform  |
 | `agents/skills`              | `src/skills/index.ts`        | Framework-agnostic Agent Skills engine — sources, `SkillRegistry`, runner    |
 | `agents/experimental/webmcp` | `src/experimental/webmcp.ts` | WebMCP adapter — bridges MCP tools to Chrome's `navigator.modelContext`      |
+| `agents/browser`             | `src/browser/index.ts`       | Browser Run helpers — CDP sessions, connector, Quick Action primitives       |
+| `agents/browser/ai`          | `src/browser/ai.ts`          | AI SDK browser tools — `createBrowserTools` (CDP) + `createQuickActionTools` |
+| `agents/browser/tanstack-ai` | `src/browser/tanstack-ai.ts` | TanStack AI browser tool (`browser_execute`)                                 |
 
 The `agents:skills` virtual-module types ship from `skills-module.d.ts` (referenced from the built `dist/index.d.ts`); `@cloudflare/think` consumes `agents/skills` and `@cloudflare/ai-chat` can too.
 
@@ -92,6 +95,17 @@ src/
   experimental/         # Experimental features (published but unstable)
     webmcp.ts           # WebMCP adapter (browser-side, uses MCP SDK client)
 
+  browser/              # Browser Run integration (experimental)
+    index.ts            # Barrel for agents/browser
+    browser-run.ts      # Low-level Browser Run REST/binding calls + errors
+    cdp-session.ts      # CdpSession — Chrome DevTools Protocol over WebSocket
+    connector.ts        # BrowserConnector — codemode connector + session helpers
+    session-manager.ts  # Durable session-id store + sweep
+    spec.ts             # CDP protocol spec loader (cdp.spec())
+    quick-actions.ts    # Stateless Quick Action primitives (browserMarkdown, …)
+    ai.ts               # createBrowserTools + createQuickActionTools (AI SDK)
+    tanstack-ai.ts      # createBrowserTools for TanStack AI
+
   core/                 # Internal utilities
     events.ts           # DisposableStore
 ```
@@ -151,6 +165,19 @@ pnpm run test:x402     # or: vitest --project x402
 ```
 
 Focused tests for the x402 payment / auth integration.
+
+### Browser connector e2e tests (`src/browser-tests/`)
+
+```bash
+pnpm run test:browser   # or: vitest run --config src/browser-tests/vitest.config.ts
+```
+
+Spawns a real `wrangler dev` (local Browser Rendering simulator + worker
+loader) and exercises the `BrowserConnector` end to end: CDP spec queries,
+`browser_execute` runs, and session lifecycle modes (one-shot, dynamic
+promotion, reuse + sweep, survive-a-pause, multi-socket probe). Kept out of
+the default `test` target so CI's `nx affected -t test` doesn't require
+Chromium — run it locally when touching `src/browser/`.
 
 ### Chat primitive tests (`src/chat/__tests__/`)
 

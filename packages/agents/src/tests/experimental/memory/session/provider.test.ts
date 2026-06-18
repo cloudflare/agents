@@ -25,6 +25,33 @@ interface SessionAgentStub {
   search(
     query: string
   ): Promise<Array<{ id: string; role: string; content: string }>>;
+  appendLinearChainForTest(count: number, prefix?: string): Promise<void>;
+  corruptMessageForTest(id: string): Promise<void>;
+  appendLargeChainForTest(
+    count: number,
+    charsPerMessage: number,
+    prefix?: string
+  ): Promise<void>;
+  getHistoryTextLengthsForTest(): Promise<
+    Array<{ id: string; textLength: number }>
+  >;
+  getRecentHistory(
+    maxContentBytes: number,
+    minRecentMessages?: number
+  ): Promise<{
+    messages: UIMessage[];
+    truncated: boolean;
+    totalContentBytes: number;
+  }>;
+  getHistoryRowStats(): Promise<Array<{
+    id: string;
+    role: string;
+    bytes: number;
+  }> | null>;
+  getAntiJoinCountForTest(): Promise<number>;
+  resetAntiJoinCountForTest(): Promise<void>;
+  rawInsertChildForTest(parentId: string, id: string): Promise<void>;
+  rawDeleteForTest(id: string): Promise<void>;
 }
 
 async function getAgent(name: string): Promise<SessionAgentStub> {
@@ -360,5 +387,480 @@ describe("AgentSessionProvider — tree-structured messages", () => {
     const history = await agent2.getHistory();
     expect(history).toHaveLength(1);
     expect(history[0].id).toBe("m1");
+  });
+});
+
+/**
+ * getHistory hydrates content in bounded chunks (HISTORY_CONTENT_CHUNK_SIZE
+ * = 50) instead of carrying message blobs through the recursive CTE and its
+ * ORDER BY sorter, which exhausted SQLite's allocator on large transcripts
+ * (#1710). These tests pin the behavior around the chunk boundary and the
+ * read paths that were restructured.
+ */
+describe("AgentSessionProvider — chunked history hydration (#1710)", () => {
+  let name: string;
+  beforeEach(() => {
+    name = `chunk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  });
+
+  it("history of exactly one chunk (50) is returned complete and in order", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(50);
+
+    const history = await agent.getHistory();
+    expect(history.map((m) => m.id)).toEqual(
+      Array.from({ length: 50 }, (_, i) => `m${i}`)
+    );
+  });
+
+  it("history one over the chunk boundary (51) is returned complete and in order", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(51);
+
+    const history = await agent.getHistory();
+    expect(history.map((m) => m.id)).toEqual(
+      Array.from({ length: 51 }, (_, i) => `m${i}`)
+    );
+  });
+
+  it("long history spanning several chunks preserves root→leaf order", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(120);
+
+    const history = await agent.getHistory();
+    expect(history.map((m) => m.id)).toEqual(
+      Array.from({ length: 120 }, (_, i) => `m${i}`)
+    );
+    expect(await agent.getPathLength()).toBe(120);
+  });
+
+  it("getHistory(leafId) follows the selected branch across chunks", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(31); // m0..m30
+
+    // Branch off m30 with 30 more messages: path length 61 spans two chunks.
+    await agent.appendMessage(
+      { id: "b0", role: "assistant", parts: [{ type: "text", text: "b 0" }] },
+      "m30"
+    );
+    for (let i = 1; i < 30; i++) {
+      await agent.appendMessage(
+        {
+          id: `b${i}`,
+          role: i % 2 === 0 ? "assistant" : "user",
+          parts: [{ type: "text", text: `b ${i}` }]
+        },
+        `b${i - 1}`
+      );
+    }
+    // A competing branch off m30 so b29 is not the latest leaf.
+    await agent.appendMessage(
+      { id: "x0", role: "assistant", parts: [{ type: "text", text: "x" }] },
+      "m30"
+    );
+
+    const history = await agent.getHistory("b29");
+    expect(history.map((m) => m.id)).toEqual([
+      ...Array.from({ length: 31 }, (_, i) => `m${i}`),
+      ...Array.from({ length: 30 }, (_, i) => `b${i}`)
+    ]);
+  });
+
+  it("compaction overlay applies across chunk boundaries", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(120);
+
+    // Compacted range spans multiple content-fetch chunks.
+    await agent.addCompaction("Summary of m10-m100", "m10", "m100");
+
+    const history = await agent.getHistory();
+    expect(history.map((m) => m.id)).toEqual([
+      ...Array.from({ length: 10 }, (_, i) => `m${i}`),
+      expect.stringMatching(/^compaction_/),
+      ...Array.from({ length: 19 }, (_, i) => `m${101 + i}`)
+    ]);
+    expect(history[10].parts[0]).toEqual({
+      type: "text",
+      text: expect.stringContaining("Summary of m10-m100")
+    });
+  });
+
+  it("skips a corrupted row without dropping the rest of the history", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(10);
+    await agent.corruptMessageForTest("m4");
+
+    const history = await agent.getHistory();
+    expect(history.map((m) => m.id)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `m${i}`).filter((id) => id !== "m4")
+    );
+  });
+
+  it("large message content round-trips intact", async () => {
+    const agent = await getAgent(name);
+    // Simulates an inline-media-sized payload (well below the 1.8MB row cap).
+    const big = "x".repeat(200_000);
+    await agent.appendMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: big }]
+    });
+    await agent.appendMessage({
+      id: "m2",
+      role: "assistant",
+      parts: [{ type: "text", text: "ok" }]
+    });
+
+    const history = await agent.getHistory();
+    expect(history).toHaveLength(2);
+    expect((history[0].parts[0] as { text: string }).text).toHaveLength(
+      200_000
+    );
+  });
+
+  it("getLatestLeaf returns the full message after the id-only leaf lookup", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(3);
+
+    const leaf = await agent.getLatestLeaf();
+    expect(leaf?.id).toBe("m2");
+    expect(leaf?.parts[0]).toEqual({ type: "text", text: "m message 2" });
+  });
+});
+
+/**
+ * Byte-budgeted history reads — hosts hydrate a bounded recent window
+ * instead of the full transcript so wake-time memory scales with the
+ * budget rather than total session history (#1710).
+ */
+describe("AgentSessionProvider — byte-budgeted recent history (#1710)", () => {
+  let name: string;
+  beforeEach(() => {
+    name = `recent-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  });
+
+  it("empty session", async () => {
+    const agent = await getAgent(name);
+    const result = await agent.getRecentHistory(1024);
+    expect(result).toEqual({
+      messages: [],
+      truncated: false,
+      totalContentBytes: 0
+    });
+  });
+
+  it("full history when it fits the budget", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(6);
+
+    const result = await agent.getRecentHistory(10 * 1024 * 1024);
+    expect(result.truncated).toBe(false);
+    expect(result.messages.map((m) => m.id)).toEqual(
+      Array.from({ length: 6 }, (_, i) => `m${i}`)
+    );
+    expect(result.totalContentBytes).toBeGreaterThan(0);
+  });
+
+  it("returns the most recent suffix when over budget, in order", async () => {
+    const agent = await getAgent(name);
+    // Each message ≈ 1KB of text plus envelope.
+    for (let i = 0; i < 10; i++) {
+      await agent.appendMessage({
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: "x".repeat(1024) }]
+      });
+    }
+
+    const result = await agent.getRecentHistory(3 * 1024);
+    expect(result.truncated).toBe(true);
+    const ids = result.messages.map((m) => m.id);
+    // A suffix ending at the leaf, shorter than the full path.
+    expect(ids.at(-1)).toBe("m9");
+    expect(ids.length).toBeGreaterThanOrEqual(1);
+    expect(ids.length).toBeLessThan(10);
+    expect(ids).toEqual(
+      Array.from({ length: ids.length }, (_, i) => `m${10 - ids.length + i}`)
+    );
+  });
+
+  it("always includes the leaf even when it alone exceeds the budget", async () => {
+    const agent = await getAgent(name);
+    await agent.appendMessage({
+      id: "small",
+      role: "user",
+      parts: [{ type: "text", text: "hi" }]
+    });
+    await agent.appendMessage({
+      id: "huge",
+      role: "assistant",
+      parts: [{ type: "text", text: "y".repeat(50_000) }]
+    });
+
+    const result = await agent.getRecentHistory(1024);
+    expect(result.truncated).toBe(true);
+    expect(result.messages.map((m) => m.id)).toEqual(["huge"]);
+  });
+
+  it("totalContentBytes matches the row stats sum", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(5);
+
+    const stats = await agent.getHistoryRowStats();
+    expect(stats).not.toBeNull();
+    expect(stats!.map((s) => s.id)).toEqual(
+      Array.from({ length: 5 }, (_, i) => `m${i}`)
+    );
+    for (const stat of stats!) {
+      expect(stat.bytes).toBeGreaterThan(0);
+    }
+
+    const result = await agent.getRecentHistory(10 * 1024 * 1024);
+    expect(result.totalContentBytes).toBe(
+      stats!.reduce((sum, s) => sum + s.bytes, 0)
+    );
+  });
+
+  it("row stats reflect content size differences", async () => {
+    const agent = await getAgent(name);
+    await agent.appendMessage({
+      id: "small",
+      role: "user",
+      parts: [{ type: "text", text: "hi" }]
+    });
+    await agent.appendMessage({
+      id: "big",
+      role: "assistant",
+      parts: [{ type: "text", text: "z".repeat(10_000) }]
+    });
+
+    const stats = await agent.getHistoryRowStats();
+    const small = stats!.find((s) => s.id === "small")!;
+    const big = stats!.find((s) => s.id === "big")!;
+    expect(big.bytes).toBeGreaterThan(small.bytes + 9_000);
+  });
+
+  it("compaction overlay applies when its range is inside the window", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(6);
+    await agent.addCompaction("Window summary", "m1", "m3");
+
+    const result = await agent.getRecentHistory(10 * 1024 * 1024);
+    expect(result.messages.map((m) => m.id)).toEqual([
+      "m0",
+      expect.stringMatching(/^compaction_/),
+      "m4",
+      "m5"
+    ]);
+  });
+
+  it("minRecentMessages floors the window even when those rows exceed the budget", async () => {
+    const agent = await getAgent(name);
+    // 10 × ~1KB messages; a 2KB budget alone fits at most 2.
+    for (let i = 0; i < 10; i++) {
+      await agent.appendMessage({
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: "x".repeat(1024) }]
+      });
+    }
+
+    const result = await agent.getRecentHistory(2 * 1024, 4);
+    expect(result.truncated).toBe(true);
+    expect(result.messages.map((m) => m.id)).toEqual(["m6", "m7", "m8", "m9"]);
+  });
+
+  it("minRecentMessages larger than the path returns the whole path untruncated", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(3);
+
+    const result = await agent.getRecentHistory(1, 10);
+    expect(result.truncated).toBe(false);
+    expect(result.messages.map((m) => m.id)).toEqual(["m0", "m1", "m2"]);
+  });
+
+  it("a corrupt row inside the window is skipped, not fatal", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(4);
+    await agent.corruptMessageForTest("m3");
+
+    // The window covers all rows; the corrupt LEAF row is dropped from the
+    // parsed result (documented contract: parse failures can shrink the
+    // window below the floor).
+    const result = await agent.getRecentHistory(10 * 1024 * 1024);
+    expect(result.truncated).toBe(false);
+    expect(result.messages.map((m) => m.id)).toEqual(["m0", "m1", "m2"]);
+    // The unparseable row still counts toward the stored size.
+    expect(result.totalContentBytes).toBeGreaterThan(0);
+  });
+
+  it("row stats carry the stored role for content-free filtering", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(4);
+
+    const stats = await agent.getHistoryRowStats();
+    expect(stats!.map((s) => ({ id: s.id, role: s.role }))).toEqual([
+      { id: "m0", role: "user" },
+      { id: "m1", role: "assistant" },
+      { id: "m2", role: "user" },
+      { id: "m3", role: "assistant" }
+    ]);
+  });
+
+  it("multi-megabyte paths round-trip across byte-bounded content chunks", async () => {
+    const agent = await getAgent(name);
+    // 4 × ~1.5MB rows ≈ 6MB total — crosses the 4MB per-chunk byte bound,
+    // so content hydration must split into multiple statements and
+    // reassemble in path order.
+    await agent.appendLargeChainForTest(4, 1_500_000);
+
+    const lengths = await agent.getHistoryTextLengthsForTest();
+    expect(lengths.map((l) => l.id)).toEqual(["big0", "big1", "big2", "big3"]);
+    for (const row of lengths) {
+      expect(row.textLength).toBeGreaterThanOrEqual(1_500_000);
+    }
+  });
+});
+
+/**
+ * The active branch tip is cached so finding it doesn't re-scan the whole
+ * session (an anti-join over every row) on every hydration and append.
+ */
+describe("AgentSessionProvider — active-leaf cache", () => {
+  let name: string;
+  beforeEach(() => {
+    name = `leaf-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  });
+
+  it("repeated leaf reads and auto-parent appends never re-run the anti-join", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(20);
+
+    // The chain's first auto-parent append warmed the cache; everything after
+    // is served from it.
+    await agent.resetAntiJoinCountForTest();
+
+    for (let i = 0; i < 5; i++) {
+      expect((await agent.getLatestLeaf())?.id).toBe("m19");
+    }
+    await agent.appendMessage({
+      id: "x0",
+      role: "user",
+      parts: [{ type: "text", text: "next" }]
+    });
+    await agent.appendMessage({
+      id: "x1",
+      role: "assistant",
+      parts: [{ type: "text", text: "reply" }]
+    });
+
+    expect((await agent.getLatestLeaf())?.id).toBe("x1");
+    expect(await agent.getAntiJoinCountForTest()).toBe(0);
+  });
+
+  it("at most one anti-join per cold start, regardless of history length", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(30);
+
+    // Across many reads the scan happens at most once (the first cold lookup);
+    // here the cache is already warm from the append chain, so it's zero.
+    await agent.resetAntiJoinCountForTest();
+    await agent.getHistory();
+    await agent.getRecentHistory(10 * 1024 * 1024);
+    await agent.getHistoryRowStats();
+    await agent.getPathLength();
+    expect(await agent.getAntiJoinCountForTest()).toBe(0);
+  });
+
+  it("tracks the tip across a branch append", async () => {
+    const agent = await getAgent(name);
+    await agent.appendMessage({
+      id: "root",
+      role: "user",
+      parts: [{ type: "text", text: "root" }]
+    });
+    await agent.appendMessage({
+      id: "a",
+      role: "assistant",
+      parts: [{ type: "text", text: "a" }]
+    });
+    // Branch off root: the new node is childless and most recent → new tip.
+    await agent.appendMessage(
+      { id: "b", role: "assistant", parts: [{ type: "text", text: "b" }] },
+      "root"
+    );
+    expect((await agent.getLatestLeaf())?.id).toBe("b");
+    expect((await agent.getHistory()).map((m) => m.id)).toEqual(["root", "b"]);
+  });
+
+  it("recomputes the tip after the leaf is deleted", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(3); // m0 → m1 → m2
+
+    await agent.resetAntiJoinCountForTest();
+    await agent.deleteMessages(["m2"]);
+    // The cache was invalidated, so the next lookup pays exactly one scan and
+    // returns the new tip.
+    expect((await agent.getLatestLeaf())?.id).toBe("m1");
+    expect(await agent.getAntiJoinCountForTest()).toBe(1);
+
+    // …and is cached again afterward.
+    await agent.resetAntiJoinCountForTest();
+    expect((await agent.getLatestLeaf())?.id).toBe("m1");
+    expect(await agent.getAntiJoinCountForTest()).toBe(0);
+  });
+
+  it("deleting an interior (non-tip) message keeps the cached tip", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(3); // m0 → m1 → m2
+
+    await agent.resetAntiJoinCountForTest();
+    await agent.deleteMessages(["m0"]);
+    expect((await agent.getLatestLeaf())?.id).toBe("m2");
+    expect(await agent.getAntiJoinCountForTest()).toBe(0);
+  });
+
+  it("returns null after clear", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(3);
+
+    await agent.clearMessages();
+    expect(await agent.getLatestLeaf()).toBeNull();
+  });
+
+  it("self-heals when another writer gives the cached tip a child", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(3); // m0 → m1 → m2
+    // Warm the cache on m2.
+    expect((await agent.getLatestLeaf())?.id).toBe("m2");
+
+    // A second writer attaches a child to the cached tip, bypassing the
+    // provider — the cache is now stale.
+    await agent.rawInsertChildForTest("m2", "ext-child");
+
+    await agent.resetAntiJoinCountForTest();
+    // The validation check sees m2 is no longer childless and recomputes.
+    expect((await agent.getLatestLeaf())?.id).toBe("ext-child");
+    expect(await agent.getAntiJoinCountForTest()).toBe(1);
+    expect((await agent.getHistory()).map((m) => m.id)).toEqual([
+      "m0",
+      "m1",
+      "m2",
+      "ext-child"
+    ]);
+  });
+
+  it("self-heals when another writer deletes the cached tip", async () => {
+    const agent = await getAgent(name);
+    await agent.appendLinearChainForTest(3); // m0 → m1 → m2
+    expect((await agent.getLatestLeaf())?.id).toBe("m2");
+
+    // A second writer deletes the cached tip, bypassing the provider.
+    await agent.rawDeleteForTest("m2");
+
+    await agent.resetAntiJoinCountForTest();
+    // The validation check sees m2 is gone and recomputes the new tip.
+    expect((await agent.getLatestLeaf())?.id).toBe("m1");
+    expect(await agent.getAntiJoinCountForTest()).toBe(1);
   });
 });
