@@ -251,6 +251,75 @@ export function selectStaleIncidentKeys(
   return staleKeys;
 }
 
+/**
+ * Sweep recovery incidents inactive past the TTL from durable storage. Lists by
+ * the incident key prefix, selects stale keys (`selectStaleIncidentKeys`), and
+ * batch-deletes them — the DO KV `delete([...])` accepts up to
+ * `KV_DELETE_MAX_KEYS` per call, collapsing N awaited round-trips into
+ * ceil(N / 128). Shared by `AIChatAgent` and `Think` so the sweep policy lives in
+ * one place. See `design/rfc-chat-recovery-foundation.md`.
+ */
+export async function sweepStaleChatRecoveryIncidents(
+  storage: Pick<DurableObjectStorage, "list" | "delete">,
+  now: number
+): Promise<void> {
+  const entries = await storage.list<ChatRecoveryIncident>({
+    prefix: CHAT_RECOVERY_INCIDENT_KEY_PREFIX
+  });
+  const staleKeys = selectStaleIncidentKeys(entries, now);
+  for (let i = 0; i < staleKeys.length; i += KV_DELETE_MAX_KEYS) {
+    await storage.delete(staleKeys.slice(i, i + KV_DELETE_MAX_KEYS));
+  }
+}
+
+/**
+ * Read the durable monotonic recovery-progress counter (0 when unset). The value
+ * feeds the no-progress budget decision; shared by `AIChatAgent` and `Think`.
+ */
+export async function readChatRecoveryProgress(
+  storage: Pick<DurableObjectStorage, "get">
+): Promise<number> {
+  return (await storage.get<number>(CHAT_RECOVERY_PROGRESS_KEY)) ?? 0;
+}
+
+/**
+ * Advance the durable recovery-progress counter by one. Called when genuinely new
+ * content is durably flushed (real, reconnect-immune forward progress); shared by
+ * `AIChatAgent` and `Think`.
+ */
+export async function bumpChatRecoveryProgress(
+  storage: Pick<DurableObjectStorage, "get" | "put">
+): Promise<void> {
+  const current = (await storage.get<number>(CHAT_RECOVERY_PROGRESS_KEY)) ?? 0;
+  await storage.put(CHAT_RECOVERY_PROGRESS_KEY, current + 1);
+}
+
+/**
+ * Throttle window for crediting a parent turn's recovery progress from forwarded
+ * sub-agent (agent-tool) stream chunks (N9). Forwarding a child's chunks IS
+ * forward progress for the parent, but the credit must not write storage per
+ * token.
+ */
+export const AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS = 5_000;
+
+/**
+ * Per-isolate throttle gate for agent-tool stream-progress crediting (N9). The
+ * `_lastBumpAt` clock is in-memory, so it resets per isolate and the first
+ * forwarded chunk after a restart always credits. `shouldCredit(now)` returns
+ * `true` at most once per `AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS` window and
+ * records the time on each credit. Shared by `AIChatAgent` and `Think`.
+ */
+export class AgentToolStreamProgressThrottle {
+  private _lastBumpAt = 0;
+  shouldCredit(now: number): boolean {
+    if (now - this._lastBumpAt < AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS) {
+      return false;
+    }
+    this._lastBumpAt = now;
+    return true;
+  }
+}
+
 // ── Incident budget evaluation ─────────────────────────────────────────────
 
 /**

@@ -92,9 +92,11 @@ export {
 
 /**
  * @internal Shared chat-recovery engine internals — sibling-package support for
- * `@cloudflare/ai-chat` and `@cloudflare/think`, not a public API. Re-exported
- * here only because both consumers import shared chat code through the
- * `agents/chat` entry point. See `design/rfc-chat-recovery-foundation.md`.
+ * `@cloudflare/ai-chat` and `@cloudflare/think`, not a public API. Everything in
+ * the three blocks below (`recovery-incident`, `recovery-engine`,
+ * `stall-watchdog`) is `@internal`: re-exported here only because both consumers
+ * import shared chat code through the `agents/chat` entry point, never from the
+ * `agents` package root. See `design/rfc-chat-recovery-foundation.md`.
  */
 export {
   evaluateChatRecoveryIncident,
@@ -102,6 +104,11 @@ export {
   chatRecoveryIncidentId,
   chatRecoveryIncidentKey,
   selectStaleIncidentKeys,
+  sweepStaleChatRecoveryIncidents,
+  readChatRecoveryProgress,
+  bumpChatRecoveryProgress,
+  AgentToolStreamProgressThrottle,
+  AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   CHAT_RECOVERY_PROGRESS_KEY,
   CHAT_RECOVERING_KEY,

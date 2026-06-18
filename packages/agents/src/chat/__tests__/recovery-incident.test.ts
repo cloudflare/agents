@@ -1,17 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ResolvedChatRecoveryConfig } from "../lifecycle";
 import {
+  AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS,
+  AgentToolStreamProgressThrottle,
+  bumpChatRecoveryProgress,
   CHAT_RECOVERY_ALARM_DEBOUNCE_MS,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   CHAT_RECOVERY_INCIDENT_TTL_MS,
+  CHAT_RECOVERY_PROGRESS_KEY,
   chatRecoveryIncidentId,
   chatRecoveryIncidentKey,
   DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
   DEFAULT_CHAT_RECOVERY_NO_PROGRESS_TIMEOUT_MS,
   DEFAULT_CHAT_RECOVERY_TERMINAL_MESSAGE,
   evaluateChatRecoveryIncident,
+  KV_DELETE_MAX_KEYS,
+  readChatRecoveryProgress,
   resolveChatRecoveryConfig,
   selectStaleIncidentKeys,
+  sweepStaleChatRecoveryIncidents,
   type ChatRecoveryIncident
 } from "../recovery-incident";
 
@@ -177,6 +184,168 @@ describe("selectStaleIncidentKeys", () => {
       ["key-c", undefined]
     ]);
     expect(selectStaleIncidentKeys(entries, T0)).toEqual(["key-b", "key-c"]);
+  });
+});
+
+/**
+ * Minimal in-memory Durable Object storage fake for the shared sweep + progress
+ * helpers. Records `list`/`delete` calls so the batching contract can be asserted.
+ */
+class FakeStorage {
+  readonly data = new Map<string, unknown>();
+  readonly listPrefixes: string[] = [];
+  readonly deleteBatches: string[][] = [];
+
+  async get<T>(key: string): Promise<T | undefined> {
+    return this.data.get(key) as T | undefined;
+  }
+
+  async put<T>(key: string, value: T): Promise<void> {
+    this.data.set(key, value);
+  }
+
+  async list<T>(options: { prefix: string }): Promise<Map<string, T>> {
+    this.listPrefixes.push(options.prefix);
+    const out = new Map<string, T>();
+    for (const [key, value] of this.data) {
+      if (key.startsWith(options.prefix)) out.set(key, value as T);
+    }
+    return out;
+  }
+
+  async delete(keys: string[]): Promise<number> {
+    this.deleteBatches.push(keys);
+    let removed = 0;
+    for (const key of keys) {
+      if (this.data.delete(key)) removed++;
+    }
+    return removed;
+  }
+}
+
+function staleIncident(id: string, now: number): ChatRecoveryIncident {
+  return {
+    incidentId: id,
+    requestId: id,
+    recoveryKind: "continue",
+    attempt: 1,
+    maxAttempts: 10,
+    status: "attempting",
+    firstSeenAt: now - CHAT_RECOVERY_INCIDENT_TTL_MS - 1,
+    lastAttemptAt: now - CHAT_RECOVERY_INCIDENT_TTL_MS - 1
+  };
+}
+
+describe("sweepStaleChatRecoveryIncidents", () => {
+  it("lists by the incident prefix and deletes only stale incidents", async () => {
+    const storage = new FakeStorage();
+    storage.data.set(`${CHAT_RECOVERY_INCIDENT_KEY_PREFIX}stale`, {
+      ...staleIncident("stale", T0)
+    });
+    storage.data.set(`${CHAT_RECOVERY_INCIDENT_KEY_PREFIX}fresh`, {
+      ...staleIncident("fresh", T0),
+      lastAttemptAt: T0
+    });
+    // An unrelated key outside the prefix must never be touched.
+    storage.data.set("cf:chat:last-terminal", { foo: 1 });
+
+    await sweepStaleChatRecoveryIncidents(
+      storage as unknown as Pick<DurableObjectStorage, "list" | "delete">,
+      T0
+    );
+
+    expect(storage.listPrefixes).toEqual([CHAT_RECOVERY_INCIDENT_KEY_PREFIX]);
+    expect(storage.deleteBatches).toEqual([
+      [`${CHAT_RECOVERY_INCIDENT_KEY_PREFIX}stale`]
+    ]);
+    expect(storage.data.has(`${CHAT_RECOVERY_INCIDENT_KEY_PREFIX}fresh`)).toBe(
+      true
+    );
+    expect(storage.data.has("cf:chat:last-terminal")).toBe(true);
+  });
+
+  it("makes no delete call when nothing is stale", async () => {
+    const storage = new FakeStorage();
+    storage.data.set(`${CHAT_RECOVERY_INCIDENT_KEY_PREFIX}fresh`, {
+      ...staleIncident("fresh", T0),
+      lastAttemptAt: T0
+    });
+
+    await sweepStaleChatRecoveryIncidents(
+      storage as unknown as Pick<DurableObjectStorage, "list" | "delete">,
+      T0
+    );
+
+    expect(storage.deleteBatches).toEqual([]);
+  });
+
+  it("batches deletes into KV_DELETE_MAX_KEYS-sized chunks", async () => {
+    const storage = new FakeStorage();
+    const total = KV_DELETE_MAX_KEYS * 2 + 5;
+    for (let i = 0; i < total; i++) {
+      storage.data.set(
+        `${CHAT_RECOVERY_INCIDENT_KEY_PREFIX}${i}`,
+        staleIncident(String(i), T0)
+      );
+    }
+
+    await sweepStaleChatRecoveryIncidents(
+      storage as unknown as Pick<DurableObjectStorage, "list" | "delete">,
+      T0
+    );
+
+    expect(storage.deleteBatches.map((batch) => batch.length)).toEqual([
+      KV_DELETE_MAX_KEYS,
+      KV_DELETE_MAX_KEYS,
+      5
+    ]);
+    expect(storage.data.size).toBe(0);
+  });
+});
+
+describe("readChatRecoveryProgress / bumpChatRecoveryProgress", () => {
+  it("reads 0 when the counter is unset", async () => {
+    const storage = new FakeStorage();
+    expect(
+      await readChatRecoveryProgress(
+        storage as unknown as Pick<DurableObjectStorage, "get">
+      )
+    ).toBe(0);
+  });
+
+  it("monotonically increments the durable counter", async () => {
+    const storage = new FakeStorage();
+    const typed = storage as unknown as Pick<
+      DurableObjectStorage,
+      "get" | "put"
+    >;
+    await bumpChatRecoveryProgress(typed);
+    await bumpChatRecoveryProgress(typed);
+    expect(await readChatRecoveryProgress(typed)).toBe(2);
+    expect(storage.data.get(CHAT_RECOVERY_PROGRESS_KEY)).toBe(2);
+  });
+});
+
+describe("AgentToolStreamProgressThrottle", () => {
+  // Production `now` is always a large epoch (`Date.now()`) ≫ the throttle
+  // window, so a fresh isolate (`_lastBumpAt = 0`) always credits its first
+  // forwarded chunk; use epoch-scale timestamps to match that.
+  it("credits the first call (fresh isolate) and throttles within the window", () => {
+    const throttle = new AgentToolStreamProgressThrottle();
+    expect(throttle.shouldCredit(T0)).toBe(true);
+    expect(
+      throttle.shouldCredit(
+        T0 + AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS - 1
+      )
+    ).toBe(false);
+  });
+
+  it("credits again once the window has elapsed", () => {
+    const throttle = new AgentToolStreamProgressThrottle();
+    expect(throttle.shouldCredit(T0)).toBe(true);
+    expect(
+      throttle.shouldCredit(T0 + AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS)
+    ).toBe(true);
   });
 });
 

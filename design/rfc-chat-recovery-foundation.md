@@ -1418,6 +1418,77 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Slice 4e (Phase 4 — lift the residual leaf duplication the confidence pass found)_
+  — Acted on the confidence-pass finding by lifting the byte-identical leaf
+  host-I/O helpers into shared `agents/chat` free functions, leaving each package a
+  thin binding. Added to `recovery-incident.ts`:
+  `sweepStaleChatRecoveryIncidents(storage, now)` (owns list-by-prefix + TTL select
+  - the batched `KV_DELETE_MAX_KEYS` delete loop), `readChatRecoveryProgress(storage)`
+    / `bumpChatRecoveryProgress(storage)` (the durable monotonic counter), and the N9
+    throttle as `AgentToolStreamProgressThrottle` + the shared
+    `AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS` constant. The storage params are typed
+    `Pick<DurableObjectStorage, …>` so `this.ctx.storage` passes with no cast and the
+    helpers stay unit-testable with a fake. Both `AIChatAgent` and `Think` dropped
+    their duplicated `_sweepStaleChatRecoveryIncidents` (hook now points straight at the
+    shared fn), turned `_chatRecoveryProgressMarker` / `_bumpChatRecoveryProgress` into
+    one-line bindings, replaced the in-memory `_lastAgentToolStreamProgressAt` field +
+    inline throttle with `new AgentToolStreamProgressThrottle()`, and deleted their
+    local duplicate `CHAT_RECOVERY_PROGRESS_KEY`, `AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS`,
+    and `KV_DELETE_MAX_KEYS` constants. Per the confidence-pass call, `_resolveRecoveryStreamId`
+    was deliberately LEFT package-local (lifting it would feed `ResumableStream` into the
+    engine for ~6 lines — the hook-bloat inversion the 4d-2 fallback warned against). Also
+    extended the `@internal` barrel comment in `chat/index.ts` to cover the
+    `recovery-engine` / `stall-watchdog` blocks, not just `recovery-incident`. Zero
+    behavior change — the throttle gate is identical (a fresh isolate's first chunk still
+    credits because production `now` ≫ the window; a unit test pins exactly that). Tests:
+    9 new `recovery-incident` unit tests (sweep prefix-scoping + no-op + 128-batching;
+    progress read/increment; throttle credit/throttle windows); full `pnpm run check`
+    green; agents / ai-chat / think suites green; local `wrangler dev` SIGKILL e2e —
+    ai-chat 10/10, think `chat-recovery` + `stall-recovery` green. Only e2e red remains
+    the documented expected-RED `reattach-budget` gate (unrelated wall-clock budget;
+    untouched). Internal `@internal` seam, zero behavior change → no changeset.
+
+- _Phase 4 confidence pass (exit-criteria audit + reviewer checklist; docs only)_ —
+  Before advancing to Phase 5, audited both packages for residual duplicated
+  recovery logic and walked the release reviewer checklist. **Exit criteria met:**
+  every recovery _orchestration engine_ now routes through `ChatRecoveryEngine` —
+  incident begin/update + exhaustion-notification core, the give-up spine
+  (`exhaustRecoveryGiveUp`, 4d-1), the schedule triplet (4b), the stable-timeout
+  reschedule (4c), the wake frame (`handleChatFiberRecovery`, 4d-2), non-chat fiber
+  dispatch (3c), the stall watchdog (3a/3b), the shared `partialHasSettledToolResults`
+  (4d-2), and the shared incident type + key/sweep _selection_ helpers (4a). Both
+  `_beginChatRecoveryIncident` / `_updateChatRecoveryIncident` are one-line engine
+  delegations in both packages; `_exhaustChatRecovery` uses the shared
+  `buildChatRecoveryExhaustedContext` + `notifyChatRecoveryExhausted` core with only
+  package-specific terminal/broadcast ORDERING left local (ai-chat persist-first,
+  Think broadcast-first — a deliberate, documented divergence). **Checklist: pass** —
+  the 4d-2 commit changed no public (non-`_`) hook signatures (verified by diff);
+  defaults flow from the shared `DEFAULT_CHAT_RECOVERY_*` constants; the engine module
+  is `@internal` and not exported from the `agents` root (only re-barrelled through
+  the `agents/chat` entry both consumers already import); schedule callback names
+  (`_chatRecoveryContinue` / `_chatRecoveryRetry`) are stable; the recovery event
+  payload is built identically via the `emitRecoveryEvent` adapter hook;
+  settled-tool-results are preserved by the byte-equivalent shared helper; HITL turns
+  stay budget-free via `isAwaitingClientInteraction` (`hasPendingInteraction` in
+  Think); stable-timeout reschedules stay non-idempotent via
+  `chatRecoverySchedulePolicy`. **Residual finding (bounded, optional — a possible
+  "Slice 4e"):** a small cluster of byte-identical _leaf host-I/O accessors_ is still
+  duplicated across both packages — `_chatRecoveryProgressMarker` /
+  `_bumpChatRecoveryProgress` (the durable progress counter), the N9 throttle-credit
+  pair (`_lastAgentToolStreamProgressAt` + `_onAgentToolStreamProgress`, the only
+  duplicated _policy_), `_sweepStaleChatRecoveryIncidents` (sweep glue around the
+  shared `selectStaleIncidentKeys`), and `_resolveRecoveryStreamId` (resumable-stream
+  metadata lookup). These are leaf accessors, not orchestration engines, so they do
+  NOT violate the exit criteria. The cleanest lift would be the sweep (the engine
+  already owns get/put/delete incident hooks; a `listIncidents` hook lets it own the
+  loop) and the progress-counter + N9 throttle (a shared `agents/chat` helper);
+  `_resolveRecoveryStreamId` is deliberately LEFT package-local — lifting it would
+  feed `ResumableStream` accessors into the engine for ~6 lines, the exact hook-bloat
+  inversion the 4d-2 fallback warned against. Cosmetic nit recorded: the `@internal`
+  barrel comment in `chat/index.ts` sits above only the `recovery-incident` export
+  block, not the `recovery-engine` / `stall-watchdog` blocks. No code, no tests — audit
+  only.
+
 - _Slice 4d-2 (Phase 4 — lift the wake FRAME into the engine; the genericity seam)_
   — Implemented the reviewed seam. Added `ChatRecoveryEngine.handleChatFiberRecovery(ctx, wake)`
   owning the wake lifecycle (chat-fiber gate → requestId parse → snapshot unwrap →

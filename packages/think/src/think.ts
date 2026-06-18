@@ -166,7 +166,10 @@ import {
   notifyChatRecoveryExhausted,
   ChatStreamStalledError,
   iterateWithStallWatchdog,
-  selectStaleIncidentKeys,
+  sweepStaleChatRecoveryIncidents,
+  readChatRecoveryProgress,
+  bumpChatRecoveryProgress,
+  AgentToolStreamProgressThrottle,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,
@@ -639,12 +642,12 @@ type ThinkRecoveryClassification = { retryTargetUserId: string | null };
 // persisted incident shape and key prefix are owned by the engine package so
 // both consumers round-trip the same record across the deploy that ships them.
 
-// Durable, monotonic forward-progress counter for recovery budget resets.
-// Bumped on each durable content flush (`_storeChunkDurably`) — production time,
-// so it reflects genuinely new content and is immune to reconnects/re-persists;
-// never recomputed from the (compactable) transcript. See
-// `_chatRecoveryProgressMarker`.
-const CHAT_RECOVERY_PROGRESS_KEY = "cf:chat-recovery:progress";
+// The durable, monotonic forward-progress counter (`CHAT_RECOVERY_PROGRESS_KEY`)
+// and its read/bump helpers now live in the shared engine (agents/chat) —
+// `readChatRecoveryProgress` / `bumpChatRecoveryProgress`. Bumped on each durable
+// content flush (`_storeChunkDurably`) — production time, so it reflects genuinely
+// new content and is immune to reconnects/re-persists; never recomputed from the
+// (compactable) transcript.
 // Recovery budget defaults (maxAttempts, maxRecoveryWork, stableTimeoutMs,
 // terminalMessage, noProgressTimeoutMs, alarm debounce) now live in the shared
 // incident engine (agents/chat) and are applied by `resolveChatRecoveryConfig`
@@ -670,12 +673,9 @@ const CHAT_RECOVERY_PROGRESS_KEY = "cf:chat-recovery:progress";
 // through to a spurious error, and a true orphan (a sibling that never arrives)
 // simply never auto-continues — the isolate is not pinned waiting for it.
 // (Stable-state retry delay `CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS` and the
-// incident sweep TTL `CHAT_RECOVERY_INCIDENT_TTL_MS` now live in agents/chat;
-// the reschedule + sweep that consume them are owned by the shared engine /
-// `selectStaleIncidentKeys`.)
-// Max keys per Durable Object KV `delete([...])` call.
-// See https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
-const KV_DELETE_MAX_KEYS = 128;
+// incident sweep — TTL selection, key prefix, and batched delete — now live in
+// agents/chat; the reschedule is owned by the shared engine and the sweep by the
+// shared `sweepStaleChatRecoveryIncidents` helper.)
 // Staleness bound for the live "recovering…" flag (#1620). A flag older than
 // this is treated as abandoned (the owning incident died without a terminal,
 // e.g. the DO went idle) so it can neither pin the indicator on forever nor
@@ -683,14 +683,10 @@ const KV_DELETE_MAX_KEYS = 128;
 // a progressing turn is bounded by work, not wall-clock
 // (rfc-chat-recovery-work-budget).
 const CHAT_RECOVERING_FLAG_TTL_MS = 15 * 60 * 1000;
-// N9: while a parent re-attaches to and forwards a sub-agent's stream, credit
-// the parent's recovery progress at most this often. The marker only needs to
-// advance ≥once between recovery attempts (the no-progress window is minutes),
-// so this caps storage writes during high-rate child streaming. The throttle
-// state is in-memory (reset per isolate), so the first forwarded chunk after
-// ANY restart always bumps — guaranteeing every recovery attempt that observes
-// child output registers forward progress.
-const AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS = 5_000;
+// N9 throttle (while a parent re-attaches to and forwards a sub-agent's stream,
+// credit the parent's recovery progress at most once per window) now lives in the
+// shared engine (agents/chat) as `AgentToolStreamProgressThrottle` /
+// `AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS`.
 
 // How far ahead to schedule the resumable-stream buffer cleanup alarm. Set to
 // ResumableStream's short completion-grace window (COMPLETED_RETENTION_MS, 10m)
@@ -9444,23 +9440,22 @@ export class Think<
    * compaction can never lower it and a reconnect can't fake it (#1637).
    */
   private async _chatRecoveryProgressMarker(): Promise<number> {
-    return (
-      (await this.ctx.storage.get<number>(CHAT_RECOVERY_PROGRESS_KEY)) ?? 0
-    );
+    // Storage read lives in the shared engine (agents/chat); this is the
+    // package binding, symmetric with `AIChatAgent`.
+    return readChatRecoveryProgress(this.ctx.storage);
   }
 
   /** Advance the durable recovery-progress counter. Called from
    *  `_storeChunkDurably` when new content is durably flushed (real, reconnect-
-   *  immune forward progress). */
+   *  immune forward progress). The increment lives in the shared engine
+   *  (agents/chat); this is the package binding. */
   private async _bumpChatRecoveryProgress(): Promise<void> {
-    const current =
-      (await this.ctx.storage.get<number>(CHAT_RECOVERY_PROGRESS_KEY)) ?? 0;
-    await this.ctx.storage.put(CHAT_RECOVERY_PROGRESS_KEY, current + 1);
+    return bumpChatRecoveryProgress(this.ctx.storage);
   }
 
-  /** In-memory wall-clock of the last N9 child-stream progress bump (reset per
-   *  isolate so the first forwarded chunk after a restart always credits). */
-  private _lastAgentToolStreamProgressAt = 0;
+  /** Per-isolate N9 throttle gate (shared `agents/chat` helper); reset per
+   *  isolate so the first forwarded chunk after a restart always credits. */
+  private _agentToolStreamProgress = new AgentToolStreamProgressThrottle();
 
   /**
    * N9: forwarding a sub-agent's chunks IS forward progress for this parent
@@ -9472,27 +9467,8 @@ export class Think<
    * Throttled (and reset per isolate) so we never write storage per token.
    */
   protected override async _onAgentToolStreamProgress(): Promise<void> {
-    const now = Date.now();
-    if (
-      now - this._lastAgentToolStreamProgressAt <
-      AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS
-    ) {
-      return;
-    }
-    this._lastAgentToolStreamProgressAt = now;
-    await this._bumpChatRecoveryProgress();
-  }
-
-  /** Sweep recovery incidents that have been inactive past the TTL. */
-  private async _sweepStaleChatRecoveryIncidents(now: number): Promise<void> {
-    const entries = await this.ctx.storage.list<ChatRecoveryIncident>({
-      prefix: CHAT_RECOVERY_INCIDENT_KEY_PREFIX
-    });
-    const staleKeys = selectStaleIncidentKeys(entries, now);
-    // Batch deletes — the DO storage KV delete accepts up to 128 keys per call,
-    // collapsing N awaited round-trips into ceil(N / 128).
-    for (let i = 0; i < staleKeys.length; i += KV_DELETE_MAX_KEYS) {
-      await this.ctx.storage.delete(staleKeys.slice(i, i + KV_DELETE_MAX_KEYS));
+    if (this._agentToolStreamProgress.shouldCredit(Date.now())) {
+      await this._bumpChatRecoveryProgress();
     }
   }
 
@@ -9526,7 +9502,8 @@ export class Think<
     return (this._chatRecoveryEngineInstance ??= new ChatRecoveryEngine({
       resolveConfig: () => this._resolveChatRecoveryConfig(),
       now: () => Date.now(),
-      sweepStaleIncidents: (now) => this._sweepStaleChatRecoveryIncidents(now),
+      sweepStaleIncidents: (now) =>
+        sweepStaleChatRecoveryIncidents(this.ctx.storage, now),
       getIncident: async (key) =>
         (await this.ctx.storage.get<ChatRecoveryIncident>(key)) ?? null,
       // Hibernation ordering guard. The budget decision consults
