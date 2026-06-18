@@ -134,9 +134,10 @@ export class ThinkWorkflow<
       })
     );
 
-    const maxAttempts = Math.max(1, options.retries?.maxAttempts ?? 1);
-    const baseDelayMs = options.retries?.baseDelayMs ?? 500;
-    const maxDelayMs = options.retries?.maxDelayMs ?? 5000;
+    const retries = this._validatePromptRetryOptions(options.retries);
+    const maxAttempts = retries.maxAttempts;
+    const baseDelayMs = retries.baseDelayMs;
+    const maxDelayMs = retries.maxDelayMs;
 
     let lastError: unknown;
 
@@ -300,6 +301,40 @@ export class ThinkWorkflow<
       payload.submissionId,
       payload.status
     );
+  }
+
+  private _validatePromptRetryOptions(
+    options: ThinkPromptRetryOptions | undefined
+  ): Required<ThinkPromptRetryOptions> {
+    const maxAttempts = options?.maxAttempts ?? 1;
+    if (!Number.isFinite(maxAttempts) || maxAttempts < 1) {
+      throw new Error("step.prompt retries.maxAttempts must be >= 1");
+    }
+    if (!Number.isInteger(maxAttempts)) {
+      throw new Error("step.prompt retries.maxAttempts must be an integer");
+    }
+
+    const baseDelayMs = options?.baseDelayMs ?? 500;
+    if (!Number.isFinite(baseDelayMs) || baseDelayMs <= 0) {
+      throw new Error("step.prompt retries.baseDelayMs must be > 0");
+    }
+
+    const maxDelayMs = options?.maxDelayMs ?? 5000;
+    if (!Number.isFinite(maxDelayMs) || maxDelayMs <= 0) {
+      throw new Error("step.prompt retries.maxDelayMs must be > 0");
+    }
+
+    if (baseDelayMs > maxDelayMs) {
+      throw new Error(
+        "step.prompt retries.baseDelayMs must be <= retries.maxDelayMs"
+      );
+    }
+
+    return {
+      maxAttempts,
+      baseDelayMs,
+      maxDelayMs
+    };
   }
 
   private async _promptRetryDelayMs(

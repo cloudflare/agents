@@ -457,5 +457,64 @@ describe("ThinkWorkflow", () => {
       expect(attempt).toBe(2);
       expect(sleepCalls.length).toBe(1);
     });
+
+    it("rejects invalid retry options eagerly", async () => {
+      const workflow = createWorkflow({
+        async submitMessages() {
+          return createSubmissionResult("submission", () => {});
+        },
+        async cancelSubmission() {}
+      });
+
+      const invalidCases = [
+        {
+          retries: { maxAttempts: 0 },
+          expected: "step.prompt retries.maxAttempts must be >= 1"
+        },
+        {
+          retries: { maxAttempts: 1.5 },
+          expected: "step.prompt retries.maxAttempts must be an integer"
+        },
+        {
+          retries: { baseDelayMs: 0 },
+          expected: "step.prompt retries.baseDelayMs must be > 0"
+        },
+        {
+          retries: { maxDelayMs: 0 },
+          expected: "step.prompt retries.maxDelayMs must be > 0"
+        },
+        {
+          retries: { baseDelayMs: 1000, maxDelayMs: 100 },
+          expected: "step.prompt retries.baseDelayMs must be <= retries.maxDelayMs"
+        }
+      ];
+
+      for (const { retries, expected } of invalidCases) {
+        await expect(
+          workflow._promptStep(
+            "structure",
+            {
+              prompt: "Return structured output",
+              output: z.object({ answer: z.string() }),
+              retries
+            },
+            {
+              do: async (_name: string, callback: () => Promise<unknown>) =>
+                callback(),
+              waitForEvent: async () => ({
+                payload: {
+                  submissionId: "submission",
+                  status: "completed",
+                  output: { answer: "ok" }
+                },
+                [Symbol.dispose]: () => {}
+              }),
+              sleep: async () => {}
+            } as unknown as AgentWorkflowStep,
+            createEvent()
+          )
+        ).rejects.toThrow(expected);
+      }
+    });
   });
 });
