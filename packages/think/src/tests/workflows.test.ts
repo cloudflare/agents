@@ -18,6 +18,7 @@ type PromptStepRunner = {
         maxAttempts?: number;
         baseDelayMs?: number;
         maxDelayMs?: number;
+        retryOnTimeout?: boolean;
       };
     },
     step: AgentWorkflowStep,
