@@ -1113,12 +1113,6 @@ export type SubmitMessagesOptions = {
   submissionId?: string;
   idempotencyKey?: string;
   metadata?: Record<string, unknown>;
-  /**
-   * Maximum number of retries for the underlying model call. Forwarded to the
-   * AI SDK's `streamText` so transient provider errors (e.g. capacity) can be
-   * recovered inside the agent turn.
-   */
-  maxRetries?: number;
 };
 
 type ThinkWorkflowPromptContext = {
@@ -1135,14 +1129,6 @@ type ThinkWorkflowPromptContext = {
 };
 
 const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
-
-/**
- * Reserved metadata key used to carry {@link SubmitMessagesOptions.maxRetries}
- * through the durable submission queue. `submitMessages` runs asynchronously via
- * the drain loop, so the retry budget is persisted alongside the submission and
- * read back when the turn actually runs.
- */
-const THINK_SUBMISSION_MAX_RETRIES_METADATA_KEY = "__thinkSubmissionMaxRetries";
 
 /**
  * Reserved name for the synthetic tool a workflow `step.prompt` turn uses to
@@ -1295,12 +1281,6 @@ export interface TurnInput {
   workflowPrompt?: ThinkWorkflowPromptContext;
   /** Whether this is a continuation turn (auto-continue after tool result, recovery). */
   continuation: boolean;
-  /**
-   * Maximum number of retries for the underlying model call. Forwarded to the
-   * AI SDK's `streamText` so transient provider errors (e.g. capacity) can be
-   * recovered inside the agent turn before the turn is reported as failed.
-   */
-  maxRetries?: number;
 }
 
 /**
@@ -3982,14 +3962,6 @@ export class Think<
     };
 
     const subclassConfig = (await this.beforeTurn(ctx)) ?? {};
-    // Seed maxRetries from the caller (e.g. submitMessages) unless beforeTurn
-    // explicitly overrode it.
-    if (
-      input.maxRetries !== undefined &&
-      subclassConfig.maxRetries === undefined
-    ) {
-      subclassConfig.maxRetries = input.maxRetries;
-    }
     const config = await this._pipelineExtensionBeforeTurn(ctx, subclassConfig);
     const workflowPrompt = input.workflowPrompt;
     // Workflow `step.prompt` turns produce their structured result by calling
@@ -6068,13 +6040,6 @@ export class Think<
     return metadata === undefined ? null : JSON.stringify(metadata);
   }
 
-  private _readSubmissionMaxRetries(
-    metadata: Record<string, unknown> | null
-  ): number | undefined {
-    const value = metadata?.[THINK_SUBMISSION_MAX_RETRIES_METADATA_KEY];
-    return typeof value === "number" ? value : undefined;
-  }
-
   private _readWorkflowPromptContext(
     metadata: Record<string, unknown> | null
   ): ThinkWorkflowPromptContext | null {
@@ -6544,17 +6509,7 @@ export class Think<
     const requestId = submissionId;
     const now = Date.now();
     const messagesJson = this._serializeSubmissionMessages(messages);
-    // `submitMessages` is asynchronous (drained later), so persist the optional
-    // model retry budget alongside the submission metadata under a reserved key
-    // and read it back when the turn runs.
-    const submissionMetadata =
-      options?.maxRetries === undefined
-        ? options?.metadata
-        : {
-            ...options?.metadata,
-            [THINK_SUBMISSION_MAX_RETRIES_METADATA_KEY]: options.maxRetries
-          };
-    const metadataJson = this._serializeMetadata(submissionMetadata);
+    const metadataJson = this._serializeMetadata(options?.metadata);
 
     this.sql`
       INSERT INTO cf_think_submissions (
@@ -6663,7 +6618,6 @@ export class Think<
       const messages = this._parseSubmissionMessages(row.messages_json);
       const metadata = this._parseJsonObject(row.metadata_json);
       const workflowPrompt = this._readWorkflowPromptContext(metadata);
-      const maxRetries = this._readSubmissionMaxRetries(metadata);
       const result = await this._runProgrammaticMessagesTurn(
         requestId,
         messages,
@@ -6672,7 +6626,6 @@ export class Think<
           captureProgrammaticStreamError: true,
           captureOutput: Boolean(workflowPrompt?.output),
           workflowPrompt: workflowPrompt ?? undefined,
-          maxRetries,
           shouldApplyMessages: () =>
             this._readSubmission(row.submission_id)?.status === "running",
           onMessagesApplied: () => {
@@ -7093,7 +7046,6 @@ export class Think<
       captureOutput?: boolean;
       body?: Record<string, unknown>;
       workflowPrompt?: ThinkWorkflowPromptContext;
-      maxRetries?: number;
       shouldApplyMessages?: () => boolean | Promise<boolean>;
     }
   ): Promise<ProgrammaticMessagesResult> {
@@ -7179,7 +7131,6 @@ export class Think<
                     clientTools,
                     body,
                     workflowPrompt: options?.workflowPrompt,
-                    maxRetries: options?.maxRetries,
                     continuation: false
                   })
               );

@@ -19,7 +19,6 @@ type PromptStepRunner = {
         baseDelayMs?: number;
         maxDelayMs?: number;
       };
-      modelMaxRetries?: number;
     },
     step: AgentWorkflowStep,
     event: WorkflowEvent<unknown>
@@ -32,10 +31,7 @@ type DisposableSubmissionResult = SubmitMessagesResult & {
 };
 
 type FakeThinkAgent = {
-  submitMessages(
-    messages: unknown[],
-    options?: Record<string, unknown>
-  ): Promise<DisposableSubmissionResult>;
+  submitMessages(): Promise<DisposableSubmissionResult>;
   cancelSubmission(submissionId: string, reason: string): Promise<void>;
 };
 
@@ -409,55 +405,6 @@ describe("ThinkWorkflow", () => {
       expect(attempt).toBe(2);
       expect(sleepCalls.length).toBe(1);
       expect(sleepCalls[0].name).toBe("structure:retry-0");
-    });
-
-    it("forwards modelMaxRetries to submitMessages", async () => {
-      const submitCalls: Array<{
-        messages: unknown[];
-        options?: Record<string, unknown>;
-      }> = [];
-
-      const agent: FakeThinkAgent = {
-        async submitMessages(messages, options) {
-          submitCalls.push({ messages, options });
-          return createSubmissionResult("submission-model-retries", () => {});
-        },
-        async cancelSubmission() {
-          throw new Error("cancelSubmission should not be called");
-        }
-      };
-
-      const waitEvent = {
-        payload: {
-          submissionId: "submission-model-retries",
-          status: "completed",
-          output: { answer: "ok" }
-        },
-        [Symbol.dispose]: () => {}
-      };
-
-      const step = {
-        do: async (_name: string, callback: () => Promise<unknown>) => {
-          return callback();
-        },
-        waitForEvent: async () => waitEvent,
-        sleep: async () => {}
-      } as unknown as AgentWorkflowStep;
-
-      const workflow = createWorkflow(agent);
-      await workflow._promptStep(
-        "structure",
-        {
-          prompt: "Return structured output",
-          output: z.object({ answer: z.string() }),
-          modelMaxRetries: 5
-        },
-        step,
-        createEvent()
-      );
-
-      expect(submitCalls.length).toBe(1);
-      expect(submitCalls[0].options?.maxRetries).toBe(5);
     });
   });
 });
