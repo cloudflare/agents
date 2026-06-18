@@ -485,7 +485,8 @@ describe("ThinkWorkflow", () => {
         },
         {
           retries: { baseDelayMs: 1000, maxDelayMs: 100 },
-          expected: "step.prompt retries.baseDelayMs must be <= retries.maxDelayMs"
+          expected:
+            "step.prompt retries.baseDelayMs must be <= retries.maxDelayMs"
         }
       ];
 
