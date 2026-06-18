@@ -96,6 +96,11 @@ export interface MessengerBackgroundContext {
 }
 
 export interface MessengerBackgroundIngress {
+  /**
+   * Start provider-owned ingress after Chat SDK state and adapters are ready.
+   * The runtime retries startup failures, but a successful start means the
+   * provider has taken durable ownership of reconnects/retries from there.
+   */
   start(context: MessengerBackgroundContext): Promise<void> | void;
 }
 
@@ -443,6 +448,7 @@ export class ThinkMessengerRuntime {
     });
 
     chat.onReaction(async (event) => {
+      if (!event.thread) return;
       const thread = event.thread as ChatThread;
       const definition = this.definitionForChatObject(thread);
       if (!definition) return;
