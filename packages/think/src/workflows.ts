@@ -37,6 +37,13 @@ export type ThinkPromptRetryOptions = {
   baseDelayMs?: number;
   /** Maximum delay cap in ms. Default: 5000 */
   maxDelayMs?: number;
+  /**
+   * Whether a `step.prompt` wait timeout should count as a retryable failure.
+   * A timeout often means the task is too complex or the provider is down, so
+   * a fresh attempt with the same prompt is likely to time out again. Set to
+   * `false` to fail fast on timeout instead of retrying. Default: `true`.
+   */
+  retryOnTimeout?: boolean;
 };
 
 export type ThinkPromptOptions<Schema extends ZodObject> = {
@@ -138,12 +145,16 @@ export class ThinkWorkflow<
     const maxAttempts = retries.maxAttempts;
     const baseDelayMs = retries.baseDelayMs;
     const maxDelayMs = retries.maxDelayMs;
+    const retryOnTimeout = retries.retryOnTimeout;
 
     let lastError: unknown;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const attemptKey =
         attempt === 0 ? options.key : `${options.key ?? ""}:attempt-${attempt}`;
+      // Captures the submission id of this attempt (set once `submitMessages`
+      // resolves) so we can terminate it before retrying.
+      const attemptRef: { submissionId?: string } = {};
       try {
         return await this._promptStepAttempt(
           stepName,
@@ -152,18 +163,56 @@ export class ThinkWorkflow<
           fingerprint,
           attempt,
           attemptKey,
-          step
+          step,
+          attemptRef
         );
       } catch (err) {
         lastError = err;
-        if (attempt === maxAttempts - 1) {
+
+        const isLastAttempt = attempt === maxAttempts - 1;
+        const stopOnTimeout =
+          !retryOnTimeout && err instanceof ThinkPromptTimeoutError;
+        if (isLastAttempt || stopOnTimeout) {
           throw err;
         }
+
+        // Terminate the abandoned attempt before retrying. Think keeps its own
+        // `chatRecovery` running for this submission (it preserves in-flight
+        // turn state across DO restarts/stalls), but once the workflow decides
+        // to retry, a lingering turn or recovery continuation for the old
+        // attempt would race the fresh attempt on the same session — producing
+        // duplicate/interleaved output. Cancelling aborts the in-flight turn
+        // and any recovery for it, and is a no-op once the submission is
+        // already terminal (e.g. it failed with a provider error).
+        if (attemptRef.submissionId) {
+          const submissionId = attemptRef.submissionId;
+          await step.do(`${stepName}:cancel-${attempt}`, async () => {
+            await this.agent.cancelSubmission(
+              submissionId,
+              "Think workflow retrying prompt step"
+            );
+          });
+        }
+
         const delayMs = await this._promptRetryDelayMs(
           stepName,
           attempt,
           baseDelayMs,
           maxDelayMs
+        );
+        console.warn(
+          `[ThinkWorkflow] step.prompt "${stepName}" attempt ${
+            attempt + 1
+          }/${maxAttempts} failed; retrying after ${delayMs}ms`,
+          {
+            workflowName: this.workflowName,
+            workflowId: this.workflowId,
+            stepName,
+            attempt,
+            nextAttempt: attempt + 1,
+            delayMs,
+            error: err instanceof Error ? err.message : String(err)
+          }
         );
         await step.sleep(`${stepName}:retry-${attempt}`, delayMs);
       }
@@ -179,7 +228,8 @@ export class ThinkWorkflow<
     fingerprint: string,
     attempt: number,
     attemptKey: string | undefined,
-    step: AgentWorkflowStep
+    step: AgentWorkflowStep,
+    attemptRef: { submissionId?: string }
   ): Promise<z.infer<Schema>> {
     const eventType = await this._eventTypeForPrompt(stepName, attemptKey);
     const idempotencyKey = await this._idempotencyKeyForPrompt(
@@ -229,6 +279,10 @@ export class ThinkWorkflow<
         disposeIfPresent(submissionResult);
       }
     })) as Pick<SubmitMessagesResult, "submissionId">;
+
+    // Expose the submission id so the retry loop can terminate this attempt's
+    // turn (and any chatRecovery continuation of it) before retrying.
+    attemptRef.submissionId = submission.submissionId;
 
     const event = await this._waitForPromptEvent(
       step,
@@ -330,10 +384,13 @@ export class ThinkWorkflow<
       );
     }
 
+    const retryOnTimeout = options?.retryOnTimeout ?? true;
+
     return {
       maxAttempts,
       baseDelayMs,
-      maxDelayMs
+      maxDelayMs,
+      retryOnTimeout
     };
   }
 

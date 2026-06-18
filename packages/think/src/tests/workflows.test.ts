@@ -289,19 +289,22 @@ describe("ThinkWorkflow", () => {
     it("retries transient prompt errors with backoff and fresh submissions", async () => {
       let submitCount = 0;
       const sleepCalls: Array<{ name: string; duration: number }> = [];
+      const cancelCalls: Array<{ submissionId: string; reason: string }> = [];
+      const doNames: string[] = [];
 
       const agent: FakeThinkAgent = {
         async submitMessages() {
           submitCount++;
           return createSubmissionResult(`submission-${submitCount}`, () => {});
         },
-        async cancelSubmission() {
-          throw new Error("cancelSubmission should not be called");
+        async cancelSubmission(submissionId: string, reason: string) {
+          cancelCalls.push({ submissionId, reason });
         }
       };
 
       const step = {
-        do: async (_name: string, callback: () => Promise<unknown>) => {
+        do: async (name: string, callback: () => Promise<unknown>) => {
+          doNames.push(name);
           return callback();
         },
         waitForEvent: async () => {
@@ -354,6 +357,24 @@ describe("ThinkWorkflow", () => {
       // to ~0ms (e.g. a degenerate fraction), which would cause thundering-herd
       // retries. The delay is deterministic for fixed inputs.
       expect(sleepCalls.some((call) => call.duration > 0)).toBe(true);
+      // Each abandoned attempt is cancelled before retrying so its turn (and
+      // any chatRecovery continuation) can't race the fresh attempt.
+      expect(cancelCalls).toEqual([
+        {
+          submissionId: "submission-1",
+          reason: "Think workflow retrying prompt step"
+        },
+        {
+          submissionId: "submission-2",
+          reason: "Think workflow retrying prompt step"
+        }
+      ]);
+      expect(doNames).toContain("structure:cancel-0");
+      expect(doNames).toContain("structure:cancel-1");
+      // The successful final attempt (submission-3) is never cancelled.
+      expect(
+        cancelCalls.some((call) => call.submissionId === "submission-3")
+      ).toBe(false);
     });
 
     it("retries any prompt error, including validation failures", async () => {
@@ -405,6 +426,54 @@ describe("ThinkWorkflow", () => {
       expect(attempt).toBe(2);
       expect(sleepCalls.length).toBe(1);
       expect(sleepCalls[0].name).toBe("structure:retry-0");
+    });
+
+    it("fails fast on timeout when retryOnTimeout is false", async () => {
+      let submitCount = 0;
+      const sleepCalls: Array<{ name: string; duration: number }> = [];
+
+      const agent: FakeThinkAgent = {
+        async submitMessages() {
+          submitCount++;
+          return createSubmissionResult(`submission-${submitCount}`, () => {});
+        },
+        async cancelSubmission() {
+          /* best-effort cleanup on timeout */
+        }
+      };
+
+      const step = {
+        do: async (_name: string, callback: () => Promise<unknown>) => {
+          return callback();
+        },
+        waitForEvent: async () => {
+          throw new Error("timed out");
+        },
+        sleep: async (name: string, duration: number) => {
+          sleepCalls.push({ name, duration });
+        }
+      } as unknown as AgentWorkflowStep;
+
+      const workflow = createWorkflow(agent);
+
+      await expect(
+        workflow._promptStep(
+          "structure",
+          {
+            prompt: "Return structured output",
+            output: z.object({ answer: z.string() }),
+            timeout: "1 minute",
+            retries: { maxAttempts: 3, retryOnTimeout: false }
+          },
+          step,
+          createEvent()
+        )
+      ).rejects.toBeInstanceOf(ThinkPromptTimeoutError);
+
+      // Timeout is not retried: only the first attempt runs and no backoff
+      // sleep is scheduled.
+      expect(submitCount).toBe(1);
+      expect(sleepCalls).toHaveLength(0);
     });
 
     it("throws the last error after exhausting all attempts", async () => {
