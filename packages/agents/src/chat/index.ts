@@ -1,11 +1,18 @@
 export {
   applyChunkToParts,
+  getPartialStreamText,
   isReplayChunk,
   normalizeToolInput,
   type MessageParts,
   type MessagePart,
   type StreamChunkData
 } from "./message-builder";
+
+export {
+  sendIfOpen,
+  isWebSocketClosedSendError,
+  type ChatConnection
+} from "./connection";
 
 export {
   sanitizeMessage,
@@ -36,7 +43,12 @@ export {
   type TransitionResult as BroadcastTransitionResult
 } from "./broadcast-state";
 
-export { ResumableStream, type SqlTaggedTemplate } from "./resumable-stream";
+export {
+  ResumableStream,
+  cleanupStreamBuffers,
+  STREAM_CLEANUP_DELAY_SECONDS,
+  type SqlTaggedTemplate
+} from "./resumable-stream";
 
 export { MAX_BOUND_PARAMS, buildInClauseStrings } from "./sql-batch";
 
@@ -72,6 +84,10 @@ export {
   crossMessageToolResultUpdate,
   toolApprovalUpdate,
   pausedExecutionUpdate,
+  hasIncompleteToolBatch,
+  partAwaitsClientInteraction,
+  clientResolvableToolNames,
+  toolPartName,
   type ToolPartUpdate
 } from "./tool-state";
 
@@ -107,6 +123,11 @@ export {
   sweepStaleChatRecoveryIncidents,
   readChatRecoveryProgress,
   bumpChatRecoveryProgress,
+  recordChatTerminal,
+  clearChatTerminal,
+  pendingChatTerminal,
+  buildChatRecoveringFrame,
+  setChatRecovering,
   AgentToolStreamProgressThrottle,
   AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
@@ -123,6 +144,7 @@ export {
   DEFAULT_CHAT_RECOVERY_NO_PROGRESS_TIMEOUT_MS,
   CHAT_RECOVERY_ALARM_DEBOUNCE_MS,
   CHAT_RECOVERING_FLAG_TTL_MS,
+  type ChatTerminalRecord,
   type ChatRecoveryIncident,
   type ChatRecoveryKind,
   type ChatRecoveryIncidentEvent,

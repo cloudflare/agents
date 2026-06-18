@@ -1628,6 +1628,48 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Slice 4f-i (Phase 4 — byte-verified pure leaf lifts; zero behavior, no changeset)_
+  — Ran the verify-first gate at execution time on all eight 4f-i items (line numbers
+  from 2026-06 had drifted; re-diffed by method name) and confirmed each
+  byte-equivalent modulo comments: `sendIfOpen` / `isWebSocketClosedSendError`
+  (identical in both packages **and** a third copy in `continuation-state.ts`);
+  `_getPartialStreamText` (one-word comment diff); the client-interaction predicates
+  (`_partAwaitsClientInteraction` / `_toolPartName` / `_clientResolvableToolNames`,
+  docblock-only diff); `_hasIncompleteToolBatch` (identical incl. comment); the
+  terminal KV trio (`_recordChatTerminal` / `_clearChatTerminal` /
+  `_pendingChatTerminal`, identical); the stream-cleanup pair
+  (`_ensureStreamCleanupScheduled` / `_cleanupStreamBuffers`, one extra comment clause
+  in Think); and `_setChatRecovering` + the recovering-frame builder (identical apart
+  from the wire-type enum + broadcast wrapper, exactly as predicted). Lifted them into
+  `agents/chat`: a **new `connection.ts`** (`sendIfOpen` / `isWebSocketClosedSendError`
+  - a `ChatConnection` minimal type — and deduped `continuation-state.ts`'s copy, a
+    bonus third-copy removal); `getPartialStreamText` in `message-builder.ts` (over the
+    resumable-stream chunk reader); `hasIncompleteToolBatch` + the three client
+    predicates in `tool-state.ts`; `STREAM_CLEANUP_DELAY_SECONDS` + `cleanupStreamBuffers`
+    in `resumable-stream.ts`; and the terminal trio + `buildChatRecoveringFrame` +
+    `setChatRecovering` in `recovery-incident.ts` (storage-glue home, same precedent as
+    4e). Both packages are now thin per-package bindings; the per-package divergence
+    (recovering wire-type enum `CF_AGENT_CHAT_RECOVERING` vs `MSG_CHAT_RECOVERING`, and
+    the `_broadcastChatMessage` / `_broadcastChat` wrapper) is threaded as params, and
+    the `_broadcastChat` wrappers stayed package-local as planned. The duplicated
+    `CHAT_RECOVERING_KEY` / `CHAT_LAST_TERMINAL_KEY` / `CHAT_RECOVERING_FLAG_TTL_MS`
+    local constants were deleted outright (no remaining direct references once the
+    helpers absorbed them). **Deep review (zero-behavior confirmation):** storage keys +
+    values unchanged (cutover-safe; the shared constants are the same strings); wake/
+    hibernation ordering unchanged (bindings issue the same storage ops in the same
+    order); the stream-cleanup re-arm stays non-idempotent (rearm passes
+    `{ idempotent: false }`, invariant documented on the shared fn); the recovering
+    set/clear stays idempotent-on-active-existing; terminal-before-seal and settled
+    tool results untouched; observability/recovering-frame payload shape identical;
+    `setChatRecovering` now uses a single injected `now` for both the staleness check and
+    the stored `at` (was two `Date.now()` calls microseconds apart — not observable, and
+    matches the engine's injected-clock seam). Tests: `pnpm run check` ✅ (sherif /
+    exports / oxfmt / oxlint / typecheck 111); agents workers 1996 ✅, ai-chat workers
+    686 ✅, Think workers 52 + react 2 ✅; ai-chat real-`wrangler dev` SIGKILL e2e 10/10
+    ✅; Think `chat-recovery` + `stall-recovery` SIGKILL e2e 6/6 ✅. The expected-RED
+    `reattach-budget` e2e (unrelated wall-clock budget) was left untouched. Internal
+    `@internal` seam, zero behavior change → no changeset.
+
 - _Confidence review of the go-forward plan (code-grounded; docs only)_ — Before
   handing the plan to a fresh session, pressure-tested the new Slice 4f and
   auto-continuation decision against the actual code (not just the explore summaries).
@@ -2757,12 +2799,21 @@ callback, data, reason })` behind hooks `exhaustChatRecovery`,
   4d-2/4e safe; line numbers below are as of 2026-06 and will drift, so trust the
   names and re-diff.
 
-  **4f-i — byte-verified pure leaf lifts (zero behavior, no changeset).** Lift each
-  into `agents/chat` with a thin per-package binding (free functions taking
-  `Pick<DurableObjectStorage, …>` or a small param, exactly like 4e's
+  **4f-i — byte-verified pure leaf lifts (zero behavior, no changeset). ✅ DONE.**
+  Lift each into `agents/chat` with a thin per-package binding (free functions
+  taking `Pick<DurableObjectStorage, …>` or a small param, exactly like 4e's
   `sweepStaleChatRecoveryIncidents` / `readChatRecoveryProgress`). Items marked
   ✔verified were diffed during the 2026-06 confidence review and confirmed
-  byte-identical; the rest still need the gate above.
+  byte-identical; the rest were re-diffed at execution time (verify-first gate)
+  and all eight passed. Landed in `agents/chat`: new `connection.ts`
+  (`sendIfOpen` / `isWebSocketClosedSendError` — also deduped `continuation-state`'s
+  third copy); `message-builder.getPartialStreamText`;
+  `tool-state.{hasIncompleteToolBatch,partAwaitsClientInteraction,clientResolvableToolNames,toolPartName}`;
+  `resumable-stream.{STREAM_CLEANUP_DELAY_SECONDS,cleanupStreamBuffers}`;
+  `recovery-incident.{recordChatTerminal,clearChatTerminal,pendingChatTerminal,buildChatRecoveringFrame,setChatRecovering}`.
+  Both packages are now thin bindings; the recovering set/clear and recovering
+  frame thread their wire-type enum + broadcast wrapper as params (the only
+  per-package divergence). See the Slice 4f-i progress-log entry.
   - **Duplicated constants ✔verified.** `CHAT_RECOVERING_KEY`,
     `CHAT_LAST_TERMINAL_KEY`, `CHAT_RECOVERING_FLAG_TTL_MS` are already exported from
     `recovery-incident.ts` (`109`, `115`, `166`) and re-barrelled by `chat/index.ts`,
@@ -2773,8 +2824,10 @@ callback, data, reason })` behind hooks `exhaustChatRecovery`,
     importing them is a no-op on storage keys and timing — no migration risk. Delete
     the local copies and import the shared ones (same fix as 4e's
     `CHAT_RECOVERY_PROGRESS_KEY`). `STREAM_CLEANUP_DELAY_SECONDS` (ai-chat `192`, think
-    `699`) is not yet in the shared barrel — add it to `agents/chat` and import in
-    both.
+    `699`) was not yet in the shared barrel — now exported from
+    `resumable-stream.ts`. ✅ In practice both packages no longer reference the
+    `CHAT_*` keys directly at all (every use went through a lifted helper), so the
+    local key constants were simply deleted rather than re-imported.
   - **`sendIfOpen` / `isWebSocketClosedSendError`** (ai-chat `199–214`, think
     `239–254`) — byte-identical WS send guard. Lift to a shared `agents/chat` helper.
   - **Terminal KV trio** `_recordChatTerminal` / `_clearChatTerminal` /

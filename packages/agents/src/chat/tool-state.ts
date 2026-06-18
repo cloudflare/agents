@@ -209,3 +209,112 @@ export function toolApprovalUpdate(
     })
   };
 }
+
+// ── Client-interaction predicates (recovery classification) ─────────────────
+//
+// `@internal` — these leaf predicates are byte-identical in `AIChatAgent` and
+// `Think`. The broad-vs-client-only asymmetry lives in each package's
+// higher-level `hasPendingInteraction` / `hasPendingClientInteraction`
+// wrappers, which both call the identical leaf, so the wrappers stay
+// package-local. See `design/rfc-chat-recovery-foundation.md`.
+
+/** A minimal message shape for the leaf tool/interaction scans. */
+type ToolBatchMessage = {
+  role: string;
+  parts: ReadonlyArray<unknown>;
+};
+
+/** Extract a tool part's name from its `tool-<name>` / `dynamic-tool` shape. */
+export function toolPartName(
+  record: Record<string, unknown>
+): string | undefined {
+  const type = typeof record.type === "string" ? record.type : "";
+  if (type === "dynamic-tool") {
+    return typeof record.toolName === "string" ? record.toolName : undefined;
+  }
+  if (type.startsWith("tool-")) {
+    return type.slice("tool-".length);
+  }
+  return undefined;
+}
+
+/**
+ * Whether a part is still awaiting a CLIENT interaction that can genuinely
+ * arrive after a restart: an `approval-requested` part (a reconnecting client
+ * replays the approval) or an `input-available` part for a CLIENT tool (the SPA
+ * replays the `tool-result`). A SERVER tool's `input-available` is NOT pending —
+ * its `execute()` died with the isolate.
+ */
+export function partAwaitsClientInteraction(
+  part: unknown,
+  clientResolvable: Set<string>
+): boolean {
+  if (typeof part !== "object" || part === null || !("state" in part)) {
+    return false;
+  }
+  const record = part as Record<string, unknown>;
+  const state = record.state;
+  if (state === "approval-requested") return true;
+  if (state !== "input-available") return false;
+  const toolName = toolPartName(record);
+  return toolName != null && clientResolvable.has(toolName);
+}
+
+/**
+ * Names of the CLIENT-resolvable tools — the client-provided schemas from the
+ * last request, which have no server `execute`. An interrupted `input-available`
+ * part for one of these can still be resolved by the client replaying a
+ * `tool-result`; a server tool's cannot.
+ */
+export function clientResolvableToolNames(
+  tools: ReadonlyArray<{ name?: string } | null | undefined> | undefined
+): Set<string> {
+  const names = new Set<string>();
+  for (const tool of tools ?? []) {
+    if (tool?.name) names.add(tool.name);
+  }
+  return names;
+}
+
+/**
+ * `true` when the latest assistant message is mid-batch: it carries at least
+ * one settled tool result AND at least one tool call/approval still awaiting a
+ * client result. That is the #1649 signature — the model fanned out parallel
+ * tool calls and only some have been answered. Scoped to the leaf (the step the
+ * continuation answers) so an unrelated dangling tool in an earlier message
+ * doesn't block a legitimate follow-up continuation.
+ */
+export function hasIncompleteToolBatch(
+  messages: ReadonlyArray<ToolBatchMessage>
+): boolean {
+  // Zero-allocation backward scan for the latest assistant message — this runs
+  // on every barrier poll tick, and `messages` can be large.
+  let leaf: ToolBatchMessage | undefined;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "assistant") {
+      leaf = messages[i];
+      break;
+    }
+  }
+  if (!leaf) return false;
+  let hasPending = false;
+  let hasSettled = false;
+  for (const part of leaf.parts) {
+    const record = part as Record<string, unknown>;
+    const state = record.state;
+    if (state === "input-available" || state === "approval-requested") {
+      hasPending = true;
+    } else if (
+      typeof record.type === "string" &&
+      (record.type.startsWith("tool-") || record.type === "dynamic-tool") &&
+      (state === "output-available" ||
+        state === "output-error" ||
+        state === "output-denied" ||
+        state === "approval-responded")
+    ) {
+      hasSettled = true;
+    }
+    if (hasPending && hasSettled) return true;
+  }
+  return false;
+}

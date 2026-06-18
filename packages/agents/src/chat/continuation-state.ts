@@ -12,39 +12,16 @@
 
 import { CHAT_MESSAGE_TYPES } from "./protocol";
 import type { ClientToolSchema } from "./client-tools";
+import { sendIfOpen, type ChatConnection } from "./connection";
 
 const MSG_STREAM_RESUME_NONE = CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE;
 
-function sendIfOpen(
-  connection: ContinuationConnection,
-  message: string
-): boolean {
-  try {
-    connection.send(message);
-    return true;
-  } catch (error) {
-    if (isWebSocketClosedSendError(error)) return false;
-    throw error;
-  }
-}
-
-function isWebSocketClosedSendError(error: unknown): boolean {
-  return (
-    error instanceof TypeError &&
-    error.message.includes("WebSocket send() after close")
-  );
-}
-
 /**
- * Minimal connection interface for sending WebSocket messages.
- * Matches the Connection type from agents without importing it.
- * Uses a permissive send signature so Connection (which extends
- * WebSocket with its own send overload) is structurally assignable.
+ * Minimal connection interface for sending WebSocket messages. Alias of the
+ * shared {@link ChatConnection} — kept as a named export for back-compat with
+ * existing `ContinuationConnection` consumers.
  */
-export interface ContinuationConnection {
-  readonly id: string;
-  send(message: string): void;
-}
+export type ContinuationConnection = ChatConnection;
 
 export interface ContinuationPending<
   TConnection extends ContinuationConnection = ContinuationConnection

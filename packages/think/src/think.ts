@@ -140,6 +140,8 @@ import {
   CHAT_MESSAGE_TYPES,
   TurnQueue,
   ResumableStream,
+  cleanupStreamBuffers,
+  STREAM_CLEANUP_DELAY_SECONDS,
   ContinuationState,
   SubmitConcurrencyController,
   createToolsFromClientSchemas,
@@ -149,8 +151,12 @@ import {
   crossMessageToolResultUpdate,
   toolApprovalUpdate,
   pausedExecutionUpdate,
+  hasIncompleteToolBatch,
+  partAwaitsClientInteraction,
+  clientResolvableToolNames,
   parseProtocolMessage,
-  applyChunkToParts,
+  getPartialStreamText,
+  sendIfOpen,
   normalizeToolInput,
   reconcileMessages,
   resolveToolMergeId,
@@ -169,6 +175,11 @@ import {
   sweepStaleChatRecoveryIncidents,
   readChatRecoveryProgress,
   bumpChatRecoveryProgress,
+  recordChatTerminal,
+  clearChatTerminal,
+  pendingChatTerminal,
+  buildChatRecoveringFrame,
+  setChatRecovering,
   AgentToolStreamProgressThrottle,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   type ChatRecoveryAdapter,
@@ -235,23 +246,6 @@ const MSG_STREAM_RESUMING = CHAT_MESSAGE_TYPES.STREAM_RESUMING;
 const MSG_STREAM_RESUME_NONE = CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE;
 const MSG_MESSAGE_UPDATED = CHAT_MESSAGE_TYPES.MESSAGE_UPDATED;
 const MSG_CHAT_RECOVERING = CHAT_MESSAGE_TYPES.CHAT_RECOVERING;
-
-function sendIfOpen(connection: Connection, message: string): boolean {
-  try {
-    connection.send(message);
-    return true;
-  } catch (error) {
-    if (isWebSocketClosedSendError(error)) return false;
-    throw error;
-  }
-}
-
-function isWebSocketClosedSendError(error: unknown): boolean {
-  return (
-    error instanceof TypeError &&
-    error.message.includes("WebSocket send() after close")
-  );
-}
 
 function shouldMarkSkippedAfterGenerationChange(
   status: SaveMessagesResult["status"]
@@ -676,27 +670,11 @@ type ThinkRecoveryClassification = { retryTargetUserId: string | null };
 // incident sweep — TTL selection, key prefix, and batched delete — now live in
 // agents/chat; the reschedule is owned by the shared engine and the sweep by the
 // shared `sweepStaleChatRecoveryIncidents` helper.)
-// Staleness bound for the live "recovering…" flag (#1620). A flag older than
-// this is treated as abandoned (the owning incident died without a terminal,
-// e.g. the DO went idle) so it can neither pin the indicator on forever nor
-// suppress a genuinely-new recovering signal. This is NOT a recovery budget —
-// a progressing turn is bounded by work, not wall-clock
-// (rfc-chat-recovery-work-budget).
-const CHAT_RECOVERING_FLAG_TTL_MS = 15 * 60 * 1000;
-// N9 throttle (while a parent re-attaches to and forwards a sub-agent's stream,
-// credit the parent's recovery progress at most once per window) now lives in the
-// shared engine (agents/chat) as `AgentToolStreamProgressThrottle` /
-// `AGENT_TOOL_STREAM_PROGRESS_BUMP_THROTTLE_MS`.
-
-// How far ahead to schedule the resumable-stream buffer cleanup alarm. Set to
-// ResumableStream's short completion-grace window (COMPLETED_RETENTION_MS, 10m)
-// so a finished buffer is reclaimed promptly. The re-arm-while-reclaimable loop
-// (see _cleanupStreamBuffers) revisits any longer-lived rows — e.g. an
-// abandoned in-flight buffer on its 1h window — by waking again each interval
-// until they age out, then stops. Driving cleanup from an alarm (rather than
-// only piggybacking on the next stream completion) ensures idle/one-off chat
-// DOs still reclaim their buffers without waking forever (#1706).
-const STREAM_CLEANUP_DELAY_SECONDS = 10 * 60;
+// (The recovering-flag key/TTL and the stream-cleanup delay/re-arm loop now live
+// in agents/chat — the durable recovery UX is driven via the shared
+// `setChatRecovering` / `buildChatRecoveringFrame` helpers, and buffer cleanup via
+// `STREAM_CLEANUP_DELAY_SECONDS` / `cleanupStreamBuffers`. The N9 throttle lives
+// there too as `AgentToolStreamProgressThrottle`.)
 
 // Ephemeral user message appended when a model request would otherwise end in
 // an assistant message (see `ensureValidContinueCheckpoint`).
@@ -722,18 +700,10 @@ function ensureValidContinueCheckpoint(
   return [...messages, { role: "user", content: CONTINUE_CHECKPOINT_PROMPT }];
 }
 
-// Durable record of the last turn that ended in a terminal error / abandoned
-// recovery. Replayed to clients on connect so a turn that failed while they
-// were disconnected (e.g. during a deploy/WS reconnect storm) is not silently
-// frozen — the terminal `MSG_CHAT_RESPONSE` broadcast is otherwise transient.
-const CHAT_LAST_TERMINAL_KEY = "cf:chat:last-terminal";
-
-// Durable record of an in-progress durable recovery, so a "recovering…" status
-// can be broadcast live AND replayed to a client that connects mid-recovery
-// (#1620). Set when a recovery continuation/retry is scheduled; cleared on every
-// terminal outcome (completed/skipped/failed/exhausted) so the indicator can't
-// spin forever.
-const CHAT_RECOVERING_KEY = "cf:chat:recovering";
+// (The terminal-record key and the recovering-flag key now live in agents/chat;
+// the durable terminal/recovering records are driven via the shared
+// `recordChatTerminal` / `clearChatTerminal` / `pendingChatTerminal` /
+// `setChatRecovering` / `buildChatRecoveringFrame` helpers.)
 
 /**
  * A best-effort internal `onStart` step that failed on this wake and was
@@ -9365,23 +9335,7 @@ export class Think<
    * ever post its result.
    */
   private _clientResolvableToolNames(): Set<string> {
-    const names = new Set<string>();
-    for (const tool of this._lastClientTools ?? []) {
-      if (tool?.name) names.add(tool.name);
-    }
-    return names;
-  }
-
-  /** Extract a tool part's name from its `tool-<name>` / `dynamic-tool` shape. */
-  private _toolPartName(record: Record<string, unknown>): string | undefined {
-    const type = typeof record.type === "string" ? record.type : "";
-    if (type === "dynamic-tool") {
-      return typeof record.toolName === "string" ? record.toolName : undefined;
-    }
-    if (type.startsWith("tool-")) {
-      return type.slice("tool-".length);
-    }
-    return undefined;
+    return clientResolvableToolNames(this._lastClientTools);
   }
 
   /**
@@ -9408,13 +9362,7 @@ export class Think<
     part: UIMessage["parts"][number],
     clientResolvable: Set<string>
   ): boolean {
-    if (!("state" in part)) return false;
-    const record = part as Record<string, unknown>;
-    const state = record.state;
-    if (state === "approval-requested") return true;
-    if (state !== "input-available") return false;
-    const toolName = this._toolPartName(record);
-    return toolName != null && clientResolvable.has(toolName);
+    return partAwaitsClientInteraction(part, clientResolvable);
   }
 
   // ── Chat recovery via fibers ───────────────────────────────────
@@ -10708,27 +10656,9 @@ export class Think<
     text: string;
     parts: MessagePart[];
   } {
-    const chunks = this._resumableStream.getStreamChunks(streamId);
-    const parts: MessagePart[] = [];
-
-    for (const chunk of chunks) {
-      try {
-        const data = JSON.parse(chunk.body);
-        applyChunkToParts(parts, data);
-      } catch {
-        // skip malformed chunks
-      }
-    }
-
-    const text = parts
-      .filter(
-        (p): p is MessagePart & { type: "text"; text: string } =>
-          p.type === "text" && "text" in p
-      )
-      .map((p) => p.text)
-      .join("");
-
-    return { text, parts };
+    return getPartialStreamText(
+      this._resumableStream.getStreamChunks(streamId)
+    );
   }
 
   // ── Concurrency strategies ──────────────────────────────────────
@@ -10969,37 +10899,7 @@ export class Think<
    * message doesn't block a legitimate follow-up continuation.
    */
   private _hasIncompleteToolBatch(): boolean {
-    // Zero-allocation backward scan for the latest assistant message — this
-    // runs on every barrier poll tick, and `this.messages` can be large.
-    const messages = this.messages;
-    let leaf: (typeof messages)[number] | undefined;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === "assistant") {
-        leaf = messages[i];
-        break;
-      }
-    }
-    if (!leaf) return false;
-    let hasPending = false;
-    let hasSettled = false;
-    for (const part of leaf.parts) {
-      const record = part as Record<string, unknown>;
-      const state = record.state;
-      if (state === "input-available" || state === "approval-requested") {
-        hasPending = true;
-      } else if (
-        typeof record.type === "string" &&
-        (record.type.startsWith("tool-") || record.type === "dynamic-tool") &&
-        (state === "output-available" ||
-          state === "output-error" ||
-          state === "output-denied" ||
-          state === "approval-responded")
-      ) {
-        hasSettled = true;
-      }
-      if (hasPending && hasSettled) return true;
-    }
-    return false;
+    return hasIncompleteToolBatch(this.messages);
   }
 
   private _fireAutoContinuation(connection: Connection): void {
@@ -11135,23 +11035,19 @@ export class Think<
     requestId: string,
     body: string
   ): Promise<void> {
-    await this.ctx.storage.put(CHAT_LAST_TERMINAL_KEY, { requestId, body });
+    await recordChatTerminal(this.ctx.storage, requestId, body);
   }
 
   /** Clear the durable terminal record once a later turn supersedes it (#1645). */
   private async _clearChatTerminal(): Promise<void> {
-    await this.ctx.storage.delete(CHAT_LAST_TERMINAL_KEY);
+    await clearChatTerminal(this.ctx.storage);
   }
 
   private async _pendingChatTerminal(): Promise<{
     requestId: string;
     body: string;
   } | null> {
-    return (
-      (await this.ctx.storage.get<{ requestId: string; body: string }>(
-        CHAT_LAST_TERMINAL_KEY
-      )) ?? null
-    );
+    return pendingChatTerminal(this.ctx.storage);
   }
 
   /**
@@ -11225,32 +11121,11 @@ export class Think<
     active: boolean,
     requestId?: string
   ): Promise<void> {
-    const existing = await this.ctx.storage.get<{
-      requestId?: string;
-      at?: number;
-    }>(CHAT_RECOVERING_KEY);
-    // A flag older than the TTL is stale: the owning incident was abandoned
-    // without ever reaching a terminal (e.g. the DO went idle before recovery
-    // could resolve), so its terminal-clear never ran. Treat it as
-    // not-recovering so a stuck record can neither pin the indicator "on"
-    // forever nor suppress a genuinely-new recovering signal.
-    const activeExisting =
-      existing && Date.now() - (existing.at ?? 0) < CHAT_RECOVERING_FLAG_TTL_MS;
-    if (active) {
-      if (activeExisting) return; // already recovering — idempotent, no re-broadcast
-      await this.ctx.storage.put(CHAT_RECOVERING_KEY, {
-        ...(requestId ? { requestId } : {}),
-        at: Date.now()
-      });
-    } else {
-      if (!existing) return; // not recovering — nothing to clear
-      await this.ctx.storage.delete(CHAT_RECOVERING_KEY);
-      requestId = requestId ?? existing.requestId;
-    }
-    this._broadcastChat({
-      type: MSG_CHAT_RECOVERING,
-      recovering: active,
-      ...(requestId ? { id: requestId } : {})
+    await setChatRecovering(active, requestId, {
+      storage: this.ctx.storage,
+      messageType: MSG_CHAT_RECOVERING,
+      broadcast: (frame) => this._broadcastChat(frame),
+      now: Date.now()
     });
   }
 
@@ -11280,19 +11155,13 @@ export class Think<
     // Skip a stale record (older than the flag TTL) so a turn whose recovery
     // was abandoned without a terminal can't show "recovering…" forever on
     // reconnect.
-    const recovering = await this.ctx.storage.get<{
-      requestId?: string;
-      at?: number;
-    }>(CHAT_RECOVERING_KEY);
-    if (
-      recovering &&
-      Date.now() - (recovering.at ?? 0) < CHAT_RECOVERING_FLAG_TTL_MS
-    ) {
-      messages.push({
-        type: MSG_CHAT_RECOVERING,
-        recovering: true,
-        ...(recovering.requestId ? { id: recovering.requestId } : {})
-      });
+    const recoveringFrame = await buildChatRecoveringFrame(
+      this.ctx.storage,
+      MSG_CHAT_RECOVERING,
+      Date.now()
+    );
+    if (recoveringFrame) {
+      messages.push(recoveringFrame);
     }
     return messages;
   }
@@ -11377,20 +11246,13 @@ export class Think<
   }
 
   /**
-   * Alarm callback: sweep aged stream buffers, then re-arm only while rows
-   * remain so a fully-swept DO stops waking itself.
+   * Alarm callback: sweep aged stream buffers, re-arming while rows remain (see
+   * the shared {@link cleanupStreamBuffers}).
    */
   async _cleanupStreamBuffers(): Promise<void> {
-    this._resumableStream.cleanup();
-    if (this._resumableStream.hasReclaimableStreams()) {
-      // Must NOT be idempotent: this runs INSIDE the currently-executing
-      // one-shot schedule row, which `alarm()` deletes only after we return. An
-      // idempotent reschedule would dedup onto that row and then be deleted with
-      // it — the re-arm would silently never fire, leaving buffers that survived
-      // this sweep (e.g. a younger turn) uncollected. A fresh delayed row
-      // survives the deletion (mirrors the chat-recovery reschedule).
-      await this._ensureStreamCleanupScheduled({ idempotent: false });
-    }
+    await cleanupStreamBuffers(this._resumableStream, () =>
+      this._ensureStreamCleanupScheduled({ idempotent: false })
+    );
   }
 
   private async _persistOrphanedStream(streamId: string): Promise<void> {

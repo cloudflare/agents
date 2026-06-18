@@ -556,3 +556,38 @@ function findDataPartByTypeAndId(
   }
   return undefined;
 }
+
+/**
+ * Rebuild the partial text + parts of an interrupted assistant turn from its
+ * stored resumable-stream chunks. Replays each chunk body through
+ * {@link applyChunkToParts}; malformed bodies are skipped. Shared by
+ * `AIChatAgent` and `Think`, which read the chunks from their
+ * `ResumableStream` (`getStreamChunks`) and pass them in.
+ *
+ * `@internal`
+ */
+export function getPartialStreamText(chunks: ReadonlyArray<{ body: string }>): {
+  text: string;
+  parts: MessagePart[];
+} {
+  const parts: MessagePart[] = [];
+
+  for (const chunk of chunks) {
+    try {
+      const data = JSON.parse(chunk.body);
+      applyChunkToParts(parts, data);
+    } catch {
+      // Skip malformed chunk bodies
+    }
+  }
+
+  const text = parts
+    .filter(
+      (p): p is MessagePart & { type: "text"; text: string } =>
+        p.type === "text" && "text" in p
+    )
+    .map((p) => p.text)
+    .join("");
+
+  return { text, parts };
+}

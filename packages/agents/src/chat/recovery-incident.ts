@@ -320,6 +320,121 @@ export class AgentToolStreamProgressThrottle {
   }
 }
 
+// ── Terminal + recovering status storage glue ──────────────────────────────
+//
+// Durable records for the terminal-error / "recovering…" reconnect UX. The
+// keys (`CHAT_LAST_TERMINAL_KEY`, `CHAT_RECOVERING_KEY`) and the flag TTL are
+// cutover-contract constants above; these helpers were byte-identical in both
+// packages apart from the recovering-broadcast wire-type enum and broadcast
+// wrapper, which are passed in. Shared by `AIChatAgent` and `Think`.
+
+/** Durable record of the last turn that ended in a terminal error (#1645). */
+export type ChatTerminalRecord = { requestId: string; body: string };
+
+/**
+ * Persist a durable record of the last terminal turn so a client that
+ * (re)connects after the turn ended still learns its outcome (#1645). Kept
+ * until a later turn supersedes it ({@link clearChatTerminal}); a single record
+ * is sufficient because only the most recent terminal is relevant.
+ */
+export async function recordChatTerminal(
+  storage: Pick<DurableObjectStorage, "put">,
+  requestId: string,
+  body: string
+): Promise<void> {
+  await storage.put(CHAT_LAST_TERMINAL_KEY, { requestId, body });
+}
+
+/** Clear the durable terminal record once a later turn supersedes it (#1645). */
+export async function clearChatTerminal(
+  storage: Pick<DurableObjectStorage, "delete">
+): Promise<void> {
+  await storage.delete(CHAT_LAST_TERMINAL_KEY);
+}
+
+/** Read the pending terminal record, or `null` if none is stored (#1645). */
+export async function pendingChatTerminal(
+  storage: Pick<DurableObjectStorage, "get">
+): Promise<ChatTerminalRecord | null> {
+  return (
+    (await storage.get<ChatTerminalRecord>(CHAT_LAST_TERMINAL_KEY)) ?? null
+  );
+}
+
+/** Durable record shape for the live "recovering…" flag (#1620). */
+type RecoveringRecord = { requestId?: string; at?: number };
+
+/**
+ * Build the on-connect "recovering…" replay frame (#1620), or `null` when no
+ * (non-stale) recovery is in progress. A client that connects between recovery
+ * attempts (no active stream) reads the turn as working rather than frozen. A
+ * record older than the flag TTL is treated as abandoned (its terminal-clear
+ * never ran) and skipped, so a dead recovery can't show "recovering…" forever.
+ * `messageType` is the package's recovering wire-type enum.
+ */
+export async function buildChatRecoveringFrame(
+  storage: Pick<DurableObjectStorage, "get">,
+  messageType: string,
+  now: number
+): Promise<Record<string, unknown> | null> {
+  const recovering = await storage.get<RecoveringRecord>(CHAT_RECOVERING_KEY);
+  if (
+    !recovering ||
+    now - (recovering.at ?? 0) >= CHAT_RECOVERING_FLAG_TTL_MS
+  ) {
+    return null;
+  }
+  return {
+    type: messageType,
+    recovering: true,
+    ...(recovering.requestId ? { id: recovering.requestId } : {})
+  };
+}
+
+/**
+ * Set or clear the live "recovering…" status (#1620). Persists a durable record
+ * (so set/clear stay consistent across the isolates a recovery spans) and
+ * broadcasts a recovering frame — but only on a genuine transition, so a
+ * deploy/reconnect storm (which re-detects recovery many times) doesn't spam
+ * the wire. A flag older than the TTL is stale: the owning incident was
+ * abandoned without a terminal (e.g. the DO went idle before recovery could
+ * resolve), so it is treated as not-recovering and can neither pin the
+ * indicator on forever nor suppress a genuinely-new recovering signal.
+ * `messageType` is the package's recovering wire-type enum; `broadcast` is the
+ * package's chat-broadcast wrapper.
+ */
+export async function setChatRecovering(
+  active: boolean,
+  requestId: string | undefined,
+  deps: {
+    storage: Pick<DurableObjectStorage, "get" | "put" | "delete">;
+    messageType: string;
+    broadcast: (frame: Record<string, unknown>) => void;
+    now: number;
+  }
+): Promise<void> {
+  const { storage, messageType, broadcast, now } = deps;
+  const existing = await storage.get<RecoveringRecord>(CHAT_RECOVERING_KEY);
+  const activeExisting =
+    existing && now - (existing.at ?? 0) < CHAT_RECOVERING_FLAG_TTL_MS;
+  if (active) {
+    if (activeExisting) return; // already recovering — idempotent, no re-broadcast
+    await storage.put(CHAT_RECOVERING_KEY, {
+      ...(requestId ? { requestId } : {}),
+      at: now
+    });
+  } else {
+    if (!existing) return; // not recovering — nothing to clear
+    await storage.delete(CHAT_RECOVERING_KEY);
+    requestId = requestId ?? existing.requestId;
+  }
+  broadcast({
+    type: messageType,
+    recovering: active,
+    ...(requestId ? { id: requestId } : {})
+  });
+}
+
 // ── Incident budget evaluation ─────────────────────────────────────────────
 
 /**
