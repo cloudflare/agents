@@ -1628,6 +1628,38 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Slice 4f-ii(b) (Phase 4 — `parseProtocolMessage` migration; classification-only, no
+  changeset)_ — Migrated ai-chat's `onMessage` off its inline `JSON.parse` +
+  `data.type === MessageType.X` switch and onto the shared `parseProtocolMessage`
+  (which Think already uses), dispatching on the typed `ChatProtocolEvent` discriminants
+  (`event.type === "chat-request" | "clear" | "messages" | "cancel" |
+"stream-resume-request" | "stream-resume-ack" | "tool-result" | "tool-approval"`).
+  **Classification-only:** all eight handler bodies are byte-preserved (`data.` →
+  `event.`); the `messages` event still calls `autoTransformMessages` + `persistMessages`
+  (ai-chat persists the client snapshot — explicitly NOT converged onto Think's no-op).
+  **Verify-first / behavior-preservation review:** (1) the wire strings in ai-chat's
+  `MessageType` enum and `agents`' `CHAT_MESSAGE_TYPES` are byte-identical for all eight
+  incoming types (same client talks to both packages), so the parser recognizes exactly
+  the set the inline switch did and routes each to the same body; (2) the inline switch's
+  first guard was `USE_CHAT_REQUEST && init.method === "POST"`, so a non-POST use-chat
+  request fell through to the consumer's `onMessage` — preserved by gating the delegate
+  on `!(event.type === "chat-request" && event.init.method !== "POST")` (only the POST
+  branch enters the handler; everything else, including a parser-null non-JSON/unknown
+  frame, still falls to `_onMessage`); (3) non-JSON and JSON-without-`type` both yield
+  `parseProtocolMessage(...) === null` → `_onMessage`, matching the old try/catch +
+  no-`type` fall-through; (4) the parser is marginally _more_ robust (defaults a missing
+  `init` to `{}` rather than throwing on `data.init.method`, and a missing `toolName` to
+  `""`) — strictly safer for malformed frames, no change for real traffic. One type fix:
+  the parser types `clientTools[].parameters` as `unknown` (vs ai-chat's `ClientToolSchema`
+  `JSONSchema7`), so the auto-continuation call site now casts `clientTools as
+ClientToolSchema[] | undefined`, mirroring the existing cast on the `_lastClientTools`
+  assignment two lines up. Removed the now-unused `type IncomingMessage` import. Tests:
+  `pnpm run check` ✅ (111 projects); ai-chat workers 686 ✅; ai-chat real-`wrangler dev`
+  SIGKILL e2e 10/10 ✅ (the dispatch-path gate); Think workers 686 ✅ for parity. Think
+  and the `agents` package are byte-unchanged this slice (Think already routed through
+  the pre-existing `parseProtocolMessage`), so the Think SIGKILL e2e cannot regress and
+  was not re-run. No changeset.
+
 - _Slice 4f-ii(a) (Phase 4 — `enforceRowSizeLimit` convergence; user-visible, changeset
   on both packages)_ — Ran the verify-first gate on ai-chat's `_enforceRowSizeLimit`
   vs the shared `enforceRowSizeLimit` (Think's). **Not** a byte-identical lift — they
@@ -2930,15 +2962,21 @@ callback, data, reason })` behind hooks `exhaustChatRecovery`,
     structure-shaped and unchanged. See the Slice 4f-ii(a) progress-log entry.
 
   - **ai-chat's inline protocol parse vs the shared `parseProtocolMessage`**
-    (`agents/chat/parse-protocol.ts`). ai-chat inlines equivalent `MessageType` switch
-    checks in `onMessage` (`index.ts:794–801`+); Think routes through
-    `parseProtocolMessage` (`think.ts:7399–7402`). Migrate ai-chat's parse step onto
-    the shared parser — but this is **classification-only**: ai-chat must KEEP its
-    distinct handler bodies, in particular `CF_AGENT_CHAT_MESSAGES` (ai-chat persists
-    the client snapshot; Think no-ops it). Do not let the migration converge the
-    handlers. Behavior-preserving if the handlers are untouched, so likely no
-    changeset, but it touches the dispatch path — gate behind ai-chat e2e and review
-    the per-type routing against the inline switch.
+    (`agents/chat/parse-protocol.ts`). ✅ DONE (Slice 4f-ii(b)). ai-chat's `onMessage`
+    wrapper now classifies via `parseProtocolMessage` and dispatches on the typed
+    `event.type` discriminants instead of inline `JSON.parse` + `data.type ===
+MessageType.X` checks; the eight handler bodies are kept verbatim
+    (`data.` → `event.`), in particular the `messages` event still persists the client
+    snapshot (Think no-ops it). Verified behavior-preserving: the wire strings in
+    ai-chat's `MessageType` and `agents`' `CHAT_MESSAGE_TYPES` are byte-identical for
+    all eight incoming types, so the parser recognizes exactly what the inline switch
+    did; the non-POST `use-chat-request` fall-through to the consumer's `onMessage` is
+    preserved by gating the delegate on `!(event.type === "chat-request" &&
+event.init.method !== "POST")` (equivalently: only the POST branch enters the
+    handler). No changeset — internal dispatch refactor, no user-visible behavior
+    change for well-formed traffic (the parser is in fact slightly more robust for
+    malformed frames: it defaults a missing `init` to `{}` rather than throwing, and
+    defaults a missing `toolName` to `""`). See the Slice 4f-ii(b) progress-log entry.
 
   4f-i items are independently revertible; land them as small commits (or one
   tightly-scoped slice) with the 4e verification bar — `pnpm run check`, agents /

@@ -17,11 +17,7 @@ import {
   type WSMessage
 } from "agents";
 
-import {
-  MessageType,
-  type IncomingMessage,
-  type OutgoingMessage
-} from "./types";
+import { MessageType, type OutgoingMessage } from "./types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
 import {
   reconcileMessages,
@@ -36,6 +32,7 @@ import {
   isReplayChunk,
   sanitizeMessage,
   enforceRowSizeLimit,
+  parseProtocolMessage,
   sendIfOpen,
   TurnQueue,
   SubmitConcurrencyController,
@@ -756,22 +753,21 @@ export class AIChatAgent<
         return _onMessage(connection, message);
       }
 
-      // Handle AIChatAgent's internal messages first
+      // Handle AIChatAgent's internal messages first. Classification is shared
+      // with `@cloudflare/think` via `parseProtocolMessage`; the handler bodies
+      // below stay AIChatAgent-specific (e.g. the `messages` event persists the
+      // client snapshot, where Think no-ops it).
       if (typeof message === "string") {
-        let data: IncomingMessage;
-        try {
-          data = JSON.parse(message) as IncomingMessage;
-        } catch (_error) {
-          // Not JSON, forward to consumer
+        const event = parseProtocolMessage(message);
+        if (!event) {
+          // Not JSON, or not a recognized chat protocol message — forward to
+          // the consumer's onMessage.
           return _onMessage(connection, message);
         }
 
         // Handle chat request
-        if (
-          data.type === MessageType.CF_AGENT_USE_CHAT_REQUEST &&
-          data.init.method === "POST"
-        ) {
-          const { body } = data.init;
+        if (event.type === "chat-request" && event.init.method === "POST") {
+          const { body } = event.init;
           if (!body) {
             console.warn(
               "[AIChatAgent] Received chat request with empty body, ignoring"
@@ -800,7 +796,7 @@ export class AIChatAgent<
             trigger?: string;
             [key: string]: unknown;
           };
-          const chatMessageId = data.id;
+          const chatMessageId = event.id;
           const transformedMessages = autoTransformMessages(messages);
           const requestTrigger: ChatRequestTrigger =
             _trigger === "regenerate-message"
@@ -1000,7 +996,7 @@ export class AIChatAgent<
         }
 
         // Handle clear chat
-        if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
+        if (event.type === "clear") {
           this.resetTurnState();
           this.sql`delete from cf_ai_chat_agent_messages`;
           // Drop any pending terminal record (#1645) so a stale exhaustion
@@ -1023,16 +1019,16 @@ export class AIChatAgent<
         }
 
         // Handle message replacement
-        if (data.type === MessageType.CF_AGENT_CHAT_MESSAGES) {
-          const transformedMessages = autoTransformMessages(data.messages);
+        if (event.type === "messages") {
+          const transformedMessages = autoTransformMessages(event.messages);
           await this.persistMessages(transformedMessages, [connection.id]);
           return;
         }
 
         // Handle request cancellation
-        if (data.type === MessageType.CF_AGENT_CHAT_REQUEST_CANCEL) {
-          this._abortRegistry.cancel(data.id);
-          this._emit("message:cancel", { requestId: data.id });
+        if (event.type === "cancel") {
+          this._abortRegistry.cancel(event.id);
+          this._emit("message:cancel", { requestId: event.id });
           return;
         }
 
@@ -1040,7 +1036,7 @@ export class AIChatAgent<
         // The client sends this after its message handler is registered,
         // avoiding the race condition where CF_AGENT_STREAM_RESUMING sent
         // in onConnect arrives before the client's handler is ready.
-        if (data.type === MessageType.CF_AGENT_STREAM_RESUME_REQUEST) {
+        if (event.type === "stream-resume-request") {
           if (this._resumableStream.hasActiveStream()) {
             if (
               this._continuation.activeRequestId ===
@@ -1083,12 +1079,12 @@ export class AIChatAgent<
         }
 
         // Handle stream resume acknowledgment
-        if (data.type === MessageType.CF_AGENT_STREAM_RESUME_ACK) {
+        if (event.type === "stream-resume-ack") {
           this._pendingResumeConnections.delete(connection.id);
 
           if (
             this._resumableStream.hasActiveStream() &&
-            this._resumableStream.activeRequestId === data.id
+            this._resumableStream.activeRequestId === event.id
           ) {
             const orphanedStreamId = this._resumableStream.replayChunks(
               connection,
@@ -1104,13 +1100,13 @@ export class AIChatAgent<
             }
           } else if (this._resumableStream.hasActiveStream()) {
             // Ignore ACKs for a different active stream request id.
-          } else if (await this._replayTerminalOnAck(connection, data.id)) {
+          } else if (await this._replayTerminalOnAck(connection, event.id)) {
             // Delivered the pending terminal error frame on the resumed stream
             // the client just ACKed (#1645).
           } else if (
             !this._resumableStream.replayCompletedChunksByRequestId(
               connection,
-              data.id
+              event.id
             )
           ) {
             sendIfOpen(
@@ -1118,7 +1114,7 @@ export class AIChatAgent<
               JSON.stringify({
                 body: "",
                 done: true,
-                id: data.id,
+                id: event.id,
                 type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
                 replay: true
               })
@@ -1128,7 +1124,7 @@ export class AIChatAgent<
         }
 
         // Handle client-side tool result
-        if (data.type === MessageType.CF_AGENT_TOOL_RESULT) {
+        if (event.type === "tool-result") {
           const {
             toolCallId,
             toolName,
@@ -1137,7 +1133,7 @@ export class AIChatAgent<
             errorText,
             autoContinue,
             clientTools
-          } = data;
+          } = event;
 
           // Update cached client tools so subsequent continuations use the latest schemas
           if (clientTools?.length) {
@@ -1163,7 +1159,8 @@ export class AIChatAgent<
           if (autoContinue) {
             this._enqueueAutoContinuation(
               connection,
-              clientTools ?? this._lastClientTools,
+              (clientTools as ClientToolSchema[] | undefined) ??
+                this._lastClientTools,
               this._lastBody,
               "[AIChatAgent] Tool continuation failed:",
               applyPromise
@@ -1173,8 +1170,8 @@ export class AIChatAgent<
         }
 
         // Handle client-side tool approval response
-        if (data.type === MessageType.CF_AGENT_TOOL_APPROVAL) {
-          const { toolCallId, approved, autoContinue } = data;
+        if (event.type === "tool-approval") {
+          const { toolCallId, approved, autoContinue } = event;
           this._emit("tool:approval", { toolCallId, approved });
           const approvalPromise = this._enqueueInteractionApply(() =>
             this._applyToolApproval(toolCallId, approved)
