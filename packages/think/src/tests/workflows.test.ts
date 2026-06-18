@@ -406,5 +406,56 @@ describe("ThinkWorkflow", () => {
       expect(sleepCalls.length).toBe(1);
       expect(sleepCalls[0].name).toBe("structure:retry-0");
     });
+
+    it("throws the last error after exhausting all attempts", async () => {
+      let attempt = 0;
+      const sleepCalls: Array<{ name: string; duration: number }> = [];
+
+      const agent: FakeThinkAgent = {
+        async submitMessages() {
+          attempt++;
+          return createSubmissionResult(`submission-${attempt}`, () => {});
+        },
+        async cancelSubmission() {
+          /* best-effort */
+        }
+      };
+
+      const step = {
+        do: async (_name: string, callback: () => Promise<unknown>) => {
+          return callback();
+        },
+        waitForEvent: async () => {
+          return {
+            payload: {
+              submissionId: `submission-${attempt}`,
+              status: "error",
+              error: "3040: Capacity temporarily exceeded"
+            },
+            [Symbol.dispose]: () => {}
+          };
+        },
+        sleep: async (name: string, duration: number) => {
+          sleepCalls.push({ name, duration });
+        }
+      } as unknown as AgentWorkflowStep;
+
+      const workflow = createWorkflow(agent);
+      await expect(
+        workflow._promptStep(
+          "structure",
+          {
+            prompt: "Return structured output",
+            output: z.object({ answer: z.string() }),
+            retries: { maxAttempts: 2 }
+          },
+          step,
+          createEvent()
+        )
+      ).rejects.toThrow("3040: Capacity temporarily exceeded");
+
+      expect(attempt).toBe(2);
+      expect(sleepCalls.length).toBe(1);
+    });
   });
 });

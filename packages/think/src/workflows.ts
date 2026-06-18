@@ -134,7 +134,7 @@ export class ThinkWorkflow<
       })
     );
 
-    const maxAttempts = options.retries?.maxAttempts ?? 1;
+    const maxAttempts = Math.max(1, options.retries?.maxAttempts ?? 1);
     const baseDelayMs = options.retries?.baseDelayMs ?? 500;
     const maxDelayMs = options.retries?.maxDelayMs ?? 5000;
 
