@@ -10,14 +10,19 @@
  * shaped assumption leaking through, the seam holds (rfc-chat-recovery-
  * foundation, Phase 5).
  *
- * Recovery model for a text-only pi turn: a SIGKILL mid-stream interrupts the
- * fiber before `message_end` commits the assistant message, so the last durable
- * transcript entry is the unanswered USER message. On wake the engine classifies
- * a `retry` and re-runs the turn through pi's real `continue()` — which
- * regenerates the assistant response (deterministic via the faux provider). pi
- * has no settled tool results, so the orphaned partial is regenerated rather
- * than persisted; this divergence from the AI SDK adapter (which merges the
- * partial) is the recorded Tier-2 seam difference.
+ * Recovery model for a text-only pi turn (`stream_continuation`): a SIGKILL
+ * mid-stream interrupts the fiber before `message_end` commits the assistant
+ * message. The streamed deltas, however, were buffered durably (per-event) into
+ * `ResumableStream` via {@link PiRecoveryCodec}. On wake the engine reconstructs
+ * that partial through the codec, PRESERVES it (`persistOrphanedStream` commits
+ * it as a partial assistant entry), classifies a `continue`, and re-runs the
+ * turn through pi's real `continue()` priming the model with only the REMAINING
+ * suffix — which merges onto the survived prefix to land the same full reply.
+ * This mirrors the AI SDK adapter's continue path and Flue's
+ * `recoverInterruptedStream`; the earlier "pi can only regenerate" framing was
+ * an artifact of the first codec, NOT a pi constraint (see the RFC Phase-5 seam
+ * note). The `retry`/full-regenerate path stays as the fallback when no partial
+ * survived (crash before the first delta flushed).
  *
  * @internal Validation fixture, not a published package.
  */
@@ -56,19 +61,26 @@ import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import type {
   AssistantMessage,
   Message,
+  TextContent,
   UserMessage
 } from "@earendil-works/pi-ai";
-import { PiRecoveryCodec } from "./pi-codec";
+import { PiRecoveryCodec, renderAssistantText } from "./pi-codec";
 import { createFauxPiModel, type FauxPiModel } from "./pi-model";
 
 export type Env = {
   PiAgent: DurableObjectNamespace<PiAgent>;
 };
 
-/** A durable transcript entry: a stable id paired with a real pi message. */
+/**
+ * A durable transcript entry: a stable id paired with a real pi message.
+ * `partial` flags a reconstructed-but-not-yet-finished assistant message (the
+ * preserved orphaned partial) — excluded from pi's model context until the
+ * continuation merges its suffix and clears the flag.
+ */
 interface TranscriptEntry {
   id: string;
   message: Message;
+  partial: boolean;
 }
 
 /** The recovery-callback payload pi schedules for itself. */
@@ -78,10 +90,24 @@ interface PiRecoveryData {
   targetUserId?: string;
 }
 
-/** pi's per-turn classification detail (text-only: always a regenerate retry). */
-type PiClassify = { regenerate: boolean };
+/**
+ * pi's per-turn classification detail: whether a partial survived the crash and
+ * the recovered turn should CONTINUE from it (`true`) vs regenerate from the
+ * unanswered user message (`false`, the no-partial fallback).
+ */
+type PiClassify = { continueFromPartial: boolean };
+
+/** A continuation summary the e2e polls to prove continue-vs-regenerate. */
+interface RecoverySummary {
+  via: "continue" | "retry";
+  /** Chars the recovered turn generated (the suffix on a continue). */
+  generatedChars: number;
+  /** Chars of the survived partial prefix (0 on a regenerate). */
+  prefixChars: number;
+}
 
 const RECOVERING_MESSAGE_TYPE = "pi:recovering";
+const RECOVERY_SUMMARY_KEY = "pi:recovery:summary";
 // Slow enough that a multi-token reply streams over several seconds, leaving a
 // wide window for the e2e to SIGKILL `wrangler dev` MID-STREAM (before the turn
 // commits its assistant message), exactly like the AI SDK e2e's slow mock.
@@ -96,6 +122,18 @@ const REPLY_FILLER = Array.from(
 /** The deterministic assistant text a turn streams for a given user prompt. */
 function replyFor(userText: string): string {
   return `pi reply to "${userText}": ${REPLY_FILLER}`;
+}
+
+/**
+ * Clone a real pi `AssistantMessage`, replacing its text with `text` (keeping
+ * any non-text content). Reuses the captured message's required envelope
+ * (`api`/`provider`/`model`/`usage`/`stopReason`/…) so the result stays a valid
+ * pi message — never hand-built from scratch.
+ */
+function withText(message: AssistantMessage, text: string): AssistantMessage {
+  const head: TextContent = { type: "text", text };
+  const nonText = message.content.filter((block) => block.type !== "text");
+  return { ...message, content: [head, ...nonText] };
 }
 
 export class PiAgent extends Agent<Env> {
@@ -114,6 +152,13 @@ export class PiAgent extends Agent<Env> {
   private _currentStreamId: string | null = null;
   private _activeChatRecoveryRootRequestId: string | undefined;
   private _engineInstance?: ChatRecoveryEngine;
+  // When set, the in-flight turn is a continuation: its committed assistant
+  // message merges its suffix ONTO this preserved-partial entry instead of
+  // appending a fresh entry.
+  private _continuationTargetId: string | null = null;
+  // True while a recovery-driven turn runs, so the regenerate (no-partial) path
+  // records its summary; cleared in the `finally`.
+  private _inRecoveryTurn = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -124,6 +169,7 @@ export class PiAgent extends Agent<Env> {
         seq INTEGER,
         role TEXT,
         body TEXT,
+        partial INTEGER,
         created_at INTEGER
       )
     `;
@@ -138,7 +184,7 @@ export class PiAgent extends Agent<Env> {
       initialState: {
         model: this._faux.model,
         systemPrompt: "You are a deterministic pi recovery harness.",
-        messages: this._transcript.map((entry) => entry.message)
+        messages: this._piMessages()
       }
     });
 
@@ -152,25 +198,31 @@ export class PiAgent extends Agent<Env> {
   // ── Transcript persistence ────────────────────────────────────────────────
 
   private _loadTranscript(): TranscriptEntry[] {
-    const rows = this.sql<{ id: string; body: string }>`
-      SELECT id, body FROM pi_messages ORDER BY seq ASC
+    const rows = this.sql<{ id: string; body: string; partial: number | null }>`
+      SELECT id, body, partial FROM pi_messages ORDER BY seq ASC
     `;
     return rows.map((row) => ({
       id: row.id,
-      message: JSON.parse(row.body) as Message
+      message: JSON.parse(row.body) as Message,
+      partial: row.partial === 1
     }));
   }
 
-  private _appendMessage(message: Message): TranscriptEntry {
-    const entry: TranscriptEntry = { id: crypto.randomUUID(), message };
+  private _appendMessage(message: Message, partial = false): TranscriptEntry {
+    const entry: TranscriptEntry = {
+      id: crypto.randomUUID(),
+      message,
+      partial
+    };
     this._transcript.push(entry);
     this.sql`
-      INSERT INTO pi_messages (id, seq, role, body, created_at)
+      INSERT INTO pi_messages (id, seq, role, body, partial, created_at)
       VALUES (
         ${entry.id},
         ${this._transcript.length},
         ${message.role},
         ${JSON.stringify(message)},
+        ${partial ? 1 : 0},
         ${Date.now()}
       )
     `;
@@ -181,6 +233,27 @@ export class PiAgent extends Agent<Env> {
     return this._transcript[this._transcript.length - 1];
   }
 
+  /**
+   * The messages pi's loop sees — committed entries only. A preserved partial
+   * assistant is excluded so the user message stays the leaf and pi GENERATES
+   * the continuation suffix (an assistant leaf would end the loop); the merge
+   * then folds that suffix back onto the partial.
+   */
+  private _piMessages(): Message[] {
+    return this._transcript
+      .filter((entry) => !entry.partial)
+      .map((entry) => entry.message);
+  }
+
+  /** Text of the last user message, or `null` when none is unanswered. */
+  private _lastUserText(): string | null {
+    for (let i = this._transcript.length - 1; i >= 0; i--) {
+      const message = this._transcript[i].message;
+      if (message.role === "user") return this._messageText(message);
+    }
+    return null;
+  }
+
   private _snapshotMessages(): SnapshotMessage[] {
     return this._transcript.map((entry) => ({
       id: entry.id,
@@ -188,16 +261,104 @@ export class PiAgent extends Agent<Env> {
     }));
   }
 
+  private async _recordRecoverySummary(
+    summary: RecoverySummary
+  ): Promise<void> {
+    await this.ctx.storage.put(RECOVERY_SUMMARY_KEY, summary);
+  }
+
+  /**
+   * Preserve a reconstructed orphaned partial as a `partial` assistant entry —
+   * the merge target the continuation folds its suffix onto. Idempotent: a
+   * partial already at the tail (an earlier wake preserved it) stays put.
+   */
+  private _persistOrphanedPartial(streamId: string): void {
+    if (this._lastEntry()?.partial) return;
+    const bodies = this._resumableStream
+      .getStreamChunks(streamId)
+      .map((chunk) => chunk.body);
+    const { text, message } = this._codec.decodePartial(bodies);
+    if (!text || !message) return;
+    this._appendMessage(withText(message, text), true);
+  }
+
+  /**
+   * Fold the continuation's committed assistant message onto the preserved
+   * partial `entryId`: the merged text is the survived prefix plus the
+   * regenerated suffix, and the entry is promoted to a committed message.
+   */
+  private async _mergeContinuation(
+    entryId: string,
+    continuation: AssistantMessage
+  ): Promise<void> {
+    const entry = this._transcript.find(
+      (candidate) => candidate.id === entryId
+    );
+    if (!entry || entry.message.role !== "assistant") {
+      this._appendMessage(continuation);
+      return;
+    }
+    const prefix = renderAssistantText(entry.message);
+    const suffix = renderAssistantText(continuation);
+    const merged = withText(continuation, prefix + suffix);
+    entry.message = merged;
+    entry.partial = false;
+    this.sql`
+      UPDATE pi_messages SET body = ${JSON.stringify(merged)}, partial = 0
+      WHERE id = ${entryId}
+    `;
+    await this._recordRecoverySummary({
+      via: "continue",
+      generatedChars: suffix.length,
+      prefixChars: prefix.length
+    });
+  }
+
+  /** Promote a preserved partial whose prefix already equals the full reply. */
+  private async _finalizePartial(entryId: string): Promise<void> {
+    const entry = this._transcript.find(
+      (candidate) => candidate.id === entryId
+    );
+    if (!entry) return;
+    entry.partial = false;
+    this.sql`UPDATE pi_messages SET partial = 0 WHERE id = ${entryId}`;
+    await this._recordRecoverySummary({
+      via: "continue",
+      generatedChars: 0,
+      prefixChars:
+        entry.message.role === "assistant"
+          ? renderAssistantText(entry.message).length
+          : 0
+    });
+  }
+
   // ── pi event handling ─────────────────────────────────────────────────────
 
   private async _onPiEvent(event: AgentEvent): Promise<void> {
     if (event.type === "message_end" && event.message.role === "assistant") {
-      this._appendMessage(event.message as AssistantMessage);
+      const assistant = event.message as AssistantMessage;
+      if (this._continuationTargetId) {
+        await this._mergeContinuation(this._continuationTargetId, assistant);
+        this._continuationTargetId = null;
+      } else {
+        this._appendMessage(assistant);
+        if (this._inRecoveryTurn) {
+          await this._recordRecoverySummary({
+            via: "retry",
+            generatedChars: renderAssistantText(assistant).length,
+            prefixChars: 0
+          });
+        }
+      }
     }
 
     const body = this._codec.encodeEvent(event);
     if (body && this._currentStreamId) {
       this._resumableStream.storeChunk(this._currentStreamId, body);
+      // Fixture: flush every delta so the partial is reliably durable the
+      // instant a SIGKILL lands (the engine reconstructs + continues from it).
+      // A batching buffer would otherwise drop the last <10 chunks on crash.
+      this._resumableStream.flushBuffer();
       // Each durably-flushed streaming event is reconnect-immune forward
       // progress for the no-progress recovery budget.
       await bumpChatRecoveryProgress(this.ctx.storage);
@@ -221,12 +382,13 @@ export class PiAgent extends Agent<Env> {
     await this._runFiberWithStashWrapper(
       PiAgent.FIBER_PREFIX + requestId,
       async (_fiber: FiberContext) => {
-        // Sync pi's live transcript from the durable mirror so continue()
-        // regenerates from exactly what survived the crash.
-        this._pi.state.messages = this._transcript.map(
-          (entry) => entry.message
-        );
-        const streamId = this._resumableStream.start(requestId);
+        // Sync pi's live context from the durable mirror (committed entries
+        // only — a preserved partial is excluded so the user stays the leaf and
+        // pi generates the continuation suffix).
+        this._pi.state.messages = this._piMessages();
+        const streamId = this._resumableStream.start(requestId, {
+          continuation: this._continuationTargetId !== null
+        });
         this._currentStreamId = streamId;
         try {
           await this._pi.continue();
@@ -259,14 +421,24 @@ export class PiAgent extends Agent<Env> {
     await this._runPiTurn(crypto.randomUUID(), false);
   }
 
-  /** Re-run an unanswered user turn (recovery regenerate). */
-  private async _resumeRecoveredTurn(data?: PiRecoveryData): Promise<void> {
+  /**
+   * Re-run a recovered turn. With `continueFromPartial` and a preserved partial
+   * at the tail, the turn CONTINUES: the model is primed with only the suffix
+   * remaining after the survived prefix, which `_mergeContinuation` folds back
+   * onto the partial (`stream_continuation`). Otherwise it regenerates the whole
+   * reply from the unanswered user message (the no-partial fallback).
+   */
+  private async _resumeRecoveredTurn(
+    data: PiRecoveryData | undefined,
+    continueFromPartial: boolean
+  ): Promise<void> {
     const previousRoot = this._activeChatRecoveryRootRequestId;
     this._activeChatRecoveryRootRequestId = data?.originalRequestId;
     const incidentId = data?.incidentId;
+    this._inRecoveryTurn = true;
     try {
-      const last = this._lastEntry();
-      if (!last || last.message.role !== "user") {
+      const userText = this._lastUserText();
+      if (userText === null) {
         await this._engine().updateIncident(
           incidentId,
           "skipped",
@@ -274,13 +446,39 @@ export class PiAgent extends Agent<Env> {
         );
         return;
       }
-      // Re-prime the deterministic reply so the regenerated turn produces the
-      // same content the crashed turn was streaming.
-      const userText = this._messageText(last.message);
-      this._faux.setNextTurnText(replyFor(userText));
+      const full = replyFor(userText);
+      const tail = this._lastEntry();
+      const partial =
+        continueFromPartial &&
+        tail?.partial === true &&
+        tail.message.role === "assistant"
+          ? tail
+          : undefined;
+
+      if (partial) {
+        const prefix = renderAssistantText(partial.message as AssistantMessage);
+        if (full.startsWith(prefix) && prefix.length < full.length) {
+          // Continue: regenerate ONLY the suffix; merge folds it onto the prefix.
+          this._continuationTargetId = partial.id;
+          this._faux.setNextTurnText(full.slice(prefix.length));
+        } else if (prefix === full) {
+          // The whole reply already survived — just promote the partial.
+          await this._finalizePartial(partial.id);
+          await this._engine().updateIncident(incidentId, "completed");
+          return;
+        } else {
+          // Prefix is not a clean prefix of the reply (shouldn't happen with
+          // per-event flush) — fall back to a fresh regenerate.
+          this._faux.setNextTurnText(full);
+        }
+      } else {
+        this._faux.setNextTurnText(full);
+      }
+
       await this._runPiTurn(crypto.randomUUID(), true);
       await this._engine().updateIncident(incidentId, "completed");
     } catch (error) {
+      this._continuationTargetId = null;
       await this._engine().updateIncident(
         incidentId,
         "failed",
@@ -288,6 +486,7 @@ export class PiAgent extends Agent<Env> {
       );
       throw error;
     } finally {
+      this._inRecoveryTurn = false;
       this._activeChatRecoveryRootRequestId = previousRoot;
     }
   }
@@ -307,11 +506,11 @@ export class PiAgent extends Agent<Env> {
   // ── Scheduled recovery callbacks (engine-driven) ────────────────────────────
 
   async _chatRecoveryRetry(data?: PiRecoveryData): Promise<void> {
-    await this._resumeRecoveredTurn(data);
+    await this._resumeRecoveredTurn(data, false);
   }
 
   async _chatRecoveryContinue(data?: PiRecoveryData): Promise<void> {
-    await this._resumeRecoveredTurn(data);
+    await this._resumeRecoveredTurn(data, true);
   }
 
   // ── Fiber recovery entry: drive the shared engine ───────────────────────────
@@ -347,27 +546,39 @@ export class PiAgent extends Agent<Env> {
             streamId !== "" && streamId === this._resumableStream.activeStreamId
         };
       },
-      classifyRecoveredTurn: (_input: ClassifyRecoveredTurnInput) => ({
-        // A text-only pi turn has no settled tool work and no mid-assistant
-        // resume; recovery always regenerates the unanswered user turn.
-        recoveryKind: "retry" as const,
-        detail: { regenerate: true }
-      }),
+      classifyRecoveredTurn: (input: ClassifyRecoveredTurnInput) => {
+        // A surviving partial drives a `continue` (regenerate only the suffix
+        // and merge); an empty partial (crash before the first delta flushed)
+        // falls back to a `retry` that regenerates the whole reply.
+        const continueFromPartial = input.partial.text.length > 0;
+        return {
+          recoveryKind: continueFromPartial
+            ? ("continue" as const)
+            : ("retry" as const),
+          detail: { continueFromPartial }
+        };
+      },
       invokeOnChatRecovery: async () => ({}),
-      // pi regenerates rather than merging an orphaned partial (no settled
-      // results to preserve), so the partial is never persisted.
-      shouldPersistOrphanedPartial: () => false,
-      persistOrphanedStream: async () => {},
+      // Mirror the AI SDK adapter: preserve the orphaned partial whenever its
+      // (restored) stream is still the active in-flight one. The engine ANDs
+      // this with the shared never-drop clause.
+      shouldPersistOrphanedPartial: (input) => input.streamStillActive,
+      persistOrphanedStream: async (streamId) => {
+        this._persistOrphanedPartial(streamId);
+      },
       completeRecoveredStream: (streamId) => {
         this._resumableStream.complete(streamId);
       },
       dispatchRecoveredTurn: async (
         input: DispatchRecoveredTurnInput<PiClassify>
       ) => {
+        const continueFromPartial = input.detail.continueFromPartial;
         await this._engine().scheduleRecovery({
           incident: input.incident,
-          recoveryKind: "retry",
-          callback: "_chatRecoveryRetry",
+          recoveryKind: continueFromPartial ? "continue" : "retry",
+          callback: continueFromPartial
+            ? "_chatRecoveryContinue"
+            : "_chatRecoveryRetry",
           data: {
             originalRequestId: input.recoveryRootRequestId,
             incidentId: input.incident.incidentId
@@ -493,6 +704,9 @@ export class PiAgent extends Agent<Env> {
     incidentCount: number;
     recovering: boolean;
     progress: number;
+    recoveredVia: "continue" | "retry" | null;
+    recoveryGeneratedChars: number;
+    partialPrefixChars: number;
   }> {
     const fiberRows = this.sql<{ count: number }>`
       SELECT COUNT(*) as count FROM cf_agents_runs
@@ -501,18 +715,23 @@ export class PiAgent extends Agent<Env> {
       prefix: "cf:chat-recovery:incident:"
     });
     const recovering = await this.ctx.storage.get("cf:chat:recovering");
+    const summary =
+      await this.ctx.storage.get<RecoverySummary>(RECOVERY_SUMMARY_KEY);
     return {
       transcript: this._transcript.map((entry) => ({
         role: entry.message.role,
         text: this._renderEntryText(entry.message)
       })),
       assistantCount: this._transcript.filter(
-        (entry) => entry.message.role === "assistant"
+        (entry) => entry.message.role === "assistant" && !entry.partial
       ).length,
       fiberRows: fiberRows[0].count,
       incidentCount: incidents.size,
       recovering: recovering !== undefined,
-      progress: await readChatRecoveryProgress(this.ctx.storage)
+      progress: await readChatRecoveryProgress(this.ctx.storage),
+      recoveredVia: summary?.via ?? null,
+      recoveryGeneratedChars: summary?.generatedChars ?? 0,
+      partialPrefixChars: summary?.prefixChars ?? 0
     };
   }
 

@@ -1637,6 +1637,46 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 5 / P5-1b (pi adapter upgraded to `stream_continuation`; seam-difference
+  correction; Flue analysis; no package behavior change, no changeset)_ — Upgraded
+  the `experimental/pi-recovery/` fixture so the pi adapter takes the **same
+  continue-from-partial path as the AI SDK adapter** rather than full-regenerate.
+  **Motivation:** an analysis of [Flue](https://github.com/withastro/flue) (requested
+  to sanity-check the recorded seam difference) showed Flue is itself a **pi-based**
+  harness — its `session.ts`/`submission-state.ts` import `@earendil-works/pi-ai` — and
+  it does far more than regenerate: it persists streaming deltas via a
+  `StreamChunkWriter` keyed `submissionId:turnId:attemptId`, reconstructs the
+  interrupted partial in `recoverInterruptedStream`, and **continues from it**
+  (`stream_continuation`); it also preserves completed tool results across a mid-batch
+  interruption (`tool_results_partial` — synthesize interrupted-markers for the
+  unresolved calls, never re-execute the settled ones), all under a leased submission
+  execution store (`attempt_id`/`lease_expires_at`/`recovery_requested_at`). That made
+  it clear the prior P5-1 note ("pi has no mid-assistant resume, so it regenerates")
+  described a limitation of the **first text-only codec**, not of pi. **Change:** (1)
+  the codec already reconstructs `{ text, message }` from buffered `message_update`
+  events — now `decodePartial`'s clonable partial `AssistantMessage` is used as a merge
+  target; (2) `PiAgent` flushes every delta durably (so a SIGKILL leaves a non-empty,
+  recoverable partial), preserves the reconstructed partial as a `partial`-flagged
+  transcript entry in `persistOrphanedStream` (gated on `streamStillActive`, mirroring
+  the AI SDK adapter), classifies `continue` when a partial survived, and on the
+  scheduled `_chatRecoveryContinue` regenerates only the **suffix** after the survived
+  prefix (faux model primed with `full.slice(prefix.length)`), merging it back onto the
+  partial entry to land the identical full reply. A preserved partial is excluded from
+  pi's model context (`_piMessages()`) so the user stays the leaf and pi GENERATES the
+  suffix; the merge then folds it on. Full regenerate stays as the `retry` fallback for
+  the no-partial case (crash before the first delta flushed). **Genericity proof
+  strengthened:** the engine's `continue` path + `persistOrphanedStream` + the
+  never-drop persist clause are now exercised by a non-AI-SDK consumer with **no
+  engine-side change** — the codec owns the wire-vocabulary and the merge, the engine
+  owns the lifecycle. **e2e upgraded** (`e2e/recovery.test.ts`): after the SIGKILL +
+  restart it now asserts continuation, not regeneration — `recoveredVia === "continue"`,
+  `partialPrefixChars > 0`, `0 < recoveryGeneratedChars < total`, and
+  `partialPrefixChars + recoveryGeneratedChars === total` (prefix preserved, only the
+  remainder generated). Tests: pi SIGKILL continuation e2e 1/1 ✅; package typecheck ✅.
+  No changeset (no `packages/` runtime behavior change; the fixture is `experimental/`
+  and unpublished; the only `agents` change in scope — `SnapshotMessage` — shipped in
+  P5-1).
+
 - _Phase 5 / P5-1 (genericity proof — REAL pi adapter on the shared engine; no
   package behavior change, no changeset)_ — Built `experimental/pi-recovery/`, a
   runnable Worker that drives the **real** `@earendil-works/pi-agent-core` `Agent`
@@ -3144,16 +3184,28 @@ Exit criteria:
 `experimental/pi-recovery/` fixture drives the **real** `@earendil-works/pi-agent-core`
 `Agent` (verified to bundle + run in `workerd`; deterministic via pi-ai's
 `registerFauxProvider`) on the shared engine, and a real `wrangler dev` SIGKILL
-crash-mid-stream e2e passes: the engine regenerates the turn through pi's real
-`continue()` with no `UIMessage` assumption (the snapshot builder was generalized off
-`UIMessage` to `SnapshotMessage`). **Recorded seam difference:** a text-only pi turn
-has no settled tool results and no mid-assistant resume, so recovery _regenerates_ the
-unanswered user turn (`classifyRecoveredTurn → "retry"`, `shouldPersistOrphanedPartial
-→ false`) rather than merging the orphaned partial as the AI SDK adapter does — the
-engine supported this with no engine-side change. Still open: lifting the resume
-handshake + streaming codec into `agents/chat` behind shared adapters (driven against
-this harness), then folding corrections back into the AI SDK adapter. See the Progress
-log entry.
+crash-mid-stream e2e passes with no `UIMessage` assumption (the snapshot builder was
+generalized off `UIMessage` to `SnapshotMessage`). **The pi adapter takes the same
+`stream_continuation` path as the AI SDK adapter:** the codec reconstructs the partial
+from the durable buffer, the engine PRESERVES it
+(`shouldPersistOrphanedPartial → streamStillActive`, `classifyRecoveredTurn →
+"continue"`), and the recovered turn regenerates only the remaining suffix through pi's
+real `continue()`, merging it onto the survived prefix. The e2e asserts continuation,
+not regeneration: `recoveredVia === "continue"`, `prefixChars > 0`, `0 < generatedChars
+< total`, and `prefixChars + generatedChars === total`. Full regenerate
+(`classifyRecoveredTurn → "retry"`) remains only as the fallback when no partial
+survived. **Seam-difference correction:** the earlier "pi can only regenerate; it has no
+mid-assistant resume" note was an artifact of the first text-only codec, **not** a pi
+constraint. An analysis of [Flue](https://github.com/withastro/flue) — itself a
+pi-based harness (its `session.ts`/`submission-state.ts` import `@earendil-works/pi-ai`)
+— confirms the richer path is the norm on this substrate: Flue persists streaming
+deltas (`StreamChunkWriter`), reconstructs the partial (`recoverInterruptedStream`), and
+continues from it (`stream_continuation`), plus preserves completed tool results across
+a mid-batch interruption (`tool_results_partial`), under a leased submission execution
+store. The shared engine supported pi's continuation with **no engine-side change**.
+Still open: lifting the resume handshake + streaming codec into `agents/chat` behind
+shared adapters (driven against this harness), then folding corrections back into the AI
+SDK adapter. See the Progress log entry.
 
 ### Phase 6: confidence and e2e hardening
 

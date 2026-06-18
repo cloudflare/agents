@@ -11,6 +11,14 @@
  * vocabulary. That is the proof the codec — not the engine — owns the
  * chunk-shape differences.
  *
+ * The reconstructed partial is not just inspected and discarded: `PiAgent`
+ * preserves it (`persistOrphanedStream`) and the recovered turn CONTINUES from
+ * it — the model regenerates only the remaining suffix, which merges onto the
+ * survived prefix (`stream_continuation`, mirroring the AI SDK adapter and
+ * Flue's `recoverInterruptedStream`). So `decodePartial` must surface both the
+ * accumulated prefix text AND a clonable partial `AssistantMessage` to merge
+ * the continuation onto.
+ *
  * @internal Validation fixture, not a published package.
  */
 

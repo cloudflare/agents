@@ -4,14 +4,17 @@
  * foundation).
  *
  * 1. Start `wrangler dev` running the `PiAgent` Durable Object.
- * 2. POST /pi/start — pi streams a slow assistant turn inside a recovery fiber.
+ * 2. POST /pi/start — pi streams a slow assistant turn inside a recovery fiber,
+ *    buffering each delta durably into `ResumableStream`.
  * 3. SIGKILL the process MID-STREAM (before `message_end` commits the assistant
- *    message), leaving an orphaned fiber row and an unanswered user message.
+ *    message), leaving an orphaned fiber row, an unanswered user message, and a
+ *    durable partial.
  * 4. Restart with the same persist dir; accessing the DO wakes it and the shared
- *    engine schedules a recovery.
- * 5. Verify: the engine regenerates the turn via pi's real `continue()` — the
- *    assistant message lands and the orphaned fiber row is reclaimed — with NO
- *    `UIMessage` anywhere in the stack.
+ *    engine reconstructs the partial, preserves it, and schedules a `continue`.
+ * 5. Verify CONTINUATION (not full regeneration): the recovered turn regenerates
+ *    only the SUFFIX after the survived prefix and merges it onto the partial —
+ *    one assistant message whose prefix length + generated suffix length equal
+ *    its total length — via the shared engine, with NO `UIMessage` in the stack.
  */
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { setDefaultAutoSelectFamily, Socket } from "node:net";
@@ -54,6 +57,9 @@ type Status = {
   incidentCount: number;
   recovering: boolean;
   progress: number;
+  recoveredVia: "continue" | "retry" | null;
+  recoveryGeneratedChars: number;
+  partialPrefixChars: number;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -221,15 +227,15 @@ describe("pi recovery e2e (shared engine, real pi runtime)", () => {
     }
   });
 
-  it("regenerates a pi turn after a SIGKILL mid-stream", async () => {
+  it("continues a pi turn from its survived partial after a SIGKILL mid-stream", async () => {
     wrangler = startWrangler();
     await waitForReady();
 
     await startTurn("recover me");
 
     // Let pi stream a few events into the durable buffer (so we crash genuinely
-    // mid-stream), then confirm the turn is in-flight: an orphaned fiber row
-    // exists and no assistant message has committed yet.
+    // mid-stream with a non-empty partial), then confirm the turn is in-flight:
+    // an orphaned fiber row exists and no assistant message has committed yet.
     await sleep(3000);
     const before = await getStatus();
     console.log("[test] before kill:", before);
@@ -245,8 +251,9 @@ describe("pi recovery e2e (shared engine, real pi runtime)", () => {
     wrangler = startWrangler();
     await waitForReady();
 
-    // Accessing the DO wakes it; the shared engine detects the orphaned fiber
-    // and schedules a regenerate, which re-runs pi's real continue().
+    // Accessing the DO wakes it; the shared engine reconstructs the orphaned
+    // partial, preserves it, and schedules a `continue` that regenerates only
+    // the remaining suffix through pi's real continue().
     const recovered = await pollUntil(
       "pi assistant committed",
       (s) => s.assistantCount >= 1
@@ -254,9 +261,22 @@ describe("pi recovery e2e (shared engine, real pi runtime)", () => {
     expect(recovered.assistantCount).toBe(1);
     expect(recovered.transcript[0].role).toBe("user");
     expect(recovered.transcript.at(-1)?.role).toBe("assistant");
-    expect(recovered.transcript.at(-1)?.text).toContain("pi reply to");
+    const assistantText = recovered.transcript.at(-1)?.text ?? "";
+    expect(assistantText).toContain("pi reply to");
 
-    // The regenerated turn settles: the orphaned fiber row is reclaimed.
+    // Continuation, NOT full regeneration: the engine took the `continue` path,
+    // the survived prefix was preserved (prefixChars > 0), and the recovered
+    // turn generated ONLY the remaining suffix (0 < generated < total). Prefix +
+    // suffix reconstruct the full reply exactly.
+    expect(recovered.recoveredVia).toBe("continue");
+    expect(recovered.partialPrefixChars).toBeGreaterThan(0);
+    expect(recovered.recoveryGeneratedChars).toBeGreaterThan(0);
+    expect(recovered.recoveryGeneratedChars).toBeLessThan(assistantText.length);
+    expect(
+      recovered.partialPrefixChars + recovered.recoveryGeneratedChars
+    ).toBe(assistantText.length);
+
+    // The continued turn settles: the orphaned fiber row is reclaimed.
     const settled = await pollUntil(
       "pi fiber cleanup",
       (s) => s.fiberRows === 0 && s.assistantCount === 1
