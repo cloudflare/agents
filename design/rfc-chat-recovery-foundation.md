@@ -571,18 +571,19 @@ should converge on that behavior intentionally.
 
 ### Convergence matrix
 
-| Area                           | Current `AIChatAgent`                             | Current `Think`                                            | Proposed shared behavior                                                                                                                                                            |
-| ------------------------------ | ------------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Durable recovery default       | `chatRecovery = false`                            | `chatRecovery = true`                                      | Keep defaults per package unless a separate semver-visible RFC changes them. The engine does not own defaults.                                                                      |
-| Live stalled stream            | No bounded stall watchdog                         | Routes stalls into bounded recovery                        | Adopt shared stall recovery in both packages, enabled by default when `chatRecovery` is on. `AIChatAgent` gains a default stall timeout. Changeset required.                        |
-| Recovery callback errors       | Less complete handling                            | Stronger callback-error handling                           | Adopt Think's stronger behavior for both packages: app errors terminalize or mark failed consistently; platform transients can defer.                                               |
-| Recovering state on reconnect  | Not replayed on connect → now replayed (slice 2d) | Replayed on connect                                        | DONE (slice 2d): `AIChatAgent` converged onto Think's replay-on-connect UX; shipped as a user-visible behavior change (minor changeset).                                            |
-| Terminal delivery              | Resume handshake, persist-first in main path      | Resume handshake, some broadcast-first resilience          | Keep resume-handshake delivery. Converge on terminal-before-seal ordering (durably record/deliver before sealing the incident); duplicate delivery tolerated, lost delivery is not. |
-| Pending interaction predicates | Split stable wait vs client-budget predicate      | More client-focused predicate                              | Converge on split predicates so server-tool stability and client/HITL budget exemption are not conflated.                                                                           |
-| Durable submissions            | Not applicable                                    | Must recover, park, complete, skip, or exhaust submissions | Keep as adapter-owned Think behavior. The engine provides hooks; `AIChatAgent` adapter no-ops.                                                                                      |
-| Message reconciliation         | Required for AI SDK client IDs                    | Session persistence avoids much of it                      | Keep adapter-owned. Do not force Think into ai-chat reconciliation.                                                                                                                 |
-| Progress accounting            | Meaningful chunk types                            | Durable flush/tool-output oriented                         | Converge on one progress policy: bump only on new forward work at production time, never on replay/re-persist. Land with budget tests proving no regressions.                       |
-| Terminal exhausted callback    | Existing public hook                              | Existing public hook plus durable-work effects             | Shared engine invokes hook, but adapter owns durable side effects.                                                                                                                  |
+| Area                           | Current `AIChatAgent`                                                                                           | Current `Think`                                                                                          | Proposed shared behavior                                                                                                                                                            |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Durable recovery default       | `chatRecovery = false`                                                                                          | `chatRecovery = true`                                                                                    | Keep defaults per package unless a separate semver-visible RFC changes them. The engine does not own defaults.                                                                      |
+| Live stalled stream            | No bounded stall watchdog                                                                                       | Routes stalls into bounded recovery                                                                      | Adopt shared stall recovery in both packages, enabled by default when `chatRecovery` is on. `AIChatAgent` gains a default stall timeout. Changeset required.                        |
+| Recovery callback errors       | Less complete handling                                                                                          | Stronger callback-error handling                                                                         | Adopt Think's stronger behavior for both packages: app errors terminalize or mark failed consistently; platform transients can defer.                                               |
+| Recovering state on reconnect  | Not replayed on connect → now replayed (slice 2d)                                                               | Replayed on connect                                                                                      | DONE (slice 2d): `AIChatAgent` converged onto Think's replay-on-connect UX; shipped as a user-visible behavior change (minor changeset).                                            |
+| Terminal delivery              | Resume handshake, persist-first in main path                                                                    | Resume handshake, some broadcast-first resilience                                                        | Keep resume-handshake delivery. Converge on terminal-before-seal ordering (durably record/deliver before sealing the incident); duplicate delivery tolerated, lost delivery is not. |
+| Pending interaction predicates | Split stable wait vs client-budget predicate                                                                    | More client-focused predicate                                                                            | Converge on split predicates so server-tool stability and client/HITL budget exemption are not conflated.                                                                           |
+| Auto-continuation barrier      | Barrier inside the continuation turn; fixed 60s timeout then continues against an incomplete tool batch (#1649) | Event-driven barrier before enqueue; stream-gated; no orphan timeout; waits for batch completion (#1650) | Adopt Think's event-driven, no-timeout, stream-gated barrier in both packages. `AIChatAgent` drops the 60s force-continue. Changeset required. See decision below.                  |
+| Durable submissions            | Not applicable                                                                                                  | Must recover, park, complete, skip, or exhaust submissions                                               | Keep as adapter-owned Think behavior. The engine provides hooks; `AIChatAgent` adapter no-ops.                                                                                      |
+| Message reconciliation         | Required for AI SDK client IDs                                                                                  | Session persistence avoids much of it                                                                    | Keep adapter-owned. Do not force Think into ai-chat reconciliation.                                                                                                                 |
+| Progress accounting            | Meaningful chunk types                                                                                          | Durable flush/tool-output oriented                                                                       | Converge on one progress policy: bump only on new forward work at production time, never on replay/re-persist. Land with budget tests proving no regressions.                       |
+| Terminal exhausted callback    | Existing public hook                                                                                            | Existing public hook plus durable-work effects                                                           | Shared engine invokes hook, but adapter owns durable side effects.                                                                                                                  |
 
 ### Behavior decisions
 
@@ -615,6 +616,79 @@ platform transients should not permanently seal the incident before terminal
 state is durably delivered.
 
 This is a correctness improvement for `AIChatAgent`.
+
+#### Adopt Think's event-driven auto-continuation barrier
+
+When a turn ends with parallel client tool calls still outstanding, the agent must
+wait for every tool result before auto-continuing, or it continues inference against
+an incomplete batch. The two packages solved this differently:
+
+- **`AIChatAgent` (#1649):** the barrier runs _inside_ the exclusive continuation
+  turn (`_awaitPendingInteractionBarrier`, `index.ts:2443–2471`), polling for
+  completion with a fixed `AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS = 60_000`
+  timeout, after which it proceeds with whatever arrived. The continuation is queued
+  via `_enqueueAutoContinuation` → `_queueAutoContinuation` → `onChatMessage`.
+- **`Think` (#1650):** the barrier is _event-driven and runs before enqueue_
+  (`_scheduleAutoContinuation` → `_fireAutoContinuationWhenStable` →
+  `_drainInteractionApplies`, `think.ts:10771–10961`). It returns without firing if
+  the batch is incomplete (`_hasIncompleteToolBatch`), re-arms on the next applied
+  result (`_rearmPendingAutoContinuationForBatch`, `_onStreamingTurnFinalized`), is
+  gated on no active stream (`_streamingAssistant`), guards against double-fire
+  (`_continuationBarrierActive`), and has **no orphan timeout** — an incomplete batch
+  simply never auto-continues until it completes.
+
+Decision: converge both packages onto Think's event-driven model. It is strictly
+better — it never fires inference against a half-complete tool batch, and it removes
+the arbitrary 60s window after which `AIChatAgent` currently continues with missing
+results.
+
+Scope — this is a substantial `AIChatAgent` slice, NOT a near-trivial follow-on to
+Slice 4f. A code read (2026-06) found ai-chat's barrier is wired into a whole
+continuation state machine and depends structurally on running _inside the exclusive
+turn_; its own docblock (`index.ts:2437–2441`) explains it needs no concurrent-entry
+guard precisely because "this runs inside the exclusive continuation turn … so the
+turn queue serializes barrier waits." Moving to Think's model therefore requires more
+than dropping the timeout. `AIChatAgent` must:
+
+- Move the barrier _out_ of the continuation turn and make it event-driven before
+  enqueue (the `_scheduleAutoContinuation` → `_fireAutoContinuationWhenStable` shape),
+  dropping `_awaitPendingInteractionBarrier`, the in-turn poll, and
+  `AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS`.
+- **Add** a `_continuationBarrierActive`-style double-fire guard. This becomes
+  load-bearing once the work leaves the turn — today the turn queue is what serializes
+  barrier waits, so removing the in-turn barrier removes that guarantee.
+- **Add** a stream-active gate + a stream-finalize re-arm hook. Think hangs these on
+  `_streamingAssistant` / `_onStreamingTurnFinalized` in its `toUIMessageStream()`
+  loop; ai-chat's streaming loop is the SSE reader (`_streamSSEReply` / `_reply`), so
+  there is no equivalent finalize point — one has to be introduced in the SSE loop.
+- **Reconcile** ai-chat's `_continuation` coalesce / `prerequisite` / deferred
+  machinery (`_enqueueAutoContinuation`, `_mergeAutoContinuationPrerequisite`,
+  `_storeDeferredAutoContinuation`, `_activateDeferredAutoContinuation`) with Think's
+  re-arm-on-apply model — Think has no direct analogue, so this is a behavior mapping,
+  not a delete.
+
+The only piece Slice 4f contributes is the shared leaf `_hasIncompleteToolBatch`
+(verified byte-identical, lifted in 4f). 4f is a prerequisite, not the bulk of the
+work.
+
+Risk + scope: this changes `AIChatAgent`'s user-visible timing — a stuck or
+never-arriving tool result that previously force-continued after 60s now parks
+indefinitely until the batch completes (matching Think, and matching how a pending
+HITL/client interaction already parks). That is the intended behavior, but it is a
+semver-minor behavior change and ships with a changeset. e2e coverage must include,
+beyond the obvious parallel-tool-call completion case: (1) a never-completing-tool
+case (confirm it parks, does not force-continue, and stays budget-free the same way
+`hasPendingClientInteraction` parking does); and critically (2) a **deploy/crash
+mid-park** case — confirm chat-recovery _re-arms_ the parked continuation rather than
+exhausting it or false-terminalizing, since ai-chat's recovery path may currently
+assume the timeout model. Sequence it as its own slice **after Slice 4f** — it is
+independent of Phase 5, but note a soft coupling: the SSE-loop finalize hook lands in
+the same streaming region the Tier-2 codec extraction will touch, so if Phase 5 runs
+close behind, coordinate the two rather than adding a hook the codec work then moves.
+The orchestration stays package-local for now (it is NOT routed through
+`ChatRecoveryEngine`); only the leaf predicate is shared. A future slice may lift the
+converged barrier into `agents/chat` once both packages run the identical algorithm —
+track that as a follow-up, not part of this decision.
 
 #### Prefer recovering replay on connect
 
@@ -1067,6 +1141,142 @@ the implemented seam is `ChatRecoveryAdapter` in `agents/chat`. 4d-2 should reco
 the decision-hook names with the Turns/Actions expectations, or update those RFCs to
 the real names.)
 
+## Chat-layer extraction map (2026-06 design review)
+
+Before starting Phase 5, a design review mapped **all** parallel chat machinery
+across `AIChatAgent` ([packages/ai-chat/src/index.ts](../packages/ai-chat/src/index.ts))
+and `Think` ([packages/think/src/think.ts](../packages/think/src/think.ts)) that is
+NOT yet shared, to answer one question: beyond recovery, what other chat machinery
+should move into `agents/chat`? The review covered four surfaces — message
+persistence, stream lifecycle + broadcast, inbound request/connection handling, and
+tool/HITL/terminal state — comparing the two files method-by-method.
+
+Already shared (excluded from the map): `turn-queue`, `submit-concurrency`,
+`resumable-stream`, `message-builder`, `stream-accumulator`, `protocol`,
+`parse-protocol`, `message-reconciler`, `tool-state`, `client-tools`,
+`broadcast-state`, `agent-tools`, `continuation-state`, `abort-registry`,
+`sanitize`, plus the recovery modules (`recovery-engine`, `recovery-incident`,
+`recovery`, `stall-watchdog`, `lifecycle`).
+
+The pervasive tell is the same one that motivated the recovery engine: both files
+are littered with "Mirrors `@cloudflare/think`" / "symmetric with `AIChatAgent`"
+comments marking hand-maintained parallel code (e.g. ai-chat `758`, `2305–2319`,
+`3156`, `3936`, `4445`; think `2667–2668`, `7627`, `7996–7997`, `9205–9206`,
+`11109–11110`). Findings sort into three tiers. Line numbers are as of 2026-06 and
+will drift — trust the method names.
+
+### Tier 1 — leaf dedup (Slice 4f; do before pi)
+
+Near-duplicate leaf helpers and constants, captured as Slice 4f in the Phase 4 slice
+plan below (with method names, line ranges, and per-item lift strategy). Slice 4f is
+split by risk: **4f-i** is the genuine pure / storage-glue lifts (same playbook as 4e
+— zero behavior change, no changeset; several confirmed byte-identical in the 2026-06
+review), and **4f-ii** is two items that _look_ like dedup but are behavior-sensitive
+convergences (ai-chat's local `enforceRowSizeLimit` reimpl; ai-chat's inline protocol
+parse vs the shared `parseProtocolMessage`) and so each take their own slice with a
+verify-first gate and a likely changeset. The 4f-i leaves land first because several
+are the pieces the Tier-2 resume-handshake frame will compose.
+
+### Tier 2 — structural seams pi should drive (do WITH Phase 5)
+
+Two subsystems are parallel-but-divergent in the same shape recovery was — a shared
+spine with package-specific organs and heavy "Mirrors" cross-referencing — but they
+should be extracted **as part of Phase 5, driven by the pi adapter**, not
+speculatively before it. The reason is the core Phase-5 thesis: extracting a seam
+without a third (non-AI-SDK) consumer risks re-baking the exact `UIMessage` / AI-SDK
+assumptions the seam is meant to abstract. Pi is the forcing function.
+
+1. **Resume / reconnect handshake.** The notify → REQUEST → ACK → replay sequence
+   (`_notifyStreamResuming`, the `STREAM_RESUME_REQUEST` / `STREAM_RESUME_ACK`
+   handlers, `_replayTerminalOnResume` / `_replayTerminalOnAck`) plus terminal
+   replay and the recovering frame. ai-chat (`1077–1161`, `3877–3928`) and Think
+   (`_handleStreamResumeRequest` / `_handleStreamResumeAck` `7495–7566`,
+   `11167–11214`) are near byte-parallel; they differ almost entirely in (a) the
+   **wire-type vocabulary** (`CF_AGENT_STREAM_*` vs `MSG_STREAM_*`) and (b) the
+   **idle-connect payload** (Think pushes the full transcript via
+   `_buildIdleConnectMessages`; ai-chat sends only the recovering frame). This is the
+   single most coherent extractable subsystem after recovery — a shared "resume
+   handshake" frame + a small adapter (wire vocabulary, idle-connect payload builder,
+   storage). Pi has its own wire vocabulary, so pi is exactly what proves the seam is
+   wire-agnostic. The Tier-1 leaf lifts (terminal trio, recovering flag,
+   `_getPartialStreamText`) are the pieces this frame composes, which is why they go
+   first.
+
+2. **Streaming response loop + codec.** The provider-stream → accumulate → store
+   durably → broadcast → complete/error → terminal-frame spine. The drivers are
+   genuinely different architectures (ai-chat reads an SSE `Response` via
+   `_streamSSEReply` / `_reply` and mutates a `UIMessage` with `applyChunkToParts`;
+   Think iterates `result.toUIMessageStream()` through a `StreamAccumulator` in
+   `_streamResult`), but the inner spine is parallel. This is precisely what the
+   RFC's **third conceptual part, the `ChatRecoveryCodec`, already exists to abstract
+   — and Phase 5 already requires a `PiRecoveryCodec`.** So this extraction is on the
+   pi roadmap by construction; doing it standalone first would duplicate that effort
+   and risk an AI-SDK-shaped codec. Treat the codec seam as the home for the
+   chunk-shape differences (`applyChunkToParts` vs `StreamAccumulator`, start-id
+   alignment `_alignStreamStartId` vs the inline rewrite, chunk-type progress
+   gating).
+
+### Tier 3 — keep package-specific (do NOT extract)
+
+The map confirms these are correctly divergent; extracting them would be the
+"abstraction dictating the product" inversion the Genericity decision forbids:
+
+- **Message storage model** — ai-chat's flat `cf_ai_chat_agent_messages` array
+  (`persistMessages`, `_loadMessagesFromDb`, `_persistedMessageCache`,
+  `maxPersistedMessages`, the v4→v5 `autoTransformMessages` migration) vs Think's
+  Session tree (`session.appendMessage` / `updateMessage` / `getHistory`,
+  `hydrationByteBudget`, `_syncMessages`). Fundamental; the non-goals already forbid
+  moving ai-chat onto Session storage.
+- **Think-only substrate** — durable submissions (`cf_think_submissions`,
+  `submitMessages`), codemode execute-pause/resume HITL (`pendingExecutions`,
+  `approveExecution` / `rejectExecution`), media eviction, transcript repair,
+  scheduled tasks, workflow notifications.
+- **ai-chat-only substrate** — `_persistedMessageCache` incremental-skip,
+  `maxPersistedMessages` cap, streaming `tool-approval-request` early-persist
+  (`_approvalPersistedMessageId`), the v4→v5 migration.
+- **`_persistOrphanedStream` id/merge semantics** — ai-chat (`1542–1649`, ~108
+  lines) reconstructs + merges by AI-SDK assistant / `toolCallId` via
+  `getStreamMessageId`; Think (`11396–11418`, ~24 lines) replays through
+  `StreamAccumulator` + `_persistAssistantMessage` with no id merge. Same purpose,
+  legitimately different. (The shared part — progress is not bumped on orphan persist
+  — is already a documented invariant.)
+- **Boot ordering** — ai-chat installs chat in the constructor; Think defers
+  protocol setup to `onStart` step 7 after session / workspace / skills hydration.
+  Different lifecycle by construction.
+- **Request-context persist/restore** — ai-chat combines body + client tools in one
+  `cf_ai_chat_request_context` table (`_persistRequestContext` /
+  `_restoreRequestContext`); Think splits them across `think_config`
+  (`_persistBody` / `_persistClientTools`). Same semantics, different storage
+  backends — keep package-local. (The pure predicate leaves over the restored client
+  tools _are_ shared in 4f-i; only the storage glue stays package-specific.)
+
+### Auto-continuation convergence (a behavior decision, not a leaf lift)
+
+The parallel-tool-call barrier (#1649 ai-chat vs #1650 Think) is intentionally
+divergent and is being **converged onto Think's event-driven model** — recorded as a
+behavior decision under "Better-behavior convergence" (changeset required). This is
+NOT a dedup: it is a substantial `AIChatAgent` rearchitecture (barrier out of the
+turn, a new double-fire guard, a new SSE-loop finalize hook, reconciling ai-chat's
+`_continuation` coalesce/deferred machinery). Slice 4f only contributes the shared
+leaf (`_hasIncompleteToolBatch`, verified byte-identical) that the convergence
+consumes — see the behavior decision for the full scope and the deploy-mid-park e2e
+requirement.
+
+### Sequencing
+
+1. **Slice 4f** (Tier 1) — shrink the copy-paste drift surface with safe leaf lifts
+   (4f-i) before pi touches this code; the two behavior-sensitive convergences (4f-ii:
+   `enforceRowSizeLimit`, `parseProtocolMessage`) each take their own slice.
+2. **Auto-continuation convergence** — its own `AIChatAgent` slice (changeset),
+   gated on 4f-i landing the shared `_hasIncompleteToolBatch`. Independent of Phase 5,
+   but its SSE-loop finalize hook touches the same streaming region the Tier-2 codec
+   extraction will; if Phase 5 runs close behind, coordinate the two. See the behavior
+   decision for the full scope — it is the largest single piece of go-forward work,
+   not a follow-on to 4f.
+3. **Phase 5 (pi)** — let the pi adapter drive the Tier-2 extractions (resume
+   handshake + streaming codec). If a Tier-2 seam cannot be cleanly shared for pi,
+   that is the signal the seam is wrong — better learned while extracting than after.
+
 ## Testing strategy
 
 This refactor should leave the test suite in a better place than today. The
@@ -1417,6 +1627,68 @@ guard against shipping a subtly broken recovery path.
 
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
+
+- _Confidence review of the go-forward plan (code-grounded; docs only)_ — Before
+  handing the plan to a fresh session, pressure-tested the new Slice 4f and
+  auto-continuation decision against the actual code (not just the explore summaries).
+  **Verified solid:** `_hasIncompleteToolBatch` is byte-identical across both packages
+  (comment included); `CHAT_RECOVERING_FLAG_TTL_MS` / `STREAM_CLEANUP_DELAY_SECONDS`
+  and the recovering/terminal keys match the shared `recovery-incident.ts` values
+  (so the constant dedup is a no-op on keys + timing, no migration); the
+  client-interaction predicates (`_partAwaitsClientInteraction` / `_toolPartName` /
+  `_clientResolvableToolNames`) are byte-identical with the broad-vs-client-only
+  asymmetry living in the wrappers — so "lift leaves, keep wrappers" is correct.
+  **Five corrections folded in:** (1) the **auto-continuation convergence was badly
+  mis-scoped** — it is not a near-trivial follow-on to 4f but a substantial
+  `AIChatAgent` rearchitecture (ai-chat's barrier runs _inside_ the exclusive turn and
+  its own docblock at `index.ts:2437–2441` says that is why it needs no double-fire
+  guard; moving to Think's event-driven model requires taking the barrier out of the
+  turn, adding a `_continuationBarrierActive`-style guard, adding an SSE-loop
+  stream-finalize re-arm hook that has no current analogue, and reconciling ai-chat's
+  `_continuation` coalesce/deferred machinery) — rewrote the decision to spell this
+  out and added a **deploy-mid-park e2e** requirement (a parked continuation must
+  re-arm on recovery, not exhaust/false-terminalize); (2) **`enforceRowSizeLimit` is
+  not a zero-behavior lift** (ai-chat adds compaction metadata + warnings and may
+  differ in truncation) → moved to a new **4f-ii** bucket with a verify-first gate and
+  likely changeset; (3) **`parseProtocolMessage` migration clarified** as
+  classification-only — ai-chat must keep its distinct handlers, esp.
+  `CF_AGENT_CHAT_MESSAGES` (ai-chat persists; Think no-ops) — also moved to 4f-ii;
+  (4) **baked a verify-byte-equivalence-first gate into all of 4f** rather than
+  asserting equivalence in prose (line numbers drift); (5) minor completeness — added
+  request-context persist/restore to Tier 3, noted the `_broadcastChat` wrappers stay
+  package-local (threaded as the broadcast-fn param), and noted the soft coupling
+  between the auto-continuation SSE-loop hook and the Tier-2 codec region. Net: 4f is
+  now split into safe **4f-i** (pure leaf lifts) and behavior-sensitive **4f-ii**, and
+  the auto-continuation convergence is correctly framed as the largest single piece of
+  go-forward work. No code; plan only.
+
+- _Design review + plan update (pre-Phase-5 chat-layer extraction map; docs only)_ —
+  Before starting Phase 5, ran a four-surface design review (message persistence;
+  stream lifecycle + broadcast; inbound request / connection handling;
+  tool / HITL / terminal) comparing `AIChatAgent` and `Think` method-by-method for
+  parallel machinery NOT already shared. Recorded the result as the new "Chat-layer
+  extraction map" section with three tiers. **Tier 1** — safe leaf dedup, captured as
+  new **Slice 4f**: the duplicated `CHAT_*` / `STREAM_CLEANUP_*` constants,
+  `sendIfOpen` / `isWebSocketClosedSendError`, the terminal KV trio
+  (`_recordChatTerminal` / `_clearChatTerminal` / `_pendingChatTerminal`),
+  `_setChatRecovering` + recovering frame, `_getPartialStreamText`, the stream-cleanup
+  pair, `_hasIncompleteToolBatch`, the client-interaction predicates, ai-chat's local
+  `enforceRowSizeLimit` reimpl, and ai-chat's non-use of the shared
+  `parseProtocolMessage`. **Tier 2** — structural seams the pi adapter should DRIVE
+  during Phase 5 (the resume / reconnect handshake and the streaming-loop codec);
+  extracting them before a non-AI-SDK consumer would re-bake `UIMessage` assumptions,
+  so they are sequenced into Phase 5, not before. **Tier 3** — keep-package-specific
+  (storage model, Think submissions / codemode / media / repair, ai-chat
+  persisted-cache / migration / early-approval-persist, `_persistOrphanedStream`
+  id-merge semantics, boot ordering). Also **locked the auto-continuation convergence
+  decision** (new behavior decision + convergence-matrix row): adopt Think's
+  event-driven, no-timeout, stream-gated parallel-tool barrier (#1650) in
+  `AIChatAgent`, dropping its in-turn 60s force-continue (#1649) — a semver-minor,
+  changeset-bearing behavior change, sequenced after Slice 4f (which lands the shared
+  `_hasIncompleteToolBatch` it depends on) and independent of Phase 5. Recommended
+  sequencing: **Slice 4f → auto-continuation convergence → Phase 5 (pi drives
+  Tier 2)**. No code; plan only. (Detail lives in the design-review sub-reports; this
+  RFC is the durable record.)
 
 - _Slice 4e (Phase 4 — lift the residual leaf duplication the confidence pass found)_
   — Acted on the confidence-pass finding by lifting the byte-identical leaf
@@ -2471,6 +2743,104 @@ callback, data, reason })` behind hooks `exhaustChatRecovery`,
     4. _Phase 5 pi:_ validated via an internal `experimental/` fixture scaffolded from
        the pi shape in "Genericity and future harnesses" — sequenced after 4d-2.
 
+- **Slice 4f — lift the remaining duplicated chat leaf machinery.** The 2026-06
+  extraction map (see "Chat-layer extraction map") found a cluster of near-identical
+  leaf helpers still copy-maintained across both packages, _outside_ the recovery
+  orchestration engine. Two sub-groups with different risk profiles — keep them
+  separate so the safe lifts are not held back by the behavior-sensitive ones.
+
+  **Verify-first gate (applies to every item).** Do NOT lift on the strength of the
+  prose below — diff the two implementations at execution time first. If they are
+  byte-equivalent (modulo comments), lift as a pure/glue helper with zero behavior
+  change. If they have drifted, STOP and treat it as a convergence: pick the correct
+  behavior, write it down, and ship a changeset. This is the discipline that made
+  4d-2/4e safe; line numbers below are as of 2026-06 and will drift, so trust the
+  names and re-diff.
+
+  **4f-i — byte-verified pure leaf lifts (zero behavior, no changeset).** Lift each
+  into `agents/chat` with a thin per-package binding (free functions taking
+  `Pick<DurableObjectStorage, …>` or a small param, exactly like 4e's
+  `sweepStaleChatRecoveryIncidents` / `readChatRecoveryProgress`). Items marked
+  ✔verified were diffed during the 2026-06 confidence review and confirmed
+  byte-identical; the rest still need the gate above.
+  - **Duplicated constants ✔verified.** `CHAT_RECOVERING_KEY`,
+    `CHAT_LAST_TERMINAL_KEY`, `CHAT_RECOVERING_FLAG_TTL_MS` are already exported from
+    `recovery-incident.ts` (`109`, `115`, `166`) and re-barrelled by `chat/index.ts`,
+    yet ai-chat still redefines them locally (`index.ts:162,169,178`) and Think
+    likewise (`think.ts:679,685` + terminal/recovering keys). Confirmed all values
+    match the shared copies (`CHAT_RECOVERING_FLAG_TTL_MS = 15 * 60 * 1000` and
+    `STREAM_CLEANUP_DELAY_SECONDS = 10 * 60` are identical in both packages), so
+    importing them is a no-op on storage keys and timing — no migration risk. Delete
+    the local copies and import the shared ones (same fix as 4e's
+    `CHAT_RECOVERY_PROGRESS_KEY`). `STREAM_CLEANUP_DELAY_SECONDS` (ai-chat `192`, think
+    `699`) is not yet in the shared barrel — add it to `agents/chat` and import in
+    both.
+  - **`sendIfOpen` / `isWebSocketClosedSendError`** (ai-chat `199–214`, think
+    `239–254`) — byte-identical WS send guard. Lift to a shared `agents/chat` helper.
+  - **Terminal KV trio** `_recordChatTerminal` / `_clearChatTerminal` /
+    `_pendingChatTerminal` (ai-chat `3845–3866`, think `11131–11155`) —
+    byte-identical, same `CHAT_LAST_TERMINAL_KEY`. Lift as free fns over a storage
+    `Pick`; leave each package a one-line binding.
+  - **`_hasIncompleteToolBatch` ✔verified** (ai-chat `2481–2513`, think
+    `10971–11003`) — confirmed byte-identical (comment included). Lift to a shared
+    pure fn. This is the one piece the auto-continuation convergence consumes — ship
+    it here so that slice can build on it. (It is a prerequisite for the convergence,
+    not the bulk of it — see that behavior decision.)
+  - **Client-interaction predicates ✔verified** `_partAwaitsClientInteraction` /
+    `_clientResolvableToolNames` / `_toolPartName` (ai-chat `2230–2265`, think
+    `9367–9418`) — confirmed byte-identical (only docblock prose differs). Lift to
+    shared pure fns. Note `_clientResolvableToolNames` reads `this._lastClientTools`,
+    so the shared fn takes the client-tool list (or the resolved `Set`) as a param.
+    Keep each package's higher-level `hasPendingInteraction` /
+    `hasPendingClientInteraction` wrappers local — the broad-vs-client-only asymmetry
+    lives in the wrappers (both already call the identical leaf), so it is Tier-3
+    package surface.
+  - **`_getPartialStreamText`** (ai-chat `4646–4671`, think `10707–10732`) —
+    structurally identical; already wired through the engine's `getPartialStreamText`
+    hook. Lift to a shared fn over the resumable-stream chunk reader.
+  - **Stream-cleanup pair** `_ensureStreamCleanupScheduled` / `_cleanupStreamBuffers`
+    (ai-chat `1446–1474`, think `11368–11394`) — near byte-identical alarm scheduling
+    - buffer cleanup (#1706). Lift with the schedule / clear primitives as params.
+  - **Recovering-flag** `_setChatRecovering` (ai-chat `3967–3997`, think
+    `11224–11255`) + the recovering-frame builder (`_buildRecoveringConnectFrame`
+    ai-chat `3938–3957`; the recovering slice of Think's `_buildIdleConnectMessages`
+    `11283–11296`) — near byte-identical; differ only in the broadcast frame's
+    message-type enum (`CF_AGENT_CHAT_RECOVERING` vs `MSG_CHAT_RECOVERING`). Lift with
+    the message type + broadcast fn passed as params. The `_broadcastChat` /
+    `_broadcastChatMessage` wrappers themselves stay package-local (they are the
+    `exclude` + `_pendingResumeConnections` merge) and are threaded in as the
+    broadcast-fn param — do not try to lift them in 4f.
+
+  **4f-ii — behavior-sensitive convergences (own review + likely changeset; NOT in
+  the zero-behavior bucket).** These look like dedup but are not pure lifts; each is a
+  convergence that can change observable output and so gets its own slice, review, and
+  (where output changes) a changeset.
+  - **ai-chat's local `enforceRowSizeLimit`** (`_enforceRowSizeLimit`,
+    `index.ts:4997–5106`, ~110 lines) vs the shared `enforceRowSizeLimit`
+    (`agents/chat/sanitize.ts:124`, which Think uses). This is NOT a byte-identical
+    lift: ai-chat's version adds `metadata.compactedToolOutputs` / `compactedTextParts`
+    annotations and console warnings, and may differ in truncation thresholds/order.
+    Converging changes what gets persisted, so: first diff the truncation behavior; if
+    it differs, decide the correct behavior and ship a changeset (persisted-row shape
+    is user-observable). Extend the shared fn with an optional annotate/`onTruncate`
+    param rather than forking. Treat as its own slice, not a leaf lift.
+  - **ai-chat's inline protocol parse vs the shared `parseProtocolMessage`**
+    (`agents/chat/parse-protocol.ts`). ai-chat inlines equivalent `MessageType` switch
+    checks in `onMessage` (`index.ts:794–801`+); Think routes through
+    `parseProtocolMessage` (`think.ts:7399–7402`). Migrate ai-chat's parse step onto
+    the shared parser — but this is **classification-only**: ai-chat must KEEP its
+    distinct handler bodies, in particular `CF_AGENT_CHAT_MESSAGES` (ai-chat persists
+    the client snapshot; Think no-ops it). Do not let the migration converge the
+    handlers. Behavior-preserving if the handlers are untouched, so likely no
+    changeset, but it touches the dispatch path — gate behind ai-chat e2e and review
+    the per-type routing against the inline switch.
+
+  4f-i items are independently revertible; land them as small commits (or one
+  tightly-scoped slice) with the 4e verification bar — `pnpm run check`, agents /
+  ai-chat / think suites, local SIGKILL e2e for both packages — zero behavior change,
+  no changeset. 4f-ii items each get a dedicated slice with the verify-first gate
+  above. 4f does not depend on 4d-2; it can run any time after 4e.
+
 Each slice: deep review for edge cases, run the local + (where auth permits) real
 e2e suites, commit with a detailed message. Slice 4d does not start until 4a–4c
 are green.
@@ -2487,12 +2857,24 @@ Exit criteria:
 Build an internal pi adapter (and a small pi codec) that runs on the shared
 engine. This is the genericity proof, not a product.
 
+Phase 5 is also the **forcing function for the Tier-2 extractions** in the
+"Chat-layer extraction map" — the resume/reconnect handshake and the streaming-loop
+codec. Drive those extractions through the pi adapter rather than before it: pi's
+non-AI-SDK wire vocabulary and transcript shape are exactly what prove the seams are
+not `UIMessage`-coupled. (Run Slice 4f and the auto-continuation convergence first;
+they are independent of Phase 5 and shrink the surface pi has to reason about.)
+
 Work:
 
 - Add an internal pi fixture under `experimental/` (no published package).
 - Implement a `PiRecoveryAdapter` and `PiRecoveryCodec` over pi's
   `AgentMessage[]` transcript and agent-event stream.
 - Run the shared engine unit suite and a recovery subset against the pi adapter.
+- As pi forces the seams, extract the Tier-2 subsystems into `agents/chat`: the
+  resume handshake (notify → REQUEST → ACK → replay, terminal replay, recovering
+  frame) behind a wire-vocabulary + idle-payload adapter, and the streaming codec
+  (chunk apply, start-id alignment, progress gating) behind `ChatRecoveryCodec` /
+  `PiRecoveryCodec`. Fold the corrections back into the AI SDK adapter and codec.
 - Record any place where the engine or adapter leaked a `UIMessage`-shaped
   assumption, and fix the seam.
 
@@ -2501,6 +2883,8 @@ Exit criteria:
 - The pi adapter recovers a deploy/crash mid-stream through the same engine.
 - No engine change was required that is specific to `UIMessage`.
 - Any seam corrections are folded back into the AI SDK adapter and codec.
+- If a Tier-2 seam could not be cleanly shared for pi, the reason is recorded (it
+  signals the seam shape is wrong) rather than forced.
 
 ### Phase 6: confidence and e2e hardening
 
