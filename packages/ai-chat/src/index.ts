@@ -150,15 +150,16 @@ type AIChatRecoveryClassification = { shouldRetryPreStream: boolean };
 // terminalMessage, noProgressTimeoutMs, alarm debounce) now live in the shared
 // incident engine (agents/chat) and are applied by `resolveChatRecoveryConfig`
 // / `evaluateChatRecoveryIncident`. See design/rfc-chat-recovery-foundation.md.
-// Auto-continuation barrier (#1649): when the model emits parallel tool calls,
-// the client answers each one independently and sends a tool result with
+// Auto-continuation barrier (#1649/#1650): when the model emits parallel tool
+// calls, the client answers each one independently and sends a tool result with
 // `autoContinue` per result. A fast tool's result must NOT trigger inference
 // while a slower sibling is still `input-available` — that feeds the provider
-// an incomplete tool-result set. So we wait until the transcript is stable (no
-// `input-available`/`approval-requested` parts) before continuing, bounded by
-// this timeout so a genuinely orphaned tool call (e.g. the client disconnected
-// mid-batch) still falls through instead of pinning the continuation open.
-const AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS = 60_000;
+// an incomplete tool-result set. The barrier is event-driven (converged onto
+// `@cloudflare/think`'s model): we only fire the continuation once the leaf
+// step's batch is fully answered, re-arming on each applied result and on stream
+// finalize, with NO orphan timeout — an incomplete batch simply never
+// auto-continues until it completes (a later user turn / chat recovery repairs
+// the transcript). See design/rfc-chat-recovery-foundation.md.
 // (Stable-state retry delay `CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS` now lives
 // in agents/chat; the reschedule that consumes it is owned by the shared engine.
 // The recovering-flag key/TTL and the terminal-record key now live in agents/chat
@@ -482,9 +483,35 @@ export class AIChatAgent<
 
   /**
    * Small debounce window to batch adjacent client-side tool results/approvals
-   * into a single server continuation turn.
+   * into a single server continuation barrier check (#1650). Matches
+   * `@cloudflare/think`'s coalesce timer.
    */
-  private static AUTO_CONTINUATION_COALESCE_MS = 10;
+  private static AUTO_CONTINUATION_COALESCE_MS = 50;
+
+  /**
+   * Coalesce/debounce timer for the event-driven auto-continuation barrier
+   * (#1650). Each tool result/approval re-arms it; on fire it runs
+   * `_fireAutoContinuationWhenStable`.
+   */
+  private _continuationTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Double-fire guard for the auto-continuation barrier (#1650). Load-bearing
+   * now that the barrier runs BEFORE the continuation turn is enqueued (rather
+   * than inside the exclusive turn, where the turn queue serialized waits): it
+   * ensures only one in-flight apply-drain runs, and that drain re-checks
+   * completeness on completion before firing.
+   */
+  private _continuationBarrierActive = false;
+
+  /**
+   * Stream-active gate for the auto-continuation barrier (#1650). True while an
+   * assistant turn is streaming in `_reply`: the parallel tool batch can still
+   * grow with tool calls the model hasn't emitted yet, so no completeness check
+   * is meaningful until the stream finalizes. `_onStreamingTurnFinalized`
+   * clears it and re-runs the barrier once the batch is fully materialized.
+   */
+  private _streamingTurnActive = false;
 
   /** Default wait for trailing-edge debounced overlapping submits. */
   private static MESSAGE_DEBOUNCE_MS = 750;
@@ -1146,7 +1173,7 @@ export class AIChatAgent<
 
           this._emit("tool:result", { toolCallId, toolName });
 
-          const applyPromise = this._enqueueInteractionApply(() =>
+          this._enqueueInteractionApply(() =>
             this._applyToolResult(
               toolCallId,
               toolName,
@@ -1157,14 +1184,20 @@ export class AIChatAgent<
           );
 
           if (autoContinue) {
-            this._enqueueAutoContinuation(
+            this._scheduleAutoContinuation(
               connection,
               (clientTools as ClientToolSchema[] | undefined) ??
                 this._lastClientTools,
               this._lastBody,
-              "[AIChatAgent] Tool continuation failed:",
-              applyPromise
+              "[AIChatAgent] Tool continuation failed:"
             );
+          } else {
+            // A result that arrived WITHOUT autoContinue (e.g. a standalone
+            // errored tool) can still be the one that completes a parallel batch
+            // a sibling already opted to continue — re-arm the barrier so that
+            // continuation fires once the batch is whole (#1650). Never CREATES
+            // a pending continuation.
+            this._rearmPendingAutoContinuationForBatch();
           }
           return;
         }
@@ -1173,18 +1206,19 @@ export class AIChatAgent<
         if (event.type === "tool-approval") {
           const { toolCallId, approved, autoContinue } = event;
           this._emit("tool:approval", { toolCallId, approved });
-          const approvalPromise = this._enqueueInteractionApply(() =>
+          this._enqueueInteractionApply(() =>
             this._applyToolApproval(toolCallId, approved)
           );
 
           if (autoContinue) {
-            this._enqueueAutoContinuation(
+            this._scheduleAutoContinuation(
               connection,
               this._lastClientTools,
               this._lastBody,
-              "[AIChatAgent] Tool approval continuation failed:",
-              approvalPromise
+              "[AIChatAgent] Tool approval continuation failed:"
             );
+          } else {
+            this._rearmPendingAutoContinuationForBatch();
           }
           return;
         }
@@ -1251,50 +1285,30 @@ export class AIChatAgent<
     );
   }
 
-  private _mergeAutoContinuationPrerequisite(
-    current: Promise<boolean> | null,
-    next?: Promise<boolean>
-  ): Promise<boolean> | null {
-    if (!next) {
-      return current;
-    }
-
-    if (!current) {
-      return next;
-    }
-
-    return Promise.all([current, next]).then(
-      ([currentApplied, nextApplied]) => {
-        return currentApplied && nextApplied;
-      }
-    );
-  }
-
   private _storeDeferredAutoContinuation(
     connection: Connection,
     clientTools: ClientToolSchema[] | undefined,
     body: Record<string, unknown> | undefined,
-    errorPrefix: string,
-    prerequisite?: Promise<boolean>
+    errorPrefix: string
   ) {
-    const existing = this._continuation.deferred;
     this._continuation.deferred = {
       connection,
       connectionId: connection.id,
       clientTools,
       body,
       errorPrefix,
-      prerequisite: this._mergeAutoContinuationPrerequisite(
-        existing?.prerequisite ?? null,
-        prerequisite
-      )
+      prerequisite: null
     };
   }
 
   private _activateDeferredAutoContinuation() {
     const pending = this._continuation.activateDeferred(() => nanoid());
     if (!pending) return;
-    this._queueAutoContinuation(pending.requestId);
+    // Run the freshly-activated continuation through the event-driven barrier
+    // (#1650) rather than enqueuing it directly — its batch may still be
+    // incomplete (or a stream may be active), in which case it parks and
+    // re-arms instead of firing inference against a half-complete transcript.
+    this._fireAutoContinuationWhenStable();
   }
 
   private _clearAllAutoContinuationState(sendNone = false) {
@@ -1754,8 +1768,39 @@ export class AIChatAgent<
    * `waitForIdle()` (tests, `waitUntilStable`, recovery code).
    */
   private async waitForIdle(): Promise<void> {
-    await this._submitConcurrency.waitForIdle(() =>
-      this._turnQueue.waitForIdle()
+    for (;;) {
+      await this._submitConcurrency.waitForIdle(() =>
+        this._turnQueue.waitForIdle()
+      );
+      // An armed coalesce timer / in-flight barrier drain means an
+      // auto-continuation decision is imminent (#1650): it will either enqueue
+      // a continuation turn (re-busying the queue) or park on an incomplete
+      // batch. Wait for that decision to resolve before reporting idle so a
+      // debounced continuation isn't missed by idle observers (tests,
+      // recovery).
+      if (!this._hasArmedContinuation()) return;
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, AIChatAgent.AUTO_CONTINUATION_COALESCE_MS)
+      );
+    }
+  }
+
+  /**
+   * `true` when an auto-continuation is armed and going to fire on its own —
+   * its coalesce timer is still pending or its completeness barrier is
+   * mid-drain (#1650). Such an agent is NOT idle/stable: a continuation turn is
+   * imminent, so idle observers (recovery, idle-eviction, tests) must keep
+   * waiting until it either enqueues a turn or parks on an incomplete batch.
+   * A continuation that has already entered its turn (`pastCoalesce`) is
+   * covered by the turn queue, and a parked one (waiting on an unanswered
+   * sibling) is covered by `hasPendingInteraction()`, so neither is reported
+   * here.
+   */
+  private _hasArmedContinuation(): boolean {
+    return (
+      this._continuation.pending !== null &&
+      !this._continuation.pending.pastCoalesce &&
+      (this._continuationTimer !== null || this._continuationBarrierActive)
     );
   }
 
@@ -2012,7 +2057,23 @@ export class AIChatAgent<
       }
 
       if (!this.hasPendingInteraction()) {
-        return true;
+        if (!this._hasArmedContinuation()) {
+          return true;
+        }
+        // An auto-continuation is armed (#1650) — not stable yet. Wait for it
+        // to fire (enqueuing a turn the outer loop then drains) or park, then
+        // re-check.
+        if (
+          (await this._awaitWithDeadline(
+            new Promise<void>((resolve) =>
+              setTimeout(resolve, AIChatAgent.AUTO_CONTINUATION_COALESCE_MS)
+            ),
+            deadline
+          )) === TIMED_OUT
+        ) {
+          return false;
+        }
+        continue;
       }
 
       const pending = this._pendingInteractionPromise;
@@ -2065,6 +2126,15 @@ export class AIChatAgent<
     // Drop the apply chain so new interactions don't serialize behind a stale
     // (possibly hung) apply from the turn we just reset (#1649).
     this._interactionApplyTail = Promise.resolve();
+    // Tear down the event-driven auto-continuation barrier (#1650): cancel the
+    // coalesce timer and clear the double-fire / stream-active gates so a reset
+    // mid-park can't leave a stale flag pinning future continuations.
+    if (this._continuationTimer) {
+      clearTimeout(this._continuationTimer);
+      this._continuationTimer = null;
+    }
+    this._continuationBarrierActive = false;
+    this._streamingTurnActive = false;
     this._continuation.sendResumeNone();
     this._continuation.clearAll();
     this._pendingChatResponseResults.length = 0;
@@ -2280,36 +2350,39 @@ export class AIChatAgent<
     return result!.value;
   }
 
-  private _enqueueAutoContinuation(
+  /**
+   * Schedule an auto-continuation for a tool result/approval that opted in with
+   * `autoContinue: true` (#1650). Coalesces rapid sibling results into a single
+   * continuation via the debounce timer; the actual fire is gated on a complete
+   * tool batch and no active stream by `_fireAutoContinuationWhenStable`. Mirrors
+   * `@cloudflare/think`'s `_scheduleAutoContinuation`.
+   */
+  private _scheduleAutoContinuation(
     connection: Connection,
     clientTools: ClientToolSchema[] | undefined,
     body: Record<string, unknown> | undefined,
-    errorPrefix: string,
-    prerequisite?: Promise<boolean>
+    errorPrefix: string
   ) {
-    if (this._continuation.pending) {
-      if (this._continuation.pending.pastCoalesce) {
-        this._storeDeferredAutoContinuation(
-          connection,
-          clientTools,
-          body,
-          errorPrefix,
-          prerequisite
-        );
-        return;
-      }
+    if (this._continuation.pending?.pastCoalesce) {
+      // A continuation is already running; the new result coalesces/defers into
+      // the next one rather than re-arming this one.
+      this._storeDeferredAutoContinuation(
+        connection,
+        clientTools,
+        body,
+        errorPrefix
+      );
+      return;
+    }
 
+    if (this._continuation.pending) {
       this._continuation.pending.connection = connection;
       this._continuation.pending.connectionId = connection.id;
       this._continuation.awaitingConnections.set(connection.id, connection);
       this._continuation.pending.clientTools = clientTools;
       this._continuation.pending.body = body;
       this._continuation.pending.errorPrefix = errorPrefix;
-      this._continuation.pending.prerequisite =
-        this._mergeAutoContinuationPrerequisite(
-          this._continuation.pending.prerequisite,
-          prerequisite
-        );
+      this._resetAutoContinuationTimer();
       return;
     }
 
@@ -2321,87 +2394,132 @@ export class AIChatAgent<
       clientTools,
       body,
       errorPrefix,
-      prerequisite: this._mergeAutoContinuationPrerequisite(null, prerequisite),
+      prerequisite: null,
       pastCoalesce: false
     };
     this._continuation.awaitingConnections.set(connection.id, connection);
-    this._queueAutoContinuation(requestId);
-  }
-
-  private async _awaitPendingAutoContinuationPrerequisite(): Promise<boolean> {
-    while (true) {
-      const prerequisite = this._continuation.pending?.prerequisite;
-      if (!prerequisite) {
-        break;
-      }
-
-      const applied = await prerequisite;
-      if (!applied) {
-        return false;
-      }
-
-      await new Promise((resolve) =>
-        setTimeout(resolve, AIChatAgent.AUTO_CONTINUATION_COALESCE_MS)
-      );
-
-      if (this._continuation.pending?.prerequisite === prerequisite) {
-        break;
-      }
-    }
-
-    // #1649 barrier: the prior step may have emitted parallel tool calls. The
-    // client answers each one independently, so the result that triggered this
-    // continuation can arrive while slower siblings are still `input-available`
-    // (or `approval-requested`). Continuing now would send the provider an
-    // incomplete tool-result set. Hold until the batch settles, bounded so a
-    // genuinely orphaned tool call (client disconnected mid-batch) still falls
-    // through rather than pinning the continuation open forever.
-    await this._awaitPendingInteractionBarrier();
-    return true;
+    this._resetAutoContinuationTimer();
   }
 
   /**
-   * Block until the latest assistant step's parallel tool batch is fully
-   * answered, or `AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS` elapses. Awaits the
-   * in-flight tool-result apply when one exists (so a sibling that lands
-   * mid-wait is observed promptly) and polls otherwise. Runs inside the
-   * continuation turn, so — unlike `waitUntilStable` — it must not wait on the
-   * turn queue (that would deadlock).
-   *
-   * No concurrent-entry guard is needed (unlike Think's `_continuationBarrier
-   * Active`): this runs inside the exclusive continuation turn, and a sibling
-   * result arriving while it waits hits the merge branch of
-   * `_enqueueAutoContinuation` (it updates `pending.prerequisite`) rather than
-   * enqueuing a second turn — so the turn queue serializes barrier waits.
+   * Re-arm the barrier for a result/approval that arrived WITHOUT `autoContinue`
+   * (#1650). A standalone errored result declines to continue on its own, but in
+   * a parallel batch a SIBLING may already have opted in — and this result can be
+   * the one that completes the batch, so we must re-run the barrier check. Unlike
+   * `_scheduleAutoContinuation` this NEVER creates a pending continuation (a
+   * standalone errored tool with no opted-in sibling must not auto-continue), and
+   * it no-ops once the continuation is running (`pastCoalesce`).
    */
-  private async _awaitPendingInteractionBarrier(): Promise<void> {
-    const deadline = Date.now() + AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      // The pending continuation was cleared (chat clear / turn reset) — nothing
-      // to wait for; bail so the turn isn't held by a stale wait.
-      if (!this._continuation.pending) return;
-      const pending = this._pendingInteractionPromise;
-      if (pending) {
-        // `_pendingInteractionPromise` is a single slot — awaiting it is only a
-        // "wake up as soon as an apply lands" optimization, NOT the correctness
-        // gate (that is `_hasIncompleteToolBatch()`, re-checked each loop). If
-        // sibling results overwrite the slot, each apply still patches the cache.
-        try {
-          await pending;
-        } catch {
-          // Ignore — re-evaluate the batch below.
-        }
-        continue;
-      }
-      if (!this._hasIncompleteToolBatch()) return;
-      await new Promise((resolve) => setTimeout(resolve, 100));
+  private _rearmPendingAutoContinuationForBatch(): void {
+    const pending = this._continuation.pending;
+    if (!pending || pending.pastCoalesce) return;
+    this._resetAutoContinuationTimer();
+  }
+
+  /**
+   * Called when a streaming assistant turn finalizes (its message, with ALL tool
+   * parts, is now persisted). Clears the stream-active gate and re-runs the
+   * barrier for a continuation the gate held (#1650). Essential for an all-fast
+   * parallel batch whose every result landed mid-stream: once the stream ends
+   * there is no further tool-result event to re-arm, so without this the held
+   * continuation would never fire. A slow batch is re-checked here and simply
+   * keeps holding (event-driven) until its remaining siblings answer.
+   */
+  private _onStreamingTurnFinalized(): void {
+    this._streamingTurnActive = false;
+    this._rearmPendingAutoContinuationForBatch();
+  }
+
+  private _resetAutoContinuationTimer(): void {
+    if (this._continuationTimer) {
+      clearTimeout(this._continuationTimer);
     }
-    // Timed out with the batch still incomplete: a sibling tool result never
-    // arrived (e.g. the client disconnected mid-batch). Proceed anyway rather
-    // than pinning the continuation turn open forever.
-    console.warn(
-      `[AIChatAgent] Auto-continuation proceeding after waiting ${AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS}ms for unanswered parallel tool result(s) (#1649).`
-    );
+    this._continuationTimer = setTimeout(() => {
+      this._continuationTimer = null;
+      const pending = this._continuation.pending;
+      if (!pending) return;
+      this._fireAutoContinuationWhenStable();
+    }, AIChatAgent.AUTO_CONTINUATION_COALESCE_MS);
+  }
+
+  /**
+   * Fire an auto-continuation, but only once the model's parallel tool-call
+   * batch is fully answered (#1649) and no assistant turn is mid-stream (#1650).
+   * The barrier is event-driven and has NO orphan timeout: when the batch is
+   * still incomplete we drain the in-flight applies, re-check, and — if still
+   * incomplete — return WITHOUT firing and WITHOUT holding the isolate, leaving
+   * `_continuation.pending` in place. The next sibling's result re-arms the
+   * coalesce timer and re-runs this check; the continuation fires once the final
+   * sibling lands. A true orphan (a sibling that never arrives) simply never
+   * auto-continues, which is correct — a later user turn / chat recovery repairs
+   * the transcript. Converged onto `@cloudflare/think`'s
+   * `_fireAutoContinuationWhenStable`.
+   */
+  private _fireAutoContinuationWhenStable(): void {
+    if (!this._continuation.pending) return;
+    // The continuation is already running (a sibling re-armed after it started).
+    // New results coalesce/defer into it — don't double-fire.
+    if (this._continuation.pending.pastCoalesce) return;
+    // A drain is already in progress; the sibling that re-armed the timer is
+    // absorbed by it. Only one drain runs, and it re-checks on completion.
+    if (this._continuationBarrierActive) return;
+    // Stream-active gate (#1650, #1649): while the model is still streaming the
+    // assistant turn we cannot know the parallel batch is complete — a fast
+    // client tool can resolve before its slower siblings have even been streamed,
+    // so they exist nowhere yet and firing now would repair them to errored.
+    // `_onStreamingTurnFinalized` re-runs this check once the stream ends.
+    if (this._streamingTurnActive) return;
+    // Fast path: no apply in flight and the leaf step is not mid-batch.
+    if (!this._pendingInteractionPromise && !this._hasIncompleteToolBatch()) {
+      this._fireAutoContinuation(this._continuation.pending.requestId);
+      return;
+    }
+    this._continuationBarrierActive = true;
+    // keepAlive only for the bounded drain — the duration of the applies that
+    // have ALREADY arrived, not an open-ended wait for siblings that haven't.
+    this.keepAliveWhile(() => this._drainInteractionApplies())
+      .catch(() => {})
+      .finally(() => {
+        // Clear the flag and re-check synchronously — no `await` between here
+        // and the fire/return decision, so a sibling-armed coalesce timer (a
+        // macrotask) cannot interleave and double-fire.
+        this._continuationBarrierActive = false;
+        const pending = this._continuation.pending;
+        if (!pending || pending.pastCoalesce) return;
+        // A stream (re)started during the drain — hold; the finalize re-trigger
+        // re-checks once the batch is fully materialized.
+        if (this._streamingTurnActive) return;
+        // Still waiting on an unanswered sibling — return without firing. The
+        // result that completes the batch re-triggers this via its own
+        // `_scheduleAutoContinuation`; we do not pin the isolate in the interim.
+        if (this._hasIncompleteToolBatch()) return;
+        this._fireAutoContinuation(pending.requestId);
+      });
+  }
+
+  /**
+   * Drain every in-flight tool-result/approval apply, including any enqueued
+   * while we wait, so the subsequent `_hasIncompleteToolBatch()` re-check sees
+   * every result that has ALREADY arrived. Bounded by real apply activity (a
+   * storage write each), never by a fixed timer: the loop re-reads
+   * `_interactionApplyTail` after each await because a sibling can extend the
+   * tail mid-drain, and stops once the tail stops advancing. Mirrors
+   * `@cloudflare/think`'s `_drainInteractionApplies`.
+   */
+  private async _drainInteractionApplies(): Promise<void> {
+    let tail = this._interactionApplyTail;
+    for (;;) {
+      // The pending continuation was cleared (chat clear / turn reset) — nothing
+      // to drain for; bail so the isolate isn't held by a stale drain.
+      if (!this._continuation.pending) return;
+      try {
+        await tail;
+      } catch {
+        // A rejected apply is irrelevant to completeness — re-read and re-check.
+      }
+      if (this._interactionApplyTail === tail) return;
+      tail = this._interactionApplyTail;
+    }
   }
 
   /**
@@ -2416,25 +2534,26 @@ export class AIChatAgent<
     return hasIncompleteToolBatch(this.messages);
   }
 
-  private _queueAutoContinuation(requestId: string) {
+  private _fireAutoContinuation(requestId: string) {
+    // Cancel any still-armed coalesce timer so a sibling result that re-armed it
+    // during the barrier wait can't fire a duplicate continuation after this one
+    // starts (#1650).
+    if (this._continuationTimer) {
+      clearTimeout(this._continuationTimer);
+      this._continuationTimer = null;
+    }
+
     const epoch = this._turnQueue.generation;
     // _runExclusiveChatTurn must be called synchronously so the chat turn
     // queue is set up immediately — otherwise waitForIdle() can resolve
     // before the continuation starts.  keepAlive() is called inside the
-    // turn to prevent hibernation while waiting for prerequisites /
-    // streaming, without deferring the queue registration.
+    // turn to prevent hibernation while streaming, without deferring the queue
+    // registration.
     this._runExclusiveChatTurn(
       requestId,
       async () => {
         const dispose = await this.keepAlive();
         try {
-          const applied =
-            await this._awaitPendingAutoContinuationPrerequisite();
-          if (!applied) {
-            this._clearAllAutoContinuationState(true);
-            return;
-          }
-
           const connection = this._continuation.pending?.connection;
           if (!connection) {
             this._clearAllAutoContinuationState(true);
@@ -5869,178 +5988,202 @@ export class AIChatAgent<
         // persistence + the success `message:response` emit below are skipped.
         let stallRouted = false;
 
+        // Stream-active gate for the auto-continuation barrier (#1650): while
+        // this assistant turn is streaming the parallel tool batch can still
+        // grow, so no completeness check is meaningful. The gate clears only in
+        // the outer `finally` below — AFTER the streamed message (with all its
+        // tool parts) is persisted to `this.messages` — so the re-armed barrier
+        // check sees the fully-materialized batch.
+        this._streamingTurnActive = true;
         try {
-          if (isSSE) {
-            // AI SDK v5 SSE format
-            streamResult = await this._streamSSEReply(
-              id,
-              streamId,
-              reader,
-              message,
-              streamCompleted,
-              continuation,
-              abortSignal
-            );
-          } else {
-            streamResult = await this._sendPlaintextReply(
-              id,
-              streamId,
-              reader,
-              message,
-              streamCompleted,
-              continuation,
-              abortSignal
-            );
-          }
-        } catch (error) {
-          // A stall watchdog abort (#1626) is a recoverable interruption, not a
-          // terminal error. Persist the settled partial (so the continuation
-          // re-anchors without re-running completed tool calls, and the user
-          // keeps generated content), then route into bounded recovery; only
-          // fall through to the terminal path once the budget is exhausted or
-          // recovery is disabled.
-          if (
-            error instanceof ChatStreamStalledError &&
-            !streamCompleted.value
-          ) {
-            // The partial generated so far lives on the in-memory `message`; the
-            // unconditional post-stream persistence block below writes it under
-            // `message.id` (the same path a normal turn uses), so the scheduled
-            // continuation re-anchors onto it via `targetAssistantId`. (Unlike a
-            // cold deploy recovery, there is no need to reconstruct from stored
-            // chunks here — the live `message` is authoritative.)
-            const targetAssistantId =
-              message.parts.length > 0 ? message.id : undefined;
-            const outcome = await this._routeStallToBoundedRecovery({
-              requestId: id,
-              streamId,
-              partialParts: message.parts,
-              targetAssistantId
-            });
-            if (outcome === "scheduled") {
-              // Recovering: close the stream cleanly (no terminal error frame);
-              // the scheduled continuation drives the turn to completion. Report
-              // `aborted` so this attempt does not terminalize the turn.
-              this._completeStream(streamId);
-              this._broadcastChatMessage({
-                body: "",
-                done: true,
+          try {
+            if (isSSE) {
+              // AI SDK v5 SSE format
+              streamResult = await this._streamSSEReply(
                 id,
-                type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-                ...(continuation && { continuation: true })
-              });
-              streamResult = { status: "aborted" };
-              streamCompleted.value = true;
-              stallRouted = true;
-            } else if (outcome === "exhausted") {
-              // `_routeStallToBoundedRecovery` already delivered terminal UX
-              // (terminalMessage + done/error frame + onExhausted), identical to
-              // deploy-recovery exhaustion. Finalize the resumable stream and
-              // report `aborted` so the generic terminal path is not re-run.
-              this._markStreamError(streamId);
-              streamResult = { status: "aborted" };
-              streamCompleted.value = true;
-              stallRouted = true;
-            }
-            // outcome === "disabled" (chat recovery off): fall through to the
-            // generic terminal path — the watchdog's "kill the spinner"
-            // guarantee.
-          }
-          if (!stallRouted) {
-            const errorMessage =
-              error instanceof Error ? error.message : String(error);
-            streamResult = { status: "error", error: errorMessage };
-            // Mark stream as error if not already completed
-            if (!streamCompleted.value) {
-              this._markStreamError(streamId);
-              // Notify clients of the error
-              this._broadcastChatMessage({
-                body: errorMessage,
-                done: true,
-                error: true,
+                streamId,
+                reader,
+                message,
+                streamCompleted,
+                continuation,
+                abortSignal
+              );
+            } else {
+              streamResult = await this._sendPlaintextReply(
                 id,
-                type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-                ...(continuation && { continuation: true })
-              });
-              this._emit("message:error", { error: errorMessage });
-              streamCompleted.value = true;
+                streamId,
+                reader,
+                message,
+                streamCompleted,
+                continuation,
+                abortSignal
+              );
             }
-          }
-        } finally {
-          reader.releaseLock();
-
-          // Always clear the streaming message reference, even on error.
-          this._streamingMessage = null;
-          // Capture and clear early-persist tracking. The persistence block
-          // after the finally uses the local to update in place.
-          earlyPersistedId = this._approvalPersistedMessageId;
-          this._approvalPersistedMessageId = null;
-
-          // Framework-level cleanup: always remove abort controller.
-          // Only emit observability on success (not on error path).
-          if (chatMessageId) {
-            this._abortRegistry.remove(chatMessageId);
+          } catch (error) {
+            // A stall watchdog abort (#1626) is a recoverable interruption, not a
+            // terminal error. Persist the settled partial (so the continuation
+            // re-anchors without re-running completed tool calls, and the user
+            // keeps generated content), then route into bounded recovery; only
+            // fall through to the terminal path once the budget is exhausted or
+            // recovery is disabled.
             if (
-              streamCompleted.value &&
-              streamResult.status !== "error" &&
-              !stallRouted
+              error instanceof ChatStreamStalledError &&
+              !streamCompleted.value
             ) {
-              this._emit("message:response");
+              // The partial generated so far lives on the in-memory `message`; the
+              // unconditional post-stream persistence block below writes it under
+              // `message.id` (the same path a normal turn uses), so the scheduled
+              // continuation re-anchors onto it via `targetAssistantId`. (Unlike a
+              // cold deploy recovery, there is no need to reconstruct from stored
+              // chunks here — the live `message` is authoritative.)
+              const targetAssistantId =
+                message.parts.length > 0 ? message.id : undefined;
+              const outcome = await this._routeStallToBoundedRecovery({
+                requestId: id,
+                streamId,
+                partialParts: message.parts,
+                targetAssistantId
+              });
+              if (outcome === "scheduled") {
+                // Recovering: close the stream cleanly (no terminal error frame);
+                // the scheduled continuation drives the turn to completion. Report
+                // `aborted` so this attempt does not terminalize the turn.
+                this._completeStream(streamId);
+                this._broadcastChatMessage({
+                  body: "",
+                  done: true,
+                  id,
+                  type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                  ...(continuation && { continuation: true })
+                });
+                streamResult = { status: "aborted" };
+                streamCompleted.value = true;
+                stallRouted = true;
+              } else if (outcome === "exhausted") {
+                // `_routeStallToBoundedRecovery` already delivered terminal UX
+                // (terminalMessage + done/error frame + onExhausted), identical to
+                // deploy-recovery exhaustion. Finalize the resumable stream and
+                // report `aborted` so the generic terminal path is not re-run.
+                this._markStreamError(streamId);
+                streamResult = { status: "aborted" };
+                streamCompleted.value = true;
+                stallRouted = true;
+              }
+              // outcome === "disabled" (chat recovery off): fall through to the
+              // generic terminal path — the watchdog's "kill the spinner"
+              // guarantee.
+            }
+            if (!stallRouted) {
+              const errorMessage =
+                error instanceof Error ? error.message : String(error);
+              streamResult = { status: "error", error: errorMessage };
+              // Mark stream as error if not already completed
+              if (!streamCompleted.value) {
+                this._markStreamError(streamId);
+                // Notify clients of the error
+                this._broadcastChatMessage({
+                  body: errorMessage,
+                  done: true,
+                  error: true,
+                  id,
+                  type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                  ...(continuation && { continuation: true })
+                });
+                this._emit("message:error", { error: errorMessage });
+                streamCompleted.value = true;
+              }
+            }
+          } finally {
+            reader.releaseLock();
+
+            // Always clear the streaming message reference, even on error.
+            this._streamingMessage = null;
+            // Capture and clear early-persist tracking. The persistence block
+            // after the finally uses the local to update in place.
+            earlyPersistedId = this._approvalPersistedMessageId;
+            this._approvalPersistedMessageId = null;
+
+            // Framework-level cleanup: always remove abort controller.
+            // Only emit observability on success (not on error path).
+            if (chatMessageId) {
+              this._abortRegistry.remove(chatMessageId);
+              if (
+                streamCompleted.value &&
+                streamResult.status !== "error" &&
+                !stallRouted
+              ) {
+                this._emit("message:response");
+              }
             }
           }
-        }
 
-        if (message.parts.length > 0) {
-          if (earlyPersistedId) {
-            // Message already exists in this.messages from the early persist.
-            // Update it in place with the final streaming state.
-            const persistedMessage: UIMessage = {
-              ...message,
-              id: earlyPersistedId
-            };
-            const existingIdx = this.messages.findIndex(
-              (msg) => msg.id === earlyPersistedId
-            );
-            const updatedMessages = [...this.messages];
-
-            if (existingIdx >= 0) {
-              updatedMessages[existingIdx] = persistedMessage;
-            } else {
-              updatedMessages.push(persistedMessage);
-            }
-
-            await this.persistMessages(updatedMessages, excludeBroadcastIds);
-          } else if (continuation) {
-            const existingIdx = this.messages.findIndex(
-              (msg) => msg.id === message.id
-            );
-            if (existingIdx >= 0) {
+          if (message.parts.length > 0) {
+            if (earlyPersistedId) {
+              // Message already exists in this.messages from the early persist.
+              // Update it in place with the final streaming state.
+              const persistedMessage: UIMessage = {
+                ...message,
+                id: earlyPersistedId
+              };
+              const existingIdx = this.messages.findIndex(
+                (msg) => msg.id === earlyPersistedId
+              );
               const updatedMessages = [...this.messages];
-              updatedMessages[existingIdx] = message;
+
+              if (existingIdx >= 0) {
+                updatedMessages[existingIdx] = persistedMessage;
+              } else {
+                updatedMessages.push(persistedMessage);
+              }
+
               await this.persistMessages(updatedMessages, excludeBroadcastIds);
+            } else if (continuation) {
+              const existingIdx = this.messages.findIndex(
+                (msg) => msg.id === message.id
+              );
+              if (existingIdx >= 0) {
+                const updatedMessages = [...this.messages];
+                updatedMessages[existingIdx] = message;
+                await this.persistMessages(
+                  updatedMessages,
+                  excludeBroadcastIds
+                );
+              } else {
+                // No assistant message to append to, create new one
+                await this.persistMessages(
+                  [...this.messages, message],
+                  excludeBroadcastIds
+                );
+              }
             } else {
-              // No assistant message to append to, create new one
               await this.persistMessages(
                 [...this.messages, message],
                 excludeBroadcastIds
               );
             }
-          } else {
-            await this.persistMessages(
-              [...this.messages, message],
-              excludeBroadcastIds
-            );
           }
-        }
 
-        this._pendingChatResponseResults.push({
-          message,
-          requestId: id,
-          continuation,
-          status: streamResult.status,
-          ...(streamResult.error !== undefined && { error: streamResult.error })
-        });
-        return streamResult;
+          this._pendingChatResponseResults.push({
+            message,
+            requestId: id,
+            continuation,
+            status: streamResult.status,
+            ...(streamResult.error !== undefined && {
+              error: streamResult.error
+            })
+          });
+          return streamResult;
+        } finally {
+          // The streamed assistant message (with all tool parts) is now
+          // persisted: clear the stream-active gate and re-run the
+          // auto-continuation barrier for a continuation it held (#1650). This
+          // package-local hook is the SSE-loop equivalent of Think's
+          // `_onStreamingTurnFinalized` in its `toUIMessageStream()` loop.
+          // TODO(phase-5): the Tier-2 streaming-codec extraction touches this
+          // same region — fold this finalize hook into the extracted codec
+          // rather than leaving a second seam here.
+          this._onStreamingTurnFinalized();
+        }
       })
     );
   }

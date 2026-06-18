@@ -979,6 +979,93 @@ describe("Client tools continuation", () => {
     }
   });
 
+  it("parks a parallel-batch continuation indefinitely when a sibling never arrives, then fires once it lands (#1650)", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    try {
+      await agentStub.persistMessages([
+        {
+          id: "user-park-barrier",
+          role: "user",
+          parts: [{ type: "text", text: "Run two tools" }]
+        },
+        {
+          id: "assistant-park-barrier",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-firstTool",
+              toolCallId: "call_first_park",
+              state: "input-available",
+              input: {}
+            },
+            {
+              type: "tool-secondTool",
+              toolCallId: "call_second_park",
+              state: "input-available",
+              input: {}
+            }
+          ] as ChatMessage["parts"]
+        }
+      ]);
+
+      // Only the FIRST of two parallel results arrives. The batch stays
+      // incomplete, so the event-driven barrier (#1650) must PARK the
+      // continuation — the old fixed 60s force-continue is gone — and must run
+      // NO inference and spend NO budget while it waits for the sibling.
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_RESULT,
+          toolCallId: "call_first_park",
+          toolName: "firstTool",
+          output: { ok: true },
+          autoContinue: true
+        })
+      );
+
+      // Wait well past the coalesce window (50ms) AND the barrier drain so the
+      // barrier has decided to park, then assert it parked rather than fired.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      const parked = await agentStub.getContinuationStateForTest();
+      // Armed and re-armable, but never entered a turn (no force-continue).
+      expect(parked.hasPending).toBe(true);
+      expect(parked.activeRequestId).toBeNull();
+      // Budget-free: no continuation inference ran while parked.
+      expect(await agentStub.getChatMessageCallCountForTest()).toBe(0);
+      // The unanswered sibling is a pending interaction — the same on-disk
+      // signature a HITL/client-tool park leaves, which is what makes a
+      // deploy/crash mid-park recover (park `skipped`) rather than terminalize.
+      expect(await agentStub.hasPendingInteractionForTest()).toBe(true);
+
+      // The missing sibling lands → the batch completes → the parked
+      // continuation re-arms and fires exactly one continuation turn.
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_RESULT,
+          toolCallId: "call_second_park",
+          toolName: "secondTool",
+          output: { ok: true },
+          autoContinue: true
+        })
+      );
+
+      await agentStub.waitForIdleForTest();
+
+      expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
+      expect(await agentStub.getContinuationStateForTest()).toEqual({
+        hasPending: false,
+        hasDeferred: false,
+        activeRequestId: null,
+        activeConnectionId: null
+      });
+    } finally {
+      ws.close(1000);
+    }
+  });
+
   it("should clear stored client tools when chat is cleared", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

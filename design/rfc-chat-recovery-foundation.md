@@ -571,19 +571,19 @@ should converge on that behavior intentionally.
 
 ### Convergence matrix
 
-| Area                           | Current `AIChatAgent`                                                                                           | Current `Think`                                                                                          | Proposed shared behavior                                                                                                                                                            |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Durable recovery default       | `chatRecovery = false`                                                                                          | `chatRecovery = true`                                                                                    | Keep defaults per package unless a separate semver-visible RFC changes them. The engine does not own defaults.                                                                      |
-| Live stalled stream            | No bounded stall watchdog                                                                                       | Routes stalls into bounded recovery                                                                      | Adopt shared stall recovery in both packages, enabled by default when `chatRecovery` is on. `AIChatAgent` gains a default stall timeout. Changeset required.                        |
-| Recovery callback errors       | Less complete handling                                                                                          | Stronger callback-error handling                                                                         | Adopt Think's stronger behavior for both packages: app errors terminalize or mark failed consistently; platform transients can defer.                                               |
-| Recovering state on reconnect  | Not replayed on connect → now replayed (slice 2d)                                                               | Replayed on connect                                                                                      | DONE (slice 2d): `AIChatAgent` converged onto Think's replay-on-connect UX; shipped as a user-visible behavior change (minor changeset).                                            |
-| Terminal delivery              | Resume handshake, persist-first in main path                                                                    | Resume handshake, some broadcast-first resilience                                                        | Keep resume-handshake delivery. Converge on terminal-before-seal ordering (durably record/deliver before sealing the incident); duplicate delivery tolerated, lost delivery is not. |
-| Pending interaction predicates | Split stable wait vs client-budget predicate                                                                    | More client-focused predicate                                                                            | Converge on split predicates so server-tool stability and client/HITL budget exemption are not conflated.                                                                           |
-| Auto-continuation barrier      | Barrier inside the continuation turn; fixed 60s timeout then continues against an incomplete tool batch (#1649) | Event-driven barrier before enqueue; stream-gated; no orphan timeout; waits for batch completion (#1650) | Adopt Think's event-driven, no-timeout, stream-gated barrier in both packages. `AIChatAgent` drops the 60s force-continue. Changeset required. See decision below.                  |
-| Durable submissions            | Not applicable                                                                                                  | Must recover, park, complete, skip, or exhaust submissions                                               | Keep as adapter-owned Think behavior. The engine provides hooks; `AIChatAgent` adapter no-ops.                                                                                      |
-| Message reconciliation         | Required for AI SDK client IDs                                                                                  | Session persistence avoids much of it                                                                    | Keep adapter-owned. Do not force Think into ai-chat reconciliation.                                                                                                                 |
-| Progress accounting            | Meaningful chunk types                                                                                          | Durable flush/tool-output oriented                                                                       | Converge on one progress policy: bump only on new forward work at production time, never on replay/re-persist. Land with budget tests proving no regressions.                       |
-| Terminal exhausted callback    | Existing public hook                                                                                            | Existing public hook plus durable-work effects                                                           | Shared engine invokes hook, but adapter owns durable side effects.                                                                                                                  |
+| Area                           | Current `AIChatAgent`                                                                                           | Current `Think`                                                                                          | Proposed shared behavior                                                                                                                                                                                  |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Durable recovery default       | `chatRecovery = false`                                                                                          | `chatRecovery = true`                                                                                    | Keep defaults per package unless a separate semver-visible RFC changes them. The engine does not own defaults.                                                                                            |
+| Live stalled stream            | No bounded stall watchdog                                                                                       | Routes stalls into bounded recovery                                                                      | Adopt shared stall recovery in both packages, enabled by default when `chatRecovery` is on. `AIChatAgent` gains a default stall timeout. Changeset required.                                              |
+| Recovery callback errors       | Less complete handling                                                                                          | Stronger callback-error handling                                                                         | Adopt Think's stronger behavior for both packages: app errors terminalize or mark failed consistently; platform transients can defer.                                                                     |
+| Recovering state on reconnect  | Not replayed on connect → now replayed (slice 2d)                                                               | Replayed on connect                                                                                      | DONE (slice 2d): `AIChatAgent` converged onto Think's replay-on-connect UX; shipped as a user-visible behavior change (minor changeset).                                                                  |
+| Terminal delivery              | Resume handshake, persist-first in main path                                                                    | Resume handshake, some broadcast-first resilience                                                        | Keep resume-handshake delivery. Converge on terminal-before-seal ordering (durably record/deliver before sealing the incident); duplicate delivery tolerated, lost delivery is not.                       |
+| Pending interaction predicates | Split stable wait vs client-budget predicate                                                                    | More client-focused predicate                                                                            | Converge on split predicates so server-tool stability and client/HITL budget exemption are not conflated.                                                                                                 |
+| Auto-continuation barrier      | Barrier inside the continuation turn; fixed 60s timeout then continues against an incomplete tool batch (#1649) | Event-driven barrier before enqueue; stream-gated; no orphan timeout; waits for batch completion (#1650) | DONE: `AIChatAgent` converged onto Think's event-driven, no-timeout, stream-gated barrier; the 60s force-continue is gone (parks until the batch completes). Minor changeset shipped. See decision below. |
+| Durable submissions            | Not applicable                                                                                                  | Must recover, park, complete, skip, or exhaust submissions                                               | Keep as adapter-owned Think behavior. The engine provides hooks; `AIChatAgent` adapter no-ops.                                                                                                            |
+| Message reconciliation         | Required for AI SDK client IDs                                                                                  | Session persistence avoids much of it                                                                    | Keep adapter-owned. Do not force Think into ai-chat reconciliation.                                                                                                                                       |
+| Progress accounting            | Meaningful chunk types                                                                                          | Durable flush/tool-output oriented                                                                       | Converge on one progress policy: bump only on new forward work at production time, never on replay/re-persist. Land with budget tests proving no regressions.                                             |
+| Terminal exhausted callback    | Existing public hook                                                                                            | Existing public hook plus durable-work effects                                                           | Shared engine invokes hook, but adapter owns durable side effects.                                                                                                                                        |
 
 ### Behavior decisions
 
@@ -618,6 +618,14 @@ state is durably delivered.
 This is a correctness improvement for `AIChatAgent`.
 
 #### Adopt Think's event-driven auto-continuation barrier
+
+**DONE** (auto-continuation convergence slice) — `AIChatAgent` now runs the
+event-driven, no-timeout, stream-gated barrier described below; the 60s
+force-continue and the in-turn poll are gone. See the Progress log entry for the
+as-built mapping (barrier-out-of-turn, double-fire guard, SSE-loop finalize
+hook, deferred/coalesce reconciliation, and the idle/stable continuation
+awareness that this convergence required). Orchestration stays package-local; a
+future slice may lift the shared algorithm into `agents/chat`.
 
 When a turn ends with parallel client tool calls still outstanding, the agent must
 wait for every tool result before auto-continuing, or it continues inference against
@@ -1252,15 +1260,16 @@ The map confirms these are correctly divergent; extracting them would be the
 
 ### Auto-continuation convergence (a behavior decision, not a leaf lift)
 
-The parallel-tool-call barrier (#1649 ai-chat vs #1650 Think) is intentionally
-divergent and is being **converged onto Think's event-driven model** — recorded as a
-behavior decision under "Better-behavior convergence" (changeset required). This is
-NOT a dedup: it is a substantial `AIChatAgent` rearchitecture (barrier out of the
-turn, a new double-fire guard, a new SSE-loop finalize hook, reconciling ai-chat's
-`_continuation` coalesce/deferred machinery). Slice 4f only contributes the shared
-leaf (`_hasIncompleteToolBatch`, verified byte-identical) that the convergence
-consumes — see the behavior decision for the full scope and the deploy-mid-park e2e
-requirement.
+The parallel-tool-call barrier (#1649 ai-chat vs #1650 Think) was intentionally
+divergent and has now been **converged onto Think's event-driven model** (DONE) —
+recorded as a behavior decision under "Better-behavior convergence" (minor changeset
+shipped). This was NOT a dedup: it was a substantial `AIChatAgent` rearchitecture
+(barrier out of the turn, a new double-fire guard, a new SSE-loop finalize hook,
+reconciling ai-chat's `_continuation` coalesce/deferred machinery, and teaching the
+idle/stable checks about an armed-but-unfired continuation). Slice 4f contributed the
+shared leaf (`_hasIncompleteToolBatch`, verified byte-identical) that the convergence
+consumes — see the behavior decision and the Progress log entry for the full
+as-built scope.
 
 ### Sequencing
 
@@ -1627,6 +1636,62 @@ guard against shipping a subtly broken recovery path.
 
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
+
+- _Auto-continuation convergence (post-Slice-4f — adopt Think's event-driven barrier in
+  `AIChatAgent`; user-visible, `@cloudflare/ai-chat` minor changeset)_ — Replaced
+  ai-chat's in-turn, 60s-polling parallel-tool barrier (#1649) with Think's
+  event-driven, no-timeout, stream-gated barrier (#1650). **As-built mapping** (Think →
+  ai-chat): `_scheduleAutoContinuation` (coalesce-timer arm + pending create/update; if
+  already-running `pastCoalesce`, defer), `_rearmPendingAutoContinuationForBatch`
+  (re-arm on a non-`autoContinue` sibling result that may complete the batch — never
+  creates a pending), `_fireAutoContinuationWhenStable` (the barrier: returns early on
+  `pastCoalesce` / `_continuationBarrierActive` / `_streamingTurnActive`; fast-path fires
+  when no apply is in flight and `_hasIncompleteToolBatch()` is false; otherwise drains
+  in-flight applies under `keepAliveWhile` and re-checks synchronously in `finally` so a
+  sibling-armed coalesce macrotask can't double-fire), `_drainInteractionApplies`
+  (tail-chasing drain bounded by real apply activity), `_onStreamingTurnFinalized`
+  (clears the stream gate + re-arms — the SSE-loop finalize hook), and `_fireAutoContinuation`
+  (cancels the still-armed timer, then **synchronously** calls `_runExclusiveChatTurn` so
+  the queue is registered before any idle observer can resolve). Dropped
+  `AUTO_CONTINUATION_PENDING_TOOL_TIMEOUT_MS`, the in-turn poll, and
+  `_awaitPendingInteractionBarrier`. New fields: `_continuationTimer`,
+  `_continuationBarrierActive`, `_streamingTurnActive` (all cleared in `resetTurnState`);
+  `AUTO_CONTINUATION_COALESCE_MS` set to 50ms to match Think. **SSE-loop finalize hook:**
+  ai-chat streams via the SSE reader, not Think's `toUIMessageStream()` loop, so the
+  stream-active gate is set after `_startStream` and cleared via `_onStreamingTurnFinalized()`
+  in an outer `finally` in `_reply` (package-local; carries a Phase-5 note since the Tier-2
+  codec extraction will touch the same region). **Deferred/coalesce reconciliation:**
+  ai-chat's `_continuation` deferred machinery is kept but the `prerequisite` field is gone
+  (the event-driven barrier subsumes "wait for a prior thing"); `_activateDeferredAutoContinuation`
+  now routes the activated continuation back through `_fireAutoContinuationWhenStable` (so a
+  freshly-activated continuation re-checks completeness instead of firing blind).
+  **Idle/stable awareness (the one place ai-chat goes beyond Think):** moving the barrier
+  out of the turn opened a window where the turn queue is momentarily empty but a debounced
+  continuation is armed. Added `_hasArmedContinuation()` (pending set, not `pastCoalesce`,
+  and `_continuationTimer !== null || _continuationBarrierActive`) and taught both
+  `waitForIdle()` (loop until the armed decision resolves) and `waitUntilStable()` (don't
+  report stable while armed) about it. This is strictly more correct — recovery/idle-eviction
+  must not fire mid-continuation — and matches `waitUntilStable`'s docstring ("no queued
+  continuation turns"); a _parked_ continuation (incomplete batch) is reported via
+  `hasPendingInteraction()`, and a _running_ one (`pastCoalesce`) via the turn queue, so
+  neither is double-counted. **Deep review:** double-fire guard holds (no `await` between the
+  drain `finally`'s flag clear and the fire/return decision); the stream gate prevents firing
+  against a batch the model is still streaming (a fast client tool can resolve before its
+  slower siblings are even emitted); a true orphan parks budget-free and re-arms when its
+  sibling lands. **e2e coverage:** added a deterministic workers-pool test (parks a
+  parallel batch when a sibling never arrives — `hasPending` stays true, `activeRequestId`
+  null, `getChatMessageCallCount` 0, `hasPendingInteraction` true — then fires exactly once
+  when the missing sibling lands); the **deploy/crash mid-park** case is covered by the
+  existing recovery PARK tests (`durable-chat-recovery.test.ts` "PARKS a continuation/retry…
+  while a CLIENT interaction is pending" + "client tool result after park resumes the turn"),
+  because a parked auto-continuation leaves the same on-disk signature as a HITL park (an
+  `input-available` orphan) → recovery parks `skipped`/`awaiting_client_interaction`
+  budget-free rather than terminalizing. Tests: `pnpm run check` ✅ (111 projects); agents
+  workers 1996 ✅, ai-chat workers 687 ✅ (incl. the new park test; the four existing
+  auto-continuation timing tests required the idle/stable awareness above and now pass
+  unchanged in intent), Think workers 686 ✅ for parity; ai-chat SIGKILL e2e 10/10 ✅; Think
+  chat-recovery e2e 5/5 ✅ (Think source byte-unchanged this slice). One changeset
+  (`@cloudflare/ai-chat` minor — no-timeout park behavior change).
 
 - _Slice 4f-ii(b) (Phase 4 — `parseProtocolMessage` migration; classification-only, no
   changeset)_ — Migrated ai-chat's `onMessage` off its inline `JSON.parse` +
