@@ -1026,6 +1026,14 @@ type ThinkWorkflowPromptContext = {
 const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
 
 /**
+ * Reserved metadata key used to carry {@link SubmitMessagesOptions.maxRetries}
+ * through the durable submission queue. `submitMessages` runs asynchronously via
+ * the drain loop, so the retry budget is persisted alongside the submission and
+ * read back when the turn actually runs.
+ */
+const THINK_SUBMISSION_MAX_RETRIES_METADATA_KEY = "__thinkSubmissionMaxRetries";
+
+/**
  * Reserved name for the synthetic tool a workflow `step.prompt` turn uses to
  * deliver its structured final answer. The agent runs a full multi-step,
  * tool-using turn and ends it by calling this tool with arguments matching the
@@ -5385,6 +5393,13 @@ export class Think<
     return metadata === undefined ? null : JSON.stringify(metadata);
   }
 
+  private _readSubmissionMaxRetries(
+    metadata: Record<string, unknown> | null
+  ): number | undefined {
+    const value = metadata?.[THINK_SUBMISSION_MAX_RETRIES_METADATA_KEY];
+    return typeof value === "number" ? value : undefined;
+  }
+
   private _readWorkflowPromptContext(
     metadata: Record<string, unknown> | null
   ): ThinkWorkflowPromptContext | null {
@@ -5853,7 +5868,17 @@ export class Think<
     const requestId = submissionId;
     const now = Date.now();
     const messagesJson = this._serializeSubmissionMessages(messages);
-    const metadataJson = this._serializeMetadata(options?.metadata);
+    // `submitMessages` is asynchronous (drained later), so persist the optional
+    // model retry budget alongside the submission metadata under a reserved key
+    // and read it back when the turn runs.
+    const submissionMetadata =
+      options?.maxRetries === undefined
+        ? options?.metadata
+        : {
+            ...options?.metadata,
+            [THINK_SUBMISSION_MAX_RETRIES_METADATA_KEY]: options.maxRetries
+          };
+    const metadataJson = this._serializeMetadata(submissionMetadata);
 
     this.sql`
       INSERT INTO cf_think_submissions (
@@ -5962,6 +5987,7 @@ export class Think<
       const messages = this._parseSubmissionMessages(row.messages_json);
       const metadata = this._parseJsonObject(row.metadata_json);
       const workflowPrompt = this._readWorkflowPromptContext(metadata);
+      const maxRetries = this._readSubmissionMaxRetries(metadata);
       const result = await this._runProgrammaticMessagesTurn(
         requestId,
         messages,
@@ -5970,6 +5996,7 @@ export class Think<
           captureProgrammaticStreamError: true,
           captureOutput: Boolean(workflowPrompt?.output),
           workflowPrompt: workflowPrompt ?? undefined,
+          maxRetries,
           onMessagesApplied: () => {
             this.sql`
               UPDATE cf_think_submissions
@@ -6310,6 +6337,7 @@ export class Think<
       captureOutput?: boolean;
       body?: Record<string, unknown>;
       workflowPrompt?: ThinkWorkflowPromptContext;
+      maxRetries?: number;
     }
   ): Promise<ProgrammaticMessagesResult> {
     const clientTools = this._lastClientTools;

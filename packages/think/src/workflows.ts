@@ -193,48 +193,53 @@ export class ThinkWorkflow<
       attemptKey
     );
 
-    const submission = (await step.do(
-      `${stepName}:submit-${attempt}`,
-      async () => {
-        const submissionResult = (await this.agent.submitMessages(
-          [
-            {
-              id: crypto.randomUUID(),
-              role: "user",
-              parts: [{ type: "text", text: options.prompt }]
-            } satisfies UIMessage
-          ],
+    // Preserve the original step names for the first attempt so in-flight
+    // workflows (which match completed steps by name during replay) continue
+    // to resume correctly after upgrading. Only retries get suffixed names.
+    const submitStepName =
+      attempt === 0 ? `${stepName}:submit` : `${stepName}:submit-${attempt}`;
+    const waitStepName =
+      attempt === 0 ? `${stepName}:wait` : `${stepName}:wait-${attempt}`;
+
+    const submission = (await step.do(submitStepName, async () => {
+      const submissionResult = (await this.agent.submitMessages(
+        [
           {
-            idempotencyKey,
-            maxRetries: options.modelMaxRetries,
-            metadata: {
-              [THINK_WORKFLOW_PROMPT_METADATA_KEY]: {
-                workflow: {
-                  name: this.workflowName,
-                  id: this.workflowId,
-                  stepName,
-                  eventType
-                },
-                output: {
-                  schema: outputSchema
-                },
-                fingerprint
-              }
+            id: crypto.randomUUID(),
+            role: "user",
+            parts: [{ type: "text", text: options.prompt }]
+          } satisfies UIMessage
+        ],
+        {
+          idempotencyKey,
+          maxRetries: options.modelMaxRetries,
+          metadata: {
+            [THINK_WORKFLOW_PROMPT_METADATA_KEY]: {
+              workflow: {
+                name: this.workflowName,
+                id: this.workflowId,
+                stepName,
+                eventType
+              },
+              output: {
+                schema: outputSchema
+              },
+              fingerprint
             }
           }
-        )) as SubmitMessagesResult;
-
-        try {
-          return { submissionId: submissionResult.submissionId };
-        } finally {
-          disposeIfPresent(submissionResult);
         }
+      )) as SubmitMessagesResult;
+
+      try {
+        return { submissionId: submissionResult.submissionId };
+      } finally {
+        disposeIfPresent(submissionResult);
       }
-    )) as Pick<SubmitMessagesResult, "submissionId">;
+    })) as Pick<SubmitMessagesResult, "submissionId">;
 
     const event = await this._waitForPromptEvent(
       step,
-      `${stepName}:wait-${attempt}`,
+      waitStepName,
       eventType,
       options.timeout,
       options.cancelOnTimeout,
@@ -313,10 +318,15 @@ export class ThinkWorkflow<
   ): Promise<number> {
     const upperBoundMs = Math.min(2 ** attempt * baseDelayMs, maxDelayMs);
     // Workflows steps must be deterministic, so jitter is derived from a hash
-    // of stable inputs instead of Math.random().
+    // of stable inputs instead of Math.random(). Two raw digest bytes give a
+    // 16-bit value that spans the full [0, 1) range once divided by 0xffff.
     const jitterSeed = `${this.workflowName}:${this.workflowId}:${stepName}:${attempt}`;
-    const hash = await this._hashString(jitterSeed);
-    const fraction = hash.charCodeAt(0) / 0xffff;
+    const digest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(jitterSeed)
+    );
+    const digestBytes = new Uint8Array(digest);
+    const fraction = ((digestBytes[0] << 8) | digestBytes[1]) / 0xffff;
     return Math.floor(fraction * upperBoundMs);
   }
 

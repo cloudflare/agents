@@ -125,6 +125,58 @@ describe("ThinkWorkflow", () => {
       expect(waitEventDisposeCount).toBe(1);
     });
 
+    it("keeps stable step names on the first attempt for in-flight replay", async () => {
+      const doNames: string[] = [];
+      const waitNames: string[] = [];
+
+      const agent: FakeThinkAgent = {
+        async submitMessages() {
+          return createSubmissionResult("submission-1", () => {});
+        },
+        async cancelSubmission() {
+          throw new Error("cancelSubmission should not be called");
+        }
+      };
+
+      const step = {
+        do: async (name: string, callback: () => Promise<unknown>) => {
+          doNames.push(name);
+          return callback();
+        },
+        waitForEvent: async (name: string) => {
+          waitNames.push(name);
+          return {
+            payload: {
+              submissionId: "submission-1",
+              status: "completed",
+              output: { answer: "done" }
+            },
+            [Symbol.dispose]: () => {}
+          };
+        },
+        sleep: async () => {}
+      } as unknown as AgentWorkflowStep;
+
+      const workflow = createWorkflow(agent);
+      await workflow._promptStep(
+        "structure",
+        {
+          prompt: "Return structured output",
+          output: z.object({ answer: z.string() })
+        },
+        step,
+        createEvent()
+      );
+
+      // The default (non-retry) path must reuse the historical step names so
+      // workflows that hibernated on an older version replay without
+      // re-executing already-completed steps.
+      expect(doNames).toContain("structure:submit");
+      expect(doNames).not.toContain("structure:submit-0");
+      expect(waitNames).toContain("structure:wait");
+      expect(waitNames).not.toContain("structure:wait-0");
+    });
+
     it("keeps the waitForEvent result alive while validating nested output", async () => {
       let waitEventDisposed = false;
 
@@ -302,6 +354,10 @@ describe("ThinkWorkflow", () => {
       expect(sleepCalls[0].duration).toBeLessThanOrEqual(100);
       expect(sleepCalls[1].duration).toBeGreaterThanOrEqual(0);
       expect(sleepCalls[1].duration).toBeLessThanOrEqual(200);
+      // Jitter must actually be applied — guard against the backoff collapsing
+      // to ~0ms (e.g. a degenerate fraction), which would cause thundering-herd
+      // retries. The delay is deterministic for fixed inputs.
+      expect(sleepCalls.some((call) => call.duration > 0)).toBe(true);
     });
 
     it("retries any prompt error, including validation failures", async () => {
