@@ -46,6 +46,13 @@ export type ThinkPromptOptions<Schema extends ZodObject> = {
   key?: string;
   cancelOnTimeout?: boolean;
   retries?: ThinkPromptRetryOptions;
+  /**
+   * Maximum number of retries for the underlying model call within each
+   * workflow attempt. Forwarded to the AI SDK's `streamText`; transient
+   * provider errors (e.g. capacity) are retried inside the agent turn before
+   * the workflow-level `retries` kick in.
+   */
+  modelMaxRetries?: number;
 };
 
 export interface ThinkWorkflowStep extends AgentWorkflowStep {
@@ -199,6 +206,7 @@ export class ThinkWorkflow<
           ],
           {
             idempotencyKey,
+            maxRetries: options.modelMaxRetries,
             metadata: {
               [THINK_WORKFLOW_PROMPT_METADATA_KEY]: {
                 workflow: {

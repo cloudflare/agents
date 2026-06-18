@@ -1002,6 +1002,12 @@ export type SubmitMessagesOptions = {
   submissionId?: string;
   idempotencyKey?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * Maximum number of retries for the underlying model call. Forwarded to the
+   * AI SDK's `streamText` so transient provider errors (e.g. capacity) can be
+   * recovered inside the agent turn.
+   */
+  maxRetries?: number;
 };
 
 type ThinkWorkflowPromptContext = {
@@ -1163,6 +1169,12 @@ export interface TurnInput {
   workflowPrompt?: ThinkWorkflowPromptContext;
   /** Whether this is a continuation turn (auto-continue after tool result, recovery). */
   continuation: boolean;
+  /**
+   * Maximum number of retries for the underlying model call. Forwarded to the
+   * AI SDK's `streamText` so transient provider errors (e.g. capacity) can be
+   * recovered inside the agent turn before the turn is reported as failed.
+   */
+  maxRetries?: number;
 }
 
 /**
@@ -3336,6 +3348,14 @@ export class Think<
     };
 
     const subclassConfig = (await this.beforeTurn(ctx)) ?? {};
+    // Seed maxRetries from the caller (e.g. submitMessages) unless beforeTurn
+    // explicitly overrode it.
+    if (
+      input.maxRetries !== undefined &&
+      subclassConfig.maxRetries === undefined
+    ) {
+      subclassConfig.maxRetries = input.maxRetries;
+    }
     const config = await this._pipelineExtensionBeforeTurn(ctx, subclassConfig);
     const workflowPrompt = input.workflowPrompt;
     // Workflow `step.prompt` turns produce their structured result by calling
@@ -6353,6 +6373,7 @@ export class Think<
                     clientTools,
                     body,
                     workflowPrompt: options?.workflowPrompt,
+                    maxRetries: options?.maxRetries,
                     continuation: false
                   })
               );
