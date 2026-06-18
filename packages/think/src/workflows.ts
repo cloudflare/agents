@@ -158,7 +158,8 @@ export class ThinkWorkflow<
         if (attempt === maxAttempts - 1) {
           throw err;
         }
-        const delayMs = this._promptRetryDelayMs(
+        const delayMs = await this._promptRetryDelayMs(
+          stepName,
           attempt,
           baseDelayMs,
           maxDelayMs
@@ -296,13 +297,19 @@ export class ThinkWorkflow<
     );
   }
 
-  private _promptRetryDelayMs(
+  private async _promptRetryDelayMs(
+    stepName: string,
     attempt: number,
     baseDelayMs: number,
     maxDelayMs: number
-  ): number {
+  ): Promise<number> {
     const upperBoundMs = Math.min(2 ** attempt * baseDelayMs, maxDelayMs);
-    return Math.floor(Math.random() * upperBoundMs);
+    // Workflows steps must be deterministic, so jitter is derived from a hash
+    // of stable inputs instead of Math.random().
+    const jitterSeed = `${this.workflowName}:${this.workflowId}:${stepName}:${attempt}`;
+    const hash = await this._hashString(jitterSeed);
+    const fraction = hash.charCodeAt(0) / 0xffff;
+    return Math.floor(fraction * upperBoundMs);
   }
 
   private async _idempotencyKeyForPrompt(
