@@ -7411,6 +7411,15 @@ export class Think<
   // ── Dynamic workflows ─────────────────────────────────────────
 
   private _dynamicWorkflowTableEnsured = false;
+  private _dynamicAgentBindingName: string | undefined;
+
+  /**
+   * Maximum size (in bytes) of a single generated workflow code payload
+   * accepted by {@link runDynamicWorkflow}. Guards against accidental storage
+   * of very large (or runaway LLM-generated) payloads. Subclasses can shadow
+   * this static to tune the limit.
+   */
+  static readonly MAX_DYNAMIC_WORKFLOW_CODE_BYTES = 512 * 1024;
 
   private _ensureDynamicWorkflowTable(): void {
     if (this._dynamicWorkflowTableEnsured) return;
@@ -7424,8 +7433,38 @@ export class Think<
     this._dynamicWorkflowTableEnsured = true;
   }
 
+  /**
+   * Validate generated workflow code before it is stored and later executed
+   * as a Dynamic Worker. The default implementation enforces a non-empty body
+   * and the {@link MAX_DYNAMIC_WORKFLOW_CODE_BYTES} size limit. Subclasses can
+   * override this to add stricter checks (e.g. static analysis of
+   * LLM-generated code) — callers remain responsible for trusting the source
+   * of the code they pass in.
+   */
+  protected validateWorkflowCode(code: string): void {
+    if (typeof code !== "string" || code.trim().length === 0) {
+      throw new Error("Dynamic workflow code must be a non-empty string");
+    }
+    const byteLength = new TextEncoder().encode(code).length;
+    const max = (this.constructor as typeof Think)
+      .MAX_DYNAMIC_WORKFLOW_CODE_BYTES;
+    if (byteLength > max) {
+      throw new Error(
+        `Dynamic workflow code is too large (${byteLength} bytes, max ${max})`
+      );
+    }
+  }
+
   private _findAgentBindingNameForDynamic(): string | undefined {
-    const className = this.constructor.name;
+    if (this._dynamicAgentBindingName !== undefined) {
+      return this._dynamicAgentBindingName;
+    }
+    // Mirror the base-class `_findAgentBindingName()`: resolve from the parent
+    // class constructor (captured via the prototype chain) rather than
+    // `this.constructor.name`, so minifier renaming behaves consistently with
+    // the rest of the SDK.
+    const className = (Object.getPrototypeOf(this).constructor as { name: string })
+      .name;
     for (const [key, value] of Object.entries(
       this.env as Record<string, unknown>
     )) {
@@ -7439,6 +7478,7 @@ export class Think<
           key === className ||
           camelCaseToKebabCase(key) === camelCaseToKebabCase(className)
         ) {
+          this._dynamicAgentBindingName = key;
           return key;
         }
       }
@@ -7471,12 +7511,8 @@ export class Think<
       metadata?: Record<string, unknown>;
     }
   ): Promise<string> {
+    this.validateWorkflowCode(code);
     this._ensureDynamicWorkflowTable();
-    const wfId = crypto.randomUUID();
-    this.sql`
-      INSERT INTO cf_think_dynamic_workflows (wf_id, code, created_at)
-      VALUES (${wfId}, ${code}, ${Date.now()})
-    `;
 
     const agentBinding =
       options?.agentBinding ?? this._findAgentBindingNameForDynamic();
@@ -7484,6 +7520,21 @@ export class Think<
       throw new Error(
         "Could not detect Agent binding name from class name. " +
           "Pass it explicitly via options.agentBinding"
+      );
+    }
+
+    // Only allow `agentBinding` to reference a Durable Object namespace that
+    // actually exists in the environment — prevents callers from probing for
+    // (or coercing the loader into reading) arbitrary env keys.
+    const agentNamespace = (this.env as Record<string, unknown>)[agentBinding];
+    if (
+      !agentNamespace ||
+      typeof agentNamespace !== "object" ||
+      typeof (agentNamespace as { idFromName?: unknown }).idFromName !==
+        "function"
+    ) {
+      throw new Error(
+        `Agent binding '${agentBinding}' is not a Durable Object namespace`
       );
     }
 
@@ -7495,6 +7546,19 @@ export class Think<
         `Workflow binding '${workflowName}' not found in environment`
       );
     }
+
+    // NOTE: code rows are intentionally not evicted here. A dynamic workflow
+    // can sit idle for a long time (`step.sleep`, `step.waitForEvent`, human
+    // approval) and the loader re-fetches the code by `wfId` on every cache
+    // miss (new isolate, retry, resumption). Time- or fetch-based eviction
+    // would race against in-flight workflows. Growth is bounded by the number
+    // of workflows a given agent runs; completion-based cleanup can be layered
+    // on later if needed.
+    const wfId = crypto.randomUUID();
+    this.sql`
+      INSERT INTO cf_think_dynamic_workflows (wf_id, code, created_at)
+      VALUES (${wfId}, ${code}, ${Date.now()})
+    `;
 
     const workflowId = options?.id ?? `wf_${crypto.randomUUID()}`;
 
@@ -7534,9 +7598,13 @@ export class Think<
 
   /**
    * Retrieve generated workflow code by ID.
-   * Called by the DynamicThinkWorkflow loader via DO RPC.
+   *
+   * Internal: called by the `DynamicThinkWorkflow` loader via Durable Object
+   * service-binding RPC. The leading underscore signals it is not part of the
+   * client-callable surface (it has no `@callable()` decorator). The `wfId` is
+   * an unguessable UUID, but treat stored code as sensitive.
    */
-  async getWorkflowCode(wfId: string): Promise<string> {
+  async _getWorkflowCode(wfId: string): Promise<string> {
     this._ensureDynamicWorkflowTable();
     const rows = this.sql`
       SELECT code FROM cf_think_dynamic_workflows WHERE wf_id = ${wfId}

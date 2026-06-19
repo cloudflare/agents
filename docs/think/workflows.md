@@ -215,3 +215,42 @@ private outbox because it needs to store an event until delivery succeeds.
 
 Use Workflows when the process has multiple deterministic steps, long waits, or
 human approval.
+
+## Dynamic Workflows
+
+When the workflow body itself is generated at runtime (for example, by an LLM),
+use `runDynamicWorkflow()` instead of registering a static `ThinkWorkflow`
+subclass. It stores the generated TypeScript source, then starts a Workflow
+instance whose code is bundled and executed as a Dynamic Worker on first run.
+
+Register the `DynamicThinkWorkflow` entrypoint as the `class_name` of a
+`workflows` binding in `wrangler.jsonc`:
+
+```typescript
+// server.ts
+export { DynamicThinkWorkflow } from "@cloudflare/think/dynamic-workflows";
+```
+
+Then call `runDynamicWorkflow()` from your Think agent:
+
+```typescript
+const workflowId = await this.runDynamicWorkflow(
+  "DYNAMIC_THINK_WF", // the workflow binding name
+  generatedCode, // TypeScript source that default-exports a ThinkWorkflow
+  { topic: "release notes" } // params forwarded to the workflow's run()
+);
+```
+
+The generated code runs as a real `ThinkWorkflow`, so `step.prompt()`,
+`step.do()`, `step.sleep()`, and `step.waitForEvent()` all work natively.
+
+Notes:
+
+- Generated code is validated by `validateWorkflowCode()` before it is stored.
+  The default implementation enforces a non-empty body and a size limit
+  (`Think.MAX_DYNAMIC_WORKFLOW_CODE_BYTES`). Override it in a subclass to add
+  stricter checks. You remain responsible for trusting the source of any
+  LLM-generated code you pass in.
+- Stored code is retained for the lifetime of the agent's Durable Object so
+  long-running workflows can be resumed. It is not evicted automatically.
+- See the `examples/dynamic-think-workflows` example for a complete setup.
