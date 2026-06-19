@@ -1173,6 +1173,48 @@ client observes a continued/completed turn, with **no engine change specific to 
 client** — and any seam leak found while binding the handshake/codec to TanStack AI's
 transport is recorded (the same trip-wire as pi) and folded back into the AI SDK adapter.
 
+**Status: BUILT — engine-direct, `experimental/tanstack-recovery/`** (Route 1; sibling to
+`pi-recovery`, not `examples/`, since it is a genericity harness not a showcase). Decisions
+taken vs the plan above: (a) **faux AG-UI model everywhere** (user choice) — a deterministic
+slow `AsyncIterable<StreamChunk>` (`RUN_STARTED` → `TEXT_MESSAGE_*` → `RUN_FINISHED`) keeps
+the SIGKILL e2e's continuation math exact, with a documented one-line swap to
+`@cloudflare/tanstack-ai`'s `createWorkersAiChat` + `chat()` (the chunk vocabulary the codec
+
+- bridge consume is identical, so the swap is model-only); (b) **the LIVE resume handshake
+  is bound now** (the more ambitious option) via a custom `@tanstack/ai`
+  `SubscribeConnectionAdapter` (`subscribe()`/`send()` over a raw WebSocket), so the foreign
+  client genuinely drives notify → ACK → replay rather than just the codec.
+
+**Core finding (the seam this forced).** The shared `ResumeHandshake` driver — and
+`ResumableStream.replayChunks` — are **frame-vocabulary-coupled but protocol-agnostic**.
+They emit `cf_agent_stream_resuming` / `_resume_none` and AI-SDK-shaped
+`cf_agent_use_chat_response` bodies (`{ body, done, id, type, replay? }`); only
+`responseMessageType` is injectable. A `@tanstack/ai` client instead wants a stream of AG-UI
+`StreamChunk`s. **Approach A (taken):** a thin client-side `cf_agent_* <-> AG-UI` bridge
+(`src/ws-bridge.ts`) intercepts `STREAM_RESUMING` → fires `STREAM_RESUME_ACK`, swallows
+`STREAM_RESUME_NONE`, and unwraps each response frame's `body` into a `StreamChunk`. The
+measurement: that bridge is **one frame-router over ~6 wire constants** — i.e. the resume
+PROTOCOL (notify → ACK → replay, #1733 double-send, #1645 terminal-via-resume) drove a
+foreign client with **zero change to published `agents`**; only the frame VOCABULARY is
+coupled. `TanStackRecoveryCodec` proves the complementary codec axis: it reconstructs the
+partial from AG-UI `TEXT_MESSAGE_CONTENT` deltas, feeding the engine the same `{ text, parts }`.
+
+**Approach B (deferred, optional future work).** Because the bridge is thin, generalizing the
+handshake's resuming/none/response vocabulary behind injectable `ResumeHandshakeHost` fields
+(defaults = the exact `cf_agent_*` bytes, so the golden-frame gate stays green) is **not**
+warranted yet. It would let foreign clients drop the bridge but touches published
+`packages/agents` → changeset. Revisit only if a second foreign client appears or the bridge
+grows. Likewise still open: the **tool-`parts` codec path** (this harness is text-only,
+`parts:[]`, like pi), a **real Workers AI provider** run (the documented one-line swap), and
+**Route 2** (front `AIChatAgent` itself with a TanStack client).
+
+**Repo dependency note.** `@tanstack/ai-client` / `@tanstack/ai-react` (which expose the
+`SubscribeConnectionAdapter` / `ChatClient` / `useChat` surface this harness needs) require
+`@tanstack/ai@0.32`, so `@tanstack/ai` was bumped `0.28 → 0.32` across the repo
+(`agents` + `codemode` devDeps); their peer ranges (`<1.0.0`) and public API are unchanged
+and all 113 projects typecheck, so no changeset. No engine source changed → no changeset for
+the harness itself.
+
 ### Decision: substrate capabilities are optional, not shared requirements
 
 A recurring question (most concretely: "should `AIChatAgent` grow a submission
@@ -1701,6 +1743,39 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 5 / Second harness (TanStack AI client + shared handshake, engine-direct)_ —
+  Built `experimental/tanstack-recovery/` (sibling to `pi-recovery`): a `TanStackAgent`
+  Durable Object driving the SAME `ChatRecoveryEngine` AND the SAME `ResumeHandshake` as
+  `AIChatAgent`/`Think`, but with a foreign `@tanstack/ai` WebSocket client
+  (`SubscribeConnectionAdapter`) and a foreign chunk vocabulary (AG-UI `StreamChunk`s). This
+  stresses the two axes the pi fixture left untouched (resume handshake against a foreign
+  client transport; streaming codec against a foreign vocabulary). **Files:** `faux-model.ts`
+  (deterministic slow AG-UI stream; one-line swap to `@cloudflare/tanstack-ai` documented),
+  `tanstack-codec.ts` (`TanStackRecoveryCodec implements ChatRecoveryCodec`; concatenates
+  `TEXT_MESSAGE_CONTENT` deltas into `{ text, parts:[] }`; AG-UI `isProgressChunk` list) +
+  unit test, `tanstack-agent.ts` (engine adapter + wake hooks mirroring `pi-agent.ts`, PLUS a
+  `ResumeHandshake` instance wired over `onConnect`/`onMessage` with a `ResumeHandshakeHost`),
+  `ws-bridge.ts` (the Approach-A `cf_agent_* <-> AG-UI` client translation),
+  `ws-adapter.ts`/`client.tsx` (real `useChat` demo), `server.ts` (WS via `routeAgentRequest`
+  - HTTP `/start`/`/status`), and a SIGKILL e2e with a headless bridge client. **Core
+    finding:** the shared `ResumeHandshake` (and `ResumableStream.replayChunks`) are
+    **frame-vocabulary-coupled but protocol-agnostic** — only `responseMessageType` is
+    injectable, yet the notify → ACK → replay protocol (incl. #1733 double-send, #1645
+    terminal-via-resume) drove the foreign client through a **thin** client bridge (one
+    frame-router, ~6 wire constants) with **zero change to published `agents`**. **Approach B**
+    (make the resuming/none/response vocabulary injectable on `ResumeHandshakeHost`,
+    defaults = exact `cf_agent_*` bytes so the golden gate stays green) is therefore **deferred
+    as optional** — revisit only if a second foreign client appears. **Still open:** the
+    tool-`parts` codec path (text-only here, like pi), a real Workers AI provider run (the
+    documented swap), and Route 2 (front `AIChatAgent` itself with a TanStack client).
+    **Dependency:** `@tanstack/ai-client`/`-react` require `@tanstack/ai@0.32`, so the repo was
+    bumped `0.28 → 0.32` (`agents` + `codemode` devDeps); peer ranges + public API unchanged,
+    all 113 projects typecheck → no changeset (and no engine source change → none for the
+    harness). Tests: `pnpm run check` ✅ (113 projects); `tanstack-codec` unit (14) ✅;
+    `tanstack-recovery` e2e ✅ (deterministic mid-stream reconnect handshake — foreign client
+    observes `STREAM_RESUMING` → ACK → replay → completed turn; and SIGKILL mid-stream →
+    `recoveredVia === "continue"` with `prefixChars + generatedChars === total`).
+
 - _Phase 5 / Tier-2 (resume-handshake + streaming-codec seams extracted into
   `agents/chat`; one behavior-visible convergence → one changeset)_ — Deduped the
   byte-parallel Tier-2 seams the `@cloudflare/ai-chat` and `@cloudflare/think`
@@ -1739,7 +1814,7 @@ the change, and the key review findings.
   per-instance (assigned once, never reassigned). `recovery-codec.test.ts` pins the
   `isProgressChunk` list; `recovery-engine.test.ts` adds minimal-adapter cases
   proving the T2-3b defaults; think's #1575 helper now exercises the shared driver.
-  **Deferred (explicitly):** converging the progress-bump *timing* (ai-chat per-type
+  **Deferred (explicitly):** converging the progress-bump _timing_ (ai-chat per-type
   vs think per-flush — correctness-critical for the no-progress budget) and moving
   start-id alignment onto the codec; the full streaming-driver merge (Tier-3). The
   unrelated, pre-existing expected-RED `reattach-budget.test.ts` gate (wall-clock

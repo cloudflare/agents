@@ -1,0 +1,783 @@
+/**
+ * `TanStackAgent` — the Phase-5 SECOND genericity harness.
+ *
+ * A Durable Object that drives a TanStack AI / AG-UI client over the SAME shared
+ * `ChatRecoveryEngine` AND the SAME shared `ResumeHandshake` that `AIChatAgent`
+ * and `Think` use. Where the [pi fixture](../../pi-recovery/src/pi-agent.ts)
+ * proved the ENGINE is generic across a non-AI-SDK transcript, this proves the
+ * other two seams the pi fixture left untouched:
+ *
+ *  1. **Resume handshake against a foreign client transport.** The client is a
+ *     `@tanstack/ai` `SubscribeConnectionAdapter` (subscribe/send over a raw
+ *     WebSocket), not the AI SDK's `useChat` reader. The shared `ResumeHandshake`
+ *     still drives notify → REQUEST/ACK → replay → terminal (#1733/#1645)
+ *     unchanged; a thin client `ws-bridge` translates the `cf_agent_*` frames
+ *     into AG-UI `StreamChunk`s (Approach A — see the RFC). No engine change
+ *     specific to this client.
+ *  2. **Streaming codec against a foreign chunk vocabulary.** Buffered chunks are
+ *     AG-UI `StreamChunk`s, reconstructed by {@link TanStackRecoveryCodec}, not
+ *     pi events or AI SDK SSE. The engine still sees only `{ text, parts }`.
+ *
+ * Recovery model (mirrors pi's `stream_continuation`): a SIGKILL mid-stream
+ * interrupts the fiber before the turn commits its assistant message. The
+ * streamed `TEXT_MESSAGE_CONTENT` deltas were buffered durably (per-chunk) into
+ * `ResumableStream`. On wake the engine reconstructs that partial through the
+ * codec, preserves it, classifies a `continue`, and re-runs the turn priming the
+ * faux model with only the REMAINING suffix — which merges onto the survived
+ * prefix to land the same full reply. A deterministic faux model keeps the e2e's
+ * continuation math exact.
+ *
+ * @internal Validation fixture, not a published package.
+ */
+
+import { Agent } from "agents";
+import type {
+  Connection,
+  ConnectionContext,
+  FiberContext,
+  FiberRecoveryContext,
+  WSMessage
+} from "agents";
+import { EventType } from "@tanstack/ai/client";
+import {
+  ChatRecoveryEngine,
+  ContinuationState,
+  ResumableStream,
+  ResumeHandshake,
+  buildChatRecoveryExhaustedContext,
+  buildChatRecoveringFrame,
+  bumpChatRecoveryProgress,
+  cleanupStreamBuffers,
+  createChatFiberSnapshot,
+  notifyChatRecoveryExhausted,
+  pendingChatTerminal,
+  readChatRecoveryProgress,
+  recordChatTerminal,
+  resolveChatRecoveryConfig,
+  sendIfOpen,
+  setChatRecovering,
+  sweepStaleChatRecoveryIncidents,
+  unwrapChatFiberSnapshot,
+  wrapChatFiberSnapshot,
+  CHAT_MESSAGE_TYPES,
+  type ChatFiberWakeHooks,
+  type ChatRecoveryAdapter,
+  type ChatRecoveryConfig,
+  type ChatRecoveryIncident,
+  type ChatRecoveryIncidentEvent,
+  type ChatRecoveryScheduleCallback,
+  type ChatRecoveryScheduleReason,
+  type ClassifyRecoveredTurnInput,
+  type DispatchRecoveredTurnInput,
+  type RecoveryPartial,
+  type ResolvedRecoveryStream,
+  type ResumeHandshakeHost,
+  type SnapshotMessage
+} from "agents/chat";
+import { FauxTanStackModel } from "./faux-model";
+import { tanStackRecoveryCodec } from "./tanstack-codec";
+
+export type Env = {
+  TanStackAgent: DurableObjectNamespace<TanStackAgent>;
+};
+
+/** A durable transcript entry. `partial` flags a preserved orphaned partial. */
+interface TranscriptEntry {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  partial: boolean;
+}
+
+/** The recovery-callback payload the agent schedules for itself. */
+interface TanStackRecoveryData {
+  originalRequestId?: string;
+  incidentId?: string;
+}
+
+/** A continuation summary the e2e polls to prove continue-vs-regenerate. */
+interface RecoverySummary {
+  via: "continue" | "retry";
+  /** Chars the recovered turn generated (the suffix on a continue). */
+  generatedChars: number;
+  /** Chars of the survived partial prefix (0 on a regenerate). */
+  prefixChars: number;
+}
+
+/** No classification detail needed — `recoveryKind` captures continue vs retry. */
+type TanStackClassify = undefined;
+
+const RECOVERING_MESSAGE_TYPE = CHAT_MESSAGE_TYPES.CHAT_RECOVERING;
+const RECOVERY_SUMMARY_KEY = "tanstack:recovery:summary";
+// Slow enough that a multi-token reply streams over several seconds, leaving a
+// wide window for the e2e to SIGKILL `wrangler dev` MID-STREAM.
+const STREAM_TOKENS_PER_SECOND = 4;
+// A long, deterministic reply body so the streamed turn lasts long enough to be
+// interrupted mid-flight. Regenerated identically on recovery.
+const REPLY_FILLER = Array.from(
+  { length: 40 },
+  (_unused, i) => `segment-${i}`
+).join(" ");
+
+/** The deterministic assistant text a turn streams for a given user prompt. */
+function replyFor(userText: string): string {
+  return `tanstack reply to "${userText}": ${REPLY_FILLER}`;
+}
+
+export class TanStackAgent extends Agent<Env> {
+  static readonly FIBER_PREFIX = "__cf_internal_tanstack_turn:";
+  static readonly SNAPSHOT_KEY = "__cfTanStackFiberSnapshot";
+
+  // Recovery is keyed off the live config; assigned as a class field (NOT in
+  // onStart) so fiber recovery reads the configured budgets on a cold wake.
+  chatRecovery: ChatRecoveryConfig = true;
+
+  private readonly _resumableStream: ResumableStream;
+  private readonly _codec = tanStackRecoveryCodec;
+  private readonly _faux: FauxTanStackModel;
+  private _transcript: TranscriptEntry[] = [];
+  private _currentStreamId: string | null = null;
+  private _activeChatRecoveryRootRequestId: string | undefined;
+  private _engineInstance?: ChatRecoveryEngine;
+  private _continuationTargetId: string | null = null;
+  private _inRecoveryTurn = false;
+
+  // ── Handshake host state (shared with the streaming/broadcast loop) ─────────
+  private _pendingResumeConnections: Set<string> = new Set();
+  private _continuation = new ContinuationState<Connection>();
+  private _resumeHandshakeInstance: ResumeHandshake | null = null;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+
+    this.sql`
+      CREATE TABLE IF NOT EXISTS tanstack_messages (
+        id TEXT PRIMARY KEY,
+        seq INTEGER,
+        role TEXT,
+        text TEXT,
+        partial INTEGER,
+        created_at INTEGER
+      )
+    `;
+
+    this._resumableStream = new ResumableStream(this.sql.bind(this));
+    this._faux = new FauxTanStackModel(STREAM_TOKENS_PER_SECOND);
+    this._transcript = this._loadTranscript();
+  }
+
+  // ── Transcript persistence ──────────────────────────────────────────────
+
+  private _loadTranscript(): TranscriptEntry[] {
+    const rows = this.sql<{
+      id: string;
+      role: string;
+      text: string;
+      partial: number | null;
+    }>`
+      SELECT id, role, text, partial FROM tanstack_messages ORDER BY seq ASC
+    `;
+    return rows.map((row) => ({
+      id: row.id,
+      role: row.role === "assistant" ? "assistant" : "user",
+      text: row.text,
+      partial: row.partial === 1
+    }));
+  }
+
+  private _appendMessage(
+    role: "user" | "assistant",
+    text: string,
+    partial = false
+  ): TranscriptEntry {
+    const entry: TranscriptEntry = {
+      id: crypto.randomUUID(),
+      role,
+      text,
+      partial
+    };
+    this._transcript.push(entry);
+    this.sql`
+      INSERT INTO tanstack_messages (id, seq, role, text, partial, created_at)
+      VALUES (
+        ${entry.id},
+        ${this._transcript.length},
+        ${role},
+        ${text},
+        ${partial ? 1 : 0},
+        ${Date.now()}
+      )
+    `;
+    return entry;
+  }
+
+  private _lastEntry(): TranscriptEntry | undefined {
+    return this._transcript[this._transcript.length - 1];
+  }
+
+  /** Text of the last user message, or `null` when none is unanswered. */
+  private _lastUserText(): string | null {
+    for (let i = this._transcript.length - 1; i >= 0; i--) {
+      const entry = this._transcript[i];
+      if (entry.role === "user") return entry.text;
+    }
+    return null;
+  }
+
+  private _snapshotMessages(): SnapshotMessage[] {
+    return this._transcript.map((entry) => ({
+      id: entry.id,
+      role: entry.role
+    }));
+  }
+
+  private async _recordRecoverySummary(
+    summary: RecoverySummary
+  ): Promise<void> {
+    await this.ctx.storage.put(RECOVERY_SUMMARY_KEY, summary);
+  }
+
+  /**
+   * Preserve a reconstructed orphaned partial as a `partial` assistant entry —
+   * the merge target the continuation folds its suffix onto. Idempotent.
+   */
+  private _persistOrphanedPartial(streamId: string): void {
+    if (this._lastEntry()?.partial) return;
+    const bodies = this._resumableStream
+      .getStreamChunks(streamId)
+      .map((chunk) => chunk.body);
+    const { text } = this._codec.toRecoveryPartial(bodies);
+    if (!text) return;
+    this._appendMessage("assistant", text, true);
+  }
+
+  /**
+   * Fold the continuation's regenerated suffix onto the preserved partial: the
+   * merged text is the survived prefix plus the suffix, and the entry is
+   * promoted to a committed message.
+   */
+  private async _mergeContinuation(
+    entryId: string,
+    suffix: string
+  ): Promise<void> {
+    const entry = this._transcript.find(
+      (candidate) => candidate.id === entryId
+    );
+    if (!entry) {
+      this._appendMessage("assistant", suffix);
+      return;
+    }
+    const prefix = entry.text;
+    const merged = prefix + suffix;
+    entry.text = merged;
+    entry.partial = false;
+    this.sql`
+      UPDATE tanstack_messages SET text = ${merged}, partial = 0
+      WHERE id = ${entryId}
+    `;
+    await this._recordRecoverySummary({
+      via: "continue",
+      generatedChars: suffix.length,
+      prefixChars: prefix.length
+    });
+  }
+
+  /** Promote a preserved partial whose prefix already equals the full reply. */
+  private async _finalizePartial(entryId: string): Promise<void> {
+    const entry = this._transcript.find(
+      (candidate) => candidate.id === entryId
+    );
+    if (!entry) return;
+    entry.partial = false;
+    this.sql`UPDATE tanstack_messages SET partial = 0 WHERE id = ${entryId}`;
+    await this._recordRecoverySummary({
+      via: "continue",
+      generatedChars: 0,
+      prefixChars: entry.text.length
+    });
+  }
+
+  // ── Turn execution (fiber-wrapped so a mid-stream crash is recoverable) ─────
+
+  private async _runTurn(
+    requestId: string,
+    continuation: boolean
+  ): Promise<void> {
+    const snapshot = createChatFiberSnapshot({
+      kind: "tanstack-turn",
+      requestId,
+      recoveryRootRequestId: this._activeChatRecoveryRootRequestId ?? requestId,
+      continuation,
+      messages: this._snapshotMessages()
+    });
+
+    await this._runFiberWithStashWrapper(
+      TanStackAgent.FIBER_PREFIX + requestId,
+      async (_fiber: FiberContext) => {
+        const isContinuation = this._continuationTargetId !== null;
+        const messageId = crypto.randomUUID();
+        const streamId = this._resumableStream.start(requestId, {
+          continuation: isContinuation,
+          messageId
+        });
+        this._currentStreamId = streamId;
+
+        let producedText = "";
+        try {
+          for await (const chunk of this._faux.stream({
+            threadId: this.name,
+            runId: requestId,
+            messageId
+          })) {
+            const body = JSON.stringify(chunk);
+            this._resumableStream.storeChunk(streamId, body);
+            // Fixture: flush every chunk so the partial is reliably durable the
+            // instant a SIGKILL lands. A batching buffer would otherwise drop
+            // the last <10 chunks on crash.
+            this._resumableStream.flushBuffer();
+            if (chunk.type === EventType.TEXT_MESSAGE_CONTENT) {
+              producedText += chunk.delta;
+            }
+            // Live broadcast to every connection EXCEPT those pending a resume
+            // ACK (they get the full replay on ACK instead of duplicate chunks).
+            this._broadcastChunk(requestId, body, false);
+            if (this._codec.isProgressChunk(chunk.type)) {
+              // Each durably-flushed chunk is reconnect-immune forward progress.
+              await bumpChatRecoveryProgress(this.ctx.storage);
+            }
+          }
+        } finally {
+          this._currentStreamId = null;
+        }
+
+        this._broadcastChunk(requestId, "", true);
+        this._resumableStream.complete(streamId);
+        this._pendingResumeConnections.clear();
+        await this._commitAssistant(producedText);
+      },
+      {
+        initialSnapshot: wrapChatFiberSnapshot(
+          TanStackAgent.SNAPSHOT_KEY,
+          snapshot,
+          null
+        ),
+        wrapStash: (data) =>
+          wrapChatFiberSnapshot(TanStackAgent.SNAPSHOT_KEY, snapshot, data)
+      }
+    );
+  }
+
+  /** Commit a finished turn: merge a continuation suffix, else append fresh. */
+  private async _commitAssistant(text: string): Promise<void> {
+    if (this._continuationTargetId) {
+      await this._mergeContinuation(this._continuationTargetId, text);
+      this._continuationTargetId = null;
+      return;
+    }
+    this._appendMessage("assistant", text);
+    if (this._inRecoveryTurn) {
+      await this._recordRecoverySummary({
+        via: "retry",
+        generatedChars: text.length,
+        prefixChars: 0
+      });
+    }
+  }
+
+  /** Broadcast a stream chunk frame, excluding connections pending a resume ACK. */
+  private _broadcastChunk(
+    requestId: string,
+    body: string,
+    done: boolean
+  ): void {
+    this.broadcast(
+      JSON.stringify({
+        type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+        id: requestId,
+        body,
+        done
+      }),
+      [...this._pendingResumeConnections]
+    );
+  }
+
+  /** Start a fresh user turn. */
+  async startTurn(text: string): Promise<void> {
+    this._appendMessage("user", text);
+    this._faux.setNextTurnText(replyFor(text));
+    await this._runTurn(crypto.randomUUID(), false);
+  }
+
+  /**
+   * Re-run a recovered turn. With `continueFromPartial` and a preserved partial
+   * at the tail, the turn CONTINUES from only the suffix after the survived
+   * prefix; otherwise it regenerates the whole reply (no-partial fallback).
+   */
+  private async _resumeRecoveredTurn(
+    data: TanStackRecoveryData | undefined,
+    continueFromPartial: boolean
+  ): Promise<void> {
+    const previousRoot = this._activeChatRecoveryRootRequestId;
+    this._activeChatRecoveryRootRequestId = data?.originalRequestId;
+    const incidentId = data?.incidentId;
+    this._inRecoveryTurn = true;
+    try {
+      const userText = this._lastUserText();
+      if (userText === null) {
+        await this._engine().updateIncident(
+          incidentId,
+          "skipped",
+          "no_unanswered_user_message"
+        );
+        return;
+      }
+      const full = replyFor(userText);
+      const tail = this._lastEntry();
+      const partial =
+        continueFromPartial &&
+        tail?.partial === true &&
+        tail.role === "assistant"
+          ? tail
+          : undefined;
+
+      if (partial) {
+        const prefix = partial.text;
+        if (full.startsWith(prefix) && prefix.length < full.length) {
+          // Continue: regenerate ONLY the suffix; merge folds it onto the prefix.
+          this._continuationTargetId = partial.id;
+          this._faux.setNextTurnText(full.slice(prefix.length));
+        } else if (prefix === full) {
+          // The whole reply already survived — just promote the partial.
+          await this._finalizePartial(partial.id);
+          await this._engine().updateIncident(incidentId, "completed");
+          return;
+        } else {
+          // Not a clean prefix (shouldn't happen with per-chunk flush) — fall
+          // back to a fresh regenerate.
+          this._faux.setNextTurnText(full);
+        }
+      } else {
+        this._faux.setNextTurnText(full);
+      }
+
+      await this._runTurn(crypto.randomUUID(), true);
+      await this._engine().updateIncident(incidentId, "completed");
+    } catch (error) {
+      this._continuationTargetId = null;
+      await this._engine().updateIncident(
+        incidentId,
+        "failed",
+        error instanceof Error ? error.message : String(error)
+      );
+      throw error;
+    } finally {
+      this._inRecoveryTurn = false;
+      this._activeChatRecoveryRootRequestId = previousRoot;
+    }
+  }
+
+  // ── Scheduled recovery callbacks (engine-driven) ────────────────────────────
+
+  async _chatRecoveryRetry(data?: TanStackRecoveryData): Promise<void> {
+    await this._resumeRecoveredTurn(data, false);
+  }
+
+  async _chatRecoveryContinue(data?: TanStackRecoveryData): Promise<void> {
+    await this._resumeRecoveredTurn(data, true);
+  }
+
+  // ── WebSocket wiring: drive the shared ResumeHandshake ──────────────────────
+
+  override async onConnect(
+    connection: Connection,
+    ctx: ConnectionContext
+  ): Promise<void> {
+    if (this._resumableStream.hasActiveStream()) {
+      // Proactively notify a connecting client about a resumable stream.
+      this._resumeHandshake().notifyStreamResuming(connection);
+    } else {
+      // No active stream but a recovery may be in progress (between attempts):
+      // replay the live "recovering…" status so a client connecting mid-recovery
+      // reads the turn as working rather than frozen (#1620).
+      const recoveringFrame = await buildChatRecoveringFrame(
+        this.ctx.storage,
+        RECOVERING_MESSAGE_TYPE,
+        Date.now()
+      );
+      if (recoveringFrame) {
+        sendIfOpen(connection, JSON.stringify(recoveringFrame));
+      }
+    }
+    await super.onConnect(connection, ctx);
+  }
+
+  override async onMessage(
+    connection: Connection,
+    message: WSMessage
+  ): Promise<void> {
+    if (typeof message !== "string") {
+      return super.onMessage(connection, message);
+    }
+    let event: { type?: string; id?: string; text?: string } | null = null;
+    try {
+      event = JSON.parse(message);
+    } catch {
+      return super.onMessage(connection, message);
+    }
+    if (!event || typeof event.type !== "string") {
+      return super.onMessage(connection, message);
+    }
+
+    switch (event.type) {
+      case CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST:
+        await this._resumeHandshake().handleResumeRequest(connection);
+        return;
+      case CHAT_MESSAGE_TYPES.STREAM_RESUME_ACK:
+        await this._resumeHandshake().handleResumeAck(
+          connection,
+          event.id ?? ""
+        );
+        return;
+      case "tanstack-run":
+        // The TanStack `SubscribeConnectionAdapter.send()` pushed a run. The
+        // text is the latest user message (the bridge sends it as `text`).
+        void this.startTurn(event.text ?? "hello tanstack");
+        return;
+      default:
+        return super.onMessage(connection, message);
+    }
+  }
+
+  override async onClose(
+    connection: Connection,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ): Promise<void> {
+    this._pendingResumeConnections.delete(connection.id);
+    this._continuation.releaseConnection(connection.id);
+    await super.onClose(connection, code, reason, wasClean);
+  }
+
+  private _resumeHandshake(): ResumeHandshake {
+    return (this._resumeHandshakeInstance ??= new ResumeHandshake(
+      this._resumeHandshakeHost()
+    ));
+  }
+
+  private _resumeHandshakeHost(): ResumeHandshakeHost {
+    return {
+      responseMessageType: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+      resumableStream: this._resumableStream,
+      continuation: this._continuation,
+      pendingResumeConnections: this._pendingResumeConnections,
+      pendingChatTerminal: () => pendingChatTerminal(this.ctx.storage),
+      persistOrphanedStream: async (streamId) => {
+        this._persistOrphanedPartial(streamId);
+      }
+    };
+  }
+
+  // ── Fiber recovery entry: drive the shared engine ───────────────────────────
+
+  protected override async _handleInternalFiberRecovery(
+    ctx: FiberRecoveryContext
+  ): Promise<boolean> {
+    return this._engine().handleChatFiberRecovery<TanStackClassify>(
+      ctx,
+      this._wakeHooks()
+    );
+  }
+
+  private _wakeHooks(): ChatFiberWakeHooks<TanStackClassify> {
+    return {
+      chatFiberPrefix: () => TanStackAgent.FIBER_PREFIX,
+      unwrapRecoverySnapshot: (ctx) => {
+        const { snapshot, user } = unwrapChatFiberSnapshot(
+          TanStackAgent.SNAPSHOT_KEY,
+          ctx.snapshot,
+          "tanstack-turn"
+        );
+        return { snapshot, recoveryData: user };
+      },
+      classifyRecoveredTurn: (input: ClassifyRecoveredTurnInput) => {
+        // A surviving partial drives a `continue`; an empty partial (crash
+        // before the first delta flushed) falls back to a `retry`.
+        const recoveryKind =
+          input.partial.text.length > 0
+            ? ("continue" as const)
+            : ("retry" as const);
+        return { recoveryKind, detail: undefined };
+      },
+      shouldPersistOrphanedPartial: (input) => input.streamStillActive,
+      persistOrphanedStream: async (streamId) => {
+        this._persistOrphanedPartial(streamId);
+      },
+      completeRecoveredStream: (streamId) => {
+        this._resumableStream.complete(streamId);
+      },
+      dispatchRecoveredTurn: async (
+        input: DispatchRecoveredTurnInput<TanStackClassify>
+      ) => {
+        const continueFromPartial = input.recoveryKind === "continue";
+        await this._engine().scheduleRecovery({
+          incident: input.incident,
+          recoveryKind: input.recoveryKind,
+          callback: continueFromPartial
+            ? "_chatRecoveryContinue"
+            : "_chatRecoveryRetry",
+          data: {
+            originalRequestId: input.recoveryRootRequestId,
+            incidentId: input.incident.incidentId
+          }
+        });
+      }
+    };
+  }
+
+  // ── Shared engine adapter ───────────────────────────────────────────────────
+
+  private _engine(): ChatRecoveryEngine {
+    return (this._engineInstance ??= new ChatRecoveryEngine(this._adapter()));
+  }
+
+  private _resolveStreamId(requestId: string): string {
+    const meta = this._resumableStream
+      .getAllStreamMetadata()
+      .find((row) => row.request_id === requestId);
+    return meta?.id ?? this._resumableStream.activeStreamId ?? "";
+  }
+
+  private _adapter(): ChatRecoveryAdapter {
+    return {
+      resolveConfig: () => resolveChatRecoveryConfig(this.chatRecovery),
+      now: () => Date.now(),
+      sweepStaleIncidents: (now) =>
+        sweepStaleChatRecoveryIncidents(this.ctx.storage, now),
+      getIncident: (key) =>
+        this.ctx.storage
+          .get<ChatRecoveryIncident>(key)
+          .then((value) => value ?? null),
+      readProgress: () => readChatRecoveryProgress(this.ctx.storage),
+      putIncident: (key, incident) => this.ctx.storage.put(key, incident),
+      deleteIncident: (key) => this.ctx.storage.delete(key).then(() => {}),
+      emitRecoveryEvent: (event: ChatRecoveryIncidentEvent) =>
+        this._emit(event.type, { ...event }),
+      scheduleRecovery: async (
+        callback: ChatRecoveryScheduleCallback,
+        data: Record<string, unknown>,
+        reason: ChatRecoveryScheduleReason,
+        delaySeconds: number
+      ) => {
+        await this.schedule(delaySeconds, callback, data, {
+          idempotent: reason === "initial"
+        });
+      },
+      setRecovering: (active, requestId) =>
+        setChatRecovering(active, requestId, {
+          storage: this.ctx.storage,
+          messageType: RECOVERING_MESSAGE_TYPE,
+          broadcast: (frame) => this.broadcast(JSON.stringify(frame)),
+          now: Date.now()
+        }),
+      onShouldKeepRecoveringError: (error) =>
+        console.error("[tanstack-recovery] shouldKeepRecovering threw", error),
+      exhaustChatRecovery: async (
+        incident,
+        config,
+        partial,
+        streamId,
+        createdAt
+      ) => {
+        const exhausted = buildChatRecoveryExhaustedContext({
+          incident,
+          config,
+          partialText: partial.text,
+          partialParts: partial.parts,
+          streamId,
+          createdAt
+        });
+        await notifyChatRecoveryExhausted(exhausted, {
+          emit: (recoveryCtx) =>
+            this._emit("chat:recovery:exhausted", { ...recoveryCtx }),
+          onError: (error) =>
+            console.error("[tanstack-recovery] onExhausted threw", error)
+        });
+        await recordChatTerminal(
+          this.ctx.storage,
+          incident.recoveryRootRequestId ?? incident.requestId,
+          exhausted.terminalMessage
+        );
+        await setChatRecovering(false, incident.requestId, {
+          storage: this.ctx.storage,
+          messageType: RECOVERING_MESSAGE_TYPE,
+          broadcast: (frame) => this.broadcast(JSON.stringify(frame)),
+          now: Date.now()
+        });
+      },
+      resolveRecoveryStream: (requestId): ResolvedRecoveryStream => {
+        const streamId = this._resolveStreamId(requestId);
+        return {
+          streamId,
+          streamStillActive:
+            streamId !== "" && streamId === this._resumableStream.activeStreamId
+        };
+      },
+      getPartialStreamText: (streamId): RecoveryPartial =>
+        this._codec.toRecoveryPartial(
+          this._resumableStream
+            .getStreamChunks(streamId)
+            .map((chunk) => chunk.body)
+        ),
+      activeChatRecoveryRootRequestId: () =>
+        this._activeChatRecoveryRootRequestId,
+      onGiveUpBookkeepingError: (phase, error) =>
+        console.error(`[tanstack-recovery] give-up ${phase} error`, error)
+    };
+  }
+
+  /** Stream-buffer cleanup alarm target (scheduled by ResumableStream cleanup). */
+  async _cleanupStreamBuffers(): Promise<void> {
+    await cleanupStreamBuffers(this._resumableStream, async () => {});
+  }
+
+  // ── Inspection surface (server HTTP → e2e assertions) ───────────────────────
+
+  async getStatus(): Promise<{
+    transcript: Array<{ role: string; text: string }>;
+    assistantCount: number;
+    fiberRows: number;
+    incidentCount: number;
+    recovering: boolean;
+    progress: number;
+    recoveredVia: "continue" | "retry" | null;
+    recoveryGeneratedChars: number;
+    partialPrefixChars: number;
+  }> {
+    const fiberRows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_runs
+    `;
+    const incidents = await this.ctx.storage.list({
+      prefix: "cf:chat-recovery:incident:"
+    });
+    const recovering = await this.ctx.storage.get("cf:chat:recovering");
+    const summary =
+      await this.ctx.storage.get<RecoverySummary>(RECOVERY_SUMMARY_KEY);
+    return {
+      transcript: this._transcript.map((entry) => ({
+        role: entry.role,
+        text: entry.text
+      })),
+      assistantCount: this._transcript.filter(
+        (entry) => entry.role === "assistant" && !entry.partial
+      ).length,
+      fiberRows: fiberRows[0].count,
+      incidentCount: incidents.size,
+      recovering: recovering !== undefined,
+      progress: await readChatRecoveryProgress(this.ctx.storage),
+      recoveredVia: summary?.via ?? null,
+      recoveryGeneratedChars: summary?.generatedChars ?? 0,
+      partialPrefixChars: summary?.prefixChars ?? 0
+    };
+  }
+}

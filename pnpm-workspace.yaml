@@ -77,3 +77,7 @@ minimumReleaseAgeExclude:
   - wrangler@4.100.0
   - partyserver@0.5.8
   - workers-ai-provider@3.2.0
+  - "@tanstack/ai-client@0.18.0"
+  - "@tanstack/ai-event-client@0.6.3"
+  - "@tanstack/ai-react@0.15.9"
+  - "@tanstack/ai@0.32.0"

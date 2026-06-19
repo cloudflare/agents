@@ -42,7 +42,7 @@
   "devDependencies": {
     "@ai-sdk/react": "^3.0.204",
     "@modelcontextprotocol/conformance": "0.1.16",
-    "@tanstack/ai": "^0.28.0",
+    "@tanstack/ai": "^0.32.0",
     "@types/react": "^19.2.17",
     "@types/yargs": "^17.0.35",
     "@vitest/browser-playwright": "^4.1.8",

@@ -1,0 +1,35 @@
+{
+  "name": "@cloudflare/agents-tanstack-recovery",
+  "description": "Internal genericity harness: a TanStack AI WebSocket client driving the shared chat-recovery engine + resume handshake (rfc-chat-recovery-foundation, Phase 5, second harness)",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "vite dev",
+    "dev": "wrangler dev",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "test": "vitest run",
+    "test:e2e": "vitest run --config e2e/vitest.config.ts"
+  },
+  "dependencies": {
+    "@tanstack/ai": "^0.32.0",
+    "@tanstack/ai-client": "^0.18.0",
+    "@tanstack/ai-react": "^0.15.9",
+    "agents": "*",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.40.2",
+    "@cloudflare/workers-types": "^4.20260612.1",
+    "@types/node": "^25.9.3",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16",
+    "vitest": "4.1.8",
+    "wrangler": "^4.100.0"
+  }
+}

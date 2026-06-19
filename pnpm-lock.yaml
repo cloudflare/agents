@@ -3555,6 +3555,58 @@ importers:
         specifier: ^4.3.0
         version: 4.3.0
 
+  experimental/tanstack-recovery:
+    dependencies:
+      '@tanstack/ai':
+        specifier: ^0.32.0
+        version: 0.32.0(@opentelemetry/api@1.9.1)
+      '@tanstack/ai-client':
+        specifier: ^0.18.0
+        version: 0.18.0(@opentelemetry/api@1.9.1)
+      '@tanstack/ai-react':
+        specifier: ^0.15.9
+        version: 0.15.9(@opentelemetry/api@1.9.1)(@tanstack/ai@0.32.0(@opentelemetry/api@1.9.1))(@types/react@19.2.17)(react@19.2.7)
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
+      react:
+        specifier: ^19.2.7
+        version: 19.2.7
+      react-dom:
+        specifier: ^19.2.7
+        version: 19.2.7(react@19.2.7)
+    devDependencies:
+      '@cloudflare/vite-plugin':
+        specifier: ^1.40.2
+        version: 1.40.2(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(workerd@1.20260611.1)(wrangler@4.100.0(@cloudflare/workers-types@4.20260612.1))
+      '@cloudflare/workers-types':
+        specifier: ^4.20260612.1
+        version: 4.20260612.1
+      '@types/node':
+        specifier: ^25.9.3
+        version: 25.9.3
+      '@types/react':
+        specifier: ^19.2.17
+        version: 19.2.17
+      '@types/react-dom':
+        specifier: ^19.2.3
+        version: 19.2.3(@types/react@19.2.17)
+      '@vitejs/plugin-react':
+        specifier: ^6.0.2
+        version: 6.0.2(@rolldown/plugin-babel@0.2.3(@babel/core@7.29.7)(@babel/runtime@7.29.7)(rolldown@1.1.1)(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      vite:
+        specifier: ^8.0.16
+        version: 8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
+      vitest:
+        specifier: 4.1.8
+        version: 4.1.8(@opentelemetry/api@1.9.1)(@types/node@25.9.3)(@vitest/browser-playwright@4.1.8)(jsdom@26.1.0)(vite@8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      wrangler:
+        specifier: ^4.100.0
+        version: 4.100.0(@cloudflare/workers-types@4.20260612.1)
+
   guides/anthropic-patterns:
     dependencies:
       nanoid:
@@ -3685,8 +3737,8 @@ importers:
         specifier: 0.1.16
         version: 0.1.16(@cfworker/json-schema@4.1.1)
       '@tanstack/ai':
-        specifier: ^0.28.0
-        version: 0.28.0(@opentelemetry/api@1.9.1)
+        specifier: ^0.32.0
+        version: 0.32.0(@opentelemetry/api@1.9.1)
       '@types/react':
         specifier: ^19.2.17
         version: 19.2.17
@@ -3768,8 +3820,8 @@ importers:
         specifier: ^1.60.0
         version: 1.60.0
       '@tanstack/ai':
-        specifier: ^0.28.0
-        version: 0.28.0(@opentelemetry/api@1.9.1)
+        specifier: ^0.32.0
+        version: 0.32.0(@opentelemetry/api@1.9.1)
       ai:
         specifier: ^6.0.202
         version: 6.0.202(zod@4.4.3)
@@ -7246,13 +7298,23 @@ packages:
     peerDependencies:
       vite: ^5.2.0 || ^6 || ^7 || ^8
 
-  '@tanstack/ai-event-client@0.5.4':
-    resolution: {integrity: sha512-DoF6LKkGCVeF0N6Vky3DdhYxseTZfvTpOkhEQud/Za/GLQ+5p1xH4egQX8oZJkx1S6HZEZTQA1hKSGFYGULtFw==}
-    peerDependencies:
-      '@tanstack/ai': 0.28.0
+  '@tanstack/ai-client@0.18.0':
+    resolution: {integrity: sha512-OjGT4VXcpWg31BVeFkqT9AWaiPQxVqryblq5tLbo3yecA+l0WphuSaB8gCZAn9mgyh5Si8r5hBKTsMhYminbhg==}
 
-  '@tanstack/ai@0.28.0':
-    resolution: {integrity: sha512-DT02H5CeqtsdH90bb1hx3zIxboiyMjuQPzbj7ov3uVkMWIFjuCjhgJbc7w27AY38ewd4d8G63QHYj4AnMSEB9Q==}
+  '@tanstack/ai-event-client@0.6.3':
+    resolution: {integrity: sha512-aQb+v9a4T+uDS3VuDGKOdhwPvr2iwjHVweroXHwbasmvClFqV6WJhoekv74VJrhJrlwz8wVMEPcwlKHxnSAzLQ==}
+    peerDependencies:
+      '@tanstack/ai': 0.32.0
+
+  '@tanstack/ai-react@0.15.9':
+    resolution: {integrity: sha512-an/EwmaFB4mmc3H0xpwBE/8C9o9hp0hv/rjxF9RX+VxLOfznJrNIhBF01bSnkoIFEZU5pBvKKcS/EFXiTjC+Sw==}
+    peerDependencies:
+      '@tanstack/ai': ^0.32.0
+      '@types/react': '>=18.0.0'
+      react: '>=18.0.0'
+
+  '@tanstack/ai@0.32.0':
+    resolution: {integrity: sha512-8Saiyws4irNkxPcyLOucquYaEFEGUVBCrBJmfr1W6z1oDVDYF+pwb31rOLjN0/xqbGCHzjOaXc4TLAZS3kPS4g==}
     engines: {node: '>=18'}
     peerDependencies:
       '@opentelemetry/api': '>=1.9.0'
@@ -14499,16 +14561,32 @@ snapshots:
       tailwindcss: 4.3.0
       vite: 8.0.16(@types/node@25.9.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
 
-  '@tanstack/ai-event-client@0.5.4(@tanstack/ai@0.28.0(@opentelemetry/api@1.9.1))':
+  '@tanstack/ai-client@0.18.0(@opentelemetry/api@1.9.1)':
     dependencies:
-      '@tanstack/ai': 0.28.0(@opentelemetry/api@1.9.1)
+      '@tanstack/ai': 0.32.0(@opentelemetry/api@1.9.1)
+      '@tanstack/ai-event-client': 0.6.3(@tanstack/ai@0.32.0(@opentelemetry/api@1.9.1))
+    transitivePeerDependencies:
+      - '@opentelemetry/api'
+
+  '@tanstack/ai-event-client@0.6.3(@tanstack/ai@0.32.0(@opentelemetry/api@1.9.1))':
+    dependencies:
+      '@tanstack/ai': 0.32.0(@opentelemetry/api@1.9.1)
       '@tanstack/devtools-event-client': 0.4.3
 
-  '@tanstack/ai@0.28.0(@opentelemetry/api@1.9.1)':
+  '@tanstack/ai-react@0.15.9(@opentelemetry/api@1.9.1)(@tanstack/ai@0.32.0(@opentelemetry/api@1.9.1))(@types/react@19.2.17)(react@19.2.7)':
+    dependencies:
+      '@tanstack/ai': 0.32.0(@opentelemetry/api@1.9.1)
+      '@tanstack/ai-client': 0.18.0(@opentelemetry/api@1.9.1)
+      '@types/react': 19.2.17
+      react: 19.2.7
+    transitivePeerDependencies:
+      - '@opentelemetry/api'
+
+  '@tanstack/ai@0.32.0(@opentelemetry/api@1.9.1)':
     dependencies:
       '@ag-ui/core': 0.0.52
       '@standard-schema/spec': 1.1.0
-      '@tanstack/ai-event-client': 0.5.4(@tanstack/ai@0.28.0(@opentelemetry/api@1.9.1))
+      '@tanstack/ai-event-client': 0.6.3(@tanstack/ai@0.32.0(@opentelemetry/api@1.9.1))
       partial-json: 0.1.7
     optionalDependencies:
       '@opentelemetry/api': 1.9.1
