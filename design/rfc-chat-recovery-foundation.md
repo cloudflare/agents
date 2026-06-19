@@ -118,9 +118,15 @@ onError, terminalize })` folds the `build → notify → terminalize` give-up
        client-tool-result preservation correctly keep the two `_persistOrphanedStream`
        bodies separate. No changeset: pure internal refactor, no public API / observable
        behavior change. See the newest Progress-log entry.\_
-2. **Phase 6 e2e audit + Phase 7 docs/release notes** — confirm SIGKILL +
-   persistent-state e2e cover the converged behavior for both hosts; then update
-   `chat-shared-layer.md`, add the history note, and finalize changesets.
+2. **Phase 6 e2e audit + Phase 7 docs/release notes** — **largely done.** Phase 6
+   orphan-persist e2e audit complete (see the Phase-6 audit subsection: coverage map
+   - green ai-chat SIGKILL re-runs, one accepted gap). `chat-shared-layer.md` now has
+     a `recovery-engine.ts` section (engine ownership, adapter/wake seams, the four
+     orphan-persist seams) + a history note linking this RFC; stale orphan-persist
+     references in that doc were corrected. **Remaining:** finalize/sweep changesets at
+     release time (the `reconcileOrphanPartial` export changeset is in; the broader
+     behavior-change changesets already exist) and the optional Layer-5 live deploy
+     smoke.
 
 **Explicitly deferred / post-v1.** Tier-3 (full streaming-driver merge);
 Workers AI Gateway provider-resume checkpoints; Route 2 (front `AIChatAgent`
@@ -2225,6 +2231,22 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 7 — chat-shared-layer.md: recovery-engine ownership (docs, no code)_ —
+  Updated `design/chat-shared-layer.md` (which predated the whole chat-recovery
+  foundation) to document the shared recovery layer. Added a `recovery-engine.ts`
+  module section: `ChatRecoveryEngine` ownership of the wake lifecycle + its
+  ordering invariants (incident → exhausted-persist-before-seal #1631 → guarded
+  `onChatRecovery` → persist-gate → complete → dispatch), the two host seams
+  (`ChatRecoveryAdapter` + per-wake `ChatFiberWakeHooks`), `pi-recovery` as the
+  non-AI-SDK forcing function, and the four orphan-persist seams ((a) shared
+  `StreamAccumulator`, (b) host `resolveOrphanTargetId`, (c) shared
+  `reconcileOrphanPartial`, (d) `SessionProvider`-subset upsert) with the
+  flat-vs-tree rationale. Also **corrected stale content** the refactor invalidated:
+  the `applyChunkToParts` users list and the "accumulator used vs not" section both
+  claimed `_persistOrphanedStream` used `applyChunkToParts` directly (it goes through
+  `StreamAccumulator` now), added `reconcileOrphanPartial` to the module map +
+  reconciler section, and added a History entry linking this RFC. Anchor/cross-refs
+  verified. No code change.
 - _Phase 6 — orphan-persist e2e audit (no code)_ — Audited whether the SIGKILL +
   persistent-state e2e suites cover the just-landed (a)/(b)/(c)/(d) orphan-persist
   behavior, and re-ran the two ai-chat e2e files that drive the refactored
