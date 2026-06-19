@@ -24,6 +24,15 @@ hasSettledToolResults }`, each codec owns its own chunk vocabulary). Three codec
 exist: `AISDKRecoveryCodec` (prod), and the `experimental/pi-recovery` (pi
 `AgentEvent`) + `experimental/tanstack-recovery` (AG-UI) harnesses.
 
+**Guiding aim.** Share the implementation, converge on the behavior that is best
+for the user, and keep per-package only what a product decision genuinely
+dictates. ai-chat and Think already share the client contract (wire protocol +
+AI-SDK `UIMessage` content model — one `useAgentChat` drives both), so remaining
+divergences are server-side substrate or latent bug-asymmetries, not client
+protocol. See **"Convergence philosophy (north star)"** for the litmus test
+(behavior drift → converge; bug-asymmetry → fix in the shared primitive; product
+substrate → keep per-package) and the ai-chat-as-subset end-state.
+
 **Recently landed (most recent first).**
 
 - `66e7a790` / `b62241e9` — **engine-owned exhaustion helper** (API-ergonomics
@@ -61,14 +70,32 @@ exist: `AISDKRecoveryCodec` (prod), and the `experimental/pi-recovery` (pi
 
 **Still open (suggested priority order).**
 
-1. **API-ergonomics finding #4 — hand the decoded partial to
-   `persistOrphanedStream`.** The engine decodes the buffer for classification,
-   then the host decodes it again to preserve the partial; pass the
-   `RecoveryPartial` (or a codec handle) through to drop the second decode.
-2. **Start-id alignment onto the codec** (the other deferred Tier-2 item) — fold
-   the per-host chunk start-id handling (`applyChunkToParts` vs `StreamAccumulator`)
-   behind the codec seam. Behavior-sensitive; verify-first, likely a changeset.
-3. **Phase 6 e2e audit + Phase 7 docs/release notes** — confirm SIGKILL +
+1. **Orphan-persist consolidation** (subsumes the former "finding #4 — hand the
+   decoded partial through" and "start-id alignment onto the codec" items; see the
+   _Orphan-persist 4-step verdict_ design note and the newest Progress-log entry).
+   A step-by-step investigation of both `_persistOrphanedStream` bodies found that
+   3 of its 4 steps are unifiable and only one is genuinely storage-coupled:
+   - **(a) chunks → parts** — migrate ai-chat off its hand-rolled
+     `applyChunkToParts` + inline `start`/`finish`/`message-metadata` onto the
+     shared `StreamAccumulator` (the superset Think already uses). Pure dedup.
+   - **(b) target-id resolution** — the one legitimately per-package step. Keep it
+     behind a narrow `resolveOrphanTargetId(streamId, reconstructedId)` host hook:
+     ai-chat needs the stored `message_id` (#1691) because a flat array can't
+     express parent/child; Think resolves it structurally from the Session tree
+     (`getLatestLeaf` + supersede guard) and so never had #1691. Neither is buggy.
+   - **(c) tool-part dedup** — **a latent correctness gap, not a design choice.**
+     ai-chat dedups settled tool parts by `toolCallId` on merge (replay-safe);
+     Think's orphan path has no inline equivalent and the shared
+     `StreamAccumulator.mergeInto` does not dedup. Promote ai-chat's dedup INTO
+     `mergeInto` so both hosts get it. Independently shippable as a small
+     changeset-worthy patch **before** the larger consolidation.
+   - **(d) upsert-by-id** — mechanical; the flat-array case already lives in
+     `mergeInto`, Think keeps its tree upsert. No behavior change.
+   While here, hand the already-decoded partial through (closes the old finding
+   #4 second-decode). Verify-first; behavior-sensitive; changeset for ai-chat.
+   _Wiggle room: whether (b) lands as a host hook on the adapter vs the codec, and
+   whether (c) ships standalone first, are open until we start._
+2. **Phase 6 e2e audit + Phase 7 docs/release notes** — confirm SIGKILL +
    persistent-state e2e cover the converged behavior for both hosts; then update
    `chat-shared-layer.md`, add the history note, and finalize changesets.
 
@@ -76,7 +103,10 @@ exist: `AISDKRecoveryCodec` (prod), and the `experimental/pi-recovery` (pi
 Workers AI Gateway provider-resume checkpoints; Route 2 (front `AIChatAgent`
 itself with a TanStack client); Layer 5 live-deploy/chaos tests;
 `ResumeHandshakeHost` Approach B (injectable frame vocabulary — revisit only if a
-second foreign client appears).
+second foreign client appears). See **"Platform context: where this seam is
+heading"** for the (non-scope) north star — aligning the storage seam with the
+existing `Session` provider interface and eventually lifting `resumable-stream`
+into a general durable-stream substrate.
 
 **Working conventions.** Validate with `pnpm run check` (113 projects) before
 considering anything done; host-suite tests via each package's
@@ -493,7 +523,6 @@ Adapter-owned behaviors:
 
 - How to inspect the latest persisted leaf.
 - How to determine whether a pre-stream turn is retryable.
-- How to reconstruct partial text/parts from stored stream chunks.
 - How to preserve settled tool results even when `persist: false`.
 - How to restore `lastBody`, `lastClientTools`, and stash data.
 - (Post-v1) How to persist and restore provider-level resume checkpoints such as
@@ -518,7 +547,11 @@ It should contain only format knowledge:
 - serialize chunk body
 - classify progress-bearing chunks
 - classify replay chunks
-- reconstruct a partial assistant from chunk bodies
+- reconstruct a partial assistant from chunk bodies (via the shared
+  `StreamAccumulator` — the codec feeds chunks in; it does not own a bespoke
+  reconstruction. This is the single home for "chunks → parts", removed from the
+  adapter list above to kill the double-assignment that let ai-chat hand-roll a
+  subset inline.)
 - repair interrupted tool parts
 - determine whether a message contains settled tool results
 - find latest user/assistant messages if the transcript shape is generic enough
@@ -552,14 +585,68 @@ knowledge, not policy. The boundary should be three explicit responsibilities:
    adapter-supplied flags only (`streamStillActive`, `streamIsTerminal`,
    `hasPartial`, `hookOptions`, `hasSettledToolResults`). The engine never reads
    the transcript directly.
-3. **Adapter writes.** `persistOrphanPartial` is the sole transcript writer. It
-   owns merge/reconcile/broadcast, stream-metadata message-id resolution, and
-   preserving settled tool results even when `onChatRecovery` returns
-   `{ persist: false }`.
+3. **Shared layer reconstructs + merges; adapter writes.** Reconstruction
+   (`StreamAccumulator`), the merge onto an existing message, and tool-part dedup
+   are **shared** (`StreamAccumulator.mergeInto` + `message-reconciler`) — they are
+   not store knowledge. The adapter owns only the genuinely store-coupled steps:
+   **target-id resolution** (`resolveOrphanTargetId` — stored `message_id` vs
+   tree-position), the **raw store write**, the **broadcast**, and preserving
+   settled tool results even when `onChatRecovery` returns `{ persist: false }`.
 
-The reconnect-resume layer reaches the same `persistOrphanPartial` writer from a
-resume ACK rather than from fiber recovery. That path is adapter-owned and shares
-the writer so the two layers cannot diverge on how an orphan is persisted.
+> **General seam rule (the principle the 4-step verdict generalizes).**
+> *Merge/reconcile/dedup is shared; only target-id resolution and the raw store
+> write are the adapter seam.* This is the litmus test applied to persistence:
+> "how to combine two messages" is behavior (converge it into a shared primitive);
+> "where the bytes live and under what id" is the product's storage model (keep it
+> in the adapter). The same rule already governs the incoming path —
+> `reconcileMessages` is shared, the `persistMessages`/`appendMessage` write is
+> per-host — so the orphan path is just bringing one straggler corner in line.
+
+The reconnect-resume layer reaches the same orphan writer from a resume ACK rather
+than from fiber recovery. That path is adapter-owned and shares the writer so the
+two layers cannot diverge on how an orphan is persisted.
+
+#### Orphan-persist 4-step verdict (2026-06 investigation)
+
+A step-by-step read of both `_persistOrphanedStream` bodies (ai-chat
+[`index.ts:1452–1543`](../packages/ai-chat/src/index.ts), Think
+[`think.ts:11174–11197`](../packages/think/src/think.ts)) against the shared
+primitives (`StreamAccumulator`, `applyChunkToParts`, `resolveToolMergeId`, the
+`message_id` stream-metadata column) decomposes the writer into four steps and
+takes a best-in-class call on each. This **supersedes** the earlier Tier-3 claim
+that the whole writer is "legitimately different, keep package-specific" — only
+one of the four steps actually is.
+
+| Step | ai-chat today | Think today | Verdict |
+| --- | --- | --- | --- |
+| **(a)** chunks → parts | hand-rolls `applyChunkToParts` + inline `start`/`finish`/`message-metadata` | `StreamAccumulator` (superset: same builder + all metadata chunks + `error`/`finish-step` + cross-message-tool detection) | **Think.** `StreamAccumulator` is the complete shared abstraction; ai-chat duplicates a subset inline (and adopts `start.messageId` without the `!isContinuation` guard the accumulator has — safe only because #1229 strips it upstream). Migrate ai-chat onto it. No behavior change. |
+| **(b)** target-id resolution | fresh id → provider `start.messageId` → stored `message_id` (#1691) → last-assistant fallback | fresh UUID; continuation target resolved later from tree position (`getLatestLeaf` + the `lastLeaf?.id !== targetId` supersede guard) | **Tie — genuinely storage-coupled.** ai-chat needs the explicit stored id because a flat array can't express parent/child, so "last assistant" is ambiguous (the #1691 corruption). Think can't represent #1691: the tree's `getLatestLeaf` lands a new-turn-after-a-later-user-message as "leaf is a user message → skip." Forcing either onto the other's scheme regresses or adds dead weight. Keep behind a narrow `resolveOrphanTargetId` host hook. _Residual: ai-chat's `storedId == null` branch is the pre-#1691 buggy last-assistant path, live only for legacy rows; Think has no such hazard._ |
+| **(c)** tool-part dedup | inline dedup by `toolCallId` when merging onto an existing message (replay-safe: an early approval-time persist + recovery replaying the SAME chunks would otherwise leave two parts for one tool call, clobbering settled state) | **none in the orphan path**; relies on `_shouldPersistOrphanedPartial` to not double-persist the message, and on `resolveToolMergeId`/`mergeServerToolOutputs` on the _incoming_ path | **ai-chat — and this is the "fixed in one, not the other" case.** ai-chat's dedup guards a real hazard Think's orphan path does not. The shared `StreamAccumulator.mergeInto` (`stream-accumulator.ts:203–231`) — already the extracted twin of ai-chat's merge — does **not** dedup. Promote the dedup INTO `mergeInto` so both hosts are protected. Independently shippable as a small correctness patch. |
+| **(d)** upsert-by-id | `findIndex` + replace/append (flat array) | `_upsertMessageInHistory` (Session `getMessage` → update/append) | **Tie — mechanically equivalent given a resolved id.** The flat-array case already lives in `mergeInto`; Think keeps the tree upsert. Substrate difference only, no bug. |
+
+Net target: **(a)+(d)** both flow through `StreamAccumulator`/`mergeInto`,
+**(c)** moves into `mergeInto` (closing Think's gap), and **(b)** is the single
+remaining host primitive (`resolveOrphanTargetId`) — the step that legitimately
+follows the storage model. That collapses ~90 lines of ai-chat's hand-rolled
+writer into the engine and removes a silent Think correctness gap, while leaving
+exactly one seam where the flat-array vs Session-tree substrate shows through.
+_Wiggle room when we get to it: whether `resolveOrphanTargetId` hangs off the
+adapter or the codec, and whether (c) ships standalone first._
+
+#### Pluggable storage — feasible, but a product/risk call, not an impossibility
+
+A related pressure-test: the non-goals forbid moving ai-chat onto Session
+storage, but is a single pluggable-storage agent actually _impossible_? **No — a
+flat message list is a degenerate (linear) Session tree**, so a neutral store
+interface (`upsertById`, `getLatestLeaf`, `append(parentId?)`) is conceivable and
+would make even step (b) above a shared implementation. The reason to **not** do
+it is risk/reward and product direction, not architecture: the storage model is
+the most load-bearing, already-shipped surface in each host (ai-chat's flat
+`cf_ai_chat_agent_messages` + v4→v5 migration vs Think's Session tree + hydration
+budget), the payoff is non-user-facing, and the roadmap is for `Think` to subsume
+`AIChatAgent` rather than to unify their substrates underneath a shared interface.
+Forcing a shared store interface now would constrain independent evolution of both
+formats for little gain. Recorded so the "can't" is understood as "shouldn't (yet)."
 
 ### Architecture
 
@@ -644,6 +731,75 @@ The refactor should not preserve every current divergence as permanent adapter
 policy. When one package has clearly better recovery behavior, both packages
 should converge on that behavior intentionally.
 
+### Convergence philosophy (north star)
+
+The guiding aim across this whole effort: **share the implementation, converge on
+the behavior that is best for the user, and keep per-package only what a product
+decision genuinely dictates.** We own both `@cloudflare/ai-chat` and
+`@cloudflare/think`, so there is no reason to ship a capability dark on one side
+and "flip it later" — we converge now, with a changeset and tests, every time.
+
+This rests on a load-bearing fact that is easy to forget: **ai-chat and Think
+already share the client-facing contract.** Both speak the same wire protocol
+(`CHAT_MESSAGE_TYPES` / `cf_agent_chat_*` in
+[protocol.ts](../packages/agents/src/chat/protocol.ts)) and the same content model
+(AI-SDK `UIMessage` chunks streamed through `aiSdkRecoveryCodec` /
+`toUIMessageStream()`), which is exactly why one `useAgentChat` hook drives both
+agents today. The divergences are therefore **not** in what the client sees — they
+are server-side substrate (storage model, durable submissions) and *additive*
+event types layered on the shared stream. That means convergence is mostly about
+aligning **server behavior** behind an already-shared contract, not about
+reconciling two different client protocols.
+
+#### The litmus test: why does this difference exist?
+
+For every divergence, ask which of three buckets it falls in — the bucket dictates
+the action:
+
+1. **Behavior drift / one side is simply better** → **converge on the better one.**
+   The other package adopts it (e.g. give-up broadcast-first ordering; Think's
+   event-driven auto-continuation barrier; shared stall recovery). Best-in-class
+   for the user is the tie-breaker, not "least change."
+2. **Latent bug-asymmetry — one side fixed something the other didn't** →
+   **propagate the fix into the shared primitive** so neither can regress (e.g.
+   orphan-persist step (c): ai-chat's `toolCallId` replay-dedup, missing from
+   Think's path and from `StreamAccumulator.mergeInto`). These are not design
+   choices; they are bugs we discover by reading the two implementations side by
+   side, and the shared layer is where the fix belongs.
+3. **Product decision dictates the difference** → **keep per-package**, with the
+   engine treating it as an *optional capability*, never a shared requirement.
+   Storage model (ai-chat's flat array + v4→v5 migration vs Think's Session tree),
+   durable submissions, codemode execute-pause HITL, media eviction — these exist
+   because the products differ, and forcing them to converge would be the
+   abstraction dictating the product (the inversion the adapter seam exists to
+   prevent). See "Decision: substrate capabilities are optional".
+
+#### End-state: ai-chat as the lean subset, Think as the product superset
+
+Played out, convergence makes **ai-chat's recovery behavior a strict subset of
+Think's** — same shared engine, same wire/content contract, same converged
+behaviors — with Think adding only the *product substrate* on top (submissions,
+Session tree, codemode HITL, scheduled-task/workflow entry points). The roadmap is
+for Think to eventually subsume ai-chat, so we deliberately push behavior toward a
+single shared implementation while letting the substrate stay divergent. This is
+**not** a plan to unify the storage models: a flat list is a degenerate Session
+tree and a neutral store interface is *feasible*, but doing it is a risk/reward and
+product-direction call, not a recovery deliverable (see the pluggable-storage note
+under "Persist-orphan boundary").
+
+#### Wiggle room (decided deliberately, revisit when we get there)
+
+- **Per-package defaults stay** (`chatRecovery` off for ai-chat, on for Think)
+  unless a separate semver-visible RFC changes them — the engine does not own
+  defaults.
+- **Some convergences are large rearchitectures, not leaf lifts** (the
+  auto-continuation barrier was a substantial `AIChatAgent` slice, not a follow-on
+  to a dedup). Sequence behavior convergence by risk, and let a changeset + tests
+  gate each one.
+- **"Better" is occasionally a judgment call.** Where it is, record the reasoning
+  in a Behavior decision / Progress-log entry (as with broadcast-first) rather than
+  converging silently, so the call is reviewable.
+
 ### Convergence matrix
 
 | Area                           | Current `AIChatAgent`                                                                                           | Current `Think`                                                                                          | Proposed shared behavior                                                                                                                                                                                  |
@@ -659,6 +815,35 @@ should converge on that behavior intentionally.
 | Message reconciliation         | Required for AI SDK client IDs                                                                                  | Session persistence avoids much of it                                                                    | Keep adapter-owned. Do not force Think into ai-chat reconciliation.                                                                                                                                       |
 | Progress accounting            | Meaningful chunk types                                                                                          | Durable flush/tool-output oriented                                                                       | Converge on one progress policy: bump only on new forward work at production time, never on replay/re-persist. Land with budget tests proving no regressions.                                             |
 | Terminal exhausted callback    | Existing public hook                                                                                            | Existing public hook plus durable-work effects                                                           | Shared engine invokes hook, but adapter owns durable side effects.                                                                                                                                        |
+
+#### Matrix status + litmus re-classification (2026-06)
+
+The matrix above mixes "current state" with "proposed", and a 2026-06 re-read
+against the [Convergence philosophy](#convergence-philosophy-north-star) litmus
+test found several cells the landed work has overtaken. Corrections (the matrix
+cells are left as the original record; this is the authoritative status):
+
+- **Terminal delivery** — the "ai-chat = persist-first" cell is **stale**. ai-chat
+  converged to **broadcast-first** this cycle (bucket 1; `@cloudflare/ai-chat`
+  patch shipped). **DONE.**
+- **Message reconciliation** — "Keep adapter-owned. Do not force Think into ai-chat
+  reconciliation" is **no longer true and was the right call to drop**:
+  `reconcileMessages` / `resolveToolMergeId` are shared in
+  `agents/chat/message-reconciler.ts` and **both** hosts call them (Think at
+  `think.ts:7590` incoming + `8766` `resolveToolMergeId`). This is **bucket 1, DONE**
+  — and it is the direct precedent for the orphan-persist (c) dedup, which is the
+  one corner of reconciliation that did *not* get shared. (c) is therefore
+  "finish an existing convergence", not new risk.
+- **Auto-continuation barrier / Recovering-state-on-connect** — already tagged DONE
+  in-cell; bucket 1.
+- **Progress accounting** — converged via `shouldCreditStreamProgress` (finding #1).
+  **DONE**, bucket 1.
+- **Durable submissions / Terminal exhausted callback durable effects** — correctly
+  **bucket 3** (product substrate); confirmed keep-per-package.
+
+Going forward, new matrix rows should carry an explicit **status** (proposed /
+DONE) and **litmus bucket** (1 behavior-drift / 2 bug-asymmetry / 3 product) so the
+table stays a live triage tool rather than drifting into a mix of past and future.
 
 ### Behavior decisions
 
@@ -1365,6 +1550,50 @@ the implemented seam is `ChatRecoveryAdapter` in `agents/chat`. 4d-2 should reco
 the decision-hook names with the Turns/Actions expectations, or update those RFCs to
 the real names.)
 
+### Platform context: where this seam is heading (north star, not scope)
+
+This RFC's deliverable is the chat-recovery foundation, and that scope is **not**
+expanding. But a 2026-06 step-back confirmed the seam we are building is one
+instance of a platform-wide pattern, and two of its substrates **already exist in
+the repo in parallel work** — so the only thing to do now is make sure this seam
+converges *toward* them rather than beside them. Cheap insurance, not new work.
+
+The platform pattern: every agent capability ("a chat turn", "a subagent call",
+"an MCP stream", "a workflow step") is composed from a few orthogonal substrates —
+**durability/resume** (`runFiber`, `resumable-stream`, recovery engine, MCP
+event-store), **streaming** (chunk-persist → replay → resume-handshake),
+**storage/session** (where state lives), **protocol/RPC/state-sync** (the wire),
+and **capabilities** (MCP/skills/browser/tools). The same litmus test governs the
+whole platform: behavior is shared; only **substrate, vocabulary, and capability**
+are pluggable.
+
+Two alignments keep the chat-recovery seam compatible with that future:
+
+1. **Shape the storage seam toward the existing `Session` provider interface.** The
+   target adapter seam (the finish line for this work) is essentially three things
+   a host supplies — **storage** (`upsertById` / `getLatestLeaf` /
+   `resolveOrphanTargetId`), **wire vocabulary**, and **product hooks**
+   (submissions, HITL). The `experimental/memory/session` provider system is
+   already a pluggable, **`UIMessage`-compatible** store with `agent` + `postgres`
+   providers — i.e. the "neutral store interface" the [Persist-orphan
+   boundary](#persist-orphan-boundary) note called feasible-but-deferred already
+   exists. The risk to avoid is inventing a *second*, chat-only storage abstraction
+   that later has to be reconciled with it. So: design `resolveOrphanTargetId` + the
+   store-write hook to be **shaped like (or become) a Session-provider method**, so
+   ai-chat's flat array and Think's tree reduce to two providers of one interface —
+   and the deferred pluggable-storage outcome arrives via work already in flight.
+   This does **not** mean migrating ai-chat onto Session storage now (still a
+   non-goal); it means not foreclosing it.
+2. **Treat `resumable-stream` as substrate, not chat.** It is conceptually a
+   general durable-stream primitive (subagent-to-parent streams and MCP streams
+   would want it) but is currently coupled to `cf_ai_chat_*` tables. Do not
+   generalize it now — but keep the codec seam from baking in chat-only assumptions
+   that would block a later lift, the same discipline as "pi is the forcing
+   function", one layer up.
+
+Net: no scope change. The chat-recovery work stays the proving ground; these notes
+just point its target seam at the platform substrates so the two efforts meet.
+
 ## Chat-layer extraction map (2026-06 design review)
 
 Before starting Phase 5, a design review mapped **all** parallel chat machinery
@@ -1401,6 +1630,16 @@ parse vs the shared `parseProtocolMessage`) and so each take their own slice wit
 verify-first gate and a likely changeset. The 4f-i leaves land first because several
 are the pieces the Tier-2 resume-handshake frame will compose.
 
+**Litmus re-read (2026-06):** the two **4f-ii** items — ai-chat's local
+`enforceRowSizeLimit` reimpl and its inline protocol parse vs the shared
+`parseProtocolMessage` — are the *same shape* as orphan-persist step (a): **ai-chat
+hand-rolls a subset of something that already exists shared.** That pattern is the
+prime habitat for a **bucket-2 bug-asymmetry** (one copy quietly carries a fix or
+an edge-case the other lacks). So 4f-ii's "verify-first + likely changeset" gate
+should explicitly *diff the two implementations for a latent fix*, not just confirm
+behavioral equivalence — converge onto the shared primitive AND carry whichever
+side's fix is better into it, exactly as (c) does for `mergeInto`.
+
 ### Tier 2 — structural seams pi should drive (do WITH Phase 5)
 
 Two subsystems are parallel-but-divergent in the same shape recovery was — a shared
@@ -1424,7 +1663,14 @@ assumptions the seam is meant to abstract. Pi is the forcing function.
    storage). Pi has its own wire vocabulary, so pi is exactly what proves the seam is
    wire-agnostic. The Tier-1 leaf lifts (terminal trio, recovering flag,
    `_getPartialStreamText`) are the pieces this frame composes, which is why they go
-   first.
+   first. **Litmus re-read (2026-06):** the spine is already *partly* shared
+   (`ResumeHandshake` in `agents/chat`, imported by both — Think `think.ts:159`), so
+   the remaining divergence is genuinely just (a) wire vocabulary (bucket 3,
+   protocol naming) and (b) the idle-connect payload. (b) deserves its own litmus
+   pass when we extract: "Think sends the full transcript, ai-chat sends only the
+   recovering frame" is a **user-visible behavior difference**, not vocabulary —
+   it may be a bucket-1 convergence (should a reconnecting ai-chat client also get
+   the transcript?) rather than a permanent adapter knob. Flag, don't assume.
 
 2. **Streaming response loop + codec.** The provider-stream → accumulate → store
    durably → broadcast → complete/error → terminal-frame spine. The drivers are
@@ -1439,6 +1685,21 @@ assumptions the seam is meant to abstract. Pi is the forcing function.
    chunk-shape differences (`applyChunkToParts` vs `StreamAccumulator`, start-id
    alignment `_alignStreamStartId` vs the inline rewrite, chunk-type progress
    gating).
+
+   **Litmus re-read (2026-06) — this item shrinks.** The orphan-persist (a)
+   verdict already decides the biggest "chunk-shape difference" listed here:
+   ai-chat adopts the shared `StreamAccumulator` (the superset), so
+   "`applyChunkToParts` vs `StreamAccumulator`" and "start-id alignment" stop being
+   *two codec implementations to abstract behind a seam* and become *one shared
+   reconstruction both drivers feed*. What genuinely remains divergent is the
+   **driver** (ai-chat's SSE `Response` reader vs Think's async-iterator over
+   `toUIMessageStream()`) plus **progress gating** (already converged via
+   `shouldCreditStreamProgress`). **Consequence:** the orphan-persist consolidation
+   (open item #1) and this streaming-codec extraction **share the reconstruction
+   work** — converging ai-chat onto `StreamAccumulator` does double duty (live loop
+   *and* orphan path), and should be sequenced as one effort rather than two. The
+   codec seam is correspondingly thinner than this bullet originally implied: it
+   abstracts the driver + format vocabulary, not the reconstruction.
 
 ### Tier 3 — keep package-specific (do NOT extract)
 
@@ -1458,12 +1719,15 @@ The map confirms these are correctly divergent; extracting them would be the
 - **ai-chat-only substrate** — `_persistedMessageCache` incremental-skip,
   `maxPersistedMessages` cap, streaming `tool-approval-request` early-persist
   (`_approvalPersistedMessageId`), the v4→v5 migration.
-- **`_persistOrphanedStream` id/merge semantics** — ai-chat (`1542–1649`, ~108
-  lines) reconstructs + merges by AI-SDK assistant / `toolCallId` via
-  `getStreamMessageId`; Think (`11396–11418`, ~24 lines) replays through
-  `StreamAccumulator` + `_persistAssistantMessage` with no id merge. Same purpose,
-  legitimately different. (The shared part — progress is not bumped on orphan persist
-  — is already a documented invariant.)
+- **`_persistOrphanedStream` — only the target-id step stays per-package**
+  (revised; the 2026-06 _Orphan-persist 4-step verdict_ under "Persist-orphan
+  boundary" supersedes the original "whole writer is legitimately different"
+  claim here). Of its four steps, (a) chunks→parts, (c) tool dedup, and (d) upsert
+  unify behind `StreamAccumulator`/`mergeInto`; only **(b) target-id resolution**
+  is genuinely storage-coupled (ai-chat's stored `message_id` / #1691 vs Think's
+  tree-position), and it stays as a narrow `resolveOrphanTargetId` host hook. Note
+  (c) is a latent Think gap to close, not a design difference. (The shared
+  invariant — progress is not bumped on orphan persist — still holds.)
 - **Boot ordering** — ai-chat installs chat in the constructor; Think defers
   protocol setup to `onStart` step 7 after session / workspace / skills hydration.
   Different lifecycle by construction.
@@ -1855,6 +2119,53 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 5 — foundation revisit through the convergence litmus test (design, no
+  code)_ — Carried the new lens (shared client contract + the 3-bucket litmus
+  test) back over **all three tiers** of the extraction map and the convergence
+  matrix, not just Tier 3. Findings: **(1)** the "Persist-orphan boundary"
+  responsibility split was miscalibrated — re-split so reconstruct+merge+dedup are
+  **shared** and only target-id resolution + raw store write + broadcast are
+  adapter, and stated the general seam rule (*merge/reconcile is shared; only id
+  resolution + the store write are the adapter seam*). **(2)** Convergence-matrix
+  "Message reconciliation: keep adapter-owned" is already false — `reconcileMessages`
+  /`resolveToolMergeId` are shared and both hosts call them (Think `7590`/`8766`);
+  reframes orphan-persist (c) as *finishing* that convergence. **(3)** Stale matrix
+  cells (terminal delivery persist-first; reconciliation) corrected via a status +
+  litmus-bucket note under the matrix. **(4)** "Reconstruct partial" was
+  double-assigned to both adapter and codec seams — removed from the adapter list,
+  homed on the shared `StreamAccumulator`. **Tier 1:** the 4f-ii items
+  (`enforceRowSizeLimit`, inline protocol parse) are the same "hand-rolled subset
+  of a shared primitive" shape as orphan-persist (a) → their verify gate must diff
+  for a latent bucket-2 fix, not just equivalence. **Tier 2:** item 1's handshake
+  spine is already partly shared (`ResumeHandshake`), narrowing divergence to wire
+  vocab + the idle-connect payload (the latter possibly a bucket-1 convergence, not
+  a permanent knob); item 2 **shrinks** — orphan-persist (a) collapses the
+  "`applyChunkToParts` vs `StreamAccumulator`" codec difference into one shared
+  reconstruction, so the orphan consolidation and the streaming-codec extraction
+  share work and the codec seam is thinner (driver + vocabulary only). No code
+  landed; this tightens the foundation before the orphan-persist consolidation.
+- _Phase 5 / Tier-2 — orphan-persist 4-step investigation (design finding, no
+  code yet)_ — Pressure-tested the long-standing assumption that
+  `_persistOrphanedStream` is "legitimately different, keep package-specific."
+  Read both bodies (ai-chat [`index.ts:1452–1543`], Think [`think.ts:11174–11197`])
+  against the shared primitives and decomposed the writer into four steps:
+  (a) chunks→parts, (b) target-id resolution, (c) tool-part dedup, (d) upsert.
+  **Finding: 3 of 4 unify; only (b) is genuinely storage-coupled.** (a) Think's
+  `StreamAccumulator` is the superset ai-chat hand-rolls a subset of → migrate
+  ai-chat onto it. (b) ai-chat's stored `message_id` (#1691) and Think's
+  `getLatestLeaf` tree-position are each correct FOR their storage model — neither
+  is buggy, and Think structurally cannot have #1691 → keep behind a narrow
+  `resolveOrphanTargetId` host hook. **(c) is the one real bug-asymmetry the user
+  suspected:** ai-chat dedups settled tool parts by `toolCallId` on merge
+  (replay-safe), Think's orphan path has no inline equivalent and the shared
+  `StreamAccumulator.mergeInto` doesn't dedup → promote ai-chat's dedup into
+  `mergeInto`, shippable standalone. (d) mechanically equivalent (substrate only).
+  Also reconsidered **pluggable storage**: a flat list is a degenerate Session
+  tree, so a neutral store interface is _feasible_; not doing it is a risk/reward +
+  product-direction call (Think subsumes ai-chat), not an architectural "can't."
+  Recorded under "Persist-orphan boundary" (4-step verdict table) + Tier-3 bullet
+  revision; folded into open item #1 (subsuming former finding #4 + start-id
+  alignment). No code landed; the (c) dedup is the recommended first concrete step.
 - _Phase 5 / Tier-2 — give-up ordering convergence (broadcast-first)_ —
   Follow-up to the exhaustion-helper extraction below. The two chat hosts had
   **diverged** in their give-up terminalize ORDER: `AIChatAgent` persisted the
