@@ -155,8 +155,8 @@ import {
   partAwaitsClientInteraction,
   clientResolvableToolNames,
   parseProtocolMessage,
-  getPartialStreamText,
-  sendIfOpen,
+  aiSdkRecoveryCodec,
+  ResumeHandshake,
   normalizeToolInput,
   reconcileMessages,
   resolveToolMergeId,
@@ -242,8 +242,6 @@ import type { WorkspaceLike } from "./tools/workspace";
 const MSG_CHAT_MESSAGES = CHAT_MESSAGE_TYPES.CHAT_MESSAGES;
 const MSG_CHAT_RESPONSE = CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE;
 const MSG_CHAT_CLEAR = CHAT_MESSAGE_TYPES.CHAT_CLEAR;
-const MSG_STREAM_RESUMING = CHAT_MESSAGE_TYPES.STREAM_RESUMING;
-const MSG_STREAM_RESUME_NONE = CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE;
 const MSG_MESSAGE_UPDATED = CHAT_MESSAGE_TYPES.MESSAGE_UPDATED;
 const MSG_CHAT_RECOVERING = CHAT_MESSAGE_TYPES.CHAT_RECOVERING;
 
@@ -2614,6 +2612,8 @@ export class Think<
   private _turnQueue = new TurnQueue();
   protected _resumableStream!: ResumableStream;
   private _pendingResumeConnections: Set<string> = new Set();
+  /** Lazily-built shared resume-handshake driver (Tier-2). */
+  private _resumeHandshakeInstance: ResumeHandshake | null = null;
   private _lastClientTools: ClientToolSchema[] | undefined;
   private _lastBody: Record<string, unknown> | undefined;
   private _continuation = new ContinuationState<Connection>();
@@ -7470,74 +7470,14 @@ export class Think<
   private async _handleStreamResumeRequest(
     connection: Connection
   ): Promise<void> {
-    if (this._resumableStream.hasActiveStream()) {
-      if (
-        this._continuation.activeRequestId ===
-          this._resumableStream.activeRequestId &&
-        this._continuation.activeConnectionId !== null &&
-        this._continuation.activeConnectionId !== connection.id
-      ) {
-        sendIfOpen(
-          connection,
-          JSON.stringify({ type: MSG_STREAM_RESUME_NONE })
-        );
-      } else {
-        this._notifyStreamResuming(connection);
-      }
-    } else if (
-      this._continuation.pending !== null &&
-      (this._continuation.pending.connectionId === null ||
-        this._continuation.pending.connectionId === connection.id)
-    ) {
-      this._continuation.awaitingConnections.set(connection.id, connection);
-    } else if (await this._replayTerminalOnResume(connection)) {
-      // A turn terminalized while no client was connected (#1645): drive the
-      // resume handshake so the terminal error frame can be delivered on the
-      // resumed stream (the only path that surfaces on the client) once this
-      // connection ACKs — see `_handleStreamResumeAck`.
-    } else {
-      sendIfOpen(connection, JSON.stringify({ type: MSG_STREAM_RESUME_NONE }));
-    }
+    await this._resumeHandshake().handleResumeRequest(connection);
   }
 
   private async _handleStreamResumeAck(
     connection: Connection,
     requestId: string
   ): Promise<void> {
-    this._pendingResumeConnections.delete(connection.id);
-    if (
-      this._resumableStream.hasActiveStream() &&
-      this._resumableStream.activeRequestId === requestId
-    ) {
-      const orphanedStreamId = this._resumableStream.replayChunks(
-        connection,
-        this._resumableStream.activeRequestId
-      );
-      if (orphanedStreamId) {
-        await this._persistOrphanedStream(orphanedStreamId);
-      }
-    } else if (this._resumableStream.hasActiveStream()) {
-      // Ignore ACKs for a different active stream request id.
-    } else if (await this._replayTerminalOnAck(connection, requestId)) {
-      // Delivered the pending terminal error frame on the resumed stream the
-      // client just ACKed (#1645).
-    } else if (
-      !this._resumableStream.replayCompletedChunksByRequestId(
-        connection,
-        requestId
-      )
-    ) {
-      sendIfOpen(
-        connection,
-        JSON.stringify({
-          body: "",
-          done: true,
-          id: requestId,
-          type: MSG_CHAT_RESPONSE,
-          replay: true
-        })
-      );
-    }
+    await this._resumeHandshake().handleResumeAck(connection, requestId);
   }
 
   private async _handleChatRequest(
@@ -9526,8 +9466,8 @@ export class Think<
           streamId,
           createdAt
         ),
-      resolveRecoveryStreamId: (requestId) =>
-        this._resolveRecoveryStreamId(requestId),
+      resolveRecoveryStream: (requestId) =>
+        this._resolveThinkRecoveryStream(requestId),
       getPartialStreamText: (streamId) => this._getPartialStreamText(streamId),
       activeChatRecoveryRootRequestId: () =>
         this._activeChatRecoveryRootRequestId,
@@ -9732,8 +9672,6 @@ export class Think<
         );
         return { snapshot, recoveryData: user };
       },
-      resolveRecoveryStream: (requestId) =>
-        this._resolveThinkRecoveryStream(requestId),
       classifyRecoveredTurn: (input) => this._classifyRecoveredThinkTurn(input),
       invokeOnChatRecovery: (input) =>
         this.onChatRecovery({
@@ -9769,7 +9707,14 @@ export class Think<
     } satisfies ChatFiberWakeHooks<ThinkRecoveryClassification>);
   }
 
-  /** Resolve the orphaned stream + its terminal status for a recovered chat turn. */
+  /**
+   * Resolve the orphaned stream + its terminal status for a recovered chat turn.
+   * Drives BOTH the wake path (full result) and the give-up terminalization
+   * (which reads only `.streamId`; the terminal banner still fires when
+   * `streamId` is `""` — `_exhaustChatRecovery` does not require a stream).
+   * Prefers the newest durable stream row keyed by the recovery-root request id;
+   * falls back to the live active stream.
+   */
   private _resolveThinkRecoveryStream(
     requestId: string
   ): ResolvedRecoveryStream {
@@ -10097,25 +10042,6 @@ export class Think<
       );
     }
     return true;
-  }
-
-  /**
-   * Resolve the stream id for a recovery turn so the give-up terminalization
-   * can surface whatever partial the turn produced. Prefers the durable stream
-   * row keyed by the recovery-root request id; falls back to the live active
-   * stream. Returns `""` when neither is available (the terminal banner still
-   * fires — `_exhaustChatRecovery` does not require a stream).
-   */
-  private _resolveRecoveryStreamId(requestId: string): string {
-    if (requestId) {
-      const fromMetadata = this._resumableStream
-        .getAllStreamMetadata()
-        .find((metadata) => metadata.request_id === requestId)?.id;
-      if (fromMetadata) return fromMetadata;
-    }
-    return this._resumableStream.hasActiveStream()
-      ? (this._resumableStream.activeStreamId ?? "")
-      : "";
   }
 
   /**
@@ -10661,8 +10587,8 @@ export class Think<
     text: string;
     parts: MessagePart[];
   } {
-    return getPartialStreamText(
-      this._resumableStream.getStreamChunks(streamId)
+    return aiSdkRecoveryCodec.toRecoveryPartial(
+      this._resumableStream.getStreamChunks(streamId).map((chunk) => chunk.body)
     );
   }
 
@@ -11056,65 +10982,6 @@ export class Think<
   }
 
   /**
-   * Replay a pending terminal outcome (#1645) over the resume handshake so a
-   * reconnecting client surfaces it exactly like a live exhaustion. A bare
-   * terminal frame sent on connect is dropped by the `useAgentChat` client
-   * because it never reaches a transport stream reader; only a frame delivered
-   * on a resumed stream becomes `useChat.error` (this is why the terminal is
-   * NOT included in `_buildIdleConnectMessages`). So we drive `STREAM_RESUMING`
-   * here and send the error frame once the client ACKs (see
-   * `_replayTerminalOnAck`). Returns true if a terminal was pending.
-   */
-  private async _replayTerminalOnResume(
-    connection: Connection
-  ): Promise<boolean> {
-    const pending = await this._pendingChatTerminal();
-    if (!pending) return false;
-    sendIfOpen(
-      connection,
-      JSON.stringify({ type: MSG_STREAM_RESUMING, id: pending.requestId })
-    );
-    return true;
-  }
-
-  /**
-   * Deliver the pending terminal error frame on the resumed stream the client
-   * ACKed (#1645). The record is retained (cleared only when a later turn
-   * supersedes it) so concurrent reconnects each learn the outcome.
-   */
-  private async _replayTerminalOnAck(
-    connection: Connection,
-    requestId: string
-  ): Promise<boolean> {
-    const pending = await this._pendingChatTerminal();
-    if (!pending || pending.requestId !== requestId) return false;
-    // Replay any partial content the errored stream produced before the
-    // error, so the reconnecting client observes the same sequence a live
-    // client did — content chunks, then the terminal error (#1575). If the
-    // connection drops mid-replay, skip the terminal frame; the record is
-    // retained, so the next reconnect retries the whole sequence.
-    if (
-      !this._resumableStream.replayErroredChunksByRequestId(
-        connection,
-        pending.requestId
-      )
-    ) {
-      return true;
-    }
-    sendIfOpen(
-      connection,
-      JSON.stringify({
-        body: pending.body,
-        done: true,
-        error: true,
-        id: pending.requestId,
-        type: MSG_CHAT_RESPONSE
-      })
-    );
-    return true;
-  }
-
-  /**
    * Set or clear the live "recovering…" status for a durable chat turn (#1620).
    * Persists a durable record (replayed on connect via `_buildIdleConnectMessages`)
    * and broadcasts a `MSG_CHAT_RECOVERING` frame — but only on a genuine
@@ -11142,9 +11009,9 @@ export class Think<
    * `MSG_CHAT_RESPONSE` frame on connect is dropped by the `useAgentChat`
    * client because it never reaches a transport stream reader, so it cannot
    * become `useChat.error` — a failed turn would still look frozen (#1645).
-   * The terminal outcome is instead surfaced over the resume handshake
-   * (`_replayTerminalOnResume` → ACK → `_replayTerminalOnAck`), the only path
-   * that lands on the stream reader.
+   * The terminal outcome is instead surfaced over the resume handshake (the
+   * shared {@link ResumeHandshake} drives `STREAM_RESUMING` → ACK → terminal
+   * error frame), the only path that lands on the stream reader.
    */
   private async _buildIdleConnectMessages(): Promise<
     Array<Record<string, unknown>>
@@ -11173,18 +11040,32 @@ export class Think<
 
   // ── Resume helpers ──────────────────────────────────────────────
 
+  /**
+   * The shared resume-handshake driver (Tier-2). Lazily built; the
+   * `ResumableStream` / `ContinuationState` / pending set are stable after
+   * `onStart`, so a single instance threads them for the agent's lifetime. The
+   * idle-connect payload (transcript + recovering, `_buildIdleConnectMessages`)
+   * stays host-owned and is NOT part of the driver.
+   */
+  private _resumeHandshake(): ResumeHandshake {
+    return (this._resumeHandshakeInstance ??= new ResumeHandshake({
+      responseMessageType: MSG_CHAT_RESPONSE,
+      resumableStream: this._resumableStream,
+      continuation: this._continuation,
+      pendingResumeConnections: this._pendingResumeConnections,
+      pendingChatTerminal: () => this._pendingChatTerminal(),
+      persistOrphanedStream: (streamId) => this._persistOrphanedStream(streamId)
+    }));
+  }
+
+  /**
+   * Notify a connection about an active stream that can be resumed — delegates
+   * to the shared {@link ResumeHandshake}. Kept as a thin method because it is
+   * also called proactively from onConnect and the broadcast loop. See the
+   * driver for the #1733 double-send contract.
+   */
   private _notifyStreamResuming(connection: Connection): void {
-    if (!this._resumableStream.hasActiveStream()) return;
-    const sent = sendIfOpen(
-      connection,
-      JSON.stringify({
-        type: MSG_STREAM_RESUMING,
-        id: this._resumableStream.activeRequestId
-      })
-    );
-    if (sent) {
-      this._pendingResumeConnections.add(connection.id);
-    }
+    this._resumeHandshake().notifyStreamResuming(connection);
   }
 
   /**

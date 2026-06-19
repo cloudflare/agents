@@ -24,7 +24,7 @@
 
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
-import type { MessagePart } from "agents/chat";
+import type { ChatRecoveryCodec, MessagePart } from "agents/chat";
 
 /** The buffer-worthy subset of pi's `AgentEvent` stream (carries text progress). */
 type BufferedPiEvent = Extract<
@@ -46,7 +46,7 @@ export function renderAssistantText(message: AssistantMessage): string {
     .join("");
 }
 
-export class PiRecoveryCodec {
+export class PiRecoveryCodec implements ChatRecoveryCodec {
   /**
    * Decide whether a pi `AgentEvent` carries recoverable streaming progress and,
    * if so, serialize it into a `ResumableStream` chunk body. The buffer treats
@@ -127,5 +127,17 @@ export class PiRecoveryCodec {
   toRecoveryPartial(bodies: string[]): { text: string; parts: MessagePart[] } {
     const { text } = this.decodePartial(bodies);
     return { text, parts: [] };
+  }
+
+  /**
+   * Pi's progress vocabulary: the assistant streaming events that carry
+   * recoverable text (`message_update` / `message_end`) — exactly the buffer-
+   * worthy subset {@link encodeEvent} stores. Pi is HTTP-only with no streaming
+   * no-progress window today, so nothing consults this; it conforms to
+   * {@link ChatRecoveryCodec} and shows the predicate is per-vocabulary (the
+   * codec, not the engine, owns "what counts as progress").
+   */
+  isProgressChunk(type: string | undefined): boolean {
+    return type === "message_update" || type === "message_end";
   }
 }

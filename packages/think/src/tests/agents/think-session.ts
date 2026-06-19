@@ -1504,14 +1504,23 @@ export class ThinkTestAgent extends Think {
         frames.push(JSON.parse(message) as Record<string, unknown>);
       }
     };
-    const returned = await (
+    // The terminal-replay logic now lives on the shared `ResumeHandshake`
+    // driver (Tier-2). Reach it through the host's lazy getter and exercise the
+    // same `_replayTerminalOnAck` so this package keeps its own #1575 guard.
+    const handshake = (
       this as unknown as {
-        _replayTerminalOnAck: (
-          connection: { send(message: string): void },
-          requestId: string
-        ) => Promise<boolean>;
+        _resumeHandshake: () => {
+          _replayTerminalOnAck: (
+            connection: { send(message: string): void },
+            requestId: string
+          ) => Promise<boolean>;
+        };
       }
-    )._replayTerminalOnAck(fakeConnection, requestId);
+    )._resumeHandshake();
+    const returned = await handshake._replayTerminalOnAck(
+      fakeConnection,
+      requestId
+    );
     return { returned, frames };
   }
 

@@ -28,7 +28,8 @@ import {
 } from "agents/chat";
 import {
   applyChunkToParts,
-  getPartialStreamText,
+  aiSdkRecoveryCodec,
+  ResumeHandshake,
   isReplayChunk,
   sanitizeMessage,
   enforceRowSizeLimit,
@@ -434,6 +435,9 @@ export class AIChatAgent<
    * @internal
    */
   private _pendingResumeConnections: Set<string> = new Set();
+
+  /** Lazily-built shared resume-handshake driver (Tier-2). */
+  private _resumeHandshakeInstance: ResumeHandshake | null = null;
 
   /**
    * Continuation lifecycle state: pending, deferred, active, and
@@ -1064,89 +1068,13 @@ export class AIChatAgent<
         // avoiding the race condition where CF_AGENT_STREAM_RESUMING sent
         // in onConnect arrives before the client's handler is ready.
         if (event.type === "stream-resume-request") {
-          if (this._resumableStream.hasActiveStream()) {
-            if (
-              this._continuation.activeRequestId ===
-                this._resumableStream.activeRequestId &&
-              this._continuation.activeConnectionId !== null &&
-              this._continuation.activeConnectionId !== connection.id
-            ) {
-              sendIfOpen(
-                connection,
-                JSON.stringify({
-                  type: MessageType.CF_AGENT_STREAM_RESUME_NONE
-                })
-              );
-            } else {
-              this._notifyStreamResuming(connection);
-            }
-          } else if (
-            this._continuation.pending !== null &&
-            (this._continuation.pending.connectionId === null ||
-              this._continuation.pending.connectionId === connection.id)
-          ) {
-            this._continuation.awaitingConnections.set(
-              connection.id,
-              connection
-            );
-          } else if (await this._replayTerminalOnResume(connection)) {
-            // A turn terminalized while no client was connected (#1645): drive
-            // the resume handshake so the terminal error frame can be delivered
-            // on the resumed stream (the only path that surfaces as an error on
-            // the client) once this connection ACKs — see `_replayTerminalOnAck`.
-          } else {
-            sendIfOpen(
-              connection,
-              JSON.stringify({
-                type: MessageType.CF_AGENT_STREAM_RESUME_NONE
-              })
-            );
-          }
+          await this._resumeHandshake().handleResumeRequest(connection);
           return;
         }
 
         // Handle stream resume acknowledgment
         if (event.type === "stream-resume-ack") {
-          this._pendingResumeConnections.delete(connection.id);
-
-          if (
-            this._resumableStream.hasActiveStream() &&
-            this._resumableStream.activeRequestId === event.id
-          ) {
-            const orphanedStreamId = this._resumableStream.replayChunks(
-              connection,
-              this._resumableStream.activeRequestId
-            );
-
-            // If the stream was orphaned (restored from SQLite after
-            // hibernation with no live reader), reconstruct the partial
-            // assistant message from stored chunks and persist it so it
-            // survives further page refreshes.
-            if (orphanedStreamId) {
-              await this._persistOrphanedStream(orphanedStreamId);
-            }
-          } else if (this._resumableStream.hasActiveStream()) {
-            // Ignore ACKs for a different active stream request id.
-          } else if (await this._replayTerminalOnAck(connection, event.id)) {
-            // Delivered the pending terminal error frame on the resumed stream
-            // the client just ACKed (#1645).
-          } else if (
-            !this._resumableStream.replayCompletedChunksByRequestId(
-              connection,
-              event.id
-            )
-          ) {
-            sendIfOpen(
-              connection,
-              JSON.stringify({
-                body: "",
-                done: true,
-                id: event.id,
-                type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-                replay: true
-              })
-            );
-          }
+          await this._resumeHandshake().handleResumeAck(connection, event.id);
           return;
         }
 
@@ -1324,38 +1252,30 @@ export class AIChatAgent<
   }
 
   /**
-   * Notify a connection about an active stream that can be resumed.
-   * The client should respond with CF_AGENT_STREAM_RESUME_ACK to receive chunks.
-   *
-   * A connection can legitimately be notified more than once for the same
-   * request — proactively from onConnect AND in response to its
-   * CF_AGENT_STREAM_RESUME_REQUEST (#1733). This is intentional and must NOT
-   * be deduped here: an explicit resume request always deserves a response
-   * (the client's reconnectToStream would otherwise hang until its safety
-   * timeout, with no replay), and the proactive notify is required for
-   * clients that never send a resume request. The notify itself is a single
-   * tiny frame; clients are responsible for deduping the ACK so the full
-   * chunk buffer is not replayed twice.
+   * The shared resume-handshake driver (Tier-2). Lazily built; the
+   * `ResumableStream` / `ContinuationState` / pending set are stable after the
+   * constructor, so a single instance threads them for the agent's lifetime.
+   */
+  private _resumeHandshake(): ResumeHandshake {
+    return (this._resumeHandshakeInstance ??= new ResumeHandshake({
+      responseMessageType: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+      resumableStream: this._resumableStream,
+      continuation: this._continuation,
+      pendingResumeConnections: this._pendingResumeConnections,
+      pendingChatTerminal: () => this._pendingChatTerminal(),
+      persistOrphanedStream: (streamId) => this._persistOrphanedStream(streamId)
+    }));
+  }
+
+  /**
+   * Notify a connection about an active stream that can be resumed — delegates
+   * to the shared {@link ResumeHandshake}. Kept as a thin method because it is
+   * also called proactively from onConnect and the broadcast loop. See the
+   * driver for the #1733 double-send contract.
    * @param connection - The WebSocket connection to notify
    */
   private _notifyStreamResuming(connection: Connection) {
-    if (!this._resumableStream.hasActiveStream()) {
-      return;
-    }
-
-    // Notify client - they will send ACK when ready
-    const sent = sendIfOpen(
-      connection,
-      JSON.stringify({
-        type: MessageType.CF_AGENT_STREAM_RESUMING,
-        id: this._resumableStream.activeRequestId
-      })
-    );
-    if (sent) {
-      // Add connection to pending set - they'll be excluded from live broadcasts
-      // until they send ACK to receive the full stream replay
-      this._pendingResumeConnections.add(connection.id);
-    }
+    this._resumeHandshake().notifyStreamResuming(connection);
   }
 
   // ── Delegate methods for backward compatibility with tests ─────────
@@ -1466,14 +1386,7 @@ export class AIChatAgent<
   private async _maybeBumpRecoveryProgress(
     type: string | undefined
   ): Promise<void> {
-    if (
-      type === "text-start" ||
-      type === "reasoning-start" ||
-      type === "tool-input-available" ||
-      type === "tool-output-available" ||
-      type === "tool-output-error" ||
-      type === "tool-output-denied"
-    ) {
+    if (aiSdkRecoveryCodec.isProgressChunk(type)) {
       await this._bumpChatRecoveryProgress();
     }
   }
@@ -3762,8 +3675,8 @@ export class AIChatAgent<
           streamId,
           createdAt
         ),
-      resolveRecoveryStreamId: (requestId) =>
-        this._resolveRecoveryStreamId(requestId),
+      resolveRecoveryStream: (requestId) =>
+        this._resolveAIChatRecoveryStream(requestId),
       getPartialStreamText: (streamId) => this._getPartialStreamText(streamId),
       activeChatRecoveryRootRequestId: () =>
         this._activeChatRecoveryRootRequestId,
@@ -3885,68 +3798,6 @@ export class AIChatAgent<
   }
 
   /**
-   * Replay a pending terminal outcome (#1645) over the resume handshake so a
-   * reconnecting client surfaces it exactly like a live exhaustion. The bare
-   * terminal frame is dropped by the client unless it arrives on a resumed
-   * stream — the only path that reaches the transport's stream reader and
-   * becomes `useChat.error` — so we drive `STREAM_RESUMING` here and deliver
-   * the error frame once the client ACKs (see `_replayTerminalOnAck`).
-   * Returns true if a terminal was pending (and `STREAM_RESUMING` was sent).
-   */
-  private async _replayTerminalOnResume(
-    connection: Connection
-  ): Promise<boolean> {
-    const pending = await this._pendingChatTerminal();
-    if (!pending) return false;
-    sendIfOpen(
-      connection,
-      JSON.stringify({
-        type: MessageType.CF_AGENT_STREAM_RESUMING,
-        id: pending.requestId
-      })
-    );
-    return true;
-  }
-
-  /**
-   * Deliver the pending terminal error frame on the resumed stream the client
-   * ACKed (#1645). The record is retained (not cleared) so concurrent
-   * reconnects (e.g. multiple tabs) each learn the outcome; it is cleared when
-   * a later turn supersedes it.
-   */
-  private async _replayTerminalOnAck(
-    connection: Connection,
-    requestId: string
-  ): Promise<boolean> {
-    const pending = await this._pendingChatTerminal();
-    if (!pending || pending.requestId !== requestId) return false;
-    // Replay any partial content the errored stream produced before the
-    // error, so the reconnecting client observes the same sequence a live
-    // client did — content chunks, then the terminal error (#1575). If the
-    // connection drops mid-replay, skip the terminal frame; the record is
-    // retained, so the next reconnect retries the whole sequence.
-    if (
-      !this._resumableStream.replayErroredChunksByRequestId(
-        connection,
-        pending.requestId
-      )
-    ) {
-      return true;
-    }
-    sendIfOpen(
-      connection,
-      JSON.stringify({
-        body: pending.body,
-        done: true,
-        error: true,
-        id: pending.requestId,
-        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-      })
-    );
-    return true;
-  }
-
-  /**
    * Build the on-connect "recovering…" replay frame (#1620), or `null` when no
    * (non-stale) recovery is in progress. A client that connects between recovery
    * attempts (no active stream) reads the turn as working rather than frozen.
@@ -4008,8 +3859,6 @@ export class AIChatAgent<
         );
         return { snapshot, recoveryData: user };
       },
-      resolveRecoveryStream: (requestId) =>
-        this._resolveAIChatRecoveryStream(requestId),
       classifyRecoveredTurn: (input) => this._classifyRecoveredChatTurn(input),
       invokeOnChatRecovery: (input) =>
         this.onChatRecovery({
@@ -4046,10 +3895,14 @@ export class AIChatAgent<
   }
 
   /**
-   * Resolve the orphaned stream for a recovered chat turn. `AIChatAgent` does not
-   * model terminal stream status, so `streamStatus` is left `undefined` (keeping
-   * the engine's terminal-stream branches dead here) — see the "substrate
-   * capabilities are optional" decision in the RFC.
+   * Resolve the orphaned stream for a recovered chat turn — drives BOTH the wake
+   * path (full result) and the give-up terminalization (which reads only
+   * `.streamId`). Prefers the newest durable stream row keyed by the recovery-
+   * root request id; falls back to the live active stream; `streamId` is `""`
+   * when neither survives. `AIChatAgent` does not model terminal stream status,
+   * so `streamStatus` is left `undefined` (keeping the engine's terminal-stream
+   * branches dead here) — see the "substrate capabilities are optional" decision
+   * in the RFC.
    */
   private _resolveAIChatRecoveryStream(
     requestId: string
@@ -4451,24 +4304,6 @@ export class AIChatAgent<
   }
 
   /**
-   * Resolve the stream id for a recovery turn so the give-up terminalization
-   * can surface whatever partial the turn produced. Prefers the durable stream
-   * row keyed by the recovery-root request id; falls back to the live active
-   * stream. Returns `""` when neither is available.
-   */
-  private _resolveRecoveryStreamId(requestId: string): string {
-    if (requestId) {
-      const fromMetadata = this._resumableStream
-        .getAllStreamMetadata()
-        .find((metadata) => metadata.request_id === requestId)?.id;
-      if (fromMetadata) return fromMetadata;
-    }
-    return this._resumableStream.hasActiveStream()
-      ? (this._resumableStream.activeStreamId ?? "")
-      : "";
-  }
-
-  /**
    * Terminalize a recovery turn that has run out of stable-state-timeout retry
    * budget — or whose incident record has vanished — by routing through the
    * SAME `_exhaustChatRecovery` path as deploy-recovery exhaustion. It fires
@@ -4637,8 +4472,8 @@ export class AIChatAgent<
     text: string;
     parts: MessagePart[];
   } {
-    return getPartialStreamText(
-      this._resumableStream.getStreamChunks(streamId)
+    return aiSdkRecoveryCodec.toRecoveryPartial(
+      this._resumableStream.getStreamChunks(streamId).map((chunk) => chunk.body)
     );
   }
 

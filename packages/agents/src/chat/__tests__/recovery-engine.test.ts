@@ -183,7 +183,7 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
         calls.push("shouldKeepRecoveringError");
       },
       exhaustChatRecovery: () => Promise.resolve(),
-      resolveRecoveryStreamId: () => "",
+      resolveRecoveryStream: () => ({ streamId: "", streamStillActive: false }),
       getPartialStreamText: () => ({ text: "", parts: [] }),
       activeChatRecoveryRootRequestId: () => undefined,
       onGiveUpBookkeepingError: () => {}
@@ -322,7 +322,7 @@ describe("ChatRecoveryEngine.updateIncident (fake adapter)", () => {
       },
       onShouldKeepRecoveringError: () => {},
       exhaustChatRecovery: () => Promise.resolve(),
-      resolveRecoveryStreamId: () => "",
+      resolveRecoveryStream: () => ({ streamId: "", streamStillActive: false }),
       getPartialStreamText: () => ({ text: "", parts: [] }),
       activeChatRecoveryRootRequestId: () => undefined,
       onGiveUpBookkeepingError: () => {}
@@ -496,7 +496,7 @@ describe("ChatRecoveryEngine.scheduleRecovery (fake adapter)", () => {
       },
       onShouldKeepRecoveringError: () => {},
       exhaustChatRecovery: () => Promise.resolve(),
-      resolveRecoveryStreamId: () => "",
+      resolveRecoveryStream: () => ({ streamId: "", streamStillActive: false }),
       getPartialStreamText: () => ({ text: "", parts: [] }),
       activeChatRecoveryRootRequestId: () => undefined,
       onGiveUpBookkeepingError: () => {}
@@ -675,7 +675,7 @@ describe("ChatRecoveryEngine.rescheduleAfterStableTimeout (fake adapter)", () =>
       },
       onShouldKeepRecoveringError: () => {},
       exhaustChatRecovery: () => Promise.resolve(),
-      resolveRecoveryStreamId: () => "",
+      resolveRecoveryStream: () => ({ streamId: "", streamStillActive: false }),
       getPartialStreamText: () => ({ text: "", parts: [] }),
       activeChatRecoveryRootRequestId: () => undefined,
       onGiveUpBookkeepingError: () => {}
@@ -876,9 +876,9 @@ describe("ChatRecoveryEngine.exhaustRecoveryGiveUp (fake adapter)", () => {
         exhausts.push({ incident, config, partial, streamId, createdAt });
         return Promise.resolve();
       },
-      resolveRecoveryStreamId: (requestId) => {
+      resolveRecoveryStream: (requestId) => {
         streamIdArgs.push(requestId);
-        return options.streamId ?? "";
+        return { streamId: options.streamId ?? "", streamStillActive: false };
       },
       getPartialStreamText: (streamId) => {
         partialArgs.push(streamId);
@@ -1349,6 +1349,13 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     basePersist?: boolean;
     dispatchThrows?: boolean;
     seedExhausted?: boolean;
+    /**
+     * Drop the engine-defaulted optional hooks (`isAwaitingClientInteraction`,
+     * `onShouldKeepRecoveringError`, `invokeOnChatRecovery`) so a MINIMAL adapter
+     * is exercised — proving the engine supplies the documented defaults
+     * (`false` / no-op / `{}`) rather than crashing on the missing functions.
+     */
+    omitOptionalHooks?: boolean;
   };
 
   const NOW = 10_000_000;
@@ -1414,7 +1421,10 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
         exhausted.push({ streamId, createdAt });
         return Promise.resolve();
       },
-      resolveRecoveryStreamId: () => "",
+      resolveRecoveryStream: () => {
+        calls.push("resolveStream");
+        return stream;
+      },
       getPartialStreamText: (streamId) => {
         calls.push(`getPartial:${streamId}`);
         return partial;
@@ -1428,10 +1438,6 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
       unwrapRecoverySnapshot: () => {
         calls.push("unwrap");
         return { snapshot: options.snapshot ?? null, recoveryData: null };
-      },
-      resolveRecoveryStream: () => {
-        calls.push("resolveStream");
-        return stream;
       },
       classifyRecoveredTurn: () => {
         calls.push("classify");
@@ -1466,6 +1472,15 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
         return Promise.resolve();
       }
     };
+
+    if (options.omitOptionalHooks) {
+      // Shrink to a minimal adapter: the engine must treat these as
+      // `false` (awaiting), a swallowed no-op (shouldKeepRecovering error),
+      // and empty options (`{}`) respectively.
+      delete adapter.isAwaitingClientInteraction;
+      delete adapter.onShouldKeepRecoveringError;
+      delete wake.invokeOnChatRecovery;
+    }
 
     if (options.seedExhausted) {
       // Seed an at-cap, long-stale incident so `beginIncident` evaluates as
@@ -1632,5 +1647,33 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
       .reverse()
       .find((e) => e.type === "chat:recovery:failed");
     expect(sealed?.reason).toBe("dispatch boom");
+  });
+
+  it("drives a MINIMAL adapter (omitted optional hooks) via engine defaults", async () => {
+    // A host with no client-interaction / shouldKeepRecovering-diagnostic /
+    // user-onChatRecovery surface (e.g. the pi fixture) omits these hooks. The
+    // engine must default them rather than throw on the missing functions
+    // (T2-3b). The run completing + dispatching is the proof.
+    const h = makeHarness({ omitOptionalHooks: true });
+
+    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
+
+    // `invokeOnChatRecovery` was omitted, so it is never called and the engine
+    // proceeds with empty options (`{}`) — which still flow through to dispatch.
+    expect(h.calls).not.toContain("invokeOnChatRecovery");
+    expect(h.calls).toContain("dispatch");
+    expect(h.dispatched).toHaveLength(1);
+    expect(h.dispatched[0].options).toEqual({});
+  });
+
+  it("minimal adapter still terminalizes an exhausted budget without onChatRecovery", async () => {
+    // The default for `isAwaitingClientInteraction` is `false`, so an at-cap
+    // incident still evaluates as exhausted and terminalizes — exercising the
+    // `?? false` default on the give-up-adjacent path.
+    const h = makeHarness({ omitOptionalHooks: true, seedExhausted: true });
+
+    expect(await h.engine.handleChatFiberRecovery(h.ctx, h.wake)).toBe(true);
+    expect(h.calls).toContain("exhaust");
+    expect(h.calls).not.toContain("dispatch");
   });
 });

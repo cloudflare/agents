@@ -159,8 +159,10 @@ export interface ChatRecoveryAdapter {
   /**
    * Whether the turn is parked on a pending CLIENT interaction (waiting on the
    * human, not stuck). When true the engine keeps the incident budget-free.
+   * Optional: a host with no client-interaction/HITL substrate (e.g. the pi
+   * fixture) omits it and the engine treats the turn as never parked (`false`).
    */
-  isAwaitingClientInteraction(): boolean;
+  isAwaitingClientInteraction?(): boolean;
   /** Persist the evaluated incident under `key`. */
   putIncident(key: string, incident: ChatRecoveryIncident): Promise<void>;
   /**
@@ -196,8 +198,12 @@ export interface ChatRecoveryAdapter {
    * staleness / idempotency / broadcast I/O.
    */
   setRecovering(active: boolean, requestId?: string): Promise<void>;
-  /** Report a throw from the caller's `shouldKeepRecovering` hook. */
-  onShouldKeepRecoveringError(error: unknown): void;
+  /**
+   * Report a throw from the caller's `shouldKeepRecovering` hook. Optional: a
+   * host that does not surface this diagnostic omits it (the engine swallows the
+   * report).
+   */
+  onShouldKeepRecoveringError?(error: unknown): void;
   /**
    * Terminalize a given-up recovery turn: deliver the exhaustion notification
    * plus the package-owned terminal record / banner / submission writes. A thin
@@ -214,11 +220,14 @@ export interface ChatRecoveryAdapter {
     createdAt: number
   ): Promise<void>;
   /**
-   * Resolve the orphaned stream id for a (recovery-root) request id, or `""`
-   * when no stream metadata survives. A thin pass-through to the package's
-   * `_resolveRecoveryStreamId`.
+   * Resolve the orphaned stream identity for a (recovery-root) request id —
+   * `streamId` is `""` when no stream metadata survives. Drives BOTH the wake
+   * path (which consumes the full {@link ResolvedRecoveryStream}) and the
+   * give-up path (which reads only `.streamId`). A thin pass-through to the
+   * package's stream-metadata lookup: the newest row keyed by the request id,
+   * else the live active stream.
    */
-  resolveRecoveryStreamId(requestId: string): string;
+  resolveRecoveryStream(requestId: string): ResolvedRecoveryStream;
   /** Reconstruct the partial text/parts buffered for `streamId`. */
   getPartialStreamText(streamId: string): RecoveryPartial;
   /**
@@ -325,8 +334,6 @@ export interface ChatFiberWakeHooks<TClassify> {
     snapshot: ChatFiberSnapshot | null;
     recoveryData: unknown;
   };
-  /** Resolve the orphaned stream identity for this turn's request id. */
-  resolveRecoveryStream(requestId: string): ResolvedRecoveryStream;
   /**
    * Classify the recovered turn as a `retry` or `continue` and return any
    * package-specific detail the dispatch decision needs (e.g. the pre-stream
@@ -340,9 +347,11 @@ export interface ChatFiberWakeHooks<TClassify> {
   /**
    * Build the package's `ChatRecoveryContext` and invoke the user `onChatRecovery`
    * hook, returning its (defaulted) options. The engine wraps this in the
-   * incident `failed`-on-throw guard.
+   * incident `failed`-on-throw guard. Optional: a host with no user
+   * `onChatRecovery` surface (e.g. the pi fixture) omits it and the engine
+   * proceeds with empty options (`{}`).
    */
-  invokeOnChatRecovery(
+  invokeOnChatRecovery?(
     input: InvokeOnChatRecoveryInput
   ): Promise<ChatRecoveryOptions | void>;
   /**
@@ -432,7 +441,7 @@ export class ChatRecoveryEngine {
 
     const requestId = ctx.name.slice(chatPrefix.length);
     const { snapshot, recoveryData } = wake.unwrapRecoverySnapshot(ctx);
-    const stream = wake.resolveRecoveryStream(requestId);
+    const stream = adapter.resolveRecoveryStream(requestId);
     const { streamId, streamStillActive, streamStatus } = stream;
     const partial = streamId
       ? adapter.getPartialStreamText(streamId)
@@ -489,7 +498,7 @@ export class ChatRecoveryEngine {
     // emit, otherwise it leaks in `attempting` and is never observable as stuck.
     try {
       const options =
-        (await wake.invokeOnChatRecovery({
+        (await wake.invokeOnChatRecovery?.({
           incident,
           recoveryKind,
           recoveryRootRequestId,
@@ -594,10 +603,11 @@ export class ChatRecoveryEngine {
       config,
       existing,
       currentProgress,
-      awaitingClientInteraction: adapter.isAwaitingClientInteraction(),
+      awaitingClientInteraction:
+        adapter.isAwaitingClientInteraction?.() ?? false,
       now,
       onShouldKeepRecoveringError: (error) =>
-        adapter.onShouldKeepRecoveringError(error)
+        adapter.onShouldKeepRecoveringError?.(error)
     });
 
     await adapter.putIncident(key, incident);
@@ -790,7 +800,7 @@ export class ChatRecoveryEngine {
           reason: input.reason
         };
 
-    const streamId = adapter.resolveRecoveryStreamId(
+    const { streamId } = adapter.resolveRecoveryStream(
       incident.recoveryRootRequestId ?? incident.requestId
     );
     const partial = streamId

@@ -9,6 +9,18 @@ export {
 } from "./message-builder";
 
 export {
+  AISDKRecoveryCodec,
+  aiSdkRecoveryCodec,
+  type ChatRecoveryCodec
+} from "./recovery-codec";
+
+export {
+  ResumeHandshake,
+  type ResumeHandshakeHost,
+  type PendingChatTerminal
+} from "./resume-handshake";
+
+export {
   sendIfOpen,
   isWebSocketClosedSendError,
   type ChatConnection

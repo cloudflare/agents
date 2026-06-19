@@ -90,11 +90,12 @@ interface PiRecoveryData {
 }
 
 /**
- * pi's per-turn classification detail: whether a partial survived the crash and
- * the recovered turn should CONTINUE from it (`true`) vs regenerate from the
- * unanswered user message (`false`, the no-partial fallback).
+ * pi carries no classification detail: whether the recovered turn CONTINUEs from
+ * a survived partial vs regenerates from the unanswered user message is fully
+ * captured by `recoveryKind` (`"continue"` vs `"retry"`), so dispatch derives it
+ * rather than threading a redundant flag through `detail` (#5).
  */
-type PiClassify = { continueFromPartial: boolean };
+type PiClassify = undefined;
 
 /** A continuation summary the e2e polls to prove continue-vs-regenerate. */
 interface RecoverySummary {
@@ -262,10 +263,10 @@ export class PiAgent extends Agent<Env> {
 
   /**
    * Resolve the durable stream id for a turn's `requestId`: the metadata row if
-   * one survived, else the live active stream, else `""`. Shared by both the
-   * adapter's `resolveRecoveryStreamId` and the wake hook's
-   * `resolveRecoveryStream` (the API exposes the lookup through two seams; see
-   * the RFC Phase-5 API-ergonomics note).
+   * one survived, else the live active stream, else `""`. Backs the single
+   * `ChatRecoveryAdapter.resolveRecoveryStream` seam, which the engine drives on
+   * both the wake and give-up paths (the two-seam duplication noted in the RFC
+   * Phase-5 API-ergonomics findings is now collapsed).
    */
   private _resolveStreamId(requestId: string): string {
     const meta = this._resumableStream
@@ -548,27 +549,18 @@ export class PiAgent extends Agent<Env> {
         );
         return { snapshot, recoveryData: user };
       },
-      resolveRecoveryStream: (requestId): ResolvedRecoveryStream => {
-        const streamId = this._resolveStreamId(requestId);
-        return {
-          streamId,
-          streamStillActive:
-            streamId !== "" && streamId === this._resumableStream.activeStreamId
-        };
-      },
       classifyRecoveredTurn: (input: ClassifyRecoveredTurnInput) => {
         // A surviving partial drives a `continue` (regenerate only the suffix
         // and merge); an empty partial (crash before the first delta flushed)
         // falls back to a `retry` that regenerates the whole reply.
-        const continueFromPartial = input.partial.text.length > 0;
-        return {
-          recoveryKind: continueFromPartial
+        const recoveryKind =
+          input.partial.text.length > 0
             ? ("continue" as const)
-            : ("retry" as const),
-          detail: { continueFromPartial }
-        };
+            : ("retry" as const);
+        return { recoveryKind, detail: undefined };
       },
-      invokeOnChatRecovery: async () => ({}),
+      // `invokeOnChatRecovery` is omitted: pi exposes no user `onChatRecovery`
+      // hook, so the engine's default (empty options) applies (#6).
       // Mirror the AI SDK adapter: preserve the orphaned partial whenever its
       // (restored) stream is still the active in-flight one. The engine ANDs
       // this with the shared never-drop clause.
@@ -582,10 +574,10 @@ export class PiAgent extends Agent<Env> {
       dispatchRecoveredTurn: async (
         input: DispatchRecoveredTurnInput<PiClassify>
       ) => {
-        const continueFromPartial = input.detail.continueFromPartial;
+        const continueFromPartial = input.recoveryKind === "continue";
         await this._engine().scheduleRecovery({
           incident: input.incident,
-          recoveryKind: continueFromPartial ? "continue" : "retry",
+          recoveryKind: input.recoveryKind,
           callback: continueFromPartial
             ? "_chatRecoveryContinue"
             : "_chatRecoveryRetry",
@@ -615,8 +607,8 @@ export class PiAgent extends Agent<Env> {
           .get<ChatRecoveryIncident>(key)
           .then((value) => value ?? null),
       readProgress: () => readChatRecoveryProgress(this.ctx.storage),
-      // pi has no client tools / HITL: a turn is never parked on a human.
-      isAwaitingClientInteraction: () => false,
+      // `isAwaitingClientInteraction` is omitted: pi has no client tools / HITL,
+      // so the engine's default (`false`, never parked on a human) applies (#6).
       putIncident: (key, incident) => this.ctx.storage.put(key, incident),
       deleteIncident: (key) => this.ctx.storage.delete(key).then(() => {}),
       emitRecoveryEvent: (event: ChatRecoveryIncidentEvent) =>
@@ -672,7 +664,14 @@ export class PiAgent extends Agent<Env> {
           now: Date.now()
         });
       },
-      resolveRecoveryStreamId: (requestId) => this._resolveStreamId(requestId),
+      resolveRecoveryStream: (requestId): ResolvedRecoveryStream => {
+        const streamId = this._resolveStreamId(requestId);
+        return {
+          streamId,
+          streamStillActive:
+            streamId !== "" && streamId === this._resumableStream.activeStreamId
+        };
+      },
       getPartialStreamText: (streamId): RecoveryPartial =>
         this._codec.toRecoveryPartial(
           this._resumableStream
