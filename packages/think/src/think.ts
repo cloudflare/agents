@@ -121,6 +121,7 @@ export type { SkillRunContext, SkillSource } from "agents/skills";
 import {
   Agent,
   callable,
+  camelCaseToKebabCase,
   getCurrentAgent,
   isPlatformTransientError,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
@@ -7405,6 +7406,145 @@ export class Think<
     }
 
     return { requestId, status, ...(error !== undefined && { error }) };
+  }
+
+  // ── Dynamic workflows ─────────────────────────────────────────
+
+  private _dynamicWorkflowTableEnsured = false;
+
+  private _ensureDynamicWorkflowTable(): void {
+    if (this._dynamicWorkflowTableEnsured) return;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_think_dynamic_workflows (
+        wf_id TEXT PRIMARY KEY,
+        code TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )
+    `;
+    this._dynamicWorkflowTableEnsured = true;
+  }
+
+  private _findAgentBindingNameForDynamic(): string | undefined {
+    const className = this.constructor.name;
+    for (const [key, value] of Object.entries(
+      this.env as Record<string, unknown>
+    )) {
+      if (
+        value &&
+        typeof value === "object" &&
+        "idFromName" in value &&
+        typeof (value as { idFromName: unknown }).idFromName === "function"
+      ) {
+        if (
+          key === className ||
+          camelCaseToKebabCase(key) === camelCaseToKebabCase(className)
+        ) {
+          return key;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Run a generated ThinkWorkflow as a Dynamic Workflow.
+   *
+   * Stores the generated TypeScript source in SQLite, then starts a Workflow
+   * instance. The `DynamicThinkWorkflow` entrypoint loads, bundles, and
+   * executes the code via Dynamic Workers when the engine calls `run()`.
+   *
+   * The generated code must export a default class that extends `ThinkWorkflow`.
+   *
+   * @param workflowName - The workflow binding name (matching `wrangler.jsonc`)
+   * @param code - Generated ThinkWorkflow TypeScript source
+   * @param params - Parsed input params forwarded to the workflow's `run()`
+   * @param options - Optional workflow ID, agent binding override, and metadata
+   * @returns The workflow instance ID
+   */
+  async runDynamicWorkflow(
+    workflowName: string,
+    code: string,
+    params: Record<string, unknown> = {},
+    options?: {
+      id?: string;
+      agentBinding?: string;
+      metadata?: Record<string, unknown>;
+    }
+  ): Promise<string> {
+    this._ensureDynamicWorkflowTable();
+    const wfId = crypto.randomUUID();
+    this.sql`
+      INSERT INTO cf_think_dynamic_workflows (wf_id, code, created_at)
+      VALUES (${wfId}, ${code}, ${Date.now()})
+    `;
+
+    const agentBinding =
+      options?.agentBinding ?? this._findAgentBindingNameForDynamic();
+    if (!agentBinding) {
+      throw new Error(
+        "Could not detect Agent binding name from class name. " +
+          "Pass it explicitly via options.agentBinding"
+      );
+    }
+
+    const workflow = (this.env as Record<string, unknown>)[workflowName] as
+      | Workflow
+      | undefined;
+    if (!workflow || typeof workflow.create !== "function") {
+      throw new Error(
+        `Workflow binding '${workflowName}' not found in environment`
+      );
+    }
+
+    const workflowId = options?.id ?? `wf_${crypto.randomUUID()}`;
+
+    const envelope = {
+      __dispatcherMetadata: {
+        wfId,
+        agentBinding,
+        agentName: this.name
+      },
+      params: {
+        ...params,
+        __agentName: this.name,
+        __agentBinding: agentBinding,
+        __workflowName: workflowName
+      }
+    };
+
+    await workflow.create({
+      id: workflowId,
+      params: envelope
+    });
+
+    const metadataJson = options?.metadata
+      ? JSON.stringify(options.metadata)
+      : null;
+    try {
+      this.sql`
+        INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status, metadata)
+        VALUES (${crypto.randomUUID()}, ${workflowId}, ${workflowName}, 'queued', ${metadataJson})
+      `;
+    } catch {
+      // Tracking is best-effort — don't fail the workflow if it fails
+    }
+
+    return workflowId;
+  }
+
+  /**
+   * Retrieve generated workflow code by ID.
+   * Called by the DynamicThinkWorkflow loader via DO RPC.
+   */
+  async getWorkflowCode(wfId: string): Promise<string> {
+    this._ensureDynamicWorkflowTable();
+    const rows = this.sql`
+      SELECT code FROM cf_think_dynamic_workflows WHERE wf_id = ${wfId}
+    `;
+    if (rows.length === 0) {
+      throw new Error(`Dynamic workflow code not found: ${wfId}`);
+    }
+    return rows[0].code as string;
   }
 
   // ── WebSocket protocol ──────────────────────────────────────────

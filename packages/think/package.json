@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@cloudflare/codemode": ">=0.4.0",
+    "@cloudflare/dynamic-workflows": ">=0.1.1",
     "@cloudflare/shell": ">=0.4.0",
     "aywson": "^0.0.16",
     "chat": "^4.30.0",
@@ -33,6 +34,25 @@
     "smol-toml": "^1.6.1",
     "yargs": "^18.0.0"
   },
+  "peerDependencies": {
+    "@chat-adapter/telegram": "^4.29.0",
+    "@cloudflare/worker-bundler": ">=0.2.1",
+    "agents": ">=0.16.0 <1.0.0",
+    "ai": "^6.0.182",
+    "vite": ">=6 <9",
+    "zod": "^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@chat-adapter/telegram": {
+      "optional": true
+    },
+    "@cloudflare/worker-bundler": {
+      "optional": true
+    },
+    "vite": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@ai-sdk/anthropic": "^3.0.83",
     "@ai-sdk/openai": "^3.0.70",
@@ -40,6 +60,7 @@
     "@chat-adapter/telegram": "^4.30.0",
     "@cloudflare/ai-chat": "workspace:*",
     "@cloudflare/kumo": "^2.5.2",
+    "@cloudflare/worker-bundler": "workspace:*",
     "@phosphor-icons/react": "^2.1.10",
     "@streamdown/code": "^1.1.1",
     "@tailwindcss/vite": "^4",
@@ -58,21 +79,6 @@
     "vite": "^8.0.16",
     "zod": "^4.4.3"
   },
-  "peerDependencies": {
-    "@chat-adapter/telegram": "^4.29.0",
-    "agents": ">=0.16.0 <1.0.0",
-    "ai": "^6.0.182",
-    "vite": ">=6 <9",
-    "zod": "^4.0.0"
-  },
-  "peerDependenciesMeta": {
-    "@chat-adapter/telegram": {
-      "optional": true
-    },
-    "vite": {
-      "optional": true
-    }
-  },
   "exports": {
     ".": {
       "types": "./dist/think.d.ts",
@@ -85,6 +91,10 @@
     "./workflows": {
       "types": "./dist/workflows.d.ts",
       "import": "./dist/workflows.js"
+    },
+    "./dynamic-workflows": {
+      "types": "./dist/dynamic-workflows/index.d.ts",
+      "import": "./dist/dynamic-workflows/index.js"
     },
     "./framework": {
       "types": "./dist/framework/index.d.ts",

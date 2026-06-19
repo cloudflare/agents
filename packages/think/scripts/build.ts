@@ -17,6 +17,7 @@ async function main() {
     entry: [
       "src/think.ts",
       "src/workflows.ts",
+      "src/dynamic-workflows/index.ts",
       "src/extensions/index.ts",
       "src/framework/index.ts",
       "src/server-entry.ts",
