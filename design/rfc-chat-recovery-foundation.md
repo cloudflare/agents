@@ -3310,19 +3310,36 @@ fixture), not just the fixture — so these are seam-shape corrections, not fixt
 They should drive the Tier-2 extraction (lifting the resume handshake + streaming codec
 into `agents/chat`). Ranked by payoff:
 
-1. **Fold progress-bumping into the durable-chunk path.** Every host hand-wires
-   `bumpChatRecoveryProgress` into its stream loop (`ai-chat` `_bumpChatRecoveryProgress`
-   at the production write + the recovery write; `think` likewise; the pi fixture inline
-   in `_onPiEvent`) and each carries a comment re-explaining the invariant. A durable
-   chunk persist _is_ the no-progress-budget signal, so `ResumableStream.flush`/
-   `storeChunk` (or a thin wrapper) should bump progress itself. Forgetting the manual
-   call silently breaks the budget — exactly the kind of invariant the engine should own.
-2. **Collapse stream resolution to one seam.** Both `ChatRecoveryAdapter
-.resolveRecoveryStreamId(requestId)` and `ChatFiberWakeHooks.resolveRecoveryStream(
-requestId)` exist and every host implements the same metadata-row-or-active-stream
-   lookup twice (the pi fixture had to extract a private `_resolveStreamId` to dedupe its
-   own two implementations). Replace with one `resolveStream(requestId) → { streamId,
-active }`.
+1. **Move the progress-bump PREDICATE onto the codec (not a blind fold into the chunk
+   path).** Every host hand-wires `bumpChatRecoveryProgress` into its stream loop
+   (`ai-chat` `_maybeBumpRecoveryProgress`; `think` at the `_shouldFlushRecoverableChunk`
+   decision; the pi fixture inline in `_onPiEvent`) and each carries a comment
+   re-explaining the invariant. The naive fix — have `ResumableStream.flush`/`storeChunk`
+   bump on every durable chunk — is **wrong**: the bump is deliberately gated by a
+   host/codec-specific "genuinely new produced content" predicate, NOT "any chunk." ai-chat
+   bumps only on `text-start` / `reasoning-start` / settled tool input-output chunk types
+   (never per `text-delta`); think bumps only when `_shouldFlushRecoverableChunk` elects to
+   flush; pi (coarse events) bumps per event. Folding it into `ResumableStream` blind would
+   write storage per token and silently change ai-chat's semantics. The real simplification
+   is to put the predicate on the codec (e.g. `ChatRecoveryCodec.isProgressChunk(chunk)`)
+   and bump when storing a chunk the codec marks as progress — which **belongs WITH the
+   Tier-2 codec extraction**, not as a standalone change. (Verified 2026-06: the bump is
+   chunk-type-gated in ai-chat and flush-gated in think, so this is behavior-sensitive.)
+2. **Collapse stream resolution to one seam (a verify-first convergence, not a no-op).**
+   `ChatRecoveryAdapter.resolveRecoveryStreamId(requestId): string` (give-up path) and
+   `ChatFiberWakeHooks.resolveRecoveryStream(requestId): ResolvedRecoveryStream` (wake
+   path) both resolve a turn's stream id, and every host implements both. They have
+   **drifted**: the give-up `_resolveRecoveryStreamId` uses an in-memory
+   `getAllStreamMetadata().find(...)` (first match), while the wake `_resolve*RecoveryStream`
+   uses `SELECT … WHERE request_id = ? ORDER BY created_at DESC LIMIT 1` (newest row) and
+   additionally computes `streamStillActive` (+ `streamStatus` for think). Collapsing to one
+   method — `ChatRecoveryAdapter.resolveRecoveryStream(requestId): ResolvedRecoveryStream`,
+   used by both the wake path and the give-up path (which reads `.streamId`) — is the right
+   shape, but it inherently **converges the give-up lookup from `.find()` onto the newest-row
+   query**. Identical in the common case (one stream per request id); differs only when
+   multiple stream rows share a request id (across recovery attempts), where newest-row is
+   the more correct "whatever partial the turn produced." Treat as a verify-first slice
+   (4f-ii-style), likely with a changeset, not a pure dedup.
 3. **Provide an engine-owned exhaustion helper.** The give-up choreography
    (`buildChatRecoveryExhaustedContext` → `notifyChatRecoveryExhausted` →
    `recordChatTerminal` → `setChatRecovering(false)`) is hand-assembled identically in
