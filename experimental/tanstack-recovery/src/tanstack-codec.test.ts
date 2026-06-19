@@ -207,19 +207,23 @@ describe("TanStackRecoveryCodec.hasSettledToolResults", () => {
 });
 
 describe("TanStackRecoveryCodec.isProgressChunk", () => {
+  // Milestones only — started segment / settled tool start+result. Deltas
+  // (TEXT_MESSAGE_CONTENT, TOOL_CALL_ARGS) are NOT milestones; they go through
+  // isStreamingContentChunk + the host throttle.
   const PROGRESS = [
     EventType.TEXT_MESSAGE_START,
-    EventType.TEXT_MESSAGE_CONTENT,
     EventType.TOOL_CALL_START,
     EventType.TOOL_CALL_RESULT
   ];
   for (const type of PROGRESS) {
-    it(`credits "${type}" as progress`, () => {
+    it(`credits "${type}" as a milestone`, () => {
       expect(codec.isProgressChunk(type)).toBe(true);
     });
   }
 
   const NON_PROGRESS = [
+    EventType.TEXT_MESSAGE_CONTENT,
+    EventType.TOOL_CALL_ARGS,
     EventType.RUN_STARTED,
     EventType.TEXT_MESSAGE_END,
     EventType.RUN_FINISHED,
@@ -228,8 +232,34 @@ describe("TanStackRecoveryCodec.isProgressChunk", () => {
     "SOMETHING_ELSE"
   ];
   for (const type of NON_PROGRESS) {
-    it(`does not credit "${String(type)}"`, () => {
+    it(`does not treat "${String(type)}" as a milestone`, () => {
       expect(codec.isProgressChunk(type)).toBe(false);
+    });
+  }
+});
+
+describe("TanStackRecoveryCodec.isStreamingContentChunk", () => {
+  const STREAMING = [EventType.TEXT_MESSAGE_CONTENT, EventType.TOOL_CALL_ARGS];
+  for (const type of STREAMING) {
+    it(`classifies "${type}" as streaming content`, () => {
+      expect(codec.isStreamingContentChunk(type)).toBe(true);
+    });
+    it(`does not also treat "${type}" as a milestone`, () => {
+      expect(codec.isProgressChunk(type)).toBe(false);
+    });
+  }
+
+  const NON_STREAMING = [
+    EventType.TEXT_MESSAGE_START,
+    EventType.TOOL_CALL_START,
+    EventType.TOOL_CALL_RESULT,
+    EventType.RUN_FINISHED,
+    undefined,
+    "SOMETHING_ELSE"
+  ];
+  for (const type of NON_STREAMING) {
+    it(`does not classify "${String(type)}" as streaming content`, () => {
+      expect(codec.isStreamingContentChunk(type)).toBe(false);
     });
   }
 });

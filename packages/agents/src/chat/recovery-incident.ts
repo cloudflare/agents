@@ -320,6 +320,33 @@ export class AgentToolStreamProgressThrottle {
   }
 }
 
+/**
+ * Throttle window for crediting recovery progress from mid-segment streaming
+ * content (text/reasoning/tool-input deltas). A milestone chunk credits
+ * unconditionally; deltas credit at most once per window so a long single
+ * segment registers forward progress across crashes without writing storage per
+ * token. 5s is far finer than the 300s no-progress budget, so any crash gap
+ * longer than this window over an actively-streaming segment still credits.
+ */
+export const CHAT_STREAM_PROGRESS_CREDIT_THROTTLE_MS = 5_000;
+
+/**
+ * Per-isolate throttle gate for crediting recovery progress from mid-segment
+ * streaming-content chunks — the delta arm of {@link shouldCreditStreamProgress}.
+ * The `_lastBumpAt` clock is in-memory, so it resets per isolate and the first
+ * delta after a restart always credits. Shared by `AIChatAgent` and `Think`.
+ */
+export class StreamProgressCreditThrottle {
+  private _lastBumpAt = 0;
+  shouldCredit(now: number): boolean {
+    if (now - this._lastBumpAt < CHAT_STREAM_PROGRESS_CREDIT_THROTTLE_MS) {
+      return false;
+    }
+    this._lastBumpAt = now;
+    return true;
+  }
+}
+
 // ── Terminal + recovering status storage glue ──────────────────────────────
 //
 // Durable records for the terminal-error / "recovering…" reconnect UX. The

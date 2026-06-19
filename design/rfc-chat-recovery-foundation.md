@@ -1776,6 +1776,36 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 5 / Tier-2 follow-up — progress-bump timing convergence_ — Closed the
+  deferred, correctness-flagged divergence in how the two hosts credited the
+  recovery no-progress counter. Before: `AIChatAgent` credited only on chunk-type
+  milestones (`isProgressChunk`: started segments + settled tools), so a long
+  **single** content segment that emits only deltas bumped exactly **once** (at
+  `text-start`); `Think` credited on its flush cadence (first content, then every
+  10 chunks, plus settled tools), so it kept crediting mid-segment. **Why it
+  matters:** `evaluateChatRecoveryIncident` compares the counter
+  _attempt-to-attempt_ (`currentProgress > prevProgress` resets `lastProgressAt`),
+  so a single long segment spanning ≥2 crashes with no intervening milestone reads
+  as "no progress" under `AIChatAgent` and can false-fire `no_progress_timeout`
+  (300s) while content is genuinely streaming. `Think` was immune; `AIChatAgent`
+  was not. **Fix:** one shared, host-agnostic rule — `shouldCreditStreamProgress`
+  ({@link recovery-codec}) — that both hosts now call at chunk-store time. A
+  milestone (`isProgressChunk`) credits unconditionally; mid-segment streaming
+  deltas (new codec `isStreamingContentChunk`: `text-delta`/`reasoning-delta`/
+  `tool-input-delta`) credit at most once per `StreamProgressCreditThrottle`
+  window (per-isolate, time-based 5s — mirrors the proven N9
+  `AgentToolStreamProgressThrottle`, far finer than the 300s budget). `Think`'s
+  bump is now decoupled from its flush decision (flush stays for durability) and
+  routed through the same rule. **Safety argument:** the unified rule is never
+  coarser than either host's prior cadence, and over-crediting (e.g. crediting a
+  buffered-but-not-yet-flushed chunk) only biases toward keeping recovery alive —
+  so the change can only delay/avoid a false no-progress timeout, never hasten
+  give-up. Tests: `recovery-codec.test.ts` pins `isStreamingContentChunk` and
+  `shouldCreditStreamProgress` (milestone-always, delta-throttled, the long
+  delta-only-segment gap); ai-chat durable-recovery (63) + think-session (193)
+  workers suites green. Changeset: patch for `agents` + `@cloudflare/ai-chat` +
+  `@cloudflare/think`. Still deferred from Tier-2: moving start-id alignment onto
+  the codec; the full streaming-driver merge (Tier-3).
 - _Phase 5 / Second harness — Route 2 reframed and deprioritized (doc-only)_ —
   Questioning what "front `AIChatAgent` with a TanStack client" even means surfaced that the
   original Route 2 conflated two independent layers of `AIChatAgent`'s wire. **(1) The handshake +
@@ -1936,7 +1966,9 @@ the change, and the key review findings.
   proving the T2-3b defaults; think's #1575 helper now exercises the shared driver.
   **Deferred (explicitly):** converging the progress-bump _timing_ (ai-chat per-type
   vs think per-flush — correctness-critical for the no-progress budget) and moving
-  start-id alignment onto the codec; the full streaming-driver merge (Tier-3). The
+  start-id alignment onto the codec; the full streaming-driver merge (Tier-3).
+  _(Progress-bump timing convergence has since landed — see the progress-log entry
+  below; start-id alignment + Tier-3 remain deferred.)_ The
   unrelated, pre-existing expected-RED `reattach-budget.test.ts` gate (wall-clock
   re-attach budget; partially addressed by #1670) was `it.skip`-ed to keep the
   manual think-e2e suite green. **Forcing function (next):** the planned TanStack AI
@@ -3497,7 +3529,8 @@ streaming codec into `agents/chat`, commit `038e6d23`), the second TanStack/AG-U
 `RecoveryPartial` agnostic-seam refactor have all landed — see the Progress log. The historical
 detail below is preserved as the original P5-1 record; "Still open" at the end of this section is
 superseded by the Progress log's current open items (a real Workers AI provider run; the deferred
-Tier-2 progress-bump _timing_ convergence + start-id alignment). The
+Tier-2 start-id alignment onto the codec — the progress-bump _timing_ convergence has since
+landed). The
 `experimental/pi-recovery/` fixture drives the **real** `@earendil-works/pi-agent-core`
 `Agent` (verified to bundle + run in `workerd`; deterministic via pi-ai's
 `registerFauxProvider`) on the shared engine, and a real `wrangler dev` SIGKILL

@@ -74,6 +74,8 @@ import {
   buildChatRecoveringFrame,
   setChatRecovering,
   AgentToolStreamProgressThrottle,
+  StreamProgressCreditThrottle,
+  shouldCreditStreamProgress,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,
@@ -1376,17 +1378,32 @@ export class AIChatAgent<
     await this._maybeBumpRecoveryProgress(type);
   }
 
+  /** Per-isolate throttle for crediting recovery progress from mid-segment
+   *  streaming-content deltas (the shared `agents/chat` rule); reset per isolate
+   *  so the first delta after a restart always credits. */
+  private _streamProgressCredit = new StreamProgressCreditThrottle();
+
   /** Advance the recovery-progress counter when a chunk represents genuinely
-   *  new produced content — a started text/reasoning segment or a settled tool
-   *  input/output. Bumped at production time (the streaming path), so it
-   *  reflects real forward progress and is immune to client reconnects /
-   *  recovery re-persists (which replay or re-materialize stored chunks rather
-   *  than flow through here). This is what the recovery no-progress window keys
-   *  off (#1637), and stays compaction-proof (#1628). */
+   *  new produced content. Uses the shared host-agnostic rule
+   *  ({@link shouldCreditStreamProgress}): a milestone (started segment / settled
+   *  tool) always credits, and a long single segment's streaming deltas credit
+   *  through a time throttle so the no-progress window doesn't false-fire while
+   *  content streams across crashes. Bumped at production time, so it reflects
+   *  real forward progress and is immune to client reconnects / recovery
+   *  re-persists (which replay or re-materialize stored chunks rather than flow
+   *  through here). This is what the recovery no-progress window keys off
+   *  (#1637), and stays compaction-proof (#1628). */
   private async _maybeBumpRecoveryProgress(
     type: string | undefined
   ): Promise<void> {
-    if (aiSdkRecoveryCodec.isProgressChunk(type)) {
+    if (
+      shouldCreditStreamProgress({
+        codec: aiSdkRecoveryCodec,
+        type,
+        throttle: this._streamProgressCredit,
+        now: Date.now()
+      })
+    ) {
       await this._bumpChatRecoveryProgress();
     }
   }

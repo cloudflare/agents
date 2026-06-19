@@ -146,18 +146,30 @@ export class TanStackRecoveryCodec implements ChatRecoveryCodec {
   }
 
   /**
-   * The AG-UI progress vocabulary: chunk types that carry genuinely new produced
-   * content (so a turn streaming them is making forward progress, not idling).
-   * Mirrors `AISDKRecoveryCodec.isProgressChunk` semantics for the AG-UI event
-   * names — the predicate is per-vocabulary (the codec, not the engine, owns
-   * "what counts as progress").
+   * AG-UI progress MILESTONES: started segments and settled tool start/result —
+   * the chunk types that always credit forward progress. Mirrors
+   * `AISDKRecoveryCodec.isProgressChunk` semantics for the AG-UI event names
+   * (`TEXT_MESSAGE_START` ↔ `text-start`, `TOOL_CALL_START`/`TOOL_CALL_RESULT` ↔
+   * the settled-tool milestones). Disjoint from {@link isStreamingContentChunk}.
    */
   isProgressChunk(type: string | undefined): boolean {
     return (
       type === EventType.TEXT_MESSAGE_START ||
-      type === EventType.TEXT_MESSAGE_CONTENT ||
       type === EventType.TOOL_CALL_START ||
       type === EventType.TOOL_CALL_RESULT
+    );
+  }
+
+  /**
+   * AG-UI mid-segment streaming content: text-body and tool-arg deltas
+   * (`TEXT_MESSAGE_CONTENT` ↔ `text-delta`, `TOOL_CALL_ARGS` ↔ `tool-input-delta`).
+   * Credited through the host's progress throttle so a long single segment still
+   * registers progress across crashes without writing storage per chunk.
+   */
+  isStreamingContentChunk(type: string | undefined): boolean {
+    return (
+      type === EventType.TEXT_MESSAGE_CONTENT ||
+      type === EventType.TOOL_CALL_ARGS
     );
   }
 }

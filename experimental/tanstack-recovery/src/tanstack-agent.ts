@@ -56,6 +56,8 @@ import {
   resolveChatRecoveryConfig,
   sendIfOpen,
   setChatRecovering,
+  shouldCreditStreamProgress,
+  StreamProgressCreditThrottle,
   sweepStaleChatRecoveryIncidents,
   unwrapChatFiberSnapshot,
   wrapChatFiberSnapshot,
@@ -142,6 +144,9 @@ export class TanStackAgent extends Agent<Env> {
 
   private readonly _resumableStream: ResumableStream;
   private readonly _codec = tanStackRecoveryCodec;
+  /** Per-isolate throttle for crediting progress from streaming-content deltas
+   *  (the shared `agents/chat` rule). */
+  private readonly _streamProgressCredit = new StreamProgressCreditThrottle();
   private readonly _faux: FauxTanStackModel;
   private _transcript: TranscriptEntry[] = [];
   private _currentStreamId: string | null = null;
@@ -357,8 +362,17 @@ export class TanStackAgent extends Agent<Env> {
             // Live broadcast to every connection EXCEPT those pending a resume
             // ACK (they get the full replay on ACK instead of duplicate chunks).
             this._broadcastChunk(requestId, body, false);
-            if (this._codec.isProgressChunk(chunk.type)) {
-              // Each durably-flushed chunk is reconnect-immune forward progress.
+            // Credit forward progress through the shared host-agnostic rule (the
+            // same one `AIChatAgent`/`Think` use): a milestone always credits, a
+            // streaming-content delta credits at most once per throttle window.
+            if (
+              shouldCreditStreamProgress({
+                codec: this._codec,
+                type: chunk.type,
+                throttle: this._streamProgressCredit,
+                now: Date.now()
+              })
+            ) {
               await bumpChatRecoveryProgress(this.ctx.storage);
             }
           }

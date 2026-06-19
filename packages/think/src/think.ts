@@ -181,6 +181,8 @@ import {
   buildChatRecoveringFrame,
   setChatRecovering,
   AgentToolStreamProgressThrottle,
+  StreamProgressCreditThrottle,
+  shouldCreditStreamProgress,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,
@@ -8318,15 +8320,33 @@ export class Think<
       this._resumableStream.flushBuffer();
       state.chunksSinceFlush = 0;
       state.hasFlushedContent = true;
-      // Forward progress: new durable content was just flushed. Advance the
-      // monotonic, compaction-immune progress counter HERE (production time)
-      // rather than in `_persistOrphanedStream` — so it bumps only on genuinely
-      // new content and is immune to client reconnects / recovery re-persists
-      // (which don't flow through this path). This is what the recovery
-      // no-progress window keys off (#1637), and stays compaction-proof (#1628).
+    }
+    // Forward progress: advance the monotonic, compaction-immune progress
+    // counter HERE (production time) rather than in `_persistOrphanedStream` —
+    // so it bumps only on genuinely new content and is immune to client
+    // reconnects / recovery re-persists (which don't flow through this path).
+    // Decoupled from the flush decision and routed through the shared
+    // host-agnostic rule ({@link shouldCreditStreamProgress}) so the bump TIMING
+    // matches `AIChatAgent`: a milestone (started segment / settled tool) always
+    // credits, and a long single segment's streaming deltas credit through a
+    // time throttle. This is what the recovery no-progress window keys off
+    // (#1637), and stays compaction-proof (#1628).
+    if (
+      shouldCreditStreamProgress({
+        codec: aiSdkRecoveryCodec,
+        type: chunk.type,
+        throttle: this._streamProgressCredit,
+        now: Date.now()
+      })
+    ) {
       await this._bumpChatRecoveryProgress();
     }
   }
+
+  /** Per-isolate throttle for crediting recovery progress from mid-segment
+   *  streaming-content deltas (the shared `agents/chat` rule); reset per isolate
+   *  so the first delta after a restart always credits. */
+  private _streamProgressCredit = new StreamProgressCreditThrottle();
 
   private async _streamResult(
     requestId: string,
@@ -9339,9 +9359,9 @@ export class Think<
   }
 
   /** Advance the durable recovery-progress counter. Called from
-   *  `_storeChunkDurably` when new content is durably flushed (real, reconnect-
-   *  immune forward progress). The increment lives in the shared engine
-   *  (agents/chat); this is the package binding. */
+   *  `_storeChunkDurably` when a stored chunk credits forward progress under the
+   *  shared rule (real, reconnect-immune forward progress). The increment lives
+   *  in the shared engine (agents/chat); this is the package binding. */
   private async _bumpChatRecoveryProgress(): Promise<void> {
     return bumpChatRecoveryProgress(this.ctx.storage);
   }
