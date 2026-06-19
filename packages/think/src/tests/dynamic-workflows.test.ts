@@ -83,9 +83,7 @@ describe("Think dynamic workflows", () => {
 
     it("rejects code over the size limit", () => {
       const { agent } = createFakeAgent();
-      const tooBig = "x".repeat(
-        Think.MAX_DYNAMIC_WORKFLOW_CODE_BYTES + 1
-      );
+      const tooBig = "x".repeat(Think.MAX_DYNAMIC_WORKFLOW_CODE_BYTES + 1);
       expect(() => agent.validateWorkflowCode(tooBig)).toThrow(/too large/);
     });
 
@@ -148,7 +146,10 @@ describe("Think dynamic workflows", () => {
     it("throws when the workflow binding is missing", async () => {
       const { agent } = createFakeAgent({ includeWorkflow: false });
       await expect(
-        agent.runDynamicWorkflow("DYNAMIC_THINK_WF", "export default class W {}")
+        agent.runDynamicWorkflow(
+          "DYNAMIC_THINK_WF",
+          "export default class W {}"
+        )
       ).rejects.toThrow(/not found in environment/);
     });
 

@@ -7463,8 +7463,9 @@ export class Think<
     // class constructor (captured via the prototype chain) rather than
     // `this.constructor.name`, so minifier renaming behaves consistently with
     // the rest of the SDK.
-    const className = (Object.getPrototypeOf(this).constructor as { name: string })
-      .name;
+    const className = (
+      Object.getPrototypeOf(this).constructor as { name: string }
+    ).name;
     for (const [key, value] of Object.entries(
       this.env as Record<string, unknown>
     )) {
