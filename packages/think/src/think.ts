@@ -9556,12 +9556,9 @@ export class Think<
           // with no terminal resolution. The broadcast itself touches no
           // storage, so ordering it first makes the banner resilient to a
           // failing `_recordTerminalChatStatus` / `_markRecoveredSubmissionInterrupted`.
-          //
-          // (`@cloudflare/ai-chat` persists before broadcasting instead.
-          // Ordering can't rescue a terminal-record write that itself fails, so
-          // that choice gains no reconnect reliability under storage failure
-          // while losing this banner resilience — hence Think keeps
-          // broadcast-first.)
+          // `@cloudflare/ai-chat` terminalizes broadcast-first for the same
+          // reason; only the set of durable writes below differs (Think also
+          // writes a submission row).
           this._broadcastChat({
             type: MSG_CHAT_RESPONSE,
             id: ctx.requestId,

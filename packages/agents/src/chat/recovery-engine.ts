@@ -194,10 +194,12 @@ export interface ChatRecoveryAdapter {
   /**
    * Terminalize a given-up recovery turn: deliver the exhaustion notification
    * plus the package-owned terminal record / banner / submission writes. A thin
-   * pass-through to the package's `_exhaustChatRecovery`. Driven by
+   * pass-through to the package's `_exhaustChatRecovery` (which composes
+   * {@link runChatRecoveryExhaustion}). Driven by
    * {@link ChatRecoveryEngine.exhaustRecoveryGiveUp}; the engine owns the
    * surrounding read → re-entry-guard → build → terminalize → seal sequence, the
-   * package owns the (legitimately divergent) terminal/broadcast ordering.
+   * package owns the terminal writes (uniformly broadcast-first; their set
+   * differs — `Think` also writes a submission row).
    */
   exhaustChatRecovery(
     incident: ChatRecoveryIncident,
@@ -949,13 +951,12 @@ export async function notifyChatRecoveryExhausted(
  *   via `onError` (a tested invariant in both published packages).
  *
  * What it deliberately does NOT own: the terminal-record / broadcast /
- * recovering-clear writes and their ORDER. That ordering legitimately diverges
- * per host (`AIChatAgent` persists before broadcasting for #1645 reconnect
- * consistency; `Think` broadcasts first so the banner survives a storage write
- * that rejects mid-deploy, then writes its submission row) — see
- * {@link ChatRecoveryAdapter.exhaustChatRecovery}. The host expresses that order
- * inside `terminalize`. A `terminalize` that throws DOES propagate, so the whole
- * give-up re-runs on a healthy isolate (#1730); see
+ * recovering-clear writes — their exact set diverges per host (both
+ * `AIChatAgent` and `Think` broadcast the banner first so it survives a storage
+ * write that rejects mid-deploy; `Think` additionally writes a submission row)
+ * — see {@link ChatRecoveryAdapter.exhaustChatRecovery}. The host expresses
+ * those writes inside `terminalize`. A `terminalize` that throws DOES propagate,
+ * so the whole give-up re-runs on a healthy isolate (#1730); see
  * {@link ChatRecoveryEngine.exhaustRecoveryGiveUp}.
  *
  * `partialParts` is passed explicitly (not derived from a `RecoveryPartial`) so a

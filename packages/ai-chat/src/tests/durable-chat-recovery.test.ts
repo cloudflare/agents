@@ -905,9 +905,9 @@ describe("onChatRecovery", () => {
       terminalMessage
     });
 
-    // `_exhaustChatRecovery` already persisted the durable terminal record and
-    // delivered the banner. The incident seal is best-effort bookkeeping, so a
-    // transient here must not propagate to `_executeScheduleCallback` and
+    // `_exhaustChatRecovery` already delivered the banner and persisted the
+    // durable terminal record. The incident seal is best-effort bookkeeping, so
+    // a transient here must not propagate to `_executeScheduleCallback` and
     // re-deliver the whole give-up unnecessarily.
     expect(result.threw).toBe(false);
     expect(result.terminalBroadcast).toBe(terminalMessage);

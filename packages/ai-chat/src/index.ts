@@ -3754,8 +3754,9 @@ export class AIChatAgent<
   ): Promise<void> {
     // Build + notification (event + onExhausted-swallow) and the
     // notify-before-terminalize invariant live in the engine helper; the
-    // terminal/broadcast ordering inside `terminalize` is ai-chat's own
-    // (persist-first; see #1645). See design/rfc-chat-recovery-foundation.md.
+    // terminal/broadcast ordering inside `terminalize` is broadcast-first,
+    // converged onto `Think`'s ordering (see the note below).
+    // See design/rfc-chat-recovery-foundation.md.
     await runChatRecoveryExhaustion(
       {
         incident,
@@ -3774,12 +3775,15 @@ export class AIChatAgent<
             error
           ),
         terminalize: async (ctx) => {
-          // Persist the terminal outcome BEFORE broadcasting it (#1645): the
-          // broadcast is transient, so a client disconnected at this moment (a
-          // deploy/reconnect storm exhausting recovery) would otherwise never
-          // learn the turn failed. The record is replayed on the next reconnect
-          // via the resume handshake (`_replayTerminalOnResume`).
-          await this._recordChatTerminal(ctx.requestId, ctx.terminalMessage);
+          // Deliver the user-visible terminal banner BEFORE the durable terminal
+          // write. The write can reject in the deploy/storage window a give-up
+          // runs in (#1730); ordering the broadcast first keeps the banner
+          // resilient to that, the throw then propagates, and the whole give-up
+          // re-runs on a healthy isolate — which persists the record
+          // (idempotently) and re-delivers the banner (the documented
+          // at-least-once edge). Persisting first gains no durability (the
+          // re-run persists either way) while dropping the live banner on the
+          // failing pass — so ai-chat matches `Think`'s broadcast-first.
           this._broadcastChatMessage({
             body: ctx.terminalMessage,
             done: true,
@@ -3787,6 +3791,9 @@ export class AIChatAgent<
             id: ctx.requestId,
             type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
           });
+          // The durable terminal record (#1645) is replayed to a client that
+          // (re)connects after the turn ended (`_replayTerminalOnResume`).
+          await this._recordChatTerminal(ctx.requestId, ctx.terminalMessage);
           // Exhaustion resolves recovery — clear the "recovering…" status (#1620).
           await this._setChatRecovering(false);
         }
