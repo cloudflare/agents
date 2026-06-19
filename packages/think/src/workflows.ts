@@ -13,6 +13,7 @@ import { toJSONSchema, type ZodObject, type z } from "zod";
 import type {
   SubmitMessagesResult,
   Think,
+  ThinkSubmissionInspection,
   ThinkSubmissionStatus
 } from "./think";
 
@@ -141,11 +142,22 @@ export class ThinkWorkflow<
       })
     );
 
+    // Single event type shared across all retry attempts.  When the DO's
+    // built-in chat recovery restarts an interrupted submission after a
+    // deploy, it emits the completion event with this same type, so a
+    // subsequent waitForEvent in a retry attempt will receive it.
+    const eventType = await this._eventTypeForPrompt(stepName, options.key);
+
     const retries = this._validatePromptRetryOptions(options.retries);
     const maxAttempts = retries.maxAttempts;
     const baseDelayMs = retries.baseDelayMs;
     const maxDelayMs = retries.maxDelayMs;
     const retryOnTimeout = retries.retryOnTimeout;
+
+    // When retries are enabled the retry loop owns cancellation so it can
+    // attempt recovery first.  Without retries the old behaviour is
+    // preserved (_waitForPromptEvent cancels on timeout).
+    const cancelOnTimeout = maxAttempts > 1 ? false : options.cancelOnTimeout;
 
     let lastError: unknown;
 
@@ -164,7 +176,9 @@ export class ThinkWorkflow<
           attempt,
           attemptKey,
           step,
-          attemptRef
+          attemptRef,
+          eventType,
+          cancelOnTimeout
         );
       } catch (err) {
         lastError = err;
@@ -173,7 +187,40 @@ export class ThinkWorkflow<
         const stopOnTimeout =
           !retryOnTimeout && err instanceof ThinkPromptTimeoutError;
         if (isLastAttempt || stopOnTimeout) {
+          // Only cancel when _waitForPromptEvent skipped it (retries
+          // enabled).  When cancelOnTimeout is true the wait wrapper
+          // already cancelled on timeout.
+          if (attemptRef.submissionId && cancelOnTimeout === false) {
+            await step.do(`${stepName}:cancel-${attempt}`, async () => {
+              await this.agent.cancelSubmission(
+                attemptRef.submissionId!,
+                "Workflow prompt wait timed out"
+              );
+            });
+          }
           throw err;
+        }
+
+        // Attempt to recover the interrupted submission via the DO's
+        // built-in chat recovery instead of immediately cancelling and
+        // re-submitting.  When a DO dies mid-turn (e.g. a deploy), the
+        // new DO instance resets the submission to `pending` or continues
+        // it via fiber recovery; the workflow re-waits for the completion
+        // event instead of wasting the in-flight turn.
+        if (
+          attemptRef.submissionId &&
+          err instanceof ThinkPromptTimeoutError &&
+          retryOnTimeout
+        ) {
+          const recovered = await this._tryRecoverSubmission(
+            step,
+            stepName,
+            attempt,
+            eventType,
+            options,
+            attemptRef.submissionId
+          );
+          if (recovered !== undefined) return recovered;
         }
 
         // Terminate the abandoned attempt before retrying. Think keeps its own
@@ -229,9 +276,10 @@ export class ThinkWorkflow<
     attempt: number,
     attemptKey: string | undefined,
     step: AgentWorkflowStep,
-    attemptRef: { submissionId?: string }
+    attemptRef: { submissionId?: string },
+    eventType: string,
+    cancelOnTimeout: boolean | undefined
   ): Promise<z.infer<Schema>> {
-    const eventType = await this._eventTypeForPrompt(stepName, attemptKey);
     const idempotencyKey = await this._idempotencyKeyForPrompt(
       stepName,
       attemptKey
@@ -289,28 +337,11 @@ export class ThinkWorkflow<
       waitStepName,
       eventType,
       options.timeout,
-      options.cancelOnTimeout,
+      cancelOnTimeout,
       submission.submissionId
     );
 
-    try {
-      const payload = event.payload;
-
-      if (payload.status !== "completed") {
-        throw this._terminalPromptError(payload);
-      }
-
-      const parsed = options.output.safeParse(payload.output);
-      if (!parsed.success) {
-        throw new ThinkPromptValidationError(
-          payload.submissionId,
-          parsed.error
-        );
-      }
-      return parsed.data;
-    } finally {
-      disposeIfPresent(event);
-    }
+    return this._processPromptEvent(event, options);
   }
 
   private async _waitForPromptEvent(
@@ -355,6 +386,74 @@ export class ThinkWorkflow<
       payload.submissionId,
       payload.status
     );
+  }
+
+  private _processPromptEvent<Schema extends ZodObject>(
+    event: WorkflowStepEvent<ThinkPromptEventPayload>,
+    options: ThinkPromptOptions<Schema>
+  ): z.infer<Schema> {
+    try {
+      const payload = event.payload;
+
+      if (payload.status !== "completed") {
+        throw this._terminalPromptError(payload);
+      }
+
+      const parsed = options.output.safeParse(payload.output);
+      if (!parsed.success) {
+        throw new ThinkPromptValidationError(
+          payload.submissionId,
+          parsed.error
+        );
+      }
+      return parsed.data;
+    } finally {
+      disposeIfPresent(event);
+    }
+  }
+
+  private async _tryRecoverSubmission<Schema extends ZodObject>(
+    step: AgentWorkflowStep,
+    stepName: string,
+    attempt: number,
+    eventType: string,
+    options: ThinkPromptOptions<Schema>,
+    submissionId: string
+  ): Promise<z.infer<Schema> | undefined> {
+    // Check whether the DO's built-in recovery has picked up the
+    // interrupted submission (status `pending` / `running`) or already
+    // completed it (`completed`).  In all three cases the DO will
+    // eventually emit (or already emitted) the completion event, which
+    // the Workflow runtime buffers and delivers to our fresh waitForEvent.
+    const inspection = (await step.do(
+      `${stepName}:recovery-check-${attempt}`,
+      async () => {
+        try {
+          return await this.agent.inspectSubmission(submissionId);
+        } catch {
+          // RPC failed — DO may still be down
+          return null;
+        }
+      }
+    )) as ThinkSubmissionInspection | null;
+
+    if (
+      !inspection ||
+      inspection.status === "error" ||
+      inspection.status === "aborted"
+    ) {
+      return undefined;
+    }
+
+    const event = (await step.waitForEvent(
+      `${stepName}:recovery-wait-${attempt}`,
+      {
+        type: eventType,
+        timeout: options.timeout
+      }
+    )) as WorkflowStepEvent<ThinkPromptEventPayload>;
+
+    return this._processPromptEvent(event, options);
   }
 
   private _validatePromptRetryOptions(
