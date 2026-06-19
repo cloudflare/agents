@@ -27,6 +27,9 @@ allowBuilds:
   nx: true
   sharp: true
   workerd: true
+  # Transitive dep of @cloudflare/tanstack-ai (tanstack-recovery harness). The
+  # Workers AI binding path never uses the OpenRouter SDK, so its build is skipped.
+  "@openrouter/sdk": false
 minimumReleaseAgeExclude:
   - "@cloudflare/*"
   - "@typescript/*"

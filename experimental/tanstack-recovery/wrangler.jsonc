@@ -4,6 +4,11 @@
   "main": "src/server.ts",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
+  // Workers AI binding for the OPTIONAL real-provider run (the faux model is the
+  // default and never calls it). `remote: true` proxies to real Workers AI even
+  // under local `wrangler dev`; the faux e2e makes no `AI.run()` call, so it stays
+  // fully offline. See `workers-ai-model.ts` + the RUN_WORKERS_AI_E2E gated e2e.
+  "ai": { "binding": "AI", "remote": true },
   "observability": {
     "enabled": true,
     "logs": {

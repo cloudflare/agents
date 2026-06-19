@@ -10,34 +10,24 @@
  * exactly like the pi harness's slow faux model. A deterministic body also keeps
  * the e2e's continuation math exact (`prefix + suffix === total`).
  *
- * ── Swapping in a real Workers AI provider (one line) ──────────────────────────
- * This faux stream is the ONLY non-real piece. To run against a real streaming
- * model, replace the `stream()` body with TanStack AI + the Cloudflare provider
- * (the chunk vocabulary the codec/bridge consume is identical):
- *
- *   import { chat } from "@tanstack/ai";
- *   import { createWorkersAiChat } from "@cloudflare/tanstack-ai";
- *   const adapter = createWorkersAiChat("@cf/meta/llama-4-scout-17b-16e-instruct", {
- *     binding: env.AI
- *   });
- *   return chat({ adapter, stream: true, messages }); // AsyncIterable<StreamChunk>
- *
- * The recovery assertions would then relax from exact char math to "a coherent
- * turn completes after crash + recovery" (a real model can't reproduce a
- * partial's exact suffix) — the handshake/codec seams are unchanged.
+ * ── The real Workers AI provider (now implemented) ─────────────────────────────
+ * This faux stream is the deterministic DEFAULT. The real swap it once only
+ * documented now lives in `workers-ai-model.ts` (`@tanstack/ai`'s `chat()` over
+ * `@cloudflare/tanstack-ai`'s `createWorkersAiChat`), selected per turn via the
+ * `provider` field and exercised by the `RUN_WORKERS_AI_E2E`-gated e2e. Both
+ * models implement the same {@link TurnModel} seam and emit the identical AG-UI
+ * `StreamChunk` vocabulary, so the codec/handshake/engine seams are unchanged.
+ * Against the real (non-deterministic) provider, recovery still CONTINUES from
+ * the survived partial — via assistant-prefill rather than exact suffix math.
  *
  * @internal Validation fixture, not a published package.
  */
 
 import { EventType, type StreamChunk } from "@tanstack/ai/client";
+import type { TurnModel, TurnStreamOptions } from "./model";
 
-export interface FauxStreamOptions {
-  threadId: string;
-  runId: string;
-  messageId: string;
-  /** Aborts the in-flight stream (turn cancellation / fiber teardown). */
-  signal?: AbortSignal;
-}
+/** The faux model ignores `messages`/`systemPrompt` (it scripts its own reply). */
+export type FauxStreamOptions = TurnStreamOptions;
 
 /**
  * A scripted tool call to settle (`START → ARGS → END → RESULT`) BEFORE the text
@@ -55,7 +45,7 @@ export interface FauxToolCall {
 }
 
 /** A deterministic faux model that streams scripted AG-UI chunks slowly. */
-export class FauxTanStackModel {
+export class FauxTanStackModel implements TurnModel {
   private _nextText = "";
   private _nextToolCall: FauxToolCall | null = null;
 

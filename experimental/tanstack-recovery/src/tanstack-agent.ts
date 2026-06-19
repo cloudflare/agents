@@ -39,6 +39,7 @@ import type {
   WSMessage
 } from "agents";
 import { EventType } from "@tanstack/ai/client";
+import type { ModelMessage } from "@tanstack/ai";
 import {
   ChatRecoveryEngine,
   ContinuationState,
@@ -78,10 +79,15 @@ import {
   type SnapshotMessage
 } from "agents/chat";
 import { FauxTanStackModel } from "./faux-model";
+import type { TurnModel, TurnProvider } from "./model";
+import { createWorkersAiModel } from "./workers-ai-model";
 import { tanStackRecoveryCodec } from "./tanstack-codec";
 
 export type Env = {
   TanStackAgent: DurableObjectNamespace<TanStackAgent>;
+  /** Workers AI binding for the OPT-IN real-provider run (the faux model never
+   *  touches it). Present so a `workers-ai` turn can stream a real reply. */
+  AI: Ai;
 };
 
 /** A durable transcript entry. `partial` flags a preserved orphaned partial. */
@@ -119,6 +125,23 @@ const PERSIST_POLICY_KEY = "tanstack:recovery:persist-policy";
 // Whether the partial the gate preserved carried a SETTLED tool result — the
 // observable that proves the AG-UI-reconstructed `parts` drove the gate.
 const PARTIAL_SETTLED_TOOL_KEY = "tanstack:recovery:partial-settled-tool";
+// The model provider this turn ran under (`faux` default | `workers-ai`). Stored
+// durably so a cold-wake recovery (post-SIGKILL) re-runs the SAME provider it
+// crashed under rather than silently falling back to the faux model.
+const PROVIDER_KEY = "tanstack:turn:provider";
+// System guidance for the REAL provider only: force a long, multi-paragraph reply
+// so the turn streams over several seconds — wide enough for a `wrangler dev`
+// SIGKILL to land mid-stream (the faux model achieves this via its slow tick).
+const WORKERS_AI_SYSTEM_PROMPT =
+  "You are a verbose assistant. Always answer in at least six long, detailed " +
+  "paragraphs (300+ words total). Do not stop early.";
+// Appended after an assistant-prefill on a real-provider continuation: ask the
+// model to resume the survived prefix rather than restart. The merge folds
+// whatever it streams onto the prefix, so the continuation invariant holds even
+// if a non-deterministic model doesn't resume perfectly.
+const WORKERS_AI_CONTINUE_NUDGE =
+  "Your previous response was cut off. Continue it from exactly where it " +
+  "stopped. Do not repeat any earlier text; output only the remaining content.";
 // Slow enough that a multi-token reply streams over several seconds, leaving a
 // wide window for the e2e to SIGKILL `wrangler dev` MID-STREAM.
 const STREAM_TOKENS_PER_SECOND = 4;
@@ -148,6 +171,10 @@ export class TanStackAgent extends Agent<Env> {
    *  (the shared `agents/chat` rule). */
   private readonly _streamProgressCredit = new StreamProgressCreditThrottle();
   private readonly _faux: FauxTanStackModel;
+  // The provider for the in-flight turn; re-read from durable storage on a
+  // cold-wake recovery so the recovered turn runs under the SAME model.
+  private _activeProvider: TurnProvider = "faux";
+  private _workersAiModelInstance?: TurnModel;
   private _transcript: TranscriptEntry[] = [];
   private _currentStreamId: string | null = null;
   private _activeChatRecoveryRootRequestId: string | undefined;
@@ -318,6 +345,45 @@ export class TanStackAgent extends Agent<Env> {
     });
   }
 
+  // ── Model selection (faux default | real Workers AI) ───────────────────────
+
+  /** The model the active provider resolves to. Faux is the shared default; the
+   *  real Workers AI adapter is built lazily the first time a turn opts in. */
+  private _model(): TurnModel {
+    if (this._activeProvider === "workers-ai") {
+      return (this._workersAiModelInstance ??= createWorkersAiModel(
+        this.env.AI
+      ));
+    }
+    return this._faux;
+  }
+
+  /**
+   * Build the conversation for the REAL provider from the COMMITTED transcript
+   * (preserved partials are excluded). On a continuation re-run, the survived
+   * partial is appended as an assistant-prefill plus a nudge so the model
+   * resumes rather than restarts — the engine's continuation, expressed through
+   * a real prompt instead of the faux model's exact-suffix scripting. The faux
+   * model ignores these messages entirely.
+   */
+  private _buildModelMessages(): ModelMessage[] {
+    const messages: ModelMessage[] = [];
+    for (const entry of this._transcript) {
+      if (entry.partial) continue;
+      messages.push({ role: entry.role, content: entry.text });
+    }
+    if (this._continuationTargetId) {
+      const partial = this._transcript.find(
+        (entry) => entry.id === this._continuationTargetId
+      );
+      if (partial && partial.text) {
+        messages.push({ role: "assistant", content: partial.text });
+        messages.push({ role: "user", content: WORKERS_AI_CONTINUE_NUDGE });
+      }
+    }
+    return messages;
+  }
+
   // ── Turn execution (fiber-wrapped so a mid-stream crash is recoverable) ─────
 
   private async _runTurn(
@@ -343,12 +409,15 @@ export class TanStackAgent extends Agent<Env> {
         });
         this._currentStreamId = streamId;
 
+        const usingWorkersAi = this._activeProvider === "workers-ai";
         let producedText = "";
         try {
-          for await (const chunk of this._faux.stream({
+          for await (const chunk of this._model().stream({
             threadId: this.name,
             runId: requestId,
-            messageId
+            messageId,
+            messages: usingWorkersAi ? this._buildModelMessages() : undefined,
+            systemPrompt: usingWorkersAi ? WORKERS_AI_SYSTEM_PROMPT : undefined
           })) {
             const body = JSON.stringify(chunk);
             this._resumableStream.storeChunk(streamId, body);
@@ -440,20 +509,30 @@ export class TanStackAgent extends Agent<Env> {
    */
   async startTurn(
     text: string,
-    opts: { withTool?: boolean; persist?: boolean } = {}
+    opts: {
+      withTool?: boolean;
+      persist?: boolean;
+      provider?: TurnProvider;
+    } = {}
   ): Promise<void> {
-    const { withTool = false, persist = true } = opts;
+    const { withTool = false, persist = true, provider = "faux" } = opts;
+    this._activeProvider = provider;
     this._appendMessage("user", text);
     await this.ctx.storage.put(PERSIST_POLICY_KEY, persist);
+    await this.ctx.storage.put(PROVIDER_KEY, provider);
     await this.ctx.storage.delete(PARTIAL_SETTLED_TOOL_KEY);
-    this._faux.setNextTurnText(replyFor(text));
-    if (withTool) {
-      this._faux.setNextTurnToolCall({
-        toolCallId: `call-${crypto.randomUUID().slice(0, 8)}`,
-        toolName: "lookup",
-        args: { query: text },
-        result: `result for "${text}"`
-      });
+    // Scripting is faux-only; the real provider streams a live, model-generated
+    // reply from the conversation built in `_buildModelMessages`.
+    if (provider === "faux") {
+      this._faux.setNextTurnText(replyFor(text));
+      if (withTool) {
+        this._faux.setNextTurnToolCall({
+          toolCallId: `call-${crypto.randomUUID().slice(0, 8)}`,
+          toolName: "lookup",
+          args: { query: text },
+          result: `result for "${text}"`
+        });
+      }
     }
     await this._runTurn(crypto.randomUUID(), false);
   }
@@ -471,6 +550,9 @@ export class TanStackAgent extends Agent<Env> {
     this._activeChatRecoveryRootRequestId = data?.originalRequestId;
     const incidentId = data?.incidentId;
     this._inRecoveryTurn = true;
+    // Restore the provider the crashed turn ran under (cold wake loses memory).
+    this._activeProvider =
+      (await this.ctx.storage.get<TurnProvider>(PROVIDER_KEY)) ?? "faux";
     try {
       const userText = this._lastUserText();
       if (userText === null) {
@@ -481,6 +563,27 @@ export class TanStackAgent extends Agent<Env> {
         );
         return;
       }
+
+      // Real provider: there is no canonical reply to slice, so continuation is
+      // expressed as an assistant-prefill prompt (see `_buildModelMessages`).
+      // Set the merge target; `_runTurn` streams the model's continuation, and
+      // `_commitAssistant` folds it onto the survived prefix. With no partial we
+      // simply regenerate the turn.
+      if (this._activeProvider === "workers-ai") {
+        const tail = this._lastEntry();
+        const partial =
+          continueFromPartial &&
+          tail?.partial === true &&
+          tail.role === "assistant" &&
+          tail.text.length > 0
+            ? tail
+            : undefined;
+        if (partial) this._continuationTargetId = partial.id;
+        await this._runTurn(crypto.randomUUID(), true);
+        await this._engine().updateIncident(incidentId, "completed");
+        return;
+      }
+
       const full = replyFor(userText);
       const tail = this._lastEntry();
       const partial =
@@ -818,10 +921,23 @@ export class TanStackAgent extends Agent<Env> {
     partialPrefixChars: number;
     persistPolicy: boolean;
     partialHadSettledTool: boolean;
+    bufferedChars: number;
   }> {
     const fiberRows = this.sql<{ count: number }>`
       SELECT COUNT(*) as count FROM cf_agents_runs
     `;
+    // Chars currently reconstructable from the ACTIVE stream buffer — lets the
+    // real-provider e2e wait until content has actually streamed (past the
+    // model's time-to-first-token) before SIGKILLing, so the survived partial is
+    // non-empty and recovery takes the `continue` path.
+    const activeStreamId = this._resumableStream.activeStreamId;
+    const bufferedChars = activeStreamId
+      ? this._codec.toRecoveryPartial(
+          this._resumableStream
+            .getStreamChunks(activeStreamId)
+            .map((chunk) => chunk.body)
+        ).text.length
+      : 0;
     const incidents = await this.ctx.storage.list({
       prefix: "cf:chat-recovery:incident:"
     });
@@ -846,7 +962,9 @@ export class TanStackAgent extends Agent<Env> {
       persistPolicy:
         (await this.ctx.storage.get<boolean>(PERSIST_POLICY_KEY)) ?? true,
       partialHadSettledTool:
-        (await this.ctx.storage.get<boolean>(PARTIAL_SETTLED_TOOL_KEY)) ?? false
+        (await this.ctx.storage.get<boolean>(PARTIAL_SETTLED_TOOL_KEY)) ??
+        false,
+      bufferedChars
     };
   }
 }
