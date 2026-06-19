@@ -176,6 +176,7 @@ export {
   ChatRecoveryEngine,
   buildChatRecoveryExhaustedContext,
   notifyChatRecoveryExhausted,
+  runChatRecoveryExhaustion,
   type ChatRecoveryScheduleReason,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryAdapter,

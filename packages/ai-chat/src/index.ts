@@ -61,8 +61,7 @@ import {
   resolveChatRecoveryConfig,
   chatRecoverySchedulePolicy,
   ChatRecoveryEngine,
-  buildChatRecoveryExhaustedContext,
-  notifyChatRecoveryExhausted,
+  runChatRecoveryExhaustion,
   ChatStreamStalledError,
   iterateWithStallWatchdog,
   sweepStaleChatRecoveryIncidents,
@@ -3753,41 +3752,46 @@ export class AIChatAgent<
     streamId: string,
     createdAt: number
   ): Promise<void> {
-    // Shared notification core (context build + event + onExhausted-swallow)
-    // lives in the engine; the terminal/broadcast ordering below is ai-chat's
-    // own (persist-first; see #1645). See design/rfc-chat-recovery-foundation.md.
-    const ctx = buildChatRecoveryExhaustedContext({
-      incident,
-      config,
-      partialText: partial.text,
-      partialParts: partial.parts as MessagePart[],
-      streamId,
-      createdAt
-    });
-    await notifyChatRecoveryExhausted(ctx, {
-      emit: (event) => this._emit("chat:recovery:exhausted", event),
-      onExhausted: config.onExhausted,
-      onError: (error) =>
-        console.error(
-          "[AIChatAgent] chatRecovery onExhausted hook threw",
-          error
-        )
-    });
-    // Persist the terminal outcome BEFORE broadcasting it (#1645): the
-    // broadcast is transient, so a client disconnected at this moment (a
-    // deploy/reconnect storm exhausting recovery) would otherwise never learn
-    // the turn failed. The record is replayed on the next reconnect via the
-    // resume handshake (`_replayTerminalOnResume`).
-    await this._recordChatTerminal(incident.requestId, config.terminalMessage);
-    this._broadcastChatMessage({
-      body: config.terminalMessage,
-      done: true,
-      error: true,
-      id: incident.requestId,
-      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-    });
-    // Exhaustion resolves recovery — clear the "recovering…" status (#1620).
-    await this._setChatRecovering(false);
+    // Build + notification (event + onExhausted-swallow) and the
+    // notify-before-terminalize invariant live in the engine helper; the
+    // terminal/broadcast ordering inside `terminalize` is ai-chat's own
+    // (persist-first; see #1645). See design/rfc-chat-recovery-foundation.md.
+    await runChatRecoveryExhaustion(
+      {
+        incident,
+        config,
+        partialText: partial.text,
+        partialParts: partial.parts as MessagePart[],
+        streamId,
+        createdAt
+      },
+      {
+        emit: (event) => this._emit("chat:recovery:exhausted", event),
+        onExhausted: config.onExhausted,
+        onError: (error) =>
+          console.error(
+            "[AIChatAgent] chatRecovery onExhausted hook threw",
+            error
+          ),
+        terminalize: async (ctx) => {
+          // Persist the terminal outcome BEFORE broadcasting it (#1645): the
+          // broadcast is transient, so a client disconnected at this moment (a
+          // deploy/reconnect storm exhausting recovery) would otherwise never
+          // learn the turn failed. The record is replayed on the next reconnect
+          // via the resume handshake (`_replayTerminalOnResume`).
+          await this._recordChatTerminal(ctx.requestId, ctx.terminalMessage);
+          this._broadcastChatMessage({
+            body: ctx.terminalMessage,
+            done: true,
+            error: true,
+            id: ctx.requestId,
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+          });
+          // Exhaustion resolves recovery — clear the "recovering…" status (#1620).
+          await this._setChatRecovering(false);
+        }
+      }
+    );
     // The exhausted record is retained for inspection and reclaimed later by
     // the TTL sweep; only successful (completed) incidents are deleted eagerly.
   }

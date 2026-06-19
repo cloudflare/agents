@@ -935,3 +935,61 @@ export async function notifyChatRecoveryExhausted(
     hooks.onError(error);
   }
 }
+
+/**
+ * The complete give-up choreography from a single call: build the exhausted
+ * context, fire the shared notification ({@link notifyChatRecoveryExhausted}),
+ * then hand that context to the host's `terminalize` step. Folds the
+ * `buildChatRecoveryExhaustedContext` → `notifyChatRecoveryExhausted` → host
+ * terminalize sequence that every host's `_exhaustChatRecovery` repeated.
+ *
+ * What this OWNS (the invariant, so it cannot drift per host):
+ * - the notification ALWAYS runs before any terminal write, and
+ * - a throwing `onExhausted` can NEVER block terminal delivery — it is swallowed
+ *   via `onError` (a tested invariant in both published packages).
+ *
+ * What it deliberately does NOT own: the terminal-record / broadcast /
+ * recovering-clear writes and their ORDER. That ordering legitimately diverges
+ * per host (`AIChatAgent` persists before broadcasting for #1645 reconnect
+ * consistency; `Think` broadcasts first so the banner survives a storage write
+ * that rejects mid-deploy, then writes its submission row) — see
+ * {@link ChatRecoveryAdapter.exhaustChatRecovery}. The host expresses that order
+ * inside `terminalize`. A `terminalize` that throws DOES propagate, so the whole
+ * give-up re-runs on a healthy isolate (#1730); see
+ * {@link ChatRecoveryEngine.exhaustRecoveryGiveUp}.
+ *
+ * `partialParts` is passed explicitly (not derived from a `RecoveryPartial`) so a
+ * foreign-vocabulary host can pass `[]` rather than fabricate AI-SDK parts — the
+ * engine seam stays parts-vocabulary-agnostic.
+ */
+export async function runChatRecoveryExhaustion(
+  input: {
+    incident: ChatRecoveryIncident;
+    config: ResolvedChatRecoveryConfig;
+    partialText: string;
+    partialParts: ChatRecoveryExhaustedContext["partialParts"];
+    streamId: string;
+    createdAt: number;
+  },
+  hooks: {
+    emit: (ctx: ChatRecoveryExhaustedContext) => void;
+    onExhausted?: (ctx: ChatRecoveryExhaustedContext) => void | Promise<void>;
+    onError: (error: unknown) => void;
+    terminalize: (ctx: ChatRecoveryExhaustedContext) => void | Promise<void>;
+  }
+): Promise<void> {
+  const ctx = buildChatRecoveryExhaustedContext({
+    incident: input.incident,
+    config: input.config,
+    partialText: input.partialText,
+    partialParts: input.partialParts,
+    streamId: input.streamId,
+    createdAt: input.createdAt
+  });
+  await notifyChatRecoveryExhausted(ctx, {
+    emit: hooks.emit,
+    onExhausted: hooks.onExhausted,
+    onError: hooks.onError
+  });
+  await hooks.terminalize(ctx);
+}

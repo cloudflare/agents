@@ -45,16 +45,15 @@ import {
   ContinuationState,
   ResumableStream,
   ResumeHandshake,
-  buildChatRecoveryExhaustedContext,
   buildChatRecoveringFrame,
   bumpChatRecoveryProgress,
   cleanupStreamBuffers,
   createChatFiberSnapshot,
-  notifyChatRecoveryExhausted,
   pendingChatTerminal,
   readChatRecoveryProgress,
   recordChatTerminal,
   resolveChatRecoveryConfig,
+  runChatRecoveryExhaustion,
   sendIfOpen,
   setChatRecovering,
   shouldCreditStreamProgress,
@@ -811,6 +810,21 @@ export class TanStackAgent extends Agent<Env> {
     return meta?.id ?? this._resumableStream.activeStreamId ?? "";
   }
 
+  /** Set/clear the live "recovering…" status (#1620), building the shared
+   *  `setChatRecovering` option bag once so the adapter hook and the give-up
+   *  terminalize share it. */
+  private _setChatRecovering(
+    active: boolean,
+    requestId?: string
+  ): Promise<void> {
+    return setChatRecovering(active, requestId, {
+      storage: this.ctx.storage,
+      messageType: RECOVERING_MESSAGE_TYPE,
+      broadcast: (frame) => this.broadcast(JSON.stringify(frame)),
+      now: Date.now()
+    });
+  }
+
   private _adapter(): ChatRecoveryAdapter {
     return {
       resolveConfig: () => resolveChatRecoveryConfig(this.chatRecovery),
@@ -837,50 +851,37 @@ export class TanStackAgent extends Agent<Env> {
         });
       },
       setRecovering: (active, requestId) =>
-        setChatRecovering(active, requestId, {
-          storage: this.ctx.storage,
-          messageType: RECOVERING_MESSAGE_TYPE,
-          broadcast: (frame) => this.broadcast(JSON.stringify(frame)),
-          now: Date.now()
-        }),
+        this._setChatRecovering(active, requestId),
       onShouldKeepRecoveringError: (error) =>
         console.error("[tanstack-recovery] shouldKeepRecovering threw", error),
-      exhaustChatRecovery: async (
-        incident,
-        config,
-        partial,
-        streamId,
-        createdAt
-      ) => {
-        const exhausted = buildChatRecoveryExhaustedContext({
-          incident,
-          config,
-          partialText: partial.text,
-          // The harness has no AI-SDK `UIMessage` parts (its parts are AG-UI
-          // native, opaque to the engine); the exhausted-context parts surface
-          // is AI-SDK-typed, so pass empty rather than fabricating one.
-          partialParts: [],
-          streamId,
-          createdAt
-        });
-        await notifyChatRecoveryExhausted(exhausted, {
-          emit: (recoveryCtx) =>
-            this._emit("chat:recovery:exhausted", { ...recoveryCtx }),
-          onError: (error) =>
-            console.error("[tanstack-recovery] onExhausted threw", error)
-        });
-        await recordChatTerminal(
-          this.ctx.storage,
-          incident.recoveryRootRequestId ?? incident.requestId,
-          exhausted.terminalMessage
-        );
-        await setChatRecovering(false, incident.requestId, {
-          storage: this.ctx.storage,
-          messageType: RECOVERING_MESSAGE_TYPE,
-          broadcast: (frame) => this.broadcast(JSON.stringify(frame)),
-          now: Date.now()
-        });
-      },
+      exhaustChatRecovery: (incident, config, partial, streamId, createdAt) =>
+        runChatRecoveryExhaustion(
+          {
+            incident,
+            config,
+            partialText: partial.text,
+            // The harness has no AI-SDK `UIMessage` parts (its parts are AG-UI
+            // native, opaque to the engine); the exhausted-context parts surface
+            // is AI-SDK-typed, so pass empty rather than fabricating one.
+            partialParts: [],
+            streamId,
+            createdAt
+          },
+          {
+            emit: (recoveryCtx) =>
+              this._emit("chat:recovery:exhausted", { ...recoveryCtx }),
+            onError: (error) =>
+              console.error("[tanstack-recovery] onExhausted threw", error),
+            terminalize: async (recoveryCtx) => {
+              await recordChatTerminal(
+                this.ctx.storage,
+                recoveryCtx.recoveryRootRequestId ?? recoveryCtx.requestId,
+                recoveryCtx.terminalMessage
+              );
+              await this._setChatRecovering(false, recoveryCtx.requestId);
+            }
+          }
+        ),
       resolveRecoveryStream: (requestId): ResolvedRecoveryStream => {
         const streamId = this._resolveStreamId(requestId);
         return {

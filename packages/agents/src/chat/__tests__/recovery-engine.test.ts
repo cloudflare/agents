@@ -4,6 +4,7 @@ import {
   buildChatRecoveryExhaustedContext,
   chatRecoverySchedulePolicy,
   notifyChatRecoveryExhausted,
+  runChatRecoveryExhaustion,
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,
   type ChatRecoveryScheduleCallback,
@@ -1261,6 +1262,137 @@ describe("notifyChatRecoveryExhausted", () => {
     });
 
     expect(order).toEqual(["emit"]);
+  });
+});
+
+describe("runChatRecoveryExhaustion", () => {
+  const config = resolveChatRecoveryConfig(undefined);
+
+  function makeIncident(
+    overrides: Partial<ChatRecoveryIncident> = {}
+  ): ChatRecoveryIncident {
+    return {
+      incidentId: "inc-1",
+      requestId: "req-1",
+      recoveryRootRequestId: "root-1",
+      recoveryKind: "continue",
+      attempt: 5,
+      maxAttempts: 5,
+      status: "exhausted",
+      firstSeenAt: 1_000,
+      lastAttemptAt: 2_000,
+      reason: "max_attempts_exceeded",
+      ...overrides
+    };
+  }
+
+  it("runs notify (emit -> onExhausted) before terminalize, passing the built context to both", async () => {
+    const order: string[] = [];
+    let emittedCtx: ChatRecoveryExhaustedContext | undefined;
+    let terminalizedCtx: ChatRecoveryExhaustedContext | undefined;
+
+    await runChatRecoveryExhaustion(
+      {
+        incident: makeIncident(),
+        config,
+        partialText: "partial reply",
+        partialParts: [],
+        streamId: "stream-9",
+        createdAt: 1_500
+      },
+      {
+        emit: (c) => {
+          order.push("emit");
+          emittedCtx = c;
+        },
+        onExhausted: () => {
+          order.push("onExhausted");
+        },
+        onError: () => order.push("onError"),
+        terminalize: (c) => {
+          order.push("terminalize");
+          terminalizedCtx = c;
+        }
+      }
+    );
+
+    // The notification fully completes before the host terminalizes.
+    expect(order).toEqual(["emit", "onExhausted", "terminalize"]);
+    // Both sides see the SAME built context (so terminalize never rebuilds it).
+    expect(terminalizedCtx).toBe(emittedCtx);
+    expect(terminalizedCtx).toMatchObject({
+      requestId: "req-1",
+      recoveryRootRequestId: "root-1",
+      partialText: "partial reply",
+      streamId: "stream-9",
+      createdAt: 1_500,
+      terminalMessage: config.terminalMessage
+    });
+  });
+
+  it("still terminalizes when onExhausted throws (a bad hook never blocks terminal UX)", async () => {
+    const order: string[] = [];
+    const thrown = new Error("hook boom");
+    let reported: unknown;
+
+    await expect(
+      runChatRecoveryExhaustion(
+        {
+          incident: makeIncident(),
+          config,
+          partialText: "",
+          partialParts: [],
+          streamId: "",
+          createdAt: 0
+        },
+        {
+          emit: () => order.push("emit"),
+          onExhausted: () => {
+            order.push("onExhausted");
+            throw thrown;
+          },
+          onError: (error) => {
+            order.push("onError");
+            reported = error;
+          },
+          terminalize: () => {
+            order.push("terminalize");
+          }
+        }
+      )
+    ).resolves.toBeUndefined();
+
+    expect(order).toEqual(["emit", "onExhausted", "onError", "terminalize"]);
+    expect(reported).toBe(thrown);
+  });
+
+  it("propagates a throwing terminalize (so the give-up re-runs on a healthy isolate, #1730)", async () => {
+    const order: string[] = [];
+    const thrown = new Error("storage transient");
+
+    await expect(
+      runChatRecoveryExhaustion(
+        {
+          incident: makeIncident(),
+          config,
+          partialText: "",
+          partialParts: [],
+          streamId: "",
+          createdAt: 0
+        },
+        {
+          emit: () => order.push("emit"),
+          onError: () => order.push("onError"),
+          terminalize: () => {
+            order.push("terminalize");
+            return Promise.reject(thrown);
+          }
+        }
+      )
+    ).rejects.toBe(thrown);
+
+    // The notification still fired before the failing terminalize.
+    expect(order).toEqual(["emit", "terminalize"]);
   });
 });
 
