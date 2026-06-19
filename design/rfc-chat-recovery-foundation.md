@@ -1,4 +1,4 @@
-Status: proposed
+Status: accepted — foundation implemented (Phases 0–5 merged); post-v1 extensions tracked below
 
 # RFC: Shared chat recovery foundation
 
@@ -1763,8 +1763,10 @@ guard against shipping a subtly broken recovery path.
    between `AIChatAgent` and `Think`. Write the findings down (in the commit
    message and, when they change the design, in this document) so the next step
    starts from a known-good base. If the review surfaces a problem that could
-   force an interface redesign (see "Open questions"), pause and revisit the
-   seam rather than pushing forward.
+   force an interface redesign (e.g. a seam that cannot be cleanly shared across
+   `AIChatAgent`, `Think`, and the pi/TanStack harnesses — see the
+   "Chat-layer extraction map" and the Phase 5 API-ergonomics findings), pause
+   and revisit the seam rather than pushing forward.
 4. **Commit.** Commit the work with a detailed message that states what changed,
    why, what was reviewed, and what is deliberately deferred. One commit per
    coherent step keeps the history bisectable across a risky refactor.
@@ -3489,7 +3491,13 @@ Exit criteria:
 - If a Tier-2 seam could not be cleanly shared for pi, the reason is recorded (it
   signals the seam shape is wrong) rather than forced.
 
-**Status — P5-1 DONE (proof + harness); Tier-2 extraction is follow-up.** The
+**Status — DONE.** P5-1 (pi proof + harness), the Tier-2 extraction (resume handshake +
+streaming codec into `agents/chat`, commit `038e6d23`), the second TanStack/AG-UI harness
+(foreign client transport + foreign chunk vocabulary), the tool-`parts` codec path, and the
+`RecoveryPartial` agnostic-seam refactor have all landed — see the Progress log. The historical
+detail below is preserved as the original P5-1 record; "Still open" at the end of this section is
+superseded by the Progress log's current open items (a real Workers AI provider run; the deferred
+Tier-2 progress-bump _timing_ convergence + start-id alignment). The
 `experimental/pi-recovery/` fixture drives the **real** `@earendil-works/pi-agent-core`
 `Agent` (verified to bundle + run in `workerd`; deterministic via pi-ai's
 `registerFauxProvider`) on the shared engine, and a real `wrangler dev` SIGKILL
@@ -3512,9 +3520,8 @@ deltas (`StreamChunkWriter`), reconstructs the partial (`recoverInterruptedStrea
 continues from it (`stream_continuation`), plus preserves completed tool results across
 a mid-batch interruption (`tool_results_partial`), under a leased submission execution
 store. The shared engine supported pi's continuation with **no engine-side change**.
-Still open: lifting the resume handshake + streaming codec into `agents/chat` behind
-shared adapters (driven against this harness), then folding corrections back into the AI
-SDK adapter. See the Progress log entry.
+_(Originally "still open: lifting the resume handshake + streaming codec into `agents/chat`" —
+since **DONE** in the Tier-2 extraction, commit `038e6d23`; see the Progress log entry.)_
 
 **Scoping conclusion — the engine is message-generic but substrate-coupled (and that
 is correct).** An inverse analysis (could Flue drop its in-house recovery and adopt this
@@ -3613,12 +3620,12 @@ into `agents/chat`). Ranked by payoff:
 Two correctness caveats the fixture also exposed, to record honestly:
 
 - **The codec's tool-`parts` path is unproven on a non-AI-SDK substrate.** A pi text turn
-  always yields `parts: []`, so the settled-tool persist gate
-  (`partialHasSettledToolResults`) was only ever exercised through the AI SDK adapter. A
-  turn carrying tool calls would be needed to prove the `MessagePart` seam end-to-end
-  off `UIMessage`. _(Since closed — not in pi, but in the TanStack harness: it reconstructs
-  AG-UI `TOOL_CALL_\*`chunks into`MessagePart`s and proves the gate keeps a settled-tool
-partial under `{ persist: false }`. See the newest progress-log entry.)\_
+  always yields `parts: []`, so the settled-tool persist gate was only ever exercised
+  through the AI SDK adapter. A turn carrying tool calls would be needed to prove the
+  settled-tool seam end-to-end off `UIMessage`. _(Since closed — not in pi, but in the
+  TanStack harness: it reconstructs AG-UI `TOOL_CALL_\*`chunks into its own **AG-UI-native**
+tool parts and computes`hasSettledToolResults`itself — no AI-SDK`MessagePart`fabrication — and proves the engine's gate keeps a settled-tool partial under`{ persist: false }`. The follow-up `RecoveryPartial` refactor then made the engine seam
+  agnostic by type, not just at runtime. See the two newest progress-log entries.)\_
 - **The fixture's continuation is simulated, not pi-native.** `_resumeRecoveredTurn`
   recomputes the full reply (`replyFor`) and primes the faux model with
   `full.slice(prefix.length)`; a real pi `continue()` would resume generation from the
