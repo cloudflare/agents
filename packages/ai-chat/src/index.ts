@@ -28,6 +28,7 @@ import {
 } from "agents/chat";
 import {
   applyChunkToParts,
+  StreamAccumulator,
   aiSdkRecoveryCodec,
   ResumeHandshake,
   isReplayChunk,
@@ -1434,48 +1435,33 @@ export class AIChatAgent<
    * stream's stored chunks. Called when the DO wakes from hibernation and
    * discovers an active stream with no live LLM reader.
    *
-   * Replays each chunk body through `applyChunkToParts` to rebuild the
-   * message parts, then persists the result so it survives further refreshes.
+   * Reconstruction runs through the shared `StreamAccumulator` (the same
+   * primitive `Think` and the client reducer use) rather than a hand-rolled
+   * chunk switch — it wraps `applyChunkToParts` and owns the `start` / `finish`
+   * / `message-metadata` handling this method used to duplicate inline. The
+   * id-resolution (#1691) and merge-onto-existing steps below stay
+   * ai-chat-specific: the merge deliberately preserves an existing in-place
+   * tool result rather than letting a replayed chunk re-advance it.
    * @internal
    */
   protected async _persistOrphanedStream(streamId: string): Promise<void> {
     const chunks = this._resumableStream.getStreamChunks(streamId);
     if (!chunks.length) return;
 
+    // A provider `start.messageId` is adopted as the id (the live path adopts
+    // it for new turns too); continuations have it stripped before storage
+    // (#1229), so the accumulator's unconditional adopt matches the live path.
     const fallbackId = `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
-    const message: UIMessage = {
-      id: fallbackId,
-      role: "assistant",
-      parts: []
-    };
-
+    const accumulator = new StreamAccumulator({ messageId: fallbackId });
     for (const chunk of chunks) {
       try {
-        const data = JSON.parse(chunk.body);
-
-        // Capture a provider `start.messageId` if present. The live path adopts
-        // it for new turns (see `_streamSSEReply`'s "start" handling), so
-        // recovery must reuse it to land under the same id a completed live
-        // turn would. Continuations have it stripped before storage (#1229).
-        if (data.type === "start" && data.messageId != null) {
-          message.id = data.messageId;
-        }
-        if (
-          (data.type === "start" ||
-            data.type === "finish" ||
-            data.type === "message-metadata") &&
-          data.messageMetadata != null
-        ) {
-          message.metadata = message.metadata
-            ? { ...message.metadata, ...data.messageMetadata }
-            : data.messageMetadata;
-        }
-
-        applyChunkToParts(message.parts, data);
+        accumulator.applyChunk(JSON.parse(chunk.body) as StreamChunkData);
       } catch {
         // Skip malformed chunk bodies
       }
     }
+
+    const message: UIMessage = accumulator.toMessage();
 
     if (message.parts.length > 0) {
       // Resolve the id to persist under when the chunks carried no provider
