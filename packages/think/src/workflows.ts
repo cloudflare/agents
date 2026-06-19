@@ -31,6 +31,15 @@ type ThinkPromptEventPayload = {
 
 const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
 
+/**
+ * How many inspect / re-wait rounds the timeout-recovery loop performs before
+ * giving up and falling back to a fresh submission. Each round tolerates the
+ * Think Durable Object being temporarily unreachable (e.g. still restarting
+ * after a deploy) by backing off and re-checking, so a slow DO restart does
+ * not cause the in-flight turn to be discarded prematurely.
+ */
+const PROMPT_RECOVERY_MAX_ROUNDS = 5;
+
 export type ThinkPromptRetryOptions = {
   /** Total number of attempts (including the first). Default: 1 */
   maxAttempts?: number;
@@ -142,31 +151,35 @@ export class ThinkWorkflow<
       })
     );
 
-    // Single event type shared across all retry attempts.  When the DO's
-    // built-in chat recovery restarts an interrupted submission after a
-    // deploy, it emits the completion event with this same type, so a
-    // subsequent waitForEvent in a retry attempt will receive it.
-    const eventType = await this._eventTypeForPrompt(stepName, options.key);
+    const { maxAttempts, baseDelayMs, maxDelayMs, retryOnTimeout } =
+      this._validatePromptRetryOptions(options.retries);
 
-    const retries = this._validatePromptRetryOptions(options.retries);
-    const maxAttempts = retries.maxAttempts;
-    const baseDelayMs = retries.baseDelayMs;
-    const maxDelayMs = retries.maxDelayMs;
-    const retryOnTimeout = retries.retryOnTimeout;
-
-    // When retries are enabled the retry loop owns cancellation so it can
-    // attempt recovery first.  Without retries the old behaviour is
-    // preserved (_waitForPromptEvent cancels on timeout).
-    const cancelOnTimeout = maxAttempts > 1 ? false : options.cancelOnTimeout;
+    // With retries enabled the loop owns the submission lifecycle: on a
+    // timeout it inspects and tries to recover the in-flight submission before
+    // deciding to cancel it, so the per-attempt wait must NOT cancel on
+    // timeout. For the single-attempt case the legacy behaviour is preserved
+    // (the wait wrapper honours `cancelOnTimeout`).
+    const waitCancelsOnTimeout =
+      maxAttempts > 1 ? false : options.cancelOnTimeout;
+    const cancelTimedOutFinalAttempt = options.cancelOnTimeout ?? true;
 
     let lastError: unknown;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const attemptKey =
         attempt === 0 ? options.key : `${options.key ?? ""}:attempt-${attempt}`;
-      // Captures the submission id of this attempt (set once `submitMessages`
-      // resolves) so we can terminate it before retrying.
+      // Each attempt's submission carries a distinct event type derived from
+      // its key, so a delivered workflow event maps 1:1 to the submission that
+      // produced it (Think emits exactly one terminal event per submission,
+      // keyed by this type). The DO's own recovery re-emits an interrupted
+      // submission's completion event with this same type, which
+      // `_tryRecoverSubmission` waits on — no cross-attempt event can be
+      // misattributed to the wrong submission.
+      const eventType = await this._eventTypeForPrompt(stepName, attemptKey);
+      // Captures this attempt's submission id (set once `submitMessages`
+      // resolves) so the loop can recover or cancel it after a failure.
       const attemptRef: { submissionId?: string } = {};
+
       try {
         return await this._promptStepAttempt(
           stepName,
@@ -178,59 +191,64 @@ export class ThinkWorkflow<
           step,
           attemptRef,
           eventType,
-          cancelOnTimeout
+          waitCancelsOnTimeout
         );
       } catch (err) {
         lastError = err;
 
+        const isTimeout = err instanceof ThinkPromptTimeoutError;
         const isLastAttempt = attempt === maxAttempts - 1;
-        const stopOnTimeout =
-          !retryOnTimeout && err instanceof ThinkPromptTimeoutError;
+
+        // On timeout, give the DO's built-in recovery a chance to finish the
+        // in-flight turn before discarding it. When the Think DO restarts
+        // (e.g. during a deploy) it re-drives the interrupted submission and
+        // re-emits its completion event; we re-wait for that instead of
+        // wasting the turn. Recovery tolerates the DO being briefly
+        // unreachable while it comes back up, and never throws — it falls
+        // through to the cancel + resubmit path below when it can't recover.
+        if (isTimeout && retryOnTimeout && attemptRef.submissionId) {
+          const recovery = await this._tryRecoverSubmission(
+            step,
+            stepName,
+            attempt,
+            eventType,
+            options,
+            attemptRef.submissionId,
+            baseDelayMs,
+            maxDelayMs
+          );
+          if (recovery.recovered) return recovery.value;
+        }
+
+        const stopOnTimeout = isTimeout && !retryOnTimeout;
         if (isLastAttempt || stopOnTimeout) {
-          // Only cancel when _waitForPromptEvent skipped it (retries
-          // enabled).  When cancelOnTimeout is true the wait wrapper
-          // already cancelled on timeout.
-          if (attemptRef.submissionId && cancelOnTimeout === false) {
+          // Final failure. On the multi-attempt path the wait wrapper never
+          // cancelled, so honour `cancelOnTimeout` for a timed-out submission
+          // here (a non-timeout failure is already terminal, so the cancel is
+          // a harmless no-op). The single-attempt path was already handled by
+          // the wait wrapper, so skip it here to avoid a redundant cancel.
+          const leaveRunning = isTimeout && !cancelTimedOutFinalAttempt;
+          if (maxAttempts > 1 && attemptRef.submissionId && !leaveRunning) {
+            const submissionId = attemptRef.submissionId;
             await step.do(`${stepName}:cancel-${attempt}`, async () => {
               await this.agent.cancelSubmission(
-                attemptRef.submissionId!,
-                "Workflow prompt wait timed out"
+                submissionId,
+                isTimeout
+                  ? "Workflow prompt wait timed out"
+                  : "Think workflow prompt failed"
               );
             });
           }
           throw err;
         }
 
-        // Attempt to recover the interrupted submission via the DO's
-        // built-in chat recovery instead of immediately cancelling and
-        // re-submitting.  When a DO dies mid-turn (e.g. a deploy), the
-        // new DO instance resets the submission to `pending` or continues
-        // it via fiber recovery; the workflow re-waits for the completion
-        // event instead of wasting the in-flight turn.
-        if (
-          attemptRef.submissionId &&
-          err instanceof ThinkPromptTimeoutError &&
-          retryOnTimeout
-        ) {
-          const recovered = await this._tryRecoverSubmission(
-            step,
-            stepName,
-            attempt,
-            eventType,
-            options,
-            attemptRef.submissionId
-          );
-          if (recovered !== undefined) return recovered;
-        }
-
-        // Terminate the abandoned attempt before retrying. Think keeps its own
-        // `chatRecovery` running for this submission (it preserves in-flight
-        // turn state across DO restarts/stalls), but once the workflow decides
-        // to retry, a lingering turn or recovery continuation for the old
-        // attempt would race the fresh attempt on the same session — producing
-        // duplicate/interleaved output. Cancelling aborts the in-flight turn
-        // and any recovery for it, and is a no-op once the submission is
-        // already terminal (e.g. it failed with a provider error).
+        // Abandoning this attempt to resubmit a fresh one. Cancel the old
+        // submission first: Think keeps its own `chatRecovery` running for it
+        // (preserving in-flight state across DO restarts/stalls), so a
+        // lingering turn or recovery for the old attempt would otherwise race
+        // the fresh attempt on the same session and produce duplicate /
+        // interleaved output. Cancelling aborts the in-flight turn and any
+        // recovery for it, and is a no-op once the submission is terminal.
         if (attemptRef.submissionId) {
           const submissionId = attemptRef.submissionId;
           await step.do(`${stepName}:cancel-${attempt}`, async () => {
@@ -412,48 +430,154 @@ export class ThinkWorkflow<
     }
   }
 
+  /**
+   * Attempt to recover an interrupted submission via the Think DO's built-in
+   * chat recovery rather than discarding the in-flight turn and resubmitting.
+   *
+   * Runs a bounded inspect / re-wait loop that is resilient to the DO being
+   * temporarily unreachable (e.g. still restarting after a deploy): an
+   * unreachable DO is treated as "still recovering", not "dead", so the loop
+   * backs off and re-checks instead of abandoning the submission. The method
+   * never throws — it returns `{ recovered: false }` for any non-recoverable
+   * outcome (genuine submission failure, invalid output, or recovery budget
+   * exhausted), letting the caller fall through to cancel + resubmit.
+   */
   private async _tryRecoverSubmission<Schema extends ZodObject>(
     step: AgentWorkflowStep,
     stepName: string,
     attempt: number,
     eventType: string,
     options: ThinkPromptOptions<Schema>,
-    submissionId: string
-  ): Promise<z.infer<Schema> | undefined> {
-    // Check whether the DO's built-in recovery has picked up the
-    // interrupted submission (status `pending` / `running`) or already
-    // completed it (`completed`).  In all three cases the DO will
-    // eventually emit (or already emitted) the completion event, which
-    // the Workflow runtime buffers and delivers to our fresh waitForEvent.
-    const inspection = (await step.do(
-      `${stepName}:recovery-check-${attempt}`,
-      async () => {
-        try {
-          return await this.agent.inspectSubmission(submissionId);
-        } catch {
-          // RPC failed — DO may still be down
-          return null;
+    submissionId: string,
+    baseDelayMs: number,
+    maxDelayMs: number
+  ): Promise<
+    { recovered: true; value: z.infer<Schema> } | { recovered: false }
+  > {
+    for (let round = 0; round < PROMPT_RECOVERY_MAX_ROUNDS; round++) {
+      const inspection = (await step.do(
+        `${stepName}:recovery-check-${attempt}-${round}`,
+        async () => {
+          try {
+            return await this.agent.inspectSubmission(submissionId);
+          } catch {
+            // RPC failed — the DO is unreachable (most likely still
+            // restarting after a deploy). Return null to signal "unknown"
+            // so the loop waits and re-checks rather than discarding the
+            // durable submission.
+            return null;
+          }
         }
-      }
-    )) as ThinkSubmissionInspection | null;
+      )) as ThinkSubmissionInspection | null;
 
-    if (
-      !inspection ||
-      inspection.status === "error" ||
-      inspection.status === "aborted"
-    ) {
-      return undefined;
+      if (inspection === null) {
+        // DO unreachable. The submission is durable in the DO's storage and
+        // will be re-driven once it wakes, so back off and re-check instead
+        // of abandoning the in-flight turn.
+        await this._recoveryBackoff(
+          step,
+          stepName,
+          attempt,
+          round,
+          baseDelayMs,
+          maxDelayMs
+        );
+        continue;
+      }
+
+      if (
+        inspection.status === "error" ||
+        inspection.status === "aborted" ||
+        inspection.status === "skipped"
+      ) {
+        // The submission reached a terminal failure — recovery cannot help;
+        // fall back to cancel + fresh resubmit.
+        return { recovered: false };
+      }
+
+      // `pending` / `running` / `completed`: the DO is (or already finished)
+      // driving this submission to its completion event. Wait for it.
+      const result = await this._waitForRecoveryEvent(
+        step,
+        `${stepName}:recovery-wait-${attempt}-${round}`,
+        eventType,
+        options
+      );
+      if (result.kind === "recovered") {
+        return { recovered: true, value: result.value };
+      }
+      if (result.kind === "failed") {
+        // The recovered turn ended in a terminal failure / invalid output —
+        // not recoverable; resubmit a fresh attempt instead.
+        return { recovered: false };
+      }
+      // `timeout`: the DO is still working (or died again). Back off and
+      // re-inspect on the next round.
+      await this._recoveryBackoff(
+        step,
+        stepName,
+        attempt,
+        round,
+        baseDelayMs,
+        maxDelayMs
+      );
     }
 
-    const event = (await step.waitForEvent(
-      `${stepName}:recovery-wait-${attempt}`,
-      {
+    return { recovered: false };
+  }
+
+  private async _recoveryBackoff(
+    step: AgentWorkflowStep,
+    stepName: string,
+    attempt: number,
+    round: number,
+    baseDelayMs: number,
+    maxDelayMs: number
+  ): Promise<void> {
+    const delayMs = await this._promptRetryDelayMs(
+      `${stepName}:recovery`,
+      round,
+      baseDelayMs,
+      maxDelayMs
+    );
+    await step.sleep(
+      `${stepName}:recovery-backoff-${attempt}-${round}`,
+      delayMs
+    );
+  }
+
+  private async _waitForRecoveryEvent<Schema extends ZodObject>(
+    step: AgentWorkflowStep,
+    waitStepName: string,
+    eventType: string,
+    options: ThinkPromptOptions<Schema>
+  ): Promise<
+    | { kind: "recovered"; value: z.infer<Schema> }
+    | { kind: "failed" }
+    | { kind: "timeout" }
+  > {
+    let event: WorkflowStepEvent<ThinkPromptEventPayload>;
+    try {
+      event = (await step.waitForEvent(waitStepName, {
         type: eventType,
         timeout: options.timeout
-      }
-    )) as WorkflowStepEvent<ThinkPromptEventPayload>;
+      })) as WorkflowStepEvent<ThinkPromptEventPayload>;
+    } catch {
+      // The completion event did not arrive within the wait window — the DO
+      // may still be working or may have died again.
+      return { kind: "timeout" };
+    }
 
-    return this._processPromptEvent(event, options);
+    try {
+      return {
+        kind: "recovered",
+        value: this._processPromptEvent(event, options)
+      };
+    } catch {
+      // Terminal failure event or invalid structured output.
+      // `_processPromptEvent` has already disposed the event.
+      return { kind: "failed" };
+    }
   }
 
   private _validatePromptRetryOptions(

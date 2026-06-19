@@ -658,8 +658,8 @@ describe("ThinkWorkflow", () => {
       // No cancel — recovery succeeded
       expect(cancelCalls).toEqual([]);
       expect(waitCount).toBe(2);
-      expect(doNames).toContain("structure:recovery-check-0");
-      expect(waitNames).toContain("structure:recovery-wait-0");
+      expect(doNames).toContain("structure:recovery-check-0-0");
+      expect(waitNames).toContain("structure:recovery-wait-0-0");
     });
 
     it("falls back to full retry when submission is dead (error status)", async () => {
@@ -725,12 +725,18 @@ describe("ThinkWorkflow", () => {
           reason: "Think workflow retrying prompt step"
         }
       ]);
-      expect(doNames).toContain("structure:recovery-check-0");
+      expect(doNames).toContain("structure:recovery-check-0-0");
     });
 
-    it("falls back to full retry when inspectSubmission throws (DO still down)", async () => {
+    it("waits for the DO to come back before recovering (does not resubmit)", async () => {
+      // The DO is unreachable for the first two recovery rounds (still
+      // restarting after a deploy), then comes back and the original
+      // submission completes. Recovery must be patient and NOT discard the
+      // in-flight turn by resubmitting.
       let submitCount = 0;
-      let waitCount = 0;
+      let inspectCount = 0;
+      const doNames: string[] = [];
+      const sleepNames: string[] = [];
       const cancelCalls: Array<{ submissionId: string; reason: string }> = [];
 
       const agent: FakeThinkAgent = {
@@ -741,24 +747,175 @@ describe("ThinkWorkflow", () => {
         async cancelSubmission(submissionId: string, reason: string) {
           cancelCalls.push({ submissionId, reason });
         },
-        async inspectSubmission() {
-          throw new Error("DO is down");
+        async inspectSubmission(submissionId: string) {
+          inspectCount++;
+          if (inspectCount <= 2) {
+            throw new Error("DO is down");
+          }
+          return { submissionId, status: "running" };
+        }
+      };
+
+      const step = {
+        do: async (name: string, callback: () => Promise<unknown>) => {
+          doNames.push(name);
+          return callback();
+        },
+        waitForEvent: async (name: string) => {
+          if (name === "structure:wait") {
+            throw new Error("timed out");
+          }
+          return {
+            payload: {
+              submissionId: "submission-1",
+              status: "completed",
+              output: { answer: "recovered" }
+            },
+            [Symbol.dispose]: () => {}
+          };
+        },
+        sleep: async (name: string) => {
+          sleepNames.push(name);
+        }
+      } as unknown as AgentWorkflowStep;
+
+      const workflow = createWorkflow(agent);
+      const output = await workflow._promptStep(
+        "structure",
+        {
+          prompt: "Return structured output",
+          output: z.object({ answer: z.string() }),
+          timeout: "1 minute",
+          retries: { maxAttempts: 3, baseDelayMs: 100, maxDelayMs: 1000 }
+        },
+        step,
+        createEvent()
+      );
+
+      expect(output).toEqual({ answer: "recovered" });
+      // The original submission was recovered — never resubmitted or cancelled.
+      expect(submitCount).toBe(1);
+      expect(cancelCalls).toEqual([]);
+      // Inspected three times: down, down, then up.
+      expect(inspectCount).toBe(3);
+      // Backed off after each unreachable round before re-checking.
+      expect(sleepNames).toEqual([
+        "structure:recovery-backoff-0-0",
+        "structure:recovery-backoff-0-1"
+      ]);
+      expect(doNames).toContain("structure:recovery-check-0-2");
+    });
+
+    it("re-inspects after a recovery wait times out, then recovers", async () => {
+      // Round 0: DO is up (running) but the completion event doesn't arrive in
+      // time. Round 1: still running, and this time the event arrives.
+      let submitCount = 0;
+      let recoveryWaitCount = 0;
+      const sleepNames: string[] = [];
+      const cancelCalls: Array<{ submissionId: string; reason: string }> = [];
+
+      const agent: FakeThinkAgent = {
+        async submitMessages() {
+          submitCount++;
+          return createSubmissionResult(`submission-${submitCount}`, () => {});
+        },
+        async cancelSubmission(submissionId: string, reason: string) {
+          cancelCalls.push({ submissionId, reason });
+        },
+        async inspectSubmission(submissionId: string) {
+          return { submissionId, status: "running" };
         }
       };
 
       const step = {
         do: async (_name: string, callback: () => Promise<unknown>) =>
           callback(),
-        waitForEvent: async () => {
-          waitCount++;
-          if (waitCount === 1) {
+        waitForEvent: async (name: string) => {
+          if (name === "structure:wait") {
             throw new Error("timed out");
+          }
+          if (name.startsWith("structure:recovery-wait-")) {
+            recoveryWaitCount++;
+            if (recoveryWaitCount === 1) {
+              throw new Error("recovery wait timed out");
+            }
           }
           return {
             payload: {
-              submissionId: `submission-${submitCount}`,
+              submissionId: "submission-1",
               status: "completed",
-              output: { answer: "retry" }
+              output: { answer: "recovered" }
+            },
+            [Symbol.dispose]: () => {}
+          };
+        },
+        sleep: async (name: string) => {
+          sleepNames.push(name);
+        }
+      } as unknown as AgentWorkflowStep;
+
+      const workflow = createWorkflow(agent);
+      const output = await workflow._promptStep(
+        "structure",
+        {
+          prompt: "Return structured output",
+          output: z.object({ answer: z.string() }),
+          timeout: "1 minute",
+          retries: { maxAttempts: 3, baseDelayMs: 100, maxDelayMs: 1000 }
+        },
+        step,
+        createEvent()
+      );
+
+      expect(output).toEqual({ answer: "recovered" });
+      expect(submitCount).toBe(1);
+      expect(cancelCalls).toEqual([]);
+      expect(recoveryWaitCount).toBe(2);
+      // Backed off once between the timed-out wait and the next inspection.
+      expect(sleepNames).toEqual(["structure:recovery-backoff-0-0"]);
+    });
+
+    it("falls back to resubmit when the recovered turn fails terminally", async () => {
+      // The DO is alive and drives the submission to a terminal *error* event.
+      // Recovery cannot help, so the loop cancels and resubmits a fresh turn.
+      let submitCount = 0;
+      const cancelCalls: Array<{ submissionId: string; reason: string }> = [];
+
+      const agent: FakeThinkAgent = {
+        async submitMessages() {
+          submitCount++;
+          return createSubmissionResult(`submission-${submitCount}`, () => {});
+        },
+        async cancelSubmission(submissionId: string, reason: string) {
+          cancelCalls.push({ submissionId, reason });
+        },
+        async inspectSubmission(submissionId: string) {
+          return { submissionId, status: "running" };
+        }
+      };
+
+      const step = {
+        do: async (_name: string, callback: () => Promise<unknown>) =>
+          callback(),
+        waitForEvent: async (name: string) => {
+          if (name === "structure:wait") {
+            throw new Error("timed out");
+          }
+          if (name.startsWith("structure:recovery-wait-")) {
+            return {
+              payload: {
+                submissionId: "submission-1",
+                status: "error",
+                error: "model failed during recovery"
+              },
+              [Symbol.dispose]: () => {}
+            };
+          }
+          return {
+            payload: {
+              submissionId: "submission-2",
+              status: "completed",
+              output: { answer: "fresh" }
             },
             [Symbol.dispose]: () => {}
           };
@@ -779,8 +936,77 @@ describe("ThinkWorkflow", () => {
         createEvent()
       );
 
-      expect(output).toEqual({ answer: "retry" });
+      expect(output).toEqual({ answer: "fresh" });
       expect(submitCount).toBe(2);
+      expect(cancelCalls).toEqual([
+        {
+          submissionId: "submission-1",
+          reason: "Think workflow retrying prompt step"
+        }
+      ]);
+    });
+
+    it("falls back to resubmit after the recovery budget is exhausted (DO stays down)", async () => {
+      // The DO never comes back during the recovery window. After exhausting
+      // the bounded recovery rounds the loop cancels and resubmits.
+      let submitCount = 0;
+      let inspectCount = 0;
+      const doNames: string[] = [];
+      const cancelCalls: Array<{ submissionId: string; reason: string }> = [];
+
+      const agent: FakeThinkAgent = {
+        async submitMessages() {
+          submitCount++;
+          return createSubmissionResult(`submission-${submitCount}`, () => {});
+        },
+        async cancelSubmission(submissionId: string, reason: string) {
+          cancelCalls.push({ submissionId, reason });
+        },
+        async inspectSubmission() {
+          inspectCount++;
+          throw new Error("DO is down");
+        }
+      };
+
+      const step = {
+        do: async (name: string, callback: () => Promise<unknown>) => {
+          doNames.push(name);
+          return callback();
+        },
+        waitForEvent: async (name: string) => {
+          if (name === "structure:wait") {
+            throw new Error("timed out");
+          }
+          return {
+            payload: {
+              submissionId: "submission-2",
+              status: "completed",
+              output: { answer: "fresh" }
+            },
+            [Symbol.dispose]: () => {}
+          };
+        },
+        sleep: async () => {}
+      } as unknown as AgentWorkflowStep;
+
+      const workflow = createWorkflow(agent);
+      const output = await workflow._promptStep(
+        "structure",
+        {
+          prompt: "Return structured output",
+          output: z.object({ answer: z.string() }),
+          timeout: "1 minute",
+          retries: { maxAttempts: 3, baseDelayMs: 100, maxDelayMs: 1000 }
+        },
+        step,
+        createEvent()
+      );
+
+      expect(output).toEqual({ answer: "fresh" });
+      expect(submitCount).toBe(2);
+      // Inspected once per recovery round before giving up (bounded budget).
+      expect(inspectCount).toBe(5);
+      expect(doNames).toContain("structure:recovery-check-0-4");
       expect(cancelCalls).toEqual([
         {
           submissionId: "submission-1",
@@ -841,7 +1067,7 @@ describe("ThinkWorkflow", () => {
       expect(submitCount).toBe(2);
       // inspectSubmission must NOT be called for non-timeout errors
       expect(inspectCalls).toEqual([]);
-      expect(doNames).not.toContain("structure:recovery-check-0");
+      expect(doNames).not.toContain("structure:recovery-check-0-0");
     });
   });
 });
