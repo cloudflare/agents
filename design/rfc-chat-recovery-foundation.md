@@ -3207,6 +3207,37 @@ Still open: lifting the resume handshake + streaming codec into `agents/chat` be
 shared adapters (driven against this harness), then folding corrections back into the AI
 SDK adapter. See the Progress log entry.
 
+**Scoping conclusion — the engine is message-generic but substrate-coupled (and that
+is correct).** An inverse analysis (could Flue drop its in-house recovery and adopt this
+engine?) sharpened where the genericity actually lives. The half that ports is the
+**message model**: `RecoveryPartial = { text, parts }` + `SnapshotMessage` + the codec
+seam carry pi's (or any) transcript with no `UIMessage` leak — the thing P5-1 set out to
+prove. The half that does **not** port is, deliberately, the substrate:
+
+- **Trigger.** The engine is entered through `handleChatFiberRecovery(ctx:
+FiberRecoveryContext, …)` — the Agents-SDK fiber-recovery wake (`cf_agents_runs`,
+  `_runFiberWithStashWrapper`, `wrap/unwrapChatFiberSnapshot`). A host without fibers
+  (Flue uses a lease/queue + recover-on-start drain) would have to synthesize a
+  `FiberRecoveryContext` and bypass the stash machinery — adopting the orchestration but
+  not the trigger.
+- **Scheduler.** `chatRecoverySchedulePolicy` encodes DO-alarm semantics (the
+  non-idempotent stable-timeout reschedule exists because `alarm()` deletes the executing
+  one-shot row only after the callback returns). That invariant does not map to a
+  Node/Postgres scheduler.
+- **Persistence.** `ResumableStream` is DO-SQLite (`this.sql`) and the adapter storage is
+  `ctx.storage`; a multi-backend host (Flue's `@flue/postgres`) would reimplement the
+  buffer.
+- **Lease layer.** A multi-owner execution store (Flue's `owner_id`/`lease_expires_at`/
+  `attempt_count`) sits _below_ this engine; the engine assumes a single-DO actor and
+  idempotent `schedule()`. They are complementary layers, not substitutes.
+
+So the engine is correctly factored as "message-agnostic recovery for the Agents-SDK
+fiber + DO-alarm substrate," not a general-purpose durable-recovery library — matching
+the "substrate capabilities are optional" stance. The reusable kernel shared with a
+pi-based host like Flue is the codec + partial-reconstruction + continue-vs-regenerate
+concept, which both already implement and both inherit from the pi substrate rather than
+from each other.
+
 ### Phase 6: confidence and e2e hardening
 
 Extend the existing local e2e suites (Layer 4) so the SIGKILL + persistent-state
@@ -3389,3 +3420,133 @@ Proposed:
 
 If accepted, implementation should proceed only after Phase 0 characterization
 tests define the intended behavior.
+
+## Future work: ideas adapted from the Flue analysis
+
+These came out of the Phase 5 inverse analysis ("could Flue drop its in-house recovery
+and adopt this engine, and what does it do that we don't?"). Flue
+([github.com/withastro/flue](https://github.com/withastro/flue)) is a pi-based agent
+harness — its `session.ts`/`submission-state.ts` import `@earendil-works/pi-ai`, the same
+substrate as our P5-1 pi fixture — so its recovery design is directly comparable to ours.
+None of these are required for the foundation refactor; they are independent, mostly
+small follow-ups. Each entry is written to be picked up cold in a later session: what
+Flue does, what we do today, the concrete change, where it lands, and how to know it
+works. Ordered by recommended priority.
+
+### F1. In-band recovery signals in the transcript (recommended first)
+
+- **What Flue does.** When a submission is interrupted and resumed, Flue writes explicit
+  entries into the durable message history — a `submission_interrupted` signal (carrying
+  the list of tool calls that were in flight), a `stream_continued` marker, and
+  per-tool interrupted markers. The transcript itself becomes the audit trail, and the
+  model sees that its previous turn was cut off and is being continued.
+- **What we do today.** We do the _structural_ repair — `repairInterruptedToolPart`
+  flips an unresolved tool part to an errored/interrupted result so the model does not
+  silently re-run it (#1631), and settled results are preserved. But recovery itself is
+  only surfaced out-of-band: incident records in storage + `chat:recovery:*` events on
+  the chat socket. The model never receives an in-band "you were interrupted and
+  resumed" signal, and the durable history has no human-readable record that a given
+  assistant message was reconstructed/continued rather than generated in one pass.
+- **Concrete change.** Add an optional, host-controlled recovery signal that the engine
+  asks the adapter to record at resume time. Sketch: a new adapter hook
+  `recordRecoverySignal(signal: RecoverySignal)` where `RecoverySignal` is a small
+  discriminated union (`{ kind: "continued"; partialChars; generatedChars }`,
+  `{ kind: "interrupted"; interruptedToolCallIds: string[] }`). The default AIChatAgent
+  adapter implementation can no-op (preserving current behavior) or append a system/data
+  part to the assistant message; an opted-in host can inject a real history entry the
+  model reads. Keep it message-agnostic: the signal is plain data, the adapter decides
+  how it materializes in its message model (mirrors the `RecoveryPartial`/codec split).
+- **Where it lands.** Engine seam: `ChatRecoveryAdapter` (new optional hook) +
+  `recovery-engine.ts` call site at the continue/retry dispatch. Reference
+  implementations: AI SDK adapter in `packages/ai-chat`, and the pi fixture in
+  `experimental/pi-recovery/src/pi-agent.ts` (it already computes
+  `recoveredVia`/`partialPrefixChars`/`recoveryGeneratedChars` in its `RecoverySummary`,
+  so it is the cheapest place to prove the hook end-to-end).
+- **Done when.** The pi SIGKILL e2e can assert a recovery signal is present in the
+  recovered transcript, and the engine unit suite covers the no-op default. No engine
+  change is `UIMessage`-specific.
+
+### F2. Transport-agnostic recovery observability hook
+
+- **What Flue does.** Exports run/recovery telemetry through OpenTelemetry (with
+  Braintrust/Sentry sinks), so a headless operator sees recovery activity without a
+  connected client.
+- **What we do today.** Recovery progress is emitted over the chat WebSocket
+  (`chat:recovery:notify/progress/...`), which is ideal for a live SPA but invisible to
+  production/headless monitoring. There is no substrate-level observer.
+- **Concrete change.** Add a single optional observer callback on the engine/adapter,
+  e.g. `onRecoveryIncident(summary: RecoveryIncidentSummary)`, fired at the key
+  lifecycle points (incident opened, attempt started, continued/regenerated, exhausted,
+  resolved). It must take no dependency on any telemetry vendor — just hand the host a
+  structured summary and let it wire OTel/logs/metrics. Reuse the existing incident
+  record shape as the payload so this is mostly plumbing, not new bookkeeping.
+- **Where it lands.** `recovery-engine.ts` incident lifecycle transitions; surfaced via
+  an optional adapter method so it is opt-in and tree-shakeable. No new deps in
+  `packages/`.
+- **Done when.** A test host can capture the full incident lifecycle through the hook,
+  and the default path (no observer) is unchanged.
+
+### F3. Context-overflow as a first-class recoverable mode
+
+- **What Flue does.** Treats context overflow (silent truncation or an explicit
+  provider overflow error) as a recovery state that triggers compact-then-retry within
+  the same classifier, rather than a separate ad-hoc code path.
+- **What we do today.** The recovery classifier models interruption only (crash/deploy/
+  stall → continue vs retry). Overflow handling, where it exists, is not part of the
+  recovery state machine.
+- **Concrete change.** Add an `overflow` classification to the recovered-turn
+  classifier that routes to a compaction step before retrying, reusing the existing
+  attempt budget so an overflow loop cannot run unbounded. This needs a host-provided
+  "compact context" operation (likely already present in some hosts) exposed through the
+  adapter; if absent, classification falls back to the current behavior.
+- **Where it lands.** `classifyRecoveredTurn` + the dispatch in `recovery-engine.ts`; new
+  optional adapter operation `compactForRetry()`. Scope caveat: this is broader than the
+  interruption-recovery foundation and may pull in context-management concerns — treat as
+  a separate mini-RFC if it grows.
+- **Done when.** A simulated overflow drives compact→retry under budget in the engine
+  unit suite, and a host without `compactForRetry()` degrades to current behavior.
+
+### F4. Explicit schema versioning for durable recovery tables
+
+- **What Flue does.** Keeps a `schema-version.ts` stamp for its durable store, enabling
+  ordered forward migrations and downgrade detection.
+- **What we do today.** Lazy `ALTER`-on-missing-column migration (e.g.
+  `ResumableStream._migrateMetadataColumns`; the P5-1b pi fixture added its `partial`
+  column the same way). It works but is ad hoc — no ordered migrations, no downgrade
+  detection, easy to drift between packages.
+- **Concrete change.** Stamp a `schema_version` row (or `PRAGMA user_version`) on the
+  recovery-owned SQLite tables (`ResumableStream` buffers, incident storage) and run an
+  explicit, ordered migration list on open. Keep it tiny — a version int + an array of
+  migration steps — not a migration framework.
+- **Where it lands.** `ResumableStream` and the incident/storage layer in `agents/chat`.
+- **Done when.** Opening an old-schema DB migrates forward deterministically and a unit
+  test exercises a version bump.
+
+### F5. "Provider-unreached" as a distinct classification signal
+
+- **What Flue does.** Distinguishes "the model provider was never reached" (the turn made
+  zero progress, so it is safe to replay/retry even when inspection is otherwise
+  uncertain) from "the provider responded partially," and feeds that into the
+  retry/replay decision.
+- **What we do today.** We track a no-progress budget but do not explicitly model
+  _whether the provider was even reached_ as an input to continue-vs-retry-vs-give-up.
+- **Concrete change.** Thread a `providerReached: boolean` (or a small progress-stage
+  enum) into the snapshot/recovery context so `classifyRecoveredTurn` can safely choose
+  a clean replay when nothing was sent to the model, without consuming the same budget as
+  a partial-response retry.
+- **Where it lands.** `ChatFiberSnapshot`/recovery context + `classifyRecoveredTurn`;
+  the adapter populates the signal from its turn state.
+- **Done when.** The classifier picks replay-without-budget-burn for a provably
+  provider-unreached interruption, covered in the engine unit suite.
+
+### Not on this list (already at parity or below the engine)
+
+- **Mid-batch tool repair (`tool_results_partial`).** We already preserve settled tool
+  results and mark unresolved calls via transcript repair (#1631, #1657 and the
+  parallel-clobber fixes), and additionally handle client-tool replay / HITL approval
+  that Flue's server-only model does not. This is parity (arguably ahead), not a gap.
+- **Leased multi-owner execution store** (`owner_id`/`lease_expires_at`/`attempt_count`).
+  This sits _below_ the engine and assumes a multi-runtime/Postgres world. The DO
+  single-actor model with idempotent `schedule()` makes a lease layer unnecessary here
+  (see the Phase 5 "substrate-coupled" scoping conclusion). Think already has a
+  queryable `cf_think_submissions` store for its own case.
