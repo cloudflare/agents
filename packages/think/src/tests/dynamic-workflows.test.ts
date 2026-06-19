@@ -68,9 +68,14 @@ function createFakeAgent(overrides?: {
   }
   const agent = Object.assign(Object.create(Think.prototype), {
     env,
-    name: "instance-1",
     sql
   }) as unknown as TestThink;
+  // `name` is a getter-only accessor on the partyserver base class, so define
+  // an own data property to shadow it instead of assigning through it.
+  Object.defineProperty(agent, "name", {
+    value: "instance-1",
+    configurable: true
+  });
   return { agent, created, rows, env };
 }
 
