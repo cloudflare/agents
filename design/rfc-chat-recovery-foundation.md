@@ -1147,21 +1147,21 @@ net-new coverage, not a duplicate).
   `MessagePart` reconstruction + the settled-tool persist gate
   (`partialHasSettledToolResults`) end-to-end on a non-faux substrate.
 
-**Two build routes (pick per how much the seam should be pushed).**
+**Build route (decided).** Two routes were considered:
 
-1. _Engine-direct (like the pi fixture)._ A thin `Agent` subclass drives the shared
-   `ChatRecoveryEngine` directly, with TanStack AI as the wire and Workers AI as the model.
-   Lower effort; proves the engine runs with a real transport + real model.
-2. _Bridge onto `AIChatAgent`._ Front `AIChatAgent` with a TanStack AI client and see what
-   leaks. Higher value (it directly tests whether the existing AI-SDK-coupled handshake can
-   serve a foreign client) and higher effort. Recommended as the deeper follow-up once
+1. _Engine-direct (like the pi fixture)_ — **chosen starting point.** A thin `Agent`
+   subclass drives the shared `ChatRecoveryEngine` directly, with TanStack AI as the wire
+   and Workers AI as the model. Lower effort; proves the engine runs with a real transport +
+   real model, and is the cleanest way to surface transport/codec seam leaks first.
+2. _Bridge onto `AIChatAgent`_ — **deeper follow-up.** Front `AIChatAgent` with a TanStack
+   AI client and see what leaks. Higher value (it directly tests whether the existing
+   AI-SDK-coupled handshake can serve a foreign client) and higher effort. Do this once
    route 1 establishes the harness.
 
-**Where it lives.** A full-stack app under `examples/` (Kumo UI, `PoweredByCloudflare`,
-the example conventions in `examples/AGENTS.md`) gives the user-facing demo; pair it with a
-SIGKILL crash-mid-stream e2e mirroring `experimental/pi-recovery/e2e` and the ai-chat e2e
-so the recovery claim is actually asserted, not just demoable. If the UI proves
-distracting, fall back to an `experimental/` fixture like pi.
+**Where it lives (decided).** A full-stack app under `examples/` (Kumo UI,
+`PoweredByCloudflare`, the example conventions in `examples/AGENTS.md`) for the user-facing
+demo, paired with a SIGKILL crash-mid-stream e2e mirroring `experimental/pi-recovery/e2e`
+and the ai-chat e2e so the recovery claim is asserted, not just demoable.
 
 **Dependencies / setup.** Adds `@tanstack/ai` (already in the lockfile at `0.28.0`; latest
 `0.32.0`) and `@cloudflare/tanstack-ai` (new), plus a Workers AI binding (`AI`) in
