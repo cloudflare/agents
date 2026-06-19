@@ -13,7 +13,7 @@ Related:
 
 > Quick orientation for a fresh working session. The authoritative detail lives in
 > the **Progress log** (newest first) and the Phase 5 section; this block is the
-> map, not the territory. Last updated after commit `799d2a04`.
+> map, not the territory. Last updated after commit `66e7a790`.
 
 **Where we are.** The shared recovery foundation (Phases 0–5) is implemented and
 merged on the `chat-recovery-foundation` branch. The recovery engine, resume
@@ -26,6 +26,18 @@ exist: `AISDKRecoveryCodec` (prod), and the `experimental/pi-recovery` (pi
 
 **Recently landed (most recent first).**
 
+- `66e7a790` / `b62241e9` — **engine-owned exhaustion helper** (API-ergonomics
+  finding **#3**, closed): `runChatRecoveryExhaustion(input, { emit, onExhausted?,
+  onError, terminalize })` folds the `build → notify → terminalize` give-up
+  sequence every host repeated, owning the invariant (notify before any terminal
+  write; a throwing `onExhausted` never blocks terminal UX) while the host
+  expresses its terminal writes in `terminalize(ctx)`. All four hosts moved onto
+  it; the harnesses also gained a `_setChatRecovering` option-bag wrapper. A
+  follow-up convergence then flipped `AIChatAgent`'s terminalize to
+  **broadcast-first** (matching `Think`), removing the last divergent give-up
+  ordering — both hosts now broadcast the banner before the durable writes
+  (`@cloudflare/ai-chat` patch changeset). See the two newest Progress-log
+  entries.
 - `799d2a04` — **real Workers AI provider run** (open
   item #1, closed): the `experimental/tanstack-recovery` harness now streams a
   real `@cf/moonshotai/kimi-k2.7-code` reply via `@tanstack/ai` `chat()` +
@@ -49,20 +61,14 @@ exist: `AISDKRecoveryCodec` (prod), and the `experimental/pi-recovery` (pi
 
 **Still open (suggested priority order).**
 
-1. **API-ergonomics finding #3 — engine-owned exhaustion helper.** Collapse the
-   ~30-line give-up choreography (`buildChatRecoveryExhaustedContext` →
-   `notifyChatRecoveryExhausted` → `recordChatTerminal` → `setChatRecovering(false)`,
-   plus the duplicated `setChatRecovering` option bag) into one
-   `runChatRecoveryExhaustion(...)` that takes host emit/broadcast primitives.
-   Duplicated identically across all three hosts. See the findings list in Phase 5.
-2. **API-ergonomics finding #4 — hand the decoded partial to
+1. **API-ergonomics finding #4 — hand the decoded partial to
    `persistOrphanedStream`.** The engine decodes the buffer for classification,
    then the host decodes it again to preserve the partial; pass the
    `RecoveryPartial` (or a codec handle) through to drop the second decode.
-3. **Start-id alignment onto the codec** (the other deferred Tier-2 item) — fold
+2. **Start-id alignment onto the codec** (the other deferred Tier-2 item) — fold
    the per-host chunk start-id handling (`applyChunkToParts` vs `StreamAccumulator`)
    behind the codec seam. Behavior-sensitive; verify-first, likely a changeset.
-4. **Phase 6 e2e audit + Phase 7 docs/release notes** — confirm SIGKILL +
+3. **Phase 6 e2e audit + Phase 7 docs/release notes** — confirm SIGKILL +
    persistent-state e2e cover the converged behavior for both hosts; then update
    `chat-shared-layer.md`, add the history note, and finalize changesets.
 
@@ -1849,6 +1855,56 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 5 / Tier-2 — give-up ordering convergence (broadcast-first)_ —
+  Follow-up to the exhaustion-helper extraction below. The two chat hosts had
+  **diverged** in their give-up terminalize ORDER: `AIChatAgent` persisted the
+  durable terminal record before broadcasting the banner (persist-first), while
+  `Think` broadcast first. Converged `AIChatAgent` onto `Think`'s
+  **broadcast-first** ordering. **Why broadcast-first is strictly better (not a
+  toss-up):** a terminal-record write can reject in the deploy/storage window a
+  give-up runs in (#1730). A throwing `terminalize` propagates, so the whole
+  give-up re-runs on a healthy isolate and persists the record **either way** —
+  so persist-first buys no durability. But under persist-first the throw fired
+  BEFORE the (storage-free) broadcast, dropping the live banner on the failing
+  pass; it only reappeared on the re-run, possibly a different isolate after the
+  affected connections had gone. Broadcast-first delivers the banner on every
+  pass (the documented at-least-once edge) and keeps the same eventual
+  durability — `Think`'s own code comment already argued this. **Verified against
+  the existing ai-chat give-up tests** (`testStableTimeoutSealTransientDefer`
+  etc.): they assert the banner VALUE + incident status, not persist-before-
+  broadcast, and `terminalBroadcast` captures the last banner — so broadcast-first
+  keeps them green (now the banner also lands on the failing pass). This removes
+  the last "legitimately divergent ordering" between the hosts — both now
+  broadcast-first; only the durable-write SET differs (`Think` also writes a
+  submission row). **Changeset:** patch for `@cloudflare/ai-chat` (behavior
+  change observable only in the storage-failure mode). Tests: `pnpm run check` ✅
+  (113), ai-chat **687/687** ✅ (incl. the transient/seal give-up tests).
+- _Phase 5 / Tier-2 — engine-owned exhaustion helper (API-ergonomics finding #3,
+  closed)_ — Every host's `_exhaustChatRecovery` repeated the same
+  `buildChatRecoveryExhaustedContext → notifyChatRecoveryExhausted →` host
+  terminalize sequence (~30 lines). Added
+  `runChatRecoveryExhaustion(input, { emit, onExhausted?, onError, terminalize })`
+  to `agents/chat`, which owns the **invariant skeleton** — build the context,
+  run the notification (emit + `onExhausted`-swallow via `onError`), THEN call
+  the host's `terminalize(ctx)` — and guarantees notify-before-terminalize plus
+  "a throwing `onExhausted` never blocks terminal UX." **Design judgment (the
+  careful part):** the RFC's literal sketch (a helper that also owns
+  broadcast/storage) would have FORCED one terminalize order and silently
+  converged the hosts' then-divergent ordering; instead the helper takes the
+  host's `terminalize` closure so each host keeps its own terminal writes. (The
+  ordering itself was converged separately, in the entry above — a deliberate
+  behavior change with a changeset, not a side effect of a dedup.) `partialParts`
+  stays an explicit input (not derived from `RecoveryPartial`) so a
+  foreign-vocabulary host passes `[]` rather than fabricating AI-SDK parts,
+  preserving the parts-agnostic seam. **Scope:** all four hosts moved onto it
+  (`ai-chat`, `think`, pi + tanstack harnesses); the harnesses also gained a
+  `_setChatRecovering` wrapper so the duplicated `setChatRecovering` option bag is
+  built once. Behavior-neutral plumbing in the `@internal` `agents/chat` layer
+  (additive sibling-only export) — **no changeset**, consistent with the
+  `RecoveryPartial`-refactor precedent. Added a `runChatRecoveryExhaustion` unit
+  test (notify-before-terminalize order, `onExhausted`-swallow, shared `ctx`,
+  terminalize propagation). Tests: chat unit **413** ✅, ai-chat **687** ✅, think
+  suites ✅, `pnpm run check` ✅ (113), typecheck 113/113 ✅.
 - _Phase 5 / Second harness — real Workers AI provider run (open item #1, closed)_ —
   Replaced the harness's deterministic faux model with a REAL streaming provider on
   the last genuinely-untested codec axis: `@tanstack/ai`'s `chat()` over
@@ -3744,7 +3800,15 @@ into `agents/chat`). Ranked by payoff:
 …, { emit, broadcast, storage })` would absorb it, leaving the host to supply only the
    emit/broadcast primitives. The duplicated `setChatRecovering` option bag
    (`{ storage, messageType, broadcast, now }`, constructed in two places per host) folds
-   into the same helper.
+   into the same helper. _(Since closed — `runChatRecoveryExhaustion(input, { emit,
+   onExhausted?, onError, terminalize })` lands in commit `b62241e9`. The one
+   correction to the sketch above: the helper takes the host's `terminalize`
+   closure rather than raw `{ broadcast, storage }`, because owning those directly
+   would force a single terminal-write ORDER and erase the hosts' then-divergent
+   broadcast/persist ordering. That ordering was instead converged deliberately
+   (ai-chat → broadcast-first, commit `66e7a790`, with a changeset) as a separate
+   slice. The `setChatRecovering` option-bag dedup landed too, via a host-side
+   `_setChatRecovering` wrapper. See the two newest Progress-log entries.)_
 4. **Hand the decoded partial back to `persistOrphanedStream`.** The engine already
    decodes the buffer for classification (`getPartialStreamText`), then the host decodes
    the same buffer again to preserve the partial message. Passing the decoded
