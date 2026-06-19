@@ -13,7 +13,7 @@ Related:
 
 > Quick orientation for a fresh working session. The authoritative detail lives in
 > the **Progress log** (newest first) and the Phase 5 section; this block is the
-> map, not the territory. Last updated after commit `c6f596c4`.
+> map, not the territory. Last updated after commit `799d2a04`.
 
 **Where we are.** The shared recovery foundation (Phases 0–5) is implemented and
 merged on the `chat-recovery-foundation` branch. The recovery engine, resume
@@ -26,6 +26,14 @@ exist: `AISDKRecoveryCodec` (prod), and the `experimental/pi-recovery` (pi
 
 **Recently landed (most recent first).**
 
+- `799d2a04` — **real Workers AI provider run** (open
+  item #1, closed): the `experimental/tanstack-recovery` harness now streams a
+  real `@cf/moonshotai/kimi-k2.7-code` reply via `@tanstack/ai` `chat()` +
+  `@cloudflare/tanstack-ai`'s `createWorkersAiChat`, behind a per-turn `provider`
+  switch and a `RUN_WORKERS_AI_E2E`-gated e2e (faux stays the CI default). The
+  codec/handshake/engine seams were unchanged — recovery genuinely CONTINUES from
+  the survived partial against a non-deterministic stream. See the newest
+  Progress-log entry.
 - `c6f596c4` — progress-bump **timing** convergence (the deferred Tier-2
   correctness item): both hosts now credit the no-progress counter through one
   shared rule `shouldCreditStreamProgress` (milestone-always + throttled
@@ -41,25 +49,20 @@ exist: `AISDKRecoveryCodec` (prod), and the `experimental/pi-recovery` (pi
 
 **Still open (suggested priority order).**
 
-1. **Real Workers AI provider run** — the single genuinely-untested codec axis.
-   Swap a harness's deterministic faux model for a real Workers AI binding (the
-   "one-line change" documented in `experimental/tanstack-recovery/faux-model.ts`
-   and the Phase 5 "Second harness" section) and confirm recovery holds against a
-   non-deterministic provider stream. Highest signal-per-effort.
-2. **API-ergonomics finding #3 — engine-owned exhaustion helper.** Collapse the
+1. **API-ergonomics finding #3 — engine-owned exhaustion helper.** Collapse the
    ~30-line give-up choreography (`buildChatRecoveryExhaustedContext` →
    `notifyChatRecoveryExhausted` → `recordChatTerminal` → `setChatRecovering(false)`,
    plus the duplicated `setChatRecovering` option bag) into one
    `runChatRecoveryExhaustion(...)` that takes host emit/broadcast primitives.
    Duplicated identically across all three hosts. See the findings list in Phase 5.
-3. **API-ergonomics finding #4 — hand the decoded partial to
+2. **API-ergonomics finding #4 — hand the decoded partial to
    `persistOrphanedStream`.** The engine decodes the buffer for classification,
    then the host decodes it again to preserve the partial; pass the
    `RecoveryPartial` (or a codec handle) through to drop the second decode.
-4. **Start-id alignment onto the codec** (the other deferred Tier-2 item) — fold
+3. **Start-id alignment onto the codec** (the other deferred Tier-2 item) — fold
    the per-host chunk start-id handling (`applyChunkToParts` vs `StreamAccumulator`)
    behind the codec seam. Behavior-sensitive; verify-first, likely a changeset.
-5. **Phase 6 e2e audit + Phase 7 docs/release notes** — confirm SIGKILL +
+4. **Phase 6 e2e audit + Phase 7 docs/release notes** — confirm SIGKILL +
    persistent-state e2e cover the converged behavior for both hosts; then update
    `chat-shared-layer.md`, add the history note, and finalize changesets.
 
@@ -1213,8 +1216,8 @@ net-new coverage, not a duplicate).
   reconstruction + the settled-tool persist gate (`partialHasSettledToolResults`) end-to-end.
   _(Done — the harness now reconstructs AG-UI `TOOL_CALL_\*`chunks into tool parts and proves
 the gate keeps a settled-tool partial under`{ persist: false }` while dropping a text-only
-  one; see the newest progress-log entry. The real-Workers-AI provider run remains the only
-  open codec axis.)\_
+  one; see the progress log. The real-Workers-AI provider run is now ALSO done — see the
+  newest progress-log entry — so no open codec axis remains.)\_
 
 **Build route (decided).** Two routes were considered:
 
@@ -1245,7 +1248,9 @@ the gate keeps a settled-tool partial under`{ persist: false }` while dropping a
    AG-UI) is a much larger separate effort and is essentially what the engine-direct harness
    already prototypes. **Conclusion: drop Route 2 as a recovery-validation deliverable;** the
    only remaining untested codec axis is the **real Workers AI provider** run (non-deterministic
-   stream, below).
+   stream, below) — which is now **done** (see the newest progress-log entry): the faux model is
+   swapped, per turn, for `@tanstack/ai` `chat()` over `@cloudflare/tanstack-ai`'s
+   `createWorkersAiChat`, and recovery continues against the live stream with no seam change.
 
 **Where it lives (decided).** A full-stack app under `examples/` (Kumo UI,
 `PoweredByCloudflare`, the example conventions in `examples/AGENTS.md`) for the user-facing
@@ -1293,8 +1298,10 @@ handshake's resuming/none/response vocabulary behind injectable `ResumeHandshake
 (defaults = the exact `cf_agent_*` bytes, so the golden-frame gate stays green) is **not**
 warranted yet. It would let foreign clients drop the bridge but touches published
 `packages/agents` → changeset. Revisit only if a second foreign client appears or the bridge
-grows. The one genuinely still-open axis is a **real Workers AI provider** run (the documented
-one-line swap). **Route 2** (front `AIChatAgent` with a TanStack client) has been
+grows. The one genuinely still-open axis was a **real Workers AI provider** run (the documented
+one-line swap) — now **done** (newest progress-log entry); the swap was model-only, exactly as
+predicted, leaving the handshake/codec/engine seams untouched. **Route 2** (front `AIChatAgent`
+with a TanStack client) has been
 **deprioritized** — Route 1 already proved the handshake is transport-agnostic, leaving only a
 client-side AI-SDK-SSE → AG-UI chunk translation that is redundant with the codec seam already
 proven from both directions (see the reframed "Build route" item above). The **tool-`parts` codec
@@ -1842,6 +1849,45 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 5 / Second harness — real Workers AI provider run (open item #1, closed)_ —
+  Replaced the harness's deterministic faux model with a REAL streaming provider on
+  the last genuinely-untested codec axis: `@tanstack/ai`'s `chat()` over
+  `@cloudflare/tanstack-ai`'s `createWorkersAiChat` (model
+  `@cf/moonshotai/kimi-k2.7-code`), bound to the `AI` binding. Because
+  `chat({ stream: true })` yields `AsyncIterable<StreamChunk>` byte-identical to the
+  faux model's output, the swap is **model-only** — `TanStackRecoveryCodec`,
+  `ws-bridge.ts`, the shared `ResumeHandshake`, and `ChatRecoveryEngine` are all
+  **unchanged**, confirming the codec/handshake/engine seams hold against a real,
+  non-deterministic chunk stream. **Shape:** a small `TurnModel` seam
+  (`src/model.ts`) with two impls — `FauxTanStackModel` (default) and
+  `createWorkersAiModel` (`src/workers-ai-model.ts`); the provider is chosen
+  per-turn via the `/start` body (`provider: "workers-ai"`) and stored durably so a
+  cold-wake recovery re-runs the SAME provider. **Continuation under
+  non-determinism (the decision taken):** rather than relax to a regenerate, the
+  recovered turn genuinely CONTINUES — the survived partial is re-fed to the model
+  as an assistant-prefill + a "resume from where you stopped" nudge
+  (`_buildModelMessages`), and the merge folds whatever it streams onto the prefix.
+  The engine's continuation INVARIANT (`recoveredVia === "continue"`,
+  `prefixChars > 0`, `generatedChars > 0`, `prefix + continuation === final`) holds
+  by construction even when the model doesn't resume verbatim. **Finding (e2e timing,
+  not a seam leak):** a real model's time-to-first-token means the orphaned fiber row
+  exists well before any `TEXT_MESSAGE_CONTENT` flushes, so killing on `fiberRows > 0`
+  alone races the TTFT and reconstructs an EMPTY partial (→ a `retry`). Added a
+  `bufferedChars` status field (chars reconstructable from the live stream buffer)
+  and gated the SIGKILL on it, so the survived prefix is non-empty — proving the
+  reconstruction works on real chunks (the first run also confirmed text accumulation:
+  the regenerate produced 7309 chars). **Default preserved:** the faux model remains
+  the hard default; the new run lives in a **`RUN_WORKERS_AI_E2E`-gated e2e**
+  (`e2e/workers-ai.test.ts`, `describe.skipIf`) that is skipped in CI, since
+  `wrangler dev`'s `AI` binding (`remote: true`) proxies to real Workers AI and needs
+  network + Cloudflare auth. Tests: `tanstack-recovery` unit **31** ✅, faux e2e
+  **4/4** ✅, gated real e2e **1/1** ✅ (local, against the live binding),
+  `pnpm run check` ✅ (113 projects). **Deps/config:** added `@cloudflare/tanstack-ai`
+  to the harness `package.json` (+ its transitive `@openrouter/sdk` build skipped in
+  `pnpm-workspace.yaml`, unused on the binding path) and the `AI` binding to
+  `wrangler.jsonc`/`env.d.ts`. No published-package source changed → **no changeset**.
+  This closes open item #1; the next open items are API-ergonomics finding #3 (engine-
+  owned exhaustion helper) and #4 (hand the decoded partial to `persistOrphanedStream`).
 - _Phase 5 / Tier-2 follow-up — progress-bump timing convergence_ — Closed the
   deferred, correctness-flagged divergence in how the two hosts credited the
   recovery no-progress counter. Before: `AIChatAgent` credited only on chunk-type
