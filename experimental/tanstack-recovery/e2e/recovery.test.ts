@@ -62,6 +62,8 @@ type Status = {
   recoveredVia: "continue" | "retry" | null;
   recoveryGeneratedChars: number;
   partialPrefixChars: number;
+  persistPolicy: boolean;
+  partialHadSettledTool: boolean;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -170,11 +172,15 @@ async function waitForPortFree(maxAttempts = 30, delayMs = 500): Promise<void> {
   throw new Error(`Port ${PORT} did not free in time`);
 }
 
-async function startTurn(session: string, text: string): Promise<void> {
+async function startTurn(
+  session: string,
+  text: string,
+  opts: { withTool?: boolean; persist?: boolean } = {}
+): Promise<void> {
   const res = await fetch(`${BASE}/start?session=${session}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ text })
+    body: JSON.stringify({ text, ...opts })
   });
   await res.body?.cancel();
 }
@@ -355,6 +361,109 @@ describe("tanstack-recovery e2e (shared engine + handshake, foreign client)", ()
         (s) => s.fiberRows === 0 && s.assistantCount === 1
       );
       expect(cleaned.fiberRows).toBe(0);
+    } finally {
+      bridge.stop();
+    }
+  });
+
+  // ── Settled-tool persist gate against a FOREIGN tool vocabulary ─────────────
+  // The shared engine never drops settled (non-idempotent) tool work, even when
+  // the user `onChatRecovery` policy says `{ persist: false }` (#1631). These two
+  // tests prove that gate — `partialHasSettledToolResults` — works when the parts
+  // are reconstructed from AG-UI `TOOL_CALL_*` chunks, not AI-SDK SSE. They share
+  // the same `persist: false` policy and differ ONLY in whether the interrupted
+  // turn had settled a tool, so the divergent outcome isolates the gate.
+
+  it("preserves a settled-tool partial on SIGKILL even under persist:false", async () => {
+    const SESSION = "tanstack-tool-persist-e2e";
+    wrangler = startWrangler();
+    await waitForReady();
+
+    // A turn that settles a tool call FIRST, then streams a long text tail. The
+    // recovery policy is persist:false — a text-only partial would be dropped.
+    await startTurn(SESSION, "tool then text", {
+      withTool: true,
+      persist: false
+    });
+
+    // Let the tool settle + a few text deltas buffer, then confirm in-flight.
+    await sleep(3500);
+    const before = await getStatus(SESSION);
+    console.log("[test] before kill (tool):", before);
+    expect(before.fiberRows).toBeGreaterThan(0);
+    expect(before.assistantCount).toBe(0);
+    expect(before.persistPolicy).toBe(false);
+
+    console.log("[test] SIGKILL wrangler mid-text-tail...");
+    await killProcess(wrangler);
+    wrangler = null;
+    await waitForPortFree();
+
+    wrangler = startWrangler();
+    await waitForReady();
+
+    const bridge = startBridge(SESSION);
+    try {
+      const recovered = await pollUntil(
+        SESSION,
+        "tool-turn recovered",
+        (s) => s.assistantCount >= 1
+      );
+
+      // The settled tool result was reconstructed from the AG-UI parts, so the
+      // shared gate kept the partial despite persist:false — and the turn
+      // CONTINUED from the survived prefix rather than regenerating.
+      expect(recovered.partialHadSettledTool).toBe(true);
+      expect(recovered.recoveredVia).toBe("continue");
+      expect(recovered.partialPrefixChars).toBeGreaterThan(0);
+      const assistantText = recovered.transcript.at(-1)?.text ?? "";
+      expect(
+        recovered.partialPrefixChars + recovered.recoveryGeneratedChars
+      ).toBe(assistantText.length);
+    } finally {
+      bridge.stop();
+    }
+  });
+
+  it("drops a text-only partial on SIGKILL under persist:false (regenerates)", async () => {
+    const SESSION = "tanstack-text-nopersist-e2e";
+    wrangler = startWrangler();
+    await waitForReady();
+
+    // Same persist:false policy, but NO tool — the partial carries no settled
+    // work, so the gate is free to drop it.
+    await startTurn(SESSION, "text only", { withTool: false, persist: false });
+
+    await sleep(3000);
+    const before = await getStatus(SESSION);
+    console.log("[test] before kill (text):", before);
+    expect(before.fiberRows).toBeGreaterThan(0);
+    expect(before.assistantCount).toBe(0);
+    expect(before.persistPolicy).toBe(false);
+
+    console.log("[test] SIGKILL wrangler mid-stream...");
+    await killProcess(wrangler);
+    wrangler = null;
+    await waitForPortFree();
+
+    wrangler = startWrangler();
+    await waitForReady();
+
+    const bridge = startBridge(SESSION);
+    try {
+      const recovered = await pollUntil(
+        SESSION,
+        "text-turn recovered",
+        (s) => s.assistantCount >= 1
+      );
+
+      // No settled tool work → the persist:false policy dropped the partial, so
+      // there was no merge target and the turn REGENERATED from scratch.
+      expect(recovered.partialHadSettledTool).toBe(false);
+      expect(recovered.recoveredVia).toBe("retry");
+      expect(recovered.partialPrefixChars).toBe(0);
+      const assistantText = recovered.transcript.at(-1)?.text ?? "";
+      expect(assistantText).toContain("tanstack reply to");
     } finally {
       bridge.stop();
     }

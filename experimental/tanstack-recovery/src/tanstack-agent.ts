@@ -50,6 +50,7 @@ import {
   cleanupStreamBuffers,
   createChatFiberSnapshot,
   notifyChatRecoveryExhausted,
+  partialHasSettledToolResults,
   pendingChatTerminal,
   readChatRecoveryProgress,
   recordChatTerminal,
@@ -65,6 +66,7 @@ import {
   type ChatRecoveryConfig,
   type ChatRecoveryIncident,
   type ChatRecoveryIncidentEvent,
+  type ChatRecoveryOptions,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryScheduleReason,
   type ClassifyRecoveredTurnInput,
@@ -109,6 +111,13 @@ type TanStackClassify = undefined;
 
 const RECOVERING_MESSAGE_TYPE = CHAT_MESSAGE_TYPES.CHAT_RECOVERING;
 const RECOVERY_SUMMARY_KEY = "tanstack:recovery:summary";
+// The durable `onChatRecovery` persist policy for the in-flight turn (default
+// true). Stored at turn start so a cold-wake recovery (post-SIGKILL) reads the
+// policy the engine's settled-tool gate is evaluated against.
+const PERSIST_POLICY_KEY = "tanstack:recovery:persist-policy";
+// Whether the partial the gate preserved carried a SETTLED tool result — the
+// observable that proves the AG-UI-reconstructed `parts` drove the gate.
+const PARTIAL_SETTLED_TOOL_KEY = "tanstack:recovery:partial-settled-tool";
 // Slow enough that a multi-token reply streams over several seconds, leaving a
 // wide window for the e2e to SIGKILL `wrangler dev` MID-STREAM.
 const STREAM_TOKENS_PER_SECOND = 4;
@@ -239,14 +248,21 @@ export class TanStackAgent extends Agent<Env> {
 
   /**
    * Preserve a reconstructed orphaned partial as a `partial` assistant entry —
-   * the merge target the continuation folds its suffix onto. Idempotent.
+   * the merge target the continuation folds its suffix onto. Idempotent. Records
+   * whether the reconstructed `parts` carried a settled tool result, since this
+   * method only runs when the engine's persist gate ALLOWED the partial — so a
+   * recorded `true` here under a `{ persist: false }` policy is proof the
+   * AG-UI-reconstructed settled tool work is exactly what kept the partial alive.
    */
-  private _persistOrphanedPartial(streamId: string): void {
+  private async _persistOrphanedPartial(streamId: string): Promise<void> {
     if (this._lastEntry()?.partial) return;
     const bodies = this._resumableStream
       .getStreamChunks(streamId)
       .map((chunk) => chunk.body);
-    const { text } = this._codec.toRecoveryPartial(bodies);
+    const { text, parts } = this._codec.toRecoveryPartial(bodies);
+    if (partialHasSettledToolResults(parts)) {
+      await this.ctx.storage.put(PARTIAL_SETTLED_TOOL_KEY, true);
+    }
     if (!text) return;
     this._appendMessage("assistant", text, true);
   }
@@ -401,10 +417,30 @@ export class TanStackAgent extends Agent<Env> {
     );
   }
 
-  /** Start a fresh user turn. */
-  async startTurn(text: string): Promise<void> {
+  /**
+   * Start a fresh user turn. `persist` sets the durable `onChatRecovery` policy
+   * the engine's gate is evaluated against on a later crash (default true).
+   * `withTool` scripts the faux model to settle a tool call before its text
+   * body, so a mid-text-tail crash leaves a partial carrying a settled tool
+   * result — the input that exercises the settled-tool persist override.
+   */
+  async startTurn(
+    text: string,
+    opts: { withTool?: boolean; persist?: boolean } = {}
+  ): Promise<void> {
+    const { withTool = false, persist = true } = opts;
     this._appendMessage("user", text);
+    await this.ctx.storage.put(PERSIST_POLICY_KEY, persist);
+    await this.ctx.storage.delete(PARTIAL_SETTLED_TOOL_KEY);
     this._faux.setNextTurnText(replyFor(text));
+    if (withTool) {
+      this._faux.setNextTurnToolCall({
+        toolCallId: `call-${crypto.randomUUID().slice(0, 8)}`,
+        toolName: "lookup",
+        args: { query: text },
+        result: `result for "${text}"`
+      });
+    }
     await this._runTurn(crypto.randomUUID(), false);
   }
 
@@ -573,7 +609,7 @@ export class TanStackAgent extends Agent<Env> {
       pendingResumeConnections: this._pendingResumeConnections,
       pendingChatTerminal: () => pendingChatTerminal(this.ctx.storage),
       persistOrphanedStream: async (streamId) => {
-        this._persistOrphanedPartial(streamId);
+        await this._persistOrphanedPartial(streamId);
       }
     };
   }
@@ -609,9 +645,19 @@ export class TanStackAgent extends Agent<Env> {
             : ("retry" as const);
         return { recoveryKind, detail: undefined };
       },
+      invokeOnChatRecovery: async (): Promise<ChatRecoveryOptions> => {
+        // The user-configurable `onChatRecovery` policy. A `{ persist: false }`
+        // return would normally DROP the orphaned partial — but the engine's
+        // shared settled-tool clause overrides it when the reconstructed parts
+        // carry a settled (non-idempotent) tool result (#1631). Read from durable
+        // storage so a cold-wake recovery honors the policy set at turn start.
+        const persist =
+          (await this.ctx.storage.get<boolean>(PERSIST_POLICY_KEY)) ?? true;
+        return { persist };
+      },
       shouldPersistOrphanedPartial: (input) => input.streamStillActive,
       persistOrphanedStream: async (streamId) => {
-        this._persistOrphanedPartial(streamId);
+        await this._persistOrphanedPartial(streamId);
       },
       completeRecoveredStream: (streamId) => {
         this._resumableStream.complete(streamId);
@@ -753,6 +799,8 @@ export class TanStackAgent extends Agent<Env> {
     recoveredVia: "continue" | "retry" | null;
     recoveryGeneratedChars: number;
     partialPrefixChars: number;
+    persistPolicy: boolean;
+    partialHadSettledTool: boolean;
   }> {
     const fiberRows = this.sql<{ count: number }>`
       SELECT COUNT(*) as count FROM cf_agents_runs
@@ -777,7 +825,11 @@ export class TanStackAgent extends Agent<Env> {
       progress: await readChatRecoveryProgress(this.ctx.storage),
       recoveredVia: summary?.via ?? null,
       recoveryGeneratedChars: summary?.generatedChars ?? 0,
-      partialPrefixChars: summary?.prefixChars ?? 0
+      partialPrefixChars: summary?.prefixChars ?? 0,
+      persistPolicy:
+        (await this.ctx.storage.get<boolean>(PERSIST_POLICY_KEY)) ?? true,
+      partialHadSettledTool:
+        (await this.ctx.storage.get<boolean>(PARTIAL_SETTLED_TOOL_KEY)) ?? false
     };
   }
 }

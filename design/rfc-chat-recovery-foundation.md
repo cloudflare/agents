@@ -1143,9 +1143,12 @@ net-new coverage, not a duplicate).
   (`applyChunkToParts` / the seam pi exercised with `RecoveryPartial`) has to reconstruct a
   partial from _those_, not from a faux model's scripted deltas.
 - **The tool-`parts` codec path** that pi left unproven (pi text turns are always
-  `parts:[]`): a TanStack AI tool call streaming through Workers AI would finally exercise
-  `MessagePart` reconstruction + the settled-tool persist gate
-  (`partialHasSettledToolResults`) end-to-end on a non-faux substrate.
+  `parts:[]`): a TanStack AI tool call streaming would finally exercise `MessagePart`
+  reconstruction + the settled-tool persist gate (`partialHasSettledToolResults`) end-to-end.
+  _(Done — the harness now reconstructs AG-UI `TOOL_CALL_*` chunks into tool parts and proves
+  the gate keeps a settled-tool partial under `{ persist: false }` while dropping a text-only
+  one; see the newest progress-log entry. The real-Workers-AI provider run remains the only
+  open codec axis.)_
 
 **Build route (decided).** Two routes were considered:
 
@@ -1204,9 +1207,12 @@ handshake's resuming/none/response vocabulary behind injectable `ResumeHandshake
 (defaults = the exact `cf_agent_*` bytes, so the golden-frame gate stays green) is **not**
 warranted yet. It would let foreign clients drop the bridge but touches published
 `packages/agents` → changeset. Revisit only if a second foreign client appears or the bridge
-grows. Likewise still open: the **tool-`parts` codec path** (this harness is text-only,
-`parts:[]`, like pi), a **real Workers AI provider** run (the documented one-line swap), and
-**Route 2** (front `AIChatAgent` itself with a TanStack client).
+grows. Likewise still open: a **real Workers AI provider** run (the documented one-line swap)
+and **Route 2** (front `AIChatAgent` itself with a TanStack client). The **tool-`parts` codec
+path** (once text-only here, like pi) is now **closed** — the harness reconstructs AG-UI
+`TOOL_CALL_*` chunks into AI-SDK tool parts and proves `partialHasSettledToolResults` keeps a
+settled-tool partial under `{ persist: false }` while dropping a text-only one (see the newest
+progress-log entry).
 
 **Repo dependency note.** `@tanstack/ai-client` / `@tanstack/ai-react` (which expose the
 `SubscribeConnectionAdapter` / `ChatClient` / `useChat` surface this harness needs) require
@@ -1743,6 +1749,34 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 5 / Second harness — tool-`parts` codec path + settled-tool persist gate (foreign vocabulary)_ —
+  Closed the last codec gap both genericity harnesses left open: until now the pi fixture AND
+  the TanStack harness were **text-only** (`parts: []`), so the engine's shared settled-tool
+  persist gate (`partialHasSettledToolResults`) had only ever been exercised through the AI SDK
+  adapter. Extended the TanStack harness to reconstruct tool `parts` from a FOREIGN tool
+  vocabulary and prove the gate end-to-end. **Files (all in `experimental/tanstack-recovery/`,
+  zero `agents` change):** `tanstack-codec.ts` — `toRecoveryPartial` now rebuilds the AG-UI
+  `TOOL_CALL_START → ARGS → END → RESULT` sub-protocol into the AI-SDK `UIMessage` tool-part
+  shape (`type: "tool-<name>"`, `state`, `input`, `output`), so a tool whose `RESULT` flushed
+  reads as **settled** and one torn before it reads as **unsettled**; `faux-model.ts` —
+  `setNextTurnToolCall` settles a scripted tool before the text body (so a mid-text-tail SIGKILL
+  leaves a partial carrying a settled result); `tanstack-agent.ts` — a durable
+  `invokeOnChatRecovery` wake hook returning the configured `{ persist }` policy + a
+  `partialHadSettledTool` observable; `server.ts` `/start` takes `withTool`/`persist`. **Core
+  finding:** the settled-tool persist gate is **vocabulary-agnostic** — it keyed off the
+  AG-UI-reconstructed parts byte-identically to AI-SDK ones, with the SAME shared predicate and
+  **no engine change**. The codec — not the engine — owns the chunk→parts contract, exactly as
+  Tier-2 claimed. **Proof:** two SIGKILL e2es sharing one `persist: false` policy and differing
+  ONLY in whether the turn settled a tool: the **tool** turn's partial SURVIVES the
+  `{ persist: false }` drop (gate override → `recoveredVia === "continue"`,
+  `partialHadSettledTool === true`, `prefix + suffix === total`) while the **text-only** turn's
+  partial is DROPPED (`recoveredVia === "retry"`, `prefixChars === 0`) — the divergent outcome
+  isolates the gate. Tests: `tanstack-codec` unit now **20** (settled/unsettled/torn tool
+  reconstruction + `partialHasSettledToolResults` over AG-UI parts, imported live in node) ✅;
+  `tanstack-recovery` e2e **4/4** ✅; `pnpm run check` ✅ (113 projects, no changeset — fixture
+  only). **Still open:** a real Workers AI provider run (the documented one-line swap) and
+  Route 2 (front `AIChatAgent` itself with a TanStack client).
+
 - _Phase 5 / Second harness (TanStack AI client + shared handshake, engine-direct)_ —
   Built `experimental/tanstack-recovery/` (sibling to `pi-recovery`): a `TanStackAgent`
   Durable Object driving the SAME `ChatRecoveryEngine` AND the SAME `ResumeHandshake` as
@@ -1766,8 +1800,9 @@ the change, and the key review findings.
     (make the resuming/none/response vocabulary injectable on `ResumeHandshakeHost`,
     defaults = exact `cf_agent_*` bytes so the golden gate stays green) is therefore **deferred
     as optional** — revisit only if a second foreign client appears. **Still open:** the
-    tool-`parts` codec path (text-only here, like pi), a real Workers AI provider run (the
-    documented swap), and Route 2 (front `AIChatAgent` itself with a TanStack client).
+    tool-`parts` codec path (text-only here, like pi — _since closed; see the newest progress-log
+    entry_), a real Workers AI provider run (the documented swap), and Route 2 (front
+    `AIChatAgent` itself with a TanStack client).
     **Dependency:** `@tanstack/ai-client`/`-react` require `@tanstack/ai@0.32`, so the repo was
     bumped `0.28 → 0.32` (`agents` + `codemode` devDeps); peer ranges + public API unchanged,
     all 113 projects typecheck → no changeset (and no engine source change → none for the
@@ -3497,8 +3532,10 @@ Two correctness caveats the fixture also exposed, to record honestly:
 - **The codec's tool-`parts` path is unproven on a non-AI-SDK substrate.** A pi text turn
   always yields `parts: []`, so the settled-tool persist gate
   (`partialHasSettledToolResults`) was only ever exercised through the AI SDK adapter. A
-  pi turn carrying tool calls would be needed to prove the `MessagePart` seam end-to-end
-  off `UIMessage`.
+  turn carrying tool calls would be needed to prove the `MessagePart` seam end-to-end
+  off `UIMessage`. _(Since closed — not in pi, but in the TanStack harness: it reconstructs
+  AG-UI `TOOL_CALL_*` chunks into `MessagePart`s and proves the gate keeps a settled-tool
+  partial under `{ persist: false }`. See the newest progress-log entry.)_
 - **The fixture's continuation is simulated, not pi-native.** `_resumeRecoveredTurn`
   recomputes the full reply (`replyFor`) and primes the faux model with
   `full.slice(prefix.length)`; a real pi `continue()` would resume generation from the

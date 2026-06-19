@@ -25,11 +25,16 @@ export default {
     if (url.pathname === "/start" && request.method === "POST") {
       const body = (await request.json().catch(() => ({}))) as {
         text?: string;
+        withTool?: boolean;
+        persist?: boolean;
       };
       const agent = await stub(env, session);
       // Fire-and-forget: the turn streams for several seconds so the test can
       // SIGKILL mid-stream. Do NOT await (the request would otherwise hang).
-      void agent.startTurn(body.text ?? "hello tanstack");
+      void agent.startTurn(body.text ?? "hello tanstack", {
+        withTool: body.withTool,
+        persist: body.persist
+      });
       return Response.json({ started: true });
     }
 
