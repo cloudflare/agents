@@ -87,7 +87,6 @@ interface TranscriptEntry {
 interface PiRecoveryData {
   originalRequestId?: string;
   incidentId?: string;
-  targetUserId?: string;
 }
 
 /**
@@ -259,6 +258,20 @@ export class PiAgent extends Agent<Env> {
       id: entry.id,
       role: entry.message.role
     }));
+  }
+
+  /**
+   * Resolve the durable stream id for a turn's `requestId`: the metadata row if
+   * one survived, else the live active stream, else `""`. Shared by both the
+   * adapter's `resolveRecoveryStreamId` and the wake hook's
+   * `resolveRecoveryStream` (the API exposes the lookup through two seams; see
+   * the RFC Phase-5 API-ergonomics note).
+   */
+  private _resolveStreamId(requestId: string): string {
+    const meta = this._resumableStream
+      .getAllStreamMetadata()
+      .find((row) => row.request_id === requestId);
+    return meta?.id ?? this._resumableStream.activeStreamId ?? "";
   }
 
   private async _recordRecoverySummary(
@@ -536,10 +549,7 @@ export class PiAgent extends Agent<Env> {
         return { snapshot, recoveryData: user };
       },
       resolveRecoveryStream: (requestId): ResolvedRecoveryStream => {
-        const meta = this._resumableStream
-          .getAllStreamMetadata()
-          .find((row) => row.request_id === requestId);
-        const streamId = meta?.id ?? this._resumableStream.activeStreamId ?? "";
+        const streamId = this._resolveStreamId(requestId);
         return {
           streamId,
           streamStillActive:
@@ -662,12 +672,7 @@ export class PiAgent extends Agent<Env> {
           now: Date.now()
         });
       },
-      resolveRecoveryStreamId: (requestId) => {
-        const meta = this._resumableStream
-          .getAllStreamMetadata()
-          .find((row) => row.request_id === requestId);
-        return meta?.id ?? this._resumableStream.activeStreamId ?? "";
-      },
+      resolveRecoveryStreamId: (requestId) => this._resolveStreamId(requestId),
       getPartialStreamText: (streamId): RecoveryPartial =>
         this._codec.toRecoveryPartial(
           this._resumableStream
@@ -736,12 +741,8 @@ export class PiAgent extends Agent<Env> {
   }
 
   private _renderEntryText(message: Message): string {
-    if (message.role === "assistant") {
-      return message.content
-        .filter((block) => block.type === "text")
-        .map((block) => ("text" in block ? block.text : ""))
-        .join("");
-    }
-    return this._messageText(message);
+    return message.role === "assistant"
+      ? renderAssistantText(message)
+      : this._messageText(message);
   }
 }

@@ -3238,6 +3238,66 @@ pi-based host like Flue is the codec + partial-reconstruction + continue-vs-rege
 concept, which both already implement and both inherit from the pi substrate rather than
 from each other.
 
+**API-ergonomics findings (from building the pi adapter) — direct Tier-2 input.** Writing
+a third, from-scratch, non-AI-SDK adapter surfaced where the `ChatRecoveryAdapter` /
+`ChatFiberWakeHooks` seam is mis-cut. The signal is strong because the same boilerplate is
+duplicated **identically across all three hosts** (`ai-chat`, `think`, and the pi
+fixture), not just the fixture — so these are seam-shape corrections, not fixture quirks.
+They should drive the Tier-2 extraction (lifting the resume handshake + streaming codec
+into `agents/chat`). Ranked by payoff:
+
+1. **Fold progress-bumping into the durable-chunk path.** Every host hand-wires
+   `bumpChatRecoveryProgress` into its stream loop (`ai-chat` `_bumpChatRecoveryProgress`
+   at the production write + the recovery write; `think` likewise; the pi fixture inline
+   in `_onPiEvent`) and each carries a comment re-explaining the invariant. A durable
+   chunk persist _is_ the no-progress-budget signal, so `ResumableStream.flush`/
+   `storeChunk` (or a thin wrapper) should bump progress itself. Forgetting the manual
+   call silently breaks the budget — exactly the kind of invariant the engine should own.
+2. **Collapse stream resolution to one seam.** Both `ChatRecoveryAdapter
+.resolveRecoveryStreamId(requestId)` and `ChatFiberWakeHooks.resolveRecoveryStream(
+requestId)` exist and every host implements the same metadata-row-or-active-stream
+   lookup twice (the pi fixture had to extract a private `_resolveStreamId` to dedupe its
+   own two implementations). Replace with one `resolveStream(requestId) → { streamId,
+active }`.
+3. **Provide an engine-owned exhaustion helper.** The give-up choreography
+   (`buildChatRecoveryExhaustedContext` → `notifyChatRecoveryExhausted` →
+   `recordChatTerminal` → `setChatRecovering(false)`) is hand-assembled identically in
+   each host (~30 lines). A single `runChatRecoveryExhaustion(incident, config, partial,
+…, { emit, broadcast, storage })` would absorb it, leaving the host to supply only the
+   emit/broadcast primitives. The duplicated `setChatRecovering` option bag
+   (`{ storage, messageType, broadcast, now }`, constructed in two places per host) folds
+   into the same helper.
+4. **Hand the decoded partial back to `persistOrphanedStream`.** The engine already
+   decodes the buffer for classification (`getPartialStreamText`), then the host decodes
+   the same buffer again to preserve the partial message. Passing the decoded
+   `RecoveryPartial` (or a codec handle) into `persistOrphanedStream` removes the second
+   decode.
+5. **Drop the redundant classify `detail` when it mirrors `recoveryKind`.** The pi
+   adapter threads `{ continueFromPartial }` that is identical to `recoveryKind ===
+"continue"`, then `dispatchRecoveredTurn` re-derives it and re-maps to a callback name.
+   Either let `recoveryKind` drive the callback selection, or stop requiring a custom
+   `TClassify` for the common continue-vs-retry case.
+6. **Make trivially-no-op hooks optional with engine-side defaults.** A host without
+   client tools / HITL / lifecycle callbacks still must implement
+   `isAwaitingClientInteraction`, `invokeOnChatRecovery`, `onShouldKeepRecoveringError`,
+   and friends (the pi fixture's are all `() => false` / `async () => ({})` / a
+   `console.error`). The "smallest real adapter" the fixture is meant to measure is still
+   ~15 methods; optional hooks would shrink it.
+
+Two correctness caveats the fixture also exposed, to record honestly:
+
+- **The codec's tool-`parts` path is unproven on a non-AI-SDK substrate.** A pi text turn
+  always yields `parts: []`, so the settled-tool persist gate
+  (`partialHasSettledToolResults`) was only ever exercised through the AI SDK adapter. A
+  pi turn carrying tool calls would be needed to prove the `MessagePart` seam end-to-end
+  off `UIMessage`.
+- **The fixture's continuation is simulated, not pi-native.** `_resumeRecoveredTurn`
+  recomputes the full reply (`replyFor`) and primes the faux model with
+  `full.slice(prefix.length)`; a real pi `continue()` would resume generation from the
+  partial assistant message held in context. So P5-1b proves the **engine's**
+  preserve/continue/merge plumbing is message-generic — not that pi natively prefilled.
+  The claim should be stated at that scope.
+
 ### Phase 6: confidence and e2e hardening
 
 Extend the existing local e2e suites (Layer 4) so the SIGKILL + persistent-state
