@@ -1701,6 +1701,58 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 5 / Tier-2 (resume-handshake + streaming-codec seams extracted into
+  `agents/chat`; one behavior-visible convergence → one changeset)_ — Deduped the
+  byte-parallel Tier-2 seams the `@cloudflare/ai-chat` and `@cloudflare/think`
+  hosts hand-maintained in lockstep, in risk-ordered slices (commit `038e6d23`).
+  **T2-1:** formalized `ChatRecoveryCodec` (`toRecoveryPartial`) + `AISDKRecoveryCodec`
+  in `recovery-codec.ts`, made `PiRecoveryCodec` conform, and routed both hosts'
+  `_getPartialStreamText` through the shared singleton (zero behavior). **T2-3a:**
+  collapsed the adapter `resolveRecoveryStreamId` and the wake-hook
+  `resolveRecoveryStream` into one `ChatRecoveryAdapter.resolveRecoveryStream`; the
+  give-up path now reads `.streamId` and resolves the **newest durable row**
+  (`ORDER BY created_at DESC LIMIT 1`) instead of an in-memory first-match `.find()`
+  — identical for single-attempt turns, more correct across recovery attempts.
+  Behavior-visible → `recovery-stream-resolution-newest-row` changeset
+  (`@cloudflare/ai-chat` + `@cloudflare/think` patch). **T2-3b:** gave the no-op
+  hooks (`isAwaitingClientInteraction`, `invokeOnChatRecovery`,
+  `onShouldKeepRecoveringError`) engine-side defaults (`false` / `{}` / no-op) so a
+  minimal adapter shrinks, and dropped pi's redundant `continueFromPartial` detail.
+  **T2-2a/T2-2b:** extracted `resume-handshake.ts` (the proactive `STREAM_RESUMING`
+  notify, the REQUEST decision tree, the ACK decision tree, and the #1645/#1575
+  terminal-replay path) behind a host-owned `ResumeHandshakeHost` seam
+  (`pendingResumeConnections` + the continuation `awaitingConnections` stay
+  host-owned, passed in, because they couple to the out-of-scope streaming loop);
+  wired ai-chat then think to delegate, deleting both hand-maintained copies.
+  **T2-4:** moved the progress-chunk-type predicate onto the codec
+  (`isProgressChunk`); ai-chat consults it at its existing bump site (zero timing
+  change), think's flush-gated bump is untouched. **Key review findings:** (1) the
+  golden handshake fixture (`resume-handshake-frames.ts`) was self-referential —
+  the test asserted only the builder functions, never the real driver — so a
+  driver-level test (`resume-handshake.test.ts`) now constructs the actual
+  `ResumeHandshake` against a fake host and asserts every branch's frames `toEqual`
+  the golden builders (host-agnostic, so it is also the byte-identity gate for
+  think, whose native browser reconnect has no e2e); (2) cross-package constant
+  equivalence (`cf_agent_use_chat_response` etc.) confirmed, so byte-identity is
+  enforced not assumed; (3) the lazy `_resumeHandshake()` getter's captured
+  `ResumableStream`/`ContinuationState`/pending-set references are stable
+  per-instance (assigned once, never reassigned). `recovery-codec.test.ts` pins the
+  `isProgressChunk` list; `recovery-engine.test.ts` adds minimal-adapter cases
+  proving the T2-3b defaults; think's #1575 helper now exercises the shared driver.
+  **Deferred (explicitly):** converging the progress-bump *timing* (ai-chat per-type
+  vs think per-flush — correctness-critical for the no-progress budget) and moving
+  start-id alignment onto the codec; the full streaming-driver merge (Tier-3). The
+  unrelated, pre-existing expected-RED `reattach-budget.test.ts` gate (wall-clock
+  re-attach budget; partially addressed by #1670) was `it.skip`-ed to keep the
+  manual think-e2e suite green. **Forcing function (next):** the planned TanStack AI
+  harness (engine-direct, `examples/`) will validate the extracted handshake/codec
+  against a foreign client transport + real Workers AI model and drive any residual
+  seam corrections. Tests: `pnpm run check` ✅ (112 projects); agents workers 2004 +
+  16 new codec ✅, ai-chat workers 687 ✅, think workers ✅; agents chat unit
+  (golden frames + driver gate + minimal-adapter) ✅; ai-chat recovery /
+  recovering-status / outcomes / exhaustion e2e ✅; think stall + messenger
+  recovery e2e ✅; pi SIGKILL e2e ✅.
+
 - _Phase 5 / P5-1b (pi adapter upgraded to `stream_continuation`; seam-difference
   correction; Flue analysis; no package behavior change, no changeset)_ — Upgraded
   the `experimental/pi-recovery/` fixture so the pi adapter takes the **same
