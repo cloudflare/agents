@@ -171,9 +171,7 @@ describe("ThinkWorkflow", () => {
         createEvent()
       );
 
-      // The default (non-retry) path must reuse the historical step names so
-      // workflows that hibernated on an older version replay without
-      // re-executing already-completed steps.
+      // Keep historical names for replay compatibility.
       expect(doNames).toContain("structure:submit");
       expect(doNames).not.toContain("structure:submit-0");
       expect(waitNames).toContain("structure:wait");
@@ -360,12 +358,9 @@ describe("ThinkWorkflow", () => {
       expect(sleepCalls[0].duration).toBeLessThanOrEqual(100);
       expect(sleepCalls[1].duration).toBeGreaterThanOrEqual(0);
       expect(sleepCalls[1].duration).toBeLessThanOrEqual(200);
-      // Jitter must actually be applied — guard against the backoff collapsing
-      // to ~0ms (e.g. a degenerate fraction), which would cause thundering-herd
-      // retries. The delay is deterministic for fixed inputs.
+      // Guard against jitter collapsing to ~0ms.
       expect(sleepCalls.some((call) => call.duration > 0)).toBe(true);
-      // Each abandoned attempt is cancelled before retrying so its turn (and
-      // any chatRecovery continuation) can't race the fresh attempt.
+      // Abandoned attempts are cancelled before retrying.
       expect(cancelCalls).toEqual([
         {
           submissionId: "submission-1",
@@ -378,7 +373,7 @@ describe("ThinkWorkflow", () => {
       ]);
       expect(doNames).toContain("structure:cancel-0");
       expect(doNames).toContain("structure:cancel-1");
-      // The successful final attempt (submission-3) is never cancelled.
+      // Successful final attempt is never cancelled.
       expect(
         cancelCalls.some((call) => call.submissionId === "submission-3")
       ).toBe(false);
@@ -477,8 +472,7 @@ describe("ThinkWorkflow", () => {
         )
       ).rejects.toBeInstanceOf(ThinkPromptTimeoutError);
 
-      // Timeout is not retried: only the first attempt runs and no backoff
-      // sleep is scheduled.
+      // Timeout is not retried.
       expect(submitCount).toBe(1);
       expect(sleepCalls).toHaveLength(0);
     });
@@ -653,9 +647,9 @@ describe("ThinkWorkflow", () => {
       );
 
       expect(output).toEqual({ answer: "recovered" });
-      // No fresh submission — the original was recovered
+      // Original submission was recovered.
       expect(submitCount).toBe(1);
-      // No cancel — recovery succeeded
+      // No cancel — recovery succeeded.
       expect(cancelCalls).toEqual([]);
       expect(waitCount).toBe(2);
       expect(doNames).toContain("structure:recovery-check-0-0");
@@ -717,7 +711,7 @@ describe("ThinkWorkflow", () => {
       );
 
       expect(output).toEqual({ answer: "retry" });
-      // Recovery failed → fresh submission on retry
+      // Recovery failed, so a fresh submission was used.
       expect(submitCount).toBe(2);
       expect(cancelCalls).toEqual([
         {
@@ -729,10 +723,7 @@ describe("ThinkWorkflow", () => {
     });
 
     it("waits for the DO to come back before recovering (does not resubmit)", async () => {
-      // The DO is unreachable for the first two recovery rounds (still
-      // restarting after a deploy), then comes back and the original
-      // submission completes. Recovery must be patient and NOT discard the
-      // in-flight turn by resubmitting.
+      // DO is down for two rounds, then recovers the original submission.
       let submitCount = 0;
       let inspectCount = 0;
       const doNames: string[] = [];
@@ -793,12 +784,12 @@ describe("ThinkWorkflow", () => {
       );
 
       expect(output).toEqual({ answer: "recovered" });
-      // The original submission was recovered — never resubmitted or cancelled.
+      // Original submission was recovered.
       expect(submitCount).toBe(1);
       expect(cancelCalls).toEqual([]);
       // Inspected three times: down, down, then up.
       expect(inspectCount).toBe(3);
-      // Backed off after each unreachable round before re-checking.
+      // Backed off after each unreachable round.
       expect(sleepNames).toEqual([
         "structure:recovery-backoff-0-0",
         "structure:recovery-backoff-0-1"
@@ -807,8 +798,7 @@ describe("ThinkWorkflow", () => {
     });
 
     it("re-inspects after a recovery wait times out, then recovers", async () => {
-      // Round 0: DO is up (running) but the completion event doesn't arrive in
-      // time. Round 1: still running, and this time the event arrives.
+      // First recovery wait times out; second one receives the event.
       let submitCount = 0;
       let recoveryWaitCount = 0;
       const sleepNames: string[] = [];
@@ -871,13 +861,12 @@ describe("ThinkWorkflow", () => {
       expect(submitCount).toBe(1);
       expect(cancelCalls).toEqual([]);
       expect(recoveryWaitCount).toBe(2);
-      // Backed off once between the timed-out wait and the next inspection.
+      // Backed off between timed-out wait and next inspection.
       expect(sleepNames).toEqual(["structure:recovery-backoff-0-0"]);
     });
 
     it("falls back to resubmit when the recovered turn fails terminally", async () => {
-      // The DO is alive and drives the submission to a terminal *error* event.
-      // Recovery cannot help, so the loop cancels and resubmits a fresh turn.
+      // Terminal recovered event falls back to fresh submission.
       let submitCount = 0;
       const cancelCalls: Array<{ submissionId: string; reason: string }> = [];
 
@@ -947,8 +936,7 @@ describe("ThinkWorkflow", () => {
     });
 
     it("falls back to resubmit after the recovery budget is exhausted (DO stays down)", async () => {
-      // The DO never comes back during the recovery window. After exhausting
-      // the bounded recovery rounds the loop cancels and resubmits.
+      // DO never comes back; bounded recovery falls back to resubmit.
       let submitCount = 0;
       let inspectCount = 0;
       const doNames: string[] = [];
