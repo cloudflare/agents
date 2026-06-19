@@ -112,6 +112,7 @@ export { parseProtocolMessage, type ChatProtocolEvent } from "./parse-protocol";
 export {
   reconcileMessages,
   resolveToolMergeId,
+  reconcileOrphanPartial,
   assistantContentKey
 } from "./message-reconciler";
 

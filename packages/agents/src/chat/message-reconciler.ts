@@ -66,6 +66,60 @@ export function resolveToolMergeId(
 }
 
 /**
+ * Merge a freshly-reconstructed orphaned partial onto the assistant message
+ * that already owns its target id (the orphan-persist **(c)** step).
+ *
+ * Used by hosts whose store can hold an assistant row for the SAME id BEFORE
+ * the stream finalizes — e.g. an early persist at tool-approval time, or a
+ * continuation resuming the prior assistant message. On recovery the engine
+ * replays the same chunks, so a naive append would leave two parts per tool
+ * call. The merge therefore:
+ *
+ *   - keeps ALL existing parts (the persisted row is authoritative for tool
+ *     parts that had a client result applied IN PLACE — that result lives only
+ *     in storage, never in the chunk stream, so a whole-message replace would
+ *     clobber it);
+ *   - appends only the reconstructed parts whose `toolCallId` is NOT already
+ *     present (dedup by tool-call identity);
+ *   - overlays the incoming metadata onto the existing metadata (incoming wins
+ *     on conflicts), falling back to whichever side is present.
+ *
+ * The result carries the INCOMING message's id/role (the caller has already
+ * resolved the incoming id to the existing row's id via the (b) target-id
+ * step), so it is safe to write straight back through `updateMessage`.
+ *
+ * Hosts whose orphan persist only ever runs at stream finalize (no early/
+ * mid-stream row for the same id) never hit the merge branch and don't need
+ * this — a plain append/replace is already dedup-safe because the shared
+ * reconstruction (`StreamAccumulator` / `applyChunkToParts`) is idempotent by
+ * `toolCallId`.
+ */
+export function reconcileOrphanPartial(
+  existing: UIMessage,
+  incoming: UIMessage
+): UIMessage {
+  const existingToolCallIds = new Set(
+    existing.parts
+      .filter((p): p is typeof p & { toolCallId: string } => "toolCallId" in p)
+      .map((p) => p.toolCallId)
+  );
+  const newParts = incoming.parts.filter(
+    (p) => !("toolCallId" in p && existingToolCallIds.has(p.toolCallId))
+  );
+
+  const merged: UIMessage = {
+    ...incoming,
+    parts: [...existing.parts, ...newParts]
+  };
+  if (existing.metadata) {
+    merged.metadata = incoming.metadata
+      ? { ...existing.metadata, ...incoming.metadata }
+      : existing.metadata;
+  }
+  return merged;
+}
+
+/**
  * Content key for assistant messages used for dedup of identical short replies.
  * Returns JSON of sanitized parts, or undefined for non-assistant messages.
  */

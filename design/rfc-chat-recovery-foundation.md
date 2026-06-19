@@ -82,32 +82,42 @@ onError, terminalize })` folds the `build → notify → terminalize` give-up
      seed-then-replace was **not** adopted because it would change ai-chat's
      tool-result-merge semantics — so (b)/(c)/(d) below were kept verbatim. See the
      newest Progress-log entry.
-   - **(b) target-id resolution** — the one legitimately per-package step, now
-     **unblocked** (Session-provider alignment spike done — see its result note).
-     Keep it behind a narrow `resolveOrphanTargetId(streamId, reconstructedId)` host
-     hook (recovery _policy_, **not** a store method): ai-chat needs the stored
-     `message_id` (#1691) because a flat array can't express parent/child; Think
-     resolves it structurally from the Session tree (`getLatestLeaf` + supersede
-     guard) and so never had #1691. Neither is buggy. The store-write half it feeds
-     is a four-method **`SessionProvider` subset** (`getMessage` / `getLatestLeaf` /
-     `appendMessage` / `updateMessage`) — ai-chat as a linear provider, Think via
-     `AgentSessionProvider` — so no second storage abstraction is introduced.
-   - **(c) tool-part dedup** — **downstream of (b), not an independent gap**
-     (corrected 2026-06; see the 4-step table). `applyChunkToParts` is already
-     idempotent by `toolCallId` (#1404), so `mergeInto` (replace, not append) is
-     dedup-safe and Think has no hazard. ai-chat's hand-rolled append-dedup is kept
-     (step (a) was scoped to reconstruction): it carries ai-chat-specific
-     tool-result preservation, so converging it onto seed-then-replace needs
-     explicit behavior analysis + tests, deferred into the (b) consolidation. No
-     standalone fix, no `mergeInto` change.
-   - **(d) upsert-by-id** — mechanical; the flat-array case already lives in
-     `mergeInto`, Think keeps its tree upsert. No behavior change.
-     While here, hand the already-decoded partial through (closes the old finding
-     #4 second-decode). Verify-first; behavior-sensitive; changeset for ai-chat.
-     _Wiggle room: (b) lands as a host hook on the **adapter** (it's recovery policy,
-     not codec/store — confirmed by the spike). (c) is not a standalone step — it
-     dissolves into the (b) consolidation once the merge writes through the
-     `SessionProvider`-subset store; see the 4-step table and the spike result.)_
+   - **(b) target-id resolution** — **LANDED** as a named seam. ai-chat now has a
+     `_resolveOrphanTargetId(streamId, reconstructedId, fallbackId)` method — the one
+     legitimately per-package step (a flat array can't express the parent/child a
+     Session tree uses to resolve this structurally, so ai-chat reads the stored
+     `message_id`, #1691, with a last-assistant fallback for legacy rows). Think
+     resolves it structurally from its Session tree and so never had #1691. Neither
+     is buggy. **Design correction from the earlier plan:** the hook lives **on the
+     host, not on the shared engine adapter.** Hoisting the full orchestration into
+     the engine would have required strip/broadcast/flush hooks that fight the
+     substrate split for negative clarity; the engine boundary (it decides _whether_
+     to persist; the host decides _how_) is already the right seam.
+   - **(c) tool-part dedup** — **LANDED** as the shared pure primitive
+     `reconcileOrphanPartial(existing, incoming)` in `message-reconciler.ts`
+     (exported from `agents/chat`, unit-tested). It captures ai-chat's
+     append-merge-with-`toolCallId`-dedup-and-metadata-overlay. Confirmed (per the
+     2026-06 correction) this is **not** convergeable to Think's whole-message
+     replace: ai-chat's early tool-approval persist can apply a client tool result
+     IN PLACE that lives ONLY in storage (never in the chunk stream), so a replace
+     would clobber it — the append-merge deliberately preserves it. Think has no
+     early/mid-stream persist, so its replace is already dedup-safe (the shared
+     reconstruction is idempotent by `toolCallId`) and it doesn't call the helper.
+     So (c) is a shared primitive with one consumer today, available to any host that
+     later gains an early-persist path.
+   - **(d) upsert-by-id** — **LANDED** as recognizably the same `SessionProvider`
+     -subset store-write on both hosts: ai-chat does `findIndex` → map-replace /
+     append over its flat array; `Think._upsertMessageInHistory` does
+     `session.getMessage` → `updateMessage` / `appendMessage` over a Session tree.
+     No behavior change. (Handing the already-decoded partial through to close the
+     old finding-#4 second-decode is a separate, still-open codec-seam item — it was
+     **not** part of this consolidation.)
+     \_As-built: (b)/(c)/(d) are now factored into named seams (`_resolveOrphanTargetId`
+     - shared `reconcileOrphanPartial` + the subset upsert) rather than collapsed into
+       one engine body — the substrate split (flat vs tree) and ai-chat's deliberate
+       client-tool-result preservation correctly keep the two `_persistOrphanedStream`
+       bodies separate. No changeset: pure internal refactor, no public API / observable
+       behavior change. See the newest Progress-log entry.\_
 2. **Phase 6 e2e audit + Phase 7 docs/release notes** — confirm SIGKILL +
    persistent-state e2e cover the converged behavior for both hosts; then update
    `chat-shared-layer.md`, add the history note, and finalize changesets.
@@ -2215,6 +2225,33 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 5 / Tier-2 — orphan-persist (b)/(c)/(d) consolidation: named seams +
+  shared merge primitive (LANDED)_ — Factored ai-chat's `_persistOrphanedStream`
+  into the three RFC seams now that the Session-provider spike settled their shape.
+  **(b):** extracted `AIChatAgent._resolveOrphanTargetId(streamId, reconstructedId,
+fallbackId)` — the #1691 stored-id / last-assistant-fallback policy — as a named
+  per-host method. **Design correction:** kept the hook **on the host, not the shared
+  engine adapter** (the earlier plan floated an engine-level `resolveOrphanTargetId`);
+  hoisting the orchestration into the engine would need strip/broadcast/flush hooks
+  that fight the flat-vs-tree split for negative clarity, and the engine boundary
+  (whether-to-persist vs how) is already correct. **(c):** extracted the
+  append-merge-with-`toolCallId`-dedup-and-metadata-overlay into a shared pure
+  `reconcileOrphanPartial(existing, incoming)` in `message-reconciler.ts` (exported
+  from `agents/chat`, **8 new unit tests**). Confirmed it is _not_ convergeable to
+  Think's whole-message replace: ai-chat's early tool-approval persist can apply a
+  client tool result in place that lives only in storage (never in the chunk
+  stream), so a replace would clobber it. Think has no early-persist, so its replace
+  is already dedup-safe and it doesn't call the helper — (c) is a shared primitive
+  with one consumer today. **(d):** the store-write is now recognizably the same
+  `SessionProvider`-subset shape on both hosts (ai-chat `findIndex`→map/append over
+  the flat array; `Think._upsertMessageInHistory` `getMessage`→`update`/`append` over
+  the Session tree). The two `_persistOrphanedStream` bodies stay separate by design
+  — the substrate split and ai-chat's tool-result preservation are product/substrate
+  decisions, not drift. **Validation:** ai-chat **687/687**, agents **2067 passed /
+  8 skipped**, typecheck **113/113**, `pnpm run check` clean. No changeset — pure
+  internal refactor of `@internal` methods, no public API / observable behavior
+  change (the new export is additive). The old finding-#4 second-decode (hand the
+  decoded partial through the codec) was **not** in scope and stays open.
 - _Phase 5 — Session-provider alignment spike: orphan-persist (b) unblocked
   (design, no code)_ — Ran the spike that gated the (b) consolidation: read the real
   `SessionProvider` interface (`experimental/memory/session/provider.ts`) to decide

@@ -22,6 +22,7 @@ import { autoTransformMessages } from "./ai-chat-v5-migration";
 import {
   reconcileMessages,
   resolveToolMergeId,
+  reconcileOrphanPartial,
   createChatFiberSnapshot,
   unwrapChatFiberSnapshot,
   wrapChatFiberSnapshot
@@ -1435,22 +1436,30 @@ export class AIChatAgent<
    * stream's stored chunks. Called when the DO wakes from hibernation and
    * discovers an active stream with no live LLM reader.
    *
-   * Reconstruction runs through the shared `StreamAccumulator` (the same
-   * primitive `Think` and the client reducer use) rather than a hand-rolled
-   * chunk switch — it wraps `applyChunkToParts` and owns the `start` / `finish`
-   * / `message-metadata` handling this method used to duplicate inline. The
-   * id-resolution (#1691) and merge-onto-existing steps below stay
-   * ai-chat-specific: the merge deliberately preserves an existing in-place
-   * tool result rather than letting a replayed chunk re-advance it.
+   * Built from the three orphan-persist seams the chat-recovery RFC factored
+   * out — all three are ai-chat's substrate-specific realizations of a shape
+   * `Think` shares:
+   *   - (a) reconstruct via the shared `StreamAccumulator` (the same primitive
+   *     `Think` and the client reducer use), replacing a hand-rolled chunk
+   *     switch; it owns the `start` / `finish` / `message-metadata` handling;
+   *   - (b) {@link _resolveOrphanTargetId} — the id to persist under (#1691);
+   *   - (c)+(d) upsert-by-id over the flat array, the `SessionProvider`-subset
+   *     store-write shape (`getMessage` → `updateMessage` / `appendMessage`)
+   *     that `Think._upsertMessageInHistory` implements over a Session tree.
+   *     When a row already owns the id, the shared `reconcileOrphanPartial`
+   *     merge preserves an in-place tool result rather than letting a replayed
+   *     chunk re-advance it (ai-chat has an early tool-approval persist; hosts
+   *     without one append straight through).
    * @internal
    */
   protected async _persistOrphanedStream(streamId: string): Promise<void> {
     const chunks = this._resumableStream.getStreamChunks(streamId);
     if (!chunks.length) return;
 
-    // A provider `start.messageId` is adopted as the id (the live path adopts
-    // it for new turns too); continuations have it stripped before storage
-    // (#1229), so the accumulator's unconditional adopt matches the live path.
+    // (a) Reconstruct. A provider `start.messageId` is adopted as the id (the
+    // live path adopts it for new turns too); continuations have it stripped
+    // before storage (#1229), so the accumulator's unconditional adopt matches
+    // the live path.
     const fallbackId = `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     const accumulator = new StreamAccumulator({ messageId: fallbackId });
     for (const chunk of chunks) {
@@ -1462,75 +1471,61 @@ export class AIChatAgent<
     }
 
     const message: UIMessage = accumulator.toMessage();
+    if (message.parts.length === 0) return;
 
-    if (message.parts.length > 0) {
-      // Resolve the id to persist under when the chunks carried no provider
-      // `start.messageId` (the common case — most providers don't emit one, and
-      // continuations have it stripped, #1229). When a provider id WAS present
-      // it was applied above and is kept, since the live path adopts it too.
-      if (message.id === fallbackId) {
-        // Preferred: the id allocated when the stream started, recorded in
-        // stream metadata (#1691) — the SAME id the live path persists under
-        // (it only adopts a provider id, never invents one). A new turn stored
-        // its own fresh id, so it becomes its own message; a continuation
-        // stored the cloned last-assistant id, so it merges (via the
-        // existing-index check below). This is what stops a new turn after a
-        // later user message from being folded into the previous assistant
-        // message (the #1691 corruption).
-        const storedId = this._resumableStream.getStreamMessageId(streamId);
-        if (storedId != null) {
-          message.id = storedId;
-        } else {
-          // Legacy row written before the metadata column existed: fall back to
-          // the last assistant message, matching pre-#1691 behavior.
-          for (let i = this.messages.length - 1; i >= 0; i--) {
-            if (this.messages[i].role === "assistant") {
-              message.id = this.messages[i].id;
-              break;
-            }
-          }
-        }
-      }
+    // (b) Resolve the persist target id (the one per-package step).
+    message.id = this._resolveOrphanTargetId(streamId, message.id, fallbackId);
 
-      // Check if a message with this ID already exists (e.g., from an
-      // early persist during tool approval, or a continuation resuming
-      // the last assistant message). Update in place if so.
-      const existingIdx = this.messages.findIndex((m) => m.id === message.id);
-      if (existingIdx >= 0) {
-        // Merge: keep existing parts and append new ones from the stream.
-        // A tool part is identified by its toolCallId, so a reconstructed part
-        // whose toolCallId already exists is NOT re-appended — otherwise an
-        // early persist (at tool approval) followed by recovery, which replays
-        // the SAME chunks, would leave two parts for one tool call. The kept
-        // (persisted) part is also the one that may have received a tool result
-        // applied in place, so preserving it avoids regressing settled state.
-        const existing = this.messages[existingIdx];
-        const existingToolCallIds = new Set(
-          existing.parts
-            .filter(
-              (p): p is typeof p & { toolCallId: string } => "toolCallId" in p
-            )
-            .map((p) => p.toolCallId)
-        );
-        const newParts = message.parts.filter(
-          (p) => !("toolCallId" in p && existingToolCallIds.has(p.toolCallId))
-        );
-        message.parts = [...existing.parts, ...newParts];
-        if (existing.metadata) {
-          message.metadata = message.metadata
-            ? { ...existing.metadata, ...message.metadata }
-            : existing.metadata;
-        }
-      }
-      const updatedMessages =
-        existingIdx >= 0
-          ? this.messages.map((m, i) => (i === existingIdx ? message : m))
-          : [...this.messages, message];
-      await this.persistMessages(updatedMessages);
-      // NOTE: progress is bumped at production/flush time in `_storeStreamChunk`
-      // (#1637), NOT here — persisting on recovery or a client reconnect must
-      // not be miscounted as new forward progress.
+    // (c)+(d) Upsert by id over the flat array. A row may already own this id
+    // (an early persist during tool approval, or a continuation resuming the
+    // last assistant message) — merge onto it; otherwise append.
+    const existingIdx = this.messages.findIndex((m) => m.id === message.id);
+    const finalMessage =
+      existingIdx >= 0
+        ? reconcileOrphanPartial(this.messages[existingIdx], message)
+        : message;
+    const updatedMessages =
+      existingIdx >= 0
+        ? this.messages.map((m, i) => (i === existingIdx ? finalMessage : m))
+        : [...this.messages, finalMessage];
+    await this.persistMessages(updatedMessages);
+    // NOTE: progress is bumped at production/flush time in `_storeStreamChunk`
+    // (#1637), NOT here — persisting on recovery or a client reconnect must
+    // not be miscounted as new forward progress.
+  }
+
+  /**
+   * Resolve the id an orphaned partial should persist under — orphan-persist
+   * step **(b)**, and the one legitimately per-package piece of the path: a
+   * flat `UIMessage[]` can't express the parent/child a Session tree uses to
+   * resolve this structurally, so ai-chat reads it from stream metadata.
+   *
+   * When the reconstructed message already adopted a provider `start.messageId`
+   * (kept as-is — the live path adopts it for new turns too) `reconstructedId`
+   * differs from `fallbackId` and is returned unchanged. Otherwise resolve to:
+   *   - the id allocated when the stream started, recorded in stream metadata
+   *     (#1691) — the SAME id the live path persists under (it only adopts a
+   *     provider id, never invents one). A new turn stored its own fresh id, so
+   *     it becomes its own message; a continuation stored the cloned
+   *     last-assistant id, so it merges. This is what stops a new turn after a
+   *     later user message from being folded into the previous assistant
+   *     message (the #1691 corruption); or
+   *   - (legacy rows written before the metadata column existed) the last
+   *     assistant message, matching pre-#1691 behavior.
+   * @internal
+   */
+  protected _resolveOrphanTargetId(
+    streamId: string,
+    reconstructedId: string,
+    fallbackId: string
+  ): string {
+    if (reconstructedId !== fallbackId) return reconstructedId;
+    const storedId = this._resumableStream.getStreamMessageId(streamId);
+    if (storedId != null) return storedId;
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      if (this.messages[i].role === "assistant") return this.messages[i].id;
     }
+    return reconstructedId;
   }
 
   /**
