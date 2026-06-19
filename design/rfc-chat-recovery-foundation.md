@@ -9,6 +9,72 @@ Related:
 - [rfc-ai-chat-maintenance.md](./rfc-ai-chat-maintenance.md)
 - [think-vs-aichat.md](./think-vs-aichat.md)
 
+## Current state & next steps (resume point)
+
+> Quick orientation for a fresh working session. The authoritative detail lives in
+> the **Progress log** (newest first) and the Phase 5 section; this block is the
+> map, not the territory. Last updated after commit `c6f596c4`.
+
+**Where we are.** The shared recovery foundation (Phases 0–5) is implemented and
+merged on the `chat-recovery-foundation` branch. The recovery engine, resume
+handshake, and streaming codec all live in `agents/chat`; `@cloudflare/ai-chat`
+and `@cloudflare/think` delegate to them, and the engine seam is
+vocabulary-agnostic (`RecoveryPartial = { text, parts: unknown[],
+hasSettledToolResults }`, each codec owns its own chunk vocabulary). Three codecs
+exist: `AISDKRecoveryCodec` (prod), and the `experimental/pi-recovery` (pi
+`AgentEvent`) + `experimental/tanstack-recovery` (AG-UI) harnesses.
+
+**Recently landed (most recent first).**
+
+- `c6f596c4` — progress-bump **timing** convergence (the deferred Tier-2
+  correctness item): both hosts now credit the no-progress counter through one
+  shared rule `shouldCreditStreamProgress` (milestone-always + throttled
+  streaming-content deltas via `StreamProgressCreditThrottle`). Closes
+  API-ergonomics finding **#1**.
+- `21d02e4b` — RFC doc-staleness fixes (status/header/caveat/dangling ref).
+- `a1925401` — Route 2 reframed and deprioritized (it reduces to a client-side
+  AI-SDK-SSE → AG-UI translator, an already-proven codec axis; **not** a
+  recovery deliverable).
+- Earlier on-branch: `038e6d23` Tier-2 extraction (codec + resume-handshake
+  seams; findings **#2, #5, #6** closed); the TanStack/AG-UI second harness; the
+  tool-`parts` codec path; the `RecoveryPartial` agnostic-seam refactor.
+
+**Still open (suggested priority order).**
+
+1. **Real Workers AI provider run** — the single genuinely-untested codec axis.
+   Swap a harness's deterministic faux model for a real Workers AI binding (the
+   "one-line change" documented in `experimental/tanstack-recovery/faux-model.ts`
+   and the Phase 5 "Second harness" section) and confirm recovery holds against a
+   non-deterministic provider stream. Highest signal-per-effort.
+2. **API-ergonomics finding #3 — engine-owned exhaustion helper.** Collapse the
+   ~30-line give-up choreography (`buildChatRecoveryExhaustedContext` →
+   `notifyChatRecoveryExhausted` → `recordChatTerminal` → `setChatRecovering(false)`,
+   plus the duplicated `setChatRecovering` option bag) into one
+   `runChatRecoveryExhaustion(...)` that takes host emit/broadcast primitives.
+   Duplicated identically across all three hosts. See the findings list in Phase 5.
+3. **API-ergonomics finding #4 — hand the decoded partial to
+   `persistOrphanedStream`.** The engine decodes the buffer for classification,
+   then the host decodes it again to preserve the partial; pass the
+   `RecoveryPartial` (or a codec handle) through to drop the second decode.
+4. **Start-id alignment onto the codec** (the other deferred Tier-2 item) — fold
+   the per-host chunk start-id handling (`applyChunkToParts` vs `StreamAccumulator`)
+   behind the codec seam. Behavior-sensitive; verify-first, likely a changeset.
+5. **Phase 6 e2e audit + Phase 7 docs/release notes** — confirm SIGKILL +
+   persistent-state e2e cover the converged behavior for both hosts; then update
+   `chat-shared-layer.md`, add the history note, and finalize changesets.
+
+**Explicitly deferred / post-v1.** Tier-3 (full streaming-driver merge);
+Workers AI Gateway provider-resume checkpoints; Route 2 (front `AIChatAgent`
+itself with a TanStack client); Layer 5 live-deploy/chaos tests;
+`ResumeHandshakeHost` Approach B (injectable frame vocabulary — revisit only if a
+second foreign client appears).
+
+**Working conventions.** Validate with `pnpm run check` (113 projects) before
+considering anything done; host-suite tests via each package's
+`vitest.config.ts`; `packages/` API/behavior changes need a changeset; commit per
+coherent step and add a Progress-log entry (newest first) for anything
+substantive. Do **not** edit `node_modules/`/`dist/`; no `any`; ES modules only.
+
 ## The problem
 
 `@cloudflare/ai-chat` and `@cloudflare/think` now have a sophisticated durable
