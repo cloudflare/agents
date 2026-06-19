@@ -1156,10 +1156,30 @@ the gate keeps a settled-tool partial under`{ persist: false }` while dropping a
    subclass drives the shared `ChatRecoveryEngine` directly, with TanStack AI as the wire
    and Workers AI as the model. Lower effort; proves the engine runs with a real transport +
    real model, and is the cleanest way to surface transport/codec seam leaks first.
-2. _Bridge onto `AIChatAgent`_ — **deeper follow-up.** Front `AIChatAgent` with a TanStack
-   AI client and see what leaks. Higher value (it directly tests whether the existing
-   AI-SDK-coupled handshake can serve a foreign client) and higher effort. Do this once
-   route 1 establishes the harness.
+2. _Bridge onto `AIChatAgent`_ — **deprioritized after Route 1 (reframed).** The original
+   pitch was "front `AIChatAgent` with a TanStack client to test whether the AI-SDK-coupled
+   handshake can serve a foreign client." Route 1 already answered that: the handshake/transport
+   layer is two independent concerns, and only one is coupled.
+   - **The handshake + frame envelope** (`cf_agent_stream_resuming` → `resume_ack` → replay,
+     `resume_none`, `chat_recovering`, and the `{ type, id, body, done, replay? }` response
+     envelope) is **transport-agnostic** — Route 1 drove the REAL shared `ResumeHandshake` over
+     a `@tanstack/ai` `SubscribeConnectionAdapter` with a thin client frame-router and zero
+     `agents` change (`ws-bridge.ts`). So "does the handshake serve a foreign client?" = **yes,
+     already proven.**
+   - **The chunk payloads inside `response.body`** ARE AI-SDK-specific: `AIChatAgent` streams AI
+     SDK UIMessage SSE parts (`text-delta`, `tool-input-available`, …), whereas a TanStack client
+     consumes AG-UI `StreamChunk`s. Our harness bridge could `JSON.parse(body)` straight to a
+     `StreamChunk` ONLY because the harness server emits AG-UI; the real `AIChatAgent` does not.
+
+   So actually fronting the real `AIChatAgent` reduces to writing a **client-side AI-SDK-SSE →
+   AG-UI chunk translator** in the bridge — a **codec-translation** exercise, NOT the handshake
+   test it was billed as. And that axis is already proven from the other direction (our codec
+   reconstructs AG-UI chunks, `AIChatAgent`'s reconstructs AI-SDK chunks, both feed the SAME
+   agnostic `RecoveryPartial` seam). A genuinely TanStack-native `AIChatAgent` (server emits
+   AG-UI) is a much larger separate effort and is essentially what the engine-direct harness
+   already prototypes. **Conclusion: drop Route 2 as a recovery-validation deliverable;** the
+   only remaining untested codec axis is the **real Workers AI provider** run (non-deterministic
+   stream, below).
 
 **Where it lives (decided).** A full-stack app under `examples/` (Kumo UI,
 `PoweredByCloudflare`, the example conventions in `examples/AGENTS.md`) for the user-facing
@@ -1207,8 +1227,11 @@ handshake's resuming/none/response vocabulary behind injectable `ResumeHandshake
 (defaults = the exact `cf_agent_*` bytes, so the golden-frame gate stays green) is **not**
 warranted yet. It would let foreign clients drop the bridge but touches published
 `packages/agents` → changeset. Revisit only if a second foreign client appears or the bridge
-grows. Likewise still open: a **real Workers AI provider** run (the documented one-line swap)
-and **Route 2** (front `AIChatAgent` itself with a TanStack client). The **tool-`parts` codec
+grows. The one genuinely still-open axis is a **real Workers AI provider** run (the documented
+one-line swap). **Route 2** (front `AIChatAgent` with a TanStack client) has been
+**deprioritized** — Route 1 already proved the handshake is transport-agnostic, leaving only a
+client-side AI-SDK-SSE → AG-UI chunk translation that is redundant with the codec seam already
+proven from both directions (see the reframed "Build route" item above). The **tool-`parts` codec
 path** (once text-only here, like pi) is now **closed** — the harness reconstructs AG-UI
 `TOOL_CALL_*` chunks into its own **AG-UI-native** tool parts (the follow-up `RecoveryPartial`
 refactor removed the earlier AI-SDK `MessagePart` fabrication and made the engine seam
@@ -1751,6 +1774,24 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 5 / Second harness — Route 2 reframed and deprioritized (doc-only)_ —
+  Questioning what "front `AIChatAgent` with a TanStack client" even means surfaced that the
+  original Route 2 conflated two independent layers of `AIChatAgent`'s wire. **(1) The handshake +
+  frame envelope** (`cf_agent_stream_resuming`/`resume_ack`/replay/`resume_none`/`chat_recovering`
+  - the `{ type, id, body, done, replay? }` response envelope) is **transport-agnostic** and Route 1
+    ALREADY proved a `@tanstack/ai` client speaks it over the REAL shared `ResumeHandshake` via a thin
+    frame-router (`ws-bridge.ts`), zero `agents` change. **(2) The chunk payloads inside
+    `response.body`** ARE AI-SDK-specific (`AIChatAgent` streams AI SDK UIMessage SSE parts; a TanStack
+    client consumes AG-UI `StreamChunk`s). So actually fronting the real `AIChatAgent` reduces to a
+    **client-side AI-SDK-SSE → AG-UI chunk translator** — a codec-translation exercise, NOT the
+    handshake test it was billed as — and that axis is already proven from both directions (our codec
+    reconstructs AG-UI, `AIChatAgent`'s reconstructs AI-SDK, both feed the same agnostic
+    `RecoveryPartial` seam). A TanStack-native `AIChatAgent` (server emits AG-UI) is a much larger
+    separate effort and is essentially what the engine-direct harness already prototypes. **Decision:**
+    drop Route 2 as a recovery-validation deliverable; the only genuinely untested axis left is the
+    **real Workers AI provider** run. Updated the "Build route" item, the body "Still open", and this
+    log accordingly. Doc-only, no code change.
+
 - _Phase 5 / Second harness — making the engine seam genuinely AI-SDK-agnostic (`RecoveryPartial` refactor)_ —
   Review of the tool-`parts` entry below caught that its "vocabulary-agnostic" claim was **overstated
   at the type level**: the engine seam `RecoveryPartial` was typed `{ text; parts: MessagePart[] }`,
@@ -1782,8 +1823,11 @@ the change, and the key review findings.
   the identical boolean it used to), `agents/chat` is `@internal`, so **no changeset**. Tests: engine
   unit (gate suite) ✅, `tanstack-codec` unit **20** (now asserts `hasSettledToolResults` directly,
   parts in AG-UI-native shape) ✅, `tanstack-recovery` e2e **4/4** ✅, `pi-recovery` e2e **1/1** ✅,
-  `pnpm run check` ✅ (113 projects). **Still open:** unchanged from below (real Workers AI provider
-  run; Route 2).
+  `pnpm run check` ✅ (113 projects). **Still open:** a **real Workers AI provider** run is the
+  only genuinely untested axis; **Route 2 (front `AIChatAgent` with a TanStack client) is
+  deprioritized** — Route 1 proved the handshake is transport-agnostic, so Route 2 reduces to a
+  redundant client-side AI-SDK-SSE → AG-UI chunk translation (see the reframed "Build route" item
+  above for the full reasoning).
 
 - _Phase 5 / Second harness — tool-`parts` codec path + settled-tool persist gate (foreign vocabulary)_ —
   Closed the last codec gap both genericity harnesses left open: until now the pi fixture AND
