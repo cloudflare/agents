@@ -1109,6 +1109,70 @@ without `UIMessage`-shaped assumptions leaking through, the seam is wrong and we
 fix it before declaring the foundation done. Building the second harness is the
 only credible proof that the abstraction is not accidentally AI-SDK-only.
 
+### Second harness: a TanStack AI client + Workers AI provider (stress test, follow-up)
+
+The pi fixture (Phase 5) proves genericity along **one** axis: a non-AI-SDK server
+transcript + event vocabulary, driven by a deterministic faux model over an HTTP control
+surface. A second harness should stress the **complementary** axis the pi fixture leaves
+untouched — a non-AI-SDK **client transport** talking to a **real streaming model** —
+because that is where the remaining `UIMessage`/AI-SDK-shaped assumptions are most likely
+to hide (the resume handshake and the streaming codec, not the transcript model).
+
+**Shape.** A runnable example built on [TanStack AI](https://www.npmjs.com/package/@tanstack/ai)
+(`@tanstack/ai`'s `chat()` + its event client) for the client, with
+[`@cloudflare/tanstack-ai`](https://www.npmjs.com/package/@cloudflare/tanstack-ai) (the
+Workers AI / AI Gateway provider adapter — "Use TanStack AI with Cloudflare Workers AI and
+AI Gateway", currently `0.1.10`, `deps: openai`) as the model provider. This satisfies the
+repo rule that examples use Workers AI for LLM calls (so no third-party key), and it
+exercises the recovery path against a _real_ streaming provider rather than a scripted one.
+Note there is already adjacent TanStack wiring to lean on: `agents/browser/tanstack-ai`,
+`@cloudflare/codemode/tanstack-ai`, and `examples/think-tanstack-start` (the last wires
+TanStack **Start** SSR + Think, but does NOT use `@tanstack/ai`'s chat client — so this is
+net-new coverage, not a duplicate).
+
+**What it stress-tests that pi does not.**
+
+- **Resume / reconnect handshake against a foreign client transport.** `AIChatAgent`'s
+  notify → REQUEST → ACK → replay handshake is carried over its own `cf_agent_*` WebSocket
+  protocol, shaped around the AI SDK `useChat` transport. TanStack AI brings its own
+  client + SSE/event transport. Binding recovery to it is exactly the Tier-2 "is the
+  handshake transport-agnostic, or AI-SDK-client-coupled?" question the pi fixture could
+  not ask (pi has no interactive client — it polls status over HTTP).
+- **The streaming codec against a real provider's chunk stream.** Workers AI streaming
+  through `@cloudflare/tanstack-ai` produces real, non-deterministic SSE chunks; the codec
+  (`applyChunkToParts` / the seam pi exercised with `RecoveryPartial`) has to reconstruct a
+  partial from _those_, not from a faux model's scripted deltas.
+- **The tool-`parts` codec path** that pi left unproven (pi text turns are always
+  `parts:[]`): a TanStack AI tool call streaming through Workers AI would finally exercise
+  `MessagePart` reconstruction + the settled-tool persist gate
+  (`partialHasSettledToolResults`) end-to-end on a non-faux substrate.
+
+**Two build routes (pick per how much the seam should be pushed).**
+
+1. _Engine-direct (like the pi fixture)._ A thin `Agent` subclass drives the shared
+   `ChatRecoveryEngine` directly, with TanStack AI as the wire and Workers AI as the model.
+   Lower effort; proves the engine runs with a real transport + real model.
+2. _Bridge onto `AIChatAgent`._ Front `AIChatAgent` with a TanStack AI client and see what
+   leaks. Higher value (it directly tests whether the existing AI-SDK-coupled handshake can
+   serve a foreign client) and higher effort. Recommended as the deeper follow-up once
+   route 1 establishes the harness.
+
+**Where it lives.** A full-stack app under `examples/` (Kumo UI, `PoweredByCloudflare`,
+the example conventions in `examples/AGENTS.md`) gives the user-facing demo; pair it with a
+SIGKILL crash-mid-stream e2e mirroring `experimental/pi-recovery/e2e` and the ai-chat e2e
+so the recovery claim is actually asserted, not just demoable. If the UI proves
+distracting, fall back to an `experimental/` fixture like pi.
+
+**Dependencies / setup.** Adds `@tanstack/ai` (already in the lockfile at `0.28.0`; latest
+`0.32.0`) and `@cloudflare/tanstack-ai` (new), plus a Workers AI binding (`AI`) in
+`wrangler.jsonc`. Per `AGENTS.md`, new deps in `packages/` are "ask first" — but this is an
+example, so it only needs the example's own `package.json`.
+
+**Done when.** A SIGKILL mid-stream is recovered by the shared engine and the TanStack AI
+client observes a continued/completed turn, with **no engine change specific to the AI SDK
+client** — and any seam leak found while binding the handshake/codec to TanStack AI's
+transport is recorded (the same trip-wire as pi) and folded back into the AI SDK adapter.
+
 ### Decision: substrate capabilities are optional, not shared requirements
 
 A recurring question (most concretely: "should `AIChatAgent` grow a submission
