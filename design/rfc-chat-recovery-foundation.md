@@ -2225,6 +2225,25 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 6 — orphan-persist e2e audit (no code)_ — Audited whether the SIGKILL +
+  persistent-state e2e suites cover the just-landed (a)/(b)/(c)/(d) orphan-persist
+  behavior, and re-ran the two ai-chat e2e files that drive the refactored
+  `_persistOrphanedStream` through a real process crash: `chat-recovery-outcomes`
+  **2/2** (partial persisted as exactly one assistant message under `continue:false`;
+  plain-text `persist:false` dropped) and `chat-recovery` **3/3** (retry on empty
+  partial, continue → `assistantMessages === 1` merge-to-one, restart churn). Both
+  green post-refactor. Built the orphan-persist coverage map (see the Phase-6 audit
+  subsection): (a)/(d) and the persist gate are covered both at the workers runtime
+  level and via real-SIGKILL e2e; (b) #1691 distinctness and (c) tool-approval dedup
+  are covered at the workers level (`durable-chat-recovery.test.ts:1096/1152/1267`)
+  - the new `reconcileOrphanPartial` unit tests. **One documented, accepted gap:**
+    no real-SIGKILL e2e for the (c) tool-dedup path (the ai-chat e2e worker has no
+    client-tool/approval agent); the dedup is a runtime-independent pure function
+    already asserted at the workers + unit layers, and the alarm-wake it would add is
+    exercised generically by the plain-text orphan e2e — so marginal value is low,
+    harness cost high. Think e2e not re-run: its orphan path is unchanged and it
+    doesn't call the new helper. Phase-6 exit criteria for the converged orphan-persist
+    behavior otherwise met.
 - _Phase 5 / Tier-2 — orphan-persist (b)/(c)/(d) consolidation: named seams +
   shared merge primitive (LANDED)_ — Factored ai-chat's `_persistOrphanedStream`
   into the three RFC seams now that the Session-provider spike settled their shape.
@@ -4363,6 +4382,42 @@ Exit criteria:
 - Terminal replay works after crash/disconnect in local e2e.
 - Repeated crash churn over progressing work does not false-terminalize.
 - Optional: live deploy smoke passes for any PR that changes engine behavior.
+
+#### Phase 6 audit — orphan-persist coverage (2026-06)
+
+Audited whether the existing SIGKILL + persistent-state e2e suites cover the
+**converged orphan-persist behavior** (the (a)/(b)/(c)/(d) seams just landed).
+Coverage map for the orphan-persist path:
+
+| Behavior                                           | Workers-runtime test (`durable-chat-recovery.test.ts`)               | Real-`wrangler dev` SIGKILL e2e                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| (a) reconstruct partial via `StreamAccumulator`    | ✅ (implicit in all orphan cases)                                    | ✅ `chat-recovery` (partialText > 0), `chat-recovery-outcomes`                |
+| (b) #1691 new-turn NOT merged into prior assistant | ✅ `:1096`, `:1346`                                                  | ❌ (workers-only)                                                             |
+| (b) continuation merges onto last assistant        | ✅ `:1152`                                                           | ⚠️ indirect — `chat-recovery` continue test asserts `assistantMessages === 1` |
+| (c) early tool-approval persist → recovery dedup   | ✅ `:1267` (one `tc-dup` part) + `reconcileOrphanPartial` unit tests | ❌ (no client-tool/approval agent in the e2e worker)                          |
+| (d) upsert → single durable message                | ✅                                                                   | ✅ `chat-recovery-outcomes` (`assistantMessages === 1`)                       |
+| persist gate (`persist:false` drops plain text)    | ✅                                                                   | ✅ `chat-recovery-outcomes` test 2                                            |
+
+**Re-ran the two ai-chat e2e files that drive the refactored `_persistOrphanedStream`
+through a real process crash, post-refactor:** `chat-recovery-outcomes` **2/2**,
+`chat-recovery` **3/3** (incl. the continue-path merge-to-one). Green. Think's
+e2e was **not** re-run: this refactor touched only ai-chat's orphan path plus an
+additive shared export — Think doesn't call `reconcileOrphanPartial` and its
+`_persistOrphanedStream` is unchanged, so its prior-green parity is unaffected.
+
+**One documented gap, assessed acceptable (not a blocker):** the (c)
+tool-approval-early-persist → recovery **dedup** has no real-SIGKILL e2e — the
+ai-chat e2e worker has no client-tool/approval agent. It is covered (i) at the
+workers runtime level by `durable-chat-recovery.test.ts:1267` (asserts a single
+`tc-dup` part after an early persist + recovery replay), and (ii) by the
+`reconcileOrphanPartial` unit tests. The dedup logic is runtime-independent (a
+pure function over `parts`), so the only thing a real-SIGKILL e2e would add over
+the workers test is the alarm-driven wake — which IS exercised generically for
+the plain-text orphan path. Marginal value is low; harness cost (a HITL-approval
+agent + crash-mid-approval flow) is high. **Recommendation:** leave it to the
+workers + unit layer; add a tool-dedup SIGKILL e2e only if a regression ever
+surfaces there. Phase-6 exit criteria for the converged orphan-persist behavior
+are otherwise **met**.
 
 ### Phase 7: documentation and release notes
 
