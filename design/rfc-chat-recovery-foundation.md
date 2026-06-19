@@ -82,11 +82,16 @@ onError, terminalize })` folds the `build → notify → terminalize` give-up
      seed-then-replace was **not** adopted because it would change ai-chat's
      tool-result-merge semantics — so (b)/(c)/(d) below were kept verbatim. See the
      newest Progress-log entry.
-   - **(b) target-id resolution** — the one legitimately per-package step. Keep it
-     behind a narrow `resolveOrphanTargetId(streamId, reconstructedId)` host hook:
-     ai-chat needs the stored `message_id` (#1691) because a flat array can't
-     express parent/child; Think resolves it structurally from the Session tree
-     (`getLatestLeaf` + supersede guard) and so never had #1691. Neither is buggy.
+   - **(b) target-id resolution** — the one legitimately per-package step, now
+     **unblocked** (Session-provider alignment spike done — see its result note).
+     Keep it behind a narrow `resolveOrphanTargetId(streamId, reconstructedId)` host
+     hook (recovery _policy_, **not** a store method): ai-chat needs the stored
+     `message_id` (#1691) because a flat array can't express parent/child; Think
+     resolves it structurally from the Session tree (`getLatestLeaf` + supersede
+     guard) and so never had #1691. Neither is buggy. The store-write half it feeds
+     is a four-method **`SessionProvider` subset** (`getMessage` / `getLatestLeaf` /
+     `appendMessage` / `updateMessage`) — ai-chat as a linear provider, Think via
+     `AgentSessionProvider` — so no second storage abstraction is introduced.
    - **(c) tool-part dedup** — **downstream of (b), not an independent gap**
      (corrected 2026-06; see the 4-step table). `applyChunkToParts` is already
      idempotent by `toolCallId` (#1404), so `mergeInto` (replace, not append) is
@@ -99,9 +104,10 @@ onError, terminalize })` folds the `build → notify → terminalize` give-up
      `mergeInto`, Think keeps its tree upsert. No behavior change.
      While here, hand the already-decoded partial through (closes the old finding
      #4 second-decode). Verify-first; behavior-sensitive; changeset for ai-chat.
-     _Wiggle room: whether (b) lands as a host hook on the adapter vs the codec is
-     open until we start. (c) is not a standalone step — it dissolves into (a)'s
-     seed-then-replace migration; see the 4-step table.)_
+     _Wiggle room: (b) lands as a host hook on the **adapter** (it's recovery policy,
+     not codec/store — confirmed by the spike). (c) is not a standalone step — it
+     dissolves into the (b) consolidation once the merge writes through the
+     `SessionProvider`-subset store; see the 4-step table and the spike result.)_
 2. **Phase 6 e2e audit + Phase 7 docs/release notes** — confirm SIGKILL +
    persistent-state e2e cover the converged behavior for both hosts; then update
    `chat-shared-layer.md`, add the history note, and finalize changesets.
@@ -1605,6 +1611,83 @@ Two alignments keep the chat-recovery seam compatible with that future:
 Net: no scope change. The chat-recovery work stays the proving ground; these notes
 just point its target seam at the platform substrates so the two efforts meet.
 
+### Session-provider alignment spike — result (2026-06)
+
+Ran the spike that gates orphan-persist **(b)** consolidation: read the real
+`SessionProvider` interface (`experimental/memory/session/provider.ts`) and asked
+whether the orphan store-write + target-id resolution can be shaped toward it
+without inventing a second storage abstraction. **Yes — with one refinement to the
+note above.**
+
+Three findings:
+
+1. **The store-write half maps cleanly onto `SessionProvider` as-is.** The orphan
+   writer needs exactly four ops, and the interface already has all four with the
+   right semantics:
+   - `getMessage(id)` — find the existing target row.
+   - `getLatestLeaf()` — Think's tail-of-branch target; ai-chat's "last assistant"
+     is the flat-array analog.
+   - `appendMessage(msg, parentId?)` — **idempotent** (re-appending the same id is a
+     no-op), `parentId: undefined → attach to latest leaf`.
+   - `updateMessage(msg)` — replace-by-id, the merge's write half.
+
+   Methods return `T | Promise<T>`, so the sync DO-SQLite path and an async
+   (Postgres) path both satisfy it.
+
+2. **ai-chat's flat `UIMessage[]` is a _degenerate linear_ `SessionProvider`.**
+   `getMessage`=findIndex, `getLatestLeaf`=last row, `appendMessage`=push (ignore
+   `parentId`; linear), `updateMessage`=replace-by-id. So **both hosts implement one
+   interface** — ai-chat as a linear provider, Think via `AgentSessionProvider`
+   (tree). No chat-only storage abstraction is needed; the "neutral store interface"
+   the [Persist-orphan boundary](#persist-orphan-boundary) note called
+   feasible-but-deferred **already exists** and both shapes reduce to it. This is the
+   green light to design the store-write seam as a `SessionProvider` _subset_ rather
+   than a bespoke hook.
+
+3. **`resolveOrphanTargetId` is _not_ a store method — it's recovery policy above the
+   store** (this corrects the parenthetical in alignment point 1 above, which listed
+   it alongside `getLatestLeaf` as if it were storage). It consults knowledge the
+   store doesn't and shouldn't have: ai-chat reads the **stored stream `message_id`**
+   (#1691); Think falls to `getLatestLeaf`. So it stays a thin **recovery-adapter
+   hook** that _calls_ the provider's `getMessage` / `getLatestLeaf` — keeping the
+   store interface clean (no recovery-specific method leaks in).
+
+Resulting layering (the finish-line shape for orphan-persist):
+
+```ts
+// Shared recovery writer (engine) — host-agnostic:
+const msg = accumulator.toMessage(); // (a) reconstruct — shared, landed
+const targetId = adapter.resolveOrphanTargetId(
+  // (b) policy — adapter hook
+  streamId,
+  msg.id
+);
+const existing = await store.getMessage(targetId); // store read
+const merged = reconcileOrphan(existing, msg); // (c) merge+dedup — shared
+existing // (d) write — store
+  ? await store.updateMessage(merged)
+  : await store.appendMessage(merged);
+
+// store: a SessionProvider subset
+//   ai-chat  → linear provider over the flat cf_ai_chat_agent_messages array
+//   Think    → AgentSessionProvider (tree)
+```
+
+Scope guardrails confirmed: "shape toward" means **align signatures** (same names +
+semantics as the `SessionProvider` subset) so a future unification is a rename, not a
+redesign. It does **not** mean migrating ai-chat onto Session storage now, nor
+promoting `SessionProvider` out of `experimental/` — both still non-goals.
+
+Out of scope / not conflated: `chat-sdk`'s `ChatSdkStateAdapter` is a separate
+concern — a `StateAdapter` for the external `chat` package that shards
+thread/channel/message-history **state** across sub-agents (key-prefix sharding),
+not the message store this seam targets.
+
+Net for the plan: **(b) consolidation is unblocked.** Build `resolveOrphanTargetId`
+as an adapter hook and the store-write as a four-method `SessionProvider`-subset
+seam; **(c)** merge+dedup and **(d)** upsert ride along on that shape (they are
+already shared / dedup-safe per the idempotency finding).
+
 ## Chat-layer extraction map (2026-06 design review)
 
 Before starting Phase 5, a design review mapped **all** parallel chat machinery
@@ -2132,6 +2215,29 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 5 — Session-provider alignment spike: orphan-persist (b) unblocked
+  (design, no code)_ — Ran the spike that gated the (b) consolidation: read the real
+  `SessionProvider` interface (`experimental/memory/session/provider.ts`) to decide
+  whether the orphan store-write can be shaped toward it without a second storage
+  abstraction. **Result: yes.** (1) The store-write half needs exactly four ops and
+  the interface already has them with the right semantics — `getMessage`,
+  `getLatestLeaf`, `appendMessage` (idempotent, `parentId:undefined→latest leaf`),
+  `updateMessage`; methods return `T | Promise<T>` so sync DO-SQLite and async
+  Postgres both fit. (2) **ai-chat's flat `UIMessage[]` is a degenerate _linear_
+  `SessionProvider`** (findIndex / last / push / replace-by-id), so both hosts reduce
+  to one interface — ai-chat linear, Think `AgentSessionProvider` (tree); the
+  "neutral store interface" the Persist-orphan note deferred already exists. (3)
+  **`resolveOrphanTargetId` is recovery _policy_, not a store method** (corrects
+  alignment point 1, which had listed it as storage): it reads the stored stream
+  `message_id` (#1691, ai-chat) or `getLatestLeaf` (Think) — knowledge the store
+  shouldn't have — so it stays a thin adapter hook that _calls_ the provider. `chat-sdk`'s
+  `ChatSdkStateAdapter` (subagent-sharded thread/history _state_ for the external
+  `chat` package) confirmed orthogonal, not conflated. Recorded the finish-line
+  layering (reconstruct → `resolveOrphanTargetId` → `getMessage` → merge →
+  `update`/`append`) as the (b)/(c)/(d) target. Scope guardrails hold: "shape toward"
+  = align signatures (a `SessionProvider` _subset_), **not** migrate ai-chat onto
+  Session storage or promote it out of `experimental/` (both still non-goals). See
+  the _Session-provider alignment spike — result_ note.
 - _Phase 5 / Tier-2 — orphan-persist step (a): ai-chat reconstruction onto the
   shared `StreamAccumulator` (LANDED)_ — `AIChatAgent._persistOrphanedStream` now
   rebuilds the partial via the shared `StreamAccumulator` instead of a hand-rolled
