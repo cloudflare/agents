@@ -3,7 +3,6 @@
  * Pure (no Workers runtime) — runs in plain node vitest.
  */
 import { EventType, type StreamChunk } from "@tanstack/ai/client";
-import { partialHasSettledToolResults } from "agents/chat";
 import { describe, expect, it } from "vitest";
 import { TanStackRecoveryCodec } from "./tanstack-codec";
 
@@ -78,7 +77,8 @@ describe("TanStackRecoveryCodec.toRecoveryPartial", () => {
     ];
     expect(codec.toRecoveryPartial(bodies)).toEqual({
       text: "Hello, world!",
-      parts: []
+      parts: [],
+      hasSettledToolResults: false
     });
   });
 
@@ -98,16 +98,24 @@ describe("TanStackRecoveryCodec.toRecoveryPartial", () => {
     const bodies = [content("m", "kept prefix "), '{"type":"TEXT_MESSAGE_CONT'];
     expect(codec.toRecoveryPartial(bodies)).toEqual({
       text: "kept prefix ",
-      parts: []
+      parts: [],
+      hasSettledToolResults: false
     });
   });
 
   it("returns an empty partial for no bodies (crash before first delta)", () => {
-    expect(codec.toRecoveryPartial([])).toEqual({ text: "", parts: [] });
+    expect(codec.toRecoveryPartial([])).toEqual({
+      text: "",
+      parts: [],
+      hasSettledToolResults: false
+    });
   });
 });
 
-describe("TanStackRecoveryCodec tool-part reconstruction", () => {
+// The codec reconstructs tool parts in its OWN AG-UI-native shape (NOT AI SDK
+// `UIMessage` parts) and decides `hasSettledToolResults` itself. The shape below
+// is the harness's `TanStackToolPart`; the engine never inspects it.
+describe("TanStackRecoveryCodec tool-part reconstruction (AG-UI-native)", () => {
   it("rebuilds a settled tool part from START → ARGS → END → RESULT", () => {
     const bodies = [
       content("m", "looking up "),
@@ -122,14 +130,15 @@ describe("TanStackRecoveryCodec tool-part reconstruction", () => {
     expect(partial.text).toBe("looking up the weather");
     expect(partial.parts).toEqual([
       {
-        type: "tool-get_weather",
         toolCallId: "call-1",
         toolName: "get_weather",
-        state: "output-available",
+        argsBuffer: '{"city":"Lisbon"}',
         input: { city: "Lisbon" },
+        hasOutput: true,
         output: "sunny, 24C"
       }
     ]);
+    expect(partial.hasSettledToolResults).toBe(true);
   });
 
   it("leaves a tool torn before its RESULT unsettled (no output)", () => {
@@ -142,13 +151,15 @@ describe("TanStackRecoveryCodec tool-part reconstruction", () => {
     const partial = codec.toRecoveryPartial(bodies);
     expect(partial.parts).toEqual([
       {
-        type: "tool-get_weather",
         toolCallId: "call-1",
         toolName: "get_weather",
-        state: "input-available",
-        input: { city: "Lisbon" }
+        argsBuffer: '{"city":"Lisbon"}',
+        input: { city: "Lisbon" },
+        hasOutput: false,
+        output: undefined
       }
     ]);
+    expect(partial.hasSettledToolResults).toBe(false);
   });
 
   it("stops at a torn final write, preserving an already-settled tool part", () => {
@@ -161,17 +172,15 @@ describe("TanStackRecoveryCodec tool-part reconstruction", () => {
     ];
     const partial = codec.toRecoveryPartial(bodies);
     expect(partial.parts).toHaveLength(1);
-    expect(
-      (partial.parts[0] as { state: string; output: unknown }).output
-    ).toBe("sunny");
+    expect(partial.hasSettledToolResults).toBe(true);
   });
 });
 
-// The whole point of reconstructing `parts`: the SHARED engine gate keyed off
-// them (`partialHasSettledToolResults`) preserves a foreign tool's completed
-// work under `{ persist: false }`. These assert the gate reads AG-UI-derived
-// parts exactly as it reads AI-SDK ones.
-describe("partialHasSettledToolResults over AG-UI-reconstructed parts", () => {
+// The whole point of computing `hasSettledToolResults` in the codec: the SHARED
+// engine persist gate consumes that boolean (NOT an AI-SDK part shape) to
+// preserve a foreign tool's completed work under `{ persist: false }`. The codec
+// owns the determination for its own vocabulary.
+describe("TanStackRecoveryCodec.hasSettledToolResults", () => {
   it("is TRUE once a TOOL_CALL_RESULT settled the tool", () => {
     const partial = codec.toRecoveryPartial([
       toolStart("call-1", "get_weather"),
@@ -179,7 +188,7 @@ describe("partialHasSettledToolResults over AG-UI-reconstructed parts", () => {
       toolEnd("call-1"),
       toolResult("call-1", "sunny")
     ]);
-    expect(partialHasSettledToolResults(partial.parts)).toBe(true);
+    expect(partial.hasSettledToolResults).toBe(true);
   });
 
   it("is FALSE for a tool torn before its result", () => {
@@ -188,12 +197,12 @@ describe("partialHasSettledToolResults over AG-UI-reconstructed parts", () => {
       toolArgs("call-1", "{}"),
       toolEnd("call-1")
     ]);
-    expect(partialHasSettledToolResults(partial.parts)).toBe(false);
+    expect(partial.hasSettledToolResults).toBe(false);
   });
 
   it("is FALSE for a text-only partial", () => {
     const partial = codec.toRecoveryPartial([content("m", "no tools here")]);
-    expect(partialHasSettledToolResults(partial.parts)).toBe(false);
+    expect(partial.hasSettledToolResults).toBe(false);
   });
 });
 

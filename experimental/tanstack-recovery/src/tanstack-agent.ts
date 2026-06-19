@@ -50,7 +50,6 @@ import {
   cleanupStreamBuffers,
   createChatFiberSnapshot,
   notifyChatRecoveryExhausted,
-  partialHasSettledToolResults,
   pendingChatTerminal,
   readChatRecoveryProgress,
   recordChatTerminal,
@@ -259,8 +258,9 @@ export class TanStackAgent extends Agent<Env> {
     const bodies = this._resumableStream
       .getStreamChunks(streamId)
       .map((chunk) => chunk.body);
-    const { text, parts } = this._codec.toRecoveryPartial(bodies);
-    if (partialHasSettledToolResults(parts)) {
+    const { text, hasSettledToolResults } =
+      this._codec.toRecoveryPartial(bodies);
+    if (hasSettledToolResults) {
       await this.ctx.storage.put(PARTIAL_SETTLED_TOOL_KEY, true);
     }
     if (!text) return;
@@ -739,7 +739,10 @@ export class TanStackAgent extends Agent<Env> {
           incident,
           config,
           partialText: partial.text,
-          partialParts: partial.parts,
+          // The harness has no AI-SDK `UIMessage` parts (its parts are AG-UI
+          // native, opaque to the engine); the exhausted-context parts surface
+          // is AI-SDK-typed, so pass empty rather than fabricating one.
+          partialParts: [],
           streamId,
           createdAt
         });

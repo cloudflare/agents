@@ -24,7 +24,7 @@
 
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
-import type { ChatRecoveryCodec, MessagePart } from "agents/chat";
+import type { ChatRecoveryCodec, RecoveryPartial } from "agents/chat";
 
 /** The buffer-worthy subset of pi's `AgentEvent` stream (carries text progress). */
 type BufferedPiEvent = Extract<
@@ -120,13 +120,13 @@ export class PiRecoveryCodec implements ChatRecoveryCodec {
 
   /**
    * Adapt the decoded pi partial to the engine's `RecoveryPartial`. Pi text
-   * turns produce no tool parts, so `parts` is empty — the engine's settled-tool
-   * persist gate (`partialHasSettledToolResults`) therefore reads `false`, which
-   * is correct for a text-only turn.
+   * turns produce no tool parts, so `parts` is empty and `hasSettledToolResults`
+   * is `false` — correct for a text-only turn, and the engine consumes only that
+   * boolean (never a part shape), so pi stays vocabulary-agnostic too.
    */
-  toRecoveryPartial(bodies: string[]): { text: string; parts: MessagePart[] } {
+  toRecoveryPartial(bodies: string[]): RecoveryPartial {
     const { text } = this.decodePartial(bodies);
-    return { text, parts: [] };
+    return { text, parts: [], hasSettledToolResults: false };
   }
 
   /**

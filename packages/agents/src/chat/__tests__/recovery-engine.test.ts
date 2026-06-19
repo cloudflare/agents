@@ -4,7 +4,6 @@ import {
   buildChatRecoveryExhaustedContext,
   chatRecoverySchedulePolicy,
   notifyChatRecoveryExhausted,
-  partialHasSettledToolResults,
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,
   type ChatRecoveryScheduleCallback,
@@ -13,6 +12,7 @@ import {
   type RecoveryPartial,
   type ResolvedRecoveryStream
 } from "../recovery-engine";
+import { partialHasSettledToolResults } from "../recovery-codec";
 import type {
   ChatRecoveryExhaustedContext,
   ChatRecoveryOptions,
@@ -184,7 +184,11 @@ describe("ChatRecoveryEngine.beginIncident (fake adapter)", () => {
       },
       exhaustChatRecovery: () => Promise.resolve(),
       resolveRecoveryStream: () => ({ streamId: "", streamStillActive: false }),
-      getPartialStreamText: () => ({ text: "", parts: [] }),
+      getPartialStreamText: () => ({
+        text: "",
+        parts: [],
+        hasSettledToolResults: false
+      }),
       activeChatRecoveryRootRequestId: () => undefined,
       onGiveUpBookkeepingError: () => {}
     };
@@ -323,7 +327,11 @@ describe("ChatRecoveryEngine.updateIncident (fake adapter)", () => {
       onShouldKeepRecoveringError: () => {},
       exhaustChatRecovery: () => Promise.resolve(),
       resolveRecoveryStream: () => ({ streamId: "", streamStillActive: false }),
-      getPartialStreamText: () => ({ text: "", parts: [] }),
+      getPartialStreamText: () => ({
+        text: "",
+        parts: [],
+        hasSettledToolResults: false
+      }),
       activeChatRecoveryRootRequestId: () => undefined,
       onGiveUpBookkeepingError: () => {}
     };
@@ -497,7 +505,11 @@ describe("ChatRecoveryEngine.scheduleRecovery (fake adapter)", () => {
       onShouldKeepRecoveringError: () => {},
       exhaustChatRecovery: () => Promise.resolve(),
       resolveRecoveryStream: () => ({ streamId: "", streamStillActive: false }),
-      getPartialStreamText: () => ({ text: "", parts: [] }),
+      getPartialStreamText: () => ({
+        text: "",
+        parts: [],
+        hasSettledToolResults: false
+      }),
       activeChatRecoveryRootRequestId: () => undefined,
       onGiveUpBookkeepingError: () => {}
     };
@@ -676,7 +688,11 @@ describe("ChatRecoveryEngine.rescheduleAfterStableTimeout (fake adapter)", () =>
       onShouldKeepRecoveringError: () => {},
       exhaustChatRecovery: () => Promise.resolve(),
       resolveRecoveryStream: () => ({ streamId: "", streamStillActive: false }),
-      getPartialStreamText: () => ({ text: "", parts: [] }),
+      getPartialStreamText: () => ({
+        text: "",
+        parts: [],
+        hasSettledToolResults: false
+      }),
       activeChatRecoveryRootRequestId: () => undefined,
       onGiveUpBookkeepingError: () => {}
     };
@@ -882,7 +898,13 @@ describe("ChatRecoveryEngine.exhaustRecoveryGiveUp (fake adapter)", () => {
       },
       getPartialStreamText: (streamId) => {
         partialArgs.push(streamId);
-        return options.partial ?? { text: "", parts: [] };
+        return (
+          options.partial ?? {
+            text: "",
+            parts: [],
+            hasSettledToolResults: false
+          }
+        );
       },
       activeChatRecoveryRootRequestId: () => options.activeRoot,
       onGiveUpBookkeepingError: (phase, error) => {
@@ -925,7 +947,7 @@ describe("ChatRecoveryEngine.exhaustRecoveryGiveUp (fake adapter)", () => {
   it("terminalizes a stored incident BEFORE sealing it, threading the reason", async () => {
     const fake = makeFakeAdapter({
       streamId: "stream-1",
-      partial: { text: "hi", parts: [] }
+      partial: { text: "hi", parts: [], hasSettledToolResults: false }
     });
     const engine = new ChatRecoveryEngine(fake.adapter);
     const { incidentId, key } = seed(fake.storage);
@@ -949,7 +971,11 @@ describe("ChatRecoveryEngine.exhaustRecoveryGiveUp (fake adapter)", () => {
     // createdAt is the (preserved) firstSeenAt of the stored incident.
     expect(call.createdAt).toBe(1_000);
     expect(call.streamId).toBe("stream-1");
-    expect(call.partial).toEqual({ text: "hi", parts: [] });
+    expect(call.partial).toEqual({
+      text: "hi",
+      parts: [],
+      hasSettledToolResults: false
+    });
     // Stream id resolved from the recovery ROOT; partial read for that stream.
     expect(fake.streamIdArgs).toEqual(["root-1"]);
     expect(fake.partialArgs).toEqual(["stream-1"]);
@@ -1083,7 +1109,11 @@ describe("ChatRecoveryEngine.exhaustRecoveryGiveUp (fake adapter)", () => {
 
     expect(fake.partialArgs).toHaveLength(0);
     expect(fake.exhausts[0].streamId).toBe("");
-    expect(fake.exhausts[0].partial).toEqual({ text: "", parts: [] });
+    expect(fake.exhausts[0].partial).toEqual({
+      text: "",
+      parts: [],
+      hasSettledToolResults: false
+    });
   });
 });
 
@@ -1370,7 +1400,11 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     const exhausted: Array<{ streamId: string; createdAt: number }> = [];
     const config = resolveChatRecoveryConfig(undefined);
 
-    const partial: RecoveryPartial = options.partial ?? { text: "", parts: [] };
+    const partial: RecoveryPartial = options.partial ?? {
+      text: "",
+      parts: [],
+      hasSettledToolResults: false
+    };
     const stream: ResolvedRecoveryStream = options.stream ?? {
       streamId: "s1",
       streamStillActive: true
@@ -1580,7 +1614,11 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     const h = makeHarness({
       basePersist: true,
       onChatRecovery: { persist: false },
-      partial: { text: "hi", parts: [{ type: "text", text: "hi" } as never] }
+      partial: {
+        text: "hi",
+        parts: [{ type: "text", text: "hi" }],
+        hasSettledToolResults: false
+      }
     });
     await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
     expect(h.persisted).toEqual([]);
@@ -1590,9 +1628,12 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
     const h = makeHarness({
       basePersist: true,
       onChatRecovery: { persist: false },
+      // The codec — not the engine — decides settledness; the engine consumes
+      // only the precomputed boolean (so the seam stays vocabulary-agnostic).
       partial: {
         text: "",
-        parts: [{ type: "tool-foo", state: "output-available" } as never]
+        parts: [{ type: "tool-foo", state: "output-available" }],
+        hasSettledToolResults: true
       }
     });
     await h.engine.handleChatFiberRecovery(h.ctx, h.wake);
@@ -1605,7 +1646,8 @@ describe("ChatRecoveryEngine.handleChatFiberRecovery (fake adapter + wake hooks)
       onChatRecovery: {},
       partial: {
         text: "",
-        parts: [{ type: "tool-foo", state: "output-available" } as never]
+        parts: [{ type: "tool-foo", state: "output-available" }],
+        hasSettledToolResults: true
       }
     });
     await h.engine.handleChatFiberRecovery(h.ctx, h.wake);

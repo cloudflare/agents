@@ -9503,7 +9503,10 @@ export class Think<
   private async _exhaustChatRecovery(
     incident: ChatRecoveryIncident,
     config: ResolvedChatRecoveryConfig,
-    partial: { text: string; parts: MessagePart[] },
+    // `parts` is the engine's vocabulary-agnostic `unknown[]`; Think owns the AI
+    // SDK `UIMessage` vocabulary, so it re-asserts `MessagePart[]` at the
+    // user-facing exhausted-context edge below.
+    partial: { text: string; parts: unknown[] },
     streamId: string,
     createdAt: number
   ): Promise<void> {
@@ -9515,7 +9518,7 @@ export class Think<
       incident,
       config,
       partialText: partial.text,
-      partialParts: partial.parts,
+      partialParts: partial.parts as MessagePart[],
       streamId,
       createdAt
     });
@@ -9683,7 +9686,9 @@ export class Think<
           streamId: input.streamId,
           requestId: input.requestId,
           partialText: input.partial.text,
-          partialParts: input.partial.parts,
+          // The engine seam is vocabulary-agnostic (`unknown[]`); Think owns the
+          // AI SDK parts vocabulary, so re-assert it for the user-facing context.
+          partialParts: input.partial.parts as MessagePart[],
           recoveryData: input.recoveryData,
           messages: [...this.messages],
           lastBody: input.snapshot?.lastBody ?? this._lastBody,
@@ -9905,7 +9910,7 @@ export class Think<
   private async _recoverablePreStreamUserId(
     snapshot: ChatFiberSnapshot | null,
     streamId: string,
-    partial: { text: string; parts: MessagePart[] }
+    partial: { text: string; parts: unknown[] }
   ): Promise<string | null> {
     if (
       !snapshot ||
@@ -10586,6 +10591,7 @@ export class Think<
   private _getPartialStreamText(streamId: string): {
     text: string;
     parts: MessagePart[];
+    hasSettledToolResults: boolean;
   } {
     return aiSdkRecoveryCodec.toRecoveryPartial(
       this._resumableStream.getStreamChunks(streamId).map((chunk) => chunk.body)

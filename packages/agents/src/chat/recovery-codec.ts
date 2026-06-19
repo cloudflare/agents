@@ -14,14 +14,50 @@
  */
 
 import { getPartialStreamText } from "./message-builder";
+import type { MessagePart } from "./message-builder";
 import type { RecoveryPartial } from "./recovery-engine";
+
+/**
+ * Whether a reconstructed AI SDK `UIMessage` parts array carries any settled
+ * (provider-accepted) tool result — the completed, often non-idempotent work
+ * that a `{ persist: false }` recovery return would otherwise silently discard
+ * (#1631). A part counts as settled when it is a tool part (`tool-*` /
+ * `dynamic-tool`) carrying an `output`/`result`, or whose state reached a
+ * terminal `output-{available,error,denied}`.
+ *
+ * This is the AI SDK codec's implementation of the per-vocabulary "did this
+ * partial settle a tool?" question. It lives with {@link AISDKRecoveryCodec}
+ * (not in the engine) because the codec owns the part vocabulary — the engine
+ * only ever reads the precomputed `RecoveryPartial.hasSettledToolResults`
+ * boolean and never names a part type. Foreign codecs (e.g. AG-UI) compute the
+ * same boolean from their own chunk vocabulary without producing AI SDK parts.
+ */
+export function partialHasSettledToolResults(parts: MessagePart[]): boolean {
+  return parts.some((part) => {
+    const record = part as Record<string, unknown>;
+    const type = typeof record.type === "string" ? record.type : "";
+    if (!(type.startsWith("tool-") || type === "dynamic-tool")) return false;
+    if ("output" in record || "result" in record) return true;
+    const state = typeof record.state === "string" ? record.state : "";
+    return (
+      state === "output-available" ||
+      state === "output-error" ||
+      state === "output-denied"
+    );
+  });
+}
 
 /**
  * Reconstructs the partial assistant state of an interrupted turn from its
  * stored `ResumableStream` chunk bodies (oldest-first).
  */
 export interface ChatRecoveryCodec {
-  /** Replay the stored chunk bodies into the engine's `RecoveryPartial`. */
+  /**
+   * Replay the stored chunk bodies into the engine's `RecoveryPartial`. The
+   * codec — not the engine — both reconstructs `parts` (in its own vocabulary,
+   * opaque to the engine) AND decides `hasSettledToolResults`, so the engine
+   * never names a part type.
+   */
   toRecoveryPartial(bodies: string[]): RecoveryPartial;
   /**
    * Whether a stored chunk of this wire `type` represents genuinely new produced
@@ -41,8 +77,24 @@ export interface ChatRecoveryCodec {
  * {@link aiSdkRecoveryCodec} singleton rather than constructing per call.
  */
 export class AISDKRecoveryCodec implements ChatRecoveryCodec {
-  toRecoveryPartial(bodies: string[]): RecoveryPartial {
-    return getPartialStreamText(bodies.map((body) => ({ body })));
+  // Return type is intentionally INFERRED (not annotated `RecoveryPartial`) so it
+  // keeps the concrete `parts: MessagePart[]`, which the AI SDK hosts' own
+  // `_getPartialStreamText` callers rely on. It is still assignable to
+  // `RecoveryPartial` (whose `parts` is `unknown[]`), so the engine seam stays
+  // vocabulary-agnostic while AI SDK callers keep their typed parts.
+  toRecoveryPartial(bodies: string[]): {
+    text: string;
+    parts: MessagePart[];
+    hasSettledToolResults: boolean;
+  } {
+    const { text, parts } = getPartialStreamText(
+      bodies.map((body) => ({ body }))
+    );
+    return {
+      text,
+      parts,
+      hasSettledToolResults: partialHasSettledToolResults(parts)
+    };
   }
 
   isProgressChunk(type: string | undefined): boolean {

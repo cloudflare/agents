@@ -11,6 +11,7 @@ export {
 export {
   AISDKRecoveryCodec,
   aiSdkRecoveryCodec,
+  partialHasSettledToolResults,
   type ChatRecoveryCodec
 } from "./recovery-codec";
 
@@ -171,7 +172,6 @@ export {
   ChatRecoveryEngine,
   buildChatRecoveryExhaustedContext,
   notifyChatRecoveryExhausted,
-  partialHasSettledToolResults,
   type ChatRecoveryScheduleReason,
   type ChatRecoveryScheduleCallback,
   type ChatRecoveryAdapter,

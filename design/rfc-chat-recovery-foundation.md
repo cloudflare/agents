@@ -1145,10 +1145,10 @@ net-new coverage, not a duplicate).
 - **The tool-`parts` codec path** that pi left unproven (pi text turns are always
   `parts:[]`): a TanStack AI tool call streaming would finally exercise `MessagePart`
   reconstruction + the settled-tool persist gate (`partialHasSettledToolResults`) end-to-end.
-  _(Done — the harness now reconstructs AG-UI `TOOL_CALL_*` chunks into tool parts and proves
-  the gate keeps a settled-tool partial under `{ persist: false }` while dropping a text-only
+  _(Done — the harness now reconstructs AG-UI `TOOL_CALL_\*`chunks into tool parts and proves
+the gate keeps a settled-tool partial under`{ persist: false }` while dropping a text-only
   one; see the newest progress-log entry. The real-Workers-AI provider run remains the only
-  open codec axis.)_
+  open codec axis.)\_
 
 **Build route (decided).** Two routes were considered:
 
@@ -1210,9 +1210,11 @@ warranted yet. It would let foreign clients drop the bridge but touches publishe
 grows. Likewise still open: a **real Workers AI provider** run (the documented one-line swap)
 and **Route 2** (front `AIChatAgent` itself with a TanStack client). The **tool-`parts` codec
 path** (once text-only here, like pi) is now **closed** — the harness reconstructs AG-UI
-`TOOL_CALL_*` chunks into AI-SDK tool parts and proves `partialHasSettledToolResults` keeps a
-settled-tool partial under `{ persist: false }` while dropping a text-only one (see the newest
-progress-log entry).
+`TOOL_CALL_*` chunks into its own **AG-UI-native** tool parts (the follow-up `RecoveryPartial`
+refactor removed the earlier AI-SDK `MessagePart` fabrication and made the engine seam
+agnostic by type), computes `hasSettledToolResults` itself, and proves the engine's settled-tool
+gate keeps that partial under `{ persist: false }` while dropping a text-only one (see the two
+newest progress-log entries).
 
 **Repo dependency note.** `@tanstack/ai-client` / `@tanstack/ai-react` (which expose the
 `SubscribeConnectionAdapter` / `ChatClient` / `useChat` surface this harness needs) require
@@ -1749,6 +1751,40 @@ guard against shipping a subtly broken recovery path.
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Phase 5 / Second harness — making the engine seam genuinely AI-SDK-agnostic (`RecoveryPartial` refactor)_ —
+  Review of the tool-`parts` entry below caught that its "vocabulary-agnostic" claim was **overstated
+  at the type level**: the engine seam `RecoveryPartial` was typed `{ text; parts: MessagePart[] }`,
+  where `MessagePart = UIMessage["parts"][number]` — i.e. the AI SDK's UI-message part type. The
+  settled-tool gate was _runtime_ duck-typed (it read `type`/`output`/`state` off
+  `Record<string, unknown>`, which is why the harness e2e passed), but to even **typecheck**, the
+  foreign AG-UI codec had to fabricate AI-SDK parts (`… as unknown as MessagePart`). So the engine
+  was text-agnostic + protocol-agnostic but **parts-vocabulary-coupled to AI SDK**, and the foreign
+  codec was "converting to AI SDK format" — the exact smell the genericity harnesses exist to surface.
+  **Fix (the codec owns the vocabulary; the engine owns nothing about parts):** `RecoveryPartial` is
+  now `{ text: string; parts: unknown[]; hasSettledToolResults: boolean }`. The engine's never-drop
+  clause reads the precomputed `partial.hasSettledToolResults` boolean and **no longer imports a part
+  type at all** (`recovery-engine.ts` dropped its `MessagePart` import). The `partialHasSettledToolResults`
+  predicate moved out of the engine into `recovery-codec.ts` as the **AI SDK codec's** helper
+  (`AISDKRecoveryCodec.toRecoveryPartial` computes the boolean from real `UIMessage` parts; its return
+  stays concretely typed `MessagePart[]` so AI-SDK hosts keep their typed parts, and is still
+  assignable to the agnostic seam). Foreign codecs compute the same boolean from their own chunks: the
+  **TanStack codec now returns AG-UI-native `TanStackToolPart`s and decides settledness via `hasOutput`
+  — zero `MessagePart` fabrication, zero AI-SDK coupling**; pi returns `false`. AI-SDK hosts
+  (`AIChatAgent`, `Think`) re-assert `MessagePart[]` with a single cast at the user-facing
+  exhausted-/recovery-context edge (legitimate: those hosts genuinely own the AI SDK vocabulary), and
+  their pre-stream classify helpers widened to `parts: unknown[]` (they only read `parts.length`).
+  **Files:** published `agents` (`recovery-engine.ts`, `recovery-codec.ts`, `chat/index.ts` export
+  repoint), `ai-chat/index.ts` + `think.ts` (edge casts + `_getPartialStreamText` boolean), both
+  harness codecs/agents, and `recovery-engine.test.ts` (the gate tests now set `hasSettledToolResults`
+  on the partial — proving the engine consumes the boolean, not a part shape). **Net:** the engine seam
+  is now wire-vocabulary-agnostic by _type_, not just at runtime; the codec is the single owner of both
+  parts reconstruction AND the settled-tool determination. Behavior-neutral (the AI SDK path computes
+  the identical boolean it used to), `agents/chat` is `@internal`, so **no changeset**. Tests: engine
+  unit (gate suite) ✅, `tanstack-codec` unit **20** (now asserts `hasSettledToolResults` directly,
+  parts in AG-UI-native shape) ✅, `tanstack-recovery` e2e **4/4** ✅, `pi-recovery` e2e **1/1** ✅,
+  `pnpm run check` ✅ (113 projects). **Still open:** unchanged from below (real Workers AI provider
+  run; Route 2).
+
 - _Phase 5 / Second harness — tool-`parts` codec path + settled-tool persist gate (foreign vocabulary)_ —
   Closed the last codec gap both genericity harnesses left open: until now the pi fixture AND
   the TanStack harness were **text-only** (`parts: []`), so the engine's shared settled-tool
@@ -1766,7 +1802,10 @@ the change, and the key review findings.
   finding:** the settled-tool persist gate is **vocabulary-agnostic** — it keyed off the
   AG-UI-reconstructed parts byte-identically to AI-SDK ones, with the SAME shared predicate and
   **no engine change**. The codec — not the engine — owns the chunk→parts contract, exactly as
-  Tier-2 claimed. **Proof:** two SIGKILL e2es sharing one `persist: false` policy and differing
+  Tier-2 claimed. _(**Superseded / corrected by the entry above:** this was true only at *runtime*
+  — the `RecoveryPartial.parts` seam was still TYPED as AI-SDK `MessagePart[]`, so this codec had to
+  fabricate AI-SDK parts to typecheck. The follow-up refactor made the seam agnostic by type too.)_
+  **Proof:** two SIGKILL e2es sharing one `persist: false` policy and differing
   ONLY in whether the turn settled a tool: the **tool** turn's partial SURVIVES the
   `{ persist: false }` drop (gate override → `recoveredVia === "continue"`,
   `partialHadSettledTool === true`, `prefix + suffix === total`) while the **text-only** turn's
@@ -3534,8 +3573,8 @@ Two correctness caveats the fixture also exposed, to record honestly:
   (`partialHasSettledToolResults`) was only ever exercised through the AI SDK adapter. A
   turn carrying tool calls would be needed to prove the `MessagePart` seam end-to-end
   off `UIMessage`. _(Since closed — not in pi, but in the TanStack harness: it reconstructs
-  AG-UI `TOOL_CALL_*` chunks into `MessagePart`s and proves the gate keeps a settled-tool
-  partial under `{ persist: false }`. See the newest progress-log entry.)_
+  AG-UI `TOOL_CALL_\*`chunks into`MessagePart`s and proves the gate keeps a settled-tool
+partial under `{ persist: false }`. See the newest progress-log entry.)\_
 - **The fixture's continuation is simulated, not pi-native.** `_resumeRecoveredTurn`
   recomputes the full reply (`replyFor`) and primes the faux model with
   `full.slice(prefix.length)`; a real pi `continue()` would resume generation from the

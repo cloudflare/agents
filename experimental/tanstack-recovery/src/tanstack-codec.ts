@@ -7,28 +7,27 @@
  * its own `AgentEvent` vocabulary; this one replays the AG-UI `StreamChunk`
  * vocabulary a TanStack AI client/provider speaks (`TEXT_MESSAGE_CONTENT` deltas,
  * `TOOL_CALL_*`, …). All three feed the engine the identical `RecoveryPartial`
- * shape (`{ text, parts }`), so the engine never sees the wire vocabulary — the
- * codec owns the chunk-shape differences. This is the second genericity axis the
- * pi fixture left untested: a foreign streaming chunk vocabulary, not pi's events
- * (rfc-chat-recovery-foundation, Phase 5 second harness).
+ * shape (`{ text, parts, hasSettledToolResults }`), so the engine never sees the
+ * wire vocabulary — the codec owns the chunk-shape differences. This is the
+ * second genericity axis the pi fixture left untested: a foreign streaming chunk
+ * vocabulary, not pi's events (rfc-chat-recovery-foundation, Phase 5 second harness).
  *
  * The codec rebuilds BOTH halves of a recovered partial: assistant `text` (from
  * `TEXT_MESSAGE_CONTENT` deltas) and tool `parts` (from the AG-UI
- * `TOOL_CALL_START → ARGS → END → RESULT` sub-protocol, materialized into the
- * AI-SDK `UIMessage` tool-part shape). Reconstructing `parts` is what lets the
- * engine's SHARED settled-tool persist gate — `partialHasSettledToolResults` —
- * preserve a foreign tool's completed (non-idempotent) result even under a
- * `{ persist: false }` recovery policy, exactly as it does for AI-SDK tools.
+ * `TOOL_CALL_START → ARGS → END → RESULT` sub-protocol) — in its OWN AG-UI-native
+ * shape, NOT AI SDK's `UIMessage` parts. Because the engine seam is
+ * vocabulary-agnostic (`parts: unknown[]` + a precomputed `hasSettledToolResults`
+ * boolean), the codec decides settledness itself and never fabricates an AI-SDK
+ * part. That boolean is what lets the engine's SHARED settled-tool persist gate
+ * preserve a foreign tool's completed (non-idempotent) result under a
+ * `{ persist: false }` recovery policy, exactly as it does for AI-SDK tools —
+ * with zero AI-SDK coupling in this codec.
  *
  * @internal Validation fixture, not a published package.
  */
 
 import { EventType, type StreamChunk } from "@tanstack/ai/client";
-import type {
-  ChatRecoveryCodec,
-  MessagePart,
-  RecoveryPartial
-} from "agents/chat";
+import type { ChatRecoveryCodec, RecoveryPartial } from "agents/chat";
 
 /** Parse one stored chunk body back into an AG-UI `StreamChunk`, or `null`. */
 function decodeChunk(body: string): StreamChunk | null {
@@ -51,11 +50,15 @@ function parseArgs(buffer: string): unknown {
 }
 
 /**
- * A tool part under construction while replaying AG-UI `TOOL_CALL_*` chunks.
- * `argsBuffer` accumulates the streamed `TOOL_CALL_ARGS` deltas so the final
- * input can be parsed once on `TOOL_CALL_END`.
+ * A reconstructed AG-UI tool part — the harness's OWN vocabulary, NOT AI SDK's
+ * `UIMessage` part shape. The engine seam (`RecoveryPartial.parts`) is opaque
+ * (`unknown[]`), so the codec never has to fabricate AI-SDK parts; it returns
+ * readable AG-UI-native parts and decides settledness itself (`hasOutput`). This
+ * is the whole point of the agnostic seam: the foreign codec owns its vocabulary
+ * end-to-end. `argsBuffer` accumulates the streamed `TOOL_CALL_ARGS` deltas so
+ * the input can be parsed once on `TOOL_CALL_END`.
  */
-interface ToolPartDraft {
+interface TanStackToolPart {
   toolCallId: string;
   toolName: string;
   argsBuffer: string;
@@ -64,51 +67,24 @@ interface ToolPartDraft {
   output: unknown;
 }
 
-/**
- * Materialize a draft into the AI-SDK `UIMessage` tool-part shape the engine's
- * settled-tool gate (`partialHasSettledToolResults`) reads: `type: "tool-<name>"`,
- * `output` present (and `state: "output-available"`) once a `TOOL_CALL_RESULT`
- * landed, else an in-flight `input-available` part with no output. The byte
- * shape mirrors `applyChunkToParts` in `agents/chat` so the SAME shared
- * predicate classifies both vocabularies identically.
- */
-function materializeToolPart(draft: ToolPartDraft): MessagePart {
-  if (draft.hasOutput) {
-    return {
-      type: `tool-${draft.toolName}`,
-      toolCallId: draft.toolCallId,
-      toolName: draft.toolName,
-      state: "output-available",
-      input: draft.input,
-      output: draft.output
-    } as unknown as MessagePart;
-  }
-  return {
-    type: `tool-${draft.toolName}`,
-    toolCallId: draft.toolCallId,
-    toolName: draft.toolName,
-    state: "input-available",
-    input: draft.input
-  } as unknown as MessagePart;
-}
-
 export class TanStackRecoveryCodec implements ChatRecoveryCodec {
   /**
    * Replay the stored AG-UI chunk bodies (oldest-first) into accumulated
-   * assistant text AND reconstructed tool `parts`. `TEXT_MESSAGE_CONTENT` deltas
-   * concatenate into `text`; the `TOOL_CALL_*` sub-protocol
+   * assistant text AND reconstructed tool `parts` (in the harness's OWN AG-UI
+   * vocabulary — no AI-SDK `MessagePart` fabrication). `TEXT_MESSAGE_CONTENT`
+   * deltas concatenate into `text`; the `TOOL_CALL_*` sub-protocol
    * (`START → ARGS* → END → RESULT`) rebuilds each tool part. A decode failure (a
    * crash can tear the final body mid-write) stops replay, preserving whatever
    * text + tool parts survived — so a tool whose `RESULT` already flushed reads
-   * as **settled** (`output` present), while a tool torn before its result reads
-   * as **unsettled** (no `output`). This is exactly what the engine's shared
-   * settled-tool persist gate (`partialHasSettledToolResults`) keys off, proving
-   * the gate works against a foreign tool vocabulary, not just AI-SDK SSE.
+   * as **settled** (`hasOutput`), while a tool torn before its result reads as
+   * **unsettled**. The codec — not the engine — decides `hasSettledToolResults`
+   * from its own vocabulary, proving the engine's settled-tool persist gate is
+   * wire-agnostic: it consumes the boolean, never an AI-SDK part shape.
    */
   toRecoveryPartial(bodies: string[]): RecoveryPartial {
     let text = "";
-    const drafts: ToolPartDraft[] = [];
-    const draftById = new Map<string, ToolPartDraft>();
+    const parts: TanStackToolPart[] = [];
+    const draftById = new Map<string, TanStackToolPart>();
 
     for (const body of bodies) {
       const chunk = decodeChunk(body);
@@ -124,7 +100,7 @@ export class TanStackRecoveryCodec implements ChatRecoveryCodec {
             toolName?: string;
           };
           if (draftById.has(start.toolCallId)) break;
-          const draft: ToolPartDraft = {
+          const draft: TanStackToolPart = {
             toolCallId: start.toolCallId,
             toolName: start.toolCallName ?? start.toolName ?? "tool",
             argsBuffer: "",
@@ -132,7 +108,7 @@ export class TanStackRecoveryCodec implements ChatRecoveryCodec {
             hasOutput: false,
             output: undefined
           };
-          drafts.push(draft);
+          parts.push(draft);
           draftById.set(start.toolCallId, draft);
           break;
         }
@@ -162,8 +138,11 @@ export class TanStackRecoveryCodec implements ChatRecoveryCodec {
       }
     }
 
-    const parts = drafts.map(materializeToolPart);
-    return { text, parts };
+    // The codec owns "settled?" for its OWN vocabulary: any tool whose RESULT
+    // flushed (`hasOutput`) is settled, non-idempotent work the engine must
+    // preserve under `{ persist: false }`.
+    const hasSettledToolResults = parts.some((part) => part.hasOutput);
+    return { text, parts, hasSettledToolResults };
   }
 
   /**

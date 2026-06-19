@@ -15,7 +15,6 @@ import type {
   ChatRecoveryOptions,
   ResolvedChatRecoveryConfig
 } from "./lifecycle";
-import type { MessagePart } from "./message-builder";
 import type { ChatFiberSnapshot } from "./recovery";
 import {
   CHAT_RECOVERY_STABLE_RETRY_DELAY_SECONDS,
@@ -53,38 +52,26 @@ export type ChatRecoveryScheduleCallback =
  */
 export type ChatRecoveryScheduleReason = "initial" | "stable_timeout_retry";
 
-/** A reconstructed orphaned-stream partial (buffered text + message parts). */
-export type RecoveryPartial = { text: string; parts: MessagePart[] };
+/**
+ * A reconstructed orphaned-stream partial. The engine seam is deliberately
+ * **wire-vocabulary-agnostic**: `text` is the accumulated assistant text and
+ * `parts` is OPAQUE to the engine (`unknown[]`) — each host casts it back to its
+ * own message-part vocabulary (AI SDK `UIMessage` parts, AG-UI tool parts, …).
+ * The single fact the engine needs about parts — does the partial carry settled
+ * (non-idempotent) tool work that must survive a `{ persist: false }` recovery
+ * (#1631)? — is precomputed by the {@link ChatRecoveryCodec} as
+ * `hasSettledToolResults`. So the engine never imports a part vocabulary; the
+ * codec owns it (see `partialHasSettledToolResults` in `recovery-codec.ts` for
+ * the AI SDK codec's implementation of that predicate).
+ */
+export type RecoveryPartial = {
+  text: string;
+  parts: unknown[];
+  hasSettledToolResults: boolean;
+};
 
 /** Lifecycle status of a recovered stream's metadata row. */
 export type ChatStreamStatus = "streaming" | "completed" | "error";
-
-/**
- * Whether a reconstructed partial carries any settled (provider-accepted) tool
- * result — the completed, often non-idempotent work that a `{ persist: false }`
- * recovery return would silently discard (#1631). A part counts as settled when
- * it is a tool part (`tool-*` / `dynamic-tool`) carrying an `output`/`result`,
- * or whose state reached a terminal `output-{available,error,denied}`.
- *
- * Single source of truth for the recovery persist gate in both packages: the
- * `AIChatAgent` and `Think` copies were byte-equivalent (Think only factored the
- * inner predicate into `_toolPartHasSettledResult`), so this pure lift is a true
- * dedup with no behavior change.
- */
-export function partialHasSettledToolResults(parts: MessagePart[]): boolean {
-  return parts.some((part) => {
-    const record = part as Record<string, unknown>;
-    const type = typeof record.type === "string" ? record.type : "";
-    if (!(type.startsWith("tool-") || type === "dynamic-tool")) return false;
-    if ("output" in record || "result" in record) return true;
-    const state = typeof record.state === "string" ? record.state : "";
-    return (
-      state === "output-available" ||
-      state === "output-error" ||
-      state === "output-denied"
-    );
-  });
-}
 
 /**
  * Resolve the `schedule()` idempotency option for a recovery schedule. Single
@@ -358,7 +345,7 @@ export interface ChatFiberWakeHooks<TClassify> {
    * The BASE persist gate: whether the orphaned partial is eligible to be
    * materialized at all (live stream, or terminal-but-not-yet-persisted). The
    * engine ANDs this with the shared `options.persist !== false ||
-   * partialHasSettledToolResults(...)` clause, so settled work is never dropped.
+   * partial.hasSettledToolResults` clause, so settled work is never dropped.
    */
   shouldPersistOrphanedPartial(
     input: PersistOrphanedPartialInput
@@ -445,7 +432,7 @@ export class ChatRecoveryEngine {
     const { streamId, streamStillActive, streamStatus } = stream;
     const partial = streamId
       ? adapter.getPartialStreamText(streamId)
-      : { text: "", parts: [] as MessagePart[] };
+      : { text: "", parts: [], hasSettledToolResults: false };
 
     const { recoveryKind, detail } = await wake.classifyRecoveredTurn({
       snapshot,
@@ -555,10 +542,11 @@ export class ChatRecoveryEngine {
    * The shared persist gate: base eligibility (the package's
    * {@link ChatFiberWakeHooks.shouldPersistOrphanedPartial}) AND the
    * never-drop-settled-work clause `options.persist !== false ||
-   * partialHasSettledToolResults(...)`. `options: undefined` (the exhausted
-   * branch) collapses the clause to the base gate. The clause lives here — not in
-   * each package — because settled-work preservation is a cross-package invariant
-   * (#1631), and `partialHasSettledToolResults` is now a single shared predicate.
+   * partial.hasSettledToolResults`. `options: undefined` (the exhausted branch)
+   * collapses the clause to the base gate. The clause lives here — not in each
+   * package — because settled-work preservation is a cross-package invariant
+   * (#1631), and the codec (not the engine) decides whether a partial carries
+   * settled tool work, so the engine stays wire-vocabulary-agnostic.
    */
   private async _shouldPersistOrphanedPartial<TClassify>(
     wake: ChatFiberWakeHooks<TClassify>,
@@ -575,8 +563,7 @@ export class ChatRecoveryEngine {
     });
     return (
       base &&
-      (input.options?.persist !== false ||
-        partialHasSettledToolResults(input.partial.parts))
+      (input.options?.persist !== false || input.partial.hasSettledToolResults)
     );
   }
 
@@ -805,7 +792,7 @@ export class ChatRecoveryEngine {
     );
     const partial = streamId
       ? adapter.getPartialStreamText(streamId)
-      : { text: "", parts: [] as MessagePart[] };
+      : { text: "", parts: [], hasSettledToolResults: false };
 
     await adapter.exhaustChatRecovery(
       incident,

@@ -643,7 +643,9 @@ export class PiAgent extends Agent<Env> {
           incident,
           config,
           partialText: partial.text,
-          partialParts: partial.parts,
+          // Pi has no AI-SDK `UIMessage` parts (text-only); the exhausted-context
+          // parts surface is AI-SDK-typed, so pass empty rather than fabricating.
+          partialParts: [],
           streamId,
           createdAt
         });
