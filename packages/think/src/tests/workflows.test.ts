@@ -240,6 +240,7 @@ describe("ThinkWorkflow", () => {
     it("disposes the submitMessages result before cancelling a timed-out prompt", async () => {
       let submissionDisposeCount = 0;
       const cancelCalls: Array<{ submissionId: string; reason: string }> = [];
+      const inspectCalls: string[] = [];
 
       const submissionResult = createSubmissionResult(
         "submission-timeout",
@@ -254,6 +255,10 @@ describe("ThinkWorkflow", () => {
         },
         async cancelSubmission(submissionId: string, reason: string) {
           cancelCalls.push({ submissionId, reason });
+        },
+        async inspectSubmission(submissionId: string) {
+          inspectCalls.push(submissionId);
+          return null;
         }
       };
 
@@ -289,6 +294,7 @@ describe("ThinkWorkflow", () => {
           reason: "Workflow prompt wait timed out"
         }
       ]);
+      expect(inspectCalls).toEqual([]);
     });
 
     it("retries transient prompt errors with backoff and fresh submissions", async () => {

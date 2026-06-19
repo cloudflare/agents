@@ -117,6 +117,8 @@ export class ThinkWorkflow<
   ProgressType = DefaultProgress,
   Env extends Cloudflare.Env = Cloudflare.Env
 > extends AgentWorkflow<AgentType, Params, ProgressType, Env> {
+  private static readonly _encoder = new TextEncoder();
+
   protected extendStep(
     step: AgentWorkflowStep,
     event: WorkflowEvent<Params>
@@ -157,7 +159,11 @@ export class ThinkWorkflow<
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const attemptKey =
-        attempt === 0 ? options.key : `${options.key ?? ""}:attempt-${attempt}`;
+        attempt === 0
+          ? options.key
+          : options.key === undefined
+            ? `attempt-${attempt}`
+            : `${options.key}:attempt-${attempt}`;
       // Per-attempt event types prevent stale events from previous attempts.
       const eventType = await this._eventTypeForPrompt(stepName, attemptKey);
       // Filled once submitMessages resolves so failures can recover/cancel it.
@@ -183,7 +189,12 @@ export class ThinkWorkflow<
         const isLastAttempt = attempt === maxAttempts - 1;
 
         // On timeout, give DO recovery a chance before resubmitting.
-        if (isTimeout && retryOnTimeout && attemptRef.submissionId) {
+        if (
+          maxAttempts > 1 &&
+          isTimeout &&
+          retryOnTimeout &&
+          attemptRef.submissionId
+        ) {
           const recovery = await this._tryRecoverSubmission(
             step,
             stepName,
@@ -569,16 +580,14 @@ export class ThinkWorkflow<
     maxDelayMs: number
   ): Promise<number> {
     const upperBoundMs = Math.min(2 ** attempt * baseDelayMs, maxDelayMs);
-    // Workflows steps must be deterministic, so jitter is derived from a hash
-    // of stable inputs instead of Math.random(). Two raw digest bytes give a
-    // 16-bit value that spans the full [0, 1) range once divided by 0xffff.
+    // Deterministic jitter for Workflows replay.
     const jitterSeed = `${this.workflowName}:${this.workflowId}:${stepName}:${attempt}`;
     const digest = await crypto.subtle.digest(
       "SHA-256",
-      new TextEncoder().encode(jitterSeed)
+      ThinkWorkflow._encoder.encode(jitterSeed)
     );
     const digestBytes = new Uint8Array(digest);
-    const fraction = ((digestBytes[0] << 8) | digestBytes[1]) / 0xffff;
+    const fraction = ((digestBytes[0] << 8) | digestBytes[1]) / 0x10000;
     return Math.floor(fraction * upperBoundMs);
   }
 
@@ -601,7 +610,7 @@ export class ThinkWorkflow<
   }
 
   private async _hashString(value: string): Promise<string> {
-    const bytes = new TextEncoder().encode(value);
+    const bytes = ThinkWorkflow._encoder.encode(value);
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     return base64Url(digest).slice(0, 22);
   }
