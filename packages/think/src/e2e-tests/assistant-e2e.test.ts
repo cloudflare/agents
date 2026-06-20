@@ -288,16 +288,22 @@ function sendChatAndWaitForDone(
 }
 
 /**
- * Wait for the next cf_agent_chat_messages broadcast.
+ * Wait for the next cf_agent_chat_messages broadcast. Best-effort sync barrier:
+ * resolves with the broadcast, or `null` on timeout. It deliberately does NOT
+ * reject — callers arm it before sending and await it after, so a reject timer
+ * could fire on a dangling promise (if the intervening send throws or the
+ * broadcast simply never lands) and surface as an unhandled rejection that fails
+ * an otherwise-green run. The authoritative assertion is always the subsequent
+ * `getMessages` RPC, so a missed broadcast does not need to fail the test here.
  */
 function waitForMessagesBroadcast(
   ws: WebSocket,
   timeout = 10000
-): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
+): Promise<Record<string, unknown> | null> {
+  return new Promise((resolve) => {
     const timer = setTimeout(() => {
       ws.removeEventListener("message", handler);
-      reject(new Error("Messages broadcast timed out"));
+      resolve(null);
     }, timeout);
 
     const handler = (e: MessageEvent) => {
@@ -436,10 +442,8 @@ describe("think e2e — real LLM", () => {
       'Use the write tool to create a file at /hello.txt with the content "Hello from e2e test"'
     );
 
-    // Wait for persistence
-    await waitForMessagesBroadcast(ws).catch(() => {
-      // timeout OK — message may have already been received
-    });
+    // Wait for persistence (best-effort barrier; resolves null on timeout).
+    await waitForMessagesBroadcast(ws);
 
     // Now ask the LLM to read it back
     const { chunks: readChunks } = await sendChatAndWaitForDone(
@@ -476,7 +480,7 @@ describe("think e2e — real LLM", () => {
 
     // First turn
     await sendChatAndWaitForDone(ws, "My name is TestBot.");
-    await waitForMessagesBroadcast(ws).catch(() => {});
+    await waitForMessagesBroadcast(ws);
 
     // Second turn — the LLM should remember the name
     const { chunks } = await sendChatAndWaitForDone(
