@@ -24,6 +24,9 @@ import type {
   ThinkSubmissionInspection,
   ThinkSubmissionStatus,
   SubmitMessagesResult,
+  TurnResult,
+  RunTurnWait,
+  RunTurnOptions,
   MediaEvictionConfig,
   ThinkScheduledTask,
   ThinkScheduledTaskContext,
@@ -3595,6 +3598,100 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async testSaveMessages(msgs: UIMessage[]): Promise<SaveMessagesResult> {
     return this.saveMessages(msgs);
+  }
+
+  async testRunTurnWait(options: RunTurnWait): Promise<TurnResult> {
+    return this.runTurn(options);
+  }
+
+  async testRunTurnWaitString(text: string): Promise<TurnResult> {
+    return this.runTurn({ mode: "wait", input: text });
+  }
+
+  async testRunTurnWaitWithFn(text: string): Promise<TurnResult> {
+    return this.runTurn({
+      mode: "wait",
+      input: (current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          role: "user" as const,
+          parts: [{ type: "text" as const, text }]
+        }
+      ]
+    });
+  }
+
+  async testRunTurnContinuation(
+    body?: Record<string, unknown>
+  ): Promise<TurnResult> {
+    return this.runTurn({ mode: "wait", continuation: true, body });
+  }
+
+  async testRunTurnSubmit(
+    text: string,
+    options?: {
+      submissionId?: string;
+      idempotencyKey?: string;
+      metadata?: Record<string, unknown>;
+    }
+  ): Promise<SubmitMessagesResult> {
+    return this.runTurn({ mode: "submit", input: text, ...options });
+  }
+
+  async testRunTurnStream(text: string): Promise<TestChatResult> {
+    const callback = new TestCollectingCallback();
+    await this.runTurn({ mode: "stream", input: text, callback });
+    return {
+      events: callback.events,
+      done: callback.doneCalled,
+      error: callback.errorMessage,
+      interruptedCalls: callback.interruptedCalls
+    };
+  }
+
+  async testRunTurnExpectError(
+    options: RunTurnOptions | Record<string, unknown>
+  ): Promise<{ name: string; message: string } | null> {
+    try {
+      const runTurnImpl = this.runTurn.bind(this) as (
+        options: RunTurnOptions
+      ) => Promise<TurnResult | SubmitMessagesResult | void>;
+      await runTurnImpl(options as RunTurnOptions);
+      return null;
+    } catch (error) {
+      return {
+        name: error instanceof Error ? error.name : "Error",
+        message: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async testRunTurnSubmitWithFunction(): Promise<{
+    name: string;
+    message: string;
+  } | null> {
+    return this.testRunTurnExpectError({
+      mode: "submit",
+      input: () => []
+    });
+  }
+
+  async testRunTurnStreamWithArray(): Promise<{
+    name: string;
+    message: string;
+  } | null> {
+    return this.testRunTurnExpectError({
+      mode: "stream",
+      input: [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text: "hi" }]
+        }
+      ],
+      callback: new TestCollectingCallback()
+    });
   }
 
   async testSubmitMessages(

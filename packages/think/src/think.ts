@@ -207,6 +207,7 @@ import type {
   OrphanPersistStore
 } from "agents/chat";
 import { Session } from "agents/experimental/memory/session";
+import type { SessionMessage } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
 import {
   evictLargeMediaFromMessage,
@@ -240,6 +241,7 @@ import type {
 } from "./messengers";
 
 export { Session } from "agents/experimental/memory/session";
+export type { SessionMessage } from "agents/experimental/memory/session";
 export { Workspace } from "@cloudflare/shell";
 export type { FiberContext, FiberRecoveryContext } from "agents";
 export type { WorkspaceLike } from "./tools/workspace";
@@ -817,6 +819,51 @@ export interface ChatOptions {
    */
   onClientToolCall?: ClientToolExecutor;
 }
+
+/** Input accepted by {@link Think.runTurn}. */
+export type TurnInputMessages =
+  | string
+  | UIMessage
+  | UIMessage[]
+  | ((current: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>);
+
+/** Shared base for {@link RunTurnOptions}; only `input` is common across modes. */
+export interface RunTurnBase {
+  input?: TurnInputMessages;
+}
+
+/** Options for {@link Think.runTurn} with `mode: "wait"` (the default). */
+export interface RunTurnWait extends RunTurnBase {
+  mode?: "wait";
+  continuation?: boolean;
+  body?: Record<string, unknown>;
+  signal?: AbortSignal;
+}
+
+/** Options for {@link Think.runTurn} with `mode: "submit"`. */
+export interface RunTurnSubmit extends RunTurnBase {
+  mode: "submit";
+  submissionId?: string;
+  idempotencyKey?: string;
+  metadata?: Record<string, unknown>;
+}
+
+/** Options for {@link Think.runTurn} with `mode: "stream"`. */
+export interface RunTurnStream extends RunTurnBase {
+  mode: "stream";
+  callback: StreamCallback;
+  clientTools?: ClientToolSchema[];
+  onClientToolCall?: ClientToolExecutor;
+  signal?: AbortSignal;
+}
+
+export type RunTurnOptions = RunTurnWait | RunTurnSubmit | RunTurnStream;
+
+/** Result of {@link Think.runTurn} in `mode: "wait"`. */
+export type TurnResult = SaveMessagesResult & {
+  message?: SessionMessage;
+  continuation: boolean;
+};
 
 /** Options for {@link Think.addMessages}. */
 export interface AddMessagesOptions {
@@ -4742,6 +4789,230 @@ export class Think<
       detachExternal();
       this._aborts.remove(requestId);
     }
+  }
+
+  /**
+   * Unified turn admission API (Turns RFC, step 2).
+   *
+   * Thin facade over {@link Think.saveMessages}, {@link Think.continueLastTurn},
+   * {@link Think.submitMessages}, and {@link Think.chat}. Each `mode` delegates
+   * to the matching backing method with a narrowed option surface; the full
+   * unified superset lands with `_admitTurn` (step 3).
+   *
+   * - `mode: "wait"` (default) — blocking turn; returns {@link TurnResult}.
+   * - `mode: "submit"` — durable queued turn; returns {@link SubmitMessagesResult}.
+   * - `mode: "stream"` — RPC-style streaming; returns `Promise<void>`.
+   *
+   * **Re-entrancy.** Calling `mode: "wait"` or `continuation: true` from inside
+   * an active turn (a tool `execute`, a lifecycle hook) deadlocks on the turn
+   * queue — identical to calling {@link Think.saveMessages} or
+   * {@link Think.continueLastTurn} from there. Prefer `mode: "submit"` or
+   * {@link Think.addMessages} instead. Precise nested-call detection is deferred
+   * to `_admitTurn` (step 3).
+   *
+   * **Empty input (`wait`).** String, single-message, and array inputs that
+   * normalize to an empty list short-circuit to `{ status: "skipped" }` without
+   * running inference. A function `input` that resolves to `[]` at run time is
+   * not pre-checked (the function must see the in-queue transcript); step 3's
+   * `_admitTurn` centralizes empty-skip inside the queue.
+   *
+   * @experimental
+   */
+  runTurn(options: RunTurnWait): Promise<TurnResult>;
+  runTurn(options: RunTurnSubmit): Promise<SubmitMessagesResult>;
+  runTurn(options: RunTurnStream): Promise<void>;
+  async runTurn(
+    options: RunTurnOptions
+  ): Promise<TurnResult | SubmitMessagesResult | void> {
+    const mode = this._resolveRunTurnMode(options);
+    if (mode === "stream") {
+      return this._runTurnStream(options as RunTurnStream);
+    }
+    if (mode === "submit") {
+      return this._runTurnSubmit(options as RunTurnSubmit);
+    }
+    return this._runTurnWait(options as RunTurnWait);
+  }
+
+  private _resolveRunTurnMode(
+    options: RunTurnOptions
+  ): "wait" | "submit" | "stream" {
+    if (options === null || typeof options !== "object") {
+      throw new TypeError("runTurn: options must be an object");
+    }
+
+    const mode = (options as { mode?: unknown }).mode;
+    if (mode === undefined || mode === "wait") return "wait";
+    if (mode === "submit" || mode === "stream") return mode;
+    throw new TypeError('runTurn: mode must be "wait", "submit", or "stream"');
+  }
+
+  private _validateRunTurnAdmission(
+    options: RunTurnOptions,
+    mode: "wait" | "submit" | "stream"
+  ): void {
+    const hasInput = options.input !== undefined;
+    const continuation =
+      mode === "wait" && (options as RunTurnWait).continuation === true;
+
+    if (mode !== "wait" && (options as RunTurnWait).continuation === true) {
+      throw new TypeError(
+        'runTurn: continuation is only supported with mode: "wait"'
+      );
+    }
+
+    if (mode === "stream" && !(options as RunTurnStream).callback) {
+      throw new TypeError('runTurn: mode "stream" requires callback');
+    }
+
+    if (mode === "wait") {
+      if (hasInput && continuation) {
+        throw new TypeError(
+          "runTurn: supply either input or continuation: true, not both"
+        );
+      }
+      if (!hasInput && !continuation) {
+        throw new TypeError(
+          "runTurn: supply either input or continuation: true"
+        );
+      }
+      return;
+    }
+
+    if (!hasInput) {
+      throw new TypeError(`runTurn: mode "${mode}" requires input`);
+    }
+  }
+
+  private _userMessageFromText(text: string): UIMessage {
+    return {
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text }]
+    };
+  }
+
+  private _normalizeRunTurnMessages(
+    input: Exclude<
+      TurnInputMessages,
+      (current: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>
+    >
+  ): UIMessage[] {
+    if (typeof input === "string") {
+      if (input.length === 0) return [];
+      return [this._userMessageFromText(input)];
+    }
+    if (Array.isArray(input)) {
+      return input;
+    }
+    return [input];
+  }
+
+  private _assertRunTurnSubmitInput(
+    input: TurnInputMessages
+  ): asserts input is string | UIMessage | UIMessage[] {
+    if (typeof input === "function") {
+      throw new Error(
+        'runTurn({ mode: "submit" }) does not support function input until _admitTurn (step 3)'
+      );
+    }
+  }
+
+  private _assertRunTurnStreamInput(
+    input: TurnInputMessages
+  ): asserts input is string | UIMessage {
+    if (typeof input === "function") {
+      throw new Error(
+        'runTurn({ mode: "stream" }) does not support function input until _admitTurn (step 3)'
+      );
+    }
+    if (Array.isArray(input)) {
+      throw new Error(
+        'runTurn({ mode: "stream" }) does not support array input until _admitTurn (step 3)'
+      );
+    }
+  }
+
+  private async _enrichTurnResult(
+    result: SaveMessagesResult,
+    continuation: boolean
+  ): Promise<TurnResult> {
+    let message: SessionMessage | undefined;
+    if (result.status === "completed") {
+      const leaf = await this.session.getLatestLeaf();
+      if (leaf?.role === "assistant") {
+        message = leaf;
+      }
+    }
+    return { ...result, continuation, message };
+  }
+
+  private async _runTurnWait(options: RunTurnWait): Promise<TurnResult> {
+    this._validateRunTurnAdmission(options, "wait");
+
+    if (options.continuation === true) {
+      const result = await this.continueLastTurn(options.body, {
+        signal: options.signal
+      });
+      return this._enrichTurnResult(result, true);
+    }
+
+    const input = options.input;
+    if (input === undefined) {
+      throw new TypeError("runTurn: supply either input or continuation: true");
+    }
+
+    if (typeof input === "function") {
+      const result = await this.saveMessages(input, { signal: options.signal });
+      return this._enrichTurnResult(result, false);
+    }
+
+    const messages = this._normalizeRunTurnMessages(input);
+    if (messages.length === 0) {
+      return { requestId: "", status: "skipped", continuation: false };
+    }
+
+    const result = await this.saveMessages(messages, {
+      signal: options.signal
+    });
+    return this._enrichTurnResult(result, false);
+  }
+
+  private async _runTurnSubmit(
+    options: RunTurnSubmit
+  ): Promise<SubmitMessagesResult> {
+    this._validateRunTurnAdmission(options, "submit");
+
+    const input = options.input;
+    if (input === undefined) {
+      throw new TypeError('runTurn: mode "submit" requires input');
+    }
+
+    this._assertRunTurnSubmitInput(input);
+    const messages = this._normalizeRunTurnMessages(input);
+    return this.submitMessages(messages, {
+      submissionId: options.submissionId,
+      idempotencyKey: options.idempotencyKey,
+      metadata: options.metadata
+    });
+  }
+
+  private async _runTurnStream(options: RunTurnStream): Promise<void> {
+    this._validateRunTurnAdmission(options, "stream");
+
+    const input = options.input;
+    if (input === undefined) {
+      throw new TypeError('runTurn: mode "stream" requires input');
+    }
+
+    this._assertRunTurnStreamInput(input);
+    const userMessage = input;
+
+    return this.chat(userMessage, options.callback, {
+      signal: options.signal,
+      clientTools: options.clientTools,
+      onClientToolCall: options.onClientToolCall
+    });
   }
 
   // ── Message access ──────────────────────────────────────────────
