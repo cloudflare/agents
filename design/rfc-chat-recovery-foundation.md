@@ -179,6 +179,34 @@ See **"Platform context: where this seam is heading"** for the (non-scope) north
 star — aligning the storage seam with the existing `Session` provider interface
 and eventually lifting `resumable-stream` into a general durable-stream substrate.
 
+> **Tracked follow-up — `AutoContinuationController` extraction (next session).**
+> Self-contained brief so this can be picked up cold from the repo alone:
+>
+> - **Precondition (already done):** the barrier _behavior_ converged and landed
+>   (ai-chat adopted Think's event-driven, no-timeout, stream-gated shape; see the
+>   as-built note under the "auto-continuation barrier convergence" progress
+>   entry). Both hosts now expose the **same method shape**, so this follow-up is a
+>   pure code de-dup, **not** a behavior change.
+> - **Scope:** extract the ~260-line near-identical barrier into a shared
+>   `AutoContinuationController` in `agents/chat`. Shared method names across both
+>   hosts: `_scheduleAutoContinuation`, `_rearmPendingAutoContinuationForBatch`,
+>   `_fireAutoContinuationWhenStable`, `_drainInteractionApplies`,
+>   `_onStreamingTurnFinalized`, `_fireAutoContinuation` (+ the
+>   `AUTO_CONTINUATION_COALESCE_MS` constant). ai-chat additionally has the
+>   `_continuation` deferred/coalesce machinery and an idle-awareness shim Think
+>   lacks — keep those as host hooks, don't force them into Think.
+> - **Parameterization:** a stream-active signal (`_streamingAssistant` /
+>   `_streamingTurnActive`), a fire callback (host's `_runExclusiveChatTurn`), and
+>   the host's apply-drain primitive. Controller owns the timer + double-fire guard
+>   (`_continuationBarrierActive`).
+> - **Gate:** its own PR + `agents` changeset + behavior tests proving both hosts'
+>   barriers stay byte-for-byte behaviorally identical (no double-fire, no
+>   fire-through on incomplete batch, self-heal across hibernation).
+> - **Sibling follow-up (separate PR):** the adapter-spine helpers
+>   (`_classifyAgentToolChildRecovery`, `_runChatRecoveryFiber`, engine adapter
+>   wiring, `broadcast()` frame interception, `_getPartialStreamText`,
+>   `_awaitWithDeadline`, `_resumeHandshake` factory, terminal-storage delegates).
+
 **Working conventions.** Validate with `pnpm run check` (113 projects) before
 considering anything done; host-suite tests via each package's
 `vitest.config.ts`; `packages/` API/behavior changes need a changeset; commit per
