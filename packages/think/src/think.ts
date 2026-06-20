@@ -198,7 +198,8 @@ import type {
   ClientToolExecutor,
   MessagePart,
   SubmitConcurrencyDecision,
-  ChatFiberSnapshot
+  ChatFiberSnapshot,
+  OrphanPersistStore
 } from "agents/chat";
 import { Session } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
@@ -2581,6 +2582,26 @@ export class Think<
       await this.session.appendMessage(safe, parentId);
     }
     return safe;
+  }
+
+  /**
+   * The orphan-persist store adapter — orphan-persist steps **(c)/(d)** route
+   * their write through this shared `OrphanPersistStore` seam (the
+   * `SessionProvider` write-subset). Delegates to `this.session` with `_rowSafe`
+   * applied at the write boundary (sanitize + row-size cap), exactly as Think's
+   * other Session call sites do. The `SessionMessage → UIMessage` read cast is
+   * confined here, matching those call sites.
+   * @internal
+   */
+  protected _orphanStore(): OrphanPersistStore {
+    return {
+      getMessage: async (id) =>
+        (await this.session.getMessage(id)) as UIMessage | null,
+      appendMessage: (message, parentId) =>
+        this.session.appendMessage(this._rowSafe(message), parentId),
+      updateMessage: (message) =>
+        this.session.updateMessage(this._rowSafe(message))
+    };
   }
 
   private async _clearHistory(): Promise<void> {
@@ -8701,24 +8722,32 @@ export class Think<
 
   // ── Session-backed persistence ──────────────────────────────────
 
+  /**
+   * Single source of Think's strip + empty-skip persistence rule. Strips the
+   * internal final-answer parts and returns the message to persist (the stripped
+   * copy, or the original when nothing was stripped), or `null` when stripping
+   * leaves nothing user-facing (only structural `step-start` markers, or
+   * nothing) — in which case the caller skips persistence so a structured
+   * workflow turn does not leave an empty assistant message in the conversation.
+   * Shared by `_persistAssistantMessage` and the orphan-persist path so the rule
+   * cannot drift between the live and recovery writes.
+   */
+  private _strippedForPersist(msg: UIMessage): UIMessage | null {
+    const stripped = this._stripInternalFinalAnswerParts(msg);
+    if (stripped === msg) return msg;
+    const hasMeaningfulParts = stripped.parts.some(
+      (part) => (part as { type?: string }).type !== "step-start"
+    );
+    return hasMeaningfulParts ? stripped : null;
+  }
+
   private async _persistAssistantMessage(
     msg: UIMessage,
     parentId?: string
   ): Promise<void> {
-    const stripped = this._stripInternalFinalAnswerParts(msg);
-    if (stripped !== msg) {
-      // If removing the internal final-answer tool leaves nothing user-facing
-      // (only structural `step-start` markers, or nothing), skip persistence so
-      // a structured workflow turn does not leave an empty assistant message in
-      // the conversation.
-      const hasMeaningfulParts = stripped.parts.some(
-        (part) => (part as { type?: string }).type !== "step-start"
-      );
-      if (!hasMeaningfulParts) return;
-      await this._upsertMessageInHistory(stripped, parentId);
-      return;
-    }
-    await this._upsertMessageInHistory(msg, parentId);
+    const toPersist = this._strippedForPersist(msg);
+    if (toPersist === null) return;
+    await this._upsertMessageInHistory(toPersist, parentId);
   }
 
   /**
@@ -11187,13 +11216,29 @@ export class Think<
       }
     }
 
-    if (accumulator.parts.length > 0) {
-      await this._persistAssistantMessage(accumulator.toMessage());
-      // NOTE: progress is bumped at production/flush time in `_storeChunkDurably`
-      // (#1637), NOT here — persisting on recovery or a client reconnect must
-      // not be miscounted as new forward progress.
-      this._broadcastMessages();
+    if (accumulator.parts.length === 0) return;
+
+    // Preserve Think's product-specific strip + empty-skip via the shared
+    // `_strippedForPersist` rule (same as `_persistAssistantMessage`): drop the
+    // internal final-answer parts, and skip persisting an empty structural-only
+    // assistant message.
+    const stripped = this._strippedForPersist(accumulator.toMessage());
+    if (stripped === null) return;
+
+    // (c)/(d) Upsert by id through the shared `OrphanPersistStore` seam. Think
+    // replaces the whole message (no partial merge), so resolve append-vs-update
+    // purely by existence.
+    const store = this._orphanStore();
+    const existing = await store.getMessage(stripped.id);
+    if (existing) {
+      await store.updateMessage(stripped);
+    } else {
+      await store.appendMessage(stripped);
     }
+    // NOTE: progress is bumped at production/flush time in `_storeChunkDurably`
+    // (#1637), NOT here — persisting on recovery or a client reconnect must
+    // not be miscounted as new forward progress.
+    this._broadcastMessages();
   }
 
   private _broadcastChat(message: Record<string, unknown>, exclude?: string[]) {

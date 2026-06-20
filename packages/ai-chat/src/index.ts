@@ -25,7 +25,8 @@ import {
   reconcileOrphanPartial,
   createChatFiberSnapshot,
   unwrapChatFiberSnapshot,
-  wrapChatFiberSnapshot
+  wrapChatFiberSnapshot,
+  type OrphanPersistStore
 } from "agents/chat";
 import {
   applyChunkToParts,
@@ -1476,19 +1477,18 @@ export class AIChatAgent<
     // (b) Resolve the persist target id (the one per-package step).
     message.id = this._resolveOrphanTargetId(streamId, message.id, fallbackId);
 
-    // (c)+(d) Upsert by id over the flat array. A row may already own this id
-    // (an early persist during tool approval, or a continuation resuming the
-    // last assistant message) — merge onto it; otherwise append.
-    const existingIdx = this.messages.findIndex((m) => m.id === message.id);
-    const finalMessage =
-      existingIdx >= 0
-        ? reconcileOrphanPartial(this.messages[existingIdx], message)
-        : message;
-    const updatedMessages =
-      existingIdx >= 0
-        ? this.messages.map((m, i) => (i === existingIdx ? finalMessage : m))
-        : [...this.messages, finalMessage];
-    await this.persistMessages(updatedMessages);
+    // (c)+(d) Upsert by id through the shared `OrphanPersistStore` seam. A row
+    // may already own this id (an early persist during tool approval, or a
+    // continuation resuming the last assistant message) — merge onto it via the
+    // shared `reconcileOrphanPartial`; otherwise append. Exactly one write
+    // (update XOR append) → one `persistMessages` → one broadcast.
+    const store = this._orphanStore();
+    const existing = await store.getMessage(message.id);
+    if (existing) {
+      await store.updateMessage(reconcileOrphanPartial(existing, message));
+    } else {
+      await store.appendMessage(message);
+    }
     // NOTE: progress is bumped at production/flush time in `_storeStreamChunk`
     // (#1637), NOT here — persisting on recovery or a client reconnect must
     // not be miscounted as new forward progress.
@@ -1526,6 +1526,28 @@ export class AIChatAgent<
       if (this.messages[i].role === "assistant") return this.messages[i].id;
     }
     return reconstructedId;
+  }
+
+  /**
+   * The orphan-persist store adapter — orphan-persist steps **(c)/(d)** route
+   * their write through this shared `OrphanPersistStore` seam (the
+   * `SessionProvider` write-subset). Backed by ai-chat's flat `this.messages`
+   * array + the existing `persistMessages` whole-array write path, so
+   * reconcile/sanitize/row-size/broadcast all stay intact. Each mutating call
+   * is exactly one `persistMessages` invocation; `parentId` is unused (a flat
+   * array has no tree to attach to).
+   * @internal
+   */
+  protected _orphanStore(): OrphanPersistStore {
+    return {
+      getMessage: (id) => this.messages.find((m) => m.id === id) ?? null,
+      appendMessage: (message) =>
+        this.persistMessages([...this.messages, message]),
+      updateMessage: (message) =>
+        this.persistMessages(
+          this.messages.map((m) => (m.id === message.id ? message : m))
+        )
+    };
   }
 
   /**

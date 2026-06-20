@@ -116,6 +116,8 @@ export {
   assistantContentKey
 } from "./message-reconciler";
 
+export type { OrphanPersistStore } from "./orphan-store";
+
 export {
   createChatFiberSnapshot,
   wrapChatFiberSnapshot,

@@ -833,6 +833,45 @@ under "Persist-orphan boundary").
   in a Behavior decision / Progress-log entry (as with broadcast-first) rather than
   converging silently, so the call is reviewable.
 
+#### When to use `OrphanPersistStore` vs converge onto `SessionProvider`
+
+The orphan-persist store seam (`OrphanPersistStore<M = UIMessage>` in
+[orphan-store.ts](../packages/agents/src/chat/orphan-store.ts), the landed
+instance of deferred north-star item (a)) is worth a standing note, because it is
+easy to mistake for a general message store and over-apply.
+
+- **What it is:** a deliberately narrow _capability slice_ — read-one + upsert
+  (`getMessage` / `appendMessage` / `updateMessage`) — that is the **write subset
+  of `SessionProvider`**, parameterized over the message type (`UIMessage` default
+  for the two AI-SDK hosts; `SessionProvider` satisfies it at `SessionMessage`).
+  "Generic" here means _SDK-neutral_, **not** _general-purpose_. The actual
+  general store is `SessionProvider` (tree, branches, history, compaction); this
+  is a keyhole onto that same substrate, named for its one current consumer.
+- **Reuse the _pattern_, not the type.** The reusable convergence mechanism is:
+  define a narrow interface that is a structural subset of `SessionProvider` →
+  have each host expose an adapter typed against it → enforce with a return-type
+  annotation + a `tests-d` assignability assertion. That turns "the two hosts
+  happen to write the same shape" into "the compiler fails if they drift," and is
+  the playbook for future storage-seam convergence.
+- **Don't widen it into a god-interface.** If a future RFC needs more than
+  read-one + upsert (history reads, branches, deletes, compaction), converge that
+  host path onto `SessionProvider` _proper_, or define a **sibling** narrow slice —
+  do not bolt operations onto `OrphanPersistStore`. The moment it stops being "the
+  orphan-persist write subset" it is lying about its name.
+- **Expect it to dissolve, not calcify.** The end-state above (ai-chat's flat list
+  as a degenerate `Session` tree, both hosts persisting through `Session` /
+  `SessionProvider`) makes this seam collapse: the adapter stops being
+  "flat-array vs tree" and becomes "use the session." Treat `OrphanPersistStore`
+  as the forcing function that proves the subset relationship _today_, expected to
+  retire once ai-chat adopts a Session-backed store — not a permanent fixture.
+- **Naming signals scope.** It is `OrphanPersistStore`, not `ChatMessageStore`, on
+  purpose. Rename to a neutral name only when a real _second_ consumer of the same
+  read-one+upsert slice appears — not speculatively.
+
+Litmus shorthand: reach for this interface when you hit the **orphan-persist
+write** specifically; for anything broader, prefer converging the host onto
+`SessionProvider` over growing this seam.
+
 ### Convergence matrix
 
 | Area                           | Current `AIChatAgent`                                                                                           | Current `Think`                                                                                          | Proposed shared behavior                                                                                                                                                                                  |
