@@ -66,3 +66,81 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: pnpm run test:e2e
         working-directory: packages/think
+
+  e2e-ai-chat-recovery:
+    name: "E2E: ai-chat (SIGKILL recovery)"
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: ./.github/actions/install
+
+      - run: pnpm run build
+
+      # Real `wrangler dev` + mid-stream SIGKILL suite that proves AIChatAgent's
+      # convergence onto the shared `agents/chat` recovery engine survives a real
+      # isolate crash. Distinct from the `e2e-ai-chat` Playwright job above, which
+      # exercises the client-side resume protocol (disconnect/reconnect), not
+      # process death. (Excludes the env-gated `deployed-recovery` suite.)
+      - name: Run ai-chat SIGKILL recovery e2e tests
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: pnpm run test:e2e
+        working-directory: packages/ai-chat
+
+  e2e-agents:
+    name: "E2E: agents (fiber eviction)"
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: ./.github/actions/install
+
+      - run: pnpm run build
+
+      # Core `runFiber` SIGKILL recovery primitives (root/sub-agent, concurrency,
+      # scan-deadline yield, poison-row aging/backoff, facet multipass). Excluded
+      # from the default unit `test` target because it spawns real wrangler dev
+      # processes; runs here nightly instead.
+      - name: Run agents fiber-recovery e2e tests
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: pnpm run test:e2e
+        working-directory: packages/agents
+
+  e2e-engine-genericity:
+    name: "E2E: shared-engine genericity (pi + tanstack)"
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: ./.github/actions/install
+
+      - run: pnpm run build
+
+      # Genericity proofs that the shared `agents/chat` recovery engine is not
+      # AI-SDK-specific: a non-`UIMessage` PiAgent and a foreign (AG-UI / TanStack
+      # AI) tool vocabulary each recover from a real SIGKILL through the same
+      # engine + resume handshake + codec. Both use deterministic faux models; the
+      # real-Workers-AI tanstack leg stays gated behind RUN_WORKERS_AI_E2E.
+      - name: Run pi-recovery genericity e2e
+        run: pnpm run test:e2e
+        working-directory: experimental/pi-recovery
+
+      - name: Run tanstack-recovery genericity e2e
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: pnpm run test:e2e
+        working-directory: experimental/tanstack-recovery
