@@ -28,6 +28,7 @@ packages/agents/src/chat/          ← shared foundation
   submit-concurrency.ts            SubmitConcurrencyController
   broadcast-state.ts               broadcastTransition state machine
   continuation-state.ts            ContinuationState
+  auto-continuation-controller.ts  AutoContinuationController (barrier timer + double-fire guard)
   abort-registry.ts                AbortRegistry
   resumable-stream.ts              ResumableStream (SQLite chunk buffer)
   sql-batch.ts                     bound-param batching for IN-clause deletes
@@ -326,3 +327,4 @@ The machine handles accumulator creation (including continuation context walking
 - Client tool primitives (`ClientToolSchema`, `createToolsFromClientSchemas`) moved to `agents/chat/client-tools.ts`. Tool protocol constants (`TOOL_RESULT`, `TOOL_APPROVAL`, `MESSAGE_UPDATED`) added. Think implements client-side tools with debounce-based auto-continuation.
 - Think now has: MCP `waitForMcpConnections`, message push on connect, feature parity with AIChatAgent's core chat experience.
 - Durable chat-recovery orchestration unified in `agents/chat/recovery-engine.ts` (`ChatRecoveryEngine` over a `ChatRecoveryAdapter` + per-wake `ChatFiberWakeHooks`); `AIChatAgent`, `Think`, and the `experimental/pi-recovery` fixture all drive it. The orphan-persist path was factored into named seams — (a) shared `StreamAccumulator` reconstruction, (b) host `resolveOrphanTargetId`, (c) shared `reconcileOrphanPartial`, (d) `SessionProvider`-subset upsert. See [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md).
+- Auto-continuation barrier (#1649 / #1650) extracted to `agents/chat/auto-continuation-controller.ts` (`AutoContinuationController`). The controller owns the coalesce timer, the `_barrierActive` double-fire guard, and the schedule/coalesce/fire lifecycle (`schedule` / `rearmForBatch` / `armTimer` / `fireWhenStable` / `activateDeferredAndReschedule` / `reset`), parameterized by an `AutoContinuationHost` (stream-active signal, pending-interaction signal, incomplete-batch test, apply-drain, `keepAliveWhile`, and the host `fire()` turn pipeline). Both hosts retain thin delegating wrappers over their original method names; `COALESCE_MS` (50ms) is now single-sourced on the controller. Exported `@internal` for sibling packages. Fast-follow: Think's `waitUntilStable()` now consults `controller.isArmed()` to wait out an armed continuation, converging its idle definition with ai-chat's `waitForIdle()`. See [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md).
