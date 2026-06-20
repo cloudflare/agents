@@ -57,6 +57,7 @@ import {
 import { MAX_BOUND_PARAMS, buildInClauseStrings } from "agents/chat";
 import {
   ContinuationState,
+  AutoContinuationController,
   AbortRegistry,
   type ClientToolSchema
 } from "agents/chat";
@@ -490,27 +491,20 @@ export class AIChatAgent<
   private _persistedMessageCache: Map<string, string> = new Map();
 
   /**
-   * Small debounce window to batch adjacent client-side tool results/approvals
-   * into a single server continuation barrier check (#1650). Matches
-   * `@cloudflare/think`'s coalesce timer.
+   * Shared auto-continuation barrier (#1649 / #1650): owns the coalesce timer
+   * and the double-fire guard. Parameterized by this agent's stream-active
+   * signal, apply-drain, and continuation-turn pipeline (`_fireAutoContinuation`).
    */
-  private static AUTO_CONTINUATION_COALESCE_MS = 50;
-
-  /**
-   * Coalesce/debounce timer for the event-driven auto-continuation barrier
-   * (#1650). Each tool result/approval re-arms it; on fire it runs
-   * `_fireAutoContinuationWhenStable`.
-   */
-  private _continuationTimer: ReturnType<typeof setTimeout> | null = null;
-
-  /**
-   * Double-fire guard for the auto-continuation barrier (#1650). Load-bearing
-   * now that the barrier runs BEFORE the continuation turn is enqueued (rather
-   * than inside the exclusive turn, where the turn queue serialized waits): it
-   * ensures only one in-flight apply-drain runs, and that drain re-checks
-   * completeness on completion before firing.
-   */
-  private _continuationBarrierActive = false;
+  private _autoContinuation = new AutoContinuationController<Connection>({
+    continuation: this._continuation,
+    generateRequestId: () => nanoid(),
+    isStreamActive: () => this._streamingTurnActive,
+    hasPendingInteraction: () => this._pendingInteractionPromise !== null,
+    hasIncompleteToolBatch: () => this._hasIncompleteToolBatch(),
+    drainInteractionApplies: () => this._drainInteractionApplies(),
+    keepAliveWhile: <T>(fn: () => Promise<T>) => this.keepAliveWhile(fn),
+    fire: () => this._fireAutoContinuation()
+  });
 
   /**
    * Stream-active gate for the auto-continuation barrier (#1650). True while an
@@ -1217,30 +1211,12 @@ export class AIChatAgent<
     );
   }
 
-  private _storeDeferredAutoContinuation(
-    connection: Connection,
-    clientTools: ClientToolSchema[] | undefined,
-    body: Record<string, unknown> | undefined,
-    errorPrefix: string
-  ) {
-    this._continuation.deferred = {
-      connection,
-      connectionId: connection.id,
-      clientTools,
-      body,
-      errorPrefix,
-      prerequisite: null
-    };
-  }
-
   private _activateDeferredAutoContinuation() {
-    const pending = this._continuation.activateDeferred(() => nanoid());
-    if (!pending) return;
     // Run the freshly-activated continuation through the event-driven barrier
     // (#1650) rather than enqueuing it directly — its batch may still be
     // incomplete (or a stream may be active), in which case it parks and
     // re-arms instead of firing inference against a half-complete transcript.
-    this._fireAutoContinuationWhenStable();
+    this._autoContinuation.activateDeferredAndReschedule();
   }
 
   private _clearAllAutoContinuationState(sendNone = false) {
@@ -1712,7 +1688,7 @@ export class AIChatAgent<
       // recovery).
       if (!this._hasArmedContinuation()) return;
       await new Promise<void>((resolve) =>
-        setTimeout(resolve, AIChatAgent.AUTO_CONTINUATION_COALESCE_MS)
+        setTimeout(resolve, AutoContinuationController.COALESCE_MS)
       );
     }
   }
@@ -1732,7 +1708,7 @@ export class AIChatAgent<
     return (
       this._continuation.pending !== null &&
       !this._continuation.pending.pastCoalesce &&
-      (this._continuationTimer !== null || this._continuationBarrierActive)
+      this._autoContinuation.isArmed()
     );
   }
 
@@ -1998,7 +1974,7 @@ export class AIChatAgent<
         if (
           (await this._awaitWithDeadline(
             new Promise<void>((resolve) =>
-              setTimeout(resolve, AIChatAgent.AUTO_CONTINUATION_COALESCE_MS)
+              setTimeout(resolve, AutoContinuationController.COALESCE_MS)
             ),
             deadline
           )) === TIMED_OUT
@@ -2061,11 +2037,7 @@ export class AIChatAgent<
     // Tear down the event-driven auto-continuation barrier (#1650): cancel the
     // coalesce timer and clear the double-fire / stream-active gates so a reset
     // mid-park can't leave a stale flag pinning future continuations.
-    if (this._continuationTimer) {
-      clearTimeout(this._continuationTimer);
-      this._continuationTimer = null;
-    }
-    this._continuationBarrierActive = false;
+    this._autoContinuation.reset();
     this._streamingTurnActive = false;
     this._continuation.sendResumeNone();
     this._continuation.clearAll();
@@ -2285,10 +2257,10 @@ export class AIChatAgent<
 
   /**
    * Schedule an auto-continuation for a tool result/approval that opted in with
-   * `autoContinue: true` (#1650). Coalesces rapid sibling results into a single
-   * continuation via the debounce timer; the actual fire is gated on a complete
-   * tool batch and no active stream by `_fireAutoContinuationWhenStable`. Mirrors
-   * `@cloudflare/think`'s `_scheduleAutoContinuation`.
+   * `autoContinue: true` (#1650). Thin host wrapper that builds the
+   * {@link ContinuationSpec} and delegates to the shared
+   * {@link AutoContinuationController}, which owns the coalesce timer and the
+   * completeness-gated fire (shared with `@cloudflare/think`).
    */
   private _scheduleAutoContinuation(
     connection: Connection,
@@ -2296,42 +2268,12 @@ export class AIChatAgent<
     body: Record<string, unknown> | undefined,
     errorPrefix: string
   ) {
-    if (this._continuation.pending?.pastCoalesce) {
-      // A continuation is already running; the new result coalesces/defers into
-      // the next one rather than re-arming this one.
-      this._storeDeferredAutoContinuation(
-        connection,
-        clientTools,
-        body,
-        errorPrefix
-      );
-      return;
-    }
-
-    if (this._continuation.pending) {
-      this._continuation.pending.connection = connection;
-      this._continuation.pending.connectionId = connection.id;
-      this._continuation.awaitingConnections.set(connection.id, connection);
-      this._continuation.pending.clientTools = clientTools;
-      this._continuation.pending.body = body;
-      this._continuation.pending.errorPrefix = errorPrefix;
-      this._resetAutoContinuationTimer();
-      return;
-    }
-
-    const requestId = nanoid();
-    this._continuation.pending = {
+    this._autoContinuation.schedule({
       connection,
-      connectionId: connection.id,
-      requestId,
       clientTools,
       body,
-      errorPrefix,
-      prerequisite: null,
-      pastCoalesce: false
-    };
-    this._continuation.awaitingConnections.set(connection.id, connection);
-    this._resetAutoContinuationTimer();
+      errorPrefix
+    });
   }
 
   /**
@@ -2344,9 +2286,7 @@ export class AIChatAgent<
    * it no-ops once the continuation is running (`pastCoalesce`).
    */
   private _rearmPendingAutoContinuationForBatch(): void {
-    const pending = this._continuation.pending;
-    if (!pending || pending.pastCoalesce) return;
-    this._resetAutoContinuationTimer();
+    this._autoContinuation.rearmForBatch();
   }
 
   /**
@@ -2360,74 +2300,7 @@ export class AIChatAgent<
    */
   private _onStreamingTurnFinalized(): void {
     this._streamingTurnActive = false;
-    this._rearmPendingAutoContinuationForBatch();
-  }
-
-  private _resetAutoContinuationTimer(): void {
-    if (this._continuationTimer) {
-      clearTimeout(this._continuationTimer);
-    }
-    this._continuationTimer = setTimeout(() => {
-      this._continuationTimer = null;
-      const pending = this._continuation.pending;
-      if (!pending) return;
-      this._fireAutoContinuationWhenStable();
-    }, AIChatAgent.AUTO_CONTINUATION_COALESCE_MS);
-  }
-
-  /**
-   * Fire an auto-continuation, but only once the model's parallel tool-call
-   * batch is fully answered (#1649) and no assistant turn is mid-stream (#1650).
-   * The barrier is event-driven and has NO orphan timeout: when the batch is
-   * still incomplete we drain the in-flight applies, re-check, and — if still
-   * incomplete — return WITHOUT firing and WITHOUT holding the isolate, leaving
-   * `_continuation.pending` in place. The next sibling's result re-arms the
-   * coalesce timer and re-runs this check; the continuation fires once the final
-   * sibling lands. A true orphan (a sibling that never arrives) simply never
-   * auto-continues, which is correct — a later user turn / chat recovery repairs
-   * the transcript. Converged onto `@cloudflare/think`'s
-   * `_fireAutoContinuationWhenStable`.
-   */
-  private _fireAutoContinuationWhenStable(): void {
-    if (!this._continuation.pending) return;
-    // The continuation is already running (a sibling re-armed after it started).
-    // New results coalesce/defer into it — don't double-fire.
-    if (this._continuation.pending.pastCoalesce) return;
-    // A drain is already in progress; the sibling that re-armed the timer is
-    // absorbed by it. Only one drain runs, and it re-checks on completion.
-    if (this._continuationBarrierActive) return;
-    // Stream-active gate (#1650, #1649): while the model is still streaming the
-    // assistant turn we cannot know the parallel batch is complete — a fast
-    // client tool can resolve before its slower siblings have even been streamed,
-    // so they exist nowhere yet and firing now would repair them to errored.
-    // `_onStreamingTurnFinalized` re-runs this check once the stream ends.
-    if (this._streamingTurnActive) return;
-    // Fast path: no apply in flight and the leaf step is not mid-batch.
-    if (!this._pendingInteractionPromise && !this._hasIncompleteToolBatch()) {
-      this._fireAutoContinuation(this._continuation.pending.requestId);
-      return;
-    }
-    this._continuationBarrierActive = true;
-    // keepAlive only for the bounded drain — the duration of the applies that
-    // have ALREADY arrived, not an open-ended wait for siblings that haven't.
-    this.keepAliveWhile(() => this._drainInteractionApplies())
-      .catch(() => {})
-      .finally(() => {
-        // Clear the flag and re-check synchronously — no `await` between here
-        // and the fire/return decision, so a sibling-armed coalesce timer (a
-        // macrotask) cannot interleave and double-fire.
-        this._continuationBarrierActive = false;
-        const pending = this._continuation.pending;
-        if (!pending || pending.pastCoalesce) return;
-        // A stream (re)started during the drain — hold; the finalize re-trigger
-        // re-checks once the batch is fully materialized.
-        if (this._streamingTurnActive) return;
-        // Still waiting on an unanswered sibling — return without firing. The
-        // result that completes the batch re-triggers this via its own
-        // `_scheduleAutoContinuation`; we do not pin the isolate in the interim.
-        if (this._hasIncompleteToolBatch()) return;
-        this._fireAutoContinuation(pending.requestId);
-      });
+    this._autoContinuation.rearmForBatch();
   }
 
   /**
@@ -2467,14 +2340,10 @@ export class AIChatAgent<
     return hasIncompleteToolBatch(this.messages);
   }
 
-  private _fireAutoContinuation(requestId: string) {
-    // Cancel any still-armed coalesce timer so a sibling result that re-armed it
-    // during the barrier wait can't fire a duplicate continuation after this one
-    // starts (#1650).
-    if (this._continuationTimer) {
-      clearTimeout(this._continuationTimer);
-      this._continuationTimer = null;
-    }
+  private _fireAutoContinuation() {
+    const pending = this._continuation.pending;
+    if (!pending) return;
+    const requestId = pending.requestId;
 
     const epoch = this._turnQueue.generation;
     // _runExclusiveChatTurn must be called synchronously so the chat turn

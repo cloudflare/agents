@@ -1326,7 +1326,10 @@ export class ThinkTestAgent extends Think {
         pending: Record<string, unknown> | null;
         awaitingConnections: Map<string, unknown>;
       };
-      _continuationTimer: ReturnType<typeof setTimeout> | null;
+      _autoContinuation: {
+        _timer: ReturnType<typeof setTimeout> | null;
+        cancelTimer(): void;
+      };
       _streamingAssistant: unknown;
     };
     // Seed a pending auto-continuation with `pastCoalesce: false` so the buggy
@@ -1349,7 +1352,8 @@ export class ThinkTestAgent extends Think {
       const first = await this.testChat("seeded pending, then stall");
       // Read synchronously: no `await` has yielded since the recovery `finally`
       // ran, so an erroneously armed 50ms timer cannot have fired yet.
-      const coalesceTimerArmedAfterStall = internal._continuationTimer !== null;
+      const coalesceTimerArmedAfterStall =
+        internal._autoContinuation._timer !== null;
       const streamingAssistantCleared = internal._streamingAssistant === null;
       const scheduledContinues =
         this.sql<{ count: number }>`
@@ -1365,10 +1369,7 @@ export class ThinkTestAgent extends Think {
     } finally {
       // Tear down the seeded pending + any armed timer so nothing leaks into a
       // later turn (and the seeded undefined connection never gets used).
-      if (internal._continuationTimer) {
-        clearTimeout(internal._continuationTimer);
-        internal._continuationTimer = null;
-      }
+      internal._autoContinuation.cancelTimer();
       internal._continuation.pending = null;
       internal._continuation.awaitingConnections.clear();
       this._stallAfterChunks = null;

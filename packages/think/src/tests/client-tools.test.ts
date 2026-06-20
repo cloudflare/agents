@@ -1531,6 +1531,24 @@ describe("Think — auto-continuation", () => {
     }
   }, 20000);
 
+  it("waitUntilStable does not report stable while an auto-continuation is armed (#1650)", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+
+    // With an auto-continuation armed (a drain in flight, barrier active) but no
+    // message-level interaction pending, `waitUntilStable` must NOT report
+    // stable: it has to wait out the armed window so idle eviction / recovery
+    // can't act in the gap before the held continuation fires. A short deadline
+    // therefore times out (stable === false) rather than returning immediately.
+    const result =
+      await agent.testWaitUntilStableHoldsForArmedContinuation(250);
+
+    expect(result.hasArmedContinuation).toBe(true);
+    // Proves the armed-continuation branch drove the result, not a pending HITL.
+    expect(result.messageInteractionPending).toBe(false);
+    expect(result.stable).toBe(false);
+  });
+
   it("continues when an errored sibling (autoContinue:false) completes the batch (#1650)", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

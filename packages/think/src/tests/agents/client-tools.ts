@@ -1065,13 +1065,15 @@ export class ThinkClientToolsAgent extends Think {
   }> {
     const internal = this as unknown as {
       _continuation: { pending: unknown };
-      _continuationTimer: ReturnType<typeof setTimeout> | null;
-      _continuationBarrierActive: boolean;
+      _autoContinuation: {
+        _timer: ReturnType<typeof setTimeout> | null;
+        _barrierActive: boolean;
+      };
     };
     return {
       hasPending: internal._continuation.pending != null,
-      barrierActive: internal._continuationBarrierActive,
-      timerArmed: internal._continuationTimer != null
+      barrierActive: internal._autoContinuation._barrierActive,
+      timerArmed: internal._autoContinuation._timer != null
     };
   }
 
@@ -1087,19 +1089,87 @@ export class ThinkClientToolsAgent extends Think {
   async evictInMemoryContinuationState(): Promise<void> {
     const internal = this as unknown as {
       _continuation: { pending: unknown };
-      _continuationTimer: ReturnType<typeof setTimeout> | null;
-      _continuationBarrierActive: boolean;
+      _autoContinuation: { reset(): void };
       _pendingInteractionPromise: Promise<boolean> | null;
       _interactionApplyTail: Promise<void>;
     };
-    if (internal._continuationTimer) {
-      clearTimeout(internal._continuationTimer);
-      internal._continuationTimer = null;
-    }
+    // reset() cancels the coalesce timer and clears the double-fire guard.
+    internal._autoContinuation.reset();
     internal._continuation.pending = null;
-    internal._continuationBarrierActive = false;
     internal._pendingInteractionPromise = null;
     internal._interactionApplyTail = Promise.resolve();
+  }
+
+  /**
+   * Probe that `waitUntilStable` does NOT report stable while an
+   * auto-continuation is armed (#1650) — the behavior `@cloudflare/think`
+   * converged onto from `@cloudflare/ai-chat`. Holds the barrier active (a drain
+   * in flight against a controlled, not-yet-resolved apply) so the controller
+   * stays armed without firing, then probes `waitUntilStable` with a short
+   * deadline. Returns whether the continuation was armed, whether the
+   * message-level interaction check was clear (proving the armed branch — not a
+   * pending HITL — drove the result), and whether `waitUntilStable` reported
+   * stable (it must NOT: it should wait out the armed window and time out).
+   */
+  async testWaitUntilStableHoldsForArmedContinuation(
+    timeoutMs: number
+  ): Promise<{
+    hasArmedContinuation: boolean;
+    messageInteractionPending: boolean;
+    stable: boolean;
+  }> {
+    const internal = this as unknown as {
+      _continuation: {
+        pending: Record<string, unknown> | null;
+        awaitingConnections: Map<string, unknown>;
+      };
+      _autoContinuation: { fireWhenStable(): void; reset(): void };
+      _pendingInteractionPromise: Promise<boolean> | null;
+      _interactionApplyTail: Promise<void>;
+      _hasArmedContinuation(): boolean;
+    };
+
+    // Seed an unfired pending continuation (no message-level interaction, so the
+    // waitUntilStable loop reaches the armed-continuation branch rather than the
+    // HITL branch).
+    internal._continuation.pending = {
+      connection: undefined,
+      connectionId: "armed-test",
+      requestId: crypto.randomUUID(),
+      clientTools: undefined,
+      body: undefined,
+      errorPrefix: "[Think] Auto-continuation failed:",
+      prerequisite: null,
+      pastCoalesce: false
+    };
+
+    // Drive the controller into an in-flight drain so it stays armed
+    // (`barrierActive`) without firing: a non-null pending-interaction promise
+    // makes fireWhenStable take the drain path, and a not-yet-resolved apply
+    // tail keeps the drain (and thus the barrier) open for the probe.
+    let releaseDrain!: () => void;
+    const drainGate = new Promise<void>((resolve) => {
+      releaseDrain = resolve;
+    });
+    internal._pendingInteractionPromise = new Promise<boolean>(() => {});
+    internal._interactionApplyTail = drainGate;
+    internal._autoContinuation.fireWhenStable();
+
+    try {
+      const hasArmedContinuation = internal._hasArmedContinuation();
+      const messageInteractionPending = this.hasPendingInteraction();
+      const stable = await this.waitUntilStable({ timeout: timeoutMs });
+      return { hasArmedContinuation, messageInteractionPending, stable };
+    } finally {
+      // Clear pending first so the drain's post-completion re-check bails
+      // without firing, then release the drain and reset the barrier.
+      internal._continuation.pending = null;
+      internal._continuation.awaitingConnections.clear();
+      internal._pendingInteractionPromise = null;
+      releaseDrain();
+      internal._interactionApplyTail = Promise.resolve();
+      internal._autoContinuation.reset();
+    }
   }
 
   /**
