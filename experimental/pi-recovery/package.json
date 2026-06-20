@@ -8,6 +8,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false",
+    "test": "vitest run",
     "test:e2e": "vitest run --config e2e/vitest.config.ts"
   },
   "dependencies": {
