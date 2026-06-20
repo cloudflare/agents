@@ -7445,12 +7445,25 @@ export class Think<
     if (typeof code !== "string" || code.trim().length === 0) {
       throw new Error("Dynamic workflow code must be a non-empty string");
     }
-    const byteLength = new TextEncoder().encode(code).length;
     const max = (this.constructor as typeof Think)
       .MAX_DYNAMIC_WORKFLOW_CODE_BYTES;
+    // Fast pre-filter: a string's UTF-8 byte length is always >= its length,
+    // so anything longer than the limit cannot fit — reject without allocating
+    // a TextEncoder buffer for the (potentially large) payload.
+    const byteLength =
+      code.length > max ? code.length : new TextEncoder().encode(code).length;
     if (byteLength > max) {
       throw new Error(
         `Dynamic workflow code is too large (${byteLength} bytes, max ${max})`
+      );
+    }
+    // The loader dispatches to the `GeneratedWorkflow` entrypoint, so the code
+    // must declare a class with that name (see dynamic-workflows/loader.ts).
+    // Catch the mismatch here rather than as an opaque runtime failure.
+    if (!/\bclass\s+GeneratedWorkflow\b/.test(code)) {
+      throw new Error(
+        "Dynamic workflow code must declare a class named 'GeneratedWorkflow' " +
+          "(the entrypoint the loader dispatches to)"
       );
     }
   }
@@ -7494,7 +7507,8 @@ export class Think<
    * instance. The `DynamicThinkWorkflow` entrypoint loads, bundles, and
    * executes the code via Dynamic Workers when the engine calls `run()`.
    *
-   * The generated code must export a default class that extends `ThinkWorkflow`.
+   * The generated code must declare a class named `GeneratedWorkflow` that
+   * extends `ThinkWorkflow` (this is the entrypoint the loader dispatches to).
    *
    * @param workflowName - The workflow binding name (matching `wrangler.jsonc`)
    * @param code - Generated ThinkWorkflow TypeScript source
@@ -7548,6 +7562,16 @@ export class Think<
       );
     }
 
+    const workflowId = options?.id ?? `wf_${crypto.randomUUID()}`;
+
+    // If the caller supplied an explicit ID that is already tracked, fail
+    // before writing the code row so we do not orphan it in SQLite.
+    if (options?.id !== undefined && this.getWorkflow(workflowId)) {
+      throw new Error(
+        `Workflow with ID "${workflowId}" is already being tracked`
+      );
+    }
+
     // NOTE: code rows are intentionally not evicted here. A dynamic workflow
     // can sit idle for a long time (`step.sleep`, `step.waitForEvent`, human
     // approval) and the loader re-fetches the code by `wfId` on every cache
@@ -7560,8 +7584,6 @@ export class Think<
       INSERT INTO cf_think_dynamic_workflows (wf_id, code, created_at)
       VALUES (${wfId}, ${code}, ${Date.now()})
     `;
-
-    const workflowId = options?.id ?? `wf_${crypto.randomUUID()}`;
 
     const envelope = {
       __dispatcherMetadata: {
@@ -7577,10 +7599,19 @@ export class Think<
       }
     };
 
-    await workflow.create({
-      id: workflowId,
-      params: envelope
-    });
+    try {
+      await workflow.create({
+        id: workflowId,
+        params: envelope
+      });
+    } catch (e) {
+      // The workflow instance was not created — drop the orphaned code row so
+      // it does not accumulate in SQLite.
+      this.sql`
+        DELETE FROM cf_think_dynamic_workflows WHERE wf_id = ${wfId}
+      `;
+      throw e;
+    }
 
     const metadataJson = options?.metadata
       ? JSON.stringify(options.metadata)
@@ -7590,8 +7621,19 @@ export class Think<
         INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status, metadata)
         VALUES (${crypto.randomUUID()}, ${workflowId}, ${workflowName}, 'queued', ${metadataJson})
       `;
-    } catch {
-      // Tracking is best-effort — don't fail the workflow if it fails
+    } catch (e) {
+      // Mirror the base Agent.runWorkflow() contract: surface duplicate-ID
+      // collisions clearly and re-throw any other error rather than silently
+      // dropping it (which would leave the workflow untracked with no signal).
+      if (
+        e instanceof Error &&
+        e.message.includes("UNIQUE constraint failed")
+      ) {
+        throw new Error(
+          `Workflow with ID "${workflowId}" is already being tracked`
+        );
+      }
+      throw e;
     }
 
     return workflowId;

@@ -26,6 +26,12 @@ type AgentStub = {
  */
 const DYNAMIC_WORKFLOW_COMPATIBILITY_DATE = "2026-01-01";
 
+/**
+ * Class name the generated code must export — `Think.runDynamicWorkflow`
+ * validates the code declares a class with this name before it is stored.
+ */
+const GENERATED_WORKFLOW_ENTRYPOINT = "GeneratedWorkflow";
+
 function assertDynamicThinkWorkflowMeta(
   metadata: unknown
 ): asserts metadata is DynamicThinkWorkflowMeta {
@@ -107,7 +113,7 @@ export const DynamicThinkWorkflow =
       });
 
       return worker.getEntrypoint(
-        "GeneratedWorkflow"
+        GENERATED_WORKFLOW_ENTRYPOINT
       ) as unknown as WorkflowRunner;
     }
   );

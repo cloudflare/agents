@@ -12,12 +12,18 @@ function createFakeSql() {
       rows.set(wfId, { code, created_at: createdAt });
       return [];
     }
+    if (text.includes("DELETE FROM cf_think_dynamic_workflows")) {
+      const wfId = values[0] as string;
+      rows.delete(wfId);
+      return [];
+    }
     if (text.includes("SELECT code FROM cf_think_dynamic_workflows")) {
       const wfId = values[0] as string;
       const row = rows.get(wfId);
       return row ? [{ code: row.code }] : [];
     }
-    // CREATE TABLE, tracking INSERT into cf_agents_workflows, etc.
+    // CREATE TABLE, tracking INSERT into cf_agents_workflows, getWorkflow
+    // SELECT (no tracked rows in these unit tests), etc.
     return [];
   };
   return { sql, rows };
@@ -46,6 +52,7 @@ interface TestThink {
 function createFakeAgent(overrides?: {
   agentBindingKey?: string;
   includeWorkflow?: boolean;
+  failCreate?: boolean;
 }) {
   const created: CreatedWorkflow[] = [];
   const { sql, rows } = createFakeSql();
@@ -61,6 +68,9 @@ function createFakeAgent(overrides?: {
   if (overrides?.includeWorkflow !== false) {
     env.DYNAMIC_THINK_WF = {
       create: async (opts: CreatedWorkflow) => {
+        if (overrides?.failCreate) {
+          throw new Error("create failed");
+        }
         created.push(opts);
         return { id: opts.id };
       }
@@ -92,10 +102,17 @@ describe("Think dynamic workflows", () => {
       expect(() => agent.validateWorkflowCode(tooBig)).toThrow(/too large/);
     });
 
+    it("rejects code without a GeneratedWorkflow class", () => {
+      const { agent } = createFakeAgent();
+      expect(() =>
+        agent.validateWorkflowCode("export default class Other {}")
+      ).toThrow(/GeneratedWorkflow/);
+    });
+
     it("accepts reasonable code", () => {
       const { agent } = createFakeAgent();
       expect(() =>
-        agent.validateWorkflowCode("export default class W {}")
+        agent.validateWorkflowCode("export default class GeneratedWorkflow {}")
       ).not.toThrow();
     });
   });
@@ -113,7 +130,8 @@ describe("Think dynamic workflows", () => {
   describe("runDynamicWorkflow", () => {
     it("stores retrievable code and dispatches the workflow with the expected envelope", async () => {
       const { agent, created } = createFakeAgent();
-      const code = "export default class W extends ThinkWorkflow {}";
+      const code =
+        "export default class GeneratedWorkflow extends ThinkWorkflow {}";
 
       const workflowId = await agent.runDynamicWorkflow(
         "DYNAMIC_THINK_WF",
@@ -153,7 +171,7 @@ describe("Think dynamic workflows", () => {
       await expect(
         agent.runDynamicWorkflow(
           "DYNAMIC_THINK_WF",
-          "export default class W {}"
+          "export default class GeneratedWorkflow {}"
         )
       ).rejects.toThrow(/not found in environment/);
     });
@@ -164,11 +182,23 @@ describe("Think dynamic workflows", () => {
       await expect(
         agent.runDynamicWorkflow(
           "DYNAMIC_THINK_WF",
-          "export default class W {}",
+          "export default class GeneratedWorkflow {}",
           {},
           { agentBinding: "NOT_A_DO" }
         )
       ).rejects.toThrow(/not a Durable Object namespace/);
+    });
+
+    it("removes the stored code row when workflow.create fails", async () => {
+      const { agent, rows } = createFakeAgent({ failCreate: true });
+      await expect(
+        agent.runDynamicWorkflow(
+          "DYNAMIC_THINK_WF",
+          "export default class GeneratedWorkflow {}"
+        )
+      ).rejects.toThrow(/create failed/);
+      // The orphaned code row must have been cleaned up.
+      expect(rows.size).toBe(0);
     });
   });
 });

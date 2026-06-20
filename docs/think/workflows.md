@@ -236,9 +236,20 @@ Then call `runDynamicWorkflow()` from your Think agent:
 ```typescript
 const workflowId = await this.runDynamicWorkflow(
   "DYNAMIC_THINK_WF", // the workflow binding name
-  generatedCode, // TypeScript source that default-exports a ThinkWorkflow
+  generatedCode, // TypeScript source (see the class-name requirement below)
   { topic: "release notes" } // params forwarded to the workflow's run()
 );
+```
+
+The generated code must declare a class named `GeneratedWorkflow` that extends
+`ThinkWorkflow` — this is the entrypoint the loader dispatches to:
+
+```typescript
+export default class GeneratedWorkflow extends ThinkWorkflow {
+  async run(event, step) {
+    /* ... */
+  }
+}
 ```
 
 The generated code runs as a real `ThinkWorkflow`, so `step.prompt()`,
@@ -247,10 +258,17 @@ The generated code runs as a real `ThinkWorkflow`, so `step.prompt()`,
 Notes:
 
 - Generated code is validated by `validateWorkflowCode()` before it is stored.
-  The default implementation enforces a non-empty body and a size limit
-  (`Think.MAX_DYNAMIC_WORKFLOW_CODE_BYTES`). Override it in a subclass to add
-  stricter checks. You remain responsible for trusting the source of any
-  LLM-generated code you pass in.
+  The default implementation enforces a non-empty body, a size limit
+  (`Think.MAX_DYNAMIC_WORKFLOW_CODE_BYTES`), and that the code declares a
+  `GeneratedWorkflow` class. Override it in a subclass to add stricter checks.
+  You remain responsible for trusting the source of any LLM-generated code you
+  pass in.
+- Passing an explicit `options.id` that is already tracked throws — the code is
+  not stored, so duplicate IDs do not orphan rows.
+- `_getWorkflowCode()` is reachable via Durable Object service-binding RPC (it
+  is excluded from the WebSocket callable surface, but the leading underscore
+  is a naming convention, not an access-control boundary). Treat stored code as
+  sensitive.
 - Stored code is retained for the lifetime of the agent's Durable Object so
   long-running workflows can be resumed. It is not evicted automatically.
 - See the `examples/dynamic-think-workflows` example for a complete setup.
