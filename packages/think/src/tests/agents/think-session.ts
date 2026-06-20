@@ -38,7 +38,11 @@ import type {
   StepContext,
   ChunkContext
 } from "../../think";
-import { sanitizeMessage, enforceRowSizeLimit } from "agents/chat";
+import {
+  sanitizeMessage,
+  enforceRowSizeLimit,
+  StreamAccumulator
+} from "agents/chat";
 import type { ClientToolSchema } from "agents/chat";
 import type { Schedule } from "agents";
 import { Session } from "agents/experimental/memory/session";
@@ -5846,6 +5850,28 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async hasPendingInteractionForTest(): Promise<boolean> {
     return this.hasPendingInteraction();
+  }
+
+  /**
+   * Seed the in-flight `_streamingAssistant` accumulator with `parts` (or clear
+   * it with `null`), simulating a mid-stream turn whose partial hasn't been
+   * persisted to `this.messages` yet — e.g. a parallel tool batch where a
+   * client-tool `input-available` part has streamed but the end-of-stream
+   * persist hasn't run. Lets tests exercise `hasPendingInteraction`'s
+   * accumulator scan in isolation.
+   */
+  async setStreamingAssistantForTest(
+    parts: UIMessage["parts"] | null
+  ): Promise<void> {
+    (
+      this as unknown as { _streamingAssistant: StreamAccumulator | null }
+    )._streamingAssistant =
+      parts === null
+        ? null
+        : new StreamAccumulator({
+            messageId: "streaming-assistant",
+            existingParts: parts
+          });
   }
 
   async waitUntilStableForTest(timeout?: number): Promise<boolean> {

@@ -4862,6 +4862,84 @@ describe("Think — waitUntilStable", () => {
     const hasPending = await agent.hasPendingInteractionForTest();
     expect(hasPending).toBe(false);
   });
+
+  it("detects a pending CLIENT-tool interaction living ONLY in the in-flight accumulator (mid-stream, pre-persist)", async () => {
+    const agent = await freshRecoveryAgent("stable-streaming-pending");
+
+    // Parallel-batch case (#1649): the model streamed a client-tool
+    // `input-available` part into `_streamingAssistant`, but the end-of-stream
+    // persist hasn't written it to `this.messages` yet. A storage-only scan
+    // would miss it; the accumulator scan must catch it so a same-isolate stall
+    // incident is treated as "awaiting client" (budget-free), matching
+    // `@cloudflare/ai-chat`'s `_streamingMessage` scan.
+    await agent.setRequestContextForTest(undefined, [
+      { name: "client_action" }
+    ]);
+
+    await agent.persistTestMessage({
+      id: "user-1",
+      role: "user",
+      parts: [{ type: "text", text: "Use a tool" }]
+    } as UIMessage);
+
+    expect(await agent.hasPendingInteractionForTest()).toBe(false);
+
+    await agent.setStreamingAssistantForTest([
+      {
+        type: "tool-client_action",
+        toolCallId: "tc-stream-1",
+        toolName: "client_action",
+        state: "input-available",
+        input: { action: "test" }
+      }
+    ] as unknown as UIMessage["parts"]);
+
+    expect(await agent.hasPendingInteractionForTest()).toBe(true);
+  });
+
+  it("does NOT report pending for a dead SERVER-tool input-available in the accumulator", async () => {
+    const agent = await freshRecoveryAgent("stable-streaming-server-orphan");
+
+    // Symmetric with the persisted-message server-tool case: a SERVER tool's
+    // `input-available` part in the accumulator must NOT keep stability open —
+    // its `execute()` promise dies with the isolate and nothing will resolve it.
+    await agent.setRequestContextForTest(undefined, [
+      { name: "client_action" }
+    ]);
+
+    await agent.setStreamingAssistantForTest([
+      {
+        type: "tool-preview_tool",
+        toolCallId: "tc-stream-server-1",
+        toolName: "preview_tool",
+        state: "input-available",
+        input: { url: "https://example.com" }
+      }
+    ] as unknown as UIMessage["parts"]);
+
+    expect(await agent.hasPendingInteractionForTest()).toBe(false);
+  });
+
+  it("stops reporting pending once the accumulator's client-tool part resolves", async () => {
+    const agent = await freshRecoveryAgent("stable-streaming-resolved");
+
+    await agent.setRequestContextForTest(undefined, [
+      { name: "client_action" }
+    ]);
+
+    await agent.setStreamingAssistantForTest([
+      {
+        type: "tool-client_action",
+        toolCallId: "tc-stream-1",
+        toolName: "client_action",
+        state: "output-available",
+        input: { action: "test" },
+        output: "result"
+      }
+    ] as unknown as UIMessage["parts"]);
+
+    expect(await agent.hasPendingInteractionForTest()).toBe(false);
+  });
 });
 
 // ── Async onChatResponse ─────────────────────────────────────────

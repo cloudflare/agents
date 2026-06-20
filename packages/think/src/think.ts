@@ -9238,6 +9238,27 @@ export class Think<
 
   protected hasPendingInteraction(): boolean {
     const clientResolvable = this._clientResolvableToolNames();
+    // Scan the in-flight accumulator first, mirroring `@cloudflare/ai-chat`'s
+    // `_streamingMessage` check. A parallel-batch client tool can stream a
+    // pending `input-available`/`approval-requested` part into
+    // `_streamingAssistant` before the end-of-stream persist writes it to
+    // `this.messages`. The hot `waitUntilStable` loop only consults this after
+    // `waitForIdle()` (when the streaming turn has drained and the accumulator
+    // is null), so the scan is a no-op there. It matters on the same-isolate
+    // stall route, where the incident-eval callback runs mid-stream: without
+    // it Think would budget a stall that ai-chat treats as "awaiting client"
+    // (budget-free) — a self-correcting drift once the continuation re-reads
+    // persisted state, but a real asymmetry the stall watchdog would expose.
+    const streaming = this._streamingAssistant;
+    if (
+      streaming &&
+      this._messageHasPendingInteraction(
+        streaming.toMessage(),
+        clientResolvable
+      )
+    ) {
+      return true;
+    }
     return this.messages.some(
       (message) =>
         message.role === "assistant" &&
