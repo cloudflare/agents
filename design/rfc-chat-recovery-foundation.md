@@ -168,10 +168,13 @@ onError, terminalize })` folds the `build → notify → terminalize` give-up
      [rfc-chat-recovery-foundation-progress.md](./rfc-chat-recovery-foundation-progress.md).
 
 **Explicitly deferred / post-v1.** `AutoContinuationController` (the ~260-line
-duplicated auto-continuation barrier) has since **landed** — see the tracked
-follow-up below, now marked done. The remaining host-convergence extraction is
-the shared adapter-spine helpers (a dozen near-identical private methods), its
-own tested PR + changeset; Tier-3 (full streaming-driver merge); Workers AI
+duplicated auto-continuation barrier) and the low-risk **adapter-spine helpers
+(Tier A + B)** have since **landed** — see the two tracked follow-ups below, now
+marked done. What remains host-side is the recovery-engine adapter seam
+(`_chatRecoveryEngine` / `_runChatRecoveryFiber`) plus the product-substrate
+`dispatch`/`classify`/`terminalize` methods, both deferred into the Turns effort
+(a persistence-model rearchitecture, not a leaf lift — see the convergence litmus
+test); Tier-3 (full streaming-driver merge); Workers AI
 Gateway provider-resume checkpoints; Route 2 (front
 `AIChatAgent` itself with a TanStack client); `ResumeHandshakeHost` Approach B
 (injectable frame vocabulary — revisit only if a second foreign client appears);
@@ -243,10 +246,54 @@ and eventually lifting `resumable-stream` into a general durable-stream substrat
 > - **Gate:** its own PR + `agents` changeset + behavior tests proving both hosts'
 >   barriers stay byte-for-byte behaviorally identical (no double-fire, no
 >   fire-through on incomplete batch, self-heal across hibernation).
-> - **Sibling follow-up (separate PR):** the adapter-spine helpers
->   (`_classifyAgentToolChildRecovery`, `_runChatRecoveryFiber`, engine adapter
->   wiring, `broadcast()` frame interception, `_getPartialStreamText`,
->   `_awaitWithDeadline`, `_resumeHandshake` factory, terminal-storage delegates).
+> - **Sibling follow-up (separate PR) — ✅ DONE (Tier A + B), see the block
+>   below:** the leaf adapter-spine helpers (`_classifyAgentToolChildRecovery`,
+>   `broadcast()` frame interception, `_awaitWithDeadline` + the apply-drain). The
+>   other names in the original sweep (`_runChatRecoveryFiber`, engine adapter
+>   wiring, `_getPartialStreamText`, `_resumeHandshake` factory, terminal-storage
+>   delegates) turned out to already be one-line shared delegates or to sit on the
+>   recovery-engine seam the Turns RFC reshapes — left in place to avoid
+>   extract-then-reshape churn.
+
+> **Tracked follow-up — adapter-spine helpers (Tier A + B) — ✅ DONE.**
+> Landed as a pure de-dup PR (`agents` patch changeset
+> `adapter-spine-helpers-dedup`; ai-chat/think need none). **As built:**
+>
+> - New `packages/agents/src/chat/async-helpers.ts` (`TIMED_OUT`,
+>   `awaitWithDeadline`, `drainInteractionApplies`) — the deadline-bounded promise
+>   race and the substrate-free interaction-apply completeness drain
+>   (parameterized by `hasPending` / `getTail`, re-read each iteration). Both hosts
+>   dropped their duplicate `TIMED_OUT` symbol and delegate through their existing
+>   `_awaitWithDeadline` / `_drainInteractionApplies` wrappers.
+> - `classifyAgentToolChildRecovery(storage)` added to `recovery-incident.ts`
+>   (in-progress > failed > none precedence); both hosts'
+>   `_classifyAgentToolChildRecovery` are now one-line delegates.
+> - `interceptAgentToolBroadcast(msg, hooks)` added to `agent-tools.ts` (the #1575
+>   agent-tool tailing snoop), parameterized by an `AgentToolBroadcastHooks`
+>   substrate (forwarder / live-sequence / last-error maps, the host
+>   response-frame type, the host run-lookup). Both `broadcast()` overrides keep a
+>   cheap size-guard — so the common no-child path stays allocation-free — then
+>   delegate the snoop and call `super.broadcast`.
+> - **Net −~160 lines** across the two hosts; **zero host-suite spec edits** (the
+>   primary parity gate). New unit coverage: `async-helpers.test.ts` (deadline +
+>   drain, incl. rejected-tail), `classifyAgentToolChildRecovery` precedence, and
+>   `interceptAgentToolBroadcast` forward/error/passthrough/no-op.
+> - **Deliberately NOT hoisted (RFC bucket 3):** `_dispatchRecovered*Turn` /
+>   `_classifyRecovered*Turn` / `terminalize`. Their convergeable parts (give-up
+>   broadcast-first ordering, recovering-state-on-connect replay, scheduled-recovery
+>   error handling) were already converged with changesets; what remains is
+>   product-substrate — Think's durable submission ledger
+>   (`completeSubmissionAfterRecovery?` / `markSubmissionInterrupted?` adapter hooks
+>   ai-chat no-ops) and the persistence model (ai-chat flat `this.messages` + #1691
+>   guard vs Think's async `Session` tree / `getLatestLeaf`, a storage-coupled
+>   "Tie"). Deeper convergence is a persistence-model rearchitecture that belongs to
+>   the Turns effort. **Verified residual:** ai-chat _does_ clear the "recovering…"
+>   indicator on a normal recovered-turn finish — its
+>   `_updateChatRecoveryIncident(…, "completed")` routes through the shared engine's
+>   `updateIncident` → `setRecovering(false)`, asserted in `recovery-engine.test.ts`
+>   ("clears recovering on completed") — so there is no bucket-1 gap.
+> - Validation: full `pnpm run check` (113 projects); agents + ai-chat + think
+>   suites green sequentially with zero spec edits.
 
 **Working conventions.** Validate with `pnpm run check` (113 projects) before
 considering anything done; host-suite tests via each package's
