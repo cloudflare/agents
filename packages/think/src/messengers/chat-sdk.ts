@@ -9,7 +9,8 @@ import type {
   Message as ChatMessage,
   ReactionEvent as ChatReactionEvent,
   SlashCommandEvent as ChatSlashCommandEvent,
-  Thread as ChatThread
+  Thread as ChatThread,
+  WebhookOptions
 } from "chat";
 import { Chat } from "chat";
 import type {
@@ -118,7 +119,8 @@ export interface MessengerDefinition {
   shardKey?: ChatSdkStateAdapterOptions["shardKey"];
   subscribeOnMention?: boolean;
   toEvent?: (
-    input: ChatSdkMessengerEventInput
+    input: ChatSdkMessengerEventInput,
+    definition: NormalizedMessengerDefinition
   ) => MessengerEvent | Promise<MessengerEvent>;
   userName: string;
   verifyWebhook?:
@@ -186,6 +188,7 @@ export interface MessengerThinkHost extends MessengerThinkTarget {
     agentClass: SubAgentClass<T>,
     name: string
   ): Promise<SubAgentStub<T>>;
+  waitUntil?(task: Promise<unknown>): void;
 }
 
 export interface MessengerFiberStartResult {
@@ -275,7 +278,10 @@ export class ThinkMessengerRuntime {
 
     const chat = this.getOrCreateChat();
     void this.startBackgroundIngress(chat);
-    return chat.webhooks[definition.adapterName](request);
+    return chat.webhooks[definition.adapterName](
+      request,
+      this.webhookOptions()
+    );
   }
 
   async handleFiberRecovery(ctx: FiberRecoveryContext): Promise<boolean> {
@@ -729,12 +735,23 @@ export class ThinkMessengerRuntime {
     return task;
   }
 
+  private webhookOptions(): WebhookOptions | undefined {
+    if (!this.host.waitUntil) {
+      return undefined;
+    }
+    return {
+      waitUntil: (task) => {
+        this.host.waitUntil?.(task);
+      }
+    };
+  }
+
   private async toEvent(
     definition: NormalizedMessengerDefinition,
     input: ChatSdkMessengerEventInput
   ): Promise<MessengerEvent> {
     return (
-      (await definition.toEvent?.(input)) ??
+      (await definition.toEvent?.(input, definition)) ??
       defaultChatSdkEvent(definition, input)
     );
   }
@@ -831,6 +848,11 @@ function idempotencyEventPart(event: MessengerEvent): string {
   if (event.action) {
     return [
       "action",
+      stableNamePart(
+        event.action.providerActionId ??
+          providerRawId(event.action.raw) ??
+          "no-provider-action"
+      ),
       stableNamePart(event.action.messageId ?? "unknown-message"),
       stableNamePart(event.action.actionId),
       stableNamePart(event.action.user?.userId ?? "unknown-user"),
@@ -891,6 +913,7 @@ export function toMessengerAction(action: ChatActionEvent): MessengerAction {
   return {
     actionId: action.actionId,
     messageId: action.messageId,
+    providerActionId: providerRawId(action.raw),
     raw: action.raw,
     user: toMessengerAuthor(action.user),
     value: action.value
