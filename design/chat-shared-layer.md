@@ -13,24 +13,42 @@ This led to:
 - **Duplicated wire protocol constants** (`MSG_CHAT_*` strings matching `MessageType` values)
 - **Duplicated metadata handling** (the `start`/`finish`/`message-metadata` switch that `applyChunkToParts` doesn't cover) in three separate code paths: ai-chat server, ai-chat client, and Think server
 
-On the ai-chat side, `index.ts` (~3700 lines) and `react.tsx` (~1577 lines) mixed too many concerns together — streaming, reconciliation, persistence, broadcasting, turn management — making the code difficult to modify and reason about.
+On the ai-chat side, `index.ts` and `react.tsx` already mixed too many concerns together — streaming, reconciliation, persistence, broadcasting, turn management — making the code difficult to modify and reason about, and both have only grown since (today ~6.1k and ~2.5k lines respectively, with durable chat-recovery layered on).
 
 ## Architecture
 
 ```
 packages/agents/src/chat/          ← shared foundation
   index.ts                         barrel exports
-  message-builder.ts               applyChunkToParts + types
+  message-builder.ts               applyChunkToParts, getPartialStreamText + types
   sanitize.ts                      sanitizeMessage, enforceRowSizeLimit
+  tool-output-truncation.ts        provider-executed tool payload truncation
   stream-accumulator.ts            StreamAccumulator class
   turn-queue.ts                    TurnQueue class
   submit-concurrency.ts            SubmitConcurrencyController
   broadcast-state.ts               broadcastTransition state machine
+  continuation-state.ts            ContinuationState
+  abort-registry.ts                AbortRegistry
   resumable-stream.ts              ResumableStream (SQLite chunk buffer)
-  recovery-engine.ts               ChatRecoveryEngine + adapter / wake-hook seams
+  sql-batch.ts                     bound-param batching for IN-clause deletes
+  connection.ts                    sendIfOpen WS send guard
   client-tools.ts                  ClientToolSchema, createToolsFromClientSchemas
   protocol.ts                      CHAT_MESSAGE_TYPES constants (chat + resume + tool)
-  message-reconciler.ts            reconcileMessages, resolveToolMergeId, reconcileOrphanPartial
+  parse-protocol.ts                parseProtocolMessage
+  tool-state.ts                    tool-part update / interaction helpers
+  agent-tools.ts                   agent-tool-as-child event state
+  message-reconciler.ts            reconcileMessages, resolveToolMergeId, reconcileOrphanPartial, assistantContentKey
+  orphan-store.ts                  OrphanPersistStore interface
+  lifecycle.ts                     shared lifecycle / result / config types
+
+  # @internal chat-recovery engine — shared by ai-chat, think, and the
+  # experimental tanstack-recovery / pi-recovery adapters
+  recovery.ts                      chat-fiber snapshot codec
+  recovery-incident.ts             incident budget math + storage helpers
+  recovery-engine.ts               ChatRecoveryEngine + adapter / wake-hook seams
+  recovery-codec.ts                ChatRecoveryCodec (AISDKRecoveryCodec)
+  resume-handshake.ts              ResumeHandshake stream-resume driver
+  stall-watchdog.ts                iterateWithStallWatchdog
 
 packages/ai-chat/src/              ← stable chat agent + client
   index.ts                         AIChatAgent (uses shared imports)
@@ -116,9 +134,9 @@ class StreamAccumulator {
 
 **`CHAT_MESSAGE_TYPES`** — plain string constants for the wire protocol message types. Used by Think to avoid depending on `@cloudflare/ai-chat/types` (which would create a dependency edge Think shouldn't have). The values match `MessageType` in `ai-chat/src/types.ts`.
 
-### message-reconciler.ts (ai-chat only)
+### message-reconciler.ts
 
-Pure functions for aligning client messages with server state during persistence. Think doesn't need these — its `INSERT OR IGNORE` + reload-from-DB model avoids the ID reconciliation problem entirely.
+Pure functions for aligning client messages with server state during persistence. Both `@cloudflare/ai-chat` and `@cloudflare/think` consume `reconcileMessages` and `resolveToolMergeId`: a client can post an optimistically-minted assistant snapshot (e.g. while a prior tool call is still streaming), so reconciling it against the server's current path maps client IDs onto server IDs and lets stale client tool states pick up the server's outputs — without it, an INSERT-OR-IGNORE-by-ID persist would write a duplicate orphan assistant row.
 
 **`reconcileMessages(incoming, serverMessages, sanitize?)`** — two-stage pipeline:
 
@@ -130,7 +148,7 @@ Pure functions for aligning client messages with server state during persistence
 
 **`resolveToolMergeId(message, serverMessages)`** — per-message ID resolution by `toolCallId`. If a tool call ID exists in a server message with a different ID, adopt the server's ID. Called during persistence to prevent duplicate rows.
 
-`reconcileMessages` and `resolveToolMergeId` are ai-chat-only. The module also exports **`reconcileOrphanPartial(existing, incoming)`** — the orphan-persist **(c)** merge primitive (shared; ai-chat is the only consumer today). It is described with the rest of the orphan path in [recovery-engine.ts](#recovery-enginets).
+`reconcileMessages` and `resolveToolMergeId` are shared — both hosts call them (`Think._handleChatRequest` reconciles incoming messages; `Think._persistIncomingMessage` resolves assistant tool-merge IDs). The module also exports **`reconcileOrphanPartial(existing, incoming)`** — the orphan-persist **(c)** merge primitive (shared; ai-chat is the only consumer today). It is described with the rest of the orphan path in [recovery-engine.ts](#recovery-enginets).
 
 ### recovery-engine.ts
 
@@ -176,11 +194,12 @@ The accumulator doesn't know about SQLite, WebSockets, or broadcasting. It signa
 
 None of these reduce complexity. The metadata handling on the server is ~30 lines of straightforward switch/case that matches the accumulator's behavior exactly. The cost of duplication is low; the risk of the refactoring is high.
 
-### Why reconciliation stays in ai-chat
+### Why reconciliation is shared
 
-Think avoids the reconciliation problem entirely through its persistence model: user messages use `INSERT OR IGNORE` (idempotent), assistant messages use `INSERT ON CONFLICT UPDATE`, and the authoritative message list is always reloaded from SQLite. There's no client/server ID mismatch because Think controls the full lifecycle.
+Both hosts face client/server ID mismatch, so the pure reconciler functions live in `agents/chat` and both consume them:
 
-`AIChatAgent` can't do this because it must accept whatever IDs the AI SDK generates on the client side, and the `useChat` hook's internal state management can produce ID mismatches during streaming, tool interactions, and page refreshes.
+- **`AIChatAgent`** must accept whatever IDs the AI SDK generates on the client side, and the `useChat` hook's internal state management can produce ID mismatches during streaming, tool interactions, and page refreshes.
+- **`Think`** persists through Session (`INSERT OR IGNORE`-by-ID for user messages, upsert for assistant), which is idempotent by ID — but a client can still post an optimistically-minted assistant snapshot mid-turn. Reconciling it against the server's active path maps the client ID onto the server's and prevents a duplicate orphan assistant row.
 
 ### Why `StreamChunkData.messageMetadata` is `unknown`
 

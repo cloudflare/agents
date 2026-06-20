@@ -13,7 +13,13 @@ Related:
 
 > Quick orientation for a fresh working session. The authoritative detail lives in
 > the **Progress log** (newest first) and the Phase 5 section; this block is the
-> map, not the territory. Last updated after commit `66e7a790`.
+> map, not the territory. Last updated after commit `16175930` (branch-cleanup
+> Tiers 1–2).
+>
+> _Archival note: the Progress log is kept inline while this branch is in flight
+> (it is an active working artifact). At branch finalization, move it to a sibling
+> `rfc-chat-recovery-foundation-progress.md` so this RFC freezes as a point-in-time
+> record, per `design/AGENTS.md`._
 
 **Where we are.** The shared recovery foundation (Phases 0–5) is implemented and
 merged on the `chat-recovery-foundation` branch. The recovery engine, resume
@@ -35,6 +41,18 @@ substrate → keep per-package) and the ai-chat-as-subset end-state.
 
 **Recently landed (most recent first).**
 
+- `16175930` / `ba05478e` — **branch cleanup, Tiers 1–2** (no behavior change):
+  dedup the third hand-copied `sendIfOpen` (now imported from `connection.ts`),
+  remove dead code (`targetAssistantId` engine field, pi-recovery `hasFiberRows`),
+  `@internal`-group the recovery exports in the `agents/chat` barrel and prune 12
+  zero-consumer barrel exports, and truth-up `chat-shared-layer.md` + this RFC.
+- `754c7b0f` — **orphan-persist store seam promoted to a shared interface**: the
+  by-convention store-write alignment from orphan-persist step (d) is now the
+  type-enforced `OrphanPersistStore<M = UIMessage>` (the `SessionProvider` write
+  subset, message-type-parameterized). Both hosts route their orphan-persist write
+  through a host adapter typed against it (`agents` patch changeset). This is the
+  first concrete step of the deferred "align the storage seam with `Session`"
+  north-star item below.
 - `66e7a790` / `b62241e9` — **engine-owned exhaustion helper** (API-ergonomics
   finding **#3**, closed): `runChatRecoveryExhaustion(input, { emit, onExhausted?,
 onError, terminalize })` folds the `build → notify → terminalize` give-up
@@ -68,11 +86,12 @@ onError, terminalize })` folds the `build → notify → terminalize` give-up
   seams; findings **#2, #5, #6** closed); the TanStack/AG-UI second harness; the
   tool-`parts` codec path; the `RecoveryPartial` agnostic-seam refactor.
 
-**Still open (suggested priority order).**
+**Tracked work items (status inline — #1 landed; #2 is release-sweep only).**
 
-1. **Orphan-persist consolidation** (subsumes the former "finding #4 — hand the
+1. **Orphan-persist consolidation — LANDED** (all four steps; kept here for the
+   4-step verdict record). Subsumes the former "finding #4 — hand the
    decoded partial through" and "start-id alignment onto the codec" items; see the
-   _Orphan-persist 4-step verdict_ design note and the newest Progress-log entry).
+   _Orphan-persist 4-step verdict_ design note and the Progress-log entries.
    A step-by-step investigation of both `_persistOrphanedStream` bodies found that
    3 of its 4 steps are unifiable and only one is genuinely storage-coupled:
    - **(a) chunks → parts** — **LANDED.** ai-chat's `_persistOrphanedStream` now
@@ -912,6 +931,11 @@ cells are left as the original record; this is the authoritative status):
   **DONE**, bucket 1.
 - **Durable submissions / Terminal exhausted callback durable effects** — correctly
   **bucket 3** (product substrate); confirmed keep-per-package.
+- **Live stalled stream** — shipped **opt-in, not default-on**. The cell proposed
+  "enabled by default when `chatRecovery` is on"; as shipped, both packages expose
+  `chatStreamStallTimeoutMs` defaulting to `0` (disabled), so the rollout is a pure
+  capability addition with no silent behavior change (parity with Think). **DONE**,
+  bucket 1. See the corrected "Adopt shared stall recovery" decision below.
 
 Going forward, new matrix rows should carry an explicit **status** (proposed /
 DONE) and **litmus bucket** (1 behavior-drift / 2 bug-asymmetry / 3 product) so the
@@ -928,10 +952,17 @@ surface the problem.
 The shared engine supports stall detection as an input path into the same
 incident budget machinery, and both packages use it.
 
-Decision: `AIChatAgent` enables a default stall timeout when `chatRecovery` is
-enabled, matching `Think`. We own both packages, so there is no reason to ship the
-capability dark and flip it later; we converge now and cover it with a changeset
-and tests. The stall timeout is configurable, so an app can tune or disable it.
+Decision (as shipped — revised from the original default-on plan): the stall
+watchdog is exposed in **both** packages as the opt-in `chatStreamStallTimeoutMs`
+(a class field like `chatRecovery`), defaulting to `0` (disabled). `Think` already
+defaulted to `0`, and defaulting `AIChatAgent` to `0` too makes the rollout a pure
+capability addition with **no** silent behavior change for existing turns. When set
+(`> 0`) and `chatRecovery` is on, a stall routes into the same bounded-recovery
+machinery; with `chatRecovery` off it surfaces as a terminal stream error (clears
+the spinner). The original plan here was "default-on when `chatRecovery` is on";
+that was revised to opt-in parity with Think to avoid changing behavior for apps
+that never asked for it. Shipped with the `@cloudflare/ai-chat`
+`chat-stream-stall-watchdog` changeset + tests.
 
 #### Adopt stronger callback-error handling
 

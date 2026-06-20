@@ -39,12 +39,12 @@ Recovery-RFC gate (see "Coordination with the chat-recovery RFC"): the
 (`classifyRecoveredTurn`/`resolveStreamForRecovery`) rather than the
 pre-refactor private methods.
 
-> **Name reconciliation (2026-06, chat-recovery Phase 4).** The recovery seam shipped
-> as **`ChatRecoveryAdapter`** in `agents/chat` (not `ThinkRecoveryAdapter`). Phases
-> 0–4 are done; the wake-path decision is being lifted in Slice 4d-2 as a package-owned
-> hook pair — a `classifyRecoveredTurn`-shaped classifier plus a `dispatchRecoveredTurn`
-> decision — which is exactly the seam `_admitTurn` should target via the
-> `recovery-continue` / `recovery-retry` triggers. The chat-recovery RFC's
+> **Name reconciliation (updated 2026-06).** The recovery seam shipped
+> as **`ChatRecoveryAdapter`** in `agents/chat` (not `ThinkRecoveryAdapter`). Chat-recovery
+> Phases 0–5 and the engine extraction are complete; the wake-path decision shipped as the
+> package-owned `ChatFiberWakeHooks` hook pair — a `classifyRecoveredTurn`-shaped classifier
+> plus a `dispatchRecoveredTurn` decision — which is exactly the seam `_admitTurn` should
+> target via the `recovery-continue` / `recovery-retry` triggers. The chat-recovery RFC's
 > "Substrate capabilities are optional" decision guarantees `Think`'s recovery decision
 > stays package-owned (submission lifecycle + Session leaf live in `Think`), so this
 > RFC's extraction is unblocked. When implementing, use the real names or update them
