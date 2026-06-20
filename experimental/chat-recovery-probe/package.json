@@ -6,7 +6,8 @@
   "version": "0.0.0",
   "scripts": {
     "deploy": "wrangler deploy",
-    "types": "wrangler types env.d.ts --include-runtime false"
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "test:e2e:deployed": "node scripts/run-suite.mjs"
   },
   "dependencies": {
     "@ai-sdk/provider": "^3.0.10",

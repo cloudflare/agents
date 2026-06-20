@@ -23,6 +23,7 @@
     "test": "nx run-many -t test",
     "ci": "oxfmt --write . && nx run-many -t build test && pnpm run check",
     "test:e2e": "nx run-many -t test:e2e --parallel=1",
+    "test:recovery:live": "RUN_DEPLOYED_E2E=1 pnpm --filter @cloudflare/ai-chat run test:e2e:deployed && RUN_DEPLOYED_E2E=1 pnpm --filter @cloudflare/agents-chat-recovery-probe run test:e2e:deployed",
     "test:react": "pnpm --filter agents run test:react",
     "prepare:playwright": "playwright install --with-deps chromium",
     "prepare": "husky"

@@ -41,6 +41,31 @@ cd experimental/chat-recovery-probe
 npm run deploy
 ```
 
+## Automated opt-in suite (`test:e2e:deployed`)
+
+The Layer-5 live counterpart to ai-chat's `deployed-recovery.test.ts`. It deploys
+the probe under a **unique throwaway name** (never clobbering a real
+`chat-recovery-probe`), runs the FAST, deterministic, abort-driven scenarios
+against the live edge, and ALWAYS deletes the Worker afterwards:
+
+```bash
+# from experimental/chat-recovery-probe (or `pnpm run test:recovery:live` at root)
+RUN_DEPLOYED_E2E=1 pnpm run test:e2e:deployed
+```
+
+Default scenario set: `a6 a7 a8 idem` (the `ctx.abort()`-driven invariants — no
+slow/racy real redeploys). Override with `SCENARIOS="a6,a7"`; add `CHURN=deploy`
+for the real-eviction variant of `a6/a7/a8`. The deploy-churn scenarios
+(`a1/a2/a4/a5/a9/rapid`) stay manual (see below).
+
+It is double-gated (the dedicated script + `RUN_DEPLOYED_E2E=1`) and runs in CI
+only via the opt-in `e2e-deployed-think-probe` nightly job (enabled by the
+`RUN_DEPLOYED_E2E` repo variable or a manual `run_deployed` dispatch).
+
+> **Account:** with multiple accessible accounts, wrangler can resolve the wrong
+> one and fail with `Authentication error [code: 10000]`. Pin it explicitly:
+> `export CLOUDFLARE_ACCOUNT_ID=<id>` (the nightly job passes this as a secret).
+
 ## Run the guard scenarios (fast, abort-driven)
 
 ```bash

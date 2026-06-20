@@ -6,6 +6,11 @@ on:
     - cron: "0 0 * * *"
   # Allow manual trigger for debugging
   workflow_dispatch:
+    inputs:
+      run_deployed:
+        description: "Also run the DEPLOYED recovery suites (real, billable Workers)"
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}
@@ -144,3 +149,59 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: pnpm run test:e2e
         working-directory: experimental/tanstack-recovery
+
+  # ── DEPLOYED (Layer-5) recovery suites ──────────────────────────────────────
+  # These deploy REAL, billable Workers and drive recovery on Cloudflare's edge
+  # (not local workerd). They are OPT-IN: skipped unless the repo variable
+  # `RUN_DEPLOYED_E2E` is `1`, or a manual run sets the `run_deployed` input.
+  # Each suite uniquely names its throwaway Worker and always deletes it.
+  e2e-deployed-ai-chat:
+    name: "E2E (deployed): ai-chat recovery on real edge"
+    if: ${{ vars.RUN_DEPLOYED_E2E == '1' || github.event.inputs.run_deployed == 'true' }}
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: ./.github/actions/install
+
+      - run: pnpm run build
+
+      # Deploys `wrangler.deployed.jsonc`, forces a mid-turn redeploy to evict the
+      # live DO, asserts recovery fires + the no-false-incident counterpart, then
+      # deletes the Worker.
+      - name: Run ai-chat DEPLOYED recovery e2e
+        env:
+          RUN_DEPLOYED_E2E: "1"
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: pnpm run test:e2e:deployed
+        working-directory: packages/ai-chat
+
+  e2e-deployed-think-probe:
+    name: "E2E (deployed): Think recovery probe on real edge"
+    if: ${{ vars.RUN_DEPLOYED_E2E == '1' || github.event.inputs.run_deployed == 'true' }}
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: ./.github/actions/install
+
+      - run: pnpm run build
+
+      # Deploys the chat-recovery-probe under a throwaway name and runs the fast,
+      # deterministic abort-driven Think scenarios (a6 HITL, a7 server-orphan,
+      # a8 approval, idem), then deletes the Worker. The slow real-deploy-churn
+      # scenarios (a1/a2/a4/a5/a9/rapid) stay manual (see the probe README).
+      - name: Run Think recovery-probe DEPLOYED suite
+        env:
+          RUN_DEPLOYED_E2E: "1"
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: pnpm run test:e2e:deployed
+        working-directory: experimental/chat-recovery-probe

@@ -2204,37 +2204,48 @@ For client state, assert:
 - hibernated sockets route `TOOL_RESULT`, `TOOL_APPROVAL`, cancel, clear, and
   resume messages through the same recovered state as fresh connections
 
-### Layer 5: live deploy and chaos tests (follow-up, not a merge gate)
+### Layer 5: live deploy and chaos tests (LANDED — opt-in, not a merge gate)
 
 Layer 4 (the extended local SIGKILL + persistent-state e2e suites) is the
-confidence gate for this refactor. Live deploy/chaos testing is a valuable
-follow-up for catching real isolate-replacement and hibernation timing, but it
-requires new infrastructure (fixtures, a controller, deploy credentials) and
-should not block the v1 merge. It runs nightly/opt-in once it stabilizes.
+confidence gate for this refactor. Live deploy/chaos testing catches real
+isolate-replacement and hibernation timing that local workerd cannot; it is
+opt-in (real, billable Workers) and not a merge blocker.
 
-The sketch below is intentionally brief; it is a starting point for the follow-up,
-not a v1 deliverable.
+**Status: implemented and validated on the real edge.** The two fixtures the
+sketch called for already existed and were extended/wired:
 
-Shape of the follow-up:
+- **ai-chat** (`packages/ai-chat/src/e2e-tests/deployed-recovery.test.ts`,
+  `RUN_DEPLOYED_E2E=1 pnpm --filter @cloudflare/ai-chat test:e2e:deployed`):
+  1. a mid-turn redeploy evicts the live DO → recovery fires on cold start;
+  2. a normally-completed turn is NOT spuriously recovered by reconnect / idle
+     churn, and the agent keeps serving fresh turns (the false-positive guard).
+- **Think** (`experimental/chat-recovery-probe`, `scripts/run-suite.mjs`,
+  `RUN_DEPLOYED_E2E=1 pnpm test:e2e:deployed`): deploys the probe under a
+  throwaway name and runs the fast, deterministic, abort-driven scenarios — `a6`
+  (HITL park survives churn, completes on reply), `a7` (server-orphan recovers
+  via repair, not exempt), `a8` (approval-requested park), `idem` (idempotency).
+  The slow real-deploy-churn scenarios (`a1/a2/a4/a5/a9/rapid`) stay manual.
 
-- Two internal fixtures (an `AIChatAgent` and a `Think` recovery fixture) using
-  deterministic fake model/tool endpoints with stable markers (`chunk-1`,
-  `tool-output-ready`, `continue-1`, `final`).
-- A controller that can deploy a fixture, drive WebSocket clients, trigger a new
-  deploy mid-stream, encourage hibernation via idle periods, reconnect, send tool
-  results, and query test-only debug endpoints (no secrets).
-- A minimum smoke set: deploy mid-text-stream continues; deploy before first
-  chunk retries; idle hibernation wake takes a fresh request without a false
-  incident; disconnect/reconnect replays without starting durable recovery;
-  terminal exhaustion during disconnect replays through the resume handshake.
-- Operational rules: opt-in `pnpm run test:recovery:live`, documented env
-  (account, deploy token, safe worker prefixes), deterministic fakes, short
-  timeouts, unique worker names, bounded runtime and cleanup, no secrets in the
-  repo.
+Realities discovered building it (worth keeping):
 
-When this layer is built, promote a small smoke subset to scheduled/nightly CI.
-Keep the full chaos suite opt-in unless it becomes fast and reliable enough for
-PR CI.
+- On the real edge a `wrangler deploy` takes ~15–20s, so a *finite* turn
+  completes before the redeploy lands — the deployed fixtures hang the turn to
+  guarantee an interruptible in-flight fiber. A deployed CONTINUE-with-exact-text
+  assertion is therefore racy; the local SIGKILL suites own that, and the
+  deployed suites prove "recovery triggers / no false positive" instead.
+- *Natural* deployed exhaustion seals are racy (a content runaway loses its seal
+  to a `conversation_changed` skip; a stuck turn is dropped as non-recoverable on
+  attempt 1), so the probe seeds them deterministically (`/probe/prime-seal`,
+  the `rapid` scenario) rather than asserting a flaky live seal.
+- With multiple accessible accounts wrangler can resolve the wrong one and fail
+  with `Authentication error [code: 10000]`; pin `CLOUDFLARE_ACCOUNT_ID`.
+
+Operational rules met: opt-in `pnpm run test:recovery:live` (root), unique
+throwaway worker names, guaranteed `wrangler delete` teardown, deterministic
+fakes, bounded timeouts, no secrets in the repo. CI: gated nightly jobs
+`e2e-deployed-ai-chat` + `e2e-deployed-think-probe` (off unless the
+`RUN_DEPLOYED_E2E` repo variable is set or a manual `run_deployed` dispatch
+enables them).
 
 ### Layer 6: release gates
 
