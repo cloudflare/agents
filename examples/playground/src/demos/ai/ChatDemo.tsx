@@ -163,6 +163,7 @@ function ChatUI() {
 
   const { messages, sendMessage, clearHistory, status } = useAgentChat({
     agent,
+    experimental_throttle: 100,
     onToolCall: async ({ toolCall, addToolOutput }) => {
       if (toolCall.toolName === "getUserTimezone") {
         addToolOutput({

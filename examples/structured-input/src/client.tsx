@@ -466,7 +466,7 @@ function Chat() {
   });
 
   const { messages, sendMessage, clearHistory, addToolOutput, stop, status } =
-    useAgentChat({ agent });
+    useAgentChat({ agent, experimental_throttle: 100 });
 
   const isStreaming = status === "streaming";
   const isConnected = connectionStatus === "connected";

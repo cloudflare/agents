@@ -477,6 +477,7 @@ function ThinkPane({
   const { messages, sendMessage, status, isStreaming, stop, clearHistory } =
     useAgentChat({
       agent,
+      experimental_throttle: 100,
       getInitialMessages: null
     });
 

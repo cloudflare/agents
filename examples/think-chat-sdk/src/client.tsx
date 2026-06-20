@@ -214,7 +214,8 @@ function App() {
     }, [])
   });
   const { messages, clearHistory } = useAgentChat({
-    agent
+    agent,
+    experimental_throttle: 100
   });
 
   useEffect(() => {

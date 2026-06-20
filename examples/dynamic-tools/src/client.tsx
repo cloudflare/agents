@@ -209,6 +209,7 @@ function Chat() {
 
   const { messages, sendMessage, clearHistory, status } = useAgentChat({
     agent,
+    experimental_throttle: 100,
     // Dynamic tools — schemas are sent to the server automatically
     tools: activeTools,
     // Execute tool calls routed back from the server

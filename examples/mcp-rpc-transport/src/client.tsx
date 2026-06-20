@@ -105,7 +105,10 @@ function App() {
     }, [])
   });
 
-  const { messages, sendMessage, clearHistory } = useAgentChat({ agent });
+  const { messages, sendMessage, clearHistory } = useAgentChat({
+    agent,
+    experimental_throttle: 100
+  });
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

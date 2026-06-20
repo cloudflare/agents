@@ -223,6 +223,7 @@ function Chat() {
     isStreaming
   } = useAgentChat({
     agent,
+    experimental_throttle: 100,
     // Custom data sent with every request (available in options.body on server)
     body: {
       clientVersion: "1.0.0"

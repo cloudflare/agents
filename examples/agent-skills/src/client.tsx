@@ -144,7 +144,8 @@ function App() {
   });
 
   const { messages, sendMessage, clearHistory, status } = useAgentChat({
-    agent
+    agent,
+    experimental_throttle: 100
   });
 
   // Skills the model has activated this conversation, derived from

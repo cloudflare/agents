@@ -372,7 +372,8 @@ function ChatPhase({ agent }: { agent: AgentHandle }) {
   const character = agent.state?.character;
 
   const { messages, sendMessage, clearHistory, stop, status } = useAgentChat({
-    agent
+    agent,
+    experimental_throttle: 100
   });
 
   const isStreaming = status === "streaming" || status === "submitted";

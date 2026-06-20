@@ -677,6 +677,7 @@ function Chat({
     clearError
   } = useAgentChat({
     agent,
+    experimental_throttle: 100,
     getInitialMessages: null,
     onToolCall: async ({ toolCall, addToolOutput }) => {
       if (toolCall.toolName === "getUserTimezone") {

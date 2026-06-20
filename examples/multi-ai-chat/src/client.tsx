@@ -249,7 +249,8 @@ function ActiveChat({ chatId }: { chatId: string }) {
     sub: [{ agent: "Chat", name: chatId }]
   });
   const { messages, sendMessage, status, setMessages } = useAgentChat({
-    agent
+    agent,
+    experimental_throttle: 100
   });
 
   // Clear local state when switching chats.

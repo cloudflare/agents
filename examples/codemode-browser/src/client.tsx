@@ -306,6 +306,7 @@ function App() {
 
   const { messages, sendMessage, clearHistory, status } = useAgentChat({
     agent,
+    experimental_throttle: 100,
     tools,
     onToolCall: async ({ toolCall, addToolOutput }) => {
       const tool = tools[toolCall.toolName];

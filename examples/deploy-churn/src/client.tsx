@@ -151,7 +151,7 @@ function App() {
   });
 
   const { messages, sendMessage, isStreaming, isRecovering, stop } =
-    useAgentChat({ agent });
+    useAgentChat({ agent, experimental_throttle: 100 });
 
   // Poll the agent's recovery view so we can watch incidents/turns evolve while
   // deploys churn underneath. Cheap RPC; harness-only.

@@ -634,7 +634,8 @@ function DrillInPanel({
     ]
   });
   const { messages, sendMessage, status } = useAgentChat({
-    agent: helperAgent
+    agent: helperAgent,
+    experimental_throttle: 100
   });
 
   const [input, setInput] = useState("");
@@ -791,7 +792,8 @@ export default function App() {
   const agent = useAgent({ agent: "Assistant", name: USER });
 
   const { messages, sendMessage, clearHistory, status } = useAgentChat({
-    agent
+    agent,
+    experimental_throttle: 100
   });
   const agentTools = useAgentToolEvents({ agent });
   const { runsByToolCallId, resetLocalState } = agentTools;

@@ -357,7 +357,8 @@ function Chat() {
   });
 
   const { messages, sendMessage, clearHistory, stop, status } = useAgentChat({
-    agent
+    agent,
+    experimental_throttle: 100
   });
 
   const isStreaming = status === "streaming";
