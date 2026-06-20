@@ -70,6 +70,17 @@ export {
   type ContinuationDeferred
 } from "./continuation-state";
 
+/**
+ * @internal Shared auto-continuation barrier (the tool-result → auto-continue
+ * flow, #1649 / #1650) — sibling-package support for `@cloudflare/ai-chat` and
+ * `@cloudflare/think`, not a public API. See `auto-continuation-controller.ts`.
+ */
+export {
+  AutoContinuationController,
+  type AutoContinuationHost,
+  type ContinuationSpec
+} from "./auto-continuation-controller";
+
 export { AbortRegistry } from "./abort-registry";
 
 export {
