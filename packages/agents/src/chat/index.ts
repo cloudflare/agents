@@ -1,33 +1,11 @@
 export {
   applyChunkToParts,
-  getPartialStreamText,
   isReplayChunk,
   normalizeToolInput,
   type MessageParts,
   type MessagePart,
   type StreamChunkData
 } from "./message-builder";
-
-export {
-  AISDKRecoveryCodec,
-  aiSdkRecoveryCodec,
-  partialHasSettledToolResults,
-  shouldCreditStreamProgress,
-  type ChatRecoveryCodec,
-  type ProgressCreditThrottle
-} from "./recovery-codec";
-
-export {
-  ResumeHandshake,
-  type ResumeHandshakeHost,
-  type PendingChatTerminal
-} from "./resume-handshake";
-
-export {
-  sendIfOpen,
-  isWebSocketClosedSendError,
-  type ChatConnection
-} from "./connection";
 
 export {
   sanitizeMessage,
@@ -103,7 +81,6 @@ export {
   hasIncompleteToolBatch,
   partAwaitsClientInteraction,
   clientResolvableToolNames,
-  toolPartName,
   type ToolPartUpdate
 } from "./tool-state";
 
@@ -112,11 +89,12 @@ export { parseProtocolMessage, type ChatProtocolEvent } from "./parse-protocol";
 export {
   reconcileMessages,
   resolveToolMergeId,
-  reconcileOrphanPartial,
-  assistantContentKey
+  reconcileOrphanPartial
 } from "./message-reconciler";
 
 export type { OrphanPersistStore } from "./orphan-store";
+
+export { sendIfOpen, type ChatConnection } from "./connection";
 
 export {
   createChatFiberSnapshot,
@@ -128,18 +106,29 @@ export {
 
 /**
  * @internal Shared chat-recovery engine internals — sibling-package support for
- * `@cloudflare/ai-chat` and `@cloudflare/think`, not a public API. Everything in
- * the three blocks below (`recovery-incident`, `recovery-engine`,
- * `stall-watchdog`) is `@internal`: re-exported here only because both consumers
- * import shared chat code through the `agents/chat` entry point, never from the
- * `agents` package root. See `design/rfc-chat-recovery-foundation.md`.
+ * `@cloudflare/ai-chat` and `@cloudflare/think` (and the experimental
+ * `tanstack-recovery` / `pi-recovery` adapters), not a public API. Everything in
+ * the five blocks below (`recovery-codec`, `resume-handshake`,
+ * `recovery-incident`, `recovery-engine`, `stall-watchdog`) is `@internal`:
+ * re-exported here only because those consumers import shared chat code through
+ * the `agents/chat` entry point, never from the `agents` package root. See
+ * `design/rfc-chat-recovery-foundation.md`.
  */
 export {
-  evaluateChatRecoveryIncident,
+  aiSdkRecoveryCodec,
+  shouldCreditStreamProgress,
+  type ChatRecoveryCodec,
+  type ProgressCreditThrottle
+} from "./recovery-codec";
+
+export {
+  ResumeHandshake,
+  type ResumeHandshakeHost,
+  type PendingChatTerminal
+} from "./resume-handshake";
+
+export {
   resolveChatRecoveryConfig,
-  chatRecoveryIncidentId,
-  chatRecoveryIncidentKey,
-  selectStaleIncidentKeys,
   sweepStaleChatRecoveryIncidents,
   readChatRecoveryProgress,
   bumpChatRecoveryProgress,
@@ -177,8 +166,6 @@ export {
 export {
   chatRecoverySchedulePolicy,
   ChatRecoveryEngine,
-  buildChatRecoveryExhaustedContext,
-  notifyChatRecoveryExhausted,
   runChatRecoveryExhaustion,
   type ChatRecoveryScheduleReason,
   type ChatRecoveryScheduleCallback,

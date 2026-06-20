@@ -18,6 +18,7 @@ surfaces as a terminal stream error so the spinner is cleared.
 The default is `0`, which disables the watchdog (no behavior change unless you
 opt in), matching `@cloudflare/think`. Because the watchdog measures the gap
 between chunks — not total turn duration — a steadily streaming turn never trips
-it regardless of overall length. This is built on the shared
-`iterateWithStallWatchdog` primitive now used by both `@cloudflare/ai-chat` and
-`@cloudflare/think`.
+it regardless of overall length. Internally this is built on the shared
+`iterateWithStallWatchdog` primitive both `@cloudflare/ai-chat` and
+`@cloudflare/think` consume (an internal `agents/chat` seam, not a public API),
+so this change ships under the `@cloudflare/ai-chat` bump alone.
