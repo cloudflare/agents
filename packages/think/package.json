@@ -98,6 +98,10 @@
       "types": "./dist/messengers/index.d.ts",
       "import": "./dist/messengers/index.js"
     },
+    "./messengers/discord": {
+      "types": "./dist/messengers/discord.d.ts",
+      "import": "./dist/messengers/discord.js"
+    },
     "./messengers/telegram": {
       "types": "./dist/messengers/telegram.d.ts",
       "import": "./dist/messengers/telegram.js"

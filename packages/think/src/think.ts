@@ -3022,6 +3022,10 @@ export class Think<
     }
   }
 
+  waitUntil(task: Promise<unknown>): void {
+    this.ctx.waitUntil(task);
+  }
+
   private _initializeMessengers(): void {
     if (this.parentPath.length > 0) {
       return;

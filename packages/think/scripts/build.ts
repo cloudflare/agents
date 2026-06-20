@@ -21,6 +21,7 @@ async function main() {
       "src/framework/index.ts",
       "src/server-entry.ts",
       "src/messengers/index.ts",
+      "src/messengers/discord.ts",
       "src/messengers/telegram.ts",
       "src/tools/workspace.ts",
       "src/tools/execute.ts",

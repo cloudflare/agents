@@ -840,6 +840,223 @@ semantics and avoids Node runtime dependencies.
     command registration, local tunnel testing, Interactions, Gateway activation,
     and permissions/intents troubleshooting.
 
+## Future Capability Slices
+
+The initial provider slice can land with signed Interactions, command/action
+normalization, and short-lived interaction webhook delivery. The remaining
+Discord surface should land as independent, reviewable slices in this order.
+
+### Slice 1: Durable Channel Delivery
+
+Goal: allow Think to post to Discord channels, threads, and DMs outside the
+15-minute interaction token window.
+
+Scope:
+
+- Implement bot-token REST delivery for `postMessage()` to encoded Discord thread
+  ids, including guild channels, Discord thread channels, and DMs.
+- Implement `openDM(userId)` or an equivalent internal helper so application code
+  can resolve `discord:@me:{channelId}` before posting.
+- Preserve current interaction response behavior: interaction-originated replies
+  still use the deferred original response first, then follow-up webhooks while
+  the interaction token is valid.
+- Fall back from expired/missing interaction response contexts to bot-token
+  channel delivery when the adapter has a real Discord thread id.
+- Centralize REST request handling so later edit/delete/fetch/attachment work can
+  share auth headers, JSON parsing, error shaping, and rate-limit handling.
+
+Tests:
+
+- Posting to `discord:{guildId}:{channelId}` calls `POST /channels/{channelId}/messages`.
+- Posting to `discord:{guildId}:{channelId}:{threadId}` targets the Discord
+  thread id, not the parent channel id.
+- Expired interaction contexts are deleted and do not reuse stale webhook tokens.
+- `allowed_mentions: { parse: [] }` remains the default on every REST send.
+- Permanent `401`/`403` responses surface actionable delivery errors without
+  unsafe retries.
+
+Non-goals:
+
+- Gateway ingress.
+- File uploads.
+- Edit/delete/fetch parity beyond what channel delivery needs internally.
+
+### Slice 2: Gateway Background Ingress
+
+Goal: receive normal Discord messages, DMs, mentions, subscribed-thread messages,
+and reactions without relying on slash commands.
+
+Scope:
+
+- Export `ThinkDiscordGatewayShardAgent` and wire `discordMessenger({ gateway })`
+  to a `MessengerBackgroundIngress` manager.
+- Resolve shard count and session-start limits from `/gateway/bot` when configured
+  with `shards: "auto"`.
+- Store shard session state in the shard Durable Object: shard id/count,
+  `session_id`, `resume_gateway_url`, last sequence, heartbeat state, and
+  identify backoff state.
+- Implement Gateway connect, Hello, jittered heartbeat, heartbeat ACK timeout,
+  dispatch sequence persistence, Ready, Resume, Reconnect, Invalid Session,
+  close-code handling, and alarm-based reconnect.
+- Forward accepted dispatches back to the root runtime through typed Agent/facet
+  calls, then normalize them through Chat SDK `processMessage()`,
+  `processReaction()`, `processAction()`, and `processSlashCommand()`.
+- Drop self-authored messages before they reach Think routing.
+- Warn when `respondTo` includes subscribed guild messages but Gateway intents do
+  not include `MessageContent`.
+
+Tests:
+
+- Shard state persists sequence before dispatch normalization.
+- Resume is attempted after resumable disconnects and Identify is used after
+  invalid sessions that cannot resume.
+- Fatal close codes stop reconnect loops and surface diagnostics.
+- DM `MESSAGE_CREATE` routes to `direct-message`; guild mentions route to
+  `mention`; subscribed messages route only when configured.
+- Duplicate Gateway dispatches use stable idempotency keys and do not start
+  duplicate reply fibers.
+
+Non-goals:
+
+- Command registration.
+- Rich component rendering.
+- Native WebSocket hibernation for outgoing Discord Gateway sockets.
+
+### Slice 3: Command Registration Tooling
+
+Goal: let users register Discord commands without hand-writing raw REST calls,
+while keeping registration out of runtime request handling.
+
+Scope:
+
+- Provide a small helper or example script for guild command create/update/bulk
+  overwrite and global command create/update/bulk overwrite.
+- Support command names, descriptions, options, subcommands, default member
+  permissions, `integration_types`, and `contexts`.
+- Prefer update/bulk-overwrite workflows that avoid repeated create loops and
+  respect Discord's daily create limits.
+- Keep Bearer-token command permission flows out of the bot-token helper; document
+  them as an advanced setup concern.
+- Include a dry-run/print mode in the example so users can inspect payloads before
+  sending them to Discord.
+
+Tests:
+
+- Payload generation enforces Discord command shape limits and required-before-
+  optional option ordering.
+- Guild and global registration hit the correct API routes.
+- Bulk overwrite does not issue per-command create calls.
+- `integration_types`, `contexts`, and `default_member_permissions` round-trip in
+  generated payloads.
+
+Non-goals:
+
+- Developer Portal application creation.
+- OAuth installation flows.
+- Automatic registration during Worker startup or webhook handling.
+
+### Slice 4: Attachments
+
+Goal: expose inbound Discord attachments in messenger context and support outbound
+file uploads when explicitly enabled.
+
+Scope:
+
+- Map Discord message attachments into `MessengerAttachment` with id, name,
+  media type, size, URL, and lazy `fetch()`.
+- Keep attachment bytes lazy so normal text-only turns do not fetch files.
+- Add outbound multipart upload support for `AdapterPostableMessage` attachments
+  and model/tool-produced file parts when the Think delivery path can represent
+  them.
+- Respect Discord file size limits and bot permissions before uploading.
+- Preserve safe defaults: do not fetch arbitrary attachment URLs unless caller
+  code asks through the attachment `fetch()` function.
+
+Tests:
+
+- Inbound Gateway messages with attachments produce serializable attachment
+  metadata without eager byte loading.
+- `fetch()` downloads bytes only when invoked and handles non-OK responses.
+- Outbound file sends use multipart form data and include `allowed_mentions`.
+- Missing `ATTACH_FILES` permission fails before repeated invalid REST calls.
+- Oversized files fail with a clear error before upload.
+
+Non-goals:
+
+- Virus scanning or content moderation.
+- Persisting attachment bytes in Think state by default.
+- Provider-neutral binary delivery redesign beyond Discord's needs.
+
+### Slice 5: Reactions, Edit/Delete, And Fetch APIs
+
+Goal: complete the Discord adapter methods that Think tools and scheduled work
+need after initial reply delivery works.
+
+Scope:
+
+- Implement `addReaction()` and `removeReaction()` using Discord emoji route
+  encoding for unicode and custom emoji values.
+- Implement `editMessage()` and `deleteMessage()` for bot-authored messages and
+  interaction-originated original responses where the adapter still has a valid
+  interaction context.
+- Implement `fetchMessages()`, `fetchChannelMessages()`, `fetchThread()`,
+  `fetchChannelInfo()`, and thread listing helpers needed by tools.
+- Normalize fetched Discord messages into Chat SDK message/thread/channel shapes
+  with stable encoded ids.
+- Share REST rate-limit handling with the durable channel delivery slice.
+
+Tests:
+
+- Unicode and custom emoji reactions are encoded correctly in REST routes.
+- Editing a normal channel message targets `/channels/{channelId}/messages/{id}`.
+- Editing an interaction original response uses the webhook route only while the
+  context is valid.
+- Deleting and fetching inaccessible messages produce permanent errors without
+  unsafe retry loops.
+- Fetched Discord threads preserve `discord:{guildId}:{channelId}:{threadId}`
+  identity.
+
+Non-goals:
+
+- Moderation actions beyond message delete.
+- Full Discord audit-log integration.
+- Cross-provider fetch API redesign.
+
+### Slice 6: Ephemeral Replies And Rich Components
+
+Goal: improve Discord-specific UX for command responses and cards without
+claiming a provider-neutral ephemeral primitive.
+
+Scope:
+
+- Add `interactions.defaultVisibility: "public" | "ephemeral"` and set the
+  initial defer response flags accordingly.
+- Keep `supportsEphemeral` false unless a provider-neutral contract exists;
+  ephemeral replies are interaction-originated Discord delivery options.
+- Render Chat SDK cards to Discord embeds and action rows, respecting Discord
+  limits for embeds, fields, rows, buttons, select menus, and component
+  `custom_id` length.
+- Use Chat SDK callback-token state for component `custom_id` values rather than
+  embedding long callback URLs or payloads directly.
+- Support link buttons as Discord URL buttons and reject unsupported component
+  shapes with readable errors before posting.
+
+Tests:
+
+- Ephemeral command defer responses include Discord's ephemeral flag and still
+  edit the original response for the first reply.
+- Public command replies remain the default.
+- Card rendering respects embed/action-row/component count limits.
+- Long callback URLs are tokenized before they enter `custom_id`.
+- Invalid component payloads fail before REST delivery, not after Discord rejects
+  the request.
+
+Non-goals:
+
+- Discord modals as a model-turn primitive.
+- General ephemeral posting to arbitrary channels.
+- A complete Discord UI framework beyond Chat SDK card rendering.
+
 ## Alternatives Considered
 
 ### Interactions-only first

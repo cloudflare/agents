@@ -52,6 +52,7 @@ export interface MessengerMessage {
 export interface MessengerAction {
   actionId: string;
   messageId?: string;
+  providerActionId?: string;
   raw?: unknown;
   user?: MessengerAuthor;
   value?: string;
@@ -134,6 +135,7 @@ export function serializableMessengerEvent(
       ? {
           actionId: event.action.actionId,
           messageId: event.action.messageId,
+          providerActionId: event.action.providerActionId,
           user: event.action.user ? { ...event.action.user } : undefined,
           value: event.action.value
         }
@@ -197,6 +199,7 @@ export function toMessengerUserMessage(event: MessengerEvent): UIMessage {
         event.messengerId,
         "action",
         event.thread.id,
+        event.action.providerActionId,
         event.action.messageId,
         event.action.actionId
       ]

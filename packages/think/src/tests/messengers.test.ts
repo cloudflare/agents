@@ -39,6 +39,14 @@ import telegramMessenger, {
   splitTelegramMessageText,
   telegramSecretTokenVerifier
 } from "../messengers/telegram";
+import discordMessenger, {
+  decodeDiscordCustomId,
+  encodeDiscordCustomId,
+  normalizeDiscordPublicKey,
+  parseDiscordSlashCommand,
+  splitDiscordMessageText,
+  verifyDiscordInteractionRequest
+} from "../messengers/discord";
 
 const baseEvent: MessengerEvent = {
   capabilities: { canStream: true },
@@ -425,7 +433,18 @@ describe("think messengers core", () => {
       }
     };
     expect(idempotencyKeyForEvent(actionEvent)).toBe(
-      "messenger:telegram:message:telegram:-100123:42:action:source-message:approve:user-1:ship-it"
+      "messenger:telegram:message:telegram:-100123:42:action:no-provider-action:source-message:approve:user-1:ship-it"
+    );
+    expect(
+      idempotencyKeyForEvent({
+        ...actionEvent,
+        action: {
+          ...actionEvent.action!,
+          providerActionId: "interaction-1"
+        }
+      })
+    ).toBe(
+      "messenger:telegram:message:telegram:-100123:42:action:interaction-1:source-message:approve:user-1:ship-it"
     );
     expect(
       idempotencyKeyForEvent({
@@ -534,6 +553,48 @@ describe("think messengers core", () => {
         ].join("\n")
       }
     ]);
+  });
+
+  it("keeps action user message IDs stable after recovery serialization", () => {
+    const event = defaultChatSdkEvent(
+      normalizeMessengers({
+        fake: chatSdkMessenger({
+          adapter: fakeAdapter(),
+          capabilities: { supportsActions: true },
+          provider: "fake",
+          userName: "fake_bot",
+          verifyWebhook: false
+        })
+      })[0]!,
+      {
+        action: {
+          actionId: "approve",
+          adapter: fakeAdapter(),
+          messageId: "source-message",
+          raw: { id: "interaction-1", token: "secret-token" },
+          thread: null,
+          threadId: "fake:thread",
+          user: {
+            fullName: "Ada Lovelace",
+            isBot: false,
+            isMe: false,
+            userId: "fake:user",
+            userName: "ada"
+          },
+          value: "ship-it"
+        } as never,
+        eventKind: "action",
+        thread: fakeThread("fake:thread")
+      }
+    );
+    const restored = serializableMessengerEvent(event);
+
+    expect(restored.action?.raw).toBeUndefined();
+    expect(restored.action?.providerActionId).toBe("interaction-1");
+    expect(toMessengerUserMessage(restored).id).toBe(
+      toMessengerUserMessage(event).id
+    );
+    expect(JSON.stringify(restored)).not.toContain("secret-token");
   });
 
   it("converts messenger commands to Think user messages", () => {
@@ -1162,6 +1223,442 @@ describe("telegram messenger provider", () => {
   });
 });
 
+describe("discord messenger provider", () => {
+  it("normalizes provider defaults", () => {
+    const [definition] = normalizeMessengers({
+      discord: discordMessenger({
+        applicationId: "123456789012345678",
+        publicKey: validDiscordPublicKey(),
+        userName: "fake_bot"
+      })
+    });
+
+    expect(definition?.adapterName).toBe("discord");
+    expect(definition?.path).toBe("/messengers/discord/webhook");
+    expect(definition?.provider).toBe("discord");
+    expect(definition?.verifyWebhook).toBe(false);
+    expect(definition?.respondTo).toEqual(["command", "action"]);
+    expect(definition?.capabilities).toMatchObject({
+      canEditMessages: false,
+      canStream: false,
+      maxMessageLength: 2_000,
+      supportsActions: false,
+      supportsAttachments: false,
+      supportsEphemeral: false
+    });
+    expect(JSON.stringify(definition)).not.toContain("token");
+  });
+
+  it("propagates custom adapter names to the Discord adapter", () => {
+    const [definition] = normalizeMessengers({
+      first: discordMessenger({
+        adapterName: "discord-support",
+        applicationId: "123456789012345678",
+        publicKey: validDiscordPublicKey(),
+        token: "token",
+        userName: "fake_bot"
+      })
+    });
+
+    expect(definition?.adapterName).toBe("discord-support");
+    expect(definition?.adapter.name).toBe("discord-support");
+  });
+
+  it("requires background ingress when Discord interactions are disabled", () => {
+    expect(() =>
+      discordMessenger({
+        applicationId: "123456789012345678",
+        interactions: false,
+        token: "token",
+        userName: "fake_bot"
+      })
+    ).toThrow("requires background ingress");
+  });
+
+  it("requires a valid public key", () => {
+    expect(() => normalizeDiscordPublicKey("not-a-key")).toThrow(
+      "64-character hex"
+    );
+  });
+
+  it("verifies signed Discord interaction requests", async () => {
+    const body = JSON.stringify({ type: 1 });
+    const { publicKey, signature, timestamp } = await signDiscordBody(body);
+
+    await expect(
+      verifyDiscordInteractionRequest({
+        body: new TextEncoder().encode(body).buffer,
+        publicKey,
+        signature,
+        timestamp
+      })
+    ).resolves.toBe(true);
+
+    await expect(
+      verifyDiscordInteractionRequest({
+        body: new TextEncoder().encode(body).buffer,
+        publicKey,
+        signature: `${signature.slice(0, -2)}00`,
+        timestamp
+      })
+    ).resolves.toBe(false);
+  });
+
+  it("parses Discord slash command paths and text", () => {
+    expect(
+      parseDiscordSlashCommand("project", [
+        {
+          name: "issue",
+          options: [
+            {
+              name: "create",
+              options: [{ name: "title", value: "Login fails" }]
+            }
+          ]
+        }
+      ])
+    ).toEqual({
+      command: "/project issue create",
+      text: "Login fails"
+    });
+  });
+
+  it("encodes and decodes Discord custom IDs", () => {
+    expect(decodeDiscordCustomId(encodeDiscordCustomId("approve"))).toEqual({
+      actionId: "approve"
+    });
+    expect(
+      decodeDiscordCustomId(encodeDiscordCustomId("approve", "ship-it"))
+    ).toEqual({
+      actionId: "approve",
+      value: "ship-it"
+    });
+    expect(() => encodeDiscordCustomId("x".repeat(101))).toThrow("custom_id");
+  });
+
+  it("handles signed Discord PING interactions", async () => {
+    const body = JSON.stringify({
+      application_id: "123456789012345678",
+      id: "interaction-1",
+      token: "interaction-token",
+      type: 1,
+      version: 1
+    });
+    const { publicKey, signature, timestamp } = await signDiscordBody(body);
+    const runtime = new ThinkMessengerRuntime(
+      defineMessengers({
+        discord: discordMessenger({
+          applicationId: "123456789012345678",
+          publicKey,
+          token: "token",
+          userName: "fake_bot"
+        })
+      }),
+      fakeHost([])
+    );
+
+    const response = await runtime.handleRequest(
+      new Request("https://example.com/messengers/discord/webhook", {
+        body,
+        headers: {
+          "content-type": "application/json",
+          "x-signature-ed25519": signature,
+          "x-signature-timestamp": timestamp
+        },
+        method: "POST"
+      })
+    );
+
+    expect(response?.status).toBe(200);
+    await expect(response?.json()).resolves.toEqual({ type: 1 });
+  });
+
+  it("normalizes signed Discord application commands", async () => {
+    const commands: unknown[] = [];
+    const body = JSON.stringify({
+      application_id: "123456789012345678",
+      channel: { id: "channel-1", type: 0 },
+      channel_id: "channel-1",
+      data: {
+        name: "project",
+        options: [
+          {
+            name: "issue",
+            options: [
+              {
+                name: "create",
+                options: [{ name: "title", value: "Login fails" }]
+              }
+            ]
+          }
+        ]
+      },
+      guild_id: "guild-1",
+      id: "interaction-1",
+      member: { user: discordUser() },
+      token: "interaction-token",
+      type: 2,
+      version: 1
+    });
+    const { publicKey, signature, timestamp } = await signDiscordBody(body);
+    const adapter = discordMessenger({
+      applicationId: "123456789012345678",
+      publicKey,
+      token: "token",
+      userName: "fake_bot"
+    }).adapter;
+    const state = memoryStateAdapter();
+    await adapter.initialize({
+      getState() {
+        return state;
+      },
+      processSlashCommand(event: unknown) {
+        commands.push(event);
+      }
+    } as never);
+
+    const response = await adapter.handleWebhook(
+      signedDiscordRequest(body, signature, timestamp)
+    );
+
+    expect(await response.json()).toEqual({ type: 5 });
+    await waitFor(() => commands.length === 1);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toMatchObject({
+      channelId: "discord:interaction:interaction-1",
+      command: "/project issue create",
+      text: "Login fails",
+      user: {
+        fullName: "Ada Lovelace",
+        isBot: false,
+        userId: "user-1",
+        userName: "ada"
+      }
+    });
+    expect(
+      (commands[0] as { raw?: { token?: unknown } }).raw
+    ).not.toHaveProperty("token");
+  });
+
+  it("passes waitUntil to Discord interaction processing", async () => {
+    const waited: Promise<unknown>[] = [];
+    const body = JSON.stringify({
+      application_id: "123456789012345678",
+      channel: { id: "channel-1", type: 0 },
+      channel_id: "channel-1",
+      data: { name: "ask" },
+      guild_id: "guild-1",
+      id: "interaction-1",
+      member: { user: discordUser() },
+      token: "interaction-token",
+      type: 2,
+      version: 1
+    });
+    const { publicKey, signature, timestamp } = await signDiscordBody(body);
+    const runtime = new ThinkMessengerRuntime(
+      defineMessengers({
+        discord: discordMessenger({
+          applicationId: "123456789012345678",
+          publicKey,
+          respondTo: [],
+          token: "token",
+          userName: "fake_bot"
+        })
+      }),
+      fakeHost([], [], (task) => waited.push(task), fakeStateSubAgent())
+    );
+
+    await runtime.handleRequest(
+      signedDiscordRequest(body, signature, timestamp)
+    );
+
+    expect(waited.length).toBeGreaterThan(0);
+    await Promise.all(waited);
+  });
+
+  it("delivers Discord command replies through interaction webhooks", async () => {
+    const calls: Array<{ body: unknown; method: string; url: string }> = [];
+    const body = JSON.stringify({
+      application_id: "123456789012345678",
+      channel: { id: "channel-1", type: 0 },
+      channel_id: "channel-1",
+      data: { name: "ask" },
+      guild_id: "guild-1",
+      id: "interaction-1",
+      member: { user: discordUser() },
+      token: "interaction/token",
+      type: 2,
+      version: 1
+    });
+    const { publicKey, signature, timestamp } = await signDiscordBody(body);
+    const adapter = discordMessenger({
+      applicationId: "123456789012345678",
+      fetch: async (input, init) => {
+        calls.push({
+          body: init?.body ? JSON.parse(String(init.body)) : undefined,
+          method: init?.method ?? "GET",
+          url: String(input)
+        });
+        return Response.json({ id: `reply-${calls.length}` });
+      },
+      publicKey,
+      token: "token",
+      userName: "fake_bot"
+    }).adapter;
+    const state = memoryStateAdapter();
+    await adapter.initialize({
+      getState() {
+        return state;
+      },
+      processSlashCommand(event: { adapter: Adapter; channelId: string }) {
+        void event.adapter.postMessage(event.channelId, {
+          markdown: "hello **discord**"
+        });
+      }
+    } as never);
+
+    const response = await adapter.handleWebhook(
+      signedDiscordRequest(body, signature, timestamp)
+    );
+    await waitFor(() => calls.length === 1);
+
+    expect(await response.json()).toEqual({ type: 5 });
+    expect(calls).toEqual([
+      {
+        body: {
+          allowed_mentions: { parse: [] },
+          content: "hello **discord**"
+        },
+        method: "PATCH",
+        url: "https://discord.com/api/v10/webhooks/123456789012345678/interaction%2Ftoken/messages/@original"
+      }
+    ]);
+  });
+
+  it("normalizes signed Discord component actions", async () => {
+    const actions: unknown[] = [];
+    const body = JSON.stringify({
+      application_id: "123456789012345678",
+      channel: { id: "thread-1", parent_id: "channel-1", type: 11 },
+      channel_id: "thread-1",
+      data: {
+        custom_id: encodeDiscordCustomId("approve", "fallback-value"),
+        values: ["selected-value"]
+      },
+      guild_id: "guild-1",
+      id: "interaction-1",
+      member: { user: discordUser() },
+      message: { id: "message-1" },
+      token: "interaction-token",
+      type: 3,
+      version: 1
+    });
+    const { publicKey, signature, timestamp } = await signDiscordBody(body);
+    const adapter = discordMessenger({
+      applicationId: "123456789012345678",
+      publicKey,
+      token: "token",
+      userName: "fake_bot"
+    }).adapter;
+    const state = memoryStateAdapter();
+    await adapter.initialize({
+      getState() {
+        return state;
+      },
+      processAction(event: unknown) {
+        actions.push(event);
+      }
+    } as never);
+
+    const response = await adapter.handleWebhook(
+      signedDiscordRequest(body, signature, timestamp)
+    );
+
+    expect(await response.json()).toEqual({ type: 5 });
+    await waitFor(() => actions.length === 1);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      actionId: "approve",
+      messageId: "message-1",
+      threadId: "discord:interaction:interaction-1",
+      user: { userId: "user-1" },
+      value: "selected-value"
+    });
+    expect(
+      (actions[0] as { raw?: { token?: unknown } }).raw
+    ).not.toHaveProperty("token");
+  });
+
+  it("acknowledges invalid Discord component custom IDs without routing", async () => {
+    const actions: unknown[] = [];
+    const body = JSON.stringify({
+      application_id: "123456789012345678",
+      channel: { id: "channel-1", type: 0 },
+      channel_id: "channel-1",
+      data: { custom_id: "" },
+      guild_id: "guild-1",
+      id: "interaction-1",
+      member: { user: discordUser() },
+      message: { id: "message-1" },
+      token: "interaction-token",
+      type: 3,
+      version: 1
+    });
+    const { publicKey, signature, timestamp } = await signDiscordBody(body);
+    const adapter = discordMessenger({
+      applicationId: "123456789012345678",
+      publicKey,
+      token: "token",
+      userName: "fake_bot"
+    }).adapter;
+    await adapter.initialize({
+      getState() {
+        return memoryStateAdapter();
+      },
+      processAction(event: unknown) {
+        actions.push(event);
+      }
+    } as never);
+
+    const response = await adapter.handleWebhook(
+      signedDiscordRequest(body, signature, timestamp)
+    );
+
+    expect(await response.json()).toEqual({ type: 6 });
+    expect(actions).toEqual([]);
+  });
+
+  it("rejects unsigned Discord interactions", async () => {
+    const runtime = new ThinkMessengerRuntime(
+      defineMessengers({
+        discord: discordMessenger({
+          applicationId: "123456789012345678",
+          publicKey: validDiscordPublicKey(),
+          token: "token",
+          userName: "fake_bot"
+        })
+      }),
+      fakeHost([])
+    );
+
+    const response = await runtime.handleRequest(
+      new Request("https://example.com/messengers/discord/webhook", {
+        body: JSON.stringify({ type: 1 }),
+        method: "POST"
+      })
+    );
+
+    expect(response?.status).toBe(401);
+  });
+
+  it("splits long Discord follow-up text without dropping content", () => {
+    const text = "alpha beta\n\ngamma delta epsilon";
+    const chunks = splitDiscordMessageText(text, 12);
+    expect(chunks.every((chunk) => chunk.length <= 12)).toBe(true);
+    expect(chunks.join("")).toBe(text);
+  });
+});
+
 async function collectText(stream: AsyncIterable<string>): Promise<string[]> {
   const chunks: string[] = [];
   for await (const chunk of stream) {
@@ -1200,7 +1697,9 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 
 function fakeHost(
   resolved: FiberRecoveryResult[],
-  parentPath: ReadonlyArray<{ className: string; name: string }> = []
+  parentPath: ReadonlyArray<{ className: string; name: string }> = [],
+  waitUntil?: (task: Promise<unknown>) => void,
+  subAgent?: unknown
 ): MessengerThinkHost {
   return {
     cancelChat() {
@@ -1220,8 +1719,12 @@ function fakeHost(
       throw new Error("startFiber is not used by this test");
     },
     subAgent() {
+      if (subAgent) {
+        return Promise.resolve(subAgent as never);
+      }
       throw new Error("subAgent is not used by this test");
-    }
+    },
+    waitUntil
   };
 }
 
@@ -1292,4 +1795,87 @@ function fakeChannel(id: string) {
     isDM: false,
     name: "Fake"
   } as never;
+}
+
+function fakeStateSubAgent() {
+  return {
+    cacheSet() {
+      return Promise.resolve();
+    }
+  };
+}
+
+function memoryStateAdapter() {
+  const values = new Map<string, unknown>();
+  return {
+    delete(key: string) {
+      values.delete(key);
+      return Promise.resolve();
+    },
+    get<T = unknown>(key: string): Promise<T | null> {
+      return Promise.resolve((values.get(key) as T | undefined) ?? null);
+    },
+    set(key: string, value: unknown) {
+      values.set(key, value);
+      return Promise.resolve();
+    }
+  };
+}
+
+function validDiscordPublicKey(): string {
+  return "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+}
+
+async function signDiscordBody(body: string): Promise<{
+  publicKey: string;
+  signature: string;
+  timestamp: string;
+}> {
+  const keyPair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+    "sign",
+    "verify"
+  ])) as CryptoKeyPair;
+  const timestamp = String(Math.floor(Date.now() / 1_000));
+  const signed = new TextEncoder().encode(`${timestamp}${body}`);
+  const signature = await crypto.subtle.sign(
+    { name: "Ed25519" },
+    keyPair.privateKey,
+    signed
+  );
+  const publicKey = await crypto.subtle.exportKey("raw", keyPair.publicKey);
+
+  return {
+    publicKey: bytesToHex(new Uint8Array(publicKey)),
+    signature: bytesToHex(new Uint8Array(signature)),
+    timestamp
+  };
+}
+
+function signedDiscordRequest(
+  body: string,
+  signature: string,
+  timestamp: string
+): Request {
+  return new Request("https://example.com/messengers/discord/webhook", {
+    body,
+    headers: {
+      "content-type": "application/json",
+      "x-signature-ed25519": signature,
+      "x-signature-timestamp": timestamp
+    },
+    method: "POST"
+  });
+}
+
+function discordUser() {
+  return {
+    bot: false,
+    global_name: "Ada Lovelace",
+    id: "user-1",
+    username: "ada"
+  };
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
