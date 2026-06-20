@@ -55,6 +55,10 @@ export type ThinkPromptOptions<Schema extends ZodObject> = {
   output: Schema;
   timeout?: WorkflowSleepDuration;
   key?: string;
+  /**
+   * Defaults to true. With retries enabled, this only controls the final
+   * timed-out attempt; abandoned attempts are always cancelled before resubmit.
+   */
   cancelOnTimeout?: boolean;
   retries?: ThinkPromptRetryOptions;
 };
@@ -520,7 +524,8 @@ export class ThinkWorkflow<
         type: eventType,
         timeout: options.timeout
       })) as WorkflowStepEvent<ThinkPromptEventPayload>;
-    } catch {
+    } catch (error) {
+      if (!isTimeoutLikeError(error)) throw error;
       // The DO may still be working or may have died again.
       return { kind: "timeout" };
     }
@@ -530,7 +535,8 @@ export class ThinkWorkflow<
         kind: "recovered",
         value: this._processPromptEvent(event, options)
       };
-    } catch {
+    } catch (error) {
+      if (!(error instanceof ThinkPromptError)) throw error;
       // Terminal event or invalid structured output; event is already disposed.
       return { kind: "failed" };
     }
@@ -633,6 +639,11 @@ function disposeIfPresent(value: unknown): void {
   if (isDisposableResource(value)) {
     value[Symbol.dispose]();
   }
+}
+
+function isTimeoutLikeError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /timeout|timed out/i.test(error.name + " " + error.message);
 }
 
 function base64Url(buffer: ArrayBuffer): string {
