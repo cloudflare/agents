@@ -59,6 +59,10 @@ import {
   ContinuationState,
   AutoContinuationController,
   AbortRegistry,
+  TIMED_OUT,
+  awaitWithDeadline,
+  drainInteractionApplies,
+  interceptAgentToolBroadcast,
   type ClientToolSchema
 } from "agents/chat";
 import {
@@ -69,6 +73,7 @@ import {
   ChatStreamStalledError,
   iterateWithStallWatchdog,
   sweepStaleChatRecoveryIncidents,
+  classifyAgentToolChildRecovery,
   readChatRecoveryProgress,
   bumpChatRecoveryProgress,
   recordChatTerminal,
@@ -79,7 +84,6 @@ import {
   AgentToolStreamProgressThrottle,
   StreamProgressCreditThrottle,
   shouldCreditStreamProgress,
-  CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   type ChatRecoveryAdapter,
   type ChatFiberWakeHooks,
   type ResolvedRecoveryStream,
@@ -184,8 +188,6 @@ type StreamResultStatus = {
 };
 
 export type ChatMessage = UIMessage;
-
-const TIMED_OUT = Symbol("timed-out");
 
 /**
  * Provider-executed tool fields that contain opaque replay tokens and must be
@@ -628,53 +630,19 @@ export class AIChatAgent<
     msg: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): void {
-    // Inspect frames while any agent-tool run is in flight (live sequences
-    // exist for the run's whole lifecycle), not only while a tailer is
-    // attached — error capture must not depend on tailer timing (#1575).
+    // Cheap idle guard so the common (no agent-tool child) broadcast path stays
+    // allocation-free — only build the snoop hooks while a run is in flight.
     if (
-      (this._agentToolForwarders.size > 0 ||
-        this._agentToolLiveSequences.size > 0) &&
-      typeof msg === "string"
+      this._agentToolForwarders.size > 0 ||
+      this._agentToolLiveSequences.size > 0
     ) {
-      try {
-        const parsed = JSON.parse(msg) as {
-          type?: unknown;
-          body?: unknown;
-          error?: unknown;
-          id?: unknown;
-        };
-        if (
-          parsed.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-          typeof parsed.id === "string"
-        ) {
-          // A frame belongs to a run iff it carries that run's turn request
-          // id. Frames from unrelated turns (a user-driven turn on this
-          // agent, or another run's turn) resolve to a different — or no —
-          // run and are left alone, so concurrent runs cannot
-          // cross-contaminate each other's progress or error state (#1575).
-          const runId = this._agentToolRunForRequest(parsed.id);
-          if (runId !== null) {
-            if (parsed.error === true && typeof parsed.body === "string") {
-              this._agentToolLastErrors.set(runId, parsed.body);
-            } else if (
-              typeof parsed.body === "string" &&
-              parsed.body.length > 0
-            ) {
-              // Advance the live sequence even with no tailer attached so a
-              // tailer registering mid-run resumes at the right offset.
-              const sequence = this._agentToolLiveSequences.get(runId) ?? 0;
-              this._agentToolLiveSequences.set(runId, sequence + 1);
-              const chunk = { sequence, body: parsed.body };
-              const forwarders = this._agentToolForwarders.get(runId);
-              if (forwarders) {
-                for (const forward of forwarders) forward(chunk);
-              }
-            }
-          }
-        }
-      } catch {
-        // Non-chat frames pass through unchanged.
-      }
+      interceptAgentToolBroadcast(msg, {
+        forwarders: this._agentToolForwarders,
+        liveSequences: this._agentToolLiveSequences,
+        lastErrors: this._agentToolLastErrors,
+        responseType: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        runForRequest: (requestId) => this._agentToolRunForRequest(requestId)
+      });
     }
     super.broadcast(msg, without);
   }
@@ -2078,24 +2046,11 @@ export class AIChatAgent<
     this._abortRegistry.destroyAll(reason);
   }
 
-  private async _awaitWithDeadline<T>(
+  private _awaitWithDeadline<T>(
     promise: Promise<T>,
     deadline: number | null
   ): Promise<T | typeof TIMED_OUT> {
-    if (deadline == null) {
-      return promise;
-    }
-
-    const remainingMs = Math.max(0, deadline - Date.now());
-    let timer: ReturnType<typeof setTimeout>;
-    const result = await Promise.race([
-      promise,
-      new Promise<typeof TIMED_OUT>((resolve) => {
-        timer = setTimeout(() => resolve(TIMED_OUT), remainingMs);
-      })
-    ]);
-    clearTimeout(timer!);
-    return result;
+    return awaitWithDeadline(promise, deadline);
   }
 
   private _messageHasPendingInteraction(message: UIMessage): boolean {
@@ -2312,20 +2267,11 @@ export class AIChatAgent<
    * tail mid-drain, and stops once the tail stops advancing. Mirrors
    * `@cloudflare/think`'s `_drainInteractionApplies`.
    */
-  private async _drainInteractionApplies(): Promise<void> {
-    let tail = this._interactionApplyTail;
-    for (;;) {
-      // The pending continuation was cleared (chat clear / turn reset) — nothing
-      // to drain for; bail so the isolate isn't held by a stale drain.
-      if (!this._continuation.pending) return;
-      try {
-        await tail;
-      } catch {
-        // A rejected apply is irrelevant to completeness — re-read and re-check.
-      }
-      if (this._interactionApplyTail === tail) return;
-      tail = this._interactionApplyTail;
-    }
+  private _drainInteractionApplies(): Promise<void> {
+    return drainInteractionApplies(
+      () => this._continuation.pending !== null,
+      () => this._interactionApplyTail
+    );
   }
 
   /**
@@ -2873,26 +2819,10 @@ export class AIChatAgent<
    * mean recovery is still resolving the interrupted turn; `exhausted`/`failed`
    * mean recovery gave up; a completed recovery deletes its incident.
    */
-  private async _classifyAgentToolChildRecovery(): Promise<
+  private _classifyAgentToolChildRecovery(): Promise<
     "in-progress" | "failed" | "none"
   > {
-    const entries = await this.ctx.storage.list<ChatRecoveryIncident>({
-      prefix: CHAT_RECOVERY_INCIDENT_KEY_PREFIX
-    });
-    let failed = false;
-    for (const incident of entries.values()) {
-      if (
-        incident.status === "detected" ||
-        incident.status === "scheduled" ||
-        incident.status === "attempting"
-      ) {
-        return "in-progress";
-      }
-      if (incident.status === "exhausted" || incident.status === "failed") {
-        failed = true;
-      }
-    }
-    return failed ? "failed" : "none";
+    return classifyAgentToolChildRecovery(this.ctx.storage);
   }
 
   /**
