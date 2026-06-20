@@ -3388,6 +3388,16 @@ export class ThinkProgrammaticTestAgent extends Think {
   private _submissionStatusDelayMs = 0;
   private _programmaticResponse = "Programmatic response";
   private _finalAnswerResponse: unknown = undefined;
+  private _nestedAdmissionMode:
+    | "wait"
+    | "continuation"
+    | "stream"
+    | "submit"
+    | "addMessages"
+    | null = null;
+  private _nestedAdmissionAttempted = false;
+  private _nestedAdmissionSucceeded = false;
+  private _nestedAdmissionError: string | null = null;
   private _inBandErrorResponse: {
     errorText: string;
     textChunks: string[];
@@ -3465,7 +3475,7 @@ export class ThinkProgrammaticTestAgent extends Think {
     this._submissionLog.push(result);
   }
 
-  override beforeTurn(ctx: TurnContext): void {
+  override async beforeTurn(ctx: TurnContext): Promise<void> {
     if (this._throwBeforeTurnError) {
       throw new Error(this._throwBeforeTurnError);
     }
@@ -3473,6 +3483,47 @@ export class ThinkProgrammaticTestAgent extends Think {
       continuation: ctx.continuation,
       body: ctx.body as RpcJsonObject | undefined
     });
+    if (this._nestedAdmissionMode && !this._nestedAdmissionAttempted) {
+      this._nestedAdmissionAttempted = true;
+      try {
+        await this._runNestedAdmissionForTest(this._nestedAdmissionMode);
+        this._nestedAdmissionSucceeded = true;
+      } catch (error) {
+        this._nestedAdmissionError =
+          error instanceof Error ? error.message : String(error);
+      }
+    }
+  }
+
+  private async _runNestedAdmissionForTest(
+    mode: Exclude<typeof this._nestedAdmissionMode, null>
+  ): Promise<void> {
+    const msg = {
+      id: crypto.randomUUID(),
+      role: "user" as const,
+      parts: [{ type: "text" as const, text: `nested ${mode}` }]
+    };
+    switch (mode) {
+      case "wait":
+        await this.runTurn({ mode: "wait", input: msg });
+        return;
+      case "continuation":
+        await this.runTurn({ mode: "wait", continuation: true });
+        return;
+      case "stream":
+        await this.runTurn({
+          mode: "stream",
+          input: msg,
+          callback: new TestCollectingCallback()
+        });
+        return;
+      case "submit":
+        await this.runTurn({ mode: "submit", input: msg });
+        return;
+      case "addMessages":
+        await this.addMessages([msg]);
+        return;
+    }
   }
 
   async setDelayedChunkResponse(
@@ -3598,6 +3649,30 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   async testSaveMessages(msgs: UIMessage[]): Promise<SaveMessagesResult> {
     return this.saveMessages(msgs);
+  }
+
+  async testSaveMessagesEmptyFunction(): Promise<SaveMessagesResult> {
+    return this.saveMessages(() => []);
+  }
+
+  async runNestedAdmissionScenario(
+    mode: Exclude<typeof this._nestedAdmissionMode, null>
+  ): Promise<{
+    attempted: boolean;
+    succeeded: boolean;
+    error: string | null;
+  }> {
+    this._nestedAdmissionMode = mode;
+    this._nestedAdmissionAttempted = false;
+    this._nestedAdmissionSucceeded = false;
+    this._nestedAdmissionError = null;
+    await this.testChat(`outer ${mode}`);
+    this._nestedAdmissionMode = null;
+    return {
+      attempted: this._nestedAdmissionAttempted,
+      succeeded: this._nestedAdmissionSucceeded,
+      error: this._nestedAdmissionError
+    };
   }
 
   async testRunTurnWait(options: RunTurnWait): Promise<TurnResult> {

@@ -80,6 +80,7 @@
  * ```
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   LanguageModel,
   ModelMessage,
@@ -864,6 +865,43 @@ export type TurnResult = SaveMessagesResult & {
   message?: SessionMessage;
   continuation: boolean;
 };
+
+type TurnTrigger =
+  | "ws-chat"
+  | "rpc"
+  | "programmatic"
+  | "submission"
+  | "scheduled"
+  | "agent-tool"
+  | "auto-continuation"
+  | "recovery-continue"
+  | "recovery-retry";
+
+type TurnAdmission = "queue" | "submit" | "execute-submission";
+
+type AdmittedQueueResult<T> =
+  | { status: "completed"; value: T }
+  | { status: "stale" };
+
+type QueueTurnSpec<T> = {
+  admission: "queue";
+  trigger: TurnTrigger;
+  requestId: string;
+  generation?: number;
+  allowNested?: boolean;
+  onQueued?: () => void;
+  execute: () => Promise<T>;
+};
+
+type NonQueueTurnSpec<T> = {
+  admission: Exclude<TurnAdmission, "queue">;
+  trigger: TurnTrigger;
+  execute: () => Promise<T>;
+};
+
+type TurnSpec<T> = QueueTurnSpec<T> | NonQueueTurnSpec<T>;
+
+const admittedTurnContext = new AsyncLocalStorage<{ agent: unknown }>();
 
 /** Options for {@link Think.addMessages}. */
 export interface AddMessagesOptions {
@@ -4633,6 +4671,47 @@ export class Think<
     };
   }
 
+  private async _admitTurn<T>(
+    spec: QueueTurnSpec<T>
+  ): Promise<AdmittedQueueResult<T>>;
+  private async _admitTurn<T>(spec: NonQueueTurnSpec<T>): Promise<T>;
+  private async _admitTurn<T>(
+    spec: TurnSpec<T>
+  ): Promise<AdmittedQueueResult<T> | T> {
+    if (spec.admission !== "queue") {
+      return spec.execute();
+    }
+
+    if (!spec.allowNested) {
+      this._assertNotInsideAdmittedTurn(spec.trigger);
+    }
+
+    return this.keepAliveWhile(async () => {
+      const turnPromise = this._turnQueue.enqueue(
+        spec.requestId,
+        () => this._runInsideAdmittedTurnBody(spec.execute),
+        spec.generation === undefined
+          ? undefined
+          : { generation: spec.generation }
+      );
+      spec.onQueued?.();
+      return turnPromise;
+    });
+  }
+
+  private _assertNotInsideAdmittedTurn(trigger: TurnTrigger): void {
+    if (admittedTurnContext.getStore()?.agent !== this) return;
+    throw new Error(
+      `Think turn admission (${trigger}) cannot be called from inside an active turn; use runTurn({ mode: "submit" }) or addMessages() instead`
+    );
+  }
+
+  private async _runInsideAdmittedTurnBody<T>(
+    fn: () => Promise<T>
+  ): Promise<T> {
+    return admittedTurnContext.run({ agent: this }, fn);
+  }
+
   // ── Sub-agent RPC entry point ───────────────────────────────────
 
   /**
@@ -4685,8 +4764,11 @@ export class Think<
 
     try {
       await callback.onStart({ requestId });
-      await this.keepAliveWhile(async () => {
-        await this._turnQueue.enqueue(requestId, async () => {
+      await this._admitTurn({
+        admission: "queue",
+        trigger: "rpc",
+        requestId,
+        execute: async () => {
           const userMsg: UIMessage =
             typeof userMessage === "string"
               ? {
@@ -4783,7 +4865,7 @@ export class Think<
           } else {
             await chatBody();
           }
-        });
+        }
       });
     } finally {
       detachExternal();
@@ -5169,7 +5251,8 @@ export class Think<
           requestId,
           [this.formatAgentToolInput(input)],
           {
-            signal: controller.signal
+            signal: controller.signal,
+            trigger: "agent-tool"
           }
         );
         const streamId =
@@ -6611,66 +6694,70 @@ export class Think<
     messages: UIMessage[],
     options?: SubmitMessagesOptions
   ): Promise<SubmitMessagesResult> {
-    this._ensureSubmissionTable();
-    if (messages.length === 0) {
-      throw new Error("submitMessages requires at least one message");
-    }
+    return this._admitTurn({
+      admission: "submit",
+      trigger: "submission",
+      execute: async () => {
+        this._ensureSubmissionTable();
+        if (messages.length === 0) {
+          throw new Error("submitMessages requires at least one message");
+        }
 
-    const existingById = options?.submissionId
-      ? this._readSubmission(options.submissionId)
-      : null;
-    const existingByKey = options?.idempotencyKey
-      ? this._readSubmissionByIdempotencyKey(options.idempotencyKey)
-      : null;
+        const existingById = options?.submissionId
+          ? this._readSubmission(options.submissionId)
+          : null;
+        const existingByKey = options?.idempotencyKey
+          ? this._readSubmissionByIdempotencyKey(options.idempotencyKey)
+          : null;
 
-    if (
-      existingById &&
-      existingByKey &&
-      existingById.submission_id !== existingByKey.submission_id
-    ) {
-      throw new Error(
-        "submissionId and idempotencyKey refer to different submissions"
-      );
-    }
-    if (
-      existingByKey &&
-      options?.submissionId &&
-      existingByKey.submission_id !== options.submissionId
-    ) {
-      throw new Error(
-        "submissionId and idempotencyKey refer to different submissions"
-      );
-    }
-    if (
-      existingById &&
-      options?.idempotencyKey &&
-      existingById.idempotency_key !== null &&
-      existingById.idempotency_key !== options.idempotencyKey
-    ) {
-      throw new Error(
-        "submissionId and idempotencyKey refer to different submissions"
-      );
-    }
+        if (
+          existingById &&
+          existingByKey &&
+          existingById.submission_id !== existingByKey.submission_id
+        ) {
+          throw new Error(
+            "submissionId and idempotencyKey refer to different submissions"
+          );
+        }
+        if (
+          existingByKey &&
+          options?.submissionId &&
+          existingByKey.submission_id !== options.submissionId
+        ) {
+          throw new Error(
+            "submissionId and idempotencyKey refer to different submissions"
+          );
+        }
+        if (
+          existingById &&
+          options?.idempotencyKey &&
+          existingById.idempotency_key !== null &&
+          existingById.idempotency_key !== options.idempotencyKey
+        ) {
+          throw new Error(
+            "submissionId and idempotencyKey refer to different submissions"
+          );
+        }
 
-    const existing = existingById ?? existingByKey;
-    if (existing) {
-      if (existing.status === "pending") {
-        await this._scheduleSubmissionDrain();
-        this._startSubmissionDrain();
-      }
-      return {
-        ...this._inspectionFromSubmissionRow(existing),
-        accepted: false
-      };
-    }
+        const existing = existingById ?? existingByKey;
+        if (existing) {
+          if (existing.status === "pending") {
+            await this._scheduleSubmissionDrain();
+            this._startSubmissionDrain();
+          }
+          return {
+            ...this._inspectionFromSubmissionRow(existing),
+            accepted: false
+          };
+        }
 
-    const submissionId = options?.submissionId ?? crypto.randomUUID();
-    const requestId = submissionId;
-    const now = Date.now();
-    const messagesJson = this._serializeSubmissionMessages(messages);
-    const metadataJson = this._serializeMetadata(options?.metadata);
+        const submissionId = options?.submissionId ?? crypto.randomUUID();
+        const requestId = submissionId;
+        const now = Date.now();
+        const messagesJson = this._serializeSubmissionMessages(messages);
+        const metadataJson = this._serializeMetadata(options?.metadata);
 
-    this.sql`
+        this.sql`
       INSERT INTO cf_think_submissions (
         submission_id, idempotency_key, request_id, stream_id, status,
         messages_json, metadata_json, error_message, created_at,
@@ -6683,24 +6770,26 @@ export class Think<
       )
     `;
 
-    const row = this._readSubmission(submissionId);
-    if (!row) {
-      throw new Error("Failed to persist submission");
-    }
+        const row = this._readSubmission(submissionId);
+        if (!row) {
+          throw new Error("Failed to persist submission");
+        }
 
-    this._emit("submission:create", {
-      submissionId: row.submission_id,
-      requestId: row.request_id ?? undefined,
-      idempotencyKey: row.idempotency_key ?? undefined
+        this._emit("submission:create", {
+          submissionId: row.submission_id,
+          requestId: row.request_id ?? undefined,
+          idempotencyKey: row.idempotency_key ?? undefined
+        });
+        await this._emitSubmissionStatus(row);
+        await this._scheduleSubmissionDrain();
+        this._startSubmissionDrain();
+
+        return {
+          ...this._inspectionFromSubmissionRow(row),
+          accepted: true
+        };
+      }
     });
-    await this._emitSubmissionStatus(row);
-    await this._scheduleSubmissionDrain();
-    this._startSubmissionDrain();
-
-    return {
-      ...this._inspectionFromSubmissionRow(row),
-      accepted: true
-    };
   }
 
   private async _scheduleSubmissionDrain(): Promise<void> {
@@ -6755,6 +6844,14 @@ export class Think<
   }
 
   private async _runSubmission(row: ThinkSubmissionRow): Promise<void> {
+    await this._admitTurn({
+      admission: "execute-submission",
+      trigger: "submission",
+      execute: () => this._executeSubmission(row)
+    });
+  }
+
+  private async _executeSubmission(row: ThinkSubmissionRow): Promise<void> {
     const requestId = row.request_id ?? row.submission_id;
     const startedAt = Date.now();
     this.sql`
@@ -6782,6 +6879,7 @@ export class Think<
         messages,
         {
           signal: controller.signal,
+          trigger: "submission",
           captureProgrammaticStreamError: true,
           captureOutput: Boolean(workflowPrompt?.output),
           workflowPrompt: workflowPrompt ?? undefined,
@@ -7206,6 +7304,7 @@ export class Think<
       body?: Record<string, unknown>;
       workflowPrompt?: ThinkWorkflowPromptContext;
       shouldApplyMessages?: () => boolean | Promise<boolean>;
+      trigger?: TurnTrigger;
     }
   ): Promise<ProgrammaticMessagesResult> {
     const clientTools = this._lastClientTools;
@@ -7216,8 +7315,11 @@ export class Think<
     let output: unknown;
     let wasAborted = false;
 
-    await this.keepAliveWhile(async () => {
-      await this._turnQueue.enqueue(requestId, async () => {
+    await this._admitTurn({
+      admission: "queue",
+      trigger: options?.trigger ?? "programmatic",
+      requestId,
+      execute: async () => {
         if (this._turnQueue.generation !== epoch) {
           status = "skipped";
           return;
@@ -7361,7 +7463,7 @@ export class Think<
           detachExternal();
           this._aborts.remove(requestId);
         }
-      });
+      }
     });
 
     if (
@@ -7400,8 +7502,10 @@ export class Think<
    */
   protected async continueLastTurn(
     body?: Record<string, unknown>,
-    options?: SaveMessagesOptions
+    options?: SaveMessagesOptions & { trigger?: TurnTrigger }
   ): Promise<SaveMessagesResult> {
+    const trigger = options?.trigger ?? "programmatic";
+    this._assertNotInsideAdmittedTurn(trigger);
     const lastLeaf = await this.session.getLatestLeaf();
     if (!lastLeaf || lastLeaf.role !== "assistant") {
       return { requestId: "", status: "skipped" };
@@ -7415,8 +7519,11 @@ export class Think<
     let error: string | undefined;
     let wasAborted = false;
 
-    await this.keepAliveWhile(async () => {
-      await this._turnQueue.enqueue(requestId, async () => {
+    await this._admitTurn({
+      admission: "queue",
+      trigger,
+      requestId,
+      execute: async () => {
         if (this._turnQueue.generation !== epoch) {
           status = "skipped";
           return;
@@ -7469,7 +7576,7 @@ export class Think<
           detachExternal();
           this._aborts.remove(requestId);
         }
-      });
+      }
     });
 
     if (
@@ -7487,8 +7594,10 @@ export class Think<
   private async _retryLastUserTurn(
     clientTools?: ClientToolSchema[],
     body?: Record<string, unknown>,
-    options?: SaveMessagesOptions
+    options?: SaveMessagesOptions & { trigger?: TurnTrigger }
   ): Promise<SaveMessagesResult> {
+    const trigger = options?.trigger ?? "recovery-retry";
+    this._assertNotInsideAdmittedTurn(trigger);
     const lastLeaf = await this.session.getLatestLeaf();
     if (!lastLeaf || lastLeaf.role !== "user") {
       return { requestId: "", status: "skipped" };
@@ -7500,8 +7609,11 @@ export class Think<
     let error: string | undefined;
     let wasAborted = false;
 
-    await this.keepAliveWhile(async () => {
-      await this._turnQueue.enqueue(requestId, async () => {
+    await this._admitTurn({
+      admission: "queue",
+      trigger,
+      requestId,
+      execute: async () => {
         if (this._turnQueue.generation !== epoch) {
           status = "skipped";
           return;
@@ -7551,7 +7663,7 @@ export class Think<
           detachExternal();
           this._aborts.remove(requestId);
         }
-      });
+      }
     });
 
     if (
@@ -7877,9 +7989,13 @@ export class Think<
       const abortSignal = this._aborts.getSignal(requestId);
 
       await this.keepAliveWhile(async () => {
-        const turnPromise = this._turnQueue.enqueue(
+        const turnPromise = this._admitTurn({
+          admission: "queue",
+          trigger: "ws-chat",
           requestId,
-          async () => {
+          generation: epoch,
+          onQueued: releaseIfPending,
+          execute: async () => {
             // Superseded by a later overlapping submit (latest/merge/debounce)
             if (
               this._submitConcurrency.isSuperseded(
@@ -8001,12 +8117,8 @@ export class Think<
             } else {
               await chatTurnBody();
             }
-          },
-          {
-            generation: epoch
           }
-        );
-        releaseIfPending();
+        });
 
         const turnResult = await turnPromise;
 
@@ -10619,7 +10731,9 @@ export class Think<
       const result = await this._retryLastUserTurn(
         this._lastClientTools,
         this._lastBody,
-        controller ? { signal: controller.signal } : undefined
+        controller
+          ? { signal: controller.signal, trigger: "recovery-retry" }
+          : { trigger: "recovery-retry" }
       );
       await this._updateChatRecoveryIncident(
         data?.incidentId,
@@ -10856,7 +10970,9 @@ export class Think<
       this._applyRecoveredRequestContext(data);
       const result = await this.continueLastTurn(
         undefined,
-        controller ? { signal: controller.signal } : undefined
+        controller
+          ? { signal: controller.signal, trigger: "recovery-continue" }
+          : { trigger: "recovery-continue" }
       );
       await this._updateChatRecoveryIncident(
         data?.incidentId,
@@ -11037,8 +11153,12 @@ export class Think<
     const { connection, requestId, clientTools } = pending;
     const abortSignal = this._aborts.getSignal(requestId);
 
-    this.keepAliveWhile(async () => {
-      await this._turnQueue.enqueue(requestId, async () => {
+    this._admitTurn({
+      admission: "queue",
+      trigger: "auto-continuation",
+      requestId,
+      allowNested: true,
+      execute: async () => {
         if (this._continuation.pending) {
           this._continuation.pending.pastCoalesce = true;
         }
@@ -11081,7 +11201,7 @@ export class Think<
           this._continuation.clearPending();
           this._activateDeferredContinuation();
         }
-      });
+      }
     }).catch((error) => {
       console.error("[Think] Auto-continuation failed:", error);
       this._aborts.remove(requestId);

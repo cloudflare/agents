@@ -95,6 +95,22 @@ describe("Think — runTurn", () => {
     expect(await agent.getStoredMessages()).toHaveLength(0);
   });
 
+  it("characterizes existing saveMessages empty-input behavior", async () => {
+    const agent = await freshProgrammaticAgent("runturn-save-empty");
+    await agent.setProgrammaticResponseForTest("Seed reply");
+    await agent.testRunTurnWaitString("seed");
+    await agent.setProgrammaticResponseForTest("Empty reply");
+
+    const emptyArray = await agent.testSaveMessages([]);
+    expect(emptyArray.status).toBe("completed");
+    expect((await agent.getStoredMessages()) as UIMessage[]).toHaveLength(3);
+
+    await agent.setProgrammaticResponseForTest("Empty function reply");
+    const emptyFunction = await agent.testSaveMessagesEmptyFunction();
+    expect(emptyFunction.status).toBe("completed");
+    expect((await agent.getStoredMessages()) as UIMessage[]).toHaveLength(4);
+  });
+
   it("continuation mode delegates to continueLastTurn", async () => {
     const agent = await freshProgrammaticAgent("runturn-continuation");
     await agent.setProgrammaticResponseForTest("First answer");
@@ -272,5 +288,30 @@ describe("Think — runTurn", () => {
 
     const messages = (await agent.getStoredMessages()) as UIMessage[];
     expect(messages.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("throws for nested blocking admissions but allows submit and addMessages", async () => {
+    const agent = await freshProgrammaticAgent("runturn-nested-admission");
+
+    for (const mode of ["wait", "continuation", "stream"] as const) {
+      const result = await agent.runNestedAdmissionScenario(mode);
+      expect(result.attempted).toBe(true);
+      expect(result.succeeded).toBe(false);
+      expect(result.error).toContain("cannot be called from inside");
+    }
+
+    const submit = await agent.runNestedAdmissionScenario("submit");
+    expect(submit).toMatchObject({
+      attempted: true,
+      succeeded: true,
+      error: null
+    });
+
+    const addMessages = await agent.runNestedAdmissionScenario("addMessages");
+    expect(addMessages).toMatchObject({
+      attempted: true,
+      succeeded: true,
+      error: null
+    });
   });
 });

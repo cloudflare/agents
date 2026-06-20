@@ -36,8 +36,14 @@ What is already built vs. still open in **this** RFC:
   `RunTurnBase` superset yet); in-queue re-entrancy guard deferred to step 3
   `_admitTurn`. Exported types: `TurnInputMessages`, `RunTurnBase`, `RunTurnWait`,
   `RunTurnSubmit`, `RunTurnStream`, `RunTurnOptions`, `TurnResult`.
-- ⛔ **`TurnSpec`/`_admitTurn` — NOT BUILT.** This is the remaining scope of
-  this RFC and what a fresh session should implement for step 3.
+- ✅ **`TurnSpec`/`_admitTurn` — SHIPPED** (step 3). The as-built extraction keeps
+  path-specific bodies/order intact while routing every turn admission through an
+  internal `TurnSpec`/`_admitTurn` spine. Submission admission and submission
+  drain execution are split so the drain never re-enters row insert/dedup.
+  Blocking nested queue admissions (`wait`/`continuation`/`stream`) now throw via
+  an async-local admitted-turn marker; legitimate concurrent non-nested turns
+  still enqueue behind. Current `saveMessages([])` and function-returning-empty
+  behavior is preserved for compatibility.
 
 Recovery-RFC gate (see "Coordination with the chat-recovery RFC"): the
 `runTurn` _facade_ (suggested order step 2) can land anytime, but the
@@ -311,9 +317,9 @@ Supported patterns for "do more work from inside a turn":
 - **`addMessages(...)`** — to add transcript context without running a turn (it
   deliberately bypasses the turn queue; see below).
 
-`runTurn` must detect **in-queue** re-entrancy for `wait`/`continuation` and throw
-a clear error ("runTurn({ mode: 'wait' }) cannot be called while a turn is
-active; use mode: 'submit' or addMessages()") rather than hang.
+`runTurn` must detect **in-queue** re-entrancy for `wait`/`continuation`/`stream`
+and throw a clear error ("runTurn({ mode: 'wait' }) cannot be called while a turn
+is active; use mode: 'submit' or addMessages()") rather than hang.
 
 **Step-2 facade vs step-3 `_admitTurn`.** The step-2 `runTurn` facade
 deliberately does **not** implement this guard: `_turnQueue.isActive` is too
@@ -324,8 +330,10 @@ handle today by enqueuing behind. There is no cheap precise "inside a turn body"
 signal at the facade layer (`agentContext` wraps all agent ops, not just turn
 bodies). The step-2 facade documents the deadlock footgun in its doc comment
 (behavior identical to calling `saveMessages`/`continueLastTurn` from inside a
-turn today — no regression). **Precise nested-call detection is step-3 scope:**
-`_admitTurn` owns it via a turn-scoped marker set around turn-body execution.
+turn today — no regression). **As built in step 3:** `_admitTurn` owns precise
+nested-call detection via an async-local turn marker set around turn-body
+execution, so separate concurrent RPC/alarm invocations still enqueue behind
+instead of throwing.
 
 #### Recipes (DX)
 
@@ -407,13 +415,11 @@ interface TurnSpec {
 3. If `admission === "submit"`: insert/dedup the submission row and schedule the
    drain (today's `submitMessages` body); return `SubmitMessagesResult`.
 4. **In-queue re-entrancy guard** (blocking queue admission only). If the spec
-   would enqueue and block on `_turnQueue` (`admission !== "submit"`, i.e.
-   `wait`/`continuation` semantics), and the caller is already inside an active
-   turn body (turn-scoped marker — **not** `_turnQueue.isActive` alone, which is
-   also true for legitimate concurrent non-nested calls that should enqueue
-   behind), throw the documented error rather than deadlock. The step-2 `runTurn`
-   facade deliberately omits this guard; `_admitTurn` is the single place that
-   implements it once the marker exists.
+   would enqueue and block on `_turnQueue` (`wait`/`continuation`/`stream`
+   semantics), and the caller is already inside an active turn body (async-local
+   turn marker — **not** `_turnQueue.isActive` alone, which is also true for
+   legitimate concurrent non-nested calls that should enqueue behind), throw the
+   documented error rather than deadlock.
 5. Else enqueue on `_turnQueue` with `spec.generation` (today's WS/programmatic
    enqueue), honoring skipped/stale/superseded semantics.
 6. Persist per `spec.persist` (append user message(s); none; or
@@ -636,11 +642,14 @@ Layered, in the spirit of the recovery RFC's approach:
   (`think.ts:7134`).
 - **No-turn writes never touch the turn queue.** `addMessages` must keep the
   `_hostSendMessage` no-deadlock guarantee.
-- **In-queue re-entrancy.** Blocking `wait`/`continuation` from inside an active
-  turn body deadlocks on `_turnQueue`. Step-2 `runTurn` documents this but does
-  not guard (see re-entrancy section); step-3 `_admitTurn` throws via a
-  turn-scoped marker. Legitimate concurrent non-nested `wait` calls must still
-  enqueue behind, not throw.
+- **In-queue re-entrancy.** Blocking `wait`/`continuation`/`stream` from inside
+  an active turn body would deadlock on `_turnQueue`; `_admitTurn` throws via an
+  async-local turn marker. Legitimate concurrent non-nested queue admissions must
+  still enqueue behind, not throw.
+- **Empty programmatic input.** Step 3 preserves the current compatibility
+  behavior for `saveMessages([])` and function inputs that resolve to `[]`: they
+  still reach the admitted programmatic turn and may run inference on existing
+  history. The narrower step-2 `runTurn(wait)` static empty-input skip remains.
 - **Per-turn vs persisted client tools.** `chat()`/`stream` mode client tools
   are per-turn and must not be persisted to `_lastClientTools` (avoids recovery
   misclassification, `think.ts:4686`); WS/programmatic continue to persist
@@ -760,10 +769,12 @@ Suggested implementation order (decouples from the recovery RFC's timeline):
    to learn" win with zero internal churn; safe even if the recovery RFC slips.
    **Does not** implement the in-queue re-entrancy guard (deferred to step 3).
    **Shipped** with per-mode option narrowing (see Status block).
-3. After recovery RFC Phases 0-1 (ideally Phase 3): extract `_admitTurn` +
+3. ✅ After recovery RFC Phases 0-1 (ideally Phase 3): extract `_admitTurn` +
    `TurnSpec`, repoint the existing methods and `runTurn` at it, and gate the
    change on the behavior-parity suite + the mapping table in section 2.
-   **Includes** the turn-scoped re-entrancy guard for blocking `wait`/`continuation`.
+   **Shipped** with an async-local re-entrancy guard for blocking
+   `wait`/`continuation`/`stream`, submission admission vs drain execution split,
+   and path-specific ordering preserved.
 4. Add `chat:turn:*` observability inside `_admitTurn`.
 
 The `_admitTurn` step list in section 2 is the _logical_ sequence; exact ordering
