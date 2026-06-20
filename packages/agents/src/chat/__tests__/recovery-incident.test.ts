@@ -5,6 +5,7 @@ import {
   AgentToolStreamProgressThrottle,
   bumpChatRecoveryProgress,
   CHAT_RECOVERY_ALARM_DEBOUNCE_MS,
+  classifyAgentToolChildRecovery,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
   CHAT_RECOVERY_INCIDENT_TTL_MS,
   CHAT_RECOVERY_PROGRESS_KEY,
@@ -300,6 +301,63 @@ describe("sweepStaleChatRecoveryIncidents", () => {
       5
     ]);
     expect(storage.data.size).toBe(0);
+  });
+});
+
+describe("classifyAgentToolChildRecovery", () => {
+  function seed(
+    storage: FakeStorage,
+    statuses: ChatRecoveryIncident["status"][]
+  ): void {
+    statuses.forEach((status, i) => {
+      storage.data.set(`${CHAT_RECOVERY_INCIDENT_KEY_PREFIX}${i}`, {
+        ...staleIncident(String(i), T0),
+        status
+      });
+    });
+  }
+
+  const classify = (storage: FakeStorage) =>
+    classifyAgentToolChildRecovery(
+      storage as unknown as Pick<DurableObjectStorage, "list">
+    );
+
+  it("returns 'none' when there are no incidents", async () => {
+    expect(await classify(new FakeStorage())).toBe("none");
+  });
+
+  it("returns 'none' when all incidents are completed/non-terminal-failure", async () => {
+    const storage = new FakeStorage();
+    seed(storage, ["completed", "completed"]);
+    expect(await classify(storage)).toBe("none");
+  });
+
+  it("returns 'failed' when any incident is exhausted or failed (and none live)", async () => {
+    const storage = new FakeStorage();
+    seed(storage, ["completed", "exhausted", "failed"]);
+    expect(await classify(storage)).toBe("failed");
+  });
+
+  it("returns 'in-progress' for a detected/scheduled/attempting incident", async () => {
+    for (const live of ["detected", "scheduled", "attempting"] as const) {
+      const storage = new FakeStorage();
+      seed(storage, [live]);
+      expect(await classify(storage)).toBe("in-progress");
+    }
+  });
+
+  it("prioritizes 'in-progress' over 'failed' regardless of order", async () => {
+    const storage = new FakeStorage();
+    seed(storage, ["failed", "attempting", "exhausted"]);
+    expect(await classify(storage)).toBe("in-progress");
+  });
+
+  it("lists by the incident prefix only", async () => {
+    const storage = new FakeStorage();
+    seed(storage, ["attempting"]);
+    storage.data.set("cf:chat:last-terminal", { foo: 1 });
+    await classify(storage);
+    expect(storage.listPrefixes).toEqual([CHAT_RECOVERY_INCIDENT_KEY_PREFIX]);
   });
 });
 

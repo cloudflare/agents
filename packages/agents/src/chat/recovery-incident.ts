@@ -271,6 +271,36 @@ export async function sweepStaleChatRecoveryIncidents(
 }
 
 /**
+ * Summarize a child agent's persisted recovery incidents for the parent's
+ * agent-tool reattach decision: `"in-progress"` if any incident is still live
+ * (detected/scheduled/attempting), else `"failed"` if any terminalized
+ * (exhausted/failed), else `"none"`. In-progress takes precedence so a parent
+ * never gives up on a child that is still recovering. Shared by `AIChatAgent`
+ * and `Think`. See `design/rfc-chat-recovery-foundation.md`.
+ */
+export async function classifyAgentToolChildRecovery(
+  storage: Pick<DurableObjectStorage, "list">
+): Promise<"in-progress" | "failed" | "none"> {
+  const entries = await storage.list<ChatRecoveryIncident>({
+    prefix: CHAT_RECOVERY_INCIDENT_KEY_PREFIX
+  });
+  let failed = false;
+  for (const incident of entries.values()) {
+    if (
+      incident.status === "detected" ||
+      incident.status === "scheduled" ||
+      incident.status === "attempting"
+    ) {
+      return "in-progress";
+    }
+    if (incident.status === "exhausted" || incident.status === "failed") {
+      failed = true;
+    }
+  }
+  return failed ? "failed" : "none";
+}
+
+/**
  * Read the durable monotonic recovery-progress counter (0 when unset). The value
  * feeds the no-progress budget decision; shared by `AIChatAgent` and `Think`.
  */

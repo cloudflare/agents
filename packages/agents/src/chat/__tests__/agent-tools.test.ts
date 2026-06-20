@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   applyAgentToolEvent,
   createAgentToolEventState,
+  interceptAgentToolBroadcast,
+  type AgentToolBroadcastHooks,
   type AgentToolEventMessage
 } from "../agent-tools";
 
@@ -174,5 +176,138 @@ describe("agent tool event reducer", () => {
       reason: "window-exceeded",
       childStillRunning: false
     });
+  });
+});
+
+describe("interceptAgentToolBroadcast", () => {
+  const RESPONSE_TYPE = "cf_agent_use_chat_response";
+
+  type Chunk = { sequence: number; body: string };
+
+  function makeHooks(runForRequest: (requestId: string) => string | null) {
+    const forwarders = new Map<string, Set<(chunk: Chunk) => void>>();
+    const liveSequences = new Map<string, number>();
+    const lastErrors = new Map<string, string>();
+    const spy = vi.fn(runForRequest);
+    const hooks: AgentToolBroadcastHooks = {
+      forwarders,
+      liveSequences,
+      lastErrors,
+      responseType: RESPONSE_TYPE,
+      runForRequest: spy
+    };
+    return { hooks, forwarders, liveSequences, lastErrors, runForRequest: spy };
+  }
+
+  function frame(fields: Record<string, unknown>): string {
+    return JSON.stringify({ type: RESPONSE_TYPE, ...fields });
+  }
+
+  it("forwards body chunks to the run's tailers with an incrementing sequence", () => {
+    const { hooks, forwarders, liveSequences } = makeHooks(() => "run-1");
+    const received: Chunk[] = [];
+    forwarders.set("run-1", new Set([(c) => received.push(c)]));
+
+    interceptAgentToolBroadcast(frame({ id: "req-1", body: "hello" }), hooks);
+    interceptAgentToolBroadcast(frame({ id: "req-1", body: "world" }), hooks);
+
+    expect(received).toEqual([
+      { sequence: 0, body: "hello" },
+      { sequence: 1, body: "world" }
+    ]);
+    expect(liveSequences.get("run-1")).toBe(2);
+  });
+
+  it("advances the live sequence even with no tailer attached", () => {
+    const { hooks, liveSequences } = makeHooks(() => "run-1");
+    // Gate opens via an existing live sequence (run in flight, no tailer yet).
+    liveSequences.set("run-1", 0);
+
+    interceptAgentToolBroadcast(frame({ id: "req-1", body: "a" }), hooks);
+
+    expect(liveSequences.get("run-1")).toBe(1);
+  });
+
+  it("captures an error body into lastErrors", () => {
+    const { hooks, forwarders, lastErrors, liveSequences } = makeHooks(
+      () => "run-1"
+    );
+    forwarders.set("run-1", new Set());
+
+    interceptAgentToolBroadcast(
+      frame({ id: "req-1", error: true, body: "boom" }),
+      hooks
+    );
+
+    expect(lastErrors.get("run-1")).toBe("boom");
+    // An error frame is not progress: the live sequence must not advance.
+    expect(liveSequences.has("run-1")).toBe(false);
+  });
+
+  it("ignores frames whose type is not the response type", () => {
+    const { hooks, forwarders } = makeHooks(() => "run-1");
+    const received: Chunk[] = [];
+    forwarders.set("run-1", new Set([(c) => received.push(c)]));
+
+    interceptAgentToolBroadcast(
+      JSON.stringify({ type: "other", id: "req-1", body: "x" }),
+      hooks
+    );
+
+    expect(received).toEqual([]);
+  });
+
+  it("ignores frames with a non-string id", () => {
+    const { hooks, forwarders, runForRequest } = makeHooks(() => "run-1");
+    forwarders.set("run-1", new Set());
+
+    interceptAgentToolBroadcast(frame({ id: 42, body: "x" }), hooks);
+
+    expect(runForRequest).not.toHaveBeenCalled();
+  });
+
+  it("leaves frames alone when the request maps to no run", () => {
+    const { hooks, forwarders, liveSequences } = makeHooks(() => null);
+    forwarders.set("run-1", new Set());
+
+    interceptAgentToolBroadcast(frame({ id: "req-x", body: "x" }), hooks);
+
+    expect(liveSequences.size).toBe(0);
+  });
+
+  it("short-circuits with no forwarders and no live sequences", () => {
+    const { hooks, runForRequest } = makeHooks(() => "run-1");
+
+    interceptAgentToolBroadcast(frame({ id: "req-1", body: "x" }), hooks);
+
+    expect(runForRequest).not.toHaveBeenCalled();
+  });
+
+  it("passes through non-string frames without throwing", () => {
+    const { hooks, forwarders, runForRequest } = makeHooks(() => "run-1");
+    forwarders.set("run-1", new Set());
+
+    expect(() =>
+      interceptAgentToolBroadcast(new ArrayBuffer(8), hooks)
+    ).not.toThrow();
+    expect(runForRequest).not.toHaveBeenCalled();
+  });
+
+  it("passes through unparseable frames without throwing", () => {
+    const { hooks, forwarders } = makeHooks(() => "run-1");
+    forwarders.set("run-1", new Set());
+
+    expect(() => interceptAgentToolBroadcast("not json{", hooks)).not.toThrow();
+  });
+
+  it("ignores an empty body (no chunk, no sequence advance)", () => {
+    const { hooks, forwarders, liveSequences } = makeHooks(() => "run-1");
+    const received: Chunk[] = [];
+    forwarders.set("run-1", new Set([(c) => received.push(c)]));
+
+    interceptAgentToolBroadcast(frame({ id: "req-1", body: "" }), hooks);
+
+    expect(received).toEqual([]);
+    expect(liveSequences.has("run-1")).toBe(false);
   });
 });

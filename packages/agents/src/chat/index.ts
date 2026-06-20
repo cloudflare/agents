@@ -57,6 +57,8 @@ export { CHAT_MESSAGE_TYPES } from "./protocol";
 export {
   applyAgentToolEvent,
   createAgentToolEventState,
+  interceptAgentToolBroadcast,
+  type AgentToolBroadcastHooks,
   type AgentToolEvent,
   type AgentToolEventMessage,
   type AgentToolEventState,
@@ -82,6 +84,17 @@ export {
 } from "./auto-continuation-controller";
 
 export { AbortRegistry } from "./abort-registry";
+
+/**
+ * @internal Small async control-flow helpers shared by the chat hosts
+ * (`@cloudflare/ai-chat` and `@cloudflare/think`), not a public API. See
+ * `async-helpers.ts`.
+ */
+export {
+  TIMED_OUT,
+  awaitWithDeadline,
+  drainInteractionApplies
+} from "./async-helpers";
 
 export {
   applyToolUpdate,
@@ -141,6 +154,7 @@ export {
 export {
   resolveChatRecoveryConfig,
   sweepStaleChatRecoveryIncidents,
+  classifyAgentToolChildRecovery,
   readChatRecoveryProgress,
   bumpChatRecoveryProgress,
   recordChatTerminal,
