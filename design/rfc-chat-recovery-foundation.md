@@ -13,8 +13,8 @@ Related:
 
 > Quick orientation for a fresh working session. The authoritative detail lives in
 > the **Progress log** (newest first) and the Phase 5 section; this block is the
-> map, not the territory. Last updated after commit `16175930` (branch-cleanup
-> Tiers 1–2).
+> map, not the territory. Last updated after commit `d0c9585b` (Layer-5 live
+> deploy/chaos suites landed + nightly wiring).
 >
 > _Archival note: the Progress log is kept inline while this branch is in flight
 > (it is an active working artifact). At branch finalization, move it to a sibling
@@ -41,6 +41,23 @@ substrate → keep per-package) and the ai-chat-as-subset end-state.
 
 **Recently landed (most recent first).**
 
+- `d0c9585b` — **Layer 5 live deploy/chaos — LANDED, validated on the real edge**
+  (opt-in, not a merge gate). ai-chat's `deployed-recovery.test.ts` gained a
+  false-positive guard (a completed turn is NOT spuriously recovered by
+  reconnect/idle churn, and keeps serving) beside the mid-turn-redeploy eviction
+  test; `experimental/chat-recovery-probe` gained `scripts/run-suite.mjs` (deploy
+  under a throwaway name → run the fast abort-driven Think scenarios a6/a7/a8/idem
+  → always delete). Root `test:recovery:live` runs both; gated nightly jobs
+  (`e2e-deployed-ai-chat`, `e2e-deployed-think-probe`) stay off unless the
+  `RUN_DEPLOYED_E2E` repo var / manual `run_deployed` dispatch enables them. See
+  the **Layer 5** section for the real-edge realities discovered.
+- `d7f3e5bc` / `f44227bf` / `55091855` — **e2e CI hardening** (no product change):
+  promoted the previously manual-only SIGKILL suites to nightly jobs
+  (`e2e-ai-chat-recovery`, `e2e-agents`, `e2e-engine-genericity`); added
+  `pi-recovery`'s missing `test` script + `pi-codec.test.ts` (32 tests, matching
+  tanstack's codec coverage) + READMEs for both genericity harnesses; fixed a
+  `think` `assistant-e2e` post-test unhandled-rejection flake. (Deferred, tracked:
+  unifying the divergent ai-chat/agents wrangler e2e harnesses — pure hygiene.)
 - `16175930` / `ba05478e` — **branch cleanup, Tiers 1–2** (no behavior change):
   dedup the third hand-copied `sendIfOpen` (now imported from `connection.ts`),
   remove dead code (`targetAssistantId` engine field, pi-recovery `hasFiberRows`),
@@ -142,19 +159,25 @@ onError, terminalize })` folds the `build → notify → terminalize` give-up
    - green ai-chat SIGKILL re-runs, one accepted gap). `chat-shared-layer.md` now has
      a `recovery-engine.ts` section (engine ownership, adapter/wake seams, the four
      orphan-persist seams) + a history note linking this RFC; stale orphan-persist
-     references in that doc were corrected. **Remaining:** finalize/sweep changesets at
-     release time (the `reconcileOrphanPartial` export changeset is in; the broader
-     behavior-change changesets already exist) and the optional Layer-5 live deploy
-     smoke.
+     references in that doc were corrected. The full local SIGKILL e2e sweep is now
+     wired into nightly CI, and the optional Layer-5 live deploy/chaos suites have
+     **landed** (opt-in; see the Layer 5 section). **Remaining:** finalize/sweep
+     changesets at release time (the `reconcileOrphanPartial` export changeset is in;
+     the broader behavior-change changesets already exist), and — at branch
+     finalization — archive the inline Progress log to a sibling file per
+     `design/AGENTS.md`.
 
-**Explicitly deferred / post-v1.** Tier-3 (full streaming-driver merge);
-Workers AI Gateway provider-resume checkpoints; Route 2 (front `AIChatAgent`
-itself with a TanStack client); Layer 5 live-deploy/chaos tests;
-`ResumeHandshakeHost` Approach B (injectable frame vocabulary — revisit only if a
-second foreign client appears). See **"Platform context: where this seam is
-heading"** for the (non-scope) north star — aligning the storage seam with the
-existing `Session` provider interface and eventually lifting `resumable-stream`
-into a general durable-stream substrate.
+**Explicitly deferred / post-v1.** The two host-convergence extractions
+(`AutoContinuationController` — the ~260-line duplicated auto-continuation
+barrier; and the shared adapter-spine helpers — a dozen near-identical private
+methods), each its own tested PR + changeset; Tier-3 (full streaming-driver
+merge); Workers AI Gateway provider-resume checkpoints; Route 2 (front
+`AIChatAgent` itself with a TanStack client); `ResumeHandshakeHost` Approach B
+(injectable frame vocabulary — revisit only if a second foreign client appears);
+unifying the divergent ai-chat/agents wrangler e2e harnesses (pure test hygiene).
+See **"Platform context: where this seam is heading"** for the (non-scope) north
+star — aligning the storage seam with the existing `Session` provider interface
+and eventually lifting `resumable-stream` into a general durable-stream substrate.
 
 **Working conventions.** Validate with `pnpm run check` (113 projects) before
 considering anything done; host-suite tests via each package's
@@ -2228,12 +2251,12 @@ sketch called for already existed and were extended/wired:
 
 Realities discovered building it (worth keeping):
 
-- On the real edge a `wrangler deploy` takes ~15–20s, so a *finite* turn
+- On the real edge a `wrangler deploy` takes ~15–20s, so a _finite_ turn
   completes before the redeploy lands — the deployed fixtures hang the turn to
   guarantee an interruptible in-flight fiber. A deployed CONTINUE-with-exact-text
   assertion is therefore racy; the local SIGKILL suites own that, and the
   deployed suites prove "recovery triggers / no false positive" instead.
-- *Natural* deployed exhaustion seals are racy (a content runaway loses its seal
+- _Natural_ deployed exhaustion seals are racy (a content runaway loses its seal
   to a `conversation_changed` skip; a stuck turn is dropped as non-recoverable on
   attempt 1), so the probe seeds them deterministically (`/probe/prime-seal`,
   the `rapid` scenario) rather than asserting a flaky live seal.
