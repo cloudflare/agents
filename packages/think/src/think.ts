@@ -9417,7 +9417,6 @@ export class Think<
     requestId: string;
     recoveryRootRequestId?: string | null;
     latestUserMessageId?: string | null;
-    targetAssistantId?: string | null;
     recoveryKind: ChatRecoveryKind;
     /** Test-only clock injection for deterministic debounce/window timing. */
     nowMs?: number;

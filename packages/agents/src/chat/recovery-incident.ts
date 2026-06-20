@@ -5,13 +5,11 @@
  * `@cloudflare/think`, not a public API. See
  * `design/rfc-chat-recovery-foundation.md`.
  *
- * Today the durable recovery state machine is duplicated verbatim in
- * `packages/ai-chat/src/index.ts` and `packages/think/src/think.ts`. The
- * incident-budget decision (`_beginChatRecoveryIncident`) is byte-identical
- * between them apart from a package log prefix, the pending-interaction
- * predicate name, and Think's extra client-tool rehydration guard. This module
- * extracts that decision into a single pure function so both packages can share
- * one implementation and one test surface.
+ * `@cloudflare/ai-chat` and `@cloudflare/think` previously hand-maintained a
+ * byte-identical incident-budget decision (`_beginChatRecoveryIncident`) apart
+ * from a package log prefix, the pending-interaction predicate name, and Think's
+ * extra client-tool rehydration guard. This module is now the single source of
+ * that decision — one pure function both packages call, with one test surface.
  *
  * Pure here means: no Durable Object storage, no global clock, no broadcasts.
  * The caller still owns storage I/O (reading the existing incident, sweeping

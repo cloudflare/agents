@@ -14,7 +14,6 @@
 import {
   fauxAssistantMessage,
   registerFauxProvider,
-  type FauxProviderRegistration,
   type Model
 } from "@earendil-works/pi-ai";
 
@@ -27,7 +26,6 @@ export interface FauxPiModel {
   model: Model<string>;
   /** Script the assistant text the NEXT turn streams. */
   setNextTurnText(text: string): void;
-  registration: FauxProviderRegistration;
 }
 
 /**
@@ -48,7 +46,6 @@ export function createFauxPiModel(options: {
 
   return {
     model: registration.getModel(),
-    registration,
     setNextTurnText(text: string): void {
       registration.setResponses([fauxAssistantMessage(text)]);
     }

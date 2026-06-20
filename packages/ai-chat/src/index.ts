@@ -2251,7 +2251,8 @@ export class AIChatAgent<
                 // as a stream `error` part — has no durable trace otherwise, so a
                 // client disconnected at this moment never learns the turn failed
                 // and stays frozen on reconnect (#1645). Record it so it replays
-                // over the resume handshake (`_replayTerminalOnResume`). Mirrors
+                // over the resume handshake (shared
+                // `ResumeHandshake._replayTerminalOnResume`). Mirrors
                 // Think's `_fireResponseHook`, which records on `error` too.
                 // Recoverable failures (deploy/eviction/stall) don't arrive here
                 // as `error` — they reach the drain loop as `aborted`, or not at
@@ -3713,7 +3714,6 @@ export class AIChatAgent<
     requestId: string;
     recoveryRootRequestId?: string | null;
     latestUserMessageId?: string | null;
-    targetAssistantId?: string | null;
     recoveryKind: ChatRecoveryKind;
     /** Test-only clock injection for deterministic debounce/window timing. */
     nowMs?: number;
@@ -3795,7 +3795,8 @@ export class AIChatAgent<
             type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
           });
           // The durable terminal record (#1645) is replayed to a client that
-          // (re)connects after the turn ended (`_replayTerminalOnResume`).
+          // (re)connects after the turn ended (shared
+          // `ResumeHandshake._replayTerminalOnResume`).
           await this._recordChatTerminal(ctx.requestId, ctx.terminalMessage);
           // Exhaustion resolves recovery — clear the "recovering…" status (#1620).
           await this._setChatRecovering(false);

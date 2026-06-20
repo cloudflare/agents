@@ -13,6 +13,7 @@
 import { nanoid } from "nanoid";
 import type { Connection } from "agents";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
+import { sendIfOpen } from "./connection";
 
 /** Number of chunks to pack into a single SQLite row before flushing */
 const CHUNK_BUFFER_SIZE = 10;
@@ -84,23 +85,6 @@ function unpackSegmentBody(rowBody: string): string[] {
     // Not valid JSON — treat as a single opaque body.
   }
   return [rowBody];
-}
-
-function sendIfOpen(connection: Connection, message: string): boolean {
-  try {
-    connection.send(message);
-    return true;
-  } catch (error) {
-    if (isWebSocketClosedSendError(error)) return false;
-    throw error;
-  }
-}
-
-function isWebSocketClosedSendError(error: unknown): boolean {
-  return (
-    error instanceof TypeError &&
-    error.message.includes("WebSocket send() after close")
-  );
 }
 
 function isMissingMetadataColumnError(error: unknown): boolean {

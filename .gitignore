@@ -140,6 +140,9 @@ dist
 .wrangler-*-state
 .dev.vars
 
+# e2e recovery harness miniflare/SQLite state
+**/.smoke-state/
+
 # macOS
 .DS_Store
 

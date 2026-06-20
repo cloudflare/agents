@@ -696,14 +696,6 @@ export class PiAgent extends Agent<Env> {
 
   // ── Inspection surface (server stub RPC → e2e assertions) ───────────────────
 
-  /** True while at least one orphaned fiber row survives (interrupted turn). */
-  hasFiberRows(): boolean {
-    const rows = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_runs
-    `;
-    return rows[0].count > 0;
-  }
-
   /** Snapshot of recovery-relevant state for the e2e to poll. */
   async getStatus(): Promise<{
     transcript: Array<{ role: string; text: string }>;

@@ -2,7 +2,8 @@
  * Shared resume-handshake driver (rfc-chat-recovery-foundation, Tier-2).
  *
  * The server side of the WebSocket stream-resume protocol — the byte-parallel
- * block `@cloudflare/ai-chat` and `@cloudflare/think` hand-maintained in lockstep:
+ * block `@cloudflare/ai-chat` and `@cloudflare/think` previously hand-maintained
+ * in lockstep, now shared here:
  * the proactive `STREAM_RESUMING` notify, the `STREAM_RESUME_REQUEST` decision
  * tree, the `STREAM_RESUME_ACK` decision tree, and the terminal-replay path
  * (#1645). The two hosts diverge only in the idle-connect payload (kept
