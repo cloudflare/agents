@@ -583,13 +583,18 @@ Think admission/recovery in the same ~9k-line file.
 `_admitTurn` is the natural single place to emit turn lifecycle events,
 paralleling the recovery layer's `chat:recovery:*`:
 
-- `chat:turn:admitted` — `{ requestId, trigger, admission, mode, continuation }`.
-- `chat:turn:skipped` / `chat:turn:aborted` / `chat:turn:completed` /
-  `chat:turn:error` — terminal outcomes with `{ requestId, trigger, status }`.
+- `chat:turn:start` — emitted when an admitted queued turn body actually starts
+  executing; payload includes `{ requestId, trigger, admission, continuation? }`
+  plus path-specific fields such as `generation` when present.
+- `chat:turn:finish` — emitted exactly once for the started turn body with
+  `{ requestId, trigger, admission, status, durationMs }`, optional
+  `continuation`, and `error` when the turn body throws.
 
-These replace ad-hoc per-path logging and give one consistent turn ledger across
-WS/RPC/programmatic/submission/recovery. Event names are additive; payloads must
-stay back-compatible with anything the recovery observability already emits.
+The shipped contract is intentionally smaller than the original proposed
+per-status event set: durable `submitMessages()` acceptance does not emit a turn
+event, while the later submission drain execution does. Event names are additive;
+payloads must stay back-compatible with anything recovery observability already
+emits.
 
 ## Versioning and compatibility
 
