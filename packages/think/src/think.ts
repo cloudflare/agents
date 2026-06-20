@@ -230,6 +230,8 @@ import {
  *   fidelity is never replaced with markers.
  */
 const MODEL_RECENT_WINDOW = 4;
+const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
+const ACTION_OUTPUT_MAX_CHARS = 20_000;
 import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "./tools/workspace";
 import { truncatePausedExecutionOutput } from "./tools/execute";
@@ -295,6 +297,65 @@ function stableHash(value: unknown): string {
   return [h1, h2, h3, h4]
     .map((part) => (part >>> 0).toString(16).padStart(8, "0"))
     .join("");
+}
+
+function actionErrorEnvelope(error: unknown): {
+  error: { name: string; message: string };
+} {
+  return {
+    error: {
+      name: error instanceof Error ? error.name : "Error",
+      message: error instanceof Error ? error.message : String(error)
+    }
+  };
+}
+
+function truncateActionOutput(output: unknown): unknown {
+  if (typeof output === "string") {
+    if (output.length <= ACTION_OUTPUT_MAX_CHARS) return output;
+    return `${output.slice(0, ACTION_OUTPUT_MAX_CHARS)}\n\n[truncated ${output.length - ACTION_OUTPUT_MAX_CHARS} chars]`;
+  }
+
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(output);
+  } catch {
+    return output;
+  }
+  if (serialized.length <= ACTION_OUTPUT_MAX_CHARS) return output;
+  return {
+    truncated: true,
+    chars: serialized.length,
+    preview: `${serialized.slice(0, ACTION_OUTPUT_MAX_CHARS)}\n\n[truncated ${serialized.length - ACTION_OUTPUT_MAX_CHARS} chars]`
+  };
+}
+
+function createActionAbortSignal(
+  turnSignal: AbortSignal | undefined,
+  timeoutMs: number | undefined
+): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const abortFromTurn = () => controller.abort(turnSignal?.reason);
+
+  if (turnSignal?.aborted) {
+    abortFromTurn();
+  } else {
+    turnSignal?.addEventListener("abort", abortFromTurn, { once: true });
+    if (timeoutMs !== undefined && timeoutMs > 0) {
+      timeout = setTimeout(() => {
+        controller.abort(new Error(`Action timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    }
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      if (timeout) clearTimeout(timeout);
+      turnSignal?.removeEventListener("abort", abortFromTurn);
+    }
+  };
 }
 
 function validateTimezone(timezone: string): string {
@@ -866,6 +927,64 @@ export type TurnResult = SaveMessagesResult & {
   continuation: boolean;
 };
 
+const ACTION_BRAND: unique symbol = Symbol.for(
+  "cf.think.action"
+) as typeof ACTION_BRAND;
+
+export type ActionKind =
+  | "server"
+  | "client"
+  | "approval-gated"
+  | "durable-pause"
+  | "delegated-agent";
+
+export interface ActionContext {
+  /** The agent instance currently executing the action. */
+  agent: Think;
+  env: Cloudflare.Env;
+  /** Current turn request id. */
+  requestId: string;
+  toolCallId: string;
+  /** Model messages visible to the tool call. */
+  messages: ReadonlyArray<ModelMessage>;
+  /** Combined action timeout and turn abort signal. */
+  signal: AbortSignal;
+}
+
+export interface ActionConfig<Input = unknown, Output = unknown> {
+  /** Defaults to the registration key when returned from getActions(). */
+  name?: string;
+  description: string;
+  inputSchema: unknown;
+  outputSchema?: unknown;
+  timeoutMs?: number;
+  kind?: ActionKind;
+  execute(input: Input, ctx: ActionContext): Promise<Output> | Output;
+}
+
+export interface Action<Input = unknown, Output = unknown> {
+  readonly [ACTION_BRAND]: true;
+  readonly config: ActionConfig<Input, Output>;
+}
+
+export function action<Input = unknown, Output = unknown>(
+  config: ActionConfig<Input, Output>
+): Action<Input, Output> {
+  const descriptor: Action<Input, Output> = {
+    [ACTION_BRAND]: true,
+    config: Object.freeze({ ...config })
+  };
+  return Object.freeze(descriptor);
+}
+
+export function isAction(value: unknown): value is Action {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { [ACTION_BRAND]?: unknown })[ACTION_BRAND] === true
+  );
+}
+
 type TurnTrigger =
   | "ws-chat"
   | "rpc"
@@ -903,7 +1022,10 @@ type NonQueueTurnSpec<T> = {
 
 type TurnSpec<T> = QueueTurnSpec<T> | NonQueueTurnSpec<T>;
 
-const admittedTurnContext = new AsyncLocalStorage<{ agent: unknown }>();
+const admittedTurnContext = new AsyncLocalStorage<{
+  agent: unknown;
+  requestId: string;
+}>();
 
 /** Options for {@link Think.addMessages}. */
 export interface AddMessagesOptions {
@@ -2984,6 +3106,11 @@ export class Think<
     return {};
   }
 
+  /** Return action descriptors compiled into tools for the assistant. */
+  getActions(): Record<string, Action> | Promise<Record<string, Action>> {
+    return {};
+  }
+
   /** Return messenger integrations that should be routed through this Think agent. */
   getMessengers(): ThinkMessengers {
     return {};
@@ -3911,6 +4038,7 @@ export class Think<
       bash: this.workspaceBash
     });
     const baseTools = this.getTools();
+    const actionTools = await this._compileActionTools();
     const extensionTools = this.extensionManager?.getTools() ?? {};
     await this._refreshSkillsIfChanged();
     const contextTools = await this.session.tools();
@@ -3924,6 +4052,7 @@ export class Think<
     const tools: ToolSet = {
       ...workspaceTools,
       ...baseTools,
+      ...actionTools,
       ...extensionTools,
       ...contextTools,
       ...skillTools,
@@ -4229,6 +4358,82 @@ export class Think<
     result: StreamableResult
   ): StreamableResult {
     return result;
+  }
+
+  private async _compileActionTools(): Promise<ToolSet> {
+    const actions = await this.getActions();
+    const tools: ToolSet = {};
+    for (const [registrationName, descriptor] of Object.entries(actions)) {
+      if (!isAction(descriptor)) {
+        throw new Error(
+          `getActions() entry "${registrationName}" must be created with action().`
+        );
+      }
+      const toolName = descriptor.config.name ?? registrationName;
+      tools[toolName] = this._actionToTool(descriptor);
+    }
+    return tools;
+  }
+
+  private _actionToTool(descriptor: Action): ToolSet[string] {
+    const config = descriptor.config;
+    const executeAction = config.execute as (
+      input: unknown,
+      ctx: ActionContext
+    ) => Promise<unknown> | unknown;
+
+    return tool({
+      description: config.description,
+      inputSchema: config.inputSchema as never,
+      execute: async (
+        input: unknown,
+        options: {
+          toolCallId?: string;
+          messages?: ModelMessage[];
+          abortSignal?: AbortSignal;
+        }
+      ): Promise<unknown> => {
+        const { signal, cleanup } = createActionAbortSignal(
+          options.abortSignal,
+          config.timeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS
+        );
+        const requestId = admittedTurnContext.getStore()?.requestId ?? "";
+        const abortError = () =>
+          signal.reason instanceof Error
+            ? signal.reason
+            : new Error(
+                signal.reason ? String(signal.reason) : "Action aborted"
+              );
+        let onAbort: (() => void) | undefined;
+
+        try {
+          if (signal.aborted) throw abortError();
+          const abortPromise = new Promise<never>((_, reject) => {
+            onAbort = () => reject(abortError());
+            signal.addEventListener("abort", onAbort, { once: true });
+          });
+          const output = await Promise.race([
+            Promise.resolve(
+              executeAction(input, {
+                agent: this,
+                env: this.env as Cloudflare.Env,
+                requestId,
+                toolCallId: options.toolCallId ?? "",
+                messages: options.messages ?? [],
+                signal
+              })
+            ),
+            abortPromise
+          ]);
+          return truncateActionOutput(output);
+        } catch (error) {
+          return actionErrorEnvelope(error);
+        } finally {
+          if (onAbort) signal.removeEventListener("abort", onAbort);
+          cleanup();
+        }
+      }
+    });
   }
 
   /** Default hook timeout in milliseconds. */
@@ -4711,49 +4916,57 @@ export class Think<
   private async _runInsideAdmittedTurnBody<T>(
     spec: QueueTurnSpec<T>
   ): Promise<T> {
-    return admittedTurnContext.run({ agent: this }, async () => {
-      const startedAt = Date.now();
-      this._emit("chat:turn:start", {
-        requestId: spec.requestId,
-        trigger: spec.trigger,
-        admission: spec.admission,
-        ...(spec.continuation !== undefined && {
-          continuation: spec.continuation
-        }),
-        ...(spec.generation !== undefined && { generation: spec.generation })
-      });
+    return admittedTurnContext.run(
+      { agent: this, requestId: spec.requestId },
+      async () => {
+        const startedAt = Date.now();
+        this._emit("chat:turn:start", {
+          requestId: spec.requestId,
+          trigger: spec.trigger,
+          admission: spec.admission,
+          ...(spec.continuation !== undefined && {
+            continuation: spec.continuation
+          }),
+          ...(spec.generation !== undefined && { generation: spec.generation })
+        });
 
-      try {
-        const value = await spec.execute();
-        this._emit("chat:turn:finish", {
-          requestId: spec.requestId,
-          trigger: spec.trigger,
-          admission: spec.admission,
-          ...(spec.continuation !== undefined && {
-            continuation: spec.continuation
-          }),
-          ...(spec.generation !== undefined && { generation: spec.generation }),
-          status: spec.getStatus?.() ?? "completed",
-          durationMs: Date.now() - startedAt
-        });
-        return value;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this._emit("chat:turn:finish", {
-          requestId: spec.requestId,
-          trigger: spec.trigger,
-          admission: spec.admission,
-          ...(spec.continuation !== undefined && {
-            continuation: spec.continuation
-          }),
-          ...(spec.generation !== undefined && { generation: spec.generation }),
-          status: "error",
-          durationMs: Date.now() - startedAt,
-          error: message
-        });
-        throw error;
+        try {
+          const value = await spec.execute();
+          this._emit("chat:turn:finish", {
+            requestId: spec.requestId,
+            trigger: spec.trigger,
+            admission: spec.admission,
+            ...(spec.continuation !== undefined && {
+              continuation: spec.continuation
+            }),
+            ...(spec.generation !== undefined && {
+              generation: spec.generation
+            }),
+            status: spec.getStatus?.() ?? "completed",
+            durationMs: Date.now() - startedAt
+          });
+          return value;
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this._emit("chat:turn:finish", {
+            requestId: spec.requestId,
+            trigger: spec.trigger,
+            admission: spec.admission,
+            ...(spec.continuation !== undefined && {
+              continuation: spec.continuation
+            }),
+            ...(spec.generation !== undefined && {
+              generation: spec.generation
+            }),
+            status: "error",
+            durationMs: Date.now() - startedAt,
+            error: message
+          });
+          throw error;
+        }
       }
-    });
+    );
   }
 
   // ── Sub-agent RPC entry point ───────────────────────────────────

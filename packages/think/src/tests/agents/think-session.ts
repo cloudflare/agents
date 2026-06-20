@@ -1,6 +1,6 @@
-import type { LanguageModel, UIMessage } from "ai";
+import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { hasToolCall, Output, tool } from "ai";
-import { defineScheduledTasks, Think } from "../../think";
+import { action, defineScheduledTasks, Think } from "../../think";
 import { Agent } from "agents";
 import type {
   AgentToolEventMessage,
@@ -38,6 +38,7 @@ import type {
   ToolCallContext,
   ToolCallDecision,
   ToolCallResultContext,
+  Action,
   StepContext,
   ChunkContext
 } from "../../think";
@@ -3178,7 +3179,8 @@ export class ThinkToolsTestAgent extends Think {
     return createToolCallingMockModel();
   }
 
-  override getTools() {
+  override getTools(): ToolSet {
+    if (this._useEchoAction) return {};
     const mode = this._echoExecuteMode;
     if (mode === "async-iterable") {
       // Regression for the wrapper bug where the original `execute`
@@ -3252,6 +3254,39 @@ export class ThinkToolsTestAgent extends Think {
     };
   }
 
+  override getActions(): Record<string, Action> {
+    if (!this._useEchoAction) return {};
+    const mode = this._actionExecuteMode;
+    return {
+      echo: action({
+        description: "Echo a message back as an action",
+        inputSchema: z.object({ message: z.string() }),
+        timeoutMs: mode === "timeout" ? 5 : undefined,
+        execute: async (
+          { message }: { message: string },
+          ctx
+        ): Promise<unknown> => {
+          this._actionExecutionCount++;
+          this._lastActionContext = {
+            requestId: ctx.requestId,
+            toolCallId: ctx.toolCallId,
+            messageCount: ctx.messages.length
+          };
+          if (mode === "throw") {
+            throw new Error("action failed");
+          }
+          if (mode === "timeout") {
+            await new Promise(() => {});
+          }
+          if (mode === "large-output") {
+            return `echo: ${message} ${"x".repeat(25_000)}`;
+          }
+          return `action echo: ${message}`;
+        }
+      })
+    };
+  }
+
   private _echoExecuteMode:
     | "default"
     | "async-iterable"
@@ -3260,11 +3295,41 @@ export class ThinkToolsTestAgent extends Think {
 
   private _midTurnInsideLoop: boolean | null = null;
   private _midTurnPersisted: boolean | null = null;
+  private _useEchoAction = false;
+  private _actionExecuteMode: "default" | "throw" | "timeout" | "large-output" =
+    "default";
+  private _actionExecutionCount = 0;
+  private _lastActionContext: {
+    requestId: string;
+    toolCallId: string;
+    messageCount: number;
+  } | null = null;
 
   async setEchoExecuteMode(
     mode: "default" | "async-iterable" | "sync-iterable" | "add-messages"
   ): Promise<void> {
     this._echoExecuteMode = mode;
+  }
+
+  async useEchoActionForTest(
+    mode: "default" | "throw" | "timeout" | "large-output" = "default"
+  ): Promise<void> {
+    this._useEchoAction = true;
+    this._actionExecuteMode = mode;
+  }
+
+  async getActionProbe(): Promise<{
+    count: number;
+    context: {
+      requestId: string;
+      toolCallId: string;
+      messageCount: number;
+    } | null;
+  }> {
+    return {
+      count: this._actionExecutionCount,
+      context: this._lastActionContext
+    };
   }
 
   async getMidTurnAddProbe(): Promise<{

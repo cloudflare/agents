@@ -286,6 +286,68 @@ describe("Think — tool-call hooks expose typed input/output", () => {
   });
 });
 
+// ── Actions ──────────────────────────────────────────────────────
+
+describe("Think — actions compile into guarded tools", () => {
+  it("executes an action through the tool-call hooks", async () => {
+    const agent = await freshToolAgent("action-default");
+    await agent.useEchoActionForTest();
+    await agent.testChat("call echo action");
+
+    const before = await agent.getBeforeToolCallLog();
+    expect(before.length).toBeGreaterThan(0);
+    expect(before[0].toolName).toBe("echo");
+    expect(JSON.parse(before[0].inputJson)).toEqual({ message: "hello" });
+
+    const after = await agent.getAfterToolCallLog();
+    expect(after.length).toBeGreaterThan(0);
+    expect(JSON.parse(after[0].outputJson)).toBe("action echo: hello");
+
+    const probe = await agent.getActionProbe();
+    expect(probe.count).toBe(1);
+    expect(probe.context?.requestId).not.toBe("");
+    expect(probe.context?.toolCallId).toBe("tc1");
+    expect(probe.context?.messageCount).toBeGreaterThan(0);
+  });
+
+  it("maps thrown action errors to structured tool output", async () => {
+    const agent = await freshToolAgent("action-throw");
+    await agent.useEchoActionForTest("throw");
+    await agent.testChat("call echo action");
+
+    const after = await agent.getAfterToolCallLog();
+    expect(after.length).toBeGreaterThan(0);
+    expect(JSON.parse(after[0].outputJson)).toEqual({
+      error: { name: "Error", message: "action failed" }
+    });
+  });
+
+  it("times out actions with a structured tool output", async () => {
+    const agent = await freshToolAgent("action-timeout");
+    await agent.useEchoActionForTest("timeout");
+    await agent.testChat("call echo action");
+
+    const after = await agent.getAfterToolCallLog();
+    expect(after.length).toBeGreaterThan(0);
+    const output = JSON.parse(after[0].outputJson) as {
+      error?: { message?: string };
+    };
+    expect(output.error?.message).toContain("timed out");
+  });
+
+  it("truncates oversized action outputs before model consumption", async () => {
+    const agent = await freshToolAgent("action-large-output");
+    await agent.useEchoActionForTest("large-output");
+    await agent.testChat("call echo action");
+
+    const after = await agent.getAfterToolCallLog();
+    expect(after.length).toBeGreaterThan(0);
+    const output = JSON.parse(after[0].outputJson) as string;
+    expect(output).toContain("[truncated");
+    expect(output.length).toBeLessThan(22_000);
+  });
+});
+
 // ── ToolCallDecision (block / substitute / allow-with-input) ────
 
 describe("Think — ToolCallDecision honored by wrapped execute", () => {

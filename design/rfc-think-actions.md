@@ -1,4 +1,4 @@
-Status: proposed
+Status: partially shipped
 
 # RFC: Think actions — rich, production-grade tools
 
@@ -15,9 +15,17 @@ Related:
 Second of three sibling API RFCs (turns, actions, channels) to be picked up in
 **separate** sessions. Recommended order: **Turns → Actions → Channels.**
 
-- ⛔ **Nothing in this RFC is built yet** — confirmed absent from
-  `packages/think/src/think.ts` (`getActions`, `action()`, `attachReply`,
-  `cf_think_action_ledger` do not exist).
+- ✅ **Step 1 shipped:** `action()`, `isAction()`, the `Action` descriptor,
+  default `getActions()`, and action-to-tool compilation are implemented in
+  `packages/think/src/think.ts`. Compiled actions flow through the existing
+  `beforeToolCall` / `afterToolCall` wrapper path.
+- ✅ **First guardrails shipped:** server actions receive a combined abort signal
+  (`ctx.signal`) with a default 30s timeout, thrown/timeout failures are mapped
+  to a structured model-facing tool output, and oversized outputs are truncated
+  before model consumption.
+- ⛔ **Still planned:** `attachReply`, declarative permissions/authorization,
+  approval descriptors, `cf_think_action_ledger`, action observability events,
+  and recovery taxonomy integration are not built yet.
 - **Depends on the Turns RFC** for `TurnContext`, the `recovery-continue`/
   `recovery-retry` triggers, and `_admitTurn` (authorization resolves once per
   turn at admission). Build Turns first.
@@ -32,10 +40,9 @@ Second of three sibling API RFCs (turns, actions, channels) to be picked up in
   optional" decision, `Think`'s recovery decision stays package-owned, so the
   ledger can be consulted inside `dispatchRecoveredTurn` on recovery re-entry. Use
   the real hook names or update them here when building.)
-- **Partial early win available:** suggested-order step 1 (the `action()`
-  descriptor + `actionToTool` guardrails, no permissions/ledger) is purely
-  additive and can land before Turns/recovery; the ledger (§6) and recovery
-  taxonomy (§7) are the parts that gate on them.
+- **Step 1 was the partial early win:** the additive descriptor/tool-compilation
+  slice landed before ledger/recovery. The ledger (§6), authorization (§4), and
+  recovery taxonomy (§7) still gate the production-safe side-effect story.
 - **Produces a seam the Channels RFC consumes:** `ctx.attachReply()` (§9) is
   inert until Channels/Voice render it.
 
@@ -176,6 +183,12 @@ interface Action<Input = unknown, Output = unknown> {
 }
 ```
 
+**Shipped step-1 subset:** the current implementation includes `name`,
+`description`, `inputSchema`, `outputSchema` as reserved metadata, `timeoutMs`,
+`kind` as reserved metadata, and `execute`. `permissions`, `approval`, and
+`idempotencyKey` remain planned-only until the authorization, approval, and
+ledger slices land.
+
 Example:
 
 ```ts
@@ -263,6 +276,12 @@ authoritative order; sections 4–8 detail each step.
 `needsApproval` is an AI SDK tool option (`boolean | (opts) => boolean |
 Promise<boolean>`); the `approval` policy plus the authorization check (step 2)
 compile into it for the `approval-gated` kind.
+
+**Shipped step-1 subset:** the compiled tool currently performs timeout/abort,
+structured error mapping, and output truncation, then leaves
+`beforeToolCall`/`afterToolCall` behavior to the existing Think wrapper. It does
+not yet run authorization, approval, output-schema validation, ledger lookup, or
+ledger writes.
 
 ### 3. `ActionContext` (`ctx`)
 
