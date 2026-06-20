@@ -775,7 +775,10 @@ Suggested implementation order (decouples from the recovery RFC's timeline):
    **Shipped** with an async-local re-entrancy guard for blocking
    `wait`/`continuation`/`stream`, submission admission vs drain execution split,
    and path-specific ordering preserved.
-4. Add `chat:turn:*` observability inside `_admitTurn`.
+4. ✅ Add `chat:turn:*` observability inside `_admitTurn`. **Shipped** as the
+   intentionally small `chat:turn:start` / `chat:turn:finish` pair around actual
+   queue execution. Durable submission acceptance does not emit a turn event; the
+   submission drain does.
 
 The `_admitTurn` step list in section 2 is the _logical_ sequence; exact ordering
 (e.g. WS persists/reconciles before enqueue) follows the current per-path code and

@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { getServerByName } from "partyserver";
 import { describe, expect, it } from "vitest";
 import type { UIMessage } from "ai";
+import { subscribe } from "agents/observability";
 import type { ThinkProgrammaticTestAgent } from "./agents/think-session";
 import type { SubmitMessagesResult, TurnResult } from "../think";
 
@@ -14,6 +15,18 @@ async function freshProgrammaticAgent(name: string) {
     env.ThinkProgrammaticTestAgent as unknown as DurableObjectNamespace<ThinkProgrammaticTestAgent>,
     `${name}-${crypto.randomUUID()}`
   );
+}
+
+async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 3000
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("Timed out waiting for condition");
 }
 
 describe("Think — runTurn", () => {
@@ -38,6 +51,58 @@ describe("Think — runTurn", () => {
     expect(messages).toHaveLength(2);
     expect(messages[0].role).toBe("user");
     expect(messages[1].role).toBe("assistant");
+  });
+
+  it("emits a minimal chat:turn start/finish pair for wait mode", async () => {
+    const name = `runturn-events-wait-${crypto.randomUUID()}`;
+    const agent = await freshProgrammaticAgent(name);
+    await agent.setProgrammaticResponseForTest("Observed reply");
+    const events: Array<{
+      type: string;
+      name?: string;
+      payload: {
+        requestId?: string;
+        trigger?: string;
+        admission?: string;
+        continuation?: boolean;
+        status?: string;
+        durationMs?: number;
+      };
+    }> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (
+        event.name?.startsWith(name) &&
+        (event.type === "chat:turn:start" || event.type === "chat:turn:finish")
+      ) {
+        events.push(event);
+      }
+    });
+
+    let result: TurnResult;
+    try {
+      result = await agent.testRunTurnWaitString("observe wait");
+    } finally {
+      unsubscribe();
+    }
+
+    expect(events.map((event) => event.type)).toEqual([
+      "chat:turn:start",
+      "chat:turn:finish"
+    ]);
+    expect(events[0].payload).toMatchObject({
+      requestId: result.requestId,
+      trigger: "programmatic",
+      admission: "queue",
+      continuation: false
+    });
+    expect(events[1].payload).toMatchObject({
+      requestId: result.requestId,
+      trigger: "programmatic",
+      admission: "queue",
+      continuation: false,
+      status: "completed"
+    });
+    expect(typeof events[1].payload.durationMs).toBe("number");
   });
 
   it("wait mode supports array input", async () => {
@@ -158,6 +223,65 @@ describe("Think — runTurn", () => {
     expect(result.submissionId).toBe("sub-runturn-1");
     expect(result.status).toBe("pending");
     expect(result.metadata).toEqual({ source: "runTurn" });
+  });
+
+  it("emits chat:turn events when a durable submission drains, not when accepted", async () => {
+    const name = `runturn-events-submit-${crypto.randomUUID()}`;
+    const agent = await freshProgrammaticAgent(name);
+    await agent.setDelayedChunkResponse(["submission ", "reply"], 50);
+    const events: Array<{
+      type: string;
+      name?: string;
+      payload: {
+        requestId?: string;
+        trigger?: string;
+        admission?: string;
+        continuation?: boolean;
+        status?: string;
+      };
+    }> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (
+        event.name?.startsWith(name) &&
+        (event.type === "chat:turn:start" || event.type === "chat:turn:finish")
+      ) {
+        events.push(event);
+      }
+    });
+
+    try {
+      const accepted = (await agent.testRunTurnSubmit("Queued prompt", {
+        submissionId: "sub-runturn-events"
+      })) as SubmitMessagesResult;
+      expect(accepted.accepted).toBe(true);
+      expect(events.some((event) => event.payload.admission === "submit")).toBe(
+        false
+      );
+
+      await waitFor(() =>
+        events.some((event) => event.type === "chat:turn:finish")
+      );
+    } finally {
+      unsubscribe();
+    }
+
+    expect(events.map((event) => event.type)).toEqual([
+      "chat:turn:start",
+      "chat:turn:finish"
+    ]);
+    expect(events[0].payload).toMatchObject({
+      requestId: "sub-runturn-events",
+      trigger: "submission",
+      admission: "queue",
+      continuation: false
+    });
+    expect(events[1].payload).toMatchObject({
+      requestId: "sub-runturn-events",
+      trigger: "submission",
+      admission: "queue",
+      continuation: false,
+      status: "completed"
+    });
   });
 
   it("stream mode drives callback and resolves void like chat", async () => {

@@ -888,8 +888,10 @@ type QueueTurnSpec<T> = {
   trigger: TurnTrigger;
   requestId: string;
   generation?: number;
+  continuation?: boolean;
   allowNested?: boolean;
   onQueued?: () => void;
+  getStatus?: () => string | undefined;
   execute: () => Promise<T>;
 };
 
@@ -4689,7 +4691,7 @@ export class Think<
     return this.keepAliveWhile(async () => {
       const turnPromise = this._turnQueue.enqueue(
         spec.requestId,
-        () => this._runInsideAdmittedTurnBody(spec.execute),
+        () => this._runInsideAdmittedTurnBody(spec),
         spec.generation === undefined
           ? undefined
           : { generation: spec.generation }
@@ -4707,9 +4709,51 @@ export class Think<
   }
 
   private async _runInsideAdmittedTurnBody<T>(
-    fn: () => Promise<T>
+    spec: QueueTurnSpec<T>
   ): Promise<T> {
-    return admittedTurnContext.run({ agent: this }, fn);
+    return admittedTurnContext.run({ agent: this }, async () => {
+      const startedAt = Date.now();
+      this._emit("chat:turn:start", {
+        requestId: spec.requestId,
+        trigger: spec.trigger,
+        admission: spec.admission,
+        ...(spec.continuation !== undefined && {
+          continuation: spec.continuation
+        }),
+        ...(spec.generation !== undefined && { generation: spec.generation })
+      });
+
+      try {
+        const value = await spec.execute();
+        this._emit("chat:turn:finish", {
+          requestId: spec.requestId,
+          trigger: spec.trigger,
+          admission: spec.admission,
+          ...(spec.continuation !== undefined && {
+            continuation: spec.continuation
+          }),
+          ...(spec.generation !== undefined && { generation: spec.generation }),
+          status: spec.getStatus?.() ?? "completed",
+          durationMs: Date.now() - startedAt
+        });
+        return value;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this._emit("chat:turn:finish", {
+          requestId: spec.requestId,
+          trigger: spec.trigger,
+          admission: spec.admission,
+          ...(spec.continuation !== undefined && {
+            continuation: spec.continuation
+          }),
+          ...(spec.generation !== undefined && { generation: spec.generation }),
+          status: "error",
+          durationMs: Date.now() - startedAt,
+          error: message
+        });
+        throw error;
+      }
+    });
   }
 
   // ── Sub-agent RPC entry point ───────────────────────────────────
@@ -4768,6 +4812,7 @@ export class Think<
         admission: "queue",
         trigger: "rpc",
         requestId,
+        continuation: false,
         execute: async () => {
           const userMsg: UIMessage =
             typeof userMessage === "string"
@@ -7319,6 +7364,8 @@ export class Think<
       admission: "queue",
       trigger: options?.trigger ?? "programmatic",
       requestId,
+      continuation: false,
+      getStatus: () => status,
       execute: async () => {
         if (this._turnQueue.generation !== epoch) {
           status = "skipped";
@@ -7523,6 +7570,8 @@ export class Think<
       admission: "queue",
       trigger,
       requestId,
+      continuation: true,
+      getStatus: () => status,
       execute: async () => {
         if (this._turnQueue.generation !== epoch) {
           status = "skipped";
@@ -7613,6 +7662,8 @@ export class Think<
       admission: "queue",
       trigger,
       requestId,
+      continuation: false,
+      getStatus: () => status,
       execute: async () => {
         if (this._turnQueue.generation !== epoch) {
           status = "skipped";
@@ -7994,6 +8045,7 @@ export class Think<
           trigger: "ws-chat",
           requestId,
           generation: epoch,
+          continuation: false,
           onQueued: releaseIfPending,
           execute: async () => {
             // Superseded by a later overlapping submit (latest/merge/debounce)
@@ -11157,6 +11209,7 @@ export class Think<
       admission: "queue",
       trigger: "auto-continuation",
       requestId,
+      continuation: true,
       allowNested: true,
       execute: async () => {
         if (this._continuation.pending) {

@@ -149,6 +149,29 @@ export type AgentObservabilityEvent =
       }
     >
   | BaseEvent<
+      "chat:turn:start",
+      {
+        requestId: string;
+        trigger: string;
+        admission: string;
+        continuation?: boolean;
+        generation?: number;
+      }
+    >
+  | BaseEvent<
+      "chat:turn:finish",
+      {
+        requestId: string;
+        trigger: string;
+        admission: string;
+        continuation?: boolean;
+        generation?: number;
+        status: string;
+        durationMs: number;
+        error?: string;
+      }
+    >
+  | BaseEvent<
       "chat:recovery:detected",
       {
         incidentId: string;
