@@ -403,6 +403,32 @@ Two AI SDK tools for managing extensions at runtime:
 4. **Permissions** — extensions declare `network` (allowed hosts) and `workspace` (`read` | `read-write` | `none`) permissions. Workspace access is mediated by `HostBridgeLoopback`, a `WorkerEntrypoint` that resolves the parent agent via `ctx.exports` and delegates operations with permission checks.
 5. **Unloading** — removes the extension and its tools, deletes from storage
 
+### Reply attachments (`ctx.attachReply`)
+
+Actions can record advisory delivery metadata for the current reply via
+`ctx.attachReply(attachment)`. The attachment is a side channel: it never changes
+the model-visible tool output, and surfaces that do not understand an attachment
+type ignore it.
+
+Think accumulates attachments for the active admitted turn, JSON-normalizes them
+on record (so circular references, bigint, functions, or symbols cannot break
+downstream persistence/RPC), caps the number recorded per turn, deep-copies
+snapshots on read, and exposes the producing-attempt snapshot in two places:
+
+- `onChatResponse(result)` receives `result.attachments`.
+- `replyAttachments(requestId?)` returns a copy for server-side/programmatic
+  callers. Passing a mismatched request id returns `[]`.
+
+Normal server actions and approval-gated actions after approval can attach reply
+metadata from successful `execute` calls. Policy callbacks (`approval`,
+`permissions`, function-valued `idempotencyKey`) receive a no-op recorder, and
+attachments from an `execute` that later fails are discarded. `durable-pause`
+approved actions are a v1 no-op because their result is delivered by a later
+continuation turn with a new request id; persisting attachments across that
+handoff is future work. Rendering (voice notes, email drafts, cards,
+messenger-specific payloads) is owned by the Channels/Voice surfaces, not by this
+recording API.
+
 ## SQLite tables
 
 | Table                   | Owner             | Purpose                                                    |

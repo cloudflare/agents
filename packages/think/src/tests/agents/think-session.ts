@@ -3082,6 +3082,153 @@ function createToolCallingMockModel(): LanguageModel {
   } as LanguageModel;
 }
 
+function createAttachReplyMockModel(): LanguageModel {
+  let callCount = 0;
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-attach-reply",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream(options: Record<string, unknown>) {
+      callCount++;
+      const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+      const hasToolResult = messages.some(
+        (m: unknown) =>
+          typeof m === "object" &&
+          m !== null &&
+          (m as Record<string, unknown>).role === "tool"
+      );
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (!hasToolResult && callCount === 1) {
+            controller.enqueue({
+              type: "tool-input-start",
+              id: "ar1",
+              toolName: "attachAction"
+            });
+            controller.enqueue({
+              type: "tool-input-delta",
+              id: "ar1",
+              delta: JSON.stringify({})
+            });
+            controller.enqueue({ type: "tool-input-end", id: "ar1" });
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "ar1",
+              toolName: "attachAction",
+              input: JSON.stringify({})
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("tool-calls"),
+              usage: v3Usage(10, 5)
+            });
+          } else {
+            controller.enqueue({ type: "text-start", id: "ar-final" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "ar-final",
+              delta: "attached-done"
+            });
+            controller.enqueue({ type: "text-end", id: "ar-final" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("stop"),
+              usage: v3Usage(20, 10)
+            });
+          }
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+// Calls the `pauseAction` durable-pause action on the first model step, then
+// emits text on every later step (within the parking turn and on the
+// connection-independent continuation after approval).
+function createDurablePauseMockModel(): LanguageModel {
+  let callCount = 0;
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-durable-pause",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream(options: Record<string, unknown>) {
+      callCount++;
+      const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+      const hasToolResult = messages.some(
+        (m: unknown) =>
+          typeof m === "object" &&
+          m !== null &&
+          (m as Record<string, unknown>).role === "tool"
+      );
+      // Only park when a user explicitly asked for it on this turn — so a
+      // post-resolution continuation (driven by a system note, no fresh user
+      // ask) responds with text instead of re-parking.
+      const userAskedToPause = messages.some((m: unknown) => {
+        if (typeof m !== "object" || m === null) return false;
+        const mm = m as Record<string, unknown>;
+        if (mm.role !== "user") return false;
+        return JSON.stringify(mm.content ?? "").includes("pauseAction");
+      });
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (!hasToolResult && callCount === 1 && userAskedToPause) {
+            controller.enqueue({
+              type: "tool-input-start",
+              id: "dp1",
+              toolName: "pauseAction"
+            });
+            controller.enqueue({
+              type: "tool-input-delta",
+              id: "dp1",
+              delta: JSON.stringify({ message: "hello" })
+            });
+            controller.enqueue({ type: "tool-input-end", id: "dp1" });
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "dp1",
+              toolName: "pauseAction",
+              input: JSON.stringify({ message: "hello" })
+            });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("tool-calls"),
+              usage: v3Usage(10, 5)
+            });
+          } else {
+            const id = `dp-text-${callCount}`;
+            controller.enqueue({ type: "text-start", id });
+            controller.enqueue({
+              type: "text-delta",
+              id,
+              delta: "acknowledged"
+            });
+            controller.enqueue({ type: "text-end", id });
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason("stop"),
+              usage: v3Usage(20, 10)
+            });
+          }
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
 // Emits a single tool call for whichever tool the turn forces via `toolChoice`
 // (or the first `think_final_answer*` tool advertised), with the configured
 // arguments. Mirrors how a real model terminates a structured workflow turn by
@@ -3155,6 +3302,11 @@ export class ThinkToolsTestAgent extends Think {
     previousStepCount: number;
     previousToolResultCount: number;
   }> = [];
+  private _responseLog: ChatResponseResult[] = [];
+
+  override onChatResponse(result: ChatResponseResult): void {
+    this._responseLog.push(result);
+  }
 
   override beforeStep(ctx: PrepareStepContext): StepConfig | void {
     this._beforeStepLog.push({
@@ -3178,6 +3330,8 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   override getModel(): LanguageModel {
+    if (this._useAttachReplyAction) return createAttachReplyMockModel();
+    if (this._useDurablePauseAction) return createDurablePauseMockModel();
     return createToolCallingMockModel();
   }
 
@@ -3257,21 +3411,106 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   override getActions(): Record<string, Action> {
-    if (!this._useEchoAction) return {};
+    const actions: Record<string, Action> = {};
+    if (this._useDurablePauseAction) {
+      const approval =
+        this._durablePauseApproval === "predicate-hello"
+          ? ({ input }: { input: { message: string } }) =>
+              input.message === "hello"
+          : this._durablePauseApproval;
+      actions.pauseAction = action({
+        name: "pauseAction",
+        description: "A durable-pause action awaiting human approval",
+        inputSchema: z.object({ message: z.string() }),
+        kind: "durable-pause",
+        approvalSummary: "Approve pause action",
+        approvalRisk: "high",
+        permissions: ["pause:run"],
+        idempotencyKey: this._durablePauseIdempotencyKey ?? undefined,
+        ...(approval !== undefined && { approval }),
+        execute: async ({ message }, ctx): Promise<unknown> => {
+          this._durablePauseExecCount++;
+          if (this._durablePauseAttachReply) {
+            ctx.attachReply({ type: "voice_note" });
+          }
+          if (this._durablePauseExecThrows) {
+            throw new Error("durable pause execute failed");
+          }
+          return `paused-exec: ${message}`;
+        }
+      });
+    }
+    if (this._useAttachReplyAction) {
+      const scenario = this._attachReplyScenario;
+      actions.attachAction = action({
+        name: "attachAction",
+        description: "Attach delivery metadata to the final reply",
+        inputSchema: z.object({}),
+        ...(scenario === "approval-gated" && {
+          approval: true,
+          approvalSummary: "Approve attach action",
+          approvalRisk: "low" as const
+        }),
+        ...(scenario === "predicate-noop" && {
+          approval: ({ ctx }) => {
+            ctx.attachReply({ type: "from_predicate" });
+            return false;
+          }
+        }),
+        ...(scenario === "permission-noop" && {
+          permissions: ({ ctx }) => {
+            ctx.attachReply({ type: "from_permission" });
+            return ["attach:run"];
+          }
+        }),
+        execute: async (_input, ctx): Promise<unknown> => {
+          if (scenario === "two") {
+            ctx.attachReply({ type: "voice_note" });
+            ctx.attachReply({ type: "card", payload: { id: 1 } });
+          } else if (scenario === "invalid") {
+            ctx.attachReply(null as never);
+            ctx.attachReply({} as never);
+            ctx.attachReply({ type: 123 } as never);
+          } else if (scenario === "non-json") {
+            const payload: { big: bigint; self?: unknown } = { big: 1n };
+            payload.self = payload;
+            ctx.attachReply({ type: "card", payload });
+          } else if (scenario === "overcap") {
+            for (let i = 0; i < 40; i++) {
+              ctx.attachReply({ type: "x", i });
+            }
+          } else if (scenario === "approval-gated") {
+            ctx.attachReply({ type: "voice_note" });
+          } else if (scenario === "attach-then-throw") {
+            ctx.attachReply({ type: "voice_note" });
+            throw new Error("attach action failed");
+          }
+          return "attached";
+        }
+      });
+    }
+    if (!this._useEchoAction) return actions;
     const mode = this._actionExecuteMode;
     return {
+      ...actions,
       echo: action({
         description: "Echo a message back as an action",
         inputSchema: z.object({ message: z.string() }),
         idempotencyKey:
-          mode === "ledger-key" ||
-          mode === "ledger-throw" ||
-          mode === "ledger-large-output" ||
-          mode === "ledger-slow" ||
-          mode === "ledger-symbol-output" ||
-          mode === "ledger-approval"
-            ? (this._actionIdempotencyKey ?? "echo-ledger-key")
-            : undefined,
+          mode === "attach-idempotency-key"
+            ? ({ ctx }) => {
+                ctx.attachReply({ type: "from_idempotency_key" });
+                return this._actionIdempotencyKey ?? "attach-idempotency-key";
+              }
+            : mode === "ledger-key" ||
+                mode === "ledger-throw" ||
+                mode === "ledger-large-output" ||
+                mode === "ledger-slow" ||
+                mode === "ledger-symbol-output" ||
+                mode === "ledger-approval" ||
+                mode === "attach-ledger"
+              ? (this._actionIdempotencyKey ?? "echo-ledger-key")
+              : undefined,
         permissions:
           mode === "permission" || mode === "approval-permission"
             ? ["echo:run"]
@@ -3335,6 +3574,12 @@ export class ThinkToolsTestAgent extends Think {
           if (mode === "ledger-symbol-output") {
             return Symbol("not-json");
           }
+          if (mode === "attach-ledger") {
+            ctx.attachReply({ type: "voice_note" });
+          }
+          if (mode === "attach-idempotency-key") {
+            ctx.attachReply({ type: "voice_note" });
+          }
           return `action echo: ${message}`;
         }
       })
@@ -3365,9 +3610,29 @@ export class ThinkToolsTestAgent extends Think {
     | "ledger-large-output"
     | "ledger-slow"
     | "ledger-symbol-output"
-    | "ledger-approval" = "default";
+    | "ledger-approval"
+    | "attach-ledger"
+    | "attach-idempotency-key" = "default";
   private _actionExecutionCount = 0;
   private _actionIdempotencyKey: string | null = null;
+  private _useAttachReplyAction = false;
+  private _attachReplyScenario:
+    | "two"
+    | "none"
+    | "invalid"
+    | "non-json"
+    | "overcap"
+    | "approval-gated"
+    | "predicate-noop"
+    | "permission-noop"
+    | "attach-then-throw" = "two";
+  private _useDurablePauseAction = false;
+  private _durablePauseApproval: boolean | "predicate-hello" | undefined =
+    undefined;
+  private _durablePauseIdempotencyKey: string | null = null;
+  private _durablePauseExecCount = 0;
+  private _durablePauseExecThrows = false;
+  private _durablePauseAttachReply = false;
   private _actionDelayMs = 25;
   private _actionGrantedPermissions: string[] | null | undefined = undefined;
   private _denyActionReason: string | null = null;
@@ -3399,10 +3664,54 @@ export class ThinkToolsTestAgent extends Think {
       | "ledger-large-output"
       | "ledger-slow"
       | "ledger-symbol-output"
-      | "ledger-approval" = "default"
+      | "ledger-approval"
+      | "attach-ledger"
+      | "attach-idempotency-key" = "default"
   ): Promise<void> {
     this._useEchoAction = true;
     this._actionExecuteMode = mode;
+  }
+
+  async useAttachReplyActionForTest(
+    scenario:
+      | "two"
+      | "none"
+      | "invalid"
+      | "non-json"
+      | "overcap"
+      | "approval-gated"
+      | "predicate-noop"
+      | "permission-noop"
+      | "attach-then-throw" = "two"
+  ): Promise<void> {
+    this._useAttachReplyAction = true;
+    this._attachReplyScenario = scenario;
+  }
+
+  async getResponseAttachmentsJson(): Promise<string> {
+    const last = this._responseLog[this._responseLog.length - 1];
+    return JSON.stringify(last?.attachments ?? null);
+  }
+
+  async getLastResponseRequestIdForTest(): Promise<string | null> {
+    const last = this._responseLog[this._responseLog.length - 1];
+    return last?.requestId ?? null;
+  }
+
+  async clearResponseLogForTest(): Promise<void> {
+    this._responseLog.length = 0;
+  }
+
+  async mutateLastResponseAttachmentForTest(): Promise<void> {
+    const attachment = this._responseLog.at(-1)?.attachments?.[0];
+    if (attachment !== undefined) {
+      (attachment as { type: string; mutated?: boolean }).type = "mutated";
+      (attachment as { type: string; mutated?: boolean }).mutated = true;
+    }
+  }
+
+  async replyAttachmentsJsonForTest(requestId?: string): Promise<string> {
+    return JSON.stringify(this.replyAttachments(requestId));
   }
 
   async setActionIdempotencyKey(key: string | null): Promise<void> {
@@ -3524,6 +3833,159 @@ export class ThinkToolsTestAgent extends Think {
         }) => Promise<{ settled: number; pending: number }>;
       }
     )._sweepActionLedger({ force: true });
+  }
+
+  // ── Durable-pause action test helpers ───────────────────────────
+
+  async useDurablePauseActionForTest(options?: {
+    approval?: boolean | "predicate-hello";
+    idempotencyKey?: string;
+    execThrows?: boolean;
+    attachReply?: boolean;
+  }): Promise<void> {
+    this._useDurablePauseAction = true;
+    this._durablePauseApproval = options?.approval;
+    this._durablePauseIdempotencyKey = options?.idempotencyKey ?? null;
+    this._durablePauseExecThrows = options?.execThrows ?? false;
+    this._durablePauseAttachReply = options?.attachReply ?? false;
+  }
+
+  /** Drop the durable-pause action so a later approve can't re-derive it. */
+  async removeDurablePauseActionForTest(): Promise<void> {
+    this._useDurablePauseAction = false;
+  }
+
+  async getDurablePauseExecCount(): Promise<number> {
+    return this._durablePauseExecCount;
+  }
+
+  /** Compile tools and directly invoke the durable-pause action to park it. */
+  async parkDurablePauseForTest(
+    message = "hello",
+    toolCallId = `tc-pause-${crypto.randomUUID()}`
+  ): Promise<unknown> {
+    const tools = await (
+      this as unknown as { _compileActionTools: () => Promise<ToolSet> }
+    )._compileActionTools();
+    const pauseTool = tools.pauseAction as {
+      execute?: (
+        input: unknown,
+        options: {
+          toolCallId?: string;
+          messages?: [];
+          abortSignal?: AbortSignal;
+        }
+      ) => Promise<unknown>;
+    };
+    return pauseTool.execute?.({ message }, { toolCallId, messages: [] });
+  }
+
+  async listActionPendingForTest(): Promise<
+    Array<{
+      execution_id: string;
+      action_name: string;
+      tool_call_id: string;
+      input_json: string;
+      descriptor_json: string | null;
+    }>
+  > {
+    return (
+      this as unknown as {
+        _listActionPendingRows: () => Array<{
+          execution_id: string;
+          action_name: string;
+          tool_call_id: string;
+          input_json: string;
+          descriptor_json: string | null;
+        }>;
+      }
+    )._listActionPendingRows();
+  }
+
+  async approveExecutionForTest(executionId: string): Promise<unknown> {
+    return this.approveExecution(executionId);
+  }
+
+  async rejectExecutionForTest(
+    executionId: string,
+    reason?: string
+  ): Promise<unknown> {
+    return this.rejectExecution(executionId, reason);
+  }
+
+  async approveExecutionTwiceForTest(executionId: string): Promise<unknown[]> {
+    return Promise.all([
+      this.approveExecution(executionId),
+      this.approveExecution(executionId)
+    ]);
+  }
+
+  /** Returns a JSON string (RPC can't serialize the `unknown`-typed input). */
+  async pendingApprovalsForTest(executionId?: string): Promise<string> {
+    return JSON.stringify(await this.pendingApprovals(executionId));
+  }
+
+  async sweepActionPendingApprovalsForTest(): Promise<{ swept: number }> {
+    return (
+      this as unknown as {
+        _sweepActionPendingApprovals: (options: {
+          force?: boolean;
+        }) => Promise<{ swept: number }>;
+      }
+    )._sweepActionPendingApprovals({ force: true });
+  }
+
+  async setActionPendingApprovalTtlForTest(ttl: number | false): Promise<void> {
+    (
+      this as unknown as { actionPendingApprovalTtlMs: number | false }
+    ).actionPendingApprovalTtlMs = ttl;
+  }
+
+  async backdateActionPendingForTest(
+    executionId: string,
+    createdAt: number
+  ): Promise<void> {
+    this.sql`
+      UPDATE cf_think_action_pending_approvals
+      SET created_at = ${createdAt}
+      WHERE execution_id = ${executionId}
+    `;
+  }
+
+  /** Derive a descriptor for a paused output (codemode-style) for unit tests. */
+  async descriptorForPausedOutputForTest(
+    requestId: string,
+    toolCallId: string,
+    output: unknown
+  ): Promise<unknown> {
+    return (
+      this as unknown as {
+        _descriptorForPausedOutput: (
+          requestId: string,
+          toolCallId: string,
+          output: unknown
+        ) => unknown;
+      }
+    )._descriptorForPausedOutput(requestId, toolCallId, output);
+  }
+
+  /** Override describePausedExecution to enrich codemode descriptors. */
+  async setDescribePausedExecutionForTest(
+    override: {
+      summary?: string;
+      permissions?: string[];
+      risk?: "low" | "medium" | "high";
+    } | null
+  ): Promise<void> {
+    if (override === null) {
+      (
+        this as unknown as { describePausedExecution: unknown }
+      ).describePausedExecution = () => undefined;
+      return;
+    }
+    (
+      this as unknown as { describePausedExecution: unknown }
+    ).describePausedExecution = () => override;
   }
 
   async setActionGrantedPermissions(

@@ -214,6 +214,7 @@ export {
 
 export type {
   ChatResponseResult,
+  ReplyAttachment,
   ChatRecoveryConfig,
   ChatRecoveryContext,
   ChatRecoveryExhaustedContext,

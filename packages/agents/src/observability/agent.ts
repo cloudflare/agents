@@ -70,6 +70,17 @@ export type AgentObservabilityEvent =
     >
   | BaseEvent<"action:ledger:swept", { settled: number; pending: number }>
   | BaseEvent<
+      "action:pause:created",
+      { action: string; executionId: string; toolCallId: string }
+    >
+  | BaseEvent<"action:pause:approved", { action: string; executionId: string }>
+  | BaseEvent<"action:pause:rejected", { action: string; executionId: string }>
+  | BaseEvent<"action:pause:swept", { swept: number }>
+  | BaseEvent<
+      "action:reply-attached",
+      { action?: string; attachmentType: string }
+    >
+  | BaseEvent<
       "fiber:run:started",
       { fiberId: string; fiberName: string; managed?: boolean }
     >

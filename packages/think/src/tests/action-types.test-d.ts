@@ -4,9 +4,16 @@
  * Checked by the typecheck script, not vitest.
  */
 
+import type { PendingAction } from "@cloudflare/codemode";
+import type { ReplyAttachment as BaseReplyAttachment } from "agents/chat";
 import { jsonSchema } from "ai";
 import { z } from "zod";
-import { action } from "../think";
+import {
+  action,
+  Think,
+  type ActionApprovalDescriptor,
+  type ReplyAttachment
+} from "../think";
 
 const zodAction = action({
   description: "Use inferred Zod input",
@@ -105,3 +112,64 @@ const reservedOutputSchema = action({
   }
 });
 void reservedOutputSchema;
+
+const durablePauseAction = action({
+  description: "A durable-pause action with a typed approval predicate",
+  inputSchema: z.object({ amount: z.number() }),
+  kind: "durable-pause",
+  approval({ input }) {
+    const amount: number = input.amount;
+    void amount;
+
+    // @ts-expect-error — `amount` is inferred as number, not string.
+    const wrong: string = input.amount;
+    void wrong;
+
+    return input.amount > 100;
+  },
+  execute(input) {
+    return input.amount;
+  }
+});
+void durablePauseAction;
+
+const attachReplyAction = action({
+  description: "Accept common and custom reply attachment shapes",
+  inputSchema: z.object({}),
+  execute(_input, ctx) {
+    ctx.attachReply({ type: "voice_note" });
+    ctx.attachReply({
+      type: "email_draft",
+      subject: "Hello",
+      to: ["user@example.com"]
+    });
+    ctx.attachReply({ type: "card", payload: { id: 1 } });
+    ctx.attachReply({ type: "custom", foo: 1 });
+
+    // @ts-expect-error — every attachment requires a string `type`.
+    ctx.attachReply({ payload: { id: 1 } });
+
+    return "ok";
+  }
+});
+void attachReplyAction;
+
+const thinkAttachment: ReplyAttachment = { type: "voice_note" };
+const baseAttachment: BaseReplyAttachment = thinkAttachment;
+void baseAttachment;
+
+class DescribePausedAgent extends Think {
+  override describePausedExecution(
+    pending: PendingAction[],
+    ctx: { requestId: string; toolCallId: string }
+  ): Partial<ActionApprovalDescriptor> | undefined {
+    const method: string = pending[0]?.method ?? "";
+    const requestId: string = ctx.requestId;
+    void method;
+    void requestId;
+
+    // @ts-expect-error — risk is a closed union, "extreme" is not allowed.
+    return { summary: pending[0]?.connector, risk: "extreme" };
+  }
+}
+void DescribePausedAgent;

@@ -17,6 +17,16 @@ import type { ClientToolSchema } from "./client-tools";
 import type { MessagePart } from "./message-builder";
 
 /**
+ * An advisory, open-ended hint that an action records during a turn to
+ * influence how the final reply is delivered without changing the model-visible
+ * tool output. The base type is intentionally open; channels/voice surfaces
+ * narrow it to the shapes they understand and ignore the rest.
+ * `@cloudflare/think` exports a richer named union for `ctx.attachReply`'s
+ * parameter; this base is what rides on `ChatResponseResult`.
+ */
+export type ReplyAttachment = { type: string } & Record<string, unknown>;
+
+/**
  * Result passed to the `onChatResponse` lifecycle hook after a chat
  * turn completes.
  */
@@ -31,6 +41,11 @@ export type ChatResponseResult = {
   status: "completed" | "error" | "aborted";
   /** Error message when `status` is `"error"`. */
   error?: string;
+  /**
+   * Advisory reply attachments recorded during the turn (best-effort,
+   * producing-attempt only — not re-applied on a ledger replay).
+   */
+  attachments?: ReplyAttachment[];
 };
 
 /**

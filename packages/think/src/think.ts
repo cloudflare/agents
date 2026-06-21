@@ -234,8 +234,14 @@ import {
 const MODEL_RECENT_WINDOW = 4;
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 const ACTION_OUTPUT_MAX_CHARS = 20_000;
+const MAX_REPLY_ATTACHMENTS_PER_TURN = 32;
 const ACTION_LEDGER_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const ACTION_LEDGER_LAST_SWEPT_KEY = "cf_think_action_ledger:last_swept_at";
+const ACTION_PENDING_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+const ACTION_PENDING_LAST_SWEPT_KEY =
+  "cf_think_action_pending_approvals:last_swept_at";
+/** Prefix for durable-pause action execution ids (vs codemode execution ids). */
+const ACTION_PAUSE_ID_PREFIX = "actpause_";
 import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "./tools/workspace";
 import { truncatePausedExecutionOutput } from "./tools/execute";
@@ -1086,7 +1092,27 @@ export interface ActionContext {
   messages: ReadonlyArray<ModelMessage>;
   /** Combined action timeout and turn abort signal. */
   signal: AbortSignal;
+  /**
+   * Record an advisory delivery hint for this turn's final reply (voice note,
+   * card, email draft, ...). Does not change the model-visible tool output.
+   * No-op for approval/permission/idempotency policy evaluation and for
+   * durable-pause approved-action resumes (their reply is delivered by a
+   * later continuation turn in v1).
+   */
+  attachReply(attachment: ReplyAttachment): void;
 }
+
+/**
+ * The attachment shape accepted by {@link ActionContext.attachReply}. An open
+ * union: the named variants give autocomplete for common channels, and the
+ * trailing `{ type: string; [k]: unknown }` keeps it extensible. Advisory only
+ * — surfaces that don't recognize a `type` ignore it.
+ */
+export type ReplyAttachment =
+  | { type: "voice_note" }
+  | { type: "email_draft"; subject?: string; to?: string[] }
+  | { type: "card"; payload: unknown }
+  | { type: string; [k: string]: unknown };
 
 export type ActionApprovalPolicy<Input> =
   | boolean
@@ -1138,6 +1164,19 @@ export interface ActionApprovalDescriptor {
   kind: "approval-gated" | "durable-pause";
 }
 
+/**
+ * A single approval awaiting a human decision, unified across pause backends so
+ * dashboards/voice/messenger can list and reconcile everything pending with one
+ * call. `source: "action"` is a parked `kind: "durable-pause"` action;
+ * `source: "codemode"` is a paused `execute`-tool execution. Both resolve via
+ * {@link Think.approveExecution} / {@link Think.rejectExecution}.
+ */
+export interface PendingApproval {
+  executionId: string;
+  source: "action" | "codemode";
+  descriptor: ActionApprovalDescriptor;
+}
+
 export interface ActionConfig<
   InputSchema extends FlexibleSchema = FlexibleSchema,
   Output = unknown
@@ -1179,6 +1218,14 @@ export function action<
   const InputSchema extends FlexibleSchema,
   Output = unknown
 >(config: ActionConfig<InputSchema, Output>): Action<InputSchema, Output> {
+  if (config.kind === "durable-pause" && config.approval === false) {
+    throw new Error(
+      `Action "${config.name ?? "(anonymous)"}": kind "durable-pause" with ` +
+        `approval: false never parks for approval, defeating the purpose. ` +
+        `Use kind "server" for an inline action, or omit approval (or set a ` +
+        `predicate) to gate when it parks.`
+    );
+  }
   const descriptor: Action<InputSchema, Output> = {
     [ACTION_BRAND]: true,
     config: Object.freeze({ ...config })
@@ -1476,6 +1523,45 @@ type ActionLedgerEvent =
       type: "action:ledger:swept";
       payload: { settled: number; pending: number };
     };
+
+/**
+ * A durably-parked `kind: "durable-pause"` action awaiting human approval. The
+ * row is the compaction-safe record of everything needed to run `execute` on
+ * approve (the transcript part can be summarized away before approval), so it
+ * carries the action name, the model's input, and the approval descriptor.
+ */
+type ActionPendingRow = {
+  execution_id: string;
+  action_name: string;
+  tool_call_id: string;
+  request_id: string | null;
+  input_json: string;
+  descriptor_json: string | null;
+  created_at: number;
+};
+
+type ActionPauseEvent =
+  | {
+      type: "action:pause:created";
+      payload: { action: string; executionId: string; toolCallId: string };
+    }
+  | {
+      type: "action:pause:approved";
+      payload: { action: string; executionId: string };
+    }
+  | {
+      type: "action:pause:rejected";
+      payload: { action: string; executionId: string };
+    }
+  | {
+      type: "action:pause:swept";
+      payload: { swept: number };
+    };
+
+type ActionReplyEvent = {
+  type: "action:reply-attached";
+  payload: { action?: string; attachmentType: string };
+};
 
 type DeclaredScheduledTaskPayload = {
   taskId: string;
@@ -2449,6 +2535,7 @@ export class Think<
         "durable-work-recovery",
         async () => {
           await this._sweepActionLedger();
+          await this._sweepActionPendingApprovals();
           await this._recoverSubmissionsOnStart();
           this._recoverWorkflowNotifications();
           if (this._hasPendingSubmissions()) {
@@ -3191,6 +3278,7 @@ export class Think<
   private _workflowNotificationTableEnsured = false;
   private _declaredScheduledTasksTableEnsured = false;
   private _actionLedgerTableEnsured = false;
+  private _actionPendingTableEnsured = false;
   private _drainingSubmissions = false;
   private _drainingWorkflowNotifications = false;
   private _submissionAbortControllers = new Map<string, AbortController>();
@@ -3581,6 +3669,16 @@ export class Think<
   };
 
   /**
+   * Retention window for abandoned durable-pause approval rows — a
+   * `kind: "durable-pause"` action that parked but was never approved or
+   * rejected. Deleting a row makes that approval permanently unresolvable, so
+   * default generously: "approve days later from a dashboard" is the use case.
+   * Set to `false` to disable sweeping. Rows are deleted promptly on
+   * approve/reject regardless; this only bounds truly abandoned pauses.
+   */
+  actionPendingApprovalTtlMs: number | false = 30 * 24 * 60 * 60 * 1000;
+
+  /**
    * Whether reasoning chunks are sent to chat clients by default. Override
    * per turn by returning `sendReasoning` from `beforeTurn`.
    */
@@ -3689,6 +3787,15 @@ export class Think<
   >();
   private _activeTurnApprovedActionInputs = new Map<string, unknown>();
   private _activeActionLedgerExecutions = new Map<string, Promise<unknown>>();
+  /**
+   * Advisory reply attachments recorded by actions during the current admitted
+   * turn (see `ctx.attachReply`). Single-slot because turns are serialized.
+   * Reset at turn start in `_runInsideAdmittedTurnBody`; intentionally not
+   * cleared at turn end so `onChatResponse` and `replyAttachments()` can read
+   * it — the next turn's reset overwrites it.
+   */
+  private _activeTurnReplyAttachments: ReplyAttachment[] = [];
+  private _activeTurnReplyAttachmentsRequestId: string | undefined;
 
   /**
    * Number of times the proactive guard has compacted within the current
@@ -3884,6 +3991,24 @@ export class Think<
       allowed: false,
       reason: `Missing required permission: ${missing.join(", ")}`
     };
+  }
+
+  /**
+   * Enrich the approval descriptor shown in approval UIs for a paused codemode
+   * `execute` execution. The default descriptor is derived from the first
+   * pending action as `connector.method` with its args as the input; override
+   * here to supply a human summary, the permissions it consumes, or a risk
+   * level (returned fields are merged over the derived defaults).
+   *
+   * Not called for `kind: "durable-pause"` actions — those carry their own
+   * descriptor from the `action()` config. Default returns `undefined` (use the
+   * derived descriptor).
+   */
+  describePausedExecution(
+    _pending: import("@cloudflare/codemode").PendingAction[],
+    _ctx: { requestId: string; toolCallId: string }
+  ): Partial<ActionApprovalDescriptor> | undefined {
+    return undefined;
   }
 
   /**
@@ -4772,9 +4897,17 @@ export class Think<
     ctx: ActionContext
   ): Promise<string[]> {
     if (spec === undefined) return [];
+    const policyCtx = this._actionContextWithoutReply(ctx);
     const permissions =
-      typeof spec === "function" ? await spec({ input, ctx }) : spec;
+      typeof spec === "function" ? await spec({ input, ctx: policyCtx }) : spec;
     return [...permissions];
+  }
+
+  private _actionContextWithoutReply(ctx: ActionContext): ActionContext {
+    return {
+      ...ctx,
+      attachReply: () => {}
+    };
   }
 
   private async _authorizeActionCall(options: {
@@ -4887,7 +5020,10 @@ export class Think<
                 requestId: admittedTurnContext.getStore()?.requestId ?? "",
                 toolCallId: options.toolCallId,
                 messages: options.messages,
-                signal: new AbortController().signal
+                signal: new AbortController().signal,
+                // No-op: approval/permission predicates must be pure and may
+                // run twice (prompt + resume). Attachments belong to execute.
+                attachReply: () => {}
               };
               if (
                 this._activeTurnApprovedActionInputs.has(options.toolCallId)
@@ -4946,7 +5082,9 @@ export class Think<
           requestId,
           toolCallId: options.toolCallId ?? "",
           messages: options.messages ?? [],
-          signal
+          signal,
+          attachReply: (attachment) =>
+            this._recordReplyAttachment(requestId, attachment, toolName)
         };
         const abortError = () =>
           signal.reason instanceof Error
@@ -4984,81 +5122,44 @@ export class Think<
           };
 
           if (kind === "durable-pause") {
-            return await runAction();
+            // The approval predicate gates whether to PARK (not whether an AI
+            // SDK approval is needed). Absent → always park; a function may opt
+            // a given input out of the human gate and run inline instead.
+            const shouldPark =
+              approval === undefined
+                ? true
+                : typeof approval === "function"
+                  ? await approval({
+                      input,
+                      ctx: this._actionContextWithoutReply(actionContext)
+                    })
+                  : approval;
+            if (!shouldPark) {
+              return await this._runLedgeredAction({
+                toolName,
+                idempotencyKey,
+                input,
+                ctx: actionContext,
+                runAction
+              });
+            }
+            return this._parkDurablePauseAction({
+              toolName,
+              input,
+              ctx: actionContext,
+              summary: config.approvalSummary ?? config.description,
+              permissions: authorization.permissions,
+              risk: config.approvalRisk
+            });
           }
 
-          const ledgerKey = await this._resolveActionLedgerKey(
+          return await this._runLedgeredAction({
             toolName,
             idempotencyKey,
             input,
-            actionContext
-          );
-          if (!ledgerKey) {
-            return await runAction();
-          }
-
-          const active = this._activeActionLedgerExecutions.get(ledgerKey);
-          if (active) {
-            return await active;
-          }
-
-          const inputHash = this._actionInputHash(input);
-          const claim = this._claimActionLedgerRow({
-            key: ledgerKey,
-            actionName: toolName,
-            requestId,
-            toolCallId: actionContext.toolCallId,
-            inputHash
+            ctx: actionContext,
+            runAction
           });
-          if (claim.outcome === "replay") {
-            this._emitActionLedgerEvent({
-              type: "action:ledger:replayed",
-              payload: { action: toolName, key: ledgerKey, inputHash }
-            });
-            return decodeActionLedgerOutput(claim.row.result_json);
-          }
-          if (claim.outcome === "pending") {
-            this._emitActionLedgerEvent({
-              type: "action:ledger:pending",
-              payload: { action: toolName, key: ledgerKey, inputHash }
-            });
-            return actionPendingErrorEnvelope();
-          }
-          if (claim.outcome === "conflict") {
-            this._emitActionLedgerEvent({
-              type: "action:ledger:conflict",
-              payload: { action: toolName, key: ledgerKey, inputHash }
-            });
-            return actionKeyConflictEnvelope(toolName, ledgerKey);
-          }
-
-          const execution = Promise.resolve().then(async () => {
-            const prepared = await runAction();
-            const encoded = encodeActionLedgerOutput(prepared);
-            if (!encoded.ok) {
-              this._releaseActionLedgerRow(ledgerKey);
-              this._emitActionLedgerEvent({
-                type: "action:ledger:serialize_failed",
-                payload: { action: toolName, key: ledgerKey }
-              });
-              return prepared;
-            }
-            this._settleActionLedgerRow(ledgerKey, encoded.json);
-            this._emitActionLedgerEvent({
-              type: "action:ledger:settled",
-              payload: { action: toolName, key: ledgerKey, inputHash }
-            });
-            return encoded.value;
-          });
-          this._activeActionLedgerExecutions.set(ledgerKey, execution);
-          try {
-            return await execution;
-          } catch (error) {
-            this._releaseActionLedgerRow(ledgerKey);
-            return actionErrorEnvelope(error);
-          } finally {
-            this._activeActionLedgerExecutions.delete(ledgerKey);
-          }
         } catch (error) {
           return actionErrorEnvelope(error);
         } finally {
@@ -5067,6 +5168,168 @@ export class Think<
         }
       }
     });
+  }
+
+  /**
+   * Run an action's `execute` through the action ledger: same-isolate
+   * coalescing, durable claim/replay, settle-on-success, release-on-failure.
+   * Shared by the inline server-action path and the durable-pause-on-approve
+   * path so an action's side effect is replay-safe regardless of how it is
+   * dispatched. `runAction` must already apply timeout/abort and
+   * `prepareActionOutputForModel`.
+   */
+  private async _runLedgeredAction(args: {
+    toolName: string;
+    idempotencyKey: ActionIdempotencyKey<unknown> | undefined;
+    input: unknown;
+    ctx: ActionContext;
+    runAction: () => Promise<unknown>;
+  }): Promise<unknown> {
+    const { toolName, idempotencyKey, input, ctx, runAction } = args;
+
+    const ledgerKey = await this._resolveActionLedgerKey(
+      toolName,
+      idempotencyKey,
+      input,
+      this._actionContextWithoutReply(ctx)
+    );
+    if (!ledgerKey) {
+      const attachmentCount = this._activeTurnReplyAttachments.length;
+      try {
+        return await runAction();
+      } catch (error) {
+        this._activeTurnReplyAttachments.length = attachmentCount;
+        throw error;
+      }
+    }
+
+    const active = this._activeActionLedgerExecutions.get(ledgerKey);
+    if (active) {
+      return await active;
+    }
+
+    const inputHash = this._actionInputHash(input);
+    const claim = this._claimActionLedgerRow({
+      key: ledgerKey,
+      actionName: toolName,
+      requestId: ctx.requestId,
+      toolCallId: ctx.toolCallId,
+      inputHash
+    });
+    if (claim.outcome === "replay") {
+      this._emitActionLedgerEvent({
+        type: "action:ledger:replayed",
+        payload: { action: toolName, key: ledgerKey, inputHash }
+      });
+      return decodeActionLedgerOutput(claim.row.result_json);
+    }
+    if (claim.outcome === "pending") {
+      this._emitActionLedgerEvent({
+        type: "action:ledger:pending",
+        payload: { action: toolName, key: ledgerKey, inputHash }
+      });
+      return actionPendingErrorEnvelope();
+    }
+    if (claim.outcome === "conflict") {
+      this._emitActionLedgerEvent({
+        type: "action:ledger:conflict",
+        payload: { action: toolName, key: ledgerKey, inputHash }
+      });
+      return actionKeyConflictEnvelope(toolName, ledgerKey);
+    }
+
+    const attachmentCount = this._activeTurnReplyAttachments.length;
+    const execution = Promise.resolve().then(async () => {
+      try {
+        const prepared = await runAction();
+        const encoded = encodeActionLedgerOutput(prepared);
+        if (!encoded.ok) {
+          this._releaseActionLedgerRow(ledgerKey);
+          this._emitActionLedgerEvent({
+            type: "action:ledger:serialize_failed",
+            payload: { action: toolName, key: ledgerKey }
+          });
+          return prepared;
+        }
+        this._settleActionLedgerRow(ledgerKey, encoded.json);
+        this._emitActionLedgerEvent({
+          type: "action:ledger:settled",
+          payload: { action: toolName, key: ledgerKey, inputHash }
+        });
+        return encoded.value;
+      } catch (error) {
+        this._activeTurnReplyAttachments.length = attachmentCount;
+        throw error;
+      }
+    });
+    this._activeActionLedgerExecutions.set(ledgerKey, execution);
+    try {
+      return await execution;
+    } catch (error) {
+      this._releaseActionLedgerRow(ledgerKey);
+      return actionErrorEnvelope(error);
+    } finally {
+      this._activeActionLedgerExecutions.delete(ledgerKey);
+    }
+  }
+
+  /**
+   * Park a `kind: "durable-pause"` action for human approval. Persists a
+   * compaction-safe pending row (action name + model input + approval
+   * descriptor) so the approval survives history compaction, deploys, and
+   * isolate eviction, then returns the minimal model-visible paused output.
+   *
+   * The action's `execute` does NOT run here — it runs later in
+   * `approveExecution` via `_runLedgeredAction`, so the side effect is gated on
+   * human approval AND remains replay-safe. The rich descriptor lives on the
+   * row and on the transcript part, never embedded in the model-visible output.
+   */
+  private _parkDurablePauseAction(args: {
+    toolName: string;
+    input: unknown;
+    ctx: ActionContext;
+    summary: string;
+    permissions: string[];
+    risk?: "low" | "medium" | "high";
+  }): {
+    status: "paused";
+    executionId: string;
+    action: string;
+    message: string;
+  } {
+    const { toolName, input, ctx, summary, permissions, risk } = args;
+    const executionId = `${ACTION_PAUSE_ID_PREFIX}${crypto.randomUUID()}`;
+    const descriptor: ActionApprovalDescriptor = {
+      requestId: ctx.requestId,
+      toolCallId: ctx.toolCallId,
+      action: toolName,
+      summary,
+      input,
+      permissions,
+      ...(risk !== undefined && { risk }),
+      kind: "durable-pause"
+    };
+    this._insertActionPendingRow({
+      execution_id: executionId,
+      action_name: toolName,
+      tool_call_id: ctx.toolCallId,
+      request_id: ctx.requestId || null,
+      input_json: JSON.stringify(input),
+      descriptor_json: JSON.stringify(descriptor),
+      created_at: Date.now()
+    });
+    this._emitActionPauseEvent({
+      type: "action:pause:created",
+      payload: { action: toolName, executionId, toolCallId: ctx.toolCallId }
+    });
+    return {
+      status: "paused",
+      executionId,
+      action: toolName,
+      message:
+        "This action is awaiting human approval. Stop and wait for the " +
+        "approval result before proceeding."
+    };
   }
 
   /** Default hook timeout in milliseconds. */
@@ -5575,6 +5838,9 @@ export class Think<
           }),
           ...(spec.generation !== undefined && { generation: spec.generation })
         });
+
+        this._activeTurnReplyAttachments = [];
+        this._activeTurnReplyAttachmentsRequestId = spec.requestId;
 
         try {
           const value = await spec.execute();
@@ -6734,6 +7000,223 @@ export class Think<
       payload: { settled, pending }
     });
     return { settled, pending };
+  }
+
+  // ── Durable-pause action approvals ──────────────────────────────
+
+  private _emitActionReplyEvent(event: ActionReplyEvent): void {
+    const emit = this._emit as unknown as (
+      type: string,
+      payload: Record<string, unknown>
+    ) => void;
+    emit.call(this, event.type, event.payload);
+  }
+
+  /**
+   * Record an advisory reply attachment for the active turn. Advisory: a
+   * non-object, a missing/non-string `type`, or exceeding the per-turn cap is
+   * silently ignored. The attachment is JSON-normalized to a safe copy so a
+   * later mutation of the caller's object can't corrupt it and downstream
+   * persistence/RPC can't choke on bigint/circular values.
+   */
+  private _recordReplyAttachment(
+    requestId: string,
+    attachment: unknown,
+    actionName?: string
+  ): void {
+    if (!requestId || requestId !== this._activeTurnReplyAttachmentsRequestId) {
+      return;
+    }
+    if (
+      typeof attachment !== "object" ||
+      attachment === null ||
+      Array.isArray(attachment) ||
+      typeof (attachment as { type?: unknown }).type !== "string"
+    ) {
+      return;
+    }
+    if (
+      this._activeTurnReplyAttachments.length >= MAX_REPLY_ATTACHMENTS_PER_TURN
+    ) {
+      return;
+    }
+    const serialized = safeStringifyActionOutput(attachment);
+    if (serialized.error || serialized.value === undefined) {
+      return;
+    }
+    const normalized = JSON.parse(serialized.value) as unknown;
+    if (
+      typeof normalized !== "object" ||
+      normalized === null ||
+      Array.isArray(normalized) ||
+      typeof (normalized as { type?: unknown }).type !== "string"
+    ) {
+      return;
+    }
+    this._activeTurnReplyAttachments.push(normalized as ReplyAttachment);
+    this._emitActionReplyEvent({
+      type: "action:reply-attached",
+      payload: {
+        ...(actionName !== undefined && { action: actionName }),
+        attachmentType: (normalized as { type: string }).type
+      }
+    });
+  }
+
+  private _cloneReplyAttachment(attachment: ReplyAttachment): ReplyAttachment {
+    return JSON.parse(JSON.stringify(attachment)) as ReplyAttachment;
+  }
+
+  /**
+   * Advisory reply attachments recorded during a turn via `ctx.attachReply`.
+   * Returns deep copies. With no `requestId`, returns the most recent turn's
+   * attachments; with a `requestId`, returns them only if they belong to that
+   * turn (else `[]`).
+   */
+  replyAttachments(requestId?: string): ReplyAttachment[] {
+    if (
+      requestId !== undefined &&
+      requestId !== this._activeTurnReplyAttachmentsRequestId
+    ) {
+      return [];
+    }
+    return this._activeTurnReplyAttachments.map((attachment) =>
+      this._cloneReplyAttachment(attachment)
+    );
+  }
+
+  private _emitActionPauseEvent(event: ActionPauseEvent): void {
+    const emit = this._emit as unknown as (
+      type: string,
+      payload: Record<string, unknown>
+    ) => void;
+    emit.call(this, event.type, event.payload);
+  }
+
+  private _ensureActionPendingTable(): void {
+    if (this._actionPendingTableEnsured) return;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_think_action_pending_approvals (
+        execution_id TEXT PRIMARY KEY,
+        action_name TEXT NOT NULL,
+        tool_call_id TEXT NOT NULL,
+        request_id TEXT,
+        input_json TEXT NOT NULL,
+        descriptor_json TEXT,
+        created_at INTEGER NOT NULL
+      )
+    `;
+    this.sql`
+      CREATE INDEX IF NOT EXISTS cf_think_action_pending_created
+      ON cf_think_action_pending_approvals (created_at)
+    `;
+    this._actionPendingTableEnsured = true;
+  }
+
+  private _readActionPendingRow(executionId: string): ActionPendingRow | null {
+    this._ensureActionPendingTable();
+    const rows = this.sql<ActionPendingRow>`
+      SELECT execution_id, action_name, tool_call_id, request_id, input_json,
+             descriptor_json, created_at
+      FROM cf_think_action_pending_approvals
+      WHERE execution_id = ${executionId}
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  }
+
+  private _insertActionPendingRow(row: ActionPendingRow): void {
+    this._ensureActionPendingTable();
+    this.sql`
+      INSERT INTO cf_think_action_pending_approvals (
+        execution_id, action_name, tool_call_id, request_id, input_json,
+        descriptor_json, created_at
+      )
+      VALUES (
+        ${row.execution_id}, ${row.action_name}, ${row.tool_call_id},
+        ${row.request_id}, ${row.input_json}, ${row.descriptor_json},
+        ${row.created_at}
+      )
+    `;
+  }
+
+  /**
+   * Atomically claim a pending-approval row for resolution: read it, then
+   * delete it. SQLite calls are synchronous and there is no `await` between the
+   * read and the delete, so within the single DO isolate this is race-free — a
+   * concurrent `approveExecution`/`rejectExecution` for the same id can only run
+   * at an await boundary, by which point the row is already gone (it sees
+   * `null` → "already resolved"). The returned row is the caller's to resolve.
+   */
+  private _claimActionPendingRow(executionId: string): ActionPendingRow | null {
+    this._ensureActionPendingTable();
+    const row = this._readActionPendingRow(executionId);
+    if (!row) return null;
+    this.sql`
+      DELETE FROM cf_think_action_pending_approvals
+      WHERE execution_id = ${executionId}
+    `;
+    return row;
+  }
+
+  private _listActionPendingRows(): ActionPendingRow[] {
+    this._ensureActionPendingTable();
+    return this.sql<ActionPendingRow>`
+      SELECT execution_id, action_name, tool_call_id, request_id, input_json,
+             descriptor_json, created_at
+      FROM cf_think_action_pending_approvals
+      ORDER BY created_at ASC
+    `;
+  }
+
+  private _deleteActionPendingRows(executionIds: string[]): number {
+    let deleted = 0;
+    for (let i = 0; i < executionIds.length; i += MAX_BOUND_PARAMS) {
+      const batch = executionIds.slice(i, i + MAX_BOUND_PARAMS);
+      const strings = buildInClauseStrings(
+        "DELETE FROM cf_think_action_pending_approvals WHERE execution_id IN ",
+        batch.length
+      );
+      this.sql(strings, ...batch);
+      deleted += batch.length;
+    }
+    return deleted;
+  }
+
+  private async _sweepActionPendingApprovals(options?: {
+    force?: boolean;
+  }): Promise<{ swept: number }> {
+    this._ensureActionPendingTable();
+    const ttl = this.actionPendingApprovalTtlMs;
+    if (ttl === false) return { swept: 0 };
+    const now = Date.now();
+    if (!options?.force) {
+      const lastSwept =
+        (await this.ctx.storage.get<number>(ACTION_PENDING_LAST_SWEPT_KEY)) ??
+        0;
+      if (now - lastSwept < ACTION_PENDING_SWEEP_INTERVAL_MS) {
+        return { swept: 0 };
+      }
+    }
+    const cutoff = now - ttl;
+    const rows = this.sql<{ execution_id: string }>`
+      SELECT execution_id
+      FROM cf_think_action_pending_approvals
+      WHERE created_at < ${cutoff}
+      ORDER BY created_at ASC
+      LIMIT 500
+    `;
+    const swept = this._deleteActionPendingRows(
+      rows.map((row) => row.execution_id)
+    );
+    await this.ctx.storage.put(ACTION_PENDING_LAST_SWEPT_KEY, now);
+    if (swept > 0) {
+      this._emitActionPauseEvent({
+        type: "action:pause:swept",
+        payload: { swept }
+      });
+    }
+    return { swept };
   }
 
   // ── Declarative scheduled tasks ─────────────────────────────────
@@ -9427,6 +9910,19 @@ export class Think<
       }
     }
 
+    // A durable pause (durable-pause action OR codemode execution) surfaces as
+    // a `tool-output-available` chunk whose output is `status: "paused"`, NOT a
+    // `tool-approval-request`. Attach the approval descriptor here so the paused
+    // transcript part renders consistently in every approval UI.
+    if (chunk.type === "tool-output-available" && toolCallId) {
+      const descriptor = this._descriptorForPausedOutput(
+        requestId,
+        toolCallId,
+        (chunk as { output?: unknown }).output
+      );
+      return descriptor ? { ...chunk, approvalDescriptor: descriptor } : chunk;
+    }
+
     if (chunk.type !== "tool-approval-request" || !toolCallId) return chunk;
 
     const storedDescriptor =
@@ -9473,12 +9969,75 @@ export class Think<
     };
   }
 
+  /**
+   * Build the approval descriptor for a paused tool output, the single source
+   * of truth for rendering a pending approval. Durable-pause actions read the
+   * descriptor persisted on their pending row (resolved permissions, survives
+   * compaction); codemode pauses derive `connector.method` from the first
+   * pending action and let {@link describePausedExecution} enrich it. Returns
+   * `undefined` for non-paused outputs or when no descriptor can be built.
+   */
+  private _descriptorForPausedOutput(
+    requestId: string,
+    toolCallId: string,
+    output: unknown
+  ): ActionApprovalDescriptor | undefined {
+    if (typeof output !== "object" || output === null) return undefined;
+    const o = output as {
+      status?: unknown;
+      executionId?: unknown;
+      pending?: unknown;
+    };
+    if (o.status !== "paused") return undefined;
+    const executionId =
+      typeof o.executionId === "string" ? o.executionId : undefined;
+
+    if (executionId?.startsWith(ACTION_PAUSE_ID_PREFIX)) {
+      const row = this._readActionPendingRow(executionId);
+      if (!row?.descriptor_json) return undefined;
+      try {
+        return JSON.parse(row.descriptor_json) as ActionApprovalDescriptor;
+      } catch {
+        return undefined;
+      }
+    }
+
+    const pending = Array.isArray(o.pending)
+      ? (o.pending as import("@cloudflare/codemode").PendingAction[])
+      : [];
+    const first = pending[0];
+    if (!first) return undefined;
+    const label = `${first.connector}.${first.method}`;
+    const base: ActionApprovalDescriptor = {
+      requestId,
+      toolCallId,
+      action: label,
+      summary: label,
+      input: first.args,
+      permissions: [],
+      kind: "durable-pause"
+    };
+    const override = this.describePausedExecution(pending, {
+      requestId,
+      toolCallId
+    });
+    if (!override) return base;
+    return {
+      ...base,
+      ...override,
+      // Identity fields are ours to set — an override can't retarget the part.
+      requestId,
+      toolCallId
+    };
+  }
+
   private _applyActionApprovalDescriptorToParts(
     chunk: StreamChunkData,
     parts: UIMessage["parts"]
   ): void {
     if (
-      chunk.type !== "tool-approval-request" ||
+      (chunk.type !== "tool-approval-request" &&
+        chunk.type !== "tool-output-available") ||
       typeof chunk.toolCallId !== "string" ||
       chunk.approvalDescriptor === undefined
     ) {
@@ -9489,10 +10048,21 @@ export class Think<
         "toolCallId" in candidate && candidate.toolCallId === chunk.toolCallId
     ) as Record<string, unknown> | undefined;
     if (!part) return;
-    part.approval = {
-      ...(part.approval as Record<string, unknown> | undefined),
-      descriptor: chunk.approvalDescriptor
-    };
+    if (chunk.type === "tool-approval-request") {
+      // A genuine AI SDK approval request: the descriptor rides on the
+      // approval object (which also carries the eventual decision).
+      part.approval = {
+        ...(part.approval as Record<string, unknown> | undefined),
+        descriptor: chunk.approvalDescriptor
+      };
+      return;
+    }
+    // A durable pause (durable-pause action / codemode) is a SETTLED
+    // `output-available` part, not an AI SDK approval. Putting the descriptor
+    // on `part.approval` would make `convertToModelMessages` emit a
+    // `tool-approval-request` for an already-resolved output on the next turn
+    // (an invalid prompt). Use a sibling field conversion ignores instead.
+    part.approvalDescriptor = chunk.approvalDescriptor;
   }
 
   private async _streamResultToRpcCallback(
@@ -10523,6 +11093,67 @@ export class Think<
   }
 
   /**
+   * List everything awaiting human approval — parked `kind: "durable-pause"`
+   * actions and paused codemode executions — each carrying its
+   * {@link ActionApprovalDescriptor}. The unified, descriptor-first view a
+   * dashboard, voice backend, or messenger reconciles against; resolve any of
+   * them via {@link approveExecution} / {@link rejectExecution}. Pass an
+   * `executionId` to scope to one.
+   *
+   * Client-callable.
+   */
+  async pendingApprovals(executionId?: string): Promise<PendingApproval[]> {
+    const out: PendingApproval[] = [];
+
+    for (const row of this._listActionPendingRows()) {
+      if (executionId && row.execution_id !== executionId) continue;
+      if (!row.descriptor_json) continue;
+      let descriptor: ActionApprovalDescriptor;
+      try {
+        descriptor = JSON.parse(
+          row.descriptor_json
+        ) as ActionApprovalDescriptor;
+      } catch {
+        continue;
+      }
+      out.push({
+        executionId: row.execution_id,
+        source: "action",
+        descriptor
+      });
+    }
+
+    const runtime = this._codemodeRuntime();
+    if (runtime) {
+      const pending = await runtime.pending(executionId);
+      const seen = new Set<string>();
+      for (const action of pending) {
+        if (seen.has(action.executionId)) continue;
+        seen.add(action.executionId);
+        const group = pending.filter(
+          (candidate) => candidate.executionId === action.executionId
+        );
+        const toolCallId =
+          this._findExecutionToolCall(action.executionId) ?? "";
+        const descriptor = this._descriptorForPausedOutput("", toolCallId, {
+          status: "paused",
+          executionId: action.executionId,
+          pending: group
+        });
+        if (descriptor) {
+          out.push({
+            executionId: action.executionId,
+            source: "codemode",
+            descriptor
+          });
+        }
+      }
+    }
+
+    return out;
+  }
+
+  /**
    * Approve a paused execution and resume it. The run continues from where
    * it stopped (replaying logged work, executing the approved call); the
    * outcome — completed, errored, or paused again on the NEXT gated call —
@@ -10536,6 +11167,11 @@ export class Think<
    * Client-callable.
    */
   async approveExecution(executionId: string): Promise<unknown> {
+    // Durable-pause action approvals own the `actpause_` id space and resolve
+    // against the pending-approval store, not the codemode runtime.
+    if (executionId.startsWith(ACTION_PAUSE_ID_PREFIX)) {
+      return await this._approveActionPause(executionId);
+    }
     const runtime = this._codemodeRuntime();
     if (!runtime) {
       return {
@@ -10554,6 +11190,135 @@ export class Think<
   }
 
   /**
+   * Approve a parked `kind: "durable-pause"` action and run its `execute`.
+   *
+   * Claim-by-delete makes this idempotent across tabs/recovery: only the caller
+   * that removes the row runs the action; a racing approve/reject sees no row
+   * and reports "already resolved". Authorization happened at PAUSE time — the
+   * human approval is the authority now, so we do not re-authorize (the turn
+   * context that `authorizeAction` needs is gone). The action runs through the
+   * ledger so its side effect stays replay-safe, the outcome replaces the
+   * paused transcript part, and the chat continues even with no socket open.
+   */
+  private async _approveActionPause(executionId: string): Promise<unknown> {
+    const row = this._claimActionPendingRow(executionId);
+    if (!row) {
+      return {
+        status: "error",
+        executionId,
+        error: `Execution "${executionId}" is no longer pending — it was approved or rejected elsewhere.`
+      };
+    }
+
+    const action = await this._findRegisteredAction(row.action_name);
+    if (!action) {
+      const output = {
+        status: "error",
+        executionId,
+        action: row.action_name,
+        error:
+          `Action "${row.action_name}" is no longer registered, so the ` +
+          `approved call cannot run. The approval was consumed.`
+      };
+      await this._applyExecutionOutcome(executionId, output);
+      return output;
+    }
+
+    let input: unknown;
+    try {
+      input = JSON.parse(row.input_json);
+    } catch {
+      input = {};
+    }
+
+    const output = await this._runApprovedActionPause(action, row, input);
+    this._emitActionPauseEvent({
+      type: "action:pause:approved",
+      payload: { action: row.action_name, executionId }
+    });
+    await this._applyExecutionOutcome(executionId, output);
+    return output;
+  }
+
+  /** Resolve a registered action by its resolved name (config.name ?? key). */
+  private async _findRegisteredAction(name: string): Promise<Action | null> {
+    const actions = await this.getActions();
+    for (const [registrationName, candidate] of Object.entries(actions)) {
+      if (!isAction(candidate)) continue;
+      const resolved = candidate.config.name ?? registrationName;
+      if (resolved === name) return candidate;
+    }
+    return null;
+  }
+
+  /**
+   * Run a just-approved durable-pause action's `execute` through the ledger.
+   * Mirrors the inline `_actionToTool` execute wrapper (timeout, abort race,
+   * model-output prep) MINUS authorization — that was settled at pause time.
+   */
+  private async _runApprovedActionPause(
+    action: Action,
+    row: ActionPendingRow,
+    input: unknown
+  ): Promise<unknown> {
+    const config = action.config;
+    const executeAction = config.execute as (
+      input: unknown,
+      ctx: ActionContext
+    ) => Promise<unknown> | unknown;
+    const idempotencyKey = config.idempotencyKey as
+      | ActionIdempotencyKey<unknown>
+      | undefined;
+    const { signal, cleanup } = createActionAbortSignal(
+      undefined,
+      config.timeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS
+    );
+    const ctx: ActionContext = {
+      agent: this,
+      env: this.env as Cloudflare.Env,
+      requestId: row.request_id ?? "",
+      toolCallId: row.tool_call_id,
+      messages: [],
+      signal,
+      // No-op: a durable-pause approved action is delivered by a later
+      // continuation turn (different requestId), so a same-turn attachment
+      // can't be delivered in v1.
+      attachReply: () => {}
+    };
+    const abortError = () =>
+      signal.reason instanceof Error
+        ? signal.reason
+        : new Error(signal.reason ? String(signal.reason) : "Action aborted");
+    let onAbort: (() => void) | undefined;
+    try {
+      if (signal.aborted) throw abortError();
+      const abortPromise = new Promise<never>((_, reject) => {
+        onAbort = () => reject(abortError());
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+      const runAction = async () => {
+        const out = await Promise.race([
+          Promise.resolve(executeAction(input, ctx)),
+          abortPromise
+        ]);
+        return prepareActionOutputForModel(out);
+      };
+      return await this._runLedgeredAction({
+        toolName: row.action_name,
+        idempotencyKey,
+        input,
+        ctx,
+        runAction
+      });
+    } catch (error) {
+      return actionErrorEnvelope(error);
+    } finally {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+      cleanup();
+    }
+  }
+
+  /**
    * Reject a paused execution's pending action, ending the run. The
    * transcript's paused output is replaced with
    * `{ status: "rejected", executionId, reason }` and the chat
@@ -10565,6 +11330,9 @@ export class Think<
     executionId: string,
     reason?: string
   ): Promise<unknown> {
+    if (executionId.startsWith(ACTION_PAUSE_ID_PREFIX)) {
+      return await this._rejectActionPause(executionId, reason);
+    }
     const runtime = this._codemodeRuntime();
     if (!runtime) {
       return {
@@ -10605,6 +11373,38 @@ export class Think<
       executionId,
       reason: reason ?? "Rejected by user"
     };
+    await this._applyExecutionOutcome(executionId, output);
+    return output;
+  }
+
+  /**
+   * Reject a parked `kind: "durable-pause"` action. Claim-by-delete consumes
+   * the pending row (idempotent across tabs/recovery), the action's `execute`
+   * never runs, and the paused transcript part is replaced with a `rejected`
+   * outcome so the model can adapt or explain.
+   */
+  private async _rejectActionPause(
+    executionId: string,
+    reason?: string
+  ): Promise<unknown> {
+    const row = this._claimActionPendingRow(executionId);
+    if (!row) {
+      return {
+        status: "error",
+        executionId,
+        error: `Execution "${executionId}" is no longer pending — it was approved or rejected elsewhere.`
+      };
+    }
+    const output = {
+      status: "rejected",
+      executionId,
+      action: row.action_name,
+      reason: reason ?? "Rejected by user"
+    };
+    this._emitActionPauseEvent({
+      type: "action:pause:rejected",
+      payload: { action: row.action_name, executionId }
+    });
     await this._applyExecutionOutcome(executionId, output);
     return output;
   }
@@ -10656,7 +11456,10 @@ export class Think<
       );
     }
     // Continue on the approving connection when there is one (WS callable),
-    // else any open connection (DO-stub approval with clients attached).
+    // else any open connection (DO-stub approval with clients attached). When
+    // NO connection is open — an approval arriving via RPC from a dashboard,
+    // webhook, or voice backend — fall back to a connection-independent
+    // continuation so the model still advances and the result isn't stranded.
     const { connection } = getCurrentAgent();
     let target = connection;
     if (!target) {
@@ -10667,6 +11470,8 @@ export class Think<
     }
     if (target) {
       this._scheduleAutoContinuation(target);
+    } else {
+      this._runConnectionlessContinuation();
     }
     return true;
   }
@@ -12446,9 +13251,79 @@ export class Think<
     this._autoContinuation.activateDeferredAndReschedule();
   }
 
+  /**
+   * Run a continuation turn that does NOT require a live client connection.
+   *
+   * Used when a durable approval (a paused action or codemode execution) is
+   * resolved via RPC from a surface with no open chat socket — e.g. an ops
+   * dashboard, a webhook, or a voice backend approving hours/days later. The
+   * connection-bound auto-continuation barrier (`_fireAutoContinuation`) cannot
+   * fire without a `Connection`, so this mirrors its turn body but streams via
+   * `broadcast` (a no-op when nobody is attached) and always persists, so a
+   * client that reconnects later resumes the continued turn from history.
+   *
+   * Wrapped in `keepAliveWhile` because the resolving RPC returns before the
+   * continuation finishes (mirrors the submission-drain pattern).
+   */
+  private _runConnectionlessContinuation(): void {
+    void this.keepAliveWhile(async () => {
+      const requestId = crypto.randomUUID();
+      const abortSignal = this._aborts.getSignal(requestId);
+      try {
+        await this._admitTurn({
+          admission: "queue",
+          trigger: "auto-continuation",
+          requestId,
+          continuation: true,
+          allowNested: true,
+          execute: async () => {
+            const continuationBody = async () => {
+              const result = await agentContext.run(
+                {
+                  agent: this,
+                  connection: undefined,
+                  request: undefined,
+                  email: undefined
+                },
+                () =>
+                  this._runInferenceLoop({
+                    signal: abortSignal,
+                    clientTools: this._lastClientTools,
+                    body: this._lastBody,
+                    continuation: true
+                  })
+              );
+              if (result) {
+                await this._streamResult(requestId, result, abortSignal, {
+                  continuation: true
+                });
+              }
+            };
+
+            if (this.chatRecovery) {
+              await this._runChatRecoveryFiber(
+                requestId,
+                true,
+                continuationBody
+              );
+            } else {
+              await continuationBody();
+            }
+          }
+        });
+      } catch (error) {
+        console.error("[Think] Connection-less continuation failed:", error);
+      } finally {
+        this._aborts.remove(requestId);
+      }
+    });
+  }
+
   // ── Response hook ──────────────────────────────────────────────
 
   private async _fireResponseHook(result: ChatResponseResult): Promise<void> {
+    // Surface advisory reply attachments recorded during this turn.
+    result.attachments = this.replyAttachments(result.requestId);
     // Record the terminal status durably so a client connecting after the turn
     // ended still learns its outcome (see `_buildIdleConnectMessages`).
     await this._recordTerminalChatStatus(
@@ -12746,6 +13621,7 @@ export class Think<
 // from source (e.g. esbuild targeting ES2021).
 for (const method of [
   Think.prototype.pendingExecutions,
+  Think.prototype.pendingApprovals,
   Think.prototype.approveExecution,
   Think.prototype.rejectExecution
 ]) {

@@ -1,4 +1,4 @@
-Status: partially shipped
+Status: partially shipped (Steps 1–6 landed; pending-retry lease remains)
 
 # RFC: Think actions — rich, production-grade tools
 
@@ -36,9 +36,22 @@ Second of three sibling API RFCs (turns, actions, channels) to be picked up in
   `execute`. The default `tool:${toolCallId}` key only dedups paths that preserve
   the tool call id; cross-recovery side-effect dedup requires an app-provided
   stable `idempotencyKey`.
-- ⛔ **Still planned:** `attachReply`, durable-pause approval descriptors, and
-  the explicit retry/lease policy for unknown pending action outcomes are not
-  built yet.
+- ✅ **Step 5 shipped:** `durable-pause` actions park in a dedicated
+  `cf_think_action_pending_approvals` durable store (claim-by-delete, no status
+  column) and resume via `approveExecution`/`rejectExecution`, surviving deploys.
+  Authorization runs once at pause time (never re-authorized at approve time);
+  the `approval` predicate gates whether the action parks or runs inline.
+  Resolution drives a **connection-independent continuation** (modeled on the
+  submission/alarm path) so a turn can be approved from a dashboard with no live
+  socket — this also fixes codemode `approveExecution` from a dashboard. A
+  unified `ActionApprovalDescriptor` is attached to paused parts (durable-pause
+  actions, codemode pauses, and approval-gated requests), `pendingApprovals()`
+  lists all pending approvals with their descriptors for cold-load
+  reconciliation, an overridable `describePausedExecution()` hook enriches
+  codemode descriptors, and `action:pause:*` observability plus a throttled
+  TTL sweep round out retention.
+- ⛔ **Still planned:** the explicit retry/lease policy for unknown pending
+  action outcomes is not built yet.
 - **Depends on the Turns RFC** for `TurnContext`, the `recovery-continue`/
   `recovery-retry` triggers, and `_admitTurn` (authorization resolves once per
   turn at admission). Build Turns first.
@@ -53,10 +66,10 @@ Second of three sibling API RFCs (turns, actions, channels) to be picked up in
   optional" decision, `Think`'s recovery decision stays package-owned, so the
   ledger can be consulted inside `dispatchRecoveredTurn` on recovery re-entry. Use
   the real hook names or update them here when building.)
-- **Steps 1–4 are the partial early win:** the additive descriptor,
-  approval-descriptor, authorization, and settled-result ledger slices have
-  landed. Pending retry leases, durable-pause descriptor mapping, and
-  `ctx.attachReply` remain planned.
+- **Steps 1–6 have landed:** the additive descriptor, approval-descriptor,
+  authorization, settled-result ledger, and durable-pause approval descriptor +
+  connection-independent resume slices are shipped, along with `ctx.attachReply`
+  recording. Pending retry leases remain planned.
 - **Produces a seam the Channels RFC consumes:** `ctx.attachReply()` (§9) is
   inert until Channels/Voice render it.
 
@@ -396,9 +409,12 @@ should be pure and side-effect free.
   part state → `tool-approval` WS event → `_applyToolApproval` /
   `toolApprovalUpdate` (`tool-state.ts:195`) → auto-continuation
   (`_scheduleAutoContinuation`, `think.ts:11163`).
-- **`durable-pause` (long-running server approval):** maps to the
-  execute/codemode paused path (`approveExecution`/`rejectExecution`,
-  `think.ts:9026`) so the turn ends and resumes later, surviving deploys.
+- **`durable-pause` (long-running server approval):** parks in a dedicated
+  durable store (`cf_think_action_pending_approvals`) and resumes via
+  `approveExecution`/`rejectExecution`, so the turn ends and resumes later,
+  surviving deploys. Parked execution ids are prefixed `actpause_` so the resume
+  path can distinguish action pauses from codemode pauses and route accordingly;
+  when no pending row matches, resume falls back to the codemode runtime.
 
 On top of both, actions emit a **stable approval descriptor** so every surface
 renders the same thing:
@@ -422,13 +438,50 @@ This descriptor is attached to the approval-requested part and exposed to
 clients (web/voice/messenger), so a voice agent can speak it and a web UI can
 render a card from the same data.
 
-**Shipped subset:** approval-gated actions compile onto AI SDK `needsApproval`.
-The descriptor is attached to the existing `approval-requested` tool part as
-`part.approval.descriptor`, then preserved by `toolApprovalUpdate` when the user
-approves or rejects. Approved action calls must execute with the approved input;
-`beforeToolCall` may still block or substitute the result, but input substitution
-for an already-approved action returns `ActionApprovalInputError`. The
-durable-pause/codemode descriptor mapping is still planned.
+**Authorization runs once, at pause time.** A `durable-pause` action authorizes
+and evaluates its `approval` predicate when it first parks; the row is only
+written if it is allowed to proceed. Approve/resume does **not** re-authorize (it
+has no turn context to authorize against), so authorization decisions are
+captured at pause time and the resume path simply runs the approved input.
+`kind: "durable-pause"` with `approval: false` is rejected by `action()` (a
+never-parking durable pause is a programming error).
+
+**Resolution is connection-independent.** `approveExecution`/`rejectExecution`
+claim the pending row (claim-by-delete: `DELETE ... WHERE execution_id=?` and
+check `changes()==1`, so concurrent approve/reject/replay is idempotent —
+exactly one caller wins), run the approved action through the shared
+`_runLedgeredAction` pipeline, then drive `_applyExecutionOutcome`. When no live
+client connection is present, the outcome schedules a self-driven continuation
+(modeled on the submission/alarm path) so the chat turn advances after a
+dashboard approval with no socket. This same path also fixes codemode
+`approveExecution` from a dashboard.
+
+**Shipped subset:** approval-gated actions compile onto AI SDK `needsApproval`;
+durable-pause actions park in `cf_think_action_pending_approvals`. The unified
+`ActionApprovalDescriptor` is attached for all three approval surfaces:
+
+- **approval-gated** requests carry it on `part.approval.descriptor` (the AI SDK
+  approval object, which also carries the eventual decision), preserved by
+  `toolApprovalUpdate` on approve/reject.
+- **durable-pause and codemode pauses** are settled `output-available` parts, not
+  AI SDK approvals; their descriptor rides on a sibling `part.approvalDescriptor`
+  field. Attaching it to `part.approval` (which has no decision yet) would make
+  `convertToModelMessages` emit an invalid `tool-approval-request` for an
+  already-resolved output on the next turn, so the sibling field is deliberate.
+
+Durable-pause descriptors are rebuilt from the pending row on cold load;
+codemode descriptors are derived from the live paused execution and may be
+enriched by the overridable `describePausedExecution(pending, ctx)` hook
+(default `undefined`). `pendingApprovals()` merges codemode and action pending
+rows into one list, each carrying its descriptor, for cold-load reconciliation.
+Approved action calls execute with the approved input; `beforeToolCall` may still
+block or substitute the result, but input substitution for an already-approved
+action returns `ActionApprovalInputError`.
+
+Retention: abandoned pending rows are swept by `_sweepActionPendingApprovals`
+(select-then-delete-by-id, throttled, generous configurable
+`actionPendingApprovalTtlMs`) wired into `onStart` recovery. Lifecycle is
+observable via `action:pause:created` / `:approved` / `:rejected` / `:swept`.
 
 ### 6. Idempotency ledger
 
@@ -506,13 +559,13 @@ stable across the re-entry path.
 adapter's `classifyRecoveredTurn` outcomes so one model covers tools and
 channels:
 
-| Kind              | On crash mid-flight                        | Replay safety                                                        |
-| ----------------- | ------------------------------------------ | -------------------------------------------------------------------- |
-| `server`          | re-run via recovery retry                  | ledger returns settled result for stable keys; otherwise re-executes |
-| `client`          | client re-resolves                         | resolved client-side; not server-executed                            |
-| `approval-gated`  | parked (pending interaction → budget-free) | re-executes only after approval; ledger applies post-approval        |
-| `durable-pause`   | parked; resumes via `approveExecution`     | execution id is the dedup anchor; ledger v1 does not apply           |
-| `delegated-agent` | child run reattached, not restarted        | child's own ledger/recovery (`agent-tools.md`)                       |
+| Kind              | On crash mid-flight                                                              | Replay safety                                                                                            |
+| ----------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `server`          | re-run via recovery retry                                                        | ledger returns settled result for stable keys; otherwise re-executes                                     |
+| `client`          | client re-resolves                                                               | resolved client-side; not server-executed                                                                |
+| `approval-gated`  | parked (pending interaction → budget-free)                                       | re-executes only after approval; ledger applies post-approval                                            |
+| `durable-pause`   | parked in durable store; resumes via `approveExecution` (connection-independent) | claim-by-delete on the pending row is the dedup anchor; the approved run flows through the action ledger |
+| `delegated-agent` | child run reattached, not restarted                                              | child's own ledger/recovery (`agent-tools.md`)                                                           |
 
 Kind is inferred when not explicit: `approval` set → `approval-gated`; no server
 `execute` → `client`; delegates to a sub-agent → `delegated-agent`; otherwise
@@ -566,11 +619,32 @@ const markAsVoiceNote = action({
 ```
 
 Implementation: attachments accumulate on the active turn (keyed by
-`requestId`), cleared at turn end. They are exposed at the existing delivery hook
-points — `onChatResponse` / `_fireResponseHook` (full `UIMessage`,
-`think.ts:8764`) and the messenger `TextStreamCallback` — so the Channels and
-Voice RFCs can consume them. This RFC only defines the recording API and the
-open `ReplyAttachment` union; it does not render anything.
+`requestId`) and are exposed at the existing response hook point —
+`onChatResponse` / `_fireResponseHook` — via
+`ChatResponseResult.attachments`. Think also exposes
+`replyAttachments(requestId?)` as a server-side getter for programmatic callers
+that need to inspect the most recent turn after it completes. This RFC only
+defines the recording API and the open `ReplyAttachment` union; it does not
+render anything.
+
+**Shipped subset:** `ctx.attachReply(attachment)` is implemented for normal
+server-action execution and for approval-gated actions after approval (the AI
+SDK re-invokes `execute` inside a regular turn). Attachments are advisory and
+best-effort: invalid values are ignored, payloads are JSON-normalized on record
+(so bigint/circular/function/symbol values cannot break downstream persistence
+or RPC), snapshots are deep-copied on read, and a per-turn cap drops extras.
+Policy callbacks (`approval`, `permissions`, function-valued `idempotencyKey`)
+receive a no-op `attachReply`; attachments from an `execute` that later throws
+or aborts are discarded. The shared `agents/chat` lifecycle type uses an open
+base shape for `ChatResponseResult.attachments`; Think exports the named
+`voice_note` / `email_draft` / `card` union for `ctx.attachReply` DX.
+
+`durable-pause` approved actions are a v1 no-op for `attachReply`: approval runs
+their `execute` under the original pause row, then delivers the result through a
+later continuation turn with a new `requestId`. Persisting attachments on the
+pause row or ledger so they survive that handoff remains future work. This is
+the same lifetime rule as ledger replay: attachments are guaranteed only on the
+producing attempt and are not re-applied when `execute` is skipped.
 
 ## Type integration
 
@@ -596,6 +670,7 @@ New `action:*` events, parallel to `chat:recovery:*` and the Turns RFC's
 - `action:settled` — `{ durationMs, truncated }`
 - `action:replayed` — `{ from: "ledger" }`
 - `action:timed-out` / `action:error` — `{ name, message }`
+- `action:reply-attached` — `{ action?, attachmentType }`
 
 These give a consistent action ledger across surfaces and feed the
 recovery-visible UI story.
@@ -606,11 +681,12 @@ recovery-visible UI story.
   a changeset.
 - New: `action()` export, `getActions()` hook (default `{}`),
   `authorizeTurn`/`authorizeAction` hooks (default full-grant → no behavior
-  change), and approval descriptors on action approval parts.
+  change), approval descriptors on action approval parts, `ctx.attachReply`, and
+  `ChatResponseResult.attachments`.
 - Unchanged: `getTools()`, `beforeToolCall`/`afterToolCall`, both approval paths.
   Actions are ordinary tools downstream, so they compose with all of these.
-- `attachReply` is inert until the Channels/Voice RFCs consume it; shipping it
-  early is safe.
+- `attachReply` records advisory delivery hints only; Channels/Voice still own
+  rendering, so unrecognized attachments are ignored by consumers.
 
 ## Testing strategy
 
@@ -625,10 +701,15 @@ recovery-visible UI story.
    `approval-requested → tool-approval → auto-continuation` path;
    `durable-pause` parks and resumes via `approveExecution`. Stable descriptor
    present on the part.
-5. **Guardrail tests.** Timeout aborts via `ctx.signal`; thrown error →
+5. **Reply attachment tests.** `ctx.attachReply` records JSON-safe attachments
+   on normal and approval-gated action execution, caps per-turn volume, exposes
+   them on `ChatResponseResult.attachments` / `replyAttachments()`, ignores
+   predicate/durable-pause-resume no-op calls, and does not re-fire on ledger
+   replay.
+6. **Guardrail tests.** Timeout aborts via `ctx.signal`; thrown error →
    `output-error` (stream survives); truncation + notice; safe-stringify on
    circular/bigint.
-6. **Recovery-coordination tests.** A settled action is not re-executed on
+7. **Recovery-coordination tests.** A settled action is not re-executed on
    `recovery-continue`/`recovery-retry`; reuse the deploy-churn e2e style
    (which already uses a `tool_ledger` fixture) to prove no double side effect
    across a crash.
@@ -645,8 +726,18 @@ recovery-visible UI story.
   (`tool-state.ts:204`); the action does not execute and the ledger records
   nothing.
 - **`attachReply` is advisory** — it never alters the tool's model-visible
-  output, and an unrecognized attachment type is ignored by surfaces that don't
+  output, invalid values are ignored, payloads are JSON-normalized and capped per
+  turn, and an unrecognized attachment type is ignored by surfaces that don't
   understand it.
+- **`attachReply` belongs to successful `execute`.** Approval predicates,
+  permission policies, and function-valued idempotency keys receive a no-op
+  recorder; if `execute` attaches and then fails/aborts, the attachments from
+  that failed attempt are rolled back.
+- **`attachReply` lifetime.** Normal server actions and approval-gated actions
+  after approval can attach reply metadata in the producing turn. Durable-pause
+  approved actions are a v1 no-op because the final reply is delivered by a later
+  continuation turn with a new request id; persisting attachments across that
+  handoff remains future work.
 - **Timeout vs turn abort** — `ctx.signal` fires on either; the action must
   treat abort as "stop now," and partial side effects are the action's
   responsibility (the ledger records `failed`/`pending`, not partial success).
@@ -750,14 +841,17 @@ Suggested implementation order:
 1. `action()` + `Action` brand + `getActions()` + `actionToTool` with guardrails
    (timeout, structured errors, truncation, safe-stringify). No
    permissions/ledger yet — pure additive win.
-2. Stable approval descriptor over the existing approval-gated AI SDK path.
-   Durable-pause descriptor mapping remains planned.
+2. Stable approval descriptor over the existing approval-gated AI SDK path, and
+   (Step 5) the unified descriptor + durable-pause store + connection-independent
+   resume for durable-pause and codemode pauses.
 3. `authorizeTurn`/`authorizeAction` (default full-grant).
    Shipped for server actions.
 4. `cf_think_action_ledger` for replay-safe settled server actions; reconcile
    keys with submissions/events. Sequence the recovery-replay tests after the
    chat-recovery RFC lands.
-5. `ctx.attachReply` recording (inert until the Channels/Voice RFCs consume it).
+5. `ctx.attachReply` recording shipped: advisory, JSON-safe reply attachments
+   surface on `ChatResponseResult.attachments` / `replyAttachments()` and remain
+   inert until Channels/Voice consume them.
 6. `action:*` observability.
 
 ## The decision
@@ -766,6 +860,6 @@ _Pending review._ Proposed direction: ship `action()` + `getActions()` with
 authorization hooks defaulting to full-grant, a `cf_think_action_ledger` for
 replay-safe settled server actions reconciled with submission/event keys, a
 stable approval descriptor over the two existing approval paths, standard
-guardrails, and an inert `ctx.attachReply()` for the Channels/Voice RFCs to
+guardrails, and `ctx.attachReply()` recording for the Channels/Voice RFCs to
 consume. All additive; sequence the ledger/recovery reconciliation after the
 chat-recovery foundation lands.
