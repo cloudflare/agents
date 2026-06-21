@@ -27,9 +27,13 @@ Second of three sibling API RFCs (turns, actions, channels) to be picked up in
   fields; compiled tools set AI SDK `needsApproval`, and `approval-requested`
   transcript parts carry an `ActionApprovalDescriptor` for the existing
   approval → auto-continuation path.
-- ⛔ **Still planned:** `attachReply`, declarative permissions/authorization,
-  durable-pause approval descriptors, `cf_think_action_ledger`, action
-  observability events, and recovery taxonomy integration are not built yet.
+- ✅ **Step 3 shipped:** server actions can declare `permissions`; Think exposes
+  default-full-grant `authorizeTurn` and `authorizeAction` hooks, denies before
+  `execute`, and suppresses approval prompts for unauthorized approval-gated
+  actions.
+- ⛔ **Still planned:** `attachReply`, durable-pause approval descriptors,
+  `cf_think_action_ledger`, action observability events, and recovery taxonomy
+  integration are not built yet.
 - **Depends on the Turns RFC** for `TurnContext`, the `recovery-continue`/
   `recovery-retry` triggers, and `_admitTurn` (authorization resolves once per
   turn at admission). Build Turns first.
@@ -44,9 +48,10 @@ Second of three sibling API RFCs (turns, actions, channels) to be picked up in
   optional" decision, `Think`'s recovery decision stays package-owned, so the
   ledger can be consulted inside `dispatchRecoveredTurn` on recovery re-entry. Use
   the real hook names or update them here when building.)
-- **Step 1 was the partial early win:** the additive descriptor/tool-compilation
-  slice landed before ledger/recovery. The ledger (§6), authorization (§4), and
-  recovery taxonomy (§7) still gate the production-safe side-effect story.
+- **Steps 1–3 are the partial early win:** the additive descriptor,
+  approval-descriptor, and authorization slices landed before ledger/recovery.
+  The ledger (§6) and recovery taxonomy (§7) still gate the replay-safe
+  side-effect story.
 - **Produces a seam the Channels RFC consumes:** `ctx.attachReply()` (§9) is
   inert until Channels/Voice render it.
 
@@ -189,10 +194,9 @@ interface Action<Input = unknown, Output = unknown> {
 
 **Shipped subset:** the current implementation includes `name`,
 `description`, schema-inferred `inputSchema` typing for `execute(input, ctx)`,
-`outputSchema` as reserved metadata, `timeoutMs`, `kind`, `approval`,
-`approvalSummary`, `approvalRisk`, and `execute`. `permissions` and
-`idempotencyKey` remain planned-only until the authorization and ledger slices
-land.
+`outputSchema` as reserved metadata, `permissions`, `timeoutMs`, `kind`,
+`approval`, `approvalSummary`, `approvalRisk`, and `execute`. `idempotencyKey`
+remains planned-only until the ledger slice lands.
 
 Example:
 
@@ -284,11 +288,12 @@ compile into it for the `approval-gated` kind.
 
 **Shipped subset:** the compiled tool currently performs timeout/abort,
 structured error mapping, JSON-safe output normalization (including bigint and
-circular-reference handling), output truncation, and AI SDK `needsApproval`
-derivation for approval-gated actions. It leaves `beforeToolCall`/`afterToolCall`
-behavior to the existing Think wrapper, so approved actions still pass through
-that outer gate before `execute`. It does not yet run authorization,
-output-schema validation, ledger lookup, or ledger writes.
+circular-reference handling), output truncation, authorization checks, and AI SDK
+`needsApproval` derivation for approval-gated actions. Authorization also runs
+while deriving `needsApproval`, so denied actions never prompt for approval. It
+leaves `beforeToolCall`/`afterToolCall` behavior to the existing Think wrapper,
+so approved actions still pass through that outer gate before `execute`. It does
+not yet run output-schema validation, ledger lookup, or ledger writes.
 
 ### 3. `ActionContext` (`ctx`)
 
@@ -336,32 +341,22 @@ caller _has_ (resolved per turn).
   overridable hook:
 
 ```ts
-type AuthorizationContext = {
-  /**
-   * Granted permission scopes for this turn. The sentinel `"*"` means
-   * grant-all (the default), which avoids needing to enumerate every scope.
-   */
-  granted: Set<string> | "*";
-  /** Opaque caller identity (channel user, API key subject, etc.). */
-  subject?: string;
-  /** Free-form claims for custom authorize logic. */
-  claims?: Record<string, unknown>;
-};
+type ActionAuthorizationDecision =
+  | boolean
+  | {
+      allowed: boolean;
+      reason?: string;
+      grantedPermissions?: readonly string[];
+    };
 
-protected async authorizeTurn(turn: TurnContext): Promise<AuthorizationContext> {
-  // default: full grant (back-compatible — no behavior change for existing apps)
-  return { granted: "*" };
+authorizeTurn(turn: TurnContext): ActionAuthorizationDecision {
+  // default: true (full grant, back-compatible)
+  return true;
 }
 
-/** Per-action decision; default = granted ⊇ required. Override for custom logic. */
-protected async authorizeAction(args: {
-  action: Action;
-  required: string[];
-  ctx: ActionContext;
-}): Promise<boolean> {
-  const { granted } = args.ctx.authorization;
-  if (granted === "*") return true;
-  return args.required.every((p) => granted.has(p));
+authorizeAction(ctx: ActionAuthorizationContext): ActionAuthorizationDecision {
+  // default: grantedPermissions is undefined => full grant; otherwise require
+  // every declared permission to be present in the turn grant.
 }
 ```
 
@@ -372,6 +367,14 @@ On denial the action does not execute; the model receives a structured
 `output-error` ("not authorized: requires billing:refund"), so the assistant can
 explain rather than crash. Default behavior is **full grant**, so existing apps
 see no change until they opt in.
+
+**Shipped subset:** `permissions`, `authorizeTurn`, and `authorizeAction` are
+implemented for server actions. `authorizeTurn` runs once per turn after
+`beforeTurn` overrides are applied. The default `authorizeAction` enforces the
+turn's `grantedPermissions` when provided and otherwise grants all permissions.
+Approval-gated actions consult authorization while deriving `needsApproval`, so
+denied actions skip the prompt and return the structured authorization error
+from `execute`.
 
 ### 5. Approval — reuse, don't reinvent
 
@@ -577,7 +580,7 @@ recovery-visible UI story.
   a changeset.
 - New: `action()` export, `getActions()` hook (default `{}`),
   `authorizeTurn`/`authorizeAction` hooks (default full-grant → no behavior
-  change), `cf_think_action_ledger` table (additive migration).
+  change), and approval descriptors on action approval parts.
 - Unchanged: `getTools()`, `beforeToolCall`/`afterToolCall`, both approval paths.
   Actions are ordinary tools downstream, so they compose with all of these.
 - `attachReply` is inert until the Channels/Voice RFCs consume it; shipping it
@@ -724,6 +727,7 @@ Suggested implementation order:
 2. Stable approval descriptor over the existing approval-gated AI SDK path.
    Durable-pause descriptor mapping remains planned.
 3. `authorizeTurn`/`authorizeAction` (default full-grant).
+   Shipped for server actions.
 4. `cf_think_action_ledger` for replay-safe settled server actions; reconcile
    keys with submissions/events. Sequence the recovery-replay tests after the
    chat-recovery RFC lands.

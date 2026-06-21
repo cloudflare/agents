@@ -312,6 +312,21 @@ function actionErrorEnvelope(error: unknown): {
   };
 }
 
+function actionAuthorizationErrorEnvelope(
+  reason: string | undefined,
+  permissions: string[]
+): {
+  error: { name: string; message: string; permissions: string[] };
+} {
+  return {
+    error: {
+      name: "ActionAuthorizationError",
+      message: reason ?? "Action is not authorized",
+      permissions
+    }
+  };
+}
+
 function safeStringifyActionOutput(output: unknown): {
   value?: string;
   lossy: boolean;
@@ -997,6 +1012,34 @@ export type ActionApprovalPolicy<Input> =
       ctx: ActionContext;
     }) => boolean | Promise<boolean>);
 
+export type ActionPermissionSpec<Input> =
+  | readonly string[]
+  | ((args: {
+      input: Input;
+      ctx: ActionContext;
+    }) => readonly string[] | Promise<readonly string[]>);
+
+export type ActionAuthorizationDecision =
+  | boolean
+  | {
+      allowed: boolean;
+      reason?: string;
+      grantedPermissions?: readonly string[];
+    };
+
+export interface ActionAuthorizationContext {
+  requestId: string;
+  toolCallId: string;
+  action: string;
+  kind: ActionKind;
+  input: unknown;
+  requiredPermissions: readonly string[];
+  grantedPermissions?: readonly string[];
+  messages: ReadonlyArray<ModelMessage>;
+  agent: Think;
+  env: Cloudflare.Env;
+}
+
 export interface ActionApprovalDescriptor {
   requestId: string;
   toolCallId: string;
@@ -1018,6 +1061,7 @@ export interface ActionConfig<
   inputSchema: InputSchema;
   /** Reserved metadata; output validation is not enforced yet. */
   outputSchema?: FlexibleSchema<Output>;
+  permissions?: ActionPermissionSpec<InferSchema<InputSchema>>;
   approval?: ActionApprovalPolicy<InferSchema<InputSchema>>;
   approvalSummary?: string;
   approvalRisk?: "low" | "medium" | "high";
@@ -1061,6 +1105,12 @@ type CompiledActionMetadata = {
   summary: string;
   risk?: "low" | "medium" | "high";
   kind: "approval-gated" | "durable-pause";
+};
+
+type NormalizedActionAuthorization = {
+  allowed: boolean;
+  reason?: string;
+  grantedPermissions?: readonly string[];
 };
 
 type TurnTrigger =
@@ -3464,6 +3514,13 @@ export class Think<
    */
   private _activeTurnTools: ToolSet = {};
   private _activeTurnActionMetadata = new Map<string, CompiledActionMetadata>();
+  private _activeTurnAuthorization: NormalizedActionAuthorization = {
+    allowed: true
+  };
+  private _activeTurnActionApprovalDescriptors = new Map<
+    string,
+    ActionApprovalDescriptor
+  >();
 
   /**
    * Number of times the proactive guard has compacted within the current
@@ -3620,6 +3677,46 @@ export class Think<
   beforeTurn(
     _ctx: TurnContext
   ): TurnConfig | void | Promise<TurnConfig | void> {}
+
+  /**
+   * Authorize action permissions for the current turn. Returning `true` grants
+   * all action permissions. Returning `grantedPermissions` limits the default
+   * `authorizeAction` implementation to that permission set.
+   */
+  authorizeTurn(
+    _ctx: TurnContext
+  ): ActionAuthorizationDecision | Promise<ActionAuthorizationDecision> {
+    return true;
+  }
+
+  /**
+   * Authorize a single action call after its model input and required
+   * permissions are known. Override this for app-specific policy; the default
+   * implementation enforces the grant returned from `authorizeTurn`.
+   */
+  authorizeAction(
+    ctx: ActionAuthorizationContext
+  ): ActionAuthorizationDecision | Promise<ActionAuthorizationDecision> {
+    const turnAuthorization = this._activeTurnAuthorization;
+    if (!turnAuthorization.allowed) {
+      return {
+        allowed: false,
+        reason: turnAuthorization.reason
+      };
+    }
+    if (turnAuthorization.grantedPermissions === undefined) {
+      return true;
+    }
+    const granted = new Set(turnAuthorization.grantedPermissions);
+    const missing = ctx.requiredPermissions.filter(
+      (permission) => !granted.has(permission)
+    );
+    if (missing.length === 0) return true;
+    return {
+      allowed: false,
+      reason: `Missing required permission: ${missing.join(", ")}`
+    };
+  }
 
   /**
    * Called before each AI SDK step in the agentic loop. Backed by
@@ -4103,6 +4200,7 @@ export class Think<
     // Reset the per-turn watchdog override; `beforeTurn` may set it below. A
     // turn that doesn't override falls back to the instance-level value.
     this._activeStallTimeoutMs = undefined;
+    this._activeTurnAuthorization = { allowed: true };
     // Reset the proactive-compaction cap for this streamText run.
     this._proactiveCompactionsThisRun = 0;
     if (this.waitForMcpConnections) {
@@ -4187,6 +4285,16 @@ export class Think<
     const mergedTools: ToolSet = config.tools
       ? { ...tools, ...config.tools }
       : tools;
+    const finalTurnContext: TurnContext = {
+      ...ctx,
+      system: finalSystem,
+      messages: finalMessages,
+      tools: mergedTools,
+      model: finalModel
+    };
+    this._activeTurnAuthorization = this._normalizeActionAuthorization(
+      await this.authorizeTurn(finalTurnContext)
+    );
     // Wrap each tool's `execute` so `beforeToolCall` is consulted before
     // the tool actually runs. The wrapped `execute` honors the returned
     // `ToolCallDecision` — `block` short-circuits with `reason`,
@@ -4439,10 +4547,67 @@ export class Think<
     return result;
   }
 
+  private _normalizeActionAuthorization(
+    decision: ActionAuthorizationDecision
+  ): NormalizedActionAuthorization {
+    if (typeof decision === "boolean") {
+      return { allowed: decision };
+    }
+    return {
+      allowed: decision.allowed,
+      ...(decision.reason !== undefined && { reason: decision.reason }),
+      ...(decision.grantedPermissions !== undefined && {
+        grantedPermissions: [...decision.grantedPermissions]
+      })
+    };
+  }
+
+  private async _resolveActionPermissions(
+    spec: ActionPermissionSpec<unknown> | undefined,
+    input: unknown,
+    ctx: ActionContext
+  ): Promise<string[]> {
+    if (spec === undefined) return [];
+    const permissions =
+      typeof spec === "function" ? await spec({ input, ctx }) : spec;
+    return [...permissions];
+  }
+
+  private async _authorizeActionCall(options: {
+    actionName: string;
+    kind: ActionKind;
+    input: unknown;
+    ctx: ActionContext;
+    permissions?: ActionPermissionSpec<unknown>;
+  }): Promise<NormalizedActionAuthorization & { permissions: string[] }> {
+    const permissions = await this._resolveActionPermissions(
+      options.permissions,
+      options.input,
+      options.ctx
+    );
+    const decision = await this.authorizeAction({
+      requestId: options.ctx.requestId,
+      toolCallId: options.ctx.toolCallId,
+      action: options.actionName,
+      kind: options.kind,
+      input: options.input,
+      requiredPermissions: permissions,
+      grantedPermissions: this._activeTurnAuthorization.grantedPermissions,
+      messages: options.ctx.messages,
+      agent: this,
+      env: this.env as Cloudflare.Env
+    });
+    return {
+      ...this._normalizeActionAuthorization(decision),
+      permissions
+    };
+  }
+
   private async _compileActionTools(): Promise<ToolSet> {
     const actions = await this.getActions();
     const tools: ToolSet = {};
     this._activeTurnActionMetadata = new Map();
+    this._activeTurnActionApprovalDescriptors = new Map();
     for (const [registrationName, descriptor] of Object.entries(actions)) {
       if (!isAction(descriptor)) {
         throw new Error(
@@ -4471,7 +4636,7 @@ export class Think<
 
   private _actionToTool(
     descriptor: Action,
-    _toolName: string,
+    toolName: string,
     kind: ActionKind
   ): ToolSet[string] {
     const config = descriptor.config;
@@ -4482,34 +4647,61 @@ export class Think<
     const approval = config.approval as
       | ActionApprovalPolicy<unknown>
       | undefined;
+    const permissions = config.permissions as
+      | ActionPermissionSpec<unknown>
+      | undefined;
 
     return tool({
       description: config.description,
       inputSchema: config.inputSchema as never,
       ...(approval !== undefined && kind !== "durable-pause"
         ? {
-            needsApproval:
-              typeof approval === "function"
-                ? async (
-                    input: unknown,
-                    options: {
-                      toolCallId: string;
-                      messages: ModelMessage[];
-                    }
-                  ) =>
-                    approval({
-                      input,
-                      ctx: {
-                        agent: this,
-                        env: this.env as Cloudflare.Env,
-                        requestId:
-                          admittedTurnContext.getStore()?.requestId ?? "",
-                        toolCallId: options.toolCallId,
-                        messages: options.messages,
-                        signal: new AbortController().signal
-                      }
-                    })
-                : approval
+            needsApproval: async (
+              input: unknown,
+              options: {
+                toolCallId: string;
+                messages: ModelMessage[];
+              }
+            ) => {
+              const ctx: ActionContext = {
+                agent: this,
+                env: this.env as Cloudflare.Env,
+                requestId: admittedTurnContext.getStore()?.requestId ?? "",
+                toolCallId: options.toolCallId,
+                messages: options.messages,
+                signal: new AbortController().signal
+              };
+              const authorization = await this._authorizeActionCall({
+                actionName: toolName,
+                kind,
+                input,
+                ctx,
+                permissions
+              });
+              if (!authorization.allowed) return false;
+              const needsApproval =
+                typeof approval === "function"
+                  ? await approval({ input, ctx })
+                  : approval;
+              if (needsApproval) {
+                this._activeTurnActionApprovalDescriptors.set(
+                  options.toolCallId,
+                  {
+                    requestId: ctx.requestId,
+                    toolCallId: options.toolCallId,
+                    action: toolName,
+                    summary: config.approvalSummary ?? config.description,
+                    input,
+                    permissions: authorization.permissions,
+                    ...(config.approvalRisk !== undefined && {
+                      risk: config.approvalRisk
+                    }),
+                    kind: "approval-gated"
+                  }
+                );
+              }
+              return needsApproval;
+            }
           }
         : {}),
       execute: async (
@@ -4525,6 +4717,14 @@ export class Think<
           config.timeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS
         );
         const requestId = admittedTurnContext.getStore()?.requestId ?? "";
+        const actionContext: ActionContext = {
+          agent: this,
+          env: this.env as Cloudflare.Env,
+          requestId,
+          toolCallId: options.toolCallId ?? "",
+          messages: options.messages ?? [],
+          signal
+        };
         const abortError = () =>
           signal.reason instanceof Error
             ? signal.reason
@@ -4534,22 +4734,26 @@ export class Think<
         let onAbort: (() => void) | undefined;
 
         try {
+          const authorization = await this._authorizeActionCall({
+            actionName: toolName,
+            kind,
+            input,
+            ctx: actionContext,
+            permissions
+          });
+          if (!authorization.allowed) {
+            return actionAuthorizationErrorEnvelope(
+              authorization.reason,
+              authorization.permissions
+            );
+          }
           if (signal.aborted) throw abortError();
           const abortPromise = new Promise<never>((_, reject) => {
             onAbort = () => reject(abortError());
             signal.addEventListener("abort", onAbort, { once: true });
           });
           const output = await Promise.race([
-            Promise.resolve(
-              executeAction(input, {
-                agent: this,
-                env: this.env as Cloudflare.Env,
-                requestId,
-                toolCallId: options.toolCallId ?? "",
-                messages: options.messages ?? [],
-                signal
-              })
-            ),
+            Promise.resolve(executeAction(input, actionContext)),
             abortPromise
           ]);
           return prepareActionOutputForModel(output);
@@ -8723,6 +8927,15 @@ export class Think<
     }
 
     if (chunk.type !== "tool-approval-request" || !toolCallId) return chunk;
+
+    const storedDescriptor =
+      this._activeTurnActionApprovalDescriptors.get(toolCallId);
+    if (storedDescriptor) {
+      return {
+        ...chunk,
+        approvalDescriptor: storedDescriptor
+      };
+    }
 
     let pending = pendingActionCalls.get(toolCallId);
     if (!pending && parts) {

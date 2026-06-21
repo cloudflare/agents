@@ -311,6 +311,33 @@ describe("Think — actions compile into guarded tools", () => {
     expect(probe.context?.messageCount).toBeGreaterThan(0);
   });
 
+  it("allows permissioned actions by default", async () => {
+    const agent = await freshToolAgent("action-permission-default");
+    await agent.useEchoActionForTest("permission");
+    await agent.testChat("call echo action");
+
+    expect((await agent.getActionProbe()).count).toBe(1);
+    const after = await agent.getAfterToolCallLog();
+    expect(JSON.parse(after[0].outputJson)).toBe("action echo: hello");
+  });
+
+  it("denies permissioned actions before execute", async () => {
+    const agent = await freshToolAgent("action-permission-denied");
+    await agent.useEchoActionForTest("permission");
+    await agent.setActionGrantedPermissions([]);
+    await agent.testChat("call echo action");
+
+    expect((await agent.getActionProbe()).count).toBe(0);
+    const after = await agent.getAfterToolCallLog();
+    expect(JSON.parse(after[0].outputJson)).toEqual({
+      error: {
+        name: "ActionAuthorizationError",
+        message: "Missing required permission: echo:run",
+        permissions: ["echo:run"]
+      }
+    });
+  });
+
   it("maps thrown action errors to structured tool output", async () => {
     const agent = await freshToolAgent("action-throw");
     await agent.useEchoActionForTest("throw");
@@ -364,7 +391,8 @@ describe("Think — actions compile into guarded tools", () => {
   it("emits an approval request with a stable action descriptor", async () => {
     const room = `action-approval-request-${crypto.randomUUID()}`;
     const agent = await freshToolAgent(room);
-    await agent.useEchoActionForTest("approval");
+    await agent.useEchoActionForTest("approval-permission");
+    await agent.setActionGrantedPermissions(["echo:run"]);
     const ws = await connectWS("ThinkToolsTestAgent", room);
 
     const initialDone = waitForDone(ws);
@@ -390,7 +418,7 @@ describe("Think — actions compile into guarded tools", () => {
         action: "echo",
         summary: "Approve echo action",
         input: { message: "hello" },
-        permissions: [],
+        permissions: ["echo:run"],
         risk: "low",
         kind: "approval-gated"
       }
@@ -409,6 +437,51 @@ describe("Think — actions compile into guarded tools", () => {
           action: "echo",
           summary: "Approve echo action",
           input: { message: "hello" }
+        }
+      }
+    });
+
+    await closeWS(ws);
+  });
+
+  it("denies approval-gated actions before prompting", async () => {
+    const room = `action-approval-denied-before-prompt-${crypto.randomUUID()}`;
+    const agent = await freshToolAgent(room);
+    await agent.useEchoActionForTest("approval-permission");
+    await agent.setActionGrantedPermissions([]);
+    const ws = await connectWS("ThinkToolsTestAgent", room);
+
+    const initialDone = waitForDone(ws);
+    sendChatRequest(ws, "call echo action");
+    const initialFrames = await initialDone;
+    const chunks = initialFrames
+      .filter(
+        (frame) =>
+          frame.type === MSG_CHAT_RESPONSE &&
+          typeof frame.body === "string" &&
+          frame.body.length > 0
+      )
+      .map(
+        (frame) => JSON.parse(frame.body as string) as Record<string, unknown>
+      );
+    expect(chunks.some((chunk) => chunk.type === "tool-approval-request")).toBe(
+      false
+    );
+    expect((await agent.getActionProbe()).count).toBe(0);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    const toolPart = messages
+      .flatMap((message) => message.parts)
+      .find((part) => "toolCallId" in part && part.toolCallId === "tc1") as
+      | Record<string, unknown>
+      | undefined;
+    expect(toolPart).toMatchObject({
+      state: "output-available",
+      output: {
+        error: {
+          name: "ActionAuthorizationError",
+          message: "Missing required permission: echo:run",
+          permissions: ["echo:run"]
         }
       }
     });

@@ -39,6 +39,8 @@ import type {
   ToolCallDecision,
   ToolCallResultContext,
   Action,
+  ActionAuthorizationContext,
+  ActionAuthorizationDecision,
   StepContext,
   ChunkContext
 } from "../../think";
@@ -3261,11 +3263,23 @@ export class ThinkToolsTestAgent extends Think {
       echo: action({
         description: "Echo a message back as an action",
         inputSchema: z.object({ message: z.string() }),
+        permissions:
+          mode === "permission" || mode === "approval-permission"
+            ? ["echo:run"]
+            : undefined,
         timeoutMs: mode === "timeout" ? 5 : undefined,
-        approval: mode === "approval" ? true : undefined,
+        approval:
+          mode === "approval" || mode === "approval-permission"
+            ? true
+            : undefined,
         approvalSummary:
-          mode === "approval" ? "Approve echo action" : undefined,
-        approvalRisk: mode === "approval" ? "low" : undefined,
+          mode === "approval" || mode === "approval-permission"
+            ? "Approve echo action"
+            : undefined,
+        approvalRisk:
+          mode === "approval" || mode === "approval-permission"
+            ? "low"
+            : undefined,
         execute: async ({ message }, ctx): Promise<unknown> => {
           this._actionExecutionCount++;
           this._lastActionContext = {
@@ -3308,8 +3322,12 @@ export class ThinkToolsTestAgent extends Think {
     | "timeout"
     | "large-output"
     | "non-json-output"
-    | "approval" = "default";
+    | "approval"
+    | "permission"
+    | "approval-permission" = "default";
   private _actionExecutionCount = 0;
+  private _actionGrantedPermissions: string[] | null | undefined = undefined;
+  private _denyActionReason: string | null = null;
   private _lastActionContext: {
     requestId: string;
     toolCallId: string;
@@ -3329,10 +3347,22 @@ export class ThinkToolsTestAgent extends Think {
       | "timeout"
       | "large-output"
       | "non-json-output"
-      | "approval" = "default"
+      | "approval"
+      | "permission"
+      | "approval-permission" = "default"
   ): Promise<void> {
     this._useEchoAction = true;
     this._actionExecuteMode = mode;
+  }
+
+  async setActionGrantedPermissions(
+    permissions: string[] | null | undefined
+  ): Promise<void> {
+    this._actionGrantedPermissions = permissions;
+  }
+
+  async setDenyActionReason(reason: string | null): Promise<void> {
+    this._denyActionReason = reason;
   }
 
   async getActionProbe(): Promise<{
@@ -3369,6 +3399,25 @@ export class ThinkToolsTestAgent extends Think {
     if (this._turnStopCondition) {
       return { stopWhen: this._turnStopCondition };
     }
+  }
+
+  override authorizeTurn(): ActionAuthorizationDecision {
+    if (this._actionGrantedPermissions === undefined) return true;
+    return {
+      allowed: true,
+      ...(this._actionGrantedPermissions !== null && {
+        grantedPermissions: this._actionGrantedPermissions
+      })
+    };
+  }
+
+  override authorizeAction(
+    ctx: ActionAuthorizationContext
+  ): ActionAuthorizationDecision | Promise<ActionAuthorizationDecision> {
+    if (this._denyActionReason !== null) {
+      return { allowed: false, reason: this._denyActionReason };
+    }
+    return super.authorizeAction(ctx);
   }
 
   private _beforeToolCallThrowMessage: string | null = null;

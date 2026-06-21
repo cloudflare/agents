@@ -48,6 +48,25 @@ const jsonSchemaAction = action({
 });
 void jsonSchemaAction;
 
+const permissionInputAction = action({
+  description: "Use inferred input in permission policy",
+  inputSchema: z.object({ userId: z.string(), amount: z.number() }),
+  permissions({ input }) {
+    const userId: string = input.userId;
+    void userId;
+
+    // @ts-expect-error — `amount` is inferred as number, not string.
+    const amount: string = input.amount;
+    void amount;
+
+    return ["billing:refund"];
+  },
+  execute(input) {
+    return input.amount;
+  }
+});
+void permissionInputAction;
+
 const wrongManualInput = action({
   description: "Reject mismatched manual input annotations",
   inputSchema: z.object({ count: z.number() }),
