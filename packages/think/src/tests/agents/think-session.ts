@@ -3262,10 +3262,7 @@ export class ThinkToolsTestAgent extends Think {
         description: "Echo a message back as an action",
         inputSchema: z.object({ message: z.string() }),
         timeoutMs: mode === "timeout" ? 5 : undefined,
-        execute: async (
-          { message }: { message: string },
-          ctx
-        ): Promise<unknown> => {
+        execute: async ({ message }, ctx): Promise<unknown> => {
           this._actionExecutionCount++;
           this._lastActionContext = {
             requestId: ctx.requestId,
@@ -3280,6 +3277,11 @@ export class ThinkToolsTestAgent extends Think {
           }
           if (mode === "large-output") {
             return `echo: ${message} ${"x".repeat(25_000)}`;
+          }
+          if (mode === "non-json-output") {
+            const output: { count: bigint; self?: unknown } = { count: 12n };
+            output.self = output;
+            return output;
           }
           return `action echo: ${message}`;
         }
@@ -3296,8 +3298,12 @@ export class ThinkToolsTestAgent extends Think {
   private _midTurnInsideLoop: boolean | null = null;
   private _midTurnPersisted: boolean | null = null;
   private _useEchoAction = false;
-  private _actionExecuteMode: "default" | "throw" | "timeout" | "large-output" =
-    "default";
+  private _actionExecuteMode:
+    | "default"
+    | "throw"
+    | "timeout"
+    | "large-output"
+    | "non-json-output" = "default";
   private _actionExecutionCount = 0;
   private _lastActionContext: {
     requestId: string;
@@ -3312,7 +3318,12 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   async useEchoActionForTest(
-    mode: "default" | "throw" | "timeout" | "large-output" = "default"
+    mode:
+      | "default"
+      | "throw"
+      | "timeout"
+      | "large-output"
+      | "non-json-output" = "default"
   ): Promise<void> {
     this._useEchoAction = true;
     this._actionExecuteMode = mode;

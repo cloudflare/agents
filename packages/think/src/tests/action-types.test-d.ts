@@ -1,0 +1,69 @@
+/**
+ * Type-level tests for Think's action descriptor surface.
+ *
+ * Checked by the typecheck script, not vitest.
+ */
+
+import { jsonSchema } from "ai";
+import { z } from "zod";
+import { action } from "../think";
+
+const zodAction = action({
+  description: "Use inferred Zod input",
+  inputSchema: z.object({
+    count: z.number(),
+    label: z.string().optional()
+  }),
+  execute(input) {
+    const count: number = input.count;
+    const label: string | undefined = input.label;
+    void count;
+    void label;
+
+    // @ts-expect-error — `count` is inferred as number, not string.
+    const wrong: string = input.count;
+    void wrong;
+
+    return { ok: true };
+  }
+});
+void zodAction;
+
+const jsonSchemaAction = action({
+  description: "Use inferred AI SDK schema input",
+  inputSchema: jsonSchema<{ enabled: boolean }>({
+    type: "object",
+    properties: { enabled: { type: "boolean" } },
+    required: ["enabled"]
+  }),
+  execute(input) {
+    const enabled: boolean = input.enabled;
+    void enabled;
+
+    // @ts-expect-error — `enabled` is inferred as boolean.
+    input.enabled.toUpperCase();
+
+    return "ok";
+  }
+});
+void jsonSchemaAction;
+
+const wrongManualInput = action({
+  description: "Reject mismatched manual input annotations",
+  inputSchema: z.object({ count: z.number() }),
+  // @ts-expect-error — schema infers `{ count: number }`, not `{ count: string }`.
+  execute(input: { count: string }) {
+    return input.count;
+  }
+});
+void wrongManualInput;
+
+const reservedOutputSchema = action({
+  description: "Accept output schema metadata",
+  inputSchema: z.object({}),
+  outputSchema: z.object({ ok: z.boolean() }),
+  execute() {
+    return { ok: true };
+  }
+});
+void reservedOutputSchema;

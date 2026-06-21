@@ -346,6 +346,19 @@ describe("Think — actions compile into guarded tools", () => {
     expect(output).toContain("[truncated");
     expect(output.length).toBeLessThan(22_000);
   });
+
+  it("normalizes non-JSON-safe action outputs before model consumption", async () => {
+    const agent = await freshToolAgent("action-non-json-output");
+    await agent.useEchoActionForTest("non-json-output");
+    await agent.testChat("call echo action");
+
+    const after = await agent.getAfterToolCallLog();
+    expect(after.length).toBeGreaterThan(0);
+    expect(JSON.parse(after[0].outputJson)).toEqual({
+      count: "12n",
+      self: "[Circular]"
+    });
+  });
 });
 
 // ── ToolCallDecision (block / substitute / allow-with-input) ────

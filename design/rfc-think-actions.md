@@ -184,10 +184,10 @@ interface Action<Input = unknown, Output = unknown> {
 ```
 
 **Shipped step-1 subset:** the current implementation includes `name`,
-`description`, `inputSchema`, `outputSchema` as reserved metadata, `timeoutMs`,
-`kind` as reserved metadata, and `execute`. `permissions`, `approval`, and
-`idempotencyKey` remain planned-only until the authorization, approval, and
-ledger slices land.
+`description`, schema-inferred `inputSchema` typing for `execute(input, ctx)`,
+`outputSchema` as reserved metadata, `timeoutMs`, `kind` as reserved metadata,
+and `execute`. `permissions`, `approval`, and `idempotencyKey` remain
+planned-only until the authorization, approval, and ledger slices land.
 
 Example:
 
@@ -278,7 +278,8 @@ Promise<boolean>`); the `approval` policy plus the authorization check (step 2)
 compile into it for the `approval-gated` kind.
 
 **Shipped step-1 subset:** the compiled tool currently performs timeout/abort,
-structured error mapping, and output truncation, then leaves
+structured error mapping, JSON-safe output normalization (including bigint and
+circular-reference handling), and output truncation, then leaves
 `beforeToolCall`/`afterToolCall` behavior to the existing Think wrapper. It does
 not yet run authorization, approval, output-schema validation, ledger lookup, or
 ledger writes.

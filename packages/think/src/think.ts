@@ -82,6 +82,8 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import type {
+  FlexibleSchema,
+  InferSchema,
   LanguageModel,
   ModelMessage,
   PrepareStepFunction,
@@ -310,23 +312,60 @@ function actionErrorEnvelope(error: unknown): {
   };
 }
 
-function truncateActionOutput(output: unknown): unknown {
+function safeStringifyActionOutput(output: unknown): {
+  value?: string;
+  lossy: boolean;
+  error?: string;
+} {
+  const seen = new WeakSet<object>();
+  let lossy = false;
+  try {
+    const value = JSON.stringify(output, (_key, value: unknown) => {
+      if (typeof value === "bigint") {
+        lossy = true;
+        return `${value.toString()}n`;
+      }
+      if (typeof value === "object" && value !== null) {
+        if (seen.has(value)) {
+          lossy = true;
+          return "[Circular]";
+        }
+        seen.add(value);
+      }
+      return value;
+    });
+    return { value, lossy };
+  } catch (error) {
+    return {
+      lossy: true,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function prepareActionOutputForModel(output: unknown): unknown {
   if (typeof output === "string") {
     if (output.length <= ACTION_OUTPUT_MAX_CHARS) return output;
     return `${output.slice(0, ACTION_OUTPUT_MAX_CHARS)}\n\n[truncated ${output.length - ACTION_OUTPUT_MAX_CHARS} chars]`;
   }
 
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(output);
-  } catch {
-    return output;
+  const serialized = safeStringifyActionOutput(output);
+  if (serialized.error) {
+    return {
+      serialized: false,
+      error: serialized.error
+    };
   }
-  if (serialized.length <= ACTION_OUTPUT_MAX_CHARS) return output;
+  if (serialized.value === undefined) return output;
+  if (serialized.value.length <= ACTION_OUTPUT_MAX_CHARS) {
+    if (!serialized.lossy) return output;
+    return JSON.parse(serialized.value) as unknown;
+  }
+
   return {
     truncated: true,
-    chars: serialized.length,
-    preview: `${serialized.slice(0, ACTION_OUTPUT_MAX_CHARS)}\n\n[truncated ${serialized.length - ACTION_OUTPUT_MAX_CHARS} chars]`
+    chars: serialized.value.length,
+    preview: `${serialized.value.slice(0, ACTION_OUTPUT_MAX_CHARS)}\n\n[truncated ${serialized.value.length - ACTION_OUTPUT_MAX_CHARS} chars]`
   };
 }
 
@@ -951,26 +990,37 @@ export interface ActionContext {
   signal: AbortSignal;
 }
 
-export interface ActionConfig<Input = unknown, Output = unknown> {
+export interface ActionConfig<
+  InputSchema extends FlexibleSchema = FlexibleSchema,
+  Output = unknown
+> {
   /** Defaults to the registration key when returned from getActions(). */
   name?: string;
   description: string;
-  inputSchema: unknown;
-  outputSchema?: unknown;
+  inputSchema: InputSchema;
+  /** Reserved metadata; output validation is not enforced yet. */
+  outputSchema?: FlexibleSchema<Output>;
   timeoutMs?: number;
   kind?: ActionKind;
-  execute(input: Input, ctx: ActionContext): Promise<Output> | Output;
+  execute(
+    input: InferSchema<InputSchema>,
+    ctx: ActionContext
+  ): Promise<Output> | Output;
 }
 
-export interface Action<Input = unknown, Output = unknown> {
+export interface Action<
+  InputSchema extends FlexibleSchema = FlexibleSchema,
+  Output = unknown
+> {
   readonly [ACTION_BRAND]: true;
-  readonly config: ActionConfig<Input, Output>;
+  readonly config: ActionConfig<InputSchema, Output>;
 }
 
-export function action<Input = unknown, Output = unknown>(
-  config: ActionConfig<Input, Output>
-): Action<Input, Output> {
-  const descriptor: Action<Input, Output> = {
+export function action<
+  const InputSchema extends FlexibleSchema,
+  Output = unknown
+>(config: ActionConfig<InputSchema, Output>): Action<InputSchema, Output> {
+  const descriptor: Action<InputSchema, Output> = {
     [ACTION_BRAND]: true,
     config: Object.freeze({ ...config })
   };
@@ -4425,7 +4475,7 @@ export class Think<
             ),
             abortPromise
           ]);
-          return truncateActionOutput(output);
+          return prepareActionOutputForModel(output);
         } catch (error) {
           return actionErrorEnvelope(error);
         } finally {
