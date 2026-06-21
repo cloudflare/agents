@@ -1485,6 +1485,7 @@ type ActionLedgerClaim =
   | { outcome: "claimed" }
   | { outcome: "replay"; row: ActionLedgerRow }
   | { outcome: "pending"; row: ActionLedgerRow }
+  | { outcome: "reclaimed"; row: ActionLedgerRow }
   | { outcome: "conflict"; row: ActionLedgerRow };
 
 type ActionLedgerRetentionConfig = {
@@ -1518,6 +1519,15 @@ type ActionLedgerEvent =
   | {
       type: "action:ledger:settled";
       payload: { action: string; key: string; inputHash: string };
+    }
+  | {
+      type: "action:ledger:reclaimed";
+      payload: {
+        action: string;
+        key: string;
+        inputHash: string;
+        ageMs: number;
+      };
     }
   | {
       type: "action:ledger:swept";
@@ -3669,6 +3679,21 @@ export class Think<
   };
 
   /**
+   * Lease window after which a durable `pending` action ledger row is assumed
+   * abandoned (its executor isolate died) and may be reclaimed and re-run.
+   * Reclaim re-runs `execute`, so it only applies to actions that declare an
+   * explicit `idempotencyKey` — that key is the developer's assertion that the
+   * keyed side effect is safe to retry. Fallback `tool:${toolCallId}` keys are
+   * never reclaimed. Set to `false` to disable stale-pending reclaim entirely
+   * (a stale row then blocks forever with `ActionPendingError`, the old
+   * behavior). This is a retry lease, not a retention window: retention answers
+   * "when may we delete old rows?"; the lease answers "when may we assume the
+   * previous executor died and retry safely?". Keep `actionLedgerRetention.pendingMs`
+   * well above this lease so reclaim happens before a sweep deletes the row.
+   */
+  actionLedgerPendingRetryLeaseMs: number | false = 5 * 60 * 1000;
+
+  /**
    * Retention window for abandoned durable-pause approval rows — a
    * `kind: "durable-pause"` action that parked but was never approved or
    * rejected. Deleting a row makes that approval permanently unresolvable, so
@@ -5209,12 +5234,18 @@ export class Think<
     }
 
     const inputHash = this._actionInputHash(input);
+    // An explicit `idempotencyKey` is the developer's assertion that retrying
+    // the keyed side effect is safe; only those rows are reclaimable when stale.
+    // Fallback `tool:${toolCallId}` keys stay conservative.
+    const hasExplicitIdempotencyKey = idempotencyKey !== undefined;
     const claim = this._claimActionLedgerRow({
       key: ledgerKey,
       actionName: toolName,
       requestId: ctx.requestId,
       toolCallId: ctx.toolCallId,
-      inputHash
+      inputHash,
+      retryablePending: hasExplicitIdempotencyKey,
+      leaseMs: this.actionLedgerPendingRetryLeaseMs
     });
     if (claim.outcome === "replay") {
       this._emitActionLedgerEvent({
@@ -5236,6 +5267,19 @@ export class Think<
         payload: { action: toolName, key: ledgerKey, inputHash }
       });
       return actionKeyConflictEnvelope(toolName, ledgerKey);
+    }
+    // `claimed` (fresh row) and `reclaimed` (stale row re-leased) both fall
+    // through to execution below; reclaim just re-runs the keyed side effect.
+    if (claim.outcome === "reclaimed") {
+      this._emitActionLedgerEvent({
+        type: "action:ledger:reclaimed",
+        payload: {
+          action: toolName,
+          key: ledgerKey,
+          inputHash,
+          ageMs: Date.now() - claim.row.updated_at
+        }
+      });
     }
 
     const attachmentCount = this._activeTurnReplyAttachments.length;
@@ -6852,14 +6896,26 @@ export class Think<
     return rows[0] ?? null;
   }
 
+  /**
+   * Claim a ledger key for execution. Read-then-write with no `await` between
+   * the read and any write, so within the single DO isolate two claims cannot
+   * interleave — the same race-free idiom documented on
+   * {@link _claimActionPendingRow}. The only way a durable `pending` row
+   * outlives its writer is a crashed prior isolate, which has no live writer to
+   * race; that is the row a stale reclaim safely re-runs.
+   */
   private _claimActionLedgerRow(options: {
     key: string;
     actionName: string;
     requestId: string;
     toolCallId: string;
     inputHash: string;
+    retryablePending: boolean;
+    leaseMs: number | false;
+    now?: number;
   }): ActionLedgerClaim {
     this._ensureActionLedgerTable();
+    const now = options.now ?? Date.now();
     const existing = this._readActionLedgerRow(options.key);
     if (existing) {
       if (
@@ -6868,12 +6924,28 @@ export class Think<
       ) {
         return { outcome: "conflict", row: existing };
       }
-      return existing.status === "settled"
-        ? { outcome: "replay", row: existing }
-        : { outcome: "pending", row: existing };
+      if (existing.status === "settled") {
+        return { outcome: "replay", row: existing };
+      }
+      // `pending` from here. Reclaim only an explicit-key row whose lease has
+      // expired; fresh rows, fallback keys, and a disabled lease still block.
+      const stale =
+        options.retryablePending &&
+        options.leaseMs !== false &&
+        now - existing.updated_at > options.leaseMs;
+      if (!stale) {
+        return { outcome: "pending", row: existing };
+      }
+      this.sql`
+        UPDATE cf_think_action_ledger
+        SET request_id = ${options.requestId || null},
+            tool_call_id = ${options.toolCallId || null},
+            updated_at = ${now}
+        WHERE key = ${options.key} AND status = ${"pending"}
+      `;
+      return { outcome: "reclaimed", row: existing };
     }
 
-    const now = Date.now();
     this.sql`
       INSERT INTO cf_think_action_ledger (
         key, action_name, request_id, tool_call_id, input_hash, status,

@@ -3735,6 +3735,12 @@ export class ThinkToolsTestAgent extends Think {
     };
   }
 
+  async setActionLedgerPendingRetryLeaseForTest(
+    ms: number | false
+  ): Promise<void> {
+    this.actionLedgerPendingRetryLeaseMs = ms;
+  }
+
   async executeEchoActionToolForTest(message = "hello"): Promise<unknown> {
     const tools = await (
       this as unknown as { _compileActionTools: () => Promise<ToolSet> }
@@ -3770,6 +3776,7 @@ export class ThinkToolsTestAgent extends Think {
       input_hash: string;
       status: string;
       result_json: string | null;
+      updated_at: number;
     }>
   > {
     (
@@ -3781,8 +3788,9 @@ export class ThinkToolsTestAgent extends Think {
       input_hash: string;
       status: string;
       result_json: string | null;
+      updated_at: number;
     }>`
-      SELECT key, action_name, input_hash, status, result_json
+      SELECT key, action_name, input_hash, status, result_json, updated_at
       FROM cf_think_action_ledger
       ORDER BY key ASC
     `;

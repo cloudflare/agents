@@ -80,6 +80,10 @@
       {
         "name": "ThinkActionPauseRecoveryE2EAgent",
         "class_name": "ThinkActionPauseRecoveryE2EAgent"
+      },
+      {
+        "name": "ThinkActionLedgerRecoveryE2EAgent",
+        "class_name": "ThinkActionLedgerRecoveryE2EAgent"
       }
     ]
   },
@@ -149,6 +153,10 @@
     {
       "tag": "v13",
       "new_sqlite_classes": ["ThinkActionPauseRecoveryE2EAgent"]
+    },
+    {
+      "tag": "v14",
+      "new_sqlite_classes": ["ThinkActionLedgerRecoveryE2EAgent"]
     }
   ],
   "r2_buckets": [

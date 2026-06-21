@@ -460,6 +460,131 @@ describe("Think — actions compile into guarded tools", () => {
     });
   });
 
+  it("reclaims a stale explicit-key pending row and settles it", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-reclaim-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-key");
+    await agent.setActionIdempotencyKey("pending-key");
+    await agent.setActionLedgerPendingRetryLeaseForTest(50);
+    const stale = Date.now() - 1_000;
+    await agent.insertActionLedgerRowForTest({
+      key: "action:echo:pending-key",
+      status: "pending",
+      updatedAt: stale
+    });
+
+    await expect(agent.executeEchoActionToolForTest()).resolves.toBe(
+      "action echo: hello"
+    );
+
+    expect((await agent.getActionProbe()).count).toBe(1);
+    const rows = await agent.listActionLedgerRowsForTest();
+    expect(rows).toMatchObject([
+      { key: "action:echo:pending-key", status: "settled" }
+    ]);
+    // Reclaim refreshes the lease timestamp before settling.
+    expect(rows[0]!.updated_at).toBeGreaterThan(stale);
+  });
+
+  it("does not reclaim a stale fallback-key pending row", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-fallback-${crypto.randomUUID()}`
+    );
+    // "default" mode declares no idempotencyKey, so the ledger key falls back
+    // to `tool:${toolCallId}` — never eligible for stale reclaim.
+    await agent.useEchoActionForTest("default");
+    await agent.setActionLedgerPendingRetryLeaseForTest(50);
+    await agent.insertActionLedgerRowForTest({
+      key: "tool:tc-direct",
+      status: "pending",
+      updatedAt: Date.now() - 1_000
+    });
+
+    await expect(agent.executeEchoActionToolForTest()).resolves.toEqual({
+      error: {
+        name: "ActionPendingError",
+        message:
+          "A prior attempt of this action is in an unknown state; not re-executed. Manual reconciliation may be required."
+      }
+    });
+    expect((await agent.getActionProbe()).count).toBe(0);
+  });
+
+  it("does not reclaim a stale explicit pending row when the lease is disabled", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-lease-off-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-key");
+    await agent.setActionIdempotencyKey("pending-key");
+    await agent.setActionLedgerPendingRetryLeaseForTest(false);
+    await agent.insertActionLedgerRowForTest({
+      key: "action:echo:pending-key",
+      status: "pending",
+      updatedAt: Date.now() - 1_000
+    });
+
+    await expect(agent.executeEchoActionToolForTest()).resolves.toEqual({
+      error: {
+        name: "ActionPendingError",
+        message:
+          "A prior attempt of this action is in an unknown state; not re-executed. Manual reconciliation may be required."
+      }
+    });
+    expect((await agent.getActionProbe()).count).toBe(0);
+  });
+
+  it("releases the row when a reclaimed execution throws", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-reclaim-throw-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-throw");
+    await agent.setActionIdempotencyKey("throw-key");
+    await agent.setActionLedgerPendingRetryLeaseForTest(50);
+    await agent.insertActionLedgerRowForTest({
+      key: "action:echo:throw-key",
+      status: "pending",
+      updatedAt: Date.now() - 1_000
+    });
+
+    await expect(agent.executeEchoActionToolForTest()).resolves.toEqual({
+      error: { name: "Error", message: "ledger action failed" }
+    });
+    expect((await agent.getActionProbe()).count).toBe(1);
+    expect(await agent.listActionLedgerRowsForTest()).toEqual([]);
+
+    // The released row lets a later attempt run again.
+    await expect(agent.executeEchoActionToolForTest()).resolves.toEqual({
+      error: { name: "Error", message: "ledger action failed" }
+    });
+    expect((await agent.getActionProbe()).count).toBe(2);
+    expect(await agent.listActionLedgerRowsForTest()).toEqual([]);
+  });
+
+  it("executes once when a stale reclaim races itself in one isolate", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-reclaim-coalesce-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-slow");
+    await agent.setActionIdempotencyKey("coalesce-key");
+    await agent.setActionDelayForTest(50);
+    await agent.setActionLedgerPendingRetryLeaseForTest(50);
+    await agent.insertActionLedgerRowForTest({
+      key: "action:echo:coalesce-key",
+      status: "pending",
+      updatedAt: Date.now() - 1_000
+    });
+
+    await expect(agent.executeEchoActionToolParallelForTest()).resolves.toEqual(
+      ["action echo: hello", "action echo: hello"]
+    );
+
+    expect((await agent.getActionProbe()).count).toBe(1);
+    expect(await agent.listActionLedgerRowsForTest()).toMatchObject([
+      { key: "action:echo:coalesce-key", status: "settled" }
+    ]);
+  });
+
   it("releases action ledger keys after execution failure", async () => {
     const agent = await freshToolAgent(
       `action-ledger-release-${crypto.randomUUID()}`

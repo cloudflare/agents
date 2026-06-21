@@ -1,4 +1,4 @@
-Status: partially shipped (Steps 1–6 landed; pending-retry lease remains)
+Status: shipped (Steps 1–6 landed, including the pending-retry lease)
 
 # RFC: Think actions — rich, production-grade tools
 
@@ -50,8 +50,11 @@ Second of three sibling API RFCs (turns, actions, channels) to be picked up in
   reconciliation, an overridable `describePausedExecution()` hook enriches
   codemode descriptors, and `action:pause:*` observability plus a throttled
   TTL sweep round out retention.
-- ⛔ **Still planned:** the explicit retry/lease policy for unknown pending
-  action outcomes is not built yet.
+- ✅ **Pending-retry lease shipped:** a stale `pending` ledger row (older than
+  `actionLedgerPendingRetryLeaseMs`, default 5 min) is reclaimed and re-run, but
+  ONLY for actions with an explicit `idempotencyKey`; fallback `tool:` keys and
+  fresh rows still surface `ActionPendingError`. Set the lease to `false` to keep
+  the old "block forever" behavior. Emits `action:ledger:reclaimed`.
 - **Depends on the Turns RFC** for `TurnContext`, the `recovery-continue`/
   `recovery-retry` triggers, and `_admitTurn` (authorization resolves once per
   turn at admission). Build Turns first.
@@ -69,7 +72,7 @@ Second of three sibling API RFCs (turns, actions, channels) to be picked up in
 - **Steps 1–6 have landed:** the additive descriptor, approval-descriptor,
   authorization, settled-result ledger, and durable-pause approval descriptor +
   connection-independent resume slices are shipped, along with `ctx.attachReply`
-  recording. Pending retry leases remain planned.
+  recording and the pending-retry lease for stale, explicitly-keyed actions.
 - **Produces a seam the Channels RFC consumes:** `ctx.attachReply()` (§9) is
   inert until Channels/Voice render it.
 
@@ -521,10 +524,16 @@ Pipeline inside `actionToTool`'s `execute`:
      (no re-execution). Emit `action:ledger:replayed`.
    - same key but different action/input hash → structured `ActionKeyConflict`
      (idempotency key reused with different input — a programming error).
-   - `pending` → an earlier attempt is mid-flight or crashed mid-execute; this
-     is the genuinely unsafe window. If a same-isolate active promise owns the
-     key, await it; otherwise surface structured `ActionPendingError` and do not
-     re-execute.
+   - `pending` → an earlier attempt is mid-flight or crashed mid-execute. If a
+     same-isolate active promise owns the key, await it. Otherwise apply the
+     **pending-retry lease**: if the action has an explicit `idempotencyKey` and
+     the row is stale (`updated_at` older than `actionLedgerPendingRetryLeaseMs`,
+     default 5 min), reclaim it — refresh `updated_at`/`request_id`/`tool_call_id`
+     in place (still `pending`, an ownership lease, not a new status), emit
+     `action:ledger:reclaimed`, and re-run `execute` (which re-runs the keyed
+     side effect — the explicit key is the developer's assertion that this is
+     safe). A fresh row, a fallback `tool:` key, or a disabled lease (`false`)
+     instead surfaces structured `ActionPendingError` and does not re-execute.
 3. Insert `pending`, register an in-memory active promise for same-isolate
    coalescing, run `execute`.
 4. On success: store the prepared, JSON-roundtripped model-visible output as
@@ -532,6 +541,9 @@ Pipeline inside `actionToTool`'s `execute`:
    structured action error, allowing a later retry to run again.
 5. Retention sweeping is best-effort. `settled` rows default to 30 days;
    `pending` rows default to 90 days; apps can disable sweeping per status.
+   Retention is distinct from the retry lease: retention decides when an old row
+   is _deleted_; the lease decides when a stale `pending` row may be _reclaimed_.
+   Keep `pendingMs` well above the lease so reclaim happens before a sweep.
 
 Reconciliation with existing keyspaces (the "one keyspace" requirement):
 

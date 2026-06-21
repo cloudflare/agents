@@ -68,6 +68,10 @@ export type AgentObservabilityEvent =
       "action:ledger:settled",
       { action: string; key: string; inputHash: string }
     >
+  | BaseEvent<
+      "action:ledger:reclaimed",
+      { action: string; key: string; inputHash: string; ageMs: number }
+    >
   | BaseEvent<"action:ledger:swept", { settled: number; pending: number }>
   | BaseEvent<
       "action:pause:created",
