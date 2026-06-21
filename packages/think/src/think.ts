@@ -990,6 +990,24 @@ export interface ActionContext {
   signal: AbortSignal;
 }
 
+export type ActionApprovalPolicy<Input> =
+  | boolean
+  | ((args: {
+      input: Input;
+      ctx: ActionContext;
+    }) => boolean | Promise<boolean>);
+
+export interface ActionApprovalDescriptor {
+  requestId: string;
+  toolCallId: string;
+  action: string;
+  summary: string;
+  input: unknown;
+  permissions: string[];
+  risk?: "low" | "medium" | "high";
+  kind: "approval-gated" | "durable-pause";
+}
+
 export interface ActionConfig<
   InputSchema extends FlexibleSchema = FlexibleSchema,
   Output = unknown
@@ -1000,6 +1018,9 @@ export interface ActionConfig<
   inputSchema: InputSchema;
   /** Reserved metadata; output validation is not enforced yet. */
   outputSchema?: FlexibleSchema<Output>;
+  approval?: ActionApprovalPolicy<InferSchema<InputSchema>>;
+  approvalSummary?: string;
+  approvalRisk?: "low" | "medium" | "high";
   timeoutMs?: number;
   kind?: ActionKind;
   execute(
@@ -1034,6 +1055,13 @@ export function isAction(value: unknown): value is Action {
     (value as { [ACTION_BRAND]?: unknown })[ACTION_BRAND] === true
   );
 }
+
+type CompiledActionMetadata = {
+  actionName: string;
+  summary: string;
+  risk?: "low" | "medium" | "high";
+  kind: "approval-gated" | "durable-pause";
+};
 
 type TurnTrigger =
   | "ws-chat"
@@ -3435,6 +3463,7 @@ export class Think<
    * Turns are serialized, so a single value is safe.
    */
   private _activeTurnTools: ToolSet = {};
+  private _activeTurnActionMetadata = new Map<string, CompiledActionMetadata>();
 
   /**
    * Number of times the proactive guard has compacted within the current
@@ -4413,6 +4442,7 @@ export class Think<
   private async _compileActionTools(): Promise<ToolSet> {
     const actions = await this.getActions();
     const tools: ToolSet = {};
+    this._activeTurnActionMetadata = new Map();
     for (const [registrationName, descriptor] of Object.entries(actions)) {
       if (!isAction(descriptor)) {
         throw new Error(
@@ -4420,21 +4450,68 @@ export class Think<
         );
       }
       const toolName = descriptor.config.name ?? registrationName;
-      tools[toolName] = this._actionToTool(descriptor);
+      const kind =
+        descriptor.config.kind ??
+        (descriptor.config.approval ? "approval-gated" : "server");
+      if (kind === "approval-gated" || kind === "durable-pause") {
+        this._activeTurnActionMetadata.set(toolName, {
+          actionName: toolName,
+          summary:
+            descriptor.config.approvalSummary ?? descriptor.config.description,
+          ...(descriptor.config.approvalRisk !== undefined && {
+            risk: descriptor.config.approvalRisk
+          }),
+          kind
+        });
+      }
+      tools[toolName] = this._actionToTool(descriptor, toolName, kind);
     }
     return tools;
   }
 
-  private _actionToTool(descriptor: Action): ToolSet[string] {
+  private _actionToTool(
+    descriptor: Action,
+    _toolName: string,
+    kind: ActionKind
+  ): ToolSet[string] {
     const config = descriptor.config;
     const executeAction = config.execute as (
       input: unknown,
       ctx: ActionContext
     ) => Promise<unknown> | unknown;
+    const approval = config.approval as
+      | ActionApprovalPolicy<unknown>
+      | undefined;
 
     return tool({
       description: config.description,
       inputSchema: config.inputSchema as never,
+      ...(approval !== undefined && kind !== "durable-pause"
+        ? {
+            needsApproval:
+              typeof approval === "function"
+                ? async (
+                    input: unknown,
+                    options: {
+                      toolCallId: string;
+                      messages: ModelMessage[];
+                    }
+                  ) =>
+                    approval({
+                      input,
+                      ctx: {
+                        agent: this,
+                        env: this.env as Cloudflare.Env,
+                        requestId:
+                          admittedTurnContext.getStore()?.requestId ?? "",
+                        toolCallId: options.toolCallId,
+                        messages: options.messages,
+                        signal: new AbortController().signal
+                      }
+                    })
+                : approval
+          }
+        : {}),
       execute: async (
         input: unknown,
         options: {
@@ -8603,6 +8680,107 @@ export class Think<
     }
   }
 
+  private _annotateActionApprovalChunk(
+    requestId: string,
+    chunk: StreamChunkData,
+    pendingActionCalls: Map<
+      string,
+      { toolName: string; input: unknown | undefined }
+    >,
+    parts?: UIMessage["parts"]
+  ): StreamChunkData {
+    const toolCallId =
+      typeof chunk.toolCallId === "string"
+        ? chunk.toolCallId
+        : typeof chunk.id === "string"
+          ? chunk.id
+          : undefined;
+
+    if (toolCallId) {
+      if (
+        (chunk.type === "tool-input-start" ||
+          chunk.type === "tool-input-available" ||
+          chunk.type === "tool-call") &&
+        typeof chunk.toolName === "string"
+      ) {
+        const previous = pendingActionCalls.get(toolCallId);
+        pendingActionCalls.set(toolCallId, {
+          toolName: chunk.toolName,
+          input:
+            "input" in chunk
+              ? normalizeToolInput(chunk.input).input
+              : previous?.input
+        });
+      } else if ("input" in chunk) {
+        const previous = pendingActionCalls.get(toolCallId);
+        if (previous) {
+          pendingActionCalls.set(toolCallId, {
+            ...previous,
+            input: normalizeToolInput(chunk.input).input
+          });
+        }
+      }
+    }
+
+    if (chunk.type !== "tool-approval-request" || !toolCallId) return chunk;
+
+    let pending = pendingActionCalls.get(toolCallId);
+    if (!pending && parts) {
+      const part = parts.find(
+        (candidate) =>
+          "toolCallId" in candidate && candidate.toolCallId === toolCallId
+      ) as Record<string, unknown> | undefined;
+      if (typeof part?.toolName === "string") {
+        pending = {
+          toolName: part.toolName,
+          input: "input" in part ? normalizeToolInput(part.input).input : {}
+        };
+      }
+    }
+    if (!pending) return chunk;
+
+    const metadata = this._activeTurnActionMetadata.get(pending.toolName);
+    if (!metadata) return chunk;
+
+    const descriptor: ActionApprovalDescriptor = {
+      requestId,
+      toolCallId,
+      action: metadata.actionName,
+      summary: metadata.summary,
+      input: pending.input ?? {},
+      permissions: [],
+      ...(metadata.risk !== undefined && { risk: metadata.risk }),
+      kind: metadata.kind
+    };
+
+    return {
+      ...chunk,
+      approvalDescriptor: descriptor
+    };
+  }
+
+  private _applyActionApprovalDescriptorToParts(
+    chunk: StreamChunkData,
+    parts: UIMessage["parts"]
+  ): void {
+    if (
+      chunk.type !== "tool-approval-request" ||
+      typeof chunk.toolCallId !== "string" ||
+      chunk.approvalDescriptor === undefined
+    ) {
+      return;
+    }
+    const part = parts.find(
+      (candidate) =>
+        "toolCallId" in candidate && candidate.toolCallId === chunk.toolCallId
+    ) as Record<string, unknown> | undefined;
+    if (!part) return;
+    part.approval = {
+      ...(part.approval as Record<string, unknown> | undefined),
+      descriptor: chunk.approvalDescriptor
+    };
+  }
+
   private async _streamResultToRpcCallback(
     requestId: string,
     result: StreamableResult,
@@ -8653,6 +8831,10 @@ export class Think<
     try {
       this._insideInferenceLoop = true;
       const flushState = { chunksSinceFlush: 0, hasFlushedContent: false };
+      const pendingActionCalls = new Map<
+        string,
+        { toolName: string; input: unknown | undefined }
+      >();
       try {
         const guardedStream = iterateWithStallWatchdog(
           result.toUIMessageStream(),
@@ -8677,8 +8859,17 @@ export class Think<
           // RPC callbacks receive serialized UIMessage chunks directly; unlike
           // the WebSocket protocol, there is no wrapper frame to rewrite for
           // accumulator actions such as `error`.
-          const streamChunk = chunk as unknown as StreamChunkData;
+          const streamChunk = this._annotateActionApprovalChunk(
+            requestId,
+            chunk as unknown as StreamChunkData,
+            pendingActionCalls,
+            accumulator.parts
+          );
           const { action } = accumulator.applyChunk(streamChunk);
+          this._applyActionApprovalDescriptorToParts(
+            streamChunk,
+            accumulator.parts
+          );
 
           if (action?.type === "error") {
             streamError = action.error;
@@ -8718,7 +8909,7 @@ export class Think<
 
           this._alignStreamStartId(streamChunk, action, accumulator, false);
 
-          const chunkBody = JSON.stringify(chunk);
+          const chunkBody = JSON.stringify(streamChunk);
           await this._storeChunkDurably(
             streamId,
             streamChunk,
@@ -9071,6 +9262,10 @@ export class Think<
     // terminal delivery so the driver can compact and re-run the turn.
     let overflowRetry = false;
     const flushState = { chunksSinceFlush: 0, hasFlushedContent: false };
+    const pendingActionCalls = new Map<
+      string,
+      { toolName: string; input: unknown | undefined }
+    >();
 
     const stallTimeoutMs =
       this._activeStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
@@ -9099,8 +9294,17 @@ export class Think<
             break;
           }
 
-          const streamChunk = chunk as unknown as StreamChunkData;
+          const streamChunk = this._annotateActionApprovalChunk(
+            requestId,
+            chunk as unknown as StreamChunkData,
+            pendingActionCalls,
+            accumulator.parts
+          );
           const { action } = accumulator.applyChunk(streamChunk);
+          this._applyActionApprovalDescriptorToParts(
+            streamChunk,
+            accumulator.parts
+          );
 
           // Approved server tools execute during a continuation stream, but
           // their original tool part lives in an earlier assistant message.
@@ -9169,7 +9373,7 @@ export class Think<
             continuation
           );
 
-          const chunkBody = JSON.stringify(chunk);
+          const chunkBody = JSON.stringify(streamChunk);
           await this._storeChunkDurably(
             streamId,
             streamChunk,

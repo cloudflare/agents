@@ -23,9 +23,13 @@ Second of three sibling API RFCs (turns, actions, channels) to be picked up in
   (`ctx.signal`) with a default 30s timeout, thrown/timeout failures are mapped
   to a structured model-facing tool output, and oversized outputs are truncated
   before model consumption.
+- ✅ **Step 2 shipped:** server actions can declare `approval` and stable display
+  fields; compiled tools set AI SDK `needsApproval`, and `approval-requested`
+  transcript parts carry an `ActionApprovalDescriptor` for the existing
+  approval → auto-continuation path.
 - ⛔ **Still planned:** `attachReply`, declarative permissions/authorization,
-  approval descriptors, `cf_think_action_ledger`, action observability events,
-  and recovery taxonomy integration are not built yet.
+  durable-pause approval descriptors, `cf_think_action_ledger`, action
+  observability events, and recovery taxonomy integration are not built yet.
 - **Depends on the Turns RFC** for `TurnContext`, the `recovery-continue`/
   `recovery-retry` triggers, and `_admitTurn` (authorization resolves once per
   turn at admission). Build Turns first.
@@ -183,11 +187,12 @@ interface Action<Input = unknown, Output = unknown> {
 }
 ```
 
-**Shipped step-1 subset:** the current implementation includes `name`,
+**Shipped subset:** the current implementation includes `name`,
 `description`, schema-inferred `inputSchema` typing for `execute(input, ctx)`,
-`outputSchema` as reserved metadata, `timeoutMs`, `kind` as reserved metadata,
-and `execute`. `permissions`, `approval`, and `idempotencyKey` remain
-planned-only until the authorization, approval, and ledger slices land.
+`outputSchema` as reserved metadata, `timeoutMs`, `kind`, `approval`,
+`approvalSummary`, `approvalRisk`, and `execute`. `permissions` and
+`idempotencyKey` remain planned-only until the authorization and ledger slices
+land.
 
 Example:
 
@@ -277,12 +282,13 @@ authoritative order; sections 4–8 detail each step.
 Promise<boolean>`); the `approval` policy plus the authorization check (step 2)
 compile into it for the `approval-gated` kind.
 
-**Shipped step-1 subset:** the compiled tool currently performs timeout/abort,
+**Shipped subset:** the compiled tool currently performs timeout/abort,
 structured error mapping, JSON-safe output normalization (including bigint and
-circular-reference handling), and output truncation, then leaves
-`beforeToolCall`/`afterToolCall` behavior to the existing Think wrapper. It does
-not yet run authorization, approval, output-schema validation, ledger lookup, or
-ledger writes.
+circular-reference handling), output truncation, and AI SDK `needsApproval`
+derivation for approval-gated actions. It leaves `beforeToolCall`/`afterToolCall`
+behavior to the existing Think wrapper, so approved actions still pass through
+that outer gate before `execute`. It does not yet run authorization,
+output-schema validation, ledger lookup, or ledger writes.
 
 ### 3. `ActionContext` (`ctx`)
 
@@ -401,6 +407,12 @@ type ActionApprovalDescriptor = {
 This descriptor is attached to the approval-requested part and exposed to
 clients (web/voice/messenger), so a voice agent can speak it and a web UI can
 render a card from the same data.
+
+**Shipped subset:** approval-gated actions compile onto AI SDK `needsApproval`.
+The descriptor is attached to the existing `approval-requested` tool part as
+`part.approval.descriptor`, then preserved by `toolApprovalUpdate` when the user
+approves or rejects. The durable-pause/codemode descriptor mapping is still
+planned.
 
 ### 6. Idempotency ledger
 
@@ -709,7 +721,8 @@ Suggested implementation order:
 1. `action()` + `Action` brand + `getActions()` + `actionToTool` with guardrails
    (timeout, structured errors, truncation, safe-stringify). No
    permissions/ledger yet — pure additive win.
-2. Stable approval descriptor over the two existing approval paths.
+2. Stable approval descriptor over the existing approval-gated AI SDK path.
+   Durable-pause descriptor mapping remains planned.
 3. `authorizeTurn`/`authorizeAction` (default full-grant).
 4. `cf_think_action_ledger` for replay-safe settled server actions; reconcile
    keys with submissions/events. Sequence the recovery-replay tests after the

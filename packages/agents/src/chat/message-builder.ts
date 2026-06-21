@@ -42,6 +42,8 @@ export type StreamChunkData = {
   preliminary?: boolean;
   /** Approval ID for tools with needsApproval */
   approvalId?: string;
+  /** Optional framework-specific metadata for the approval request. */
+  approvalDescriptor?: unknown;
   providerMetadata?: Record<string, unknown>;
   /** Whether the tool was executed by the provider (e.g. Gemini code execution) */
   providerExecuted?: boolean;
@@ -360,7 +362,12 @@ export function applyChunkToParts(
       if (toolPart) {
         const p = toolPart as Record<string, unknown>;
         p.state = "approval-requested";
-        p.approval = { id: chunk.approvalId };
+        p.approval = {
+          id: chunk.approvalId,
+          ...(chunk.approvalDescriptor !== undefined && {
+            descriptor: chunk.approvalDescriptor
+          })
+        };
       }
       return true;
     }

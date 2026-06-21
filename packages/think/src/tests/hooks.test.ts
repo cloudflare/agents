@@ -5,6 +5,7 @@ import type { UIMessage } from "ai";
 
 const MSG_CHAT_REQUEST = "cf_agent_use_chat_request";
 const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
+const MSG_TOOL_APPROVAL = "cf_agent_tool_approval";
 
 async function connectWS(agentClass: string, room: string) {
   const slug = agentClass
@@ -358,6 +359,176 @@ describe("Think — actions compile into guarded tools", () => {
       count: "12n",
       self: "[Circular]"
     });
+  });
+
+  it("emits an approval request with a stable action descriptor", async () => {
+    const room = `action-approval-request-${crypto.randomUUID()}`;
+    const agent = await freshToolAgent(room);
+    await agent.useEchoActionForTest("approval");
+    const ws = await connectWS("ThinkToolsTestAgent", room);
+
+    const initialDone = waitForDone(ws);
+    sendChatRequest(ws, "call echo action");
+    const initialFrames = await initialDone;
+    const approvalChunk = initialFrames
+      .filter(
+        (frame) =>
+          frame.type === MSG_CHAT_RESPONSE &&
+          typeof frame.body === "string" &&
+          frame.body.length > 0
+      )
+      .map(
+        (frame) => JSON.parse(frame.body as string) as Record<string, unknown>
+      )
+      .find((chunk) => chunk.type === "tool-approval-request");
+
+    expect(approvalChunk).toMatchObject({
+      toolCallId: "tc1",
+      approvalDescriptor: {
+        requestId: expect.any(String),
+        toolCallId: "tc1",
+        action: "echo",
+        summary: "Approve echo action",
+        input: { message: "hello" },
+        permissions: [],
+        risk: "low",
+        kind: "approval-gated"
+      }
+    });
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    const toolPart = messages
+      .flatMap((message) => message.parts)
+      .find((part) => "toolCallId" in part && part.toolCallId === "tc1") as
+      | Record<string, unknown>
+      | undefined;
+    expect(toolPart).toMatchObject({
+      state: "approval-requested",
+      approval: {
+        descriptor: {
+          action: "echo",
+          summary: "Approve echo action",
+          input: { message: "hello" }
+        }
+      }
+    });
+
+    await closeWS(ws);
+  });
+
+  it("resumes and executes an approved action", async () => {
+    const room = `action-approval-approved-${crypto.randomUUID()}`;
+    const agent = await freshToolAgent(room);
+    await agent.useEchoActionForTest("approval");
+    const ws = await connectWS("ThinkToolsTestAgent", room);
+
+    const initialDone = waitForDone(ws);
+    sendChatRequest(ws, "call echo action");
+    await initialDone;
+
+    const continuationDone = waitForDone(ws);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc1",
+        approved: true,
+        autoContinue: true
+      })
+    );
+    await continuationDone;
+
+    expect((await agent.getActionProbe()).count).toBe(1);
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    const toolPart = messages
+      .flatMap((message) => message.parts)
+      .find((part) => "toolCallId" in part && part.toolCallId === "tc1") as
+      | Record<string, unknown>
+      | undefined;
+    expect(toolPart).toMatchObject({
+      state: "output-available",
+      output: "action echo: hello",
+      approval: {
+        approved: true,
+        descriptor: {
+          action: "echo"
+        }
+      }
+    });
+
+    await closeWS(ws);
+  });
+
+  it("does not execute a rejected action", async () => {
+    const room = `action-approval-rejected-${crypto.randomUUID()}`;
+    const agent = await freshToolAgent(room);
+    await agent.useEchoActionForTest("approval");
+    const ws = await connectWS("ThinkToolsTestAgent", room);
+
+    const initialDone = waitForDone(ws);
+    sendChatRequest(ws, "call echo action");
+    await initialDone;
+
+    const continuationDone = waitForDone(ws);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc1",
+        approved: false,
+        autoContinue: true
+      })
+    );
+    await continuationDone;
+
+    expect((await agent.getActionProbe()).count).toBe(0);
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    const toolPart = messages
+      .flatMap((message) => message.parts)
+      .find((part) => "toolCallId" in part && part.toolCallId === "tc1") as
+      | Record<string, unknown>
+      | undefined;
+    expect(toolPart).toMatchObject({
+      state: "output-denied",
+      approval: {
+        approved: false,
+        descriptor: {
+          action: "echo"
+        }
+      }
+    });
+
+    await closeWS(ws);
+  });
+
+  it("keeps beforeToolCall as the outer gate after approval", async () => {
+    const room = `action-approval-before-tool-call-${crypto.randomUUID()}`;
+    const agent = await freshToolAgent(room);
+    await agent.useEchoActionForTest("approval");
+    await agent.setToolCallDecision({
+      action: "block",
+      reason: "blocked by hook"
+    });
+    const ws = await connectWS("ThinkToolsTestAgent", room);
+
+    const initialDone = waitForDone(ws);
+    sendChatRequest(ws, "call echo action");
+    await initialDone;
+
+    const continuationDone = waitForDone(ws);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc1",
+        approved: true,
+        autoContinue: true
+      })
+    );
+    await continuationDone;
+
+    expect((await agent.getActionProbe()).count).toBe(0);
+    const after = await agent.getAfterToolCallLog();
+    expect(JSON.parse(after[0].outputJson)).toBe("blocked by hook");
+
+    await closeWS(ws);
   });
 });
 

@@ -427,12 +427,26 @@ describe("StreamAccumulator", () => {
       const r = a.applyChunk({
         type: "tool-approval-request",
         toolCallId: "tc1",
-        approvalId: "apr-1"
+        approvalId: "apr-1",
+        approvalDescriptor: {
+          action: "danger",
+          summary: "Approve danger"
+        }
       } as StreamChunkData);
       expect(r.handled).toBe(true);
       expect(r.action).toEqual({
         type: "tool-approval-request",
         toolCallId: "tc1"
+      });
+      expect(a.parts[0]).toMatchObject({
+        state: "approval-requested",
+        approval: {
+          id: "apr-1",
+          descriptor: {
+            action: "danger",
+            summary: "Approve danger"
+          }
+        }
       });
     });
   });

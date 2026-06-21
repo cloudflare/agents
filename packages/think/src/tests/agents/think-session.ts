@@ -3262,6 +3262,10 @@ export class ThinkToolsTestAgent extends Think {
         description: "Echo a message back as an action",
         inputSchema: z.object({ message: z.string() }),
         timeoutMs: mode === "timeout" ? 5 : undefined,
+        approval: mode === "approval" ? true : undefined,
+        approvalSummary:
+          mode === "approval" ? "Approve echo action" : undefined,
+        approvalRisk: mode === "approval" ? "low" : undefined,
         execute: async ({ message }, ctx): Promise<unknown> => {
           this._actionExecutionCount++;
           this._lastActionContext = {
@@ -3303,7 +3307,8 @@ export class ThinkToolsTestAgent extends Think {
     | "throw"
     | "timeout"
     | "large-output"
-    | "non-json-output" = "default";
+    | "non-json-output"
+    | "approval" = "default";
   private _actionExecutionCount = 0;
   private _lastActionContext: {
     requestId: string;
@@ -3323,7 +3328,8 @@ export class ThinkToolsTestAgent extends Think {
       | "throw"
       | "timeout"
       | "large-output"
-      | "non-json-output" = "default"
+      | "non-json-output"
+      | "approval" = "default"
   ): Promise<void> {
     this._useEchoAction = true;
     this._actionExecuteMode = mode;
