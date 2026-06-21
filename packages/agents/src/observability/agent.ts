@@ -52,6 +52,24 @@ export type AgentObservabilityEvent =
       { submissionId: string; requestId?: string; error: string }
     >
   | BaseEvent<
+      "action:ledger:replayed",
+      { action: string; key: string; inputHash: string }
+    >
+  | BaseEvent<
+      "action:ledger:pending",
+      { action: string; key: string; inputHash: string }
+    >
+  | BaseEvent<
+      "action:ledger:conflict",
+      { action: string; key: string; inputHash: string }
+    >
+  | BaseEvent<"action:ledger:serialize_failed", { action: string; key: string }>
+  | BaseEvent<
+      "action:ledger:settled",
+      { action: string; key: string; inputHash: string }
+    >
+  | BaseEvent<"action:ledger:swept", { settled: number; pending: number }>
+  | BaseEvent<
       "fiber:run:started",
       { fiberId: string; fiberName: string; managed?: boolean }
     >

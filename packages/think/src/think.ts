@@ -234,6 +234,8 @@ import {
 const MODEL_RECENT_WINDOW = 4;
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 const ACTION_OUTPUT_MAX_CHARS = 20_000;
+const ACTION_LEDGER_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+const ACTION_LEDGER_LAST_SWEPT_KEY = "cf_think_action_ledger:last_swept_at";
 import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "./tools/workspace";
 import { truncatePausedExecutionOutput } from "./tools/execute";
@@ -266,8 +268,13 @@ function shouldMarkSkippedAfterGenerationChange(
 }
 
 function stableStringify(value: unknown): string {
+  if (value === undefined) return "undefined";
+  if (typeof value === "function" || typeof value === "symbol") {
+    return String(value);
+  }
   if (value === null || typeof value !== "object") {
-    return JSON.stringify(value);
+    if (typeof value === "bigint") return `${value.toString()}n`;
+    return JSON.stringify(value) ?? "undefined";
   }
   if (Array.isArray(value)) {
     return `[${value.map((item) => stableStringify(item)).join(",")}]`;
@@ -299,6 +306,10 @@ function stableHash(value: unknown): string {
   return [h1, h2, h3, h4]
     .map((part) => (part >>> 0).toString(16).padStart(8, "0"))
     .join("");
+}
+
+function stableJsonEqual(left: unknown, right: unknown): boolean {
+  return stableStringify(left) === stableStringify(right);
 }
 
 function actionErrorEnvelope(error: unknown): {
@@ -338,8 +349,65 @@ function actionApprovalInputErrorEnvelope(): {
   };
 }
 
-function structurallyEqualJson(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+function actionPendingErrorEnvelope(): {
+  error: { name: string; message: string };
+} {
+  return {
+    error: {
+      name: "ActionPendingError",
+      message:
+        "A prior attempt of this action is in an unknown state; not re-executed. Manual reconciliation may be required."
+    }
+  };
+}
+
+function actionKeyConflictEnvelope(
+  actionName: string,
+  key: string
+): {
+  error: { name: string; message: string };
+} {
+  return {
+    error: {
+      name: "ActionKeyConflict",
+      message: `Idempotency key "${key}" for action "${actionName}" was reused with different input. This is a programming error; do not retry.`
+    }
+  };
+}
+
+function encodeActionLedgerOutput(
+  output: unknown
+): { ok: true; json: string; value: unknown } | { ok: false } {
+  try {
+    const json = JSON.stringify({
+      valuePresent: output !== undefined,
+      value: output
+    });
+    if (json === undefined) return { ok: false };
+    const parsed = JSON.parse(json) as {
+      valuePresent: boolean;
+      value?: unknown;
+    };
+    if (output !== undefined && !("value" in parsed)) {
+      return { ok: false };
+    }
+    return {
+      ok: true,
+      json,
+      value: parsed.valuePresent ? parsed.value : undefined
+    };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function decodeActionLedgerOutput(json: string | null): unknown {
+  if (json === null) return undefined;
+  const parsed = JSON.parse(json) as {
+    valuePresent?: unknown;
+    value?: unknown;
+  };
+  return parsed.valuePresent === true ? parsed.value : undefined;
 }
 
 function safeStringifyActionOutput(output: unknown): {
@@ -1034,6 +1102,10 @@ export type ActionPermissionSpec<Input> =
       ctx: ActionContext;
     }) => readonly string[] | Promise<readonly string[]>);
 
+export type ActionIdempotencyKey<Input> =
+  | string
+  | ((args: { input: Input; ctx: ActionContext }) => string | Promise<string>);
+
 export type ActionAuthorizationDecision =
   | boolean
   | {
@@ -1076,6 +1148,13 @@ export interface ActionConfig<
   inputSchema: InputSchema;
   /** Reserved metadata; output validation is not enforced yet. */
   outputSchema?: FlexibleSchema<Output>;
+  /**
+   * Stable key used to replay settled action results without re-running side
+   * effects. Use domain identifiers that survive recovery retries (for example,
+   * an order id or inbound event id); avoid request ids, timestamps, and random
+   * values.
+   */
+  idempotencyKey?: ActionIdempotencyKey<InferSchema<InputSchema>>;
   permissions?: ActionPermissionSpec<InferSchema<InputSchema>>;
   approval?: ActionApprovalPolicy<InferSchema<InputSchema>>;
   approvalSummary?: string;
@@ -1340,6 +1419,63 @@ type DeclaredScheduledTaskRow = {
   created_at: number;
   updated_at: number;
 };
+
+type ActionLedgerStatus = "pending" | "settled";
+
+type ActionLedgerRow = {
+  key: string;
+  action_name: string;
+  request_id: string | null;
+  tool_call_id: string | null;
+  input_hash: string;
+  status: ActionLedgerStatus;
+  result_json: string | null;
+  created_at: number;
+  updated_at: number;
+};
+
+type ActionLedgerClaim =
+  | { outcome: "claimed" }
+  | { outcome: "replay"; row: ActionLedgerRow }
+  | { outcome: "pending"; row: ActionLedgerRow }
+  | { outcome: "conflict"; row: ActionLedgerRow };
+
+type ActionLedgerRetentionConfig = {
+  settledMs: number | false;
+  pendingMs: number | false;
+  maxSweepRows: number;
+};
+
+type ActionLedgerSweepStatus = Extract<
+  ActionLedgerStatus,
+  "pending" | "settled"
+>;
+
+type ActionLedgerEvent =
+  | {
+      type: "action:ledger:replayed";
+      payload: { action: string; key: string; inputHash: string };
+    }
+  | {
+      type: "action:ledger:pending";
+      payload: { action: string; key: string; inputHash: string };
+    }
+  | {
+      type: "action:ledger:conflict";
+      payload: { action: string; key: string; inputHash: string };
+    }
+  | {
+      type: "action:ledger:serialize_failed";
+      payload: { action: string; key: string };
+    }
+  | {
+      type: "action:ledger:settled";
+      payload: { action: string; key: string; inputHash: string };
+    }
+  | {
+      type: "action:ledger:swept";
+      payload: { settled: number; pending: number };
+    };
 
 type DeclaredScheduledTaskPayload = {
   taskId: string;
@@ -2312,6 +2448,7 @@ export class Think<
       await this._runBestEffortOnStartStep(
         "durable-work-recovery",
         async () => {
+          await this._sweepActionLedger();
           await this._recoverSubmissionsOnStart();
           this._recoverWorkflowNotifications();
           if (this._hasPendingSubmissions()) {
@@ -3053,6 +3190,7 @@ export class Think<
   private _submissionTableEnsured = false;
   private _workflowNotificationTableEnsured = false;
   private _declaredScheduledTasksTableEnsured = false;
+  private _actionLedgerTableEnsured = false;
   private _drainingSubmissions = false;
   private _drainingWorkflowNotifications = false;
   private _submissionAbortControllers = new Map<string, AbortController>();
@@ -3431,6 +3569,18 @@ export class Think<
   maxSteps = 10;
 
   /**
+   * Retention window for settled action ledger rows. Deleting a row ends the
+   * idempotency guarantee for that key, so increase these windows for side
+   * effects whose downstream idempotency horizon is longer. Set a status to
+   * `false` to disable sweeping it.
+   */
+  actionLedgerRetention: ActionLedgerRetentionConfig = {
+    settledMs: 30 * 24 * 60 * 60 * 1000,
+    pendingMs: 90 * 24 * 60 * 60 * 1000,
+    maxSweepRows: 500
+  };
+
+  /**
    * Whether reasoning chunks are sent to chat clients by default. Override
    * per turn by returning `sendReasoning` from `beforeTurn`.
    */
@@ -3538,6 +3688,7 @@ export class Think<
     ActionApprovalDescriptor
   >();
   private _activeTurnApprovedActionInputs = new Map<string, unknown>();
+  private _activeActionLedgerExecutions = new Map<string, Promise<unknown>>();
 
   /**
    * Number of times the proactive guard has compacted within the current
@@ -4581,6 +4732,14 @@ export class Think<
     };
   }
 
+  private _emitActionLedgerEvent(event: ActionLedgerEvent): void {
+    const emit = this._emit as unknown as (
+      type: string,
+      payload: Record<string, unknown>
+    ) => void;
+    emit.call(this, event.type, event.payload);
+  }
+
   private _approvedActionInputsFromTranscript(): Map<string, unknown> {
     const approved = new Map<string, unknown>();
     for (const message of this.messages) {
@@ -4701,6 +4860,9 @@ export class Think<
     const permissions = config.permissions as
       | ActionPermissionSpec<unknown>
       | undefined;
+    const idempotencyKey = config.idempotencyKey as
+      | ActionIdempotencyKey<unknown>
+      | undefined;
 
     return tool({
       description: config.description,
@@ -4813,11 +4975,90 @@ export class Think<
             onAbort = () => reject(abortError());
             signal.addEventListener("abort", onAbort, { once: true });
           });
-          const output = await Promise.race([
-            Promise.resolve(executeAction(input, actionContext)),
-            abortPromise
-          ]);
-          return prepareActionOutputForModel(output);
+          const runAction = async () => {
+            const output = await Promise.race([
+              Promise.resolve(executeAction(input, actionContext)),
+              abortPromise
+            ]);
+            return prepareActionOutputForModel(output);
+          };
+
+          if (kind === "durable-pause") {
+            return await runAction();
+          }
+
+          const ledgerKey = await this._resolveActionLedgerKey(
+            toolName,
+            idempotencyKey,
+            input,
+            actionContext
+          );
+          if (!ledgerKey) {
+            return await runAction();
+          }
+
+          const active = this._activeActionLedgerExecutions.get(ledgerKey);
+          if (active) {
+            return await active;
+          }
+
+          const inputHash = this._actionInputHash(input);
+          const claim = this._claimActionLedgerRow({
+            key: ledgerKey,
+            actionName: toolName,
+            requestId,
+            toolCallId: actionContext.toolCallId,
+            inputHash
+          });
+          if (claim.outcome === "replay") {
+            this._emitActionLedgerEvent({
+              type: "action:ledger:replayed",
+              payload: { action: toolName, key: ledgerKey, inputHash }
+            });
+            return decodeActionLedgerOutput(claim.row.result_json);
+          }
+          if (claim.outcome === "pending") {
+            this._emitActionLedgerEvent({
+              type: "action:ledger:pending",
+              payload: { action: toolName, key: ledgerKey, inputHash }
+            });
+            return actionPendingErrorEnvelope();
+          }
+          if (claim.outcome === "conflict") {
+            this._emitActionLedgerEvent({
+              type: "action:ledger:conflict",
+              payload: { action: toolName, key: ledgerKey, inputHash }
+            });
+            return actionKeyConflictEnvelope(toolName, ledgerKey);
+          }
+
+          const execution = Promise.resolve().then(async () => {
+            const prepared = await runAction();
+            const encoded = encodeActionLedgerOutput(prepared);
+            if (!encoded.ok) {
+              this._releaseActionLedgerRow(ledgerKey);
+              this._emitActionLedgerEvent({
+                type: "action:ledger:serialize_failed",
+                payload: { action: toolName, key: ledgerKey }
+              });
+              return prepared;
+            }
+            this._settleActionLedgerRow(ledgerKey, encoded.json);
+            this._emitActionLedgerEvent({
+              type: "action:ledger:settled",
+              payload: { action: toolName, key: ledgerKey, inputHash }
+            });
+            return encoded.value;
+          });
+          this._activeActionLedgerExecutions.set(ledgerKey, execution);
+          try {
+            return await execution;
+          } catch (error) {
+            this._releaseActionLedgerRow(ledgerKey);
+            return actionErrorEnvelope(error);
+          } finally {
+            this._activeActionLedgerExecutions.delete(ledgerKey);
+          }
         } catch (error) {
           return actionErrorEnvelope(error);
         } finally {
@@ -5092,7 +5333,7 @@ export class Think<
             : undefined;
           if (
             approvedInput !== undefined &&
-            !structurallyEqualJson(finalInput, approvedInput)
+            !stableJsonEqual(finalInput, approvedInput)
           ) {
             return actionApprovalInputErrorEnvelope();
           }
@@ -6307,6 +6548,192 @@ export class Think<
       if (text.length > 0) return text;
     }
     return null;
+  }
+
+  // ── Action ledger ────────────────────────────────────────────────
+
+  private _ensureActionLedgerTable(): void {
+    if (this._actionLedgerTableEnsured) return;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_think_action_ledger (
+        key TEXT PRIMARY KEY,
+        action_name TEXT NOT NULL,
+        request_id TEXT,
+        tool_call_id TEXT,
+        input_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        result_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `;
+    this.sql`
+      CREATE INDEX IF NOT EXISTS cf_think_action_ledger_sweep
+      ON cf_think_action_ledger (status, updated_at)
+    `;
+    this._actionLedgerTableEnsured = true;
+  }
+
+  private _readActionLedgerRow(key: string): ActionLedgerRow | null {
+    this._ensureActionLedgerTable();
+    const rows = this.sql<ActionLedgerRow>`
+      SELECT key, action_name, request_id, tool_call_id, input_hash, status,
+             result_json, created_at, updated_at
+      FROM cf_think_action_ledger
+      WHERE key = ${key}
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  }
+
+  private _claimActionLedgerRow(options: {
+    key: string;
+    actionName: string;
+    requestId: string;
+    toolCallId: string;
+    inputHash: string;
+  }): ActionLedgerClaim {
+    this._ensureActionLedgerTable();
+    const existing = this._readActionLedgerRow(options.key);
+    if (existing) {
+      if (
+        existing.action_name !== options.actionName ||
+        existing.input_hash !== options.inputHash
+      ) {
+        return { outcome: "conflict", row: existing };
+      }
+      return existing.status === "settled"
+        ? { outcome: "replay", row: existing }
+        : { outcome: "pending", row: existing };
+    }
+
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_think_action_ledger (
+        key, action_name, request_id, tool_call_id, input_hash, status,
+        result_json, created_at, updated_at
+      )
+      VALUES (
+        ${options.key}, ${options.actionName}, ${options.requestId || null},
+        ${options.toolCallId || null}, ${options.inputHash}, ${"pending"},
+        ${null}, ${now}, ${now}
+      )
+    `;
+    return { outcome: "claimed" };
+  }
+
+  private _settleActionLedgerRow(key: string, resultJson: string): void {
+    this._ensureActionLedgerTable();
+    this.sql`
+      UPDATE cf_think_action_ledger
+      SET status = ${"settled"},
+          result_json = ${resultJson},
+          updated_at = ${Date.now()}
+      WHERE key = ${key}
+    `;
+  }
+
+  private _releaseActionLedgerRow(key: string): void {
+    this._ensureActionLedgerTable();
+    this.sql`
+      DELETE FROM cf_think_action_ledger
+      WHERE key = ${key}
+    `;
+  }
+
+  private async _resolveActionLedgerKey(
+    actionName: string,
+    spec: ActionIdempotencyKey<unknown> | undefined,
+    input: unknown,
+    ctx: ActionContext
+  ): Promise<string | null> {
+    if (spec !== undefined) {
+      const key =
+        typeof spec === "function" ? await spec({ input, ctx }) : spec;
+      if (key.length === 0) {
+        throw new Error(
+          `Action "${actionName}" returned an empty idempotency key`
+        );
+      }
+      return `action:${actionName}:${key}`;
+    }
+    return ctx.toolCallId ? `tool:${ctx.toolCallId}` : null;
+  }
+
+  private _actionInputHash(input: unknown): string {
+    return stableHash(input);
+  }
+
+  private _actionLedgerRetentionForStatus(
+    status: ActionLedgerSweepStatus
+  ): number | false {
+    return status === "settled"
+      ? this.actionLedgerRetention.settledMs
+      : this.actionLedgerRetention.pendingMs;
+  }
+
+  private _deleteActionLedgerRows(keys: string[]): number {
+    let deleted = 0;
+    for (let i = 0; i < keys.length; i += MAX_BOUND_PARAMS) {
+      const batch = keys.slice(i, i + MAX_BOUND_PARAMS);
+      const strings = buildInClauseStrings(
+        "DELETE FROM cf_think_action_ledger WHERE key IN ",
+        batch.length
+      );
+      this.sql(strings, ...batch);
+      deleted += batch.length;
+    }
+    return deleted;
+  }
+
+  private _sweepActionLedgerStatus(
+    status: ActionLedgerSweepStatus,
+    now: number,
+    limit: number
+  ): number {
+    const retentionMs = this._actionLedgerRetentionForStatus(status);
+    if (retentionMs === false || limit <= 0) return 0;
+    const cutoff = now - retentionMs;
+    const rows = this.sql<{ key: string }>`
+      SELECT key
+      FROM cf_think_action_ledger
+      WHERE status = ${status}
+        AND updated_at < ${cutoff}
+      ORDER BY updated_at ASC
+      LIMIT ${limit}
+    `;
+    return this._deleteActionLedgerRows(rows.map((row) => row.key));
+  }
+
+  private async _sweepActionLedger(options?: {
+    force?: boolean;
+  }): Promise<{ settled: number; pending: number }> {
+    this._ensureActionLedgerTable();
+    const now = Date.now();
+    if (!options?.force) {
+      const lastSwept =
+        (await this.ctx.storage.get<number>(ACTION_LEDGER_LAST_SWEPT_KEY)) ?? 0;
+      if (now - lastSwept < ACTION_LEDGER_SWEEP_INTERVAL_MS) {
+        return { settled: 0, pending: 0 };
+      }
+    }
+
+    const maxSweepRows = Math.max(
+      0,
+      Math.floor(this.actionLedgerRetention.maxSweepRows)
+    );
+    const settled = this._sweepActionLedgerStatus("settled", now, maxSweepRows);
+    const pending = this._sweepActionLedgerStatus(
+      "pending",
+      now,
+      Math.max(0, maxSweepRows - settled)
+    );
+    await this.ctx.storage.put(ACTION_LEDGER_LAST_SWEPT_KEY, now);
+    this._emitActionLedgerEvent({
+      type: "action:ledger:swept",
+      payload: { settled, pending }
+    });
+    return { settled, pending };
   }
 
   // ── Declarative scheduled tasks ─────────────────────────────────

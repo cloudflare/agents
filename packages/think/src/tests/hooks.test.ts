@@ -388,6 +388,172 @@ describe("Think — actions compile into guarded tools", () => {
     });
   });
 
+  it("records and replays settled action ledger rows", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-replay-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-key");
+    await agent.setActionIdempotencyKey("replay-key");
+
+    await expect(agent.executeEchoActionToolForTest()).resolves.toBe(
+      "action echo: hello"
+    );
+    expect((await agent.getActionProbe()).count).toBe(1);
+    expect(await agent.listActionLedgerRowsForTest()).toMatchObject([
+      {
+        key: "action:echo:replay-key",
+        action_name: "echo",
+        status: "settled"
+      }
+    ]);
+
+    await expect(agent.executeEchoActionToolForTest()).resolves.toBe(
+      "action echo: hello"
+    );
+    expect((await agent.getActionProbe()).count).toBe(1);
+  });
+
+  it("returns a programming error for action ledger key/input conflicts", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-conflict-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-key");
+    await agent.setActionIdempotencyKey("conflict-key");
+
+    await expect(agent.executeEchoActionToolForTest()).resolves.toBe(
+      "action echo: hello"
+    );
+    await expect(
+      agent.executeEchoActionToolForTest("different")
+    ).resolves.toEqual({
+      error: {
+        name: "ActionKeyConflict",
+        message:
+          'Idempotency key "action:echo:conflict-key" for action "echo" was reused with different input. This is a programming error; do not retry.'
+      }
+    });
+
+    expect((await agent.getActionProbe()).count).toBe(1);
+  });
+
+  it("does not execute when the action ledger has an unknown pending row", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-pending-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-key");
+    await agent.setActionIdempotencyKey("pending-key");
+    await agent.insertActionLedgerRowForTest({
+      key: "action:echo:pending-key",
+      status: "pending"
+    });
+
+    await agent.testChat("call echo action");
+
+    expect((await agent.getActionProbe()).count).toBe(0);
+    const after = await agent.getAfterToolCallLog();
+    expect(JSON.parse(after[after.length - 1]?.outputJson ?? "null")).toEqual({
+      error: {
+        name: "ActionPendingError",
+        message:
+          "A prior attempt of this action is in an unknown state; not re-executed. Manual reconciliation may be required."
+      }
+    });
+  });
+
+  it("releases action ledger keys after execution failure", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-release-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-throw");
+    await agent.setActionIdempotencyKey("throw-key");
+
+    await expect(agent.executeEchoActionToolForTest()).resolves.toEqual({
+      error: { name: "Error", message: "ledger action failed" }
+    });
+    await expect(agent.executeEchoActionToolForTest()).resolves.toEqual({
+      error: { name: "Error", message: "ledger action failed" }
+    });
+
+    expect((await agent.getActionProbe()).count).toBe(2);
+    expect(await agent.listActionLedgerRowsForTest()).toEqual([]);
+  });
+
+  it("coalesces same-isolate duplicate action ledger executions", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-coalesce-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-slow");
+    await agent.setActionIdempotencyKey("coalesce-key");
+    await agent.setActionDelayForTest(50);
+
+    await expect(agent.executeEchoActionToolParallelForTest()).resolves.toEqual(
+      ["action echo: hello", "action echo: hello"]
+    );
+
+    expect((await agent.getActionProbe()).count).toBe(1);
+    expect(await agent.listActionLedgerRowsForTest()).toMatchObject([
+      {
+        key: "action:echo:coalesce-key",
+        status: "settled"
+      }
+    ]);
+  });
+
+  it("releases action ledger rows when result serialization fails", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-serialize-failure-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-symbol-output");
+    await agent.setActionIdempotencyKey("symbol-key");
+
+    const output = await agent.executeEchoActionToolForTest();
+
+    expect(output).toEqual({ type: "symbol" });
+    expect((await agent.getActionProbe()).count).toBe(1);
+    expect(await agent.listActionLedgerRowsForTest()).toEqual([]);
+  });
+
+  it("sweeps expired action ledger rows without deleting fresh rows", async () => {
+    const agent = await freshToolAgent(
+      `action-ledger-sweep-${crypto.randomUUID()}`
+    );
+    await agent.useEchoActionForTest("ledger-key");
+    await agent.setActionLedgerRetentionForTest({
+      settledMs: 10,
+      pendingMs: 10,
+      maxSweepRows: 10
+    });
+    const old = Date.now() - 1_000;
+    await agent.insertActionLedgerRowForTest({
+      key: "action:echo:old-settled",
+      status: "settled",
+      output: "old",
+      updatedAt: old
+    });
+    await agent.insertActionLedgerRowForTest({
+      key: "action:echo:old-pending",
+      status: "pending",
+      updatedAt: old
+    });
+    await agent.insertActionLedgerRowForTest({
+      key: "action:echo:fresh-settled",
+      status: "settled",
+      output: "fresh"
+    });
+
+    await expect(agent.sweepActionLedgerForTest()).resolves.toEqual({
+      settled: 1,
+      pending: 1
+    });
+
+    expect(await agent.listActionLedgerRowsForTest()).toMatchObject([
+      {
+        key: "action:echo:fresh-settled",
+        status: "settled"
+      }
+    ]);
+  });
+
   it("emits an approval request with a stable action descriptor", async () => {
     const room = `action-approval-request-${crypto.randomUUID()}`;
     const agent = await freshToolAgent(room);
@@ -519,6 +685,7 @@ describe("Think — actions compile into guarded tools", () => {
         }
       }
     });
+    expect(await agent.listActionLedgerRowsForTest()).toEqual([]);
 
     await closeWS(ws);
   });
@@ -610,6 +777,40 @@ describe("Think — actions compile into guarded tools", () => {
     await closeWS(ws);
   });
 
+  it("records approval-gated actions only after approval", async () => {
+    const room = `action-ledger-approval-${crypto.randomUUID()}`;
+    const agent = await freshToolAgent(room);
+    await agent.useEchoActionForTest("ledger-approval");
+    await agent.setActionIdempotencyKey("approval-ledger-key");
+    const ws = await connectWS("ThinkToolsTestAgent", room);
+
+    const initialDone = waitForDone(ws);
+    sendChatRequest(ws, "call echo action");
+    await initialDone;
+    expect(await agent.listActionLedgerRowsForTest()).toEqual([]);
+
+    const continuationDone = waitForDone(ws);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc1",
+        approved: true,
+        autoContinue: true
+      })
+    );
+    await continuationDone;
+
+    expect((await agent.getActionProbe()).count).toBe(1);
+    expect(await agent.listActionLedgerRowsForTest()).toMatchObject([
+      {
+        key: "action:echo:approval-ledger-key",
+        status: "settled"
+      }
+    ]);
+
+    await closeWS(ws);
+  });
+
   it("does not execute an approved action with rewritten input", async () => {
     const room = `action-approval-rewritten-input-${crypto.randomUUID()}`;
     const agent = await freshToolAgent(room);
@@ -685,6 +886,7 @@ describe("Think — actions compile into guarded tools", () => {
         }
       }
     });
+    expect(await agent.listActionLedgerRowsForTest()).toEqual([]);
 
     await closeWS(ws);
   });

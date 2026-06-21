@@ -77,7 +77,8 @@ function getChannel(type: string): Channel {
   if (
     type.startsWith("message:") ||
     type.startsWith("tool:") ||
-    type.startsWith("submission:")
+    type.startsWith("submission:") ||
+    type.startsWith("action:")
   )
     return channels.message;
   if (type === "rpc" || type.startsWith("rpc:")) return channels.rpc;
@@ -107,7 +108,13 @@ export type ChannelEventMap = {
   rpc: Extract<ObservabilityEvent, { type: "rpc" | `rpc:${string}` }>;
   message: Extract<
     ObservabilityEvent,
-    { type: `message:${string}` | `tool:${string}` | `submission:${string}` }
+    {
+      type:
+        | `message:${string}`
+        | `tool:${string}`
+        | `submission:${string}`
+        | `action:${string}`;
+    }
   >;
   chat: Exclude<
     Extract<ObservabilityEvent, { type: `chat:${string}` }>,

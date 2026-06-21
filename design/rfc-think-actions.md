@@ -31,9 +31,14 @@ Second of three sibling API RFCs (turns, actions, channels) to be picked up in
   default-full-grant `authorizeTurn` and `authorizeAction` hooks, denies before
   `execute`, and suppresses approval prompts for unauthorized approval-gated
   actions.
-- ⛔ **Still planned:** `attachReply`, durable-pause approval descriptors,
-  `cf_think_action_ledger`, action observability events, and recovery taxonomy
-  integration are not built yet.
+- ✅ **Step 4 shipped:** `cf_think_action_ledger` records settled action outputs
+  and replays them for matching idempotency keys without re-running
+  `execute`. The default `tool:${toolCallId}` key only dedups paths that preserve
+  the tool call id; cross-recovery side-effect dedup requires an app-provided
+  stable `idempotencyKey`.
+- ⛔ **Still planned:** `attachReply`, durable-pause approval descriptors, and
+  the explicit retry/lease policy for unknown pending action outcomes are not
+  built yet.
 - **Depends on the Turns RFC** for `TurnContext`, the `recovery-continue`/
   `recovery-retry` triggers, and `_admitTurn` (authorization resolves once per
   turn at admission). Build Turns first.
@@ -48,10 +53,10 @@ Second of three sibling API RFCs (turns, actions, channels) to be picked up in
   optional" decision, `Think`'s recovery decision stays package-owned, so the
   ledger can be consulted inside `dispatchRecoveredTurn` on recovery re-entry. Use
   the real hook names or update them here when building.)
-- **Steps 1–3 are the partial early win:** the additive descriptor,
-  approval-descriptor, and authorization slices landed before ledger/recovery.
-  The ledger (§6) and recovery taxonomy (§7) still gate the replay-safe
-  side-effect story.
+- **Steps 1–4 are the partial early win:** the additive descriptor,
+  approval-descriptor, authorization, and settled-result ledger slices have
+  landed. Pending retry leases, durable-pause descriptor mapping, and
+  `ctx.attachReply` remain planned.
 - **Produces a seam the Channels RFC consumes:** `ctx.attachReply()` (§9) is
   inert until Channels/Voice render it.
 
@@ -427,19 +432,27 @@ durable-pause/codemode descriptor mapping is still planned.
 
 ### 6. Idempotency ledger
 
-A new durable table makes settled server actions replay-safe on recovery — the
-precise gap today: a tool can execute, then lose its result to a crash before
-the transcript persists, and re-execute on the recovery retry.
+A durable table makes settled server actions replay-safe for a stable action
+key. This closes the same-key replay gap: if a server action has already settled,
+Think returns the stored model-visible output instead of running `execute` again.
+
+Important recovery boundary: the fallback key `tool:${toolCallId}` only dedups
+paths that preserve the tool call id (approval continuations and
+auto-continuation replays). A full recovery retry may re-run the model, causing a
+new tool call id; side-effecting actions that must dedup across recovery re-runs,
+submissions, or webhooks should provide a semantic `idempotencyKey` derived from
+stable domain data (for example an order id or inbound event id). Do not include
+`ctx.requestId`, timestamps, or random values in the key.
 
 ```sql
 CREATE TABLE IF NOT EXISTS cf_think_action_ledger (
-  key          TEXT PRIMARY KEY,   -- idempotencyKey(input) OR `tool:${toolCallId}`
+  key          TEXT PRIMARY KEY,   -- action:name:key OR `tool:${toolCallId}`
   action_name  TEXT NOT NULL,
   request_id   TEXT,
   tool_call_id TEXT,
   input_hash   TEXT NOT NULL,      -- stable hash of normalized input
-  status       TEXT NOT NULL,      -- 'pending' | 'settled' | 'failed'
-  result_json  TEXT,               -- safe-stringified output when settled
+  status       TEXT NOT NULL,      -- 'pending' | 'settled'
+  result_json  TEXT,               -- JSON envelope for settled model output
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL
 );
@@ -447,20 +460,25 @@ CREATE TABLE IF NOT EXISTS cf_think_action_ledger (
 
 Pipeline inside `actionToTool`'s `execute`:
 
-1. Compute `key` = `action.idempotencyKey(input)` if provided, else
-   `tool:${toolCallId}`.
+1. After authorization and approved-input validation, compute `key` =
+   `action:${actionName}:${action.idempotencyKey(input)}` if provided, else
+   `tool:${toolCallId}` when a tool call id exists.
 2. **Lookup.** If a row exists:
    - `settled` and `input_hash` matches → return stored `result_json`
-     (no re-execution). Emit `action:replayed`.
-   - `settled` and `input_hash` differs → error (idempotency key reused with
-     different input — a programming error).
+     (no re-execution). Emit `action:ledger:replayed`.
+   - same key but different action/input hash → structured `ActionKeyConflict`
+     (idempotency key reused with different input — a programming error).
    - `pending` → an earlier attempt is mid-flight or crashed mid-execute; this
-     is the genuinely-unsafe window. Policy: treat as not-yet-settled and
-     re-execute only if the action is marked replay-safe, else surface a
-     structured "in progress / unknown outcome" error. (See Open Questions —
-     this is the hard case.)
-3. Insert `pending` (or no-op if present), run `execute`.
-4. On success: update `settled` + `result_json`. On throw: update `failed`.
+     is the genuinely unsafe window. If a same-isolate active promise owns the
+     key, await it; otherwise surface structured `ActionPendingError` and do not
+     re-execute.
+3. Insert `pending`, register an in-memory active promise for same-isolate
+   coalescing, run `execute`.
+4. On success: store the prepared, JSON-roundtripped model-visible output as
+   `settled`. On throw/timeout: delete the pending row and return the normal
+   structured action error, allowing a later retry to run again.
+5. Retention sweeping is best-effort. `settled` rows default to 30 days;
+   `pending` rows default to 90 days; apps can disable sweeping per status.
 
 Reconciliation with existing keyspaces (the "one keyspace" requirement):
 
@@ -469,8 +487,8 @@ Reconciliation with existing keyspaces (the "one keyspace" requirement):
   callers should set `idempotencyKey` to incorporate the
   `cf_think_submissions.idempotency_key` or `idempotencyKeyForEvent` value when
   the action is the side effect of a deduped event. The RFC does not auto-couple
-  them (that would be surprising); it documents the pattern and provides
-  `ctx.requestId`/submission metadata so the key can include them.
+  them (that would be surprising); it documents the pattern and lets the action
+  derive a stable semantic key from its input/context.
 - Transcript first-write-wins (`tool-state.ts`) still applies and is the _model-
   visible_ dedup; the ledger is the _side-effect_ dedup. They are complementary:
   transcript prevents the model from re-calling; the ledger prevents a recovery
@@ -479,8 +497,8 @@ Reconciliation with existing keyspaces (the "one keyspace" requirement):
 Coordination with the recovery RFC: the ledger is consulted on every action
 execution including recovery re-entry (`recovery-continue`/`recovery-retry` from
 the Turns RFC). The recovery engine's "a settled tool result is not accidentally
-replayed" promise is implemented here for side effects, not just transcript
-state.
+replayed" promise is implemented here for side effects when the action key is
+stable across the re-entry path.
 
 ### 7. Recovery taxonomy
 
@@ -488,13 +506,13 @@ state.
 adapter's `classifyRecoveredTurn` outcomes so one model covers tools and
 channels:
 
-| Kind              | On crash mid-flight                        | Replay safety                                                 |
-| ----------------- | ------------------------------------------ | ------------------------------------------------------------- |
-| `server`          | re-run via recovery retry                  | ledger returns settled result; otherwise re-executes          |
-| `client`          | client re-resolves                         | resolved client-side; not server-executed                     |
-| `approval-gated`  | parked (pending interaction → budget-free) | re-executes only after approval; ledger applies post-approval |
-| `durable-pause`   | parked; resumes via `approveExecution`     | execution id is the dedup anchor                              |
-| `delegated-agent` | child run reattached, not restarted        | child's own ledger/recovery (`agent-tools.md`)                |
+| Kind              | On crash mid-flight                        | Replay safety                                                        |
+| ----------------- | ------------------------------------------ | -------------------------------------------------------------------- |
+| `server`          | re-run via recovery retry                  | ledger returns settled result for stable keys; otherwise re-executes |
+| `client`          | client re-resolves                         | resolved client-side; not server-executed                            |
+| `approval-gated`  | parked (pending interaction → budget-free) | re-executes only after approval; ledger applies post-approval        |
+| `durable-pause`   | parked; resumes via `approveExecution`     | execution id is the dedup anchor; ledger v1 does not apply           |
+| `delegated-agent` | child run reattached, not restarted        | child's own ledger/recovery (`agent-tools.md`)                       |
 
 Kind is inferred when not explicit: `approval` set → `approval-gated`; no server
 `execute` → `client`; delegates to a sub-agent → `delegated-agent`; otherwise

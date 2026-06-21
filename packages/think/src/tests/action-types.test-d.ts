@@ -67,6 +67,25 @@ const permissionInputAction = action({
 });
 void permissionInputAction;
 
+const idempotencyInputAction = action({
+  description: "Use inferred input in idempotency key policy",
+  inputSchema: z.object({ eventId: z.string(), amount: z.number() }),
+  idempotencyKey({ input }) {
+    const eventId: string = input.eventId;
+    void eventId;
+
+    // @ts-expect-error — `amount` is inferred as number, not string.
+    const amount: string = input.amount;
+    void amount;
+
+    return `event:${input.eventId}`;
+  },
+  execute(input) {
+    return input.amount;
+  }
+});
+void idempotencyInputAction;
+
 const wrongManualInput = action({
   description: "Reject mismatched manual input annotations",
   inputSchema: z.object({ count: z.number() }),

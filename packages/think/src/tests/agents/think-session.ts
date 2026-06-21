@@ -3263,6 +3263,15 @@ export class ThinkToolsTestAgent extends Think {
       echo: action({
         description: "Echo a message back as an action",
         inputSchema: z.object({ message: z.string() }),
+        idempotencyKey:
+          mode === "ledger-key" ||
+          mode === "ledger-throw" ||
+          mode === "ledger-large-output" ||
+          mode === "ledger-slow" ||
+          mode === "ledger-symbol-output" ||
+          mode === "ledger-approval"
+            ? (this._actionIdempotencyKey ?? "echo-ledger-key")
+            : undefined,
         permissions:
           mode === "permission" || mode === "approval-permission"
             ? ["echo:run"]
@@ -3271,7 +3280,9 @@ export class ThinkToolsTestAgent extends Think {
               : undefined,
         timeoutMs: mode === "timeout" ? 5 : undefined,
         approval:
-          mode === "approval" || mode === "approval-permission"
+          mode === "approval" ||
+          mode === "approval-permission" ||
+          mode === "ledger-approval"
             ? true
             : mode === "function-policy"
               ? ({ input }) => input.message === "hello"
@@ -3279,11 +3290,14 @@ export class ThinkToolsTestAgent extends Think {
         approvalSummary:
           mode === "approval" ||
           mode === "approval-permission" ||
-          mode === "function-policy"
+          mode === "function-policy" ||
+          mode === "ledger-approval"
             ? "Approve echo action"
             : undefined,
         approvalRisk:
-          mode === "approval" || mode === "approval-permission"
+          mode === "approval" ||
+          mode === "approval-permission" ||
+          mode === "ledger-approval"
             ? "low"
             : undefined,
         execute: async ({ message }, ctx): Promise<unknown> => {
@@ -3296,16 +3310,30 @@ export class ThinkToolsTestAgent extends Think {
           if (mode === "throw") {
             throw new Error("action failed");
           }
+          if (mode === "ledger-throw") {
+            throw new Error("ledger action failed");
+          }
           if (mode === "timeout") {
             await new Promise(() => {});
           }
+          if (mode === "ledger-slow") {
+            await new Promise((resolve) =>
+              setTimeout(resolve, this._actionDelayMs)
+            );
+          }
           if (mode === "large-output") {
+            return `echo: ${message} ${"x".repeat(25_000)}`;
+          }
+          if (mode === "ledger-large-output") {
             return `echo: ${message} ${"x".repeat(25_000)}`;
           }
           if (mode === "non-json-output") {
             const output: { count: bigint; self?: unknown } = { count: 12n };
             output.self = output;
             return output;
+          }
+          if (mode === "ledger-symbol-output") {
+            return Symbol("not-json");
           }
           return `action echo: ${message}`;
         }
@@ -3331,8 +3359,16 @@ export class ThinkToolsTestAgent extends Think {
     | "approval"
     | "permission"
     | "approval-permission"
-    | "function-policy" = "default";
+    | "function-policy"
+    | "ledger-key"
+    | "ledger-throw"
+    | "ledger-large-output"
+    | "ledger-slow"
+    | "ledger-symbol-output"
+    | "ledger-approval" = "default";
   private _actionExecutionCount = 0;
+  private _actionIdempotencyKey: string | null = null;
+  private _actionDelayMs = 25;
   private _actionGrantedPermissions: string[] | null | undefined = undefined;
   private _denyActionReason: string | null = null;
   private _lastActionContext: {
@@ -3357,10 +3393,137 @@ export class ThinkToolsTestAgent extends Think {
       | "approval"
       | "permission"
       | "approval-permission"
-      | "function-policy" = "default"
+      | "function-policy"
+      | "ledger-key"
+      | "ledger-throw"
+      | "ledger-large-output"
+      | "ledger-slow"
+      | "ledger-symbol-output"
+      | "ledger-approval" = "default"
   ): Promise<void> {
     this._useEchoAction = true;
     this._actionExecuteMode = mode;
+  }
+
+  async setActionIdempotencyKey(key: string | null): Promise<void> {
+    this._actionIdempotencyKey = key;
+  }
+
+  async setActionDelayForTest(ms: number): Promise<void> {
+    this._actionDelayMs = ms;
+  }
+
+  async setActionLedgerRetentionForTest(
+    retention: Partial<{
+      settledMs: number | false;
+      pendingMs: number | false;
+      maxSweepRows: number;
+    }>
+  ): Promise<void> {
+    this.actionLedgerRetention = {
+      ...this.actionLedgerRetention,
+      ...retention
+    };
+  }
+
+  async executeEchoActionToolForTest(message = "hello"): Promise<unknown> {
+    const tools = await (
+      this as unknown as { _compileActionTools: () => Promise<ToolSet> }
+    )._compileActionTools();
+    const echo = tools.echo as {
+      execute?: (
+        input: unknown,
+        options: {
+          toolCallId?: string;
+          messages?: [];
+          abortSignal?: AbortSignal;
+        }
+      ) => Promise<unknown>;
+    };
+    const result = await echo.execute?.(
+      { message },
+      { toolCallId: "tc-direct", messages: [] }
+    );
+    return typeof result === "symbol" ? { type: "symbol" } : result;
+  }
+
+  async executeEchoActionToolParallelForTest(): Promise<unknown[]> {
+    return Promise.all([
+      this.executeEchoActionToolForTest(),
+      this.executeEchoActionToolForTest()
+    ]);
+  }
+
+  async listActionLedgerRowsForTest(): Promise<
+    Array<{
+      key: string;
+      action_name: string;
+      input_hash: string;
+      status: string;
+      result_json: string | null;
+    }>
+  > {
+    (
+      this as unknown as { _ensureActionLedgerTable: () => void }
+    )._ensureActionLedgerTable();
+    return this.sql<{
+      key: string;
+      action_name: string;
+      input_hash: string;
+      status: string;
+      result_json: string | null;
+    }>`
+      SELECT key, action_name, input_hash, status, result_json
+      FROM cf_think_action_ledger
+      ORDER BY key ASC
+    `;
+  }
+
+  async insertActionLedgerRowForTest(options: {
+    key: string;
+    actionName?: string;
+    input?: unknown;
+    status?: "pending" | "settled";
+    output?: unknown;
+    updatedAt?: number;
+  }): Promise<void> {
+    (
+      this as unknown as { _ensureActionLedgerTable: () => void }
+    )._ensureActionLedgerTable();
+    const inputHash = (
+      this as unknown as { _actionInputHash: (input: unknown) => string }
+    )._actionInputHash(options.input ?? { message: "hello" });
+    const output =
+      options.status === "settled"
+        ? JSON.stringify({
+            valuePresent: options.output !== undefined,
+            value: options.output
+          })
+        : null;
+    const now = options.updatedAt ?? Date.now();
+    this.sql`
+      INSERT INTO cf_think_action_ledger (
+        key, action_name, request_id, tool_call_id, input_hash, status,
+        result_json, created_at, updated_at
+      )
+      VALUES (
+        ${options.key}, ${options.actionName ?? "echo"}, ${null}, ${"tc-seeded"},
+        ${inputHash}, ${options.status ?? "pending"}, ${output}, ${now}, ${now}
+      )
+    `;
+  }
+
+  async sweepActionLedgerForTest(): Promise<{
+    settled: number;
+    pending: number;
+  }> {
+    return (
+      this as unknown as {
+        _sweepActionLedger: (options: {
+          force?: boolean;
+        }) => Promise<{ settled: number; pending: number }>;
+      }
+    )._sweepActionLedger({ force: true });
   }
 
   async setActionGrantedPermissions(
