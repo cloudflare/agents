@@ -3266,14 +3266,20 @@ export class ThinkToolsTestAgent extends Think {
         permissions:
           mode === "permission" || mode === "approval-permission"
             ? ["echo:run"]
-            : undefined,
+            : mode === "function-policy"
+              ? ({ input }) => [`echo:${input.message}`]
+              : undefined,
         timeoutMs: mode === "timeout" ? 5 : undefined,
         approval:
           mode === "approval" || mode === "approval-permission"
             ? true
-            : undefined,
+            : mode === "function-policy"
+              ? ({ input }) => input.message === "hello"
+              : undefined,
         approvalSummary:
-          mode === "approval" || mode === "approval-permission"
+          mode === "approval" ||
+          mode === "approval-permission" ||
+          mode === "function-policy"
             ? "Approve echo action"
             : undefined,
         approvalRisk:
@@ -3324,7 +3330,8 @@ export class ThinkToolsTestAgent extends Think {
     | "non-json-output"
     | "approval"
     | "permission"
-    | "approval-permission" = "default";
+    | "approval-permission"
+    | "function-policy" = "default";
   private _actionExecutionCount = 0;
   private _actionGrantedPermissions: string[] | null | undefined = undefined;
   private _denyActionReason: string | null = null;
@@ -3349,7 +3356,8 @@ export class ThinkToolsTestAgent extends Think {
       | "non-json-output"
       | "approval"
       | "permission"
-      | "approval-permission" = "default"
+      | "approval-permission"
+      | "function-policy" = "default"
   ): Promise<void> {
     this._useEchoAction = true;
     this._actionExecuteMode = mode;

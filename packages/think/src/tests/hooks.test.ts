@@ -444,6 +444,40 @@ describe("Think — actions compile into guarded tools", () => {
     await closeWS(ws);
   });
 
+  it("supports function-valued approval and permission policies", async () => {
+    const room = `action-function-policy-${crypto.randomUUID()}`;
+    const agent = await freshToolAgent(room);
+    await agent.useEchoActionForTest("function-policy");
+    await agent.setActionGrantedPermissions(["echo:hello"]);
+    const ws = await connectWS("ThinkToolsTestAgent", room);
+
+    const initialDone = waitForDone(ws);
+    sendChatRequest(ws, "call echo action");
+    const initialFrames = await initialDone;
+    const approvalChunk = initialFrames
+      .filter(
+        (frame) =>
+          frame.type === MSG_CHAT_RESPONSE &&
+          typeof frame.body === "string" &&
+          frame.body.length > 0
+      )
+      .map(
+        (frame) => JSON.parse(frame.body as string) as Record<string, unknown>
+      )
+      .find((chunk) => chunk.type === "tool-approval-request");
+
+    expect(approvalChunk).toMatchObject({
+      toolCallId: "tc1",
+      approvalDescriptor: {
+        action: "echo",
+        input: { message: "hello" },
+        permissions: ["echo:hello"]
+      }
+    });
+
+    await closeWS(ws);
+  });
+
   it("denies approval-gated actions before prompting", async () => {
     const room = `action-approval-denied-before-prompt-${crypto.randomUUID()}`;
     const agent = await freshToolAgent(room);
@@ -469,6 +503,51 @@ describe("Think — actions compile into guarded tools", () => {
     );
     expect((await agent.getActionProbe()).count).toBe(0);
 
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    const toolPart = messages
+      .flatMap((message) => message.parts)
+      .find((part) => "toolCallId" in part && part.toolCallId === "tc1") as
+      | Record<string, unknown>
+      | undefined;
+    expect(toolPart).toMatchObject({
+      state: "output-available",
+      output: {
+        error: {
+          name: "ActionAuthorizationError",
+          message: "Missing required permission: echo:run",
+          permissions: ["echo:run"]
+        }
+      }
+    });
+
+    await closeWS(ws);
+  });
+
+  it("rechecks authorization after approval before execute", async () => {
+    const room = `action-approval-grant-changed-${crypto.randomUUID()}`;
+    const agent = await freshToolAgent(room);
+    await agent.useEchoActionForTest("approval-permission");
+    await agent.setActionGrantedPermissions(["echo:run"]);
+    const ws = await connectWS("ThinkToolsTestAgent", room);
+
+    const initialDone = waitForDone(ws);
+    sendChatRequest(ws, "call echo action");
+    await initialDone;
+
+    await agent.setActionGrantedPermissions([]);
+
+    const continuationDone = waitForDone(ws);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc1",
+        approved: true,
+        autoContinue: true
+      })
+    );
+    await continuationDone;
+
+    expect((await agent.getActionProbe()).count).toBe(0);
     const messages = (await agent.getStoredMessages()) as UIMessage[];
     const toolPart = messages
       .flatMap((message) => message.parts)
@@ -525,6 +604,44 @@ describe("Think — actions compile into guarded tools", () => {
         descriptor: {
           action: "echo"
         }
+      }
+    });
+
+    await closeWS(ws);
+  });
+
+  it("does not execute an approved action with rewritten input", async () => {
+    const room = `action-approval-rewritten-input-${crypto.randomUUID()}`;
+    const agent = await freshToolAgent(room);
+    await agent.useEchoActionForTest("approval");
+    const ws = await connectWS("ThinkToolsTestAgent", room);
+
+    const initialDone = waitForDone(ws);
+    sendChatRequest(ws, "call echo action");
+    await initialDone;
+
+    await agent.setToolCallDecision({
+      action: "allow",
+      input: { message: "rewritten" }
+    });
+
+    const continuationDone = waitForDone(ws);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc1",
+        approved: true,
+        autoContinue: true
+      })
+    );
+    await continuationDone;
+
+    expect((await agent.getActionProbe()).count).toBe(0);
+    const after = await agent.getAfterToolCallLog();
+    expect(JSON.parse(after[0].outputJson)).toEqual({
+      error: {
+        name: "ActionApprovalInputError",
+        message: "Approved action input cannot be changed by beforeToolCall"
       }
     });
 

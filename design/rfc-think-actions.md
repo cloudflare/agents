@@ -267,7 +267,7 @@ authoritative order; sections 4–8 detail each step.
 
 1. `_wrapToolsWithDecision` -> `beforeToolCall` (existing; can block/substitute,
    stays the outermost gate).
-2. **Authorization** (`authorizeAction`). Deny -> structured `output-error`,
+2. **Authorization** (`authorizeAction`). Deny -> structured tool output,
    skip the rest. Also consulted when deriving `needsApproval` so an
    _unauthorized_ approval-gated action is never prompted (authorize before
    approval, never prompt for something that would be denied).
@@ -292,8 +292,11 @@ circular-reference handling), output truncation, authorization checks, and AI SD
 `needsApproval` derivation for approval-gated actions. Authorization also runs
 while deriving `needsApproval`, so denied actions never prompt for approval. It
 leaves `beforeToolCall`/`afterToolCall` behavior to the existing Think wrapper,
-so approved actions still pass through that outer gate before `execute`. It does
-not yet run output-schema validation, ledger lookup, or ledger writes.
+so approved actions still pass through that outer gate before `execute`; if that
+hook rewrites the input for an already-approved action, Think returns a
+structured `ActionApprovalInputError` instead of executing different arguments
+than the human approved. It does not yet run output-schema validation, ledger
+lookup, or ledger writes.
 
 ### 3. `ActionContext` (`ctx`)
 
@@ -363,9 +366,10 @@ authorizeAction(ctx: ActionAuthorizationContext): ActionAuthorizationDecision {
 Where granted permissions come from is deliberately app-owned via
 `authorizeTurn`. Common sources: the channel (a channel can declare default
 grants — coordinated with the Channels RFC), the session, or the request `body`.
-On denial the action does not execute; the model receives a structured
-`output-error` ("not authorized: requires billing:refund"), so the assistant can
-explain rather than crash. Default behavior is **full grant**, so existing apps
+On denial the action does not execute; the model receives a structured tool
+output (`{ error: { name: "ActionAuthorizationError", ... } }`), so the assistant
+can explain rather than crash. This is intentionally not a UI `output-error`
+part in the shipped slice. Default behavior is **full grant**, so existing apps
 see no change until they opt in.
 
 **Shipped subset:** `permissions`, `authorizeTurn`, and `authorizeAction` are
@@ -374,7 +378,9 @@ implemented for server actions. `authorizeTurn` runs once per turn after
 turn's `grantedPermissions` when provided and otherwise grants all permissions.
 Approval-gated actions consult authorization while deriving `needsApproval`, so
 denied actions skip the prompt and return the structured authorization error
-from `execute`.
+from `execute`. Because `permissions` and `approval` predicates can run once
+while deciding whether to prompt and again when an approved call resumes, they
+should be pure and side-effect free.
 
 ### 5. Approval — reuse, don't reinvent
 
@@ -414,8 +420,10 @@ render a card from the same data.
 **Shipped subset:** approval-gated actions compile onto AI SDK `needsApproval`.
 The descriptor is attached to the existing `approval-requested` tool part as
 `part.approval.descriptor`, then preserved by `toolApprovalUpdate` when the user
-approves or rejects. The durable-pause/codemode descriptor mapping is still
-planned.
+approves or rejects. Approved action calls must execute with the approved input;
+`beforeToolCall` may still block or substitute the result, but input substitution
+for an already-approved action returns `ActionApprovalInputError`. The
+durable-pause/codemode descriptor mapping is still planned.
 
 ### 6. Idempotency ledger
 

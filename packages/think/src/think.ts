@@ -327,6 +327,21 @@ function actionAuthorizationErrorEnvelope(
   };
 }
 
+function actionApprovalInputErrorEnvelope(): {
+  error: { name: string; message: string };
+} {
+  return {
+    error: {
+      name: "ActionApprovalInputError",
+      message: "Approved action input cannot be changed by beforeToolCall"
+    }
+  };
+}
+
+function structurallyEqualJson(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 function safeStringifyActionOutput(output: unknown): {
   value?: string;
   lossy: boolean;
@@ -1103,6 +1118,7 @@ export function isAction(value: unknown): value is Action {
 type CompiledActionMetadata = {
   actionName: string;
   summary: string;
+  permissions?: string[];
   risk?: "low" | "medium" | "high";
   kind: "approval-gated" | "durable-pause";
 };
@@ -3521,6 +3537,7 @@ export class Think<
     string,
     ActionApprovalDescriptor
   >();
+  private _activeTurnApprovedActionInputs = new Map<string, unknown>();
 
   /**
    * Number of times the proactive guard has compacted within the current
@@ -4201,6 +4218,8 @@ export class Think<
     // turn that doesn't override falls back to the instance-level value.
     this._activeStallTimeoutMs = undefined;
     this._activeTurnAuthorization = { allowed: true };
+    this._activeTurnApprovedActionInputs =
+      this._approvedActionInputsFromTranscript();
     // Reset the proactive-compaction cap for this streamText run.
     this._proactiveCompactionsThisRun = 0;
     if (this.waitForMcpConnections) {
@@ -4562,6 +4581,32 @@ export class Think<
     };
   }
 
+  private _approvedActionInputsFromTranscript(): Map<string, unknown> {
+    const approved = new Map<string, unknown>();
+    for (const message of this.messages) {
+      for (const part of message.parts ?? []) {
+        if (typeof part !== "object" || part === null) continue;
+        const record = part as Record<string, unknown>;
+        const toolCallId =
+          typeof record.toolCallId === "string" ? record.toolCallId : undefined;
+        if (!toolCallId) continue;
+        const approval = record.approval as
+          | { approved?: unknown; descriptor?: unknown }
+          | undefined;
+        if (approval?.approved !== true) continue;
+        const descriptor = approval.descriptor as
+          | { input?: unknown; action?: unknown }
+          | undefined;
+        if (typeof descriptor?.action !== "string") continue;
+        approved.set(
+          toolCallId,
+          "input" in descriptor ? descriptor.input : record.input
+        );
+      }
+    }
+    return approved;
+  }
+
   private async _resolveActionPermissions(
     spec: ActionPermissionSpec<unknown> | undefined,
     input: unknown,
@@ -4619,10 +4664,16 @@ export class Think<
         descriptor.config.kind ??
         (descriptor.config.approval ? "approval-gated" : "server");
       if (kind === "approval-gated" || kind === "durable-pause") {
+        const staticPermissions = Array.isArray(descriptor.config.permissions)
+          ? [...descriptor.config.permissions]
+          : undefined;
         this._activeTurnActionMetadata.set(toolName, {
           actionName: toolName,
           summary:
             descriptor.config.approvalSummary ?? descriptor.config.description,
+          ...(staticPermissions !== undefined && {
+            permissions: staticPermissions
+          }),
           ...(descriptor.config.approvalRisk !== undefined && {
             risk: descriptor.config.approvalRisk
           }),
@@ -4653,6 +4704,11 @@ export class Think<
 
     return tool({
       description: config.description,
+      metadata: {
+        cfThinkAction: true,
+        cfThinkActionApprovalConfigured:
+          approval !== undefined && kind !== "durable-pause"
+      },
       inputSchema: config.inputSchema as never,
       ...(approval !== undefined && kind !== "durable-pause"
         ? {
@@ -4671,6 +4727,11 @@ export class Think<
                 messages: options.messages,
                 signal: new AbortController().signal
               };
+              if (
+                this._activeTurnApprovedActionInputs.has(options.toolCallId)
+              ) {
+                return true;
+              }
               const authorization = await this._authorizeActionCall({
                 actionName: toolName,
                 kind,
@@ -4975,6 +5036,10 @@ export class Think<
       }
 
       const isDynamic = t.type === "dynamic";
+      const metadata = t.metadata as Record<string, unknown> | undefined;
+      const isApprovalConfiguredAction =
+        metadata?.cfThinkAction === true &&
+        metadata.cfThinkActionApprovalConfigured === true;
 
       const wrappedExecute = async (
         input: unknown,
@@ -5022,6 +5087,15 @@ export class Think<
         // Resolve the decision.
         if (!decision || decision.action === "allow") {
           const finalInput = decision?.input ?? input;
+          const approvedInput = isApprovalConfiguredAction
+            ? this._activeTurnApprovedActionInputs.get(options.toolCallId)
+            : undefined;
+          if (
+            approvedInput !== undefined &&
+            !structurallyEqualJson(finalInput, approvedInput)
+          ) {
+            return actionApprovalInputErrorEnvelope();
+          }
           // Await before inspecting so we detect AsyncIterable returns
           // whether the original `execute` returned them directly (sync
           // function or `async function*`) or wrapped in a Promise (a
@@ -8961,7 +9035,7 @@ export class Think<
       action: metadata.actionName,
       summary: metadata.summary,
       input: pending.input ?? {},
-      permissions: [],
+      permissions: metadata.permissions ?? [],
       ...(metadata.risk !== undefined && { risk: metadata.risk }),
       kind: metadata.kind
     };
