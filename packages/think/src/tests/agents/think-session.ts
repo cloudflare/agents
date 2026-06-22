@@ -5595,6 +5595,27 @@ export class ThinkRecoveryTestAgent extends Think {
   private _rejectPrefill = false;
   private _lastPromptRole: string | undefined;
   private _throwBeforeTurnMessage: string | null = null;
+  // recovery × channels: capture the channel context + assembled system prompt
+  // that each turn (including recovered ones) actually ran with, so a test can
+  // assert per-channel policy is re-applied on recovery, not just that the
+  // `metadata.channel` stamp survives.
+  private _capturedTurnChannels: string[] = [];
+  private _capturedTurnSystems: string[] = [];
+
+  // A single per-channel policy (voice) so recovery tests can assert that a
+  // recovered turn re-resolves the channel from the persisted user message and
+  // re-applies its instructions / tool narrowing.
+  override configureChannels() {
+    return {
+      voice: {
+        kind: "voice" as const,
+        ingress: { transport: "voice" as const },
+        instructions: "VOICE MODE",
+        tools: () => ({}),
+        maxTurns: 3
+      }
+    };
+  }
 
   override getModel(): LanguageModel {
     if (this._rejectPrefill) {
@@ -5617,6 +5638,8 @@ export class ThinkRecoveryTestAgent extends Think {
     this._turnCallCount++;
     this._turnBodies.push(ctx.body);
     this._turnClientToolNames.push(Object.keys(ctx.tools));
+    this._capturedTurnChannels.push(this.activeChannel?.channelId ?? "");
+    this._capturedTurnSystems.push(ctx.system);
 
     if (this._stashData !== null) {
       try {
@@ -5676,6 +5699,16 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async getTurnCallCount(): Promise<number> {
     return this._turnCallCount;
+  }
+
+  /** The active channel id captured at each turn's `beforeTurn` (""=none). */
+  async getCapturedTurnChannelsForTest(): Promise<string[]> {
+    return this._capturedTurnChannels;
+  }
+
+  /** The assembled system prompt captured at each turn's `beforeTurn`. */
+  async getCapturedTurnSystemsForTest(): Promise<string[]> {
+    return this._capturedTurnSystems;
   }
 
   async getRecoveryContexts(): Promise<

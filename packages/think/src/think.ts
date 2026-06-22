@@ -9553,7 +9553,7 @@ export class Think<
   private async _retryLastUserTurn(
     clientTools?: ClientToolSchema[],
     body?: Record<string, unknown>,
-    options?: SaveMessagesOptions & { trigger?: TurnTrigger }
+    options?: SaveMessagesOptions & { trigger?: TurnTrigger; channel?: string }
   ): Promise<SaveMessagesResult> {
     const trigger = options?.trigger ?? "recovery-retry";
     this._assertNotInsideAdmittedTurn(trigger);
@@ -9564,6 +9564,11 @@ export class Think<
 
     const requestId = crypto.randomUUID();
     const epoch = this._turnQueue.generation;
+    // Re-resolve the channel from the persisted user message so a recovered
+    // retry re-applies per-channel policy, exactly like `continueLastTurn`. The
+    // `metadata.channel` stamp survives the interruption; without this the
+    // retried turn would silently fall back to the default policy.
+    const channel = options?.channel ?? this._channelFromLatestUserMessage();
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
     let wasAborted = false;
@@ -9573,6 +9578,7 @@ export class Think<
       trigger,
       requestId,
       continuation: false,
+      channel,
       getStatus: () => status,
       execute: async () => {
         if (this._turnQueue.generation !== epoch) {
