@@ -55,8 +55,14 @@ describe("resolveChannels", () => {
       }
     });
     const { channels } = resolveChannels(configured, {});
-    expect(channels.get("web")?.kind).toBe("web");
-    expect(channels.get("web")?.instructions).toBe("be concise");
+    const web = channels.get("web");
+    expect(web?.kind).toBe("web");
+    expect(web?.instructions).toBe("be concise");
+    // A policy-only override must retain the implicit web capabilities.
+    expect(web?.capabilities).toEqual({
+      canStream: true,
+      canEditMessages: true
+    });
   });
 
   it("throws when configureChannels() replaces web with a non-web kind", () => {

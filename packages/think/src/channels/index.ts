@@ -130,10 +130,21 @@ export function resolveChannels(
     // override its *policy* (instructions / tool narrowing / maxTurns) with a
     // `{ kind: "web" }` entry, but replacing it with another kind would silently
     // break the native chat ingress/delivery path — reject that footgun loudly.
-    if (id === "web" && definition.kind !== "web") {
-      throw new Error(
-        `Channel "web" is reserved for the built-in WebSocket chat surface; configureChannels() may override its policy with a { kind: "web" } entry but cannot replace it with kind "${definition.kind}"`
-      );
+    if (id === "web") {
+      if (definition.kind !== "web") {
+        throw new Error(
+          `Channel "web" is reserved for the built-in WebSocket chat surface; configureChannels() may override its policy with a { kind: "web" } entry but cannot replace it with kind "${definition.kind}"`
+        );
+      }
+      // Merge over the implicit web defaults so a policy-only override (e.g.
+      // just `instructions`) keeps the built-in capabilities/ingress instead of
+      // silently dropping them.
+      channels.set("web", {
+        ...IMPLICIT_WEB_CHANNEL,
+        ...definition,
+        id: "web"
+      });
+      continue;
     }
     channels.set(id, { ...definition, id });
   }
