@@ -248,11 +248,32 @@ import { truncatePausedExecutionOutput } from "./tools/execute";
 import { ExtensionManager, sanitizeName } from "./extensions/manager";
 import { ThinkMessengerRuntime } from "./messengers/chat-sdk";
 import type {
+  DeliveryKind,
   MessengerContext,
+  MessengerDeliverySurface,
   ThinkMessengers,
   MessengerThinkHost
 } from "./messengers";
+import { resolveChannels } from "./channels";
+import type {
+  ChannelContext,
+  NormalizedChannelDefinition,
+  ThinkChannels
+} from "./channels";
 
+export { defineChannels, messengerChannel } from "./channels";
+export type {
+  ChannelCapabilities,
+  ChannelContext,
+  ChannelDefinition,
+  ChannelDeliveryPolicy,
+  ChannelDeliverySurface,
+  ChannelIngress,
+  ChannelKind,
+  NormalizedChannelDefinition,
+  ThinkChannels
+} from "./channels";
+export type { DeliveryKind, DeliveryTag } from "./messengers";
 export { Session } from "agents/experimental/memory/session";
 export type { SessionMessage } from "agents/experimental/memory/session";
 export { Workspace } from "@cloudflare/shell";
@@ -1023,6 +1044,8 @@ export interface ChatOptions {
    * `cf_agent_tool_result` messages.
    */
   onClientToolCall?: ClientToolExecutor;
+  /** Channel id this turn belongs to. See {@link RunTurnBase.channel}. */
+  channel?: string;
 }
 
 /** Input accepted by {@link Think.runTurn}. */
@@ -1035,6 +1058,13 @@ export type TurnInputMessages =
 /** Shared base for {@link RunTurnOptions}; only `input` is common across modes. */
 export interface RunTurnBase {
   input?: TurnInputMessages;
+  /**
+   * Channel id this turn belongs to (resolved against `configureChannels()` /
+   * `getMessengers()`). Sets the turn-scoped channel context and is persisted on
+   * the user message so a recovered/continued turn re-resolves it. Defaults to
+   * the implicit `web` channel.
+   */
+  channel?: string;
 }
 
 /** Options for {@link Think.runTurn} with `mode: "wait"` (the default). */
@@ -1279,6 +1309,7 @@ type QueueTurnSpec<T> = {
   generation?: number;
   continuation?: boolean;
   allowNested?: boolean;
+  channel?: string;
   onQueued?: () => void;
   getStatus?: () => string | undefined;
   execute: () => Promise<T>;
@@ -1287,6 +1318,7 @@ type QueueTurnSpec<T> = {
 type NonQueueTurnSpec<T> = {
   admission: Exclude<TurnAdmission, "queue">;
   trigger: TurnTrigger;
+  channel?: string;
   execute: () => Promise<T>;
 };
 
@@ -1325,6 +1357,28 @@ export interface AddMessagesOptions {
    * live view is intentionally not touched until the next turn's sync.
    */
   broadcast?: boolean;
+}
+
+/** Options for {@link Think.deliverNotice}. */
+export interface DeliverNoticeOptions {
+  /**
+   * Target channel id. Defaults to the active turn's channel, else `"web"`.
+   */
+  channel?: string;
+  /**
+   * Also record the notice in the model-visible transcript so the next turn
+   * knows it was said. Default `false`. For the `web` channel the note is always
+   * appended to the transcript (its only render path); `informModel` then only
+   * controls the phrasing.
+   */
+  informModel?: boolean;
+  /** Delivery kind for the wire tag. Default `"notice"`. */
+  kind?: DeliveryKind;
+  /**
+   * Conversation/thread hint, required for out-of-turn delivery to a
+   * multi-thread messenger channel.
+   */
+  thread?: string;
 }
 
 type AgentToolChildRunStatus =
@@ -1534,6 +1588,24 @@ type ActionLedgerEvent =
       payload: { settled: number; pending: number };
     };
 
+type ChannelEvent =
+  | {
+      type: "channel:resolved";
+      payload: { channel: string; kind: string; requestId?: string };
+    }
+  | {
+      type: "channel:delivered";
+      payload: { channel: string; kind: DeliveryKind; turnEnded: boolean };
+    }
+  | {
+      type: "notice:delivered";
+      payload: { channel: string; kind: DeliveryKind; informModel: boolean };
+    }
+  | {
+      type: "notice:failed";
+      payload: { channel: string; error: string };
+    };
+
 /**
  * A durably-parked `kind: "durable-pause"` action awaiting human approval. The
  * row is the compaction-safe record of everything needed to run `execute` on
@@ -1606,6 +1678,8 @@ export type SubmitMessagesOptions = {
   submissionId?: string;
   idempotencyKey?: string;
   metadata?: Record<string, unknown>;
+  /** Channel id this submission belongs to. See {@link RunTurnBase.channel}. */
+  channel?: string;
 };
 
 type ThinkWorkflowPromptContext = {
@@ -2386,7 +2460,24 @@ export class Think<
 
   private _activeMessengerContext?: MessengerContext;
 
+  /**
+   * Turn-scoped channel context (superset of `_activeMessengerContext`). Set on
+   * both the queue and submit admission paths via `_withChannelContext`, read by
+   * `deliverNotice` and per-channel policy. Save/restore keeps nested turns safe.
+   */
+  private _activeChannelContext?: ChannelContext;
+
+  /**
+   * Live delivery surface for the active turn, bound by `deliverMessengerReply`
+   * so `deliverNotice` can post to the originating channel mid-turn. Save/restore
+   * keeps nested turns safe.
+   */
+  private _activeDeliverySurface?: MessengerDeliverySurface;
+
   private _messengerRuntime?: ThinkMessengerRuntime;
+
+  /** Resolved channel registry (implicit web + configureChannels + messengers). */
+  private _channels?: Map<string, NormalizedChannelDefinition>;
 
   /**
    * WorkerLoader binding for sandboxed extensions.
@@ -2521,7 +2612,7 @@ export class Think<
       this._restoreClientTools();
       this._restoreBody();
       this._setupProtocolHandlers();
-      this._initializeMessengers();
+      await this._initializeChannels();
 
       // 8. User's onStart
       await _onStart();
@@ -3496,6 +3587,18 @@ export class Think<
     return {};
   }
 
+  /**
+   * Return the channels for this agent. Wraps (does not supersede)
+   * {@link getMessengers}: the implicit `web` channel is always present, each
+   * messenger from `getMessengers()` is absorbed as a `kind: "messenger"`
+   * channel, and these entries add `web`/`voice`/`custom` surfaces plus
+   * per-channel policy. A channel id that collides with a `getMessengers()` id
+   * is an error.
+   */
+  configureChannels(): ThinkChannels | Promise<ThinkChannels> {
+    return {};
+  }
+
   getMessengerContext(): MessengerContext | undefined {
     if (this._activeMessengerContext) {
       return this._activeMessengerContext;
@@ -3516,24 +3619,258 @@ export class Think<
     const previous = this._activeMessengerContext;
     this._activeMessengerContext = context;
     try {
-      await this.chat(userMessage, callback, options);
+      await this.chat(userMessage, callback, {
+        ...options,
+        channel: context.messengerId
+      });
     } finally {
       this._activeMessengerContext = previous;
     }
   }
 
-  private _initializeMessengers(): void {
+  /**
+   * Bind the live messenger delivery surface for the active turn so
+   * `deliverNotice` can post to the originating channel while a messenger turn
+   * is running. Returns a restore function; save/restore keeps nested turns
+   * safe. Called by `deliverMessengerReply`.
+   */
+  bindActiveDeliverySurface(surface: MessengerDeliverySurface): () => void {
+    const previous = this._activeDeliverySurface;
+    this._activeDeliverySurface = surface;
+    return () => {
+      this._activeDeliverySurface = previous;
+    };
+  }
+
+  /**
+   * The channel context for the active turn, if the turn resolved to a channel.
+   * Readable from tools/hooks during a turn (e.g. to branch on `kind`).
+   */
+  get activeChannel(): ChannelContext | undefined {
+    return this._activeChannelContext;
+  }
+
+  /** Resolve a channel id to a turn-scoped {@link ChannelContext}, if registered. */
+  private _resolveChannelContext(
+    channel: string | undefined
+  ): ChannelContext | undefined {
+    if (!channel) {
+      return undefined;
+    }
+    const definition = this._channels?.get(channel);
+    if (!definition) {
+      // A channel was requested but is not registered. Don't throw (a recovered
+      // turn may name a channel later removed from `configureChannels()`), but
+      // warn so a typo'd channel id is visible rather than silently policy-free.
+      // `_channels` is undefined for sub-agents (no channel registry), where a
+      // missing channel is expected, so only warn once the registry exists.
+      if (this._channels) {
+        console.warn(
+          `[Think] turn requested channel "${channel}" which is not registered ` +
+            `(configureChannels()/getMessengers()); no per-channel policy applied`
+        );
+      }
+      return undefined;
+    }
+    this._emitChannelEvent({
+      type: "channel:resolved",
+      payload: {
+        channel,
+        kind: definition.kind,
+        requestId: admittedTurnContext.getStore()?.requestId
+      }
+    });
+    return {
+      channelId: channel,
+      kind: definition.kind,
+      capabilities: definition.capabilities,
+      messenger:
+        definition.kind === "messenger" ? this.getMessengerContext() : undefined
+    };
+  }
+
+  /**
+   * Run `fn` with the turn-scoped channel context set for `channel`. No-op (just
+   * runs `fn`) when the channel is unset or unregistered. Save/restore keeps
+   * nested turns safe — mirrors `chatWithMessengerContext`.
+   */
+  private async _withChannelContext<T>(
+    channel: string | undefined,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    const context = this._resolveChannelContext(channel);
+    if (!context) {
+      return fn();
+    }
+    const previous = this._activeChannelContext;
+    this._activeChannelContext = context;
+    try {
+      return await fn();
+    } finally {
+      this._activeChannelContext = previous;
+    }
+  }
+
+  /**
+   * Stamp the channel id onto user messages so a recovered/continued turn can
+   * re-resolve the channel from durable history.
+   */
+  private _stampChannel(
+    messages: UIMessage[],
+    channel: string | undefined
+  ): UIMessage[] {
+    if (!channel) {
+      return messages;
+    }
+    return messages.map((message) =>
+      message.role === "user"
+        ? {
+            ...message,
+            metadata: {
+              ...(message.metadata as Record<string, unknown> | undefined),
+              channel
+            }
+          }
+        : message
+    );
+  }
+
+  /** The channel stamped on the latest user message in the given list, if any. */
+  private _channelFromMessages(messages: UIMessage[]): string | undefined {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message.role === "user") {
+        const channel = (message.metadata as { channel?: unknown } | undefined)
+          ?.channel;
+        return typeof channel === "string" ? channel : undefined;
+      }
+    }
+    return undefined;
+  }
+
+  /** Re-resolve the channel for a continuation from the latest user message. */
+  private _channelFromLatestUserMessage(): string | undefined {
+    return this._channelFromMessages(this.messages);
+  }
+
+  /**
+   * Deliver a no-turn, channel-routed message — a deterministic status, fallback,
+   * or notice — straight to the channel's delivery surface WITHOUT invoking the
+   * model and WITHOUT opening a recovery incident.
+   *
+   * Routing precedence for the target channel: explicit `options.channel` → the
+   * active turn's channel → `"web"`. The `web` channel renders via the transcript
+   * (its only client render path), so a web notice is always transcript-visible;
+   * messenger/voice deliver out of band and only touch the transcript when
+   * `informModel: true`.
+   *
+   * Like `addMessages`, this bypasses the turn queue and is safe to call from
+   * inside a tool `execute` without deadlocking.
+   */
+  async deliverNotice(
+    text: string | { markdown: string },
+    options?: DeliverNoticeOptions
+  ): Promise<void> {
+    const informModel = options?.informModel ?? false;
+    const kind: DeliveryKind = options?.kind ?? "notice";
+    const plain = typeof text === "string" ? text : text.markdown;
+    const annotated = `[Delivered to the user out of band] ${plain}`;
+    const channelId = options?.channel ?? this._activeChannelId() ?? "web";
+
+    try {
+      if (channelId === "web") {
+        await this.addMessages([
+          this._noticeMessage(informModel ? annotated : plain, kind)
+        ]);
+      } else {
+        const surface =
+          this._activeDeliverySurface ??
+          (await this._messengerRuntime?.resolveDeliverySurface(
+            channelId,
+            options?.thread
+          ));
+        if (!surface) {
+          const kindOf = this._channels?.get(channelId)?.kind;
+          let hint: string;
+          if (kindOf === undefined) {
+            hint = `; channel "${channelId}" is not registered`;
+          } else if (kindOf === "messenger") {
+            hint = options?.thread
+              ? ` (thread "${options.thread}"); the adapter must implement fetchThread() for out-of-turn notices`
+              : "; pass { thread } for out-of-turn messenger notices (and the adapter must implement fetchThread())";
+          } else {
+            hint = `; channel kind "${kindOf}" has no out-of-turn delivery surface yet`;
+          }
+          throw new Error(
+            `deliverNotice: cannot resolve a delivery surface for channel "${channelId}"${hint}`
+          );
+        }
+        await surface.post(
+          typeof text === "string" ? text : { markdown: text.markdown }
+        );
+        if (informModel) {
+          await this.addMessages([this._noticeMessage(annotated, kind)]);
+        }
+      }
+      this._emitChannelEvent({
+        type: "notice:delivered",
+        payload: { channel: channelId, kind, informModel }
+      });
+    } catch (error) {
+      this._emitChannelEvent({
+        type: "notice:failed",
+        payload: {
+          channel: channelId,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * The active turn's channel id, if any. Prefers the turn-scoped channel
+   * context, then the active messenger turn's id; web turns have none, so
+   * `deliverNotice` defaults to `"web"`.
+   */
+  private _activeChannelId(): string | undefined {
+    return (
+      this._activeChannelContext?.channelId ??
+      this._activeMessengerContext?.messengerId
+    );
+  }
+
+  private _noticeMessage(
+    text: string,
+    kind: DeliveryKind = "notice"
+  ): UIMessage {
+    return {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [{ type: "text", text }],
+      metadata: { deliveryKind: kind }
+    };
+  }
+
+  private async _initializeChannels(): Promise<void> {
     if (this.parentPath.length > 0) {
       return;
     }
 
+    const configured = await this.configureChannels();
     const messengers = this.getMessengers();
-    if (Object.keys(messengers).length === 0) {
+    const { channels, messengers: messengerDefs } = resolveChannels(
+      configured,
+      messengers
+    );
+    this._channels = channels;
+
+    if (Object.keys(messengerDefs).length === 0) {
       return;
     }
 
     this._messengerRuntime = new ThinkMessengerRuntime(
-      messengers,
+      messengerDefs,
       this as unknown as MessengerThinkHost
     );
     this._messengerRuntime.initialize();
@@ -4546,7 +4883,7 @@ export class Think<
         ? { execute: input.clientToolExecutor }
         : undefined
     );
-    const tools: ToolSet = {
+    let tools: ToolSet = {
       ...workspaceTools,
       ...baseTools,
       ...actionTools,
@@ -4557,8 +4894,29 @@ export class Think<
       ...clientToolSet
     };
 
+    // Per-channel policy (overridable defaults applied BEFORE `beforeTurn`):
+    // narrow the tool set (the `config.tools` seam can only ADD, never remove)
+    // and prepend channel instructions to the base system prompt.
+    const channelContext = this._activeChannelContext;
+    const channelDefinition = channelContext
+      ? this._channels?.get(channelContext.channelId)
+      : undefined;
+    if (channelDefinition?.tools) {
+      tools = channelDefinition.tools(tools);
+    }
+
+    const channelInstructions =
+      channelDefinition?.instructions && channelContext
+        ? typeof channelDefinition.instructions === "function"
+          ? await channelDefinition.instructions(channelContext)
+          : channelDefinition.instructions
+        : undefined;
+
     const frozenPrompt = await this.session.freezeSystemPrompt();
-    const baseSystem = frozenPrompt || this.getSystemPrompt();
+    const rawBaseSystem = frozenPrompt || this.getSystemPrompt();
+    const baseSystem = channelInstructions
+      ? `${channelInstructions}\n\n${rawBaseSystem}`
+      : rawBaseSystem;
     const system = this._systemPromptForTurn(baseSystem, tools);
 
     const messages = await this._assembleModelMessages(tools);
@@ -4650,7 +5008,11 @@ export class Think<
     this._turnModelMessageBaseline = finalMessages.length;
     this._activeTurnTools = mergedTools;
 
-    const finalMaxSteps = config.maxSteps ?? this.maxSteps;
+    // `maxTurns` is an overridable per-channel default: a user `beforeTurn`
+    // returning `maxSteps` still wins, then the channel cap, then the instance
+    // default.
+    const finalMaxSteps =
+      config.maxSteps ?? channelDefinition?.maxTurns ?? this.maxSteps;
     const finalSendReasoning = config.sendReasoning ?? this.sendReasoning;
     // Resolve the per-turn stall-watchdog override (explicit `0` = off for this
     // turn). Read by `_streamResult` / `_streamResultToRpcCallback` when arming
@@ -4883,6 +5245,14 @@ export class Think<
   }
 
   private _emitActionLedgerEvent(event: ActionLedgerEvent): void {
+    const emit = this._emit as unknown as (
+      type: string,
+      payload: Record<string, unknown>
+    ) => void;
+    emit.call(this, event.type, event.payload);
+  }
+
+  private _emitChannelEvent(event: ChannelEvent): void {
     const emit = this._emit as unknown as (
       type: string,
       payload: Record<string, unknown>
@@ -5839,7 +6209,10 @@ export class Think<
     spec: TurnSpec<T>
   ): Promise<AdmittedQueueResult<T> | T> {
     if (spec.admission !== "queue") {
-      return spec.execute();
+      // The non-queue (submit/execute-submission) path runs `execute()` here
+      // directly — it does NOT pass through `_runInsideAdmittedTurnBody`, so the
+      // channel context must be set here too.
+      return this._withChannelContext(spec.channel, () => spec.execute());
     }
 
     if (!spec.allowNested) {
@@ -5887,7 +6260,9 @@ export class Think<
         this._activeTurnReplyAttachmentsRequestId = spec.requestId;
 
         try {
-          const value = await spec.execute();
+          const value = await this._withChannelContext(spec.channel, () =>
+            spec.execute()
+          );
           this._emit("chat:turn:finish", {
             requestId: spec.requestId,
             trigger: spec.trigger,
@@ -5982,8 +6357,9 @@ export class Think<
         trigger: "rpc",
         requestId,
         continuation: false,
+        channel: options?.channel,
         execute: async () => {
-          const userMsg: UIMessage =
+          const baseUserMsg: UIMessage =
             typeof userMessage === "string"
               ? {
                   id: crypto.randomUUID(),
@@ -5991,6 +6367,10 @@ export class Think<
                   parts: [{ type: "text", text: userMessage }]
                 }
               : userMessage;
+          const userMsg = this._stampChannel(
+            [baseUserMsg],
+            options?.channel
+          )[0];
 
           await this._appendMessageToHistory(userMsg);
           this._broadcastMessages();
@@ -6248,7 +6628,8 @@ export class Think<
 
     if (options.continuation === true) {
       const result = await this.continueLastTurn(options.body, {
-        signal: options.signal
+        signal: options.signal,
+        channel: options.channel
       });
       return this._enrichTurnResult(result, true);
     }
@@ -6259,7 +6640,11 @@ export class Think<
     }
 
     if (typeof input === "function") {
-      const result = await this.saveMessages(input, { signal: options.signal });
+      const result = await this._runProgrammaticMessagesTurn(
+        crypto.randomUUID(),
+        input,
+        { signal: options.signal, channel: options.channel }
+      );
       return this._enrichTurnResult(result, false);
     }
 
@@ -6268,9 +6653,11 @@ export class Think<
       return { requestId: "", status: "skipped", continuation: false };
     }
 
-    const result = await this.saveMessages(messages, {
-      signal: options.signal
-    });
+    const result = await this._runProgrammaticMessagesTurn(
+      crypto.randomUUID(),
+      messages,
+      { signal: options.signal, channel: options.channel }
+    );
     return this._enrichTurnResult(result, false);
   }
 
@@ -6289,7 +6676,8 @@ export class Think<
     return this.submitMessages(messages, {
       submissionId: options.submissionId,
       idempotencyKey: options.idempotencyKey,
-      metadata: options.metadata
+      metadata: options.metadata,
+      channel: options.channel
     });
   }
 
@@ -6307,7 +6695,8 @@ export class Think<
     return this.chat(userMessage, options.callback, {
       signal: options.signal,
       clientTools: options.clientTools,
-      onClientToolCall: options.onClientToolCall
+      onClientToolCall: options.onClientToolCall,
+      channel: options.channel
     });
   }
 
@@ -8339,6 +8728,9 @@ export class Think<
     messages: UIMessage[],
     options?: SubmitMessagesOptions
   ): Promise<SubmitMessagesResult> {
+    // Persist the channel on the user messages so the drained turn re-resolves
+    // it from history (the model turn runs later in the submission drain).
+    messages = this._stampChannel(messages, options?.channel);
     return this._admitTurn({
       admission: "submit",
       trigger: "submission",
@@ -8950,11 +9342,19 @@ export class Think<
       workflowPrompt?: ThinkWorkflowPromptContext;
       shouldApplyMessages?: () => boolean | Promise<boolean>;
       trigger?: TurnTrigger;
+      channel?: string;
     }
   ): Promise<ProgrammaticMessagesResult> {
     const clientTools = this._lastClientTools;
     const body = options?.body ?? this._lastBody;
     const epoch = this._turnQueue.generation;
+    // Explicit channel wins; otherwise re-resolve from persisted user-message
+    // metadata (covers the submission drain replaying stamped messages).
+    const channel =
+      options?.channel ??
+      (Array.isArray(messages)
+        ? this._channelFromMessages(messages)
+        : undefined);
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
     let output: unknown;
@@ -8965,6 +9365,7 @@ export class Think<
       trigger: options?.trigger ?? "programmatic",
       requestId,
       continuation: false,
+      channel,
       getStatus: () => status,
       execute: async () => {
         if (this._turnQueue.generation !== epoch) {
@@ -8998,7 +9399,7 @@ export class Think<
           return;
         }
 
-        for (const msg of resolved) {
+        for (const msg of this._stampChannel(resolved, channel)) {
           await this._appendMessageToHistory(msg);
         }
         options?.onMessagesApplied?.();
@@ -9149,7 +9550,7 @@ export class Think<
    */
   protected async continueLastTurn(
     body?: Record<string, unknown>,
-    options?: SaveMessagesOptions & { trigger?: TurnTrigger }
+    options?: SaveMessagesOptions & { trigger?: TurnTrigger; channel?: string }
   ): Promise<SaveMessagesResult> {
     const trigger = options?.trigger ?? "programmatic";
     this._assertNotInsideAdmittedTurn(trigger);
@@ -9162,6 +9563,9 @@ export class Think<
     const clientTools = this._lastClientTools;
     const resolvedBody = body ?? this._lastBody;
     const epoch = this._turnQueue.generation;
+    // Re-resolve the channel from durable history so a continued/recovered turn
+    // re-applies per-channel policy.
+    const channel = options?.channel ?? this._channelFromLatestUserMessage();
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
     let wasAborted = false;
@@ -9171,6 +9575,7 @@ export class Think<
       trigger,
       requestId,
       continuation: true,
+      channel,
       getStatus: () => status,
       execute: async () => {
         if (this._turnQueue.generation !== epoch) {
@@ -13393,9 +13798,88 @@ export class Think<
 
   // ── Response hook ──────────────────────────────────────────────
 
+  /**
+   * Render a reply attachment ({@link ReplyAttachment}) for delivery to the
+   * active channel. Returns the text/markdown to post, or `undefined` to skip —
+   * unknown types, or types a channel handles out of band (e.g. `voice_note`
+   * via the voice transport). Override to customize per app/channel.
+   */
+  renderAttachment(
+    attachment: ReplyAttachment
+  ): string | { markdown: string } | undefined {
+    switch (attachment.type) {
+      case "card":
+        return {
+          markdown: `\`\`\`json\n${JSON.stringify(
+            (attachment as { payload: unknown }).payload,
+            null,
+            2
+          )}\n\`\`\``
+        };
+      case "email_draft": {
+        const draft = attachment as { subject?: string; to?: string[] };
+        const lines = ["**Email draft**"];
+        if (draft.to?.length) lines.push(`To: ${draft.to.join(", ")}`);
+        if (draft.subject) lines.push(`Subject: ${draft.subject}`);
+        return { markdown: lines.join("\n") };
+      }
+      case "voice_note":
+        return undefined;
+      default:
+        return undefined;
+    }
+  }
+
+  /**
+   * Deliver known reply attachments to the active channel (best-effort, never
+   * fails the turn). Unknown types are ignored.
+   */
+  private async _renderChannelAttachments(
+    attachments: ReplyAttachment[] | undefined
+  ): Promise<void> {
+    if (!attachments?.length) {
+      return;
+    }
+    for (const attachment of attachments) {
+      let rendered: string | { markdown: string } | undefined;
+      try {
+        rendered = this.renderAttachment(attachment);
+      } catch (error) {
+        console.warn(
+          `[Think] renderAttachment threw: ${error instanceof Error ? error.message : String(error)}`
+        );
+        continue;
+      }
+      if (rendered === undefined) {
+        continue;
+      }
+      try {
+        await this.deliverNotice(rendered, { kind: "interim" });
+      } catch (error) {
+        console.warn(
+          `[Think] failed to deliver channel attachment: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+  }
+
   private async _fireResponseHook(result: ChatResponseResult): Promise<void> {
     // Surface advisory reply attachments recorded during this turn.
     result.attachments = this.replyAttachments(result.requestId);
+    // Record the channel-level delivery for this turn (the turn-scoped channel
+    // context is still set here — the response hook runs inside the turn body).
+    const deliveredChannel = this._activeChannelContext;
+    if (deliveredChannel) {
+      this._emitChannelEvent({
+        type: "channel:delivered",
+        payload: {
+          channel: deliveredChannel.channelId,
+          kind: "final",
+          turnEnded: true
+        }
+      });
+    }
+    await this._renderChannelAttachments(result.attachments);
     // Record the terminal status durably so a client connecting after the turn
     // ended still learns its outcome (see `_buildIdleConnectMessages`).
     await this._recordTerminalChatStatus(

@@ -568,6 +568,19 @@ export class ThinkTestAgent extends Think {
     body?: RpcJsonObject;
   }> = [];
   private _beforeTurnMessagesJson: string[] = [];
+  private _capturedTurnChannels: string[] = [];
+
+  override configureChannels() {
+    return {
+      voice: {
+        kind: "voice" as const,
+        ingress: { transport: "voice" as const },
+        instructions: "VOICE MODE",
+        tools: () => ({}),
+        maxTurns: 3
+      }
+    };
+  }
   private _stepLog: Array<{
     finishReason: string;
     text: string;
@@ -611,7 +624,44 @@ export class ThinkTestAgent extends Think {
       body: ctx.body as RpcJsonObject | undefined
     });
     this._beforeTurnMessagesJson.push(JSON.stringify(ctx.messages));
+    this._capturedTurnChannels.push(this.activeChannel?.channelId ?? "");
     if (this._turnConfigOverride) return this._turnConfigOverride;
+  }
+
+  async getCapturedTurnChannelsForTest(): Promise<string[]> {
+    return this._capturedTurnChannels;
+  }
+
+  async runChannelTurnForTest(options: {
+    input?: string;
+    channel?: string;
+    continuation?: boolean;
+  }): Promise<void> {
+    if (options.continuation) {
+      await this.runTurn({ continuation: true, channel: options.channel });
+      return;
+    }
+    await this.runTurn({
+      input: options.input ?? "hi",
+      channel: options.channel
+    });
+  }
+
+  async renderAttachmentsForTest(
+    attachments: import("../../think").ReplyAttachment[]
+  ): Promise<UIMessage[]> {
+    await (
+      this as unknown as {
+        _renderChannelAttachments(
+          a: import("../../think").ReplyAttachment[]
+        ): Promise<void>;
+      }
+    )._renderChannelAttachments(attachments);
+    return this.getMessages();
+  }
+
+  async resetCapturedTurnChannelsForTest(): Promise<void> {
+    this._capturedTurnChannels = [];
   }
 
   async setTurnConfigOverride(config: TurnConfig | null): Promise<void> {
@@ -1701,6 +1751,18 @@ export class ThinkTestAgent extends Think {
 
   async getSessionHistoryForTest(): Promise<UIMessage[]> {
     return (await this.session.getHistory()) as UIMessage[];
+  }
+
+  async deliverNoticeErrorForTest(
+    text: string,
+    channel?: string
+  ): Promise<string | null> {
+    try {
+      await this.deliverNotice(text, channel ? { channel } : undefined);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
 
   async enableCompactionForTest(): Promise<void> {

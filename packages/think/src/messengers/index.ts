@@ -28,6 +28,7 @@ export type {
 } from "./chat-sdk";
 
 export {
+  defaultDeliveryTag,
   deliverMessengerReply,
   EMPTY_MESSENGER_RESPONSE,
   ERROR_MESSENGER_RESPONSE,
@@ -43,6 +44,8 @@ export {
 
 export type {
   DeliverMessengerReplyOptions,
+  DeliveryKind,
+  DeliveryTag,
   MessengerDeliveryPolicy,
   MessengerDeliverySurface,
   MessengerDeliveryTarget,

@@ -1,10 +1,10 @@
-Status: proposed
+Status: in progress
 
 # RFC: Think channels and notices
 
 Related:
 
-- [rfc-think-turns.md](./rfc-think-turns.md) — `runTurn`/`TurnSpec`; `channel` is the seam this RFC fills (`TurnSpec.channelContext`)
+- [rfc-think-turns.md](./rfc-think-turns.md) — `runTurn`/`_admitTurn`; `channel` is the seam this RFC fills via a turn-scoped `_activeChannelContext` (not the reserved-but-unbuilt `TurnSpec.channelContext`)
 - [rfc-think-actions.md](./rfc-think-actions.md) — `ctx.attachReply()` produces delivery metadata; channels consume it
 - [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md) — `tryHandleNonChatFiberRecovery` and messenger-reply snapshots are adapter-owned; this RFC must preserve that contract and keep notices out of the incident path
 - [think.md](./think.md) — Think design doc
@@ -12,26 +12,26 @@ Related:
 
 ## Status and dependencies (read first)
 
-Third of three sibling API RFCs (turns, actions, channels) to be picked up in
-**separate** sessions. Recommended order: **Turns → Actions → Channels** — this
-one lands last because it consumes seams from both.
+Third of three sibling API RFCs (turns, actions, channels). Recommended order:
+**Turns → Actions → Channels** — this one lands last because it consumes seams
+from both.
 
-- ⛔ **Nothing in this RFC is built yet** — confirmed absent from
-  `packages/think/src/think.ts` (`configureChannels`, `deliverNotice` do not
-  exist). The messenger runtime it generalizes (`packages/think/src/messengers/`)
-  is fully built and unchanged.
-- **Depends on the Turns RFC** for `TurnSpec.channelContext`,
-  `runTurn({ channel })`, and `addMessages()` (the `informModel` write —
-  `addMessages` is already shipped).
-- **Depends on the Actions RFC** for `ctx.attachReply()` (consumed at delivery,
-  §6) — but only suggested-order step 5 needs it.
-- **Depends on the chat-recovery RFC** to preserve `tryHandleNonChatFiberRecovery`
-  and the messenger-reply snapshot contract, and to keep notices out of the
-  incident path.
-- **Partial early win available:** suggested-order step 1
-  (`deliverNotice()` + `informModel`) only needs the already-shipped
-  `addMessages()` plus the existing web/messenger delivery surfaces, so it can
-  ship independently of the larger messengers→channels rename.
+- ✅ **Shipped** (`@cloudflare/think`, minor) — `packages/think/src/channels/`
+  (`ChannelDefinition`, `ChannelIngress`, `configureChannels()`, implicit `web`
+  channel, `voice` seam, `resolveChannels`), `deliverNotice()` + `informModel`,
+  the additive `DeliveryTag` (`kind` + `turnEnded`), per-channel policy
+  (instructions/tool-narrowing/`maxTurns`) applied at admission, channel
+  threading through `runTurn`, attachment rendering, and `channel:*`/`notice:*`
+  observability. The messenger runtime it generalizes
+  (`packages/think/src/messengers/`) is wrapped unchanged.
+- **Built on the Turns spine** (`runTurn`, `_admitTurn`, `addMessages()`). Channel
+  threading is delivered as a turn-scoped `_activeChannelContext` plus a persisted
+  channel **id** in turn metadata — not the `TurnSpec.channelContext` the Turns
+  RFC originally reserved (see Coordination, below).
+- **Consumes the Actions RFC** `ctx.attachReply()` / `ReplyAttachment` union at
+  delivery (§6).
+- **Preserves the chat-recovery contract** — `tryHandleNonChatFiberRecovery` and
+  the messenger-reply snapshot stay adapter-owned; notices never open an incident.
 
 ## The problem
 
@@ -309,18 +309,36 @@ function deliverNotice(
 
 Semantics:
 
-- **No model turn.** It delivers straight to the channel's delivery surface
-  (web: `_broadcast` a notice frame; messenger: `surface.post(...)`; voice: TTS).
+- **No model turn.** It delivers straight to the channel's delivery surface.
   Because it is not a turn, it bypasses `_admitTurn` (Turns RFC) and the turn
   queue entirely — like `addMessages`/`_hostSendMessage`, it cannot deadlock
   inside a tool `execute`.
-- **`informModel: true`** calls `addMessages()` (Turns RFC) with a standard,
-  model-legible annotation, e.g. an `assistant`/`system` message
-  `"[Delivered to the user out of band] <text>"`, so the next turn does not
-  repeat or contradict it. `informModel: false` (default) leaves the transcript
-  untouched — pure side channel.
+  - **web: transcript append, not a new frame.** As built, a web notice rides
+    `addMessages()` (a transcript append the client already renders), **not** a
+    new `_broadcast` notice frame. The web client transport ignores broadcast
+    frames it does not recognize (only `CF_AGENT_USE_CHAT_RESPONSE` /
+    `MSG_CHAT_*` are consumed), so a bespoke notice frame would be silently
+    dropped client-side. `informModel` only controls phrasing: `false` appends
+    the plain text, `true` appends the `"[Delivered to the user out of band]"`
+    annotation so the next turn sees it.
+  - **messenger: `surface.post(...)`** on a live delivery surface. During an
+    active turn the surface is stashed turn-scoped as `_activeDeliverySurface`
+    (set while `deliverMessengerReply` runs). Out of turn, the surface is
+    reconstructed via the adapter's `fetchThread(thread)`, which is why an
+    out-of-turn messenger notice **requires** `{ thread }`.
+  - **voice: TTS** (seam — filled by the Voice spike).
+- **`informModel`** controls the model-legible annotation. When `true`, the
+  delivered text is wrapped as `"[Delivered to the user out of band] <text>"` so
+  the next turn does not repeat or contradict it; when `false` the raw text is
+  used. **Caveat — web is not a pure side channel.** Because the web channel's
+  only client render path is the transcript, a web notice always rides
+  `addMessages()` and is therefore visible to the next model turn regardless of
+  `informModel` (the flag only changes the phrasing). For messenger/voice,
+  `informModel: false` is a true side channel (delivered out of band, transcript
+  untouched); `informModel: true` additionally appends the annotation. Notice
+  messages carry their `DeliveryKind` in `metadata.deliveryKind`.
 - **Routing.** Inside a turn, the target defaults to the active channel
-  (`getMessengerContext()`/`_activeMessengerContext`, `think.ts:2969`). Outside a
+  (`_activeChannelContext`, falling back to the messenger context). Outside a
   turn (a scheduled task, a webhook handler, an action firing a status update),
   the caller must name `channel` (and `thread` for multi-thread messengers);
   otherwise it resolves to `web`. If a named channel/thread cannot be resolved,
@@ -371,9 +389,11 @@ Where it lives on the wire:
   optional `tag: DeliveryTag` field; recovery code that switches on
   `messengerReplyRecoveryMode(snapshot)` (`delivery.ts:249`) keeps working
   because `stage` is unchanged.
-- **Web frames:** notice/command frames carry the tag in the broadcast payload
-  alongside the existing `MSG_CHAT_RESPONSE`/`MSG_CHAT_MESSAGES` types; clients
-  that ignore unknown fields are unaffected (additive).
+- **Web frames:** web notices ride a transcript append (`addMessages`) rather
+  than a bespoke notice frame, since the web client ignores unrecognized
+  broadcast frames; the tag is therefore meaningful on the messenger/voice
+  surfaces and on the existing `MSG_CHAT_RESPONSE`/`MSG_CHAT_MESSAGES` reply
+  path (additive `stage`-preserving field).
 - **Voice/CLI:** read the tag instead of guessing from text — this is the whole
   point for non-streaming-text surfaces.
 
@@ -397,15 +417,26 @@ said it would expose them.
 
 ## Coordination with the Turns and recovery RFCs
 
-- **Turns RFC seam.** `runTurn({ channel })` (Turns RFC) resolves the channel id
-  to a `ChannelContext` and sets `TurnSpec.channelContext` (the field the Turns
-  RFC reserved). For `kind: "messenger"` channels this is the existing
-  `MessengerContext` (`events.ts:67`) — so `chatWithMessengerContext`
-  (`think.ts:2980`) becomes the messenger-channel specialization of one general
-  path. The Turns RFC owns admission; this RFC owns what `channel` _means_.
-- **Per-channel policy at admission.** `instructions`/`tools`/`maxTurns` are read
-  when `_admitTurn` builds the inference loop, so a channel's narrowed tool set
-  applies to that turn only.
+- **Turns RFC seam (D2 — as built).** `runTurn({ channel })` threads a `channel`
+  id through every dispatch mode (`RunTurnBase.channel`) into `_admitTurn`. The
+  runtime resolves it to a `ChannelContext` and sets a **turn-scoped**
+  `_activeChannelContext` (save/restore) around the turn body on **both** the
+  queue and non-queue/`submit` paths — _not_ a serialized
+  `TurnSpec.channelContext` (the field the Turns RFC reserved but never built).
+  For recovery, the channel **id** is persisted on the user message metadata
+  (`metadata.channel`), so `continueLastTurn`/`_chatRecoveryContinue` re-resolve
+  the channel on wake and re-apply policy. For `kind: "messenger"` channels the
+  context wraps the existing `MessengerContext` (`events.ts`), so
+  `chatWithMessengerContext` becomes the messenger-channel specialization of one
+  general path. The Turns RFC owns admission; this RFC owns what `channel`
+  _means_.
+- **Per-channel policy at admission (as built).** `instructions`/`tools`/
+  `maxTurns` are read in `_runInferenceLoop` when the turn resolves to a channel,
+  applied **before** user `beforeTurn`/`TurnConfig` so they remain an
+  **overridable default**, not a hard cap: `instructions` are prepended to the
+  base system prompt; `tools` runs as a dedicated **narrowing** step (an explicit
+  filter, since the existing `config.tools` merge is additive and cannot remove);
+  `maxTurns` maps to a `maxSteps` cap on model steps for the turn.
 - **Recovery contract preserved.** Messenger fiber dispatch
   (`tryHandleNonChatFiberRecovery` per the recovery RFC; `handleFiberRecovery`,
   `chat-sdk.ts:238`) and reply snapshots stay adapter-owned and behavior-
@@ -426,6 +457,13 @@ New events, parallel to `chat:recovery:*`, `chat:turn:*` (Turns RFC), and
 
 These make the channel/notice path visible in the same ledger as turns,
 actions, and recovery.
+
+These ship as a **dual union**: an internal `ChannelEvent` union with a
+`_emitChannelEvent` helper in `packages/think/src/think.ts` (mirroring
+`ActionLedgerEvent`/`_emitActionLedgerEvent`), and matching public
+`BaseEvent<...>` arms added to `AgentObservabilityEvent`
+(`packages/agents/src/observability/agent.ts`). Editing the public union means
+the `agents` package must be rebuilt before `think` typechecks.
 
 ## Versioning and compatibility
 
@@ -509,29 +547,70 @@ actions, and recovery.
 
 ## Open questions and what could force a redesign
 
-- **`configureChannels()` supersede vs wrap.** Proposed: wrap (back-compat). If
-  the dual hook proves confusing, a later major could fold `getMessengers()` into
-  `configureChannels()` with a codemod.
-- **`deliverNotice` on `AIChatAgent`.** Should a reduced, chat-protocol-only
-  `deliverNotice` exist on `AIChatAgent` (mapping to `cf_agent_chat_*`), or is it
-  Think-only? Leaning Think-only; `AIChatAgent` stays the low-level adapter
-  (parent plan, Recommendation 5).
-- **Where per-channel granted permissions come from.** The Actions RFC's
-  `authorizeTurn` can draw default grants from the channel (a voice channel might
-  grant less than an authenticated web session). If channels must inject grants
-  at admission, `ChannelContext` needs a `grants` field consumed by
-  `authorizeTurn`. Cross-RFC seam to settle with Actions.
+Resolved in v1 (shipped defaults):
+
+- **`configureChannels()` supersede vs wrap → wrap.** `configureChannels()` wraps
+  `getMessengers()` for back-compat; resolution order is implicit `web` →
+  `configureChannels()` entries → `getMessengers()` entries, with a duplicate-id
+  guard. A later major could fold `getMessengers()` in with a codemod.
+- **`deliverNotice` on `AIChatAgent` → Think-only.** `deliverNotice` is a `Think`
+  method; `AIChatAgent` stays the low-level adapter (parent plan,
+  Recommendation 5).
+- **Voice as a literal channel → yes (seam only).** Voice ships as
+  `kind: "voice"` with a `transport: "voice"` ingress seam; the audio transport
+  is the [Voice spike](./rfc-think-voice.md)'s job, but voice is expressible as a
+  channel today (`deliverNotice({ channel: "voice" })`, `DeliveryKind`/
+  `turnEnded` are real).
+- **`DeliveryKind` extensibility → start closed.** Shipped as the closed
+  four-value enum (`final | interim | notice | command`); widen only if a surface
+  needs a fifth signal.
+- **`maxTurns` semantic → `maxSteps` cap.** A channel's `maxTurns` maps to a
+  `maxSteps` cap on model steps for the turn, applied as an overridable default
+  (before user `beforeTurn`), not a hard security cap. Tool narrowing is likewise
+  an overridable default, not an enforcement boundary.
+
+Still open:
+
+- **Where per-channel granted permissions come from.** v1 shipped **without**
+  channel grants. `ChannelContext` carries a documented seam (`capabilities`,
+  room for a future `grants` field) that the Actions RFC's `authorizeTurn` could
+  draw from (a voice channel might grant less than an authenticated web session).
+  Grants are a future slice; see Actions RFC.
 - **Channel gateways: explicit DO vs managed.** Should channel ingress always be
   an app-defined Worker entrypoint (verify/parse → durable enqueue → return), or
   can Think generate/manage gateways for common channels? Keep the thin
   awaited-durable-handoff invariant either way (parent plan).
-- **Voice as a literal channel vs a parallel surface.** This RFC assumes voice is
-  a channel. If the Voice spike finds the audio transport cannot fit the
-  delivery-surface contract, voice may become a parallel surface that _reuses_
-  turns/notices instead of being a `ChannelKind`. The spike decides.
-- **`DeliveryKind` extensibility.** Is the four-value enum enough, or do surfaces
-  need an open string union (like `ReplyAttachment`)? Start closed; widen if a
-  channel needs a fifth lifecycle signal.
+
+## Deferred follow-ups (tracked, not built in v1)
+
+These are known gaps in the shipped slice. They are seams, not regressions —
+flagged here so a follow-up can pick them up:
+
+- **Sub-agent channels.** `_initializeChannels` early-returns for sub-agents
+  (`parentPath.length > 0`), so a sub-agent has no channel registry: per-channel
+  policy never applies to a sub-agent turn, and `deliverNotice` from a sub-agent
+  degrades to `"web"` (its own transcript) or throws for a named channel. The
+  open design question is whether sub-agents should (a) inherit the root agent's
+  channel registry/policy, (b) define their own via `configureChannels()`, and
+  (c) how `deliverNotice` from a sub-agent reaches the _originating user_ channel
+  rather than the sub-agent's own surface. Non-trivial (routing + ownership +
+  recovery implications); deliberately out of v1.
+- **`DeliveryKind` on the delivery wire.** `deliverNotice({ kind })` is now
+  observable (`notice:delivered` event) and recorded on web notices
+  (`metadata.deliveryKind`), but `MessengerDeliverySurface.post()` still takes
+  only text — a notice's `kind`/`DeliveryTag` does not reach the messenger/voice
+  wire. Carrying the tag to `post()` is an adapter-contract change (every adapter
+  must thread it); deferred until a surface (voice/CLI) actually consumes it.
+- **Bundled adapters: `fetchThread`.** Out-of-turn messenger `deliverNotice`
+  requires the channel adapter to implement `fetchThread(threadId)`. No bundled
+  adapter (Telegram, `chatSdkMessenger`) implements it yet — only test fixtures
+  do — so out-of-turn messenger notices are a working seam only for adapters that
+  opt in. Implement it on the bundled adapters to make the path real.
+- **Attachment delivery ordering.** Reply attachments render in
+  `_fireResponseHook` via `deliverNotice(..., { kind: "interim" })` _after_ the
+  turn's final answer, so on web they appear as trailing assistant messages and
+  on messenger as extra posts after the reply. A richer model (interleaving with
+  the reply, or a dedicated attachment frame) is deferred.
 
 ## Implementation notes (for a fresh session)
 
@@ -557,14 +636,17 @@ Where things live:
   `_broadcast` (`think.ts:11821`), frame types `MSG_CHAT_RESPONSE`/
   `MSG_CHAT_MESSAGES` (`think.ts:211`), `_hostSendMessage` (`think.ts:4631`, the
   no-turn-append precedent for web notices).
-- New public methods/hooks live on `Think` (`packages/think/src/think.ts`):
-  `configureChannels()`, `deliverNotice()`. New types can live in a
-  `packages/think/src/channels/` module that re-exports/wraps `messengers/`.
-- Depends on Turns RFC (`TurnSpec.channelContext`, `addMessages` for
-  `informModel`, `runTurn({ channel })`) and Actions RFC (`ctx.attachReply`).
-- Tests: `packages/think/src/tests/` (`npm run test:workers`). Build
-  `tsx ./scripts/build.ts`; gate `pnpm run check`; changeset required; no `any`,
-  use `import type`.
+- New public methods/hooks on `Think` (`packages/think/src/think.ts`):
+  `configureChannels()`, `deliverNotice()`, `renderAttachment()`, and the
+  `activeChannel` getter. Channel types live in `packages/think/src/channels/`
+  (`ChannelDefinition`, `ChannelIngress`, `ChannelContext`, `resolveChannels`,
+  `defineChannels`, `messengerChannel`) which wraps `messengers/`.
+- Built on the Turns spine (`addMessages` for `informModel`, `runTurn({ channel })`)
+  and the Actions RFC (`ctx.attachReply` / `ReplyAttachment`).
+- Tests live in `packages/think/src/tests/`: `channels.test.ts`,
+  `deliver-notice.test.ts`, `channel-threading.test.ts`, `channel-policy.test.ts`,
+  `attachment-consumption.test.ts`, plus the unchanged messenger parity suites.
+  Gate `pnpm run check`; changeset required; no `any`, use `import type`.
 
 Suggested implementation order:
 
@@ -583,7 +665,7 @@ Suggested implementation order:
 
 ## The decision
 
-_Pending review._ Proposed direction: generalize the existing messenger runtime
+_Accepted and shipped (v1)._ Direction: generalize the existing messenger runtime
 into a public `ChannelDefinition`/`configureChannels()` surface (wrapping, not
 replacing, `getMessengers()`), model native web and voice as channels over one
 contract, add a no-turn `deliverNotice()` with `informModel`, make delivery

@@ -85,6 +85,19 @@ export type AgentObservabilityEvent =
       { action?: string; attachmentType: string }
     >
   | BaseEvent<
+      "channel:resolved",
+      { channel: string; kind: string; requestId?: string }
+    >
+  | BaseEvent<
+      "channel:delivered",
+      { channel: string; kind: string; turnEnded: boolean }
+    >
+  | BaseEvent<
+      "notice:delivered",
+      { channel: string; kind: string; informModel: boolean }
+    >
+  | BaseEvent<"notice:failed", { channel: string; error: string }>
+  | BaseEvent<
       "fiber:run:started",
       { fiberId: string; fiberName: string; managed?: boolean }
     >

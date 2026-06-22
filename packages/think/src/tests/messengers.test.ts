@@ -398,6 +398,37 @@ describe("think messengers core", () => {
     expect(parseMessengerReplySnapshot({ type: "wrong" })).toBeNull();
   });
 
+  it("carries an additive delivery tag without changing recovery classification", () => {
+    const completed = messengerReplySnapshot("completed", baseEvent);
+    expect(completed.tag).toEqual({
+      stage: "completed",
+      kind: "final",
+      turnEnded: true
+    });
+    expect(messengerReplyRecoveryMode(completed)).toBeNull();
+
+    const streaming = messengerReplySnapshot("streaming", baseEvent);
+    expect(streaming.tag).toEqual({
+      stage: "streaming",
+      kind: "interim",
+      turnEnded: false
+    });
+    expect(messengerReplyRecoveryMode(streaming)).toBe("apologize");
+
+    const tagged = messengerReplySnapshot("accepted", baseEvent, undefined, {
+      stage: "accepted",
+      kind: "command",
+      turnEnded: false
+    });
+    const parsed = parseMessengerReplySnapshot(tagged);
+    expect(parsed?.tag).toEqual({
+      stage: "accepted",
+      kind: "command",
+      turnEnded: false
+    });
+    expect(messengerReplyRecoveryMode(tagged)).toBe("answer");
+  });
+
   it("recovers interrupted messenger reply fibers through the shared Chat runtime", async () => {
     const posted: string[] = [];
     const resolved: FiberRecoveryResult[] = [];

@@ -200,9 +200,39 @@ export function textDeltaFromStreamChunk(json: string): string | null {
 
 export type MessengerReplyStage = "accepted" | "streaming" | "completed";
 
+/**
+ * Explicit delivery lifecycle kind, orthogonal to {@link MessengerReplyStage}.
+ * Lets surfaces (voice/CLI especially) tell a final answer from an interim
+ * progress note from a deterministic notice from a control command, rather than
+ * inferring from text shape.
+ */
+export type DeliveryKind = "final" | "interim" | "notice" | "command";
+
+/**
+ * Explicit delivery lifecycle tag carried on the wire/snapshot. Orthogonal to,
+ * and additive on top of, {@link MessengerReplyStage}: recovery still switches
+ * on `stage`, while `kind`/`turnEnded` give non-streaming-text surfaces
+ * (voice/CLI) an explicit signal instead of inferring from text shape.
+ */
+export interface DeliveryTag {
+  stage: MessengerReplyStage;
+  kind: DeliveryKind;
+  turnEnded: boolean;
+}
+
+/** Derive a sensible default tag from a reply stage. */
+export function defaultDeliveryTag(stage: MessengerReplyStage): DeliveryTag {
+  return {
+    stage,
+    kind: stage === "completed" ? "final" : "interim",
+    turnEnded: stage === "completed"
+  };
+}
+
 export interface MessengerReplySnapshot {
   event: MessengerEvent;
   stage: MessengerReplyStage;
+  tag?: DeliveryTag;
   thread?: unknown;
   type: typeof MESSENGER_REPLY_FIBER_NAME;
 }
@@ -210,11 +240,13 @@ export interface MessengerReplySnapshot {
 export function messengerReplySnapshot(
   stage: MessengerReplyStage,
   event: MessengerEvent,
-  thread?: unknown
+  thread?: unknown,
+  tag?: DeliveryTag
 ): MessengerReplySnapshot {
   return {
     event,
     stage,
+    tag: tag ?? defaultDeliveryTag(stage),
     thread,
     type: MESSENGER_REPLY_FIBER_NAME
   };
@@ -241,6 +273,7 @@ export function parseMessengerReplySnapshot(
   return {
     event: candidate.event,
     stage: candidate.stage,
+    tag: candidate.tag ?? defaultDeliveryTag(candidate.stage),
     thread: candidate.thread,
     type: MESSENGER_REPLY_FIBER_NAME
   };
@@ -288,6 +321,12 @@ export interface MessengerDeliveryTarget {
     callback: StreamCallback,
     context: MessengerEvent
   ): Promise<void>;
+  /**
+   * Bind the live delivery surface for the duration of the model turn so the
+   * target can reach it from `deliverNotice` while a messenger turn is active.
+   * Returns a restore function (save/restore, so nested turns are safe).
+   */
+  bindActiveDeliverySurface?(surface: MessengerDeliverySurface): () => void;
 }
 
 export interface MessengerDeliverySurface {
@@ -371,14 +410,21 @@ export async function deliverMessengerReply(
     await options.surface.startTyping?.("Thinking...");
     const userMessage =
       options.userMessage ?? toMessengerUserMessage(options.event);
-    if (options.target.chatWithMessengerContext) {
-      await options.target.chatWithMessengerContext(
-        userMessage,
-        callback,
-        snapshotEvent
-      );
-    } else {
-      await options.target.chat(userMessage, callback);
+    const restoreSurface = options.target.bindActiveDeliverySurface?.(
+      options.surface
+    );
+    try {
+      if (options.target.chatWithMessengerContext) {
+        await options.target.chatWithMessengerContext(
+          userMessage,
+          callback,
+          snapshotEvent
+        );
+      } else {
+        await options.target.chat(userMessage, callback);
+      }
+    } finally {
+      restoreSurface?.();
     }
     if (callback.wasInterrupted()) {
       // The model turn was interrupted and routed into bounded recovery; the

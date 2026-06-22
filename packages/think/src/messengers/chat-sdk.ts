@@ -471,6 +471,30 @@ export class ThinkMessengerRuntime {
     });
   }
 
+  /**
+   * Resolve a live delivery surface for an out-of-turn notice (e.g. a scheduled
+   * task or webhook handler calling `deliverNotice`). Best-effort: reconstructs
+   * the thread from the channel's adapter via `fetchThread(threadId)`. Returns
+   * `undefined` when the channel/thread cannot be resolved so the caller can
+   * fail fast.
+   */
+  async resolveDeliverySurface(
+    channelId: string,
+    threadId?: string
+  ): Promise<MessengerDeliverySurface | undefined> {
+    const definition = this.definitionsById.get(channelId);
+    if (!definition || !threadId) {
+      return undefined;
+    }
+    const adapter = definition.adapter as unknown as {
+      fetchThread?: (id: string) => Promise<MessengerDeliverySurface>;
+    };
+    if (typeof adapter.fetchThread !== "function") {
+      return undefined;
+    }
+    return adapter.fetchThread(threadId);
+  }
+
   private async resolveTarget(
     definition: NormalizedMessengerDefinition,
     event: MessengerEvent

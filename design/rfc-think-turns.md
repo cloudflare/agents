@@ -19,8 +19,10 @@ Actions → Channels** — because the later two depend on seams this RFC define
 - **Actions RFC** needs the `TurnContext`/recovery taxonomy and the
   `recovery-continue`/`recovery-retry` triggers defined here, and authorizes at
   `_admitTurn` time.
-- **Channels RFC** needs `TurnSpec.channelContext`, `runTurn({ channel })`, and
-  `addMessages()` (for `informModel`).
+- **Channels RFC** (shipped) uses `runTurn({ channel })` and `addMessages()` (for
+  `informModel`). It threads the bare `channel` id through `_admitTurn` into a
+  turn-scoped `_activeChannelContext` rather than the originally-reserved
+  `TurnSpec.channelContext` (never built).
 
 What is already built vs. still open in **this** RFC:
 
@@ -187,13 +189,13 @@ interface RunTurnBase {
   /** Custom body exposed on `TurnContext.body` for `beforeTurn`. */
   body?: Record<string, unknown>;
   /**
-   * Optional channel/surface tag (a plain string). Passthrough for the Channels
-   * RFC. In `stream` mode it routes through `chatWithMessengerContext` only when
-   * a full `MessengerContext` is supplied internally (see `TurnSpec.channelContext`);
-   * the bare string is otherwise recorded as a lightweight `metadata.channel`
-   * tag on the persisted user message. It does not itself route delivery in
-   * `wait`/`submit`. The Channels RFC owns the string -> `MessengerContext`
-   * resolution.
+   * Optional channel/surface tag (a plain string). Delivered by the Channels
+   * RFC: it threads through every `runTurn` dispatch mode into `_admitTurn`,
+   * where the runtime resolves it to a turn-scoped `_activeChannelContext` and
+   * persists the id as `metadata.channel` on the user message (so recovery can
+   * re-resolve and re-apply per-channel policy). It is no longer routed via a
+   * serialized `TurnSpec.channelContext`. The Channels RFC owns the string ->
+   * `ChannelContext` resolution and what `channel` _means_.
    */
   channel?: string;
   /**
@@ -403,8 +405,11 @@ interface TurnSpec {
   submissionId?: string;
   metadata?: Record<string, unknown>;
 
-  // Channel passthrough (Channels RFC owns the real semantics):
-  channelContext?: MessengerContext;
+  // Channel passthrough: the bare `channel` id flows through `_admitTurn`; the
+  // Channels RFC resolves it to a turn-scoped `_activeChannelContext` rather than
+  // a serialized `channelContext`. (`TurnSpec.channelContext` was reserved here
+  // but never built — see the Channels RFC "Coordination" / D2.)
+  channel?: string;
 }
 ```
 
@@ -717,11 +722,13 @@ Layered, in the spirit of the recovery RFC's approach:
   dynamically), split into `runTurn` (wait), `streamTurn`, and keep
   `submitMessages`. Decision deferred until the prototype (`qw-demo`) exercises
   real call sites.
-- **`channel` field scope.** This RFC treats `channel` as a thin messenger-
-  context passthrough. If the Channels RFC needs per-channel admission policy
-  (tools/instructions/turn caps) to be decided at admission time, `TurnSpec`
-  may need a richer `channelContext`. Flagged so the Channels RFC can extend the
-  seam.
+- **`channel` field scope → resolved by the Channels RFC.** Per-channel admission
+  policy (tools/instructions/turn caps) _is_ decided at admission, but **not** via
+  a richer serialized `TurnSpec.channelContext`. The Channels RFC threads the bare
+  `channel` id through `_admitTurn`, resolves it to a turn-scoped
+  `_activeChannelContext`, and persists the id as `metadata.channel` for recovery
+  re-resolution. `TurnSpec.channelContext` was never built; the seam is the
+  `channel` string plus turn-scoped context.
 - **Sequencing risk.** If the recovery RFC slips, do we land `runTurn` as a thin
   facade over the _current_ private methods first (user-facing win, no internal
   unification yet), then unify `_admitTurn` after recovery lands? This is the

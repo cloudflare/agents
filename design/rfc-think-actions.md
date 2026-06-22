@@ -385,8 +385,10 @@ authorizeAction(ctx: ActionAuthorizationContext): ActionAuthorizationDecision {
 ```
 
 Where granted permissions come from is deliberately app-owned via
-`authorizeTurn`. Common sources: the channel (a channel can declare default
-grants — coordinated with the Channels RFC), the session, or the request `body`.
+`authorizeTurn`. Common sources: the channel (a channel could declare default
+grants — **not yet built**; the Channels RFC shipped v1 without channel grants,
+but `ChannelContext` carries a documented seam for a future `grants` slice that
+would feed `authorizeTurn`), the session, or the request `body`.
 On denial the action does not execute; the model receives a structured tool
 output (`{ error: { name: "ActionAuthorizationError", ... } }`), so the assistant
 can explain rather than crash. This is intentionally not a UI `output-error`
@@ -796,9 +798,11 @@ recovery-visible UI story.
   an "unknown outcome" error and require human/compensation handling; (c) a
   two-phase `prepare`/`commit` action shape. Likely (a) as default with (b) as
   opt-in. This could force an `ActionConfig` shape change.
-- **Where granted permissions come from.** Needs Channels RFC coordination —
-  channels are a natural source of default grants. If channels must inject
-  grants at admission time, `TurnSpec`/`authorizeTurn` need a channel hook.
+- **Where granted permissions come from.** Still open. The Channels RFC shipped
+  v1 **without** channel grants, so `authorizeTurn` does not yet receive any
+  channel-injected default grants. The seam exists: `ChannelContext` is resolved
+  turn-scoped at admission and is the natural place to hang a future `grants`
+  field that `authorizeTurn` would read. This is a future slice, not built.
 - **`attachReply` delivery lifetime + replay.** Exact storage and the surfaces
   that consume it are owned by the Channels/Voice RFCs; if they need richer
   per-attachment routing, the union and storage may grow. Open sub-question:

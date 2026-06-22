@@ -9,7 +9,7 @@ and latency questions.
 
 Related:
 
-- [rfc-think-channels.md](./rfc-think-channels.md) — voice is the `kind: "voice"` channel; this note fills that seam
+- [rfc-think-channels.md](./rfc-think-channels.md) — **seam shipped**: the `kind: "voice"` channel, `transport: "voice"` ingress, `deliverNotice({ channel: "voice" })`, and `DeliveryKind`/`turnEnded` are all built; this note fills the remaining audio-transport seam
 - [rfc-think-turns.md](./rfc-think-turns.md) — an utterance dispatches `runTurn({ channel: "voice", mode: "stream" })`; barge-in maps to `cancelChat`
 - [rfc-think-actions.md](./rfc-think-actions.md) — spoken approval prompts and `attachReply({ type: "voice_note" })`
 - [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md) — interruption/recovery model (reuse the #1644 interrupted-reply handling)
@@ -90,8 +90,10 @@ hard product constraint, so we spike first.
 
 - The final production voice API (this note feeds the implementation RFC).
 - New STT/TTS providers — reuse the existing ones.
-- The channel contract itself — owned by the [Channels RFC](./rfc-think-channels.md);
-  voice is a `ChannelKind` there.
+- The channel contract itself — owned by the [Channels RFC](./rfc-think-channels.md),
+  now **shipped**; voice is a built `ChannelKind` (`kind: "voice"`,
+  `transport: "voice"`) there. This note only fills the audio transport behind
+  that seam.
 
 ## The spike (what to build)
 
@@ -197,15 +199,17 @@ Proposed: **bridge first, absorb selectively.**
 
 ### Q4 — Is voice literally a channel?
 
-Proposed: **yes** — a `kind: "voice"` channel (Channels RFC) with ingress
-`transport: "voice"` (STT utterance → `runTurn`) and a TTS delivery surface. The
-parts that do not fit the messenger `post(text)` surface — binary audio and
-interim/streaming semantics — are exactly why the Channels RFC made the delivery
-surface kind-specific and added `DeliveryKind` (`final | interim | notice |
-command`) + `turnEnded`. **Fallback:** if the spike finds the audio transport
-cannot fit the channel delivery-surface contract, voice becomes a _parallel
-surface that reuses turns_ (keeps its own transport but still calls `runTurn`).
-The spike decides.
+**Answered: yes.** The Channels RFC shipped voice as a `kind: "voice"` channel
+with ingress `transport: "voice"` (STT utterance → `runTurn`) and a TTS delivery
+surface. The parts that do not fit the messenger `post(text)` surface — binary
+audio and interim/streaming semantics — are exactly why the Channels RFC made the
+delivery surface kind-specific and added `DeliveryKind` (`final | interim |
+notice | command`) + `turnEnded`. The seam (`kind: "voice"`,
+`deliverNotice({ channel: "voice" })`, per-channel policy) is now real; the spike
+only needs to fit the **audio transport** behind it. **Fallback retained:** if the
+spike finds the audio transport cannot fit the channel delivery-surface contract,
+voice can still fall back to a _parallel surface that reuses turns_ (keeps its own
+transport but still calls `runTurn`).
 
 ## Interruption and recovery policy (explicit)
 
@@ -231,9 +235,10 @@ timing), gaining memory / FTS / compaction / recovery. `cf_voice_messages`
 
 ## Coordination with the other RFCs
 
-- **Channels RFC:** voice is the `kind: "voice"` channel; this note fills that
-  seam. `DeliveryKind`/`turnEnded` and `deliverNotice` are precisely what voice
-  needs for spoken status/approval.
+- **Channels RFC (shipped):** voice is the built `kind: "voice"` channel; this
+  note fills the audio-transport seam behind it. `DeliveryKind`/`turnEnded` and
+  `deliverNotice({ channel: "voice" })` are now real and are precisely what voice
+  needs for spoken status/approval. The voice transport spike is **unblocked**.
 - **Turns RFC:** utterance → `runTurn({ channel: "voice", mode: "stream",
 callback })`; barge-in → `cancelChat(requestId)`. Voice uses the stream sink,
   never `ws-broadcast`.
