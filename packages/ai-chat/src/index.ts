@@ -23,6 +23,8 @@ import {
   reconcileMessages,
   resolveToolMergeId,
   reconcileOrphanPartial,
+  repairInterruptedToolParts,
+  persistReconstructedOrphan,
   createChatFiberSnapshot,
   unwrapChatFiberSnapshot,
   wrapChatFiberSnapshot,
@@ -30,7 +32,6 @@ import {
 } from "agents/chat";
 import {
   applyChunkToParts,
-  StreamAccumulator,
   aiSdkRecoveryCodec,
   ResumeHandshake,
   isReplayChunk,
@@ -929,6 +930,7 @@ export class AIChatAgent<
                   async () => {
                     const chatTurnBody = async () => {
                       try {
+                        await this._repairInterruptedToolsBeforeTurn();
                         const response = await this.onChatMessage(
                           async (_finishResult) => {
                             // User-provided hook. Cleanup is now handled by _reply,
@@ -1401,41 +1403,37 @@ export class AIChatAgent<
     const chunks = this._resumableStream.getStreamChunks(streamId);
     if (!chunks.length) return;
 
-    // (a) Reconstruct. A provider `start.messageId` is adopted as the id (the
-    // live path adopts it for new turns too); continuations have it stripped
-    // before storage (#1229), so the accumulator's unconditional adopt matches
-    // the live path.
-    const fallbackId = `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
-    const accumulator = new StreamAccumulator({ messageId: fallbackId });
-    for (const chunk of chunks) {
-      try {
-        accumulator.applyChunk(JSON.parse(chunk.body) as StreamChunkData);
-      } catch {
-        // Skip malformed chunk bodies
-      }
-    }
-
-    const message: UIMessage = accumulator.toMessage();
-    if (message.parts.length === 0) return;
-
-    // (b) Resolve the persist target id (the one per-package step).
-    message.id = this._resolveOrphanTargetId(streamId, message.id, fallbackId);
-
-    // (c)+(d) Upsert by id through the shared `OrphanPersistStore` seam. A row
-    // may already own this id (an early persist during tool approval, or a
-    // continuation resuming the last assistant message) — merge onto it via the
-    // shared `reconcileOrphanPartial`; otherwise append. Exactly one write
-    // (update XOR append) → one `persistMessages` → one broadcast.
-    const store = this._orphanStore();
-    const existing = await store.getMessage(message.id);
-    if (existing) {
-      await store.updateMessage(reconcileOrphanPartial(existing, message));
-    } else {
-      await store.appendMessage(message);
-    }
+    // The accumulate loop and the `getMessage → update(merge) XOR append` upsert
+    // are the shared `persistReconstructedOrphan` core. ai-chat supplies the two
+    // host-specific hooks:
+    //   - prepare: resolve the persist-target id (#1691) — the one per-package
+    //     step (a flat array can't express the tree a Session uses). A provider
+    //     `start.messageId` is adopted by the accumulator (the live path adopts
+    //     it for new turns too); continuations have it stripped before storage
+    //     (#1229), so the unconditional adopt matches the live path.
+    //   - merge: a row may already own this id (an early persist during tool
+    //     approval, or a continuation resuming the last assistant message) —
+    //     reconcile onto it via the shared `reconcileOrphanPartial` so an
+    //     in-place tool result isn't re-advanced by a replayed chunk.
+    // The store routes each write through `persistMessages` (exactly one write →
+    // one `persistMessages` → one broadcast), so no explicit broadcast here.
     // NOTE: progress is bumped at production/flush time in `_storeStreamChunk`
-    // (#1637), NOT here — persisting on recovery or a client reconnect must
-    // not be miscounted as new forward progress.
+    // (#1637), NOT here — persisting on recovery or a client reconnect must not
+    // be miscounted as new forward progress.
+    const fallbackId = `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    await persistReconstructedOrphan(chunks, {
+      store: this._orphanStore(),
+      fallbackId,
+      prepare: (message) => {
+        message.id = this._resolveOrphanTargetId(
+          streamId,
+          message.id,
+          fallbackId
+        );
+        return message;
+      },
+      merge: (existing, incoming) => reconcileOrphanPartial(existing, incoming)
+    });
   }
 
   /**
@@ -1492,6 +1490,82 @@ export class AIChatAgent<
           this.messages.map((m) => (m.id === message.id ? message : m))
         )
     };
+  }
+
+  /**
+   * Repair a single interrupted tool call — a tool part with no settled result,
+   * left behind when a stream was cut off mid-flight (e.g. a SERVER tool whose
+   * `execute()` died with an evicted isolate, leaving an `input-available`
+   * orphan that nothing will ever resolve). Returns the replacement part that
+   * takes its place in the transcript; `input` has already been normalized to a
+   * valid object.
+   *
+   * The default flips it to an errored tool result so the record survives (no
+   * "disappearing" tool call) and `convertToModelMessages` still gets a
+   * tool-result for it, avoiding `AI_MissingToolResultsError` on the next
+   * provider call. This mirrors `@cloudflare/think` so ai-chat RECOVERS an
+   * interrupted server tool (repairs, then continues) instead of waiting on a
+   * dead orphan until its budget is spent.
+   *
+   * Override to customize the repaired shape for client-resolved tools — e.g.
+   * convert an interrupted question tool (no server `execute`, normally answered
+   * by the user's next message) into a plain text part so the model sees it as
+   * ordinary conversation rather than a tool error. A returned tool part MUST
+   * carry a settled result (`output-available` / `output-error` /
+   * `output-denied` or an `output` / `result` field); returning a non-tool part
+   * (e.g. text) is fine.
+   */
+  protected repairInterruptedToolPart(
+    part: UIMessage["parts"][number]
+  ): UIMessage["parts"][number] {
+    return {
+      ...part,
+      state: "output-error",
+      errorText: "The tool call was interrupted before a result was recorded."
+    } as UIMessage["parts"][number];
+  }
+
+  /**
+   * Transcript repair, run before EVERY inference chokepoint (live submit, tool
+   * auto-continuation, `continueLastTurn`, `saveMessages`/retry, and the chat
+   * recovery callbacks). An interrupted server-tool orphan is flipped to a
+   * settled (errored) result — via the shared `agents/chat`
+   * `repairInterruptedToolParts` primitive, the SAME logic `@cloudflare/think`
+   * runs before its own inference (`_assembleModelMessages`) — so the app's next
+   * `convertToModelMessages(this.messages)` doesn't 400 with
+   * `AI_MissingToolResultsError`. Because the app owns the inference call, the
+   * framework can't repair "inside" it the way Think does; it repairs
+   * `this.messages` at each point right before handing control to
+   * `onChatMessage` instead. This reaches the cases the recovery-only repair
+   * missed: a mixed client+server orphan whose client replay drives an
+   * auto-continuation, and any agent running with `chatRecovery` disabled.
+   *
+   * Guard: repair runs ONLY when no client interaction is genuinely pending. In
+   * that state every unsettled tool part is a dead SERVER orphan (its
+   * `execute()` died with the evicted isolate), so flipping it to an errored
+   * result is always safe. While a client tool is still awaiting the user the
+   * guard skips repair — flipping it would clobber a result the client may still
+   * replay. (On the recovery-continue path this mirrors the narrow predicate
+   * that already let `waitUntilStable` converge.)
+   *
+   * Repair only ever reshapes ASSISTANT tool parts; it never touches user
+   * messages, so per-channel policy carried on the user message's
+   * `metadata.channel` (re-resolved on wake) is structurally untouched. It is a
+   * no-op (no write, no broadcast) when nothing needs repair — the common case
+   * for a healthy transcript. When anything changes, the corrected transcript is
+   * persisted and broadcast through the normal `persistMessages` write path (one
+   * write, one broadcast), which also refreshes `this.messages`.
+   * @internal
+   */
+  private async _repairInterruptedToolsBeforeTurn(): Promise<void> {
+    if (this.hasPendingClientInteraction()) return;
+    const repaired = repairInterruptedToolParts(this.messages, {
+      repairPart: (part) => this.repairInterruptedToolPart(part)
+    });
+    if (repaired.removedToolCalls === 0 && repaired.normalizedInputs === 0) {
+      return;
+    }
+    await this.persistMessages(repaired.messages);
   }
 
   /**
@@ -1898,12 +1972,26 @@ export class AIChatAgent<
    * Returns `true` when stable. Returns `false` if `timeout` expires before
    * a pending interaction resolves. Safe to call at any time; if there is
    * nothing pending it returns immediately.
+   *
+   * `pendingInteraction` overrides which "still waiting" predicate gates
+   * stability. It defaults to the broad {@link hasPendingInteraction} (any
+   * `input-available` / `approval-requested` part) to preserve the documented
+   * semantics for app overrides. The recovery paths pass the narrower
+   * {@link hasPendingClientInteraction} so a DEAD server-tool `input-available`
+   * orphan (its `execute()` died with the evicted isolate; nothing will resolve
+   * it) does NOT block stability — recovery then repairs it to an errored
+   * result and continues, instead of waiting until the budget is spent. This
+   * mirrors `@cloudflare/think`, whose single pending predicate is already
+   * client-only by construction.
    */
   protected async waitUntilStable(options?: {
     timeout?: number;
+    pendingInteraction?: () => boolean;
   }): Promise<boolean> {
     const deadline =
       options?.timeout != null ? Date.now() + options.timeout : null;
+    const hasPendingInteraction =
+      options?.pendingInteraction ?? (() => this.hasPendingInteraction());
 
     while (true) {
       // Drain active turns AND any in-flight submits past the concurrency
@@ -1932,7 +2020,7 @@ export class AIChatAgent<
         }
       }
 
-      if (!this.hasPendingInteraction()) {
+      if (!hasPendingInteraction()) {
         if (!this._hasArmedContinuation()) {
           return true;
         }
@@ -2327,6 +2415,7 @@ export class AIChatAgent<
               async () => {
                 const autoContinuationBody = async () => {
                   try {
+                    await this._repairInterruptedToolsBeforeTurn();
                     const response = await this.onChatMessage(
                       async (_finishResult) => {},
                       {
@@ -2425,6 +2514,7 @@ export class AIChatAgent<
           );
           try {
             const programmaticBody = async () => {
+              await this._repairInterruptedToolsBeforeTurn();
               const response = await this.onChatMessage(() => {}, {
                 requestId,
                 abortSignal,
@@ -3280,6 +3370,7 @@ export class AIChatAgent<
                   options?.signal
                 );
                 try {
+                  await this._repairInterruptedToolsBeforeTurn();
                   const response = await this.onChatMessage(() => {}, {
                     requestId,
                     abortSignal,
@@ -3911,7 +4002,12 @@ export class AIChatAgent<
     try {
       const recoveryConfig = this._resolveChatRecoveryConfig();
       const ready = await this.waitUntilStable({
-        timeout: recoveryConfig.stableTimeoutMs
+        timeout: recoveryConfig.stableTimeoutMs,
+        // Recovery-scoped: a DEAD server-tool `input-available` orphan must not
+        // block stability (A.2 repairs it below), so gate on the client-
+        // resolvable predicate. A genuinely-pending CLIENT interaction still
+        // keeps it unstable and parks via the `!ready` branch.
+        pendingInteraction: () => this.hasPendingClientInteraction()
       });
       if (!ready) {
         // PARK, don't burn the budget: a stable-state timeout while a CLIENT
@@ -3970,6 +4066,10 @@ export class AIChatAgent<
       }
 
       this._applyRecoveredRequestContext(data);
+      // `continueLastTurn` repairs interrupted server-tool orphans before it
+      // re-enters inference (`_repairInterruptedToolsBeforeTurn`), so the
+      // recovered transcript is settled and the next `convertToModelMessages`
+      // doesn't 400 with `AI_MissingToolResultsError`.
       const result = await this.continueLastTurn();
       await this._updateChatRecoveryIncident(
         data?.incidentId,
@@ -4221,7 +4321,11 @@ export class AIChatAgent<
     try {
       const recoveryConfig = this._resolveChatRecoveryConfig();
       const ready = await this.waitUntilStable({
-        timeout: recoveryConfig.stableTimeoutMs
+        timeout: recoveryConfig.stableTimeoutMs,
+        // Recovery-scoped narrow predicate (see `_chatRecoveryContinue`): a dead
+        // server-tool orphan must not block stability; a real client
+        // interaction still parks via the `!ready` branch.
+        pendingInteraction: () => this.hasPendingClientInteraction()
       });
       if (!ready) {
         // PARK while a CLIENT interaction is pending — the turn is waiting for
@@ -4276,6 +4380,11 @@ export class AIChatAgent<
       }
 
       this._applyRecoveredRequestContext(data);
+      // The retry runs through `_runProgrammaticChatTurn`, which repairs any
+      // interrupted tool orphan before re-entering inference
+      // (`_repairInterruptedToolsBeforeTurn`). The retry path normally re-runs
+      // an unanswered user-message tail (no assistant orphan to repair), so that
+      // is a defensive no-op here, but keeps both recovery entrypoints converged.
       const result = await this._retryLastUserTurn(
         this._lastClientTools,
         this._lastBody

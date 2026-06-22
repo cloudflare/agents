@@ -116,7 +116,31 @@ export {
   reconcileOrphanPartial
 } from "./message-reconciler";
 
+/**
+ * @internal Shared transcript-repair primitive — flips interrupted tool calls
+ * to a settled shape so a recovered turn's next provider call doesn't 400 with
+ * `AI_MissingToolResultsError`. Sibling-package support for `@cloudflare/think`
+ * and `@cloudflare/ai-chat`, not a public API. See `repair-transcript.ts`.
+ */
+export {
+  repairInterruptedToolParts,
+  toolPartHasSettledResult,
+  type RepairInterruptedToolPartsOptions,
+  type RepairInterruptedToolPartsResult
+} from "./repair-transcript";
+
 export type { OrphanPersistStore } from "./orphan-store";
+
+/**
+ * @internal Shared orphan-persist core — reconstruct an interrupted stream's
+ * message and upsert it through an `OrphanPersistStore`. Sibling-package support
+ * for `@cloudflare/think` and `@cloudflare/ai-chat`, not a public API. See
+ * `orphan-persist.ts`.
+ */
+export {
+  persistReconstructedOrphan,
+  type PersistReconstructedOrphanOptions
+} from "./orphan-persist";
 
 export { sendIfOpen, type ChatConnection } from "./connection";
 

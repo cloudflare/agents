@@ -166,6 +166,9 @@ import {
   aiSdkRecoveryCodec,
   ResumeHandshake,
   normalizeToolInput,
+  repairInterruptedToolParts,
+  toolPartHasSettledResult,
+  persistReconstructedOrphan,
   reconcileMessages,
   resolveToolMergeId,
   createChatFiberSnapshot,
@@ -2700,45 +2703,14 @@ export class Think<
   }
 
   /**
-   * Normalize a tool part's `input` into something the provider will accept.
-   *
-   * Malformed shapes 400 modern providers and persist forever once written:
-   * a stringified-JSON `input` (e.g. `'{"prompt":"a cat"}'` instead of the
-   * object), and any non-object `input` — `null`, `undefined`, `""`, an array,
-   * or a primitive — on a settled or interrupted tool call (Anthropic rejects
-   * a `tool_use` block whose `input` is not an object). We parse the former and
-   * default the latter to an empty object so the tool-call/tool-result pair
-   * stays valid. Delegates to the shared `normalizeToolInput` so the read-side
-   * repair and the write-side accumulator guard enforce the same invariant.
-   */
-  private _normalizeToolInput(record: Record<string, unknown>): {
-    input: unknown;
-    changed: boolean;
-  } {
-    return normalizeToolInput("input" in record ? record.input : undefined);
-  }
-
-  /**
    * Whether a tool part already has a settled result the provider accepts, so
-   * it must NOT be re-repaired into an errored result.
-   *
-   * Single source of truth for the terminal tool states, shared by the repair
-   * pass and the backstop detector so they cannot drift. Mirror the AI SDK's
-   * terminal states: `convertToModelMessages` emits a `tool-result` for
-   * `output-available`, `output-error`, AND `output-denied` (a user-denied
-   * approval — its denial reason becomes the tool-result). Omitting any of
-   * these makes repair re-flip the part every turn — clobbering a real
-   * `errorText`/denial with the generic "interrupted" message — and makes the
-   * backstop falsely drop a valid call.
+   * it must NOT be re-repaired into an errored result. Delegates to the shared
+   * `agents/chat` primitive so the repair pass and the backstop detector
+   * (`_incompleteToolCallIds`) share the single source of truth for terminal
+   * tool states.
    */
   private _toolPartHasSettledResult(record: Record<string, unknown>): boolean {
-    if ("output" in record || "result" in record) return true;
-    const state = typeof record.state === "string" ? record.state : "";
-    return (
-      state === "output-available" ||
-      state === "output-error" ||
-      state === "output-denied"
-    );
+    return toolPartHasSettledResult(record);
   }
 
   /**
@@ -2809,83 +2781,16 @@ export class Think<
     normalizedInputs: number;
     toolCallIds: string[];
   } {
-    let removedToolCalls = 0;
-    let normalizedInputs = 0;
-    const toolCallIds: string[] = [];
-    const repaired: UIMessage[] = [];
-
-    for (const message of messages) {
-      const parts: UIMessage["parts"] = [];
-      let messageChanged = false;
-      for (const part of message.parts) {
-        const record = part as Record<string, unknown>;
-        const toolCallId =
-          typeof record.toolCallId === "string" ? record.toolCallId : undefined;
-        const isToolPart =
-          typeof record.type === "string" &&
-          (record.type.startsWith("tool-") || record.type === "dynamic-tool") &&
-          toolCallId;
-        if (!isToolPart) {
-          parts.push(part);
-          continue;
-        }
-
-        if (!this._toolPartHasSettledResult(record)) {
-          const state = typeof record.state === "string" ? record.state : "";
-          // An approved server tool waits at `approval-responded` until its
-          // scheduled continuation runs `execute()`. It is not abandoned, so
-          // preserve it verbatim — flipping it to an error (or removing it)
-          // would strand the approval and prevent the real result from ever
-          // being produced by the continuation.
-          if (state === "approval-responded") {
-            parts.push(part);
-            continue;
-          }
-          // Preserve the interrupted/abandoned tool call instead of deleting
-          // it. Deleting makes the call "disappear" from the (broadcast)
-          // transcript and lets the model silently re-run it. `input` is
-          // normalized to a valid object first, then `repairInterruptedToolPart`
-          // decides the replacement shape (default: an errored result, so
-          // conversion still gets a tool-result and the provider doesn't 400
-          // with AI_MissingToolResultsError). Subclasses can override it to
-          // preserve client-resolved tools (e.g. `ask_user`) as text.
-          const normalized = this._normalizeToolInput(record);
-          parts.push(
-            this.repairInterruptedToolPart({
-              ...part,
-              input: normalized.input
-            } as UIMessage["parts"][number])
-          );
-          if (normalized.changed) normalizedInputs++;
-          removedToolCalls++;
-          messageChanged = true;
-          toolCallIds.push(toolCallId);
-          continue;
-        }
-
-        const normalized = this._normalizeToolInput(record);
-        if (normalized.changed) {
-          parts.push({
-            ...part,
-            input: normalized.input
-          } as UIMessage["parts"][number]);
-          normalizedInputs++;
-          messageChanged = true;
-          continue;
-        }
-
-        parts.push(part);
-      }
-
-      repaired.push(messageChanged ? { ...message, parts } : message);
-    }
-
-    return {
-      messages: repaired,
-      removedToolCalls,
-      normalizedInputs,
-      toolCallIds
-    };
+    // Delegates to the shared `agents/chat` primitive so Think and ai-chat run
+    // identical repair logic. The overridable `repairInterruptedToolPart` hook
+    // (default: flip to an errored result; subclasses can preserve a
+    // client-resolved tool such as `ask_user` as text) is threaded through, and
+    // the settled-result / input-normalization helpers are the shared defaults.
+    return repairInterruptedToolParts(messages, {
+      repairPart: (part) => this.repairInterruptedToolPart(part),
+      isSettled: (record) => this._toolPartHasSettledResult(record),
+      normalizeInput: (input) => normalizeToolInput(input)
+    });
   }
 
   private async _repairTranscriptForProvider(
@@ -14115,40 +14020,23 @@ export class Think<
     const chunks = this._resumableStream.getStreamChunks(streamId);
     if (chunks.length === 0) return;
 
-    const accumulator = new StreamAccumulator({
-      messageId: crypto.randomUUID()
-    });
-    for (const chunk of chunks) {
-      try {
-        accumulator.applyChunk(JSON.parse(chunk.body) as StreamChunkData);
-      } catch {
-        // skip malformed chunks
-      }
-    }
-
-    if (accumulator.parts.length === 0) return;
-
-    // Preserve Think's product-specific strip + empty-skip via the shared
-    // `_strippedForPersist` rule (same as `_persistAssistantMessage`): drop the
-    // internal final-answer parts, and skip persisting an empty structural-only
-    // assistant message.
-    const stripped = this._strippedForPersist(accumulator.toMessage());
-    if (stripped === null) return;
-
-    // (c)/(d) Upsert by id through the shared `OrphanPersistStore` seam. Think
-    // replaces the whole message (no partial merge), so resolve append-vs-update
-    // purely by existence.
-    const store = this._orphanStore();
-    const existing = await store.getMessage(stripped.id);
-    if (existing) {
-      await store.updateMessage(stripped);
-    } else {
-      await store.appendMessage(stripped);
-    }
+    // The accumulate loop and the `getMessage → update(merge) XOR append` upsert
+    // are the shared `persistReconstructedOrphan` core. Think supplies the two
+    // host-specific hooks:
+    //   - prepare: `_strippedForPersist` (same as `_persistAssistantMessage`) —
+    //     drop the internal final-answer parts and skip (`null`) an empty
+    //     structural-only assistant message.
+    //   - merge: Think replaces the whole message (no partial merge).
     // NOTE: progress is bumped at production/flush time in `_storeChunkDurably`
-    // (#1637), NOT here — persisting on recovery or a client reconnect must
-    // not be miscounted as new forward progress.
-    this._broadcastMessages();
+    // (#1637), NOT here — persisting on recovery or a client reconnect must not
+    // be miscounted as new forward progress.
+    const wrote = await persistReconstructedOrphan(chunks, {
+      store: this._orphanStore(),
+      fallbackId: crypto.randomUUID(),
+      prepare: (message) => this._strippedForPersist(message),
+      merge: (_existing, incoming) => incoming
+    });
+    if (wrote) this._broadcastMessages();
   }
 
   private _broadcastChat(message: Record<string, unknown>, exclude?: string[]) {

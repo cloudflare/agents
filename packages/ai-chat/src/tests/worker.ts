@@ -2290,6 +2290,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   override async waitUntilStable(options?: {
     timeout?: number;
+    pendingInteraction?: () => boolean;
   }): Promise<boolean> {
     if (this._forceStableTimeout) return false;
     return super.waitUntilStable(options);

@@ -1944,6 +1944,65 @@ describe("onChatRecovery", () => {
     expect(parked?.reason).toBe("awaiting_client_interaction");
   });
 
+  it("RECOVERS a dead SERVER-tool orphan on continue (repairs to errored, then continues) instead of waiting-then-exhausting", async () => {
+    const agentStub = await getTestAgent(
+      `stable-recover-${crypto.randomUUID()}`
+    );
+    // Real stability wait (NOT forced): the narrow recovery predicate must let a
+    // dead server-tool orphan through as "stable" so it is repaired + continued,
+    // converging ai-chat with `@cloudflare/think` (which already recovers here).
+    await agentStub.setForceStableTimeoutForTest(false);
+
+    // `previewTool` is NOT a registered client tool, so its `input-available`
+    // part is a dead SERVER orphan (its `execute()` died with the isolate). The
+    // contrast with the CLIENT-interaction park test above is the whole point:
+    // a client orphan parks, a dead server orphan recovers.
+    await agentStub.setRequestContextForTest(undefined, [
+      { name: "chooseOption" }
+    ]);
+    await agentStub.persistPendingToolCallForTest(
+      "assistant-recover",
+      "previewTool"
+    );
+
+    await agentStub.seedIncidentForTest({
+      incidentId: "inc-recover",
+      requestId: "root-recover",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 6,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+
+    await agentStub.runChatRecoveryContinueDirectForTest({
+      incidentId: "inc-recover",
+      originalRequestId: "root-recover",
+      targetAssistantId: "assistant-recover"
+    });
+    await agentStub.waitForIdleForTest();
+
+    // The orphaned server-tool part was repaired to an errored result (no longer
+    // `input-available`), so the next provider call won't 400 with
+    // `AI_MissingToolResultsError`.
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const orphan = messages.find((m) => m.id === "assistant-recover");
+    const toolPart = orphan?.parts.find(
+      (p) =>
+        "toolCallId" in p &&
+        (p as { toolCallId?: string }).toolCallId === "call_assistant-recover"
+    ) as { state?: string } | undefined;
+    expect(toolPart?.state).toBe("output-error");
+
+    // It CONTINUED (ran inference) rather than parking/exhausting on a dead
+    // orphan, and the incident terminalized as completed (deleted), NOT a
+    // stable-timeout give-up.
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
+    const incident = await agentStub.getIncidentForTest("inc-recover");
+    expect(incident).toBeNull();
+  });
+
   it("PARKS a retry (no reschedule, no budget spent) while a CLIENT interaction is pending", async () => {
     const agentStub = await getTestAgent(
       `stable-retry-park-${crypto.randomUUID()}`

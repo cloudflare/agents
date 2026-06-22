@@ -9,6 +9,94 @@
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Recovery-engine convergence finish — ai-chat recovers interrupted server-tool
+  calls like Think (LANDED), plus orphan-persist core dedup_ — Closed the last
+  real behavior gap between the two AI-SDK chat hosts, restoring the
+  ai-chat-as-subset-of-Think north star after an earlier review pass had drifted
+  toward "keep the predicate split divergent."
+  - **The gap (bucket 1, Think better).** On an interrupted **server tool** (its
+    `execute()` died with the evicted isolate, leaving a dead `input-available`
+    orphan nothing will ever resolve), Think **recovers** the turn but ai-chat
+    **gave up**: Think excludes the dead orphan from its (client-only) stability
+    predicate AND repairs the transcript before inference, so
+    `convertToModelMessages` doesn't 400 with `AI_MissingToolResultsError`;
+    ai-chat used the **broad** `hasPendingInteraction()` for its recovery wait and
+    had no repair pass, so it rescheduled until the budget was spent and
+    terminalized via `onExhausted`.
+  - **A.1 — shared `repairInterruptedToolParts` primitive (behavior-neutral).**
+    Extracted Think's `_repairToolTranscriptParts` into a new `@internal`
+    `agents/chat/repair-transcript.ts` (plus the `toolPartHasSettledResult`
+    terminal-state check), parameterized by an overridable `repairPart` hook and
+    reusing the already-shared `normalizeToolInput`. Preserves the
+    `approval-responded` passthrough (an approved server tool waiting for its
+    continuation is NOT abandoned). Think delegates through its existing
+    `repairInterruptedToolPart` hook — pure refactor, suites unchanged. 11 unit
+    tests. `agents` + `think` patches.
+  - **A.2 — ai-chat adopts repair.** Added an overridable
+    `AIChatAgent.repairInterruptedToolPart` hook (default: flip to
+    `output-error`) and a private `_repairInterruptedToolsBeforeTurn()` that runs
+    the shared primitive over `this.messages` before re-invoking `onChatMessage`
+    and persists+broadcasts via the normal `persistMessages` write path.
+    `@cloudflare/ai-chat` minor.
+  - **A.3 — narrow the recovery predicate.** `waitUntilStable` gained an optional
+    `pendingInteraction` predicate; the two recovery call sites
+    (`_chatRecoveryContinue` / `_chatRecoveryRetry` — the only callers, both
+    recovery, no live path) pass the narrow `hasPendingClientInteraction()` so a
+    dead server-tool orphan no longer blocks stability. The broad default — and
+    the documented semantics for app overrides — are unchanged.
+  - **Hard constraint honored.** Repair only ever reshapes **assistant** tool
+    parts; user messages (and their `metadata.channel`, re-resolved on wake) are
+    structurally untouched — pinned with comments at the repair seam.
+  - **A.4 — e2e.** New `durable-chat-recovery` test: a dead server-tool
+    `input-available` orphan now **recovers** (repairs to errored, continues,
+    incident completes) instead of waiting-then-`onExhausted`, contrasting the
+    existing CLIENT-interaction park test. Think e2e unchanged.
+  - **A.5 — repair at all pre-inference chokepoints (deep-review follow-up).**
+    A post-implementation deep review found the recovery-only repair left a
+    residual gap vs Think, which repairs in `_assembleModelMessages` before
+    **every** inference: (1) a **mixed** client+server orphan parks for the
+    client, then the client replay drives `_fireAutoContinuation` (which calls
+    `onChatMessage` directly, **not** `continueLastTurn`), so the dead server
+    orphan reached `convertToModelMessages` unrepaired; and (2) agents with
+    `chatRecovery` **disabled** never hit a recovery callback at all. ai-chat
+    can't repair "inside" inference (the app owns `convertToModelMessages`), so
+    `_repairInterruptedToolsBeforeTurn()` is now invoked at all four
+    `onChatMessage` chokepoints — live submit (`chatTurnBody`), auto-continuation
+    (`autoContinuationBody`), `_runProgrammaticChatTurn` (saveMessages/retry),
+    and `continueLastTurn` — and the two now-redundant explicit recovery-callback
+    calls were removed (those bodies self-repair). A **guard**
+    (`!hasPendingClientInteraction()`) restricts repair to states where every
+    unsettled tool part is a dead server orphan, so a tool the user may still
+    answer is never clobbered; repair is a no-op (no write/broadcast) for a
+    healthy transcript. Two `continue-last-turn` tests added (repairs a dead
+    server orphan on a direct `continueLastTurn`; leaves a pending client tool
+    untouched). Full ai-chat suite (612) green.
+  - **C2 — orphan-persist core dedup (behavior-neutral).** Extracted the
+    genuinely-shared skeleton of both `_persistOrphanedStream` bodies (the
+    accumulate loop + `getMessage → updateMessage(merge) XOR appendMessage` upsert)
+    into a new `@internal` `agents/chat/orphan-persist.ts`
+    `persistReconstructedOrphan(chunks, { store, fallbackId, prepare, merge })` —
+    exactly two hooks. The host-specific bits stay in the wrappers: flush (Think
+    only), fallback id, `prepare` (Think `_strippedForPersist`+null skip; ai-chat
+    `_resolveOrphanTargetId`), `merge` (Think replace; ai-chat
+    `reconcileOrphanPartial`), and broadcast (Think after via `_broadcastMessages`;
+    ai-chat inside `persistMessages`). `agents` patch; both hosts' recovery suites
+    green.
+  - **C1 — already enforced (verify only).** Both hosts annotate
+    `_orphanStore(): OrphanPersistStore` (`ai-chat:1482`, `think:3182`);
+    compiler-enforced, nothing to implement.
+  - **D — auto-continuation lift (doc-only).** `AutoContinuationController`,
+    `hasIncompleteToolBatch`, and `_hasArmedContinuation` are already shared; the
+    remainder of each host's auto-continuation is coupled to its own streaming
+    driver / turn loop (Think's submission-aware turn spine vs ai-chat's
+    `TurnQueue`), so there is no further host-agnostic algorithm to lift. Deferred
+    Tier-3 follow-up **closed** as no-op.
+  - **B — finding #4 second-decode (deferred, tracked).** Threading the
+    already-decoded `RecoveryPartial` into the orphan write still collides with the
+    vocabulary-agnostic seam (no message id; the codec uses `getPartialStreamText`
+    while the hosts reconstruct via `StreamAccumulator`), for negligible payoff and
+    no behavior drift. Left tracked; it falls out naturally if a future
+    engine-owned orphan writer subsumes the host wrappers.
 - _Cross-RFC breadcrumb — Channels v1 persists channel id in turn metadata (docs,
   no code)_ — The [Channels RFC](./rfc-think-channels.md) shipped per-channel
   policy (instructions / tool-narrowing / `maxTurns`) as a turn-scoped
