@@ -112,7 +112,7 @@ test.describe("LLM e2e (Workers AI)", () => {
   test.setTimeout(30_000);
 
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("SSE streaming: receives text-start, text-delta(s), text-end from real model", async ({

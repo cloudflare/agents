@@ -81,7 +81,7 @@ async function connectAndRun(
 test.describe("AIChatAgent e2e", () => {
   test.beforeEach(async ({ page }) => {
     // Navigate to a blank page so we have a browser context for WebSockets
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("chat message round-trip: send request, receive streamed response", async ({
@@ -573,7 +573,7 @@ test.describe("AIChatAgent e2e", () => {
 
 test.describe("Stream resumption e2e", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("resume mid-stream: reconnecting client receives CF_AGENT_STREAM_RESUMING", async ({
@@ -966,7 +966,7 @@ test.describe("Stream resumption e2e", () => {
 
 test.describe("Custom body forwarding e2e", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("custom fields in request body are forwarded to onChatMessage", async ({
@@ -1023,7 +1023,7 @@ test.describe("Custom body forwarding e2e", () => {
 
 test.describe("Error handling e2e", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("malformed JSON on WebSocket does not crash connection", async ({
@@ -1207,7 +1207,7 @@ test.describe("Error handling e2e", () => {
 
 test.describe("Concurrency e2e", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("concurrent requests: two requests complete without interference", async ({
@@ -1312,7 +1312,7 @@ test.describe("Concurrency e2e", () => {
 
 test.describe("Large messages e2e", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("large message persistence: 10KB message persists correctly", async ({
@@ -1373,7 +1373,7 @@ test.describe("Large messages e2e", () => {
 
 test.describe("Malformed input e2e", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("empty messages array: agent handles gracefully", async ({
@@ -1471,7 +1471,7 @@ test.describe("Malformed input e2e", () => {
 
 test.describe("Large tool output e2e", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("large message persists without crash", async ({ page, baseURL }) => {
@@ -1623,10 +1623,11 @@ test.describe("Large tool output e2e", () => {
     expect(toolPart).toBeTruthy();
     const output = toolPart.output as string;
 
-    // Should contain the compaction notice
-    expect(output).toContain("too large to persist");
-    expect(output).toContain("suggest re-running the tool");
-    expect(output).toContain("Preview:");
+    // Should carry the structured-truncation marker (agents/chat row-size
+    // compaction replaces the oversized output with a `... [truncated N chars]`
+    // notice rather than persisting the full payload).
+    expect(output).toContain("[truncated");
+    expect(output).toContain("chars]");
 
     // Should be much smaller than 3MB
     expect(output.length).toBeLessThan(10_000);
@@ -1638,10 +1639,8 @@ test.describe("Large tool output e2e", () => {
     expect(textPart).toBeTruthy();
     expect(textPart.text).toBe("Here are the results:");
 
-    // Metadata should indicate compaction happened
-    if (hugeMsg.metadata) {
-      expect(hugeMsg.metadata.compactedToolOutputs).toContain("call_3mb");
-    }
+    // Metadata should indicate compaction happened.
+    expect(hugeMsg.metadata?.compactedToolOutputs).toContain("call_3mb");
 
     // The conversation should still work -- send another message
     const followUp = await connectAndRun(

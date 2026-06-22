@@ -41,7 +41,7 @@ function extractChunkBodies(
 
 test.describe("Data parts e2e", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("transient data parts appear in stream but not in persisted messages", async ({

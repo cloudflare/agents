@@ -82,7 +82,7 @@ async function sendAndWait(
 
 test.describe("sanitizeMessageForPersistence e2e", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("custom sanitize hook redacts content before persistence", async ({
@@ -133,7 +133,7 @@ test.describe("sanitizeMessageForPersistence e2e", () => {
 
 test.describe("maxPersistedMessages e2e", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("messages are trimmed to maxPersistedMessages limit", async ({
@@ -234,7 +234,7 @@ test.describe("maxPersistedMessages e2e", () => {
 
 test.describe("Regenerate message flow e2e", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("regenerate replaces old assistant message with new one", async ({

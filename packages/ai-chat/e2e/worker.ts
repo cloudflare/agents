@@ -352,6 +352,15 @@ export class ResponseChainAgent extends AIChatAgent<Env> {
 
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext) {
+    // Real readiness probe. Playwright's `webServer.url` polls this so it only
+    // starts tests once `wrangler dev` is actually serving — not merely once the
+    // proxy port is open. This matters because a `remote` binding keeps the
+    // worker unable to serve while it is "Establishing remote connection...",
+    // during which the port is already open and a port-only readiness check
+    // would race ahead and every request would fail.
+    if (new URL(request.url).pathname === "/__health") {
+      return new Response("ok");
+    }
     return (
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })

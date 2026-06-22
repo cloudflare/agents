@@ -22,7 +22,7 @@ type WSMessage = {
 
 test.describe("Stream error recovery e2e", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("connection remains usable after stream error", async ({

@@ -34,7 +34,7 @@ test.describe("Multi-tab continuation broadcast e2e", () => {
   test.setTimeout(30_000);
 
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("observer tab receives continuation stream without sending ACK", async ({
@@ -233,7 +233,7 @@ test.describe("Delayed tool result e2e", () => {
   test.setTimeout(30_000);
 
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("tool result sent after delay still triggers valid continuation", async ({
@@ -414,7 +414,7 @@ test.describe("Turn coalescing e2e", () => {
   test.setTimeout(30_000);
 
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("single tool result + autoContinue produces exactly one continuation", async ({

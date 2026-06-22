@@ -29,7 +29,7 @@ test.describe("Client-side tool results e2e", () => {
   test.setTimeout(30_000);
 
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("client tool round-trip: LLM calls tool, client sends result, server broadcasts update", async ({
@@ -344,7 +344,7 @@ test.describe("Tool approval auto-continuation e2e", () => {
   test.setTimeout(30_000);
 
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("tool approval with autoContinue triggers continuation stream", async ({

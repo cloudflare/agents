@@ -70,6 +70,8 @@
     "test:react": "vitest --project react",
     "test:workers": "vitest --project workers",
     "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts",
-    "test:e2e:deployed": "vitest --run -c src/e2e-tests/vitest.deployed.config.ts"
+    "test:e2e:deployed": "vitest --run -c src/e2e-tests/vitest.deployed.config.ts",
+    "test:e2e:playwright": "playwright test --config e2e/playwright.config.ts",
+    "test:e2e:playwright:llm": "playwright test --config e2e/playwright.llm.config.ts"
   }
 }

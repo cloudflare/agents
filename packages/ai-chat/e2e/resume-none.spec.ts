@@ -28,7 +28,7 @@ function agentPath(baseURL: string, room: string) {
 
 test.describe("CF_AGENT_STREAM_RESUME_NONE e2e", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("about:blank");
+    await page.goto("/__health");
   });
 
   test("fresh room: RESUME_REQUEST gets RESUME_NONE immediately", async ({

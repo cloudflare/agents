@@ -1,0 +1,44 @@
+{
+  // Deterministic mock-agent config. Intentionally has NO `ai` binding: the
+  // mock agents (ChatAgent, SlowAgent, DataPartsAgent, ...) never call Workers
+  // AI, so this worker boots offline and instantly — no "Establishing remote
+  // connection..." readiness gap. The Workers-AI specs use `wrangler.jsonc`
+  // (which keeps the remote `ai` binding) via `playwright.llm.config.ts`.
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "ChatAgent", "name": "ChatAgent" },
+      { "class_name": "LlmChatAgent", "name": "LlmChatAgent" },
+      { "class_name": "ClientToolAgent", "name": "ClientToolAgent" },
+      { "class_name": "SlowAgent", "name": "SlowAgent" },
+      { "class_name": "BadKeyAgent", "name": "BadKeyAgent" },
+      { "class_name": "SanitizeAgent", "name": "SanitizeAgent" },
+      { "class_name": "MaxPersistedAgent", "name": "MaxPersistedAgent" },
+      { "class_name": "DataPartsAgent", "name": "DataPartsAgent" },
+      { "class_name": "ResponseLlmAgent", "name": "ResponseLlmAgent" },
+      { "class_name": "ResponseChainAgent", "name": "ResponseChainAgent" }
+    ]
+  },
+  "main": "worker.ts",
+  "migrations": [
+    { "new_sqlite_classes": ["ChatAgent"], "tag": "v1" },
+    { "new_sqlite_classes": ["LlmChatAgent"], "tag": "v2" },
+    {
+      "new_sqlite_classes": ["ClientToolAgent", "SlowAgent", "BadKeyAgent"],
+      "tag": "v3"
+    },
+    {
+      "new_sqlite_classes": [
+        "SanitizeAgent",
+        "MaxPersistedAgent",
+        "DataPartsAgent"
+      ],
+      "tag": "v4"
+    },
+    {
+      "new_sqlite_classes": ["ResponseLlmAgent", "ResponseChainAgent"],
+      "tag": "v5"
+    }
+  ]
+}
