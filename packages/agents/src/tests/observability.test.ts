@@ -381,6 +381,56 @@ describe("channel routing", () => {
     unsub();
   });
 
+  it("should route channel:* and notice:* to the channel channel", () => {
+    const received: ObservabilityEvent[] = [];
+    const lifecycleEvents: ObservabilityEvent[] = [];
+    const unsub = subscribe("channel", (event) => received.push(event));
+    const unsubLifecycle = subscribe("lifecycle", (event) =>
+      lifecycleEvents.push(event)
+    );
+
+    genericObservability.emit({
+      type: "channel:resolved",
+      agent: "test-agent",
+      name: "inst-1",
+      payload: { channel: "voice", kind: "voice", requestId: "req-1" },
+      timestamp: Date.now()
+    });
+    genericObservability.emit({
+      type: "channel:delivered",
+      agent: "test-agent",
+      name: "inst-1",
+      payload: { channel: "web", kind: "final", turnEnded: true },
+      timestamp: Date.now()
+    });
+    genericObservability.emit({
+      type: "notice:delivered",
+      agent: "test-agent",
+      name: "inst-1",
+      payload: { channel: "web", kind: "notice", informModel: false },
+      timestamp: Date.now()
+    });
+    genericObservability.emit({
+      type: "notice:failed",
+      agent: "test-agent",
+      name: "inst-1",
+      payload: { channel: "telegram", error: "no surface" },
+      timestamp: Date.now()
+    });
+
+    expect(received.map((event) => event.type)).toEqual([
+      "channel:resolved",
+      "channel:delivered",
+      "notice:delivered",
+      "notice:failed"
+    ]);
+    // Must NOT leak into the catch-all lifecycle channel.
+    expect(lifecycleEvents).toHaveLength(0);
+
+    unsub();
+    unsubLifecycle();
+  });
+
   it("should route mcp:* to the mcp channel", () => {
     const received: ObservabilityEvent[] = [];
     const unsub = subscribe("mcp", (event) => received.push(event));

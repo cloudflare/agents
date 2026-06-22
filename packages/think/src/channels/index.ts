@@ -126,6 +126,15 @@ export function resolveChannels(
   channels.set("web", { ...IMPLICIT_WEB_CHANNEL, id: "web" });
 
   for (const [id, definition] of Object.entries(configured)) {
+    // `web` is reserved for the built-in WebSocket chat surface. Users may
+    // override its *policy* (instructions / tool narrowing / maxTurns) with a
+    // `{ kind: "web" }` entry, but replacing it with another kind would silently
+    // break the native chat ingress/delivery path — reject that footgun loudly.
+    if (id === "web" && definition.kind !== "web") {
+      throw new Error(
+        `Channel "web" is reserved for the built-in WebSocket chat surface; configureChannels() may override its policy with a { kind: "web" } entry but cannot replace it with kind "${definition.kind}"`
+      );
+    }
     channels.set(id, { ...definition, id });
   }
 

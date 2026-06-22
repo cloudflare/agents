@@ -46,6 +46,28 @@ describe("resolveChannels", () => {
     expect(Object.keys(messengers)).toEqual(["tg"]);
   });
 
+  it("allows overriding the web channel's policy with a kind: web entry", () => {
+    const configured = defineChannels({
+      web: {
+        kind: "web",
+        ingress: { transport: "websocket" },
+        instructions: "be concise"
+      }
+    });
+    const { channels } = resolveChannels(configured, {});
+    expect(channels.get("web")?.kind).toBe("web");
+    expect(channels.get("web")?.instructions).toBe("be concise");
+  });
+
+  it("throws when configureChannels() replaces web with a non-web kind", () => {
+    const configured = defineChannels({
+      web: { kind: "voice", ingress: { transport: "voice" } }
+    });
+    expect(() => resolveChannels(configured, {})).toThrow(
+      /reserved for the built-in WebSocket chat surface/
+    );
+  });
+
   it("throws on a duplicate id across configureChannels() and getMessengers()", () => {
     const configured = defineChannels({
       telegram: { kind: "voice", ingress: { transport: "voice" } }

@@ -465,7 +465,11 @@ These ship as a **dual union**: an internal `ChannelEvent` union with a
 `ActionLedgerEvent`/`_emitActionLedgerEvent`), and matching public
 `BaseEvent<...>` arms added to `AgentObservabilityEvent`
 (`packages/agents/src/observability/agent.ts`). Editing the public union means
-the `agents` package must be rebuilt before `think` typechecks.
+the `agents` package must be rebuilt before `think` typechecks. The `channel:*`
+and `notice:*` events route to a dedicated `agents:channel` diagnostics channel
+and are reachable via the typed `subscribe("channel", cb)` API (a new
+`ChannelEventMap` bucket) — they are deliberately **not** folded into the
+catch-all `lifecycle` channel.
 
 ## Versioning and compatibility
 
