@@ -10,6 +10,10 @@ export default defineConfig({
   testDir: e2eDir,
   testMatch: "*.spec.ts",
   timeout: 60_000,
+  // Hard wall-clock cap so a slow/flaky run (e.g. the Workers-AI llm spec) fails
+  // WITH a Playwright report instead of being silently killed by a CI job's hard
+  // cancel, which produces no actionable output. Mirrors the ai-chat e2e config.
+  globalTimeout: 15 * 60_000,
   retries: 2,
   workers: 1,
   use: {

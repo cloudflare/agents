@@ -18,3 +18,4 @@ The goal is to give contributors (and future-us) a quick way to understand _why_
 | [rfc-sub-agents.md](./rfc-sub-agents.md)                                         | RFC: Sub-agents — child DOs via facets, typed stubs, mixin API                |
 | [rfc-helper-sub-agent-orchestration.md](./rfc-helper-sub-agent-orchestration.md) | RFC: Agent tool orchestration — `runAgentTool`, `agentTool`, event forwarding |
 | [loopback.md](./loopback.md)                                                     | Loopback pattern — cross-boundary RPC for sub-agents and dynamic isolates     |
+| [test-coverage-matrix.md](./test-coverage-matrix.md)                             | Feature × test-layer coverage rollup, CI mapping, skipped-test debt, hygiene  |
