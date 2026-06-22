@@ -207,6 +207,42 @@ describe("repairInterruptedToolParts", () => {
     expect(part.text).toBe("Which file?");
   });
 
+  it("skips an interrupted part when shouldRepair returns false (left verbatim)", () => {
+    const messages = [
+      toolMsg("a1", {
+        type: "tool-chooseOption",
+        toolCallId: "client-1",
+        toolName: "chooseOption",
+        state: "input-available",
+        input: {}
+      }),
+      toolMsg("a2", {
+        type: "tool-previewTool",
+        toolCallId: "server-1",
+        toolName: "previewTool",
+        state: "input-available",
+        input: {}
+      })
+    ];
+    const result = repairInterruptedToolParts(messages, {
+      repairPart: flipToError,
+      // Skip the client tool; repair only the server one.
+      shouldRepair: (part) =>
+        (part as Record<string, unknown>).toolName !== "chooseOption"
+    });
+    expect(result.removedToolCalls).toBe(1);
+    expect(result.toolCallIds).toEqual(["server-1"]);
+    // Skipped client part kept verbatim (message identity preserved).
+    expect(result.messages[0]).toBe(messages[0]);
+    expect((result.messages[0].parts[0] as Record<string, unknown>).state).toBe(
+      "input-available"
+    );
+    // Server part repaired.
+    expect((result.messages[1].parts[0] as Record<string, unknown>).state).toBe(
+      "output-error"
+    );
+  });
+
   it("repairs across multiple messages and reports all ids", () => {
     const messages = [
       toolMsg("a1", {

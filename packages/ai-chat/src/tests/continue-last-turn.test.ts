@@ -651,15 +651,15 @@ describe("continueLastTurn", () => {
     expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
   });
 
-  it("does NOT repair a pending CLIENT-tool interaction on continue (guard skips it)", async () => {
+  it("does NOT repair a pending CLIENT-tool interaction on continue (per-part skip)", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
 
     // A CLIENT tool genuinely awaiting the user must NOT be repaired — flipping
     // it to an error would clobber a result the client may still replay. Mark
     // `chooseOption` as a registered client tool, then leave it at
-    // `input-available`: the guard (`hasPendingClientInteraction()`) must skip
-    // repair so the part stays pending.
+    // `input-available`: the shared `shouldRepair` skip leaves that part verbatim
+    // so it stays pending.
     await agentStub.setRequestContextForTest(undefined, [
       { name: "chooseOption" }
     ]);
@@ -693,8 +693,82 @@ describe("continueLastTurn", () => {
         "toolCallId" in p &&
         (p as { toolCallId?: string }).toolCallId === "call_assistant-client"
     ) as { state?: string } | undefined;
-    // Still pending — the guard left the client interaction untouched.
+    // Still pending — the per-part skip left the client interaction untouched.
     expect(toolPart?.state).toBe("input-available");
+  });
+
+  it("repairs a leaf server orphan even when an abandoned client orphan sits earlier (per-part, not whole-transcript)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    // `chooseOption` is a registered client tool; `previewTool` is not (server).
+    // An EARLIER assistant message holds an abandoned client orphan
+    // (`input-available` chooseOption), and the LEAF assistant holds a fresh dead
+    // SERVER orphan. A whole-transcript guard would skip ALL repair because a
+    // client interaction is "pending" somewhere; the per-part `shouldRepair` skip
+    // must instead leave the buried client orphan alone AND still repair the leaf
+    // server orphan so the next inference doesn't 400.
+    await agentStub.setRequestContextForTest(undefined, [
+      { name: "chooseOption" }
+    ]);
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "First" }]
+      },
+      {
+        id: "assistant-buried-client",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-chooseOption",
+            toolCallId: "call_buried-client",
+            state: "input-available",
+            input: {}
+          }
+        ] as ChatMessage["parts"]
+      },
+      {
+        id: "user-2",
+        role: "user",
+        parts: [{ type: "text", text: "Second" }]
+      },
+      {
+        id: "assistant-leaf-server",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-previewTool",
+            toolCallId: "call_leaf-server",
+            state: "input-available",
+            input: {}
+          }
+        ] as ChatMessage["parts"]
+      }
+    ] as ChatMessage[]);
+
+    await agentStub.callContinueLastTurn();
+    await agentStub.waitForIdleForTest();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const partState = (messageId: string, toolCallId: string) => {
+      const m = messages.find((msg) => msg.id === messageId)!;
+      const p = m.parts.find(
+        (part) =>
+          "toolCallId" in part &&
+          (part as { toolCallId?: string }).toolCallId === toolCallId
+      ) as { state?: string } | undefined;
+      return p?.state;
+    };
+
+    // Buried client orphan untouched; leaf server orphan repaired.
+    expect(partState("assistant-buried-client", "call_buried-client")).toBe(
+      "input-available"
+    );
+    expect(partState("assistant-leaf-server", "call_leaf-server")).toBe(
+      "output-error"
+    );
   });
 
   it("should not recurse infinitely — recovery converges", async () => {

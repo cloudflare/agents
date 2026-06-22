@@ -25,9 +25,12 @@ inference (the app owns `convertToModelMessages`, so the framework repairs
 `this.messages` right before handing control to `onChatMessage`). This closes
 the cases a recovery-only repair missed: a mixed client+server orphan whose
 client replay drives an auto-continuation, and any agent running with
-`chatRecovery` disabled. A guard restricts repair to when no client interaction
-is genuinely pending, so a tool the user may still answer is never clobbered; it
-is a no-op (no write, no broadcast) for a healthy transcript.
+`chatRecovery` disabled. Repair is scoped per-part to dead SERVER orphans: a
+part still legitimately awaiting a client (an `input-available` client tool or an
+`approval-requested` part the user may still answer) is left verbatim, so a fresh
+dead-server orphan at the leaf is repaired even when an unrelated abandoned client
+orphan sits earlier in history. It is a no-op (no write, no broadcast) for a
+healthy transcript.
 
 The recovery-path stability wait (`waitUntilStable`) now gates on the narrower
 client-resolvable predicate so a dead server-tool orphan no longer blocks

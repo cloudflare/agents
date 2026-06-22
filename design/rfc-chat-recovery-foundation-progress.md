@@ -9,6 +9,41 @@
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Convergence lock-in — server-only repair scope, cross-host conformance suite,
+  stale-RFC sweep_ — Follow-up to the recovery-engine convergence: cements the
+  shared seams and pays down the one edge the deep review found.
+  - **Server-only repair scope (refinement of A.5).** The whole-transcript guard
+    (`!hasPendingClientInteraction()`) the lock-in PR added was correct but coarse:
+    an abandoned client orphan buried in history would suppress repairing a fresh
+    dead-server orphan at the leaf. Replaced with a **per-part** skip: the shared
+    `repairInterruptedToolParts` gained an optional `shouldRepair(part)` predicate
+    (default `true` = repair all, so **Think is unchanged**); ai-chat passes
+    `shouldRepair = !partAwaitsClientInteraction(part, clientResolvable)` so it
+    repairs dead server orphans anywhere while leaving any part still awaiting a
+    client (`input-available` client tool / `approval-requested`) verbatim. New
+    unit test for the skip; new ai-chat test for the buried-client + leaf-server
+    case. `agents` + `@cloudflare/ai-chat`.
+  - **Cross-host recovery conformance suite.** New
+    `agents/chat/__tests__/recovery-conformance.test.ts` runs the REAL shared
+    primitives (`repairInterruptedToolParts` + the `partAwaitsClientInteraction` /
+    `clientResolvableToolNames` predicate) under **both** host wirings side by
+    side over a canonical scenario table (dead server orphan, pending client
+    orphan, mixed, approval-requested, approval-responded). It pins the **subset**
+    relationship — identical for server orphans; intentional divergence for
+    client orphans (ai-chat parks/skips, Think repairs-to-proceed) — and asserts
+    the invariant "ai-chat never repairs more than Think." This is the convergence
+    seam where the two hosts actually meet; a literal dual-driver e2e harness was
+    rejected because Think's recovery test agent is structurally different (Session
+    tree, no orphan-seeding hooks) and plumbing it would add fragile surface for
+    no extra coverage the shared-primitive suite doesn't already give. Each host's
+    own e2e suite (ai-chat `durable-chat-recovery` + `continue-last-turn`; Think
+    `think-session`) continues to cover its side end to end.
+  - **Stale-RFC sweep.** Corrected the §Cutover claim that the
+    `ChatRecoveryIncident` shape / keys / id formula are "duplicated verbatim …
+    not yet in `agents/chat`" — they have lived in shared
+    `recovery-incident.ts` since the engine landed. (Matrix cells are left as the
+    historical record per the doc's own note; the 2026-06 re-classification block
+    remains the authoritative status.)
 - _Recovery-engine convergence finish — ai-chat recovers interrupted server-tool
   calls like Think (LANDED), plus orphan-persist core dedup_ — Closed the last
   real behavior gap between the two AI-SDK chat hosts, restoring the

@@ -1540,13 +1540,14 @@ export class AIChatAgent<
    * missed: a mixed client+server orphan whose client replay drives an
    * auto-continuation, and any agent running with `chatRecovery` disabled.
    *
-   * Guard: repair runs ONLY when no client interaction is genuinely pending. In
-   * that state every unsettled tool part is a dead SERVER orphan (its
-   * `execute()` died with the evicted isolate), so flipping it to an errored
-   * result is always safe. While a client tool is still awaiting the user the
-   * guard skips repair — flipping it would clobber a result the client may still
-   * replay. (On the recovery-continue path this mirrors the narrow predicate
-   * that already let `waitUntilStable` converge.)
+   * Scope: repair only ever flips a DEAD SERVER orphan (an interrupted tool with
+   * no settled result whose `execute()` died with the evicted isolate). A part
+   * still legitimately awaiting a CLIENT interaction — an `input-available`
+   * client tool the SPA replays, or an `approval-requested` part the user may
+   * still answer — is left verbatim via the shared `shouldRepair` skip, so it is
+   * never clobbered with an error. This is per-part (not a whole-transcript
+   * guard), so a fresh dead-server orphan at the leaf is still repaired even if
+   * an unrelated abandoned client orphan sits earlier in history.
    *
    * Repair only ever reshapes ASSISTANT tool parts; it never touches user
    * messages, so per-channel policy carried on the user message's
@@ -1558,9 +1559,11 @@ export class AIChatAgent<
    * @internal
    */
   private async _repairInterruptedToolsBeforeTurn(): Promise<void> {
-    if (this.hasPendingClientInteraction()) return;
+    const clientResolvable = this._clientResolvableToolNames();
     const repaired = repairInterruptedToolParts(this.messages, {
-      repairPart: (part) => this.repairInterruptedToolPart(part)
+      repairPart: (part) => this.repairInterruptedToolPart(part),
+      shouldRepair: (part) =>
+        !this._partAwaitsClientInteraction(part, clientResolvable)
     });
     if (repaired.removedToolCalls === 0 && repaired.normalizedInputs === 0) {
       return;

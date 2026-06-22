@@ -15,7 +15,11 @@ terminal-state check) in `agents/chat`.
 
 The primitive is pure (returns a new messages array plus repair stats; never
 touches storage, broadcast, or events) and is parameterized by an overridable
-`repairPart` hook, so both AI-SDK chat hosts can run identical repair logic
-before re-entering inference on a recovered turn. `@cloudflare/think` delegates
-to it through its existing `repairInterruptedToolPart` hook — a pure internal
-refactor with no observable behavior or API change; its suites pass unchanged.
+`repairPart` hook plus an optional `shouldRepair(part)` skip predicate (defaults
+to repairing every interrupted part), so both AI-SDK chat hosts can run repair
+logic before re-entering inference on a recovered turn — a host whose default
+errors the part (ai-chat) uses `shouldRepair` to leave a part still awaiting a
+client interaction verbatim. `@cloudflare/think` delegates through its existing
+`repairInterruptedToolPart` hook with no `shouldRepair` (repairs everything) — a
+pure internal refactor with no observable behavior or API change; its suites pass
+unchanged.

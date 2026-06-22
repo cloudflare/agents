@@ -63,6 +63,17 @@ export interface RepairInterruptedToolPartsOptions {
    * {@link normalizeToolInput}).
    */
   normalizeInput?: (input: unknown) => { input: unknown; changed: boolean };
+  /**
+   * Whether an interrupted tool part (no settled result, not
+   * `approval-responded`) should be repaired at all. Defaults to `true` (repair
+   * everything, like Think — which converts even client tools via its
+   * `repairPart` override). A host whose default `repairPart` errors the part
+   * (ai-chat) passes this to SKIP a part still legitimately awaiting a CLIENT
+   * interaction (an `input-available` client tool or an `approval-requested`
+   * part the user may still answer) so it is left verbatim rather than clobbered
+   * with an error. Skipped parts are not counted in `removedToolCalls`.
+   */
+  shouldRepair?: (part: UIMessage["parts"][number]) => boolean;
 }
 
 export interface RepairInterruptedToolPartsResult {
@@ -84,6 +95,8 @@ export interface RepairInterruptedToolPartsResult {
  *   - a tool part with NO settled result and state `approval-responded` is kept
  *     verbatim (an approved server tool waiting for its continuation to run
  *     `execute()` — not abandoned);
+ *   - a tool part with NO settled result for which `shouldRepair` returns false
+ *     is kept verbatim (a part still awaiting a CLIENT interaction; see option);
  *   - any other tool part with no settled result is normalized then handed to
  *     `repairPart` (default: flipped to an errored result);
  *   - a tool part WITH a settled result only has its `input` normalized.
@@ -98,6 +111,7 @@ export function repairInterruptedToolParts(
   const isSettled = options.isSettled ?? toolPartHasSettledResult;
   const normalizeInput = options.normalizeInput ?? normalizeToolInput;
   const { repairPart } = options;
+  const shouldRepair = options.shouldRepair ?? (() => true);
 
   let removedToolCalls = 0;
   let normalizedInputs = 0;
@@ -128,6 +142,15 @@ export function repairInterruptedToolParts(
         // strand the approval and prevent the real result from ever being
         // produced by the continuation.
         if (state === "approval-responded") {
+          parts.push(part);
+          continue;
+        }
+        // A part still legitimately awaiting a CLIENT interaction (the host's
+        // `shouldRepair` returns false) is left verbatim — erroring it would
+        // clobber a tool-result / approval the client may still replay. Only
+        // hosts whose default repair ERRORS the part opt into this; Think keeps
+        // the default (repair everything, converting client tools via its hook).
+        if (!shouldRepair(part)) {
           parts.push(part);
           continue;
         }

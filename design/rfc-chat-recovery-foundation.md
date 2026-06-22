@@ -1451,9 +1451,16 @@ records.
 The deploy that ships this refactor is itself a deploy-mid-recovery event. When
 the new engine boots, it can find incidents, snapshots, and schedule rows written
 by the old per-package code. The refactor must round-trip every persisted artifact
-without a data migration. Today the `ChatRecoveryIncident` shape, its keys, and
-the incident-id formula are duplicated verbatim in both packages and are not yet
-in `agents/chat`; moving them must preserve the exact serialized contract.
+without a data migration.
+
+> **Status correction (2026-06).** The `ChatRecoveryIncident` shape, its keys,
+> and the incident-id formula are **no longer duplicated** — they now live in the
+> shared `agents/chat/recovery-incident.ts` (`ChatRecoveryIncident`,
+> `CHAT_RECOVERY_INCIDENT_KEY_PREFIX`, `chatRecoveryIncidentId`,
+> `evaluateChatRecoveryIncident`), which both hosts call. The serialized contract
+> below was preserved through that move and remains the authority for cutover
+> round-tripping; the original "duplicated verbatim in both packages" wording was
+> the pre-cutover state.
 
 ### Cutover invariants
 
