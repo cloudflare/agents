@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { DynamicWorkerExecutor } from "../executor";
 import { codeMcpServer, openApiMcpServer } from "../mcp";
@@ -552,6 +553,161 @@ describe("openApiMcpServer", () => {
     });
 
     expect(callText(result)).toBe("List users");
+
+    await client.close();
+  });
+
+  it("execute request callback receives the originating MCP request context", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    let callbackRequestId: string | number | undefined;
+    const server = openApiMcpServer({
+      spec: sampleSpec,
+      executor,
+      request: async (opts, context) => {
+        callbackRequestId = context.requestId;
+        return {
+          method: opts.method,
+          path: opts.path,
+          requestId: context.requestId,
+          hasSignal: context.signal instanceof AbortSignal
+        };
+      }
+    });
+
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const originalSend = clientTransport.send.bind(clientTransport);
+    let toolCallRequestId: string | number | undefined;
+    clientTransport.send = async (message, options) => {
+      if (
+        "method" in message &&
+        message.method === "tools/call" &&
+        "id" in message
+      ) {
+        toolCallRequestId = message.id;
+      }
+      return originalSend(message, options);
+    };
+    const client = new Client({ name: "test-client", version: "1.0.0" });
+    await client.connect(clientTransport);
+
+    const result = await client.callTool({
+      name: "execute",
+      arguments: {
+        code: 'async () => await codemode.request({ method: "GET", path: "/users" })'
+      }
+    });
+
+    expect(callbackRequestId).toBe(toolCallRequestId);
+    expect(JSON.parse(callText(result))).toEqual({
+      method: "GET",
+      path: "/users",
+      requestId: toolCallRequestId,
+      hasSignal: true
+    });
+
+    await client.close();
+  });
+
+  it("keeps request contexts isolated across concurrent executions", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const callbackRequestIds = new Map<string, string | number>();
+    let arrivals = 0;
+    let releaseCallbacks: (() => void) | undefined;
+    const bothCallbacksArrived = new Promise<void>((resolve) => {
+      releaseCallbacks = resolve;
+    });
+    const server = openApiMcpServer({
+      spec: sampleSpec,
+      executor,
+      request: async (opts, context) => {
+        callbackRequestIds.set(opts.path, context.requestId);
+        arrivals += 1;
+        if (arrivals === 2) releaseCallbacks?.();
+        await bothCallbacksArrived;
+        return { path: opts.path, requestId: context.requestId };
+      }
+    });
+
+    const client = await connectClient(server);
+
+    const [a, b] = await Promise.all(
+      ["/a", "/b"].map((path) =>
+        client.callTool({
+          name: "execute",
+          arguments: {
+            code: `async () => await codemode.request({ method: "GET", path: "${path}" })`
+          }
+        })
+      )
+    );
+
+    const aRequestId = callbackRequestIds.get("/a");
+    const bRequestId = callbackRequestIds.get("/b");
+    expect(aRequestId).toBeDefined();
+    expect(bRequestId).toBeDefined();
+    expect(aRequestId).not.toBe(bRequestId);
+    expect([JSON.parse(callText(a)), JSON.parse(callText(b))]).toEqual([
+      { path: "/a", requestId: aRequestId },
+      { path: "/b", requestId: bRequestId }
+    ]);
+
+    await client.close();
+  });
+
+  it("lets request callbacks elicit input for the originating tool call", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    let server: McpServer;
+    server = openApiMcpServer({
+      spec: sampleSpec,
+      executor,
+      request: async (opts, context) => {
+        const elicitation = await server.server.elicitInput(
+          {
+            message: `Allow ${opts.method} ${opts.path}?`,
+            requestedSchema: {
+              type: "object",
+              properties: { approved: { type: "boolean" } },
+              required: ["approved"]
+            }
+          },
+          {
+            relatedRequestId: context.requestId,
+            signal: context.signal
+          }
+        );
+        return elicitation;
+      }
+    });
+
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client(
+      { name: "test-client", version: "1.0.0" },
+      { capabilities: { elicitation: { form: {} } } }
+    );
+    client.setRequestHandler(ElicitRequestSchema, async (request) => {
+      expect(request.params.message).toBe("Allow DELETE /users/123?");
+      return { action: "accept", content: { approved: true } };
+    });
+    await client.connect(clientTransport);
+
+    const result = await client.callTool({
+      name: "execute",
+      arguments: {
+        code: `async () => await codemode.request({
+          method: "DELETE",
+          path: "/users/123"
+        })`
+      }
+    });
+
+    expect(JSON.parse(callText(result))).toEqual({
+      action: "accept",
+      content: { approved: true }
+    });
 
     await client.close();
   });

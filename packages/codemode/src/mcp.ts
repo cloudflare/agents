@@ -2,6 +2,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type {
+  ServerNotification,
+  ServerRequest
+} from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
   generateTypesFromJsonSchema,
@@ -254,10 +259,31 @@ export interface RequestOptions {
   rawBody?: boolean;
 }
 
+/**
+ * MCP context for the outer `execute` tool call.
+ *
+ * This remains in trusted host code and is never exposed to the sandbox.
+ * Use it only while the outer tool call is active.
+ */
+export type OpenApiMcpRequestContext = RequestHandlerExtra<
+  ServerRequest,
+  ServerNotification
+>;
+
 export interface OpenApiMcpServerOptions {
   spec: Record<string, unknown>;
   executor: Executor;
-  request: (options: RequestOptions) => Promise<unknown>;
+  /**
+   * Handle an API request from sandbox code on the trusted host.
+   *
+   * The context belongs to the outer MCP `execute` tool call. It can be used
+   * to associate elicitation, sampling, roots, and notifications with that
+   * call's response stream.
+   */
+  request: (
+    options: RequestOptions,
+    context: OpenApiMcpRequestContext
+  ) => Promise<unknown>;
   name?: string;
   version?: string;
   description?: string;
@@ -510,7 +536,7 @@ async () => {
         code: z.string().describe("JavaScript async arrow function to execute")
       }
     },
-    async ({ code }) => {
+    async ({ code }, context) => {
       try {
         const result = await executor.execute(
           createOpenApiSandboxCode(code, spec, true),
@@ -518,7 +544,8 @@ async () => {
             {
               name: "__openapiHost",
               fns: {
-                request: (args: unknown) => requestFn(args as RequestOptions)
+                request: (args: unknown) =>
+                  requestFn(args as RequestOptions, context)
               }
             }
           ]
