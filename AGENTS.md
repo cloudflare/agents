@@ -135,6 +135,8 @@ Test locations:
 
 Each test directory has its own `vitest.config.ts` and (for Workers tests) a `wrangler.jsonc`.
 
+For a repo-wide rollup of **what proves feature X works, at which layer, and which CI run guards it** — plus the tracked skip/quarantine debt — see [`design/test-coverage-matrix.md`](design/test-coverage-matrix.md).
+
 ## Contributing
 
 ### Changesets

@@ -124,6 +124,9 @@ The `check:exports` script at the repo root verifies that every `exports` entry 
 
 ## Testing
 
+> Repo-wide coverage rollup (feature × layer, CI→layer mapping, skip debt):
+> [`../../design/test-coverage-matrix.md`](../../design/test-coverage-matrix.md).
+
 Multiple separate test suites, each with its own vitest config:
 
 ### Workers tests (`src/tests/`)

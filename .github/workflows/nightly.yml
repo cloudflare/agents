@@ -184,12 +184,91 @@ jobs:
         run: pnpm run test:e2e
         working-directory: experimental/pi-recovery
 
+      # The real-Workers-AI tanstack leg is enabled here (secrets available in
+      # nightly); locally it stays gated behind RUN_WORKERS_AI_E2E so contributors
+      # without an `ai` binding skip it.
       - name: Run tanstack-recovery genericity e2e
         env:
+          RUN_WORKERS_AI_E2E: "1"
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: pnpm run test:e2e
         working-directory: experimental/tanstack-recovery
+
+  # Deterministic codemode Playwright suite (Layer 4b). Drives the dynamic
+  # Worker-loader code-generation flow in a real browser; offline, no Cloudflare
+  # credentials. Mirrors `e2e-ai-chat`. A `globalTimeout` in its
+  # playwright.config.ts bounds it so a hang can never silently run to the cap.
+  e2e-codemode:
+    name: "E2E: codemode (Playwright)"
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: ./.github/actions/install
+
+      - run: pnpm run build
+
+      - name: Get Playwright version
+        id: playwright-version
+        run: echo "version=$(node -p 'require(\"playwright/package.json\").version')" >> $GITHUB_OUTPUT
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v5
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run codemode e2e tests
+        run: pnpm run test:e2e
+        working-directory: packages/codemode
+
+  # Browser-connector e2e (Layer 3c). Spawns a real `wrangler dev` (local Browser
+  # Rendering simulator + worker loader) and drives `BrowserConnector` over CDP.
+  # Kept out of the default unit `test` target (it needs Chromium); runs here
+  # nightly instead.
+  e2e-agents-browser:
+    name: "E2E: agents (browser connector)"
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: ./.github/actions/install
+
+      - run: pnpm run build
+
+      - name: Get Playwright version
+        id: playwright-version
+        run: echo "version=$(node -p 'require(\"playwright/package.json\").version')" >> $GITHUB_OUTPUT
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v5
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run agents browser-connector e2e tests
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: pnpm run test:browser
+        working-directory: packages/agents
 
   # ── DEPLOYED (Layer-5) recovery suites ──────────────────────────────────────
   # These deploy REAL, billable Workers and drive recovery on Cloudflare's edge

@@ -925,16 +925,17 @@ describe("useAgent hook", () => {
       expect(capturedAgent!.identified).toBe(true);
     });
 
-    // TODO: This test has a React Suspense/act timing issue in vitest-browser-react
-    // The async query triggers suspense but the act scope isn't properly awaited
-    it.skip("should support async query function", async () => {
+    it("should support async query function", async () => {
       const { host, protocol } = getTestWorkerHost();
       let capturedAgent: TestAgent | null = null;
       const queryFn = vi.fn(async () => {
         return { token: "test-token" };
       });
 
-      render(
+      // Must await: the async `query` makes useAgent suspend, so the wrapped
+      // render needs to settle (and flip IS_REACT_ACT_ENVIRONMENT off) before we
+      // poll — the original skip was just a missing await, not a real act bug.
+      await render(
         <SuspenseWrapper>
           <TestAgentComponent
             options={{

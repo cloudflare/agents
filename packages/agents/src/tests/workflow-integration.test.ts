@@ -25,10 +25,7 @@ async function getTestAgent(name: string) {
 
 describe("AgentWorkflow integration", () => {
   describe("workflow lifecycle", () => {
-    // Note: These tests are skipped because the durable step methods (step.reportComplete, etc.)
-    // don't work well with the workflow introspection API when the step callbacks make RPC calls
-    // to Durable Objects. The functionality is tested via workflow.test.ts.
-    it.skip("should start a workflow and track it in the database", async () => {
+    it("should start a workflow and track it in the database", async () => {
       const agentStub = await getTestAgent("integration-lifecycle-1");
 
       // Clear any existing state
@@ -71,10 +68,14 @@ describe("AgentWorkflow integration", () => {
       )) as WorkflowInfo | null;
       expect(trackedWorkflow).toBeDefined();
       expect(trackedWorkflow?.workflowId).toBe(workflowId);
-      expect(trackedWorkflow?.status).toBe("queued"); // Initial status when created
+      // Tracking is inserted as "queued"; the workflow's first (non-durable)
+      // reportProgress callback advances it to "running". The durable
+      // reportComplete step is mocked, so it never reaches "complete" — making
+      // "running" the deterministic end state here.
+      expect(trackedWorkflow?.status).toBe("running");
     });
 
-    it.skip("should receive progress callbacks from workflow", async () => {
+    it("should receive progress callbacks from workflow", async () => {
       const agentStub = await getTestAgent("integration-progress-1");
 
       await agentStub.clearCallbacks();
@@ -133,12 +134,7 @@ describe("AgentWorkflow integration", () => {
   });
 
   describe("workflow with approval flow", () => {
-    // Note: These tests are skipped because step.waitForEvent mocking
-    // requires more complex setup with the introspection API.
-    // The approval flow functionality is tested indirectly through the
-    // sendWorkflowEvent tests in workflow.test.ts
-
-    it.skip("should handle approval event and continue workflow", async () => {
+    it("should handle approval event and continue workflow", async () => {
       const agentStub = await getTestAgent("integration-approval-1");
 
       await agentStub.clearCallbacks();
@@ -175,7 +171,7 @@ describe("AgentWorkflow integration", () => {
       );
     });
 
-    it.skip("should handle rejection and report error", async () => {
+    it("should handle rejection and report error", async () => {
       const agentStub = await getTestAgent("integration-rejection-1");
 
       await agentStub.clearCallbacks();
@@ -214,8 +210,7 @@ describe("AgentWorkflow integration", () => {
   });
 
   describe("simple workflow", () => {
-    // Note: Skipped - the durable step methods don't work with workflow introspection
-    it.skip("should run a simple workflow and complete", async () => {
+    it("should run a simple workflow and complete", async () => {
       const agentStub = await getTestAgent("integration-simple-1");
 
       await agentStub.clearCallbacks();

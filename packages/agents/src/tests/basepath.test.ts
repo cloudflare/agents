@@ -166,16 +166,48 @@ describe("basePath routing", () => {
   });
 
   describe("HTTP requests via custom path", () => {
-    it.skip("should handle HTTP requests via custom path", async () => {
-      // Note: HTTP requests via custom path work in production but have issues
-      // in vitest cloudflare:test environment. WebSocket tests cover the main use case.
-      // Make HTTP request to /user which is handled by custom routing
-      const res = await exports.default.fetch("http://example.com/user");
+    // The worker's custom router forwards `/custom-state/{seg}` to TestStateAgent
+    // via `getAgentByName` + `agent.fetch` (see worker.ts). These prove a PLAIN
+    // HTTP request (no WebSocket upgrade) is forwarded intact to the resolved
+    // instance — a dimension the other tests (all WS upgrades) never exercise.
+    //
+    // The previous `it.skip` only asserted "not 404" against `/user`, which is
+    // meaningless: TestStateAgent.onRequest returns 404 for any path it doesn't
+    // recognize (and `/user`'s last segment isn't a handled path), so "404" here
+    // means "the agent ran and declined", NOT "the worker failed to route".
+    // Status alone can't tell the two apart. (TestStateAgent.onRequest routes by
+    // the LAST path segment, so `/custom-state/echo` reaches its `echo` handler.)
+    it("forwards method + body through a custom path to the agent", async () => {
+      const res = await exports.default.fetch(
+        "http://example.com/custom-state/echo",
+        { method: "POST", body: "ping" }
+      );
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as {
+        method: string;
+        body: string;
+        path: string;
+      };
+      expect(json).toEqual({ method: "POST", body: "ping", path: "echo" });
+    });
 
-      // Request should reach the agent (not get 404 from the worker)
-      // The agent returns 426 for non-WebSocket upgrade required, or handles HTTP
-      // Either way, it should NOT be 404 (which means the route wasn't matched)
-      expect(res.status).not.toBe(404);
+    it("resolves a custom HTTP path to the same instance as RPC (shared state)", async () => {
+      // Seed state via a direct stub, then read it back over the custom HTTP
+      // path: proves the path resolves to the SAME DO instance, not just "some"
+      // agent. The instance name is the route's last segment ("state").
+      const agentStub = await getAgentByName(env.TestStateAgent, "state");
+      await agentStub.updateState({
+        count: 7,
+        items: ["http"],
+        lastUpdated: "d1"
+      });
+
+      const res = await exports.default.fetch(
+        "http://example.com/custom-state/state"
+      );
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as { state: { count: number } };
+      expect(json.state.count).toBe(7);
     });
   });
 

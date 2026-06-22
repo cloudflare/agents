@@ -542,21 +542,39 @@ describe("git add all with deletes", () => {
   });
 });
 
+// Intentional network gate (Group A — not Group B debt). A real clone over
+// HTTPS to github.com works in the Workers pool, but pinning CI to an external
+// host (and a specific upstream repo) is fragile — the previously-pinned repo
+// now 401s, having been removed/made-private. So this stays OFF by default and
+// runs on demand:
+//
+//   RUN_GIT_CLONE_E2E=1 pnpm --filter @cloudflare/shell exec \
+//     vitest run --project workers git -t "clones a small public repo"
+//
+// The host env var is forwarded into the pool as a binding by vitest.config.ts
+// (host `process.env` is not visible inside workerd). `octocat/Hello-World` is
+// GitHub's canonical, long-stable public test repo.
+const RUN_GIT_CLONE_E2E = Boolean(
+  (env as unknown as Record<string, unknown>).RUN_GIT_CLONE_E2E
+);
+
 describe("git clone", () => {
-  // Clone requires outbound network — skip in Workers test pool.
-  // Test manually via `wrangler dev` or deploy.
-  it.skip("clones a small public repo (requires network)", async () => {
-    const agent = await freshAgent(`clone-${Date.now()}`);
-    const result = await agent.clone({
-      url: "https://github.com/nicolo-ribaudo/tc39-proposal-await-dictionary.git",
-      depth: 1
-    });
-    expect(result.cloned).toBeDefined();
+  it.skipIf(!RUN_GIT_CLONE_E2E)(
+    "clones a small public repo (requires network)",
+    async () => {
+      const agent = await freshAgent(`clone-${Date.now()}`);
+      const result = await agent.clone({
+        url: "https://github.com/octocat/Hello-World.git",
+        depth: 1
+      });
+      expect(result.cloned).toBeDefined();
 
-    const content = await agent.readFile("/README.md");
-    expect(content).toBeTruthy();
+      const content = await agent.readFile("/README");
+      expect(content).toBeTruthy();
 
-    const log = await agent.log({ depth: 1 });
-    expect(log).toHaveLength(1);
-  }, 30000);
+      const log = await agent.log({ depth: 1 });
+      expect(log).toHaveLength(1);
+    },
+    30000
+  );
 });

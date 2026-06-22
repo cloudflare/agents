@@ -62,12 +62,7 @@ describe("workflow error auto-reporting", () => {
   });
 
   describe("throw in step.do() triggers onWorkflowError", () => {
-    // Skipped: The Workflows runtime retries failed steps with backoff, so
-    // waitForStatus("errored") hangs until all retries are exhausted (exceeds test timeout).
-    // The auto-reporting for step.do failures is still covered: step errors propagate up
-    // to run(), where the catch wrapper fires _autoReportError. This is verified by
-    // the "throw in run()" test above.
-    it.skip("should notify agent when workflow throws inside step.do()", async () => {
+    it("should notify agent when workflow throws inside step.do()", async () => {
       const agentStub = await getTestAgent("error-auto-report-throw-step-1");
       await agentStub.clearCallbacks();
 
@@ -75,6 +70,18 @@ describe("workflow error auto-reporting", () => {
         env.TEST_WORKFLOW,
         "throw-in-step-wf-1"
       );
+
+      // The Workflows runtime retries a failing `step.do()` with backoff, so a
+      // real run would not reach "errored" until every retry's wall-clock delay
+      // elapsed (well past the test timeout). `disableRetryDelays()` keeps the
+      // real retry + throw behavior (the actual `step.do("process")` callback
+      // still runs and throws "Intentional failure for testing" on each attempt)
+      // but collapses the inter-attempt waits, so retries exhaust immediately and
+      // the error propagates to run() where the catch wrapper fires
+      // `_autoReportError` — the exact path this test means to cover.
+      await instance.modify(async (m) => {
+        await m.disableRetryDelays();
+      });
 
       await agentStub.runWorkflowTest("throw-in-step-wf-1", {
         taskId: "task-fail",

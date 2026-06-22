@@ -30,6 +30,7 @@ export {
   TestScheduleAgent,
   TestWorkflowAgent,
   TestAgentToolReplayAgent,
+  TestAgentToolStubChild,
   TestOAuthAgent,
   TestCustomOAuthAgent,
   TestReadonlyAgent,
