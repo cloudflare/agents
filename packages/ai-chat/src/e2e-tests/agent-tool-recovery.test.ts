@@ -10,6 +10,16 @@
  * self-heals via continue recovery and the parent re-attaches to the still-
  * running `cf_agent_tool_runs` row, following it to its REAL terminal
  * (`completed`) rather than abandoning it as `interrupted`.
+ *
+ * Coverage split (mirrors Think's `reattach-budget` e2e note): this is the
+ * INTEGRATION smoke for the full eviction → self-heal → re-attach loop. The
+ * TIGHT regression gate for the `request_id` rebind that keeps frames
+ * attributable across recovery is the deterministic Workers-pool unit suite
+ * (`src/tests/agent-tool-reattach-recovery.test.ts` and
+ * `src/tests/agent-tool-rebind-noop.test.ts`). We deliberately do NOT replicate
+ * Think's long (>2.5min) no-progress-budget e2e here — a finite ~10s child can't
+ * outlive a production no-progress budget, so it would gate nothing the unit
+ * suite doesn't already cover, at a large flakiness/runtime cost.
  */
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { type ChildProcess } from "node:child_process";

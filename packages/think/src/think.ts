@@ -3322,9 +3322,14 @@ export class Think<
   private _agentToolRunForRequest(requestId: string): string | null {
     const cached = this._agentToolRunsByRequestId.get(requestId);
     if (cached !== undefined) return cached;
+    // Active-run predicate: a child run is in flight while `status` is
+    // `starting`/`running`; terminal rows set `status` AND `completed_at`
+    // together (the lifecycle invariant), so this is equivalent to
+    // `completed_at IS NULL` but states the intent. Kept consistent with
+    // `_rebindAgentToolChildRunRequestId` and the ai-chat counterpart.
     const rows = this.sql<{ run_id: string }>`
       SELECT run_id FROM cf_agent_tool_child_runs
-      WHERE request_id = ${requestId} AND completed_at IS NULL
+      WHERE request_id = ${requestId} AND status IN ('starting', 'running')
       LIMIT 1
     `;
     const runId = rows[0]?.run_id ?? null;
@@ -3348,16 +3353,26 @@ export class Think<
    * turn's request id keeps frame attribution alive across recovery so the
    * parent re-attaches and follows the child to its real terminal.
    *
-   * A no-op for the common case: facets that never ran as an agent-tool child
-   * have no `cf_agent_tool_child_runs` table (the SELECT is guarded), and a
-   * facet whose run already settled has no incomplete row.
+   * Safe to call on EVERY recovery continuation:
+   *   - Facets that never ran as an agent-tool child have no
+   *     `cf_agent_tool_child_runs` table → the guarded SELECT throws → no-op.
+   *   - A facet whose run already settled has no `starting`/`running` row → no-op.
+   *   - A child DO is addressed by its `runId` (`subAgent(cls, runId)`), so it
+   *     owns AT MOST ONE child-run row for its whole lifetime and is never reused
+   *     as a top-level chat agent — the single active row is unambiguously this
+   *     recovery's run. The `ORDER BY started_at DESC LIMIT 1` is defensive
+   *     belt-and-suspenders for that invariant.
+   *
+   * Uses the same `status IN ('starting','running')` active-run predicate as
+   * `_agentToolRunForRequest` and the ai-chat counterpart (see the lifecycle
+   * invariant note there).
    */
   private _rebindAgentToolChildRunRequestId(requestId: string): void {
     let runId: string | undefined;
     try {
       const rows = this.sql<{ run_id: string }>`
         SELECT run_id FROM cf_agent_tool_child_runs
-        WHERE completed_at IS NULL
+        WHERE status IN ('starting', 'running')
         ORDER BY started_at DESC
         LIMIT 1
       `;

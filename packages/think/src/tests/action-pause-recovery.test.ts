@@ -96,4 +96,80 @@ describe("action-pause during an active recovery incident", () => {
     expect(await agent.getDurablePauseExecCount()).toBe(1);
     expect(await agent.listActionPendingForTest()).toHaveLength(0);
   });
+
+  it("a CONTINUE recovery incident also leaves a parked pause approvable", async () => {
+    const agent = await freshPauseAgent(
+      `ap-rec-continue-${crypto.randomUUID()}`
+    );
+    await agent.useDurablePauseActionForTest();
+
+    const parked = (await agent.parkDurablePauseForTest(
+      "world"
+    )) as PausedOutput;
+    expect(parked.status).toBe("paused");
+    const executionId = parked.executionId ?? "";
+    expect(await agent.listActionPendingForTest()).toHaveLength(1);
+
+    // A separate interrupted turn with a PARTIAL assistant reply → the
+    // mid-stream `continue` recovery path (the other arm vs the retry test
+    // above).
+    await agent.persistTestMessage({
+      id: "u-ap-continue",
+      role: "user",
+      parts: [{ type: "text", text: "an earlier partially-answered question" }]
+    });
+    await agent.persistTestMessage({
+      id: "a-ap-continue",
+      role: "assistant",
+      parts: [{ type: "text", text: "Partial answer" }]
+    });
+    await agent.insertInterruptedStream(
+      "stream-ap-continue",
+      "req-ap-continue",
+      [
+        {
+          body: JSON.stringify({ type: "start", messageId: "a-ap-continue" }),
+          index: 0
+        },
+        { body: JSON.stringify({ type: "text-start" }), index: 1 },
+        {
+          body: JSON.stringify({ type: "text-delta", delta: "Partial answer" }),
+          index: 2
+        }
+      ]
+    );
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-ap-continue",
+      {
+        __cfThinkChatFiberSnapshot: {
+          kind: "think-chat-turn",
+          version: 1,
+          requestId: "req-ap-continue",
+          continuation: false,
+          latestMessageId: "a-ap-continue",
+          latestMessageRole: "assistant",
+          latestUserMessageId: "u-ap-continue",
+          startedAt: Date.now()
+        },
+        user: null
+      }
+    );
+
+    await agent.triggerFiberRecovery();
+    expect(
+      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
+    ).toBe(1);
+    await agent.runScheduledRecoveryContinueForTest();
+
+    // Recovery settled the interrupted turn without disturbing the pause.
+    expect(await agent.getActiveFibers()).toHaveLength(0);
+    const pendingAfter = await agent.listActionPendingForTest();
+    expect(pendingAfter).toHaveLength(1);
+    expect(pendingAfter[0]?.execution_id).toBe(executionId);
+    expect(await agent.getDurablePauseExecCount()).toBe(0);
+
+    const result = await agent.approveExecutionForTest(executionId);
+    expect(result).toBe("paused-exec: world");
+    expect(await agent.getDurablePauseExecCount()).toBe(1);
+  });
 });

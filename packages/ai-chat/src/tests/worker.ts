@@ -2811,13 +2811,41 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
    */
   async seedAgentToolChildRunForTest(
     runId: string,
-    requestId: string
+    requestId: string,
+    startedAt: number = Date.now()
   ): Promise<void> {
     this.sql`
       insert into cf_ai_chat_agent_tool_runs
         (run_id, request_id, status, input_json, started_at)
-      values (${runId}, ${requestId}, 'running', '{}', ${Date.now()})
+      values (${runId}, ${requestId}, 'running', '{}', ${startedAt})
     `;
+  }
+
+  /**
+   * Seed a SETTLED (terminal) child-run row — `completed` with `completed_at`
+   * set — to assert the rebind is a no-op for already-finished runs.
+   */
+  async seedSettledAgentToolChildRunForTest(
+    runId: string,
+    requestId: string
+  ): Promise<void> {
+    const now = Date.now();
+    this.sql`
+      insert into cf_ai_chat_agent_tool_runs
+        (run_id, request_id, status, input_json, started_at, completed_at)
+      values (${runId}, ${requestId}, 'completed', '{}', ${now}, ${now})
+    `;
+  }
+
+  /** Directly invoke the rebind helper (bypassing the full recovery flow). */
+  async rebindAgentToolChildRunRequestIdForTest(
+    requestId: string
+  ): Promise<void> {
+    (
+      this as unknown as {
+        _rebindAgentToolChildRunRequestId(requestId: string): void;
+      }
+    )._rebindAgentToolChildRunRequestId(requestId);
   }
 
   /** The `request_id` currently bound to an agent-tool child run row. */
