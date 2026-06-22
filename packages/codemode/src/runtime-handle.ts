@@ -1,4 +1,3 @@
-import type { Tool } from "ai";
 import type { CodemodeConnector } from "./connectors";
 import type { Executor } from "./executor";
 import {
@@ -11,7 +10,7 @@ import {
   resumeCodemode,
   rollbackCodemode,
   validateConnectorNames,
-  type ProxyToolInput,
+  type CodemodeTool,
   type ProxyToolOutput,
   type TransformResult
 } from "./proxy-tool";
@@ -81,9 +80,7 @@ export type CodemodeExpireOptions = {
 };
 
 export interface CodemodeRuntimeHandle {
-  tool(
-    options?: CodemodeRuntimeToolOptions
-  ): Tool<ProxyToolInput, ProxyToolOutput>;
+  tool(options?: CodemodeRuntimeToolOptions): CodemodeTool;
   approve(options: CodemodeApproveOptions): Promise<ProxyToolOutput>;
   /**
    * Reject a pending action, ending the run. Returns whether the reject
@@ -130,9 +127,7 @@ class DefaultCodemodeRuntimeHandle implements CodemodeRuntimeHandle {
     this.#options = options;
   }
 
-  tool(
-    options?: CodemodeRuntimeToolOptions
-  ): Tool<ProxyToolInput, ProxyToolOutput> {
+  tool(options?: CodemodeRuntimeToolOptions): CodemodeTool {
     return createProxyTool({
       ctx: this.#options.ctx,
       executor: this.#options.executor,

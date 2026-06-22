@@ -19,8 +19,6 @@
  * concurrently without clobbering one another.
  */
 import { RpcTarget } from "cloudflare:workers";
-import { tool, type Tool } from "ai";
-import { z } from "zod";
 import type { Executor, ResolvedProvider, ConnectorBinding } from "./executor";
 import { runCode } from "./run-code";
 import { normalizeCode } from "./normalize";
@@ -163,7 +161,64 @@ export type CreateProxyToolOptions = {
 // Schema + pause sentinel
 // ---------------------------------------------------------------------------
 
-const proxySchema = z.object({ code: z.string() });
+type StandardSchemaIssue = {
+  readonly message: string;
+  readonly path?: ReadonlyArray<PropertyKey>;
+};
+
+type ProxyToolInputSchema = {
+  readonly "~standard": {
+    readonly version: 1;
+    readonly vendor: "@cloudflare/codemode";
+    readonly validate: (
+      value: unknown
+    ) =>
+      | { readonly value: ProxyToolInput }
+      | { readonly issues: ReadonlyArray<StandardSchemaIssue> };
+    readonly jsonSchema: {
+      readonly input: (options: {
+        readonly target: string;
+      }) => Record<string, unknown>;
+      readonly output: (options: {
+        readonly target: string;
+      }) => Record<string, unknown>;
+    };
+  };
+};
+
+const proxyJsonSchema = {
+  type: "object",
+  properties: {
+    code: { type: "string" }
+  },
+  required: ["code"],
+  additionalProperties: false
+};
+
+const proxySchema: ProxyToolInputSchema = {
+  "~standard": {
+    version: 1,
+    vendor: "@cloudflare/codemode",
+    validate: (value) => {
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        "code" in value &&
+        typeof value.code === "string"
+      ) {
+        return { value: { code: value.code } };
+      }
+
+      return {
+        issues: [{ message: "Expected an object with a string code property" }]
+      };
+    },
+    jsonSchema: {
+      input: (_options) => proxyJsonSchema,
+      output: (_options) => proxyJsonSchema
+    }
+  }
+};
 
 // Sandbox-side marker thrown to abort the run on a pause. The proxy tool
 // detects the pause via the facet's recorded state, not this message.
@@ -680,9 +735,16 @@ async function applyTransform(
 // createProxyTool
 // ---------------------------------------------------------------------------
 
-export function createProxyTool(
-  options: CreateProxyToolOptions
-): Tool<ProxyToolInput, ProxyToolOutput> {
+export type CodemodeTool = {
+  description: string;
+  inputSchema: ProxyToolInputSchema;
+  execute: (
+    input: ProxyToolInput,
+    options: unknown
+  ) => Promise<ProxyToolOutput>;
+};
+
+export function createProxyTool(options: CreateProxyToolOptions): CodemodeTool {
   const connectors = options.connectors;
   validateConnectorNames(connectors);
 
@@ -698,7 +760,7 @@ export function createProxyTool(
     return (setupPromise ??= loadSetup(connectors));
   }
 
-  return tool({
+  return {
     description: buildDescription(
       connectors,
       options.description,
@@ -730,7 +792,7 @@ export function createProxyTool(
         options.transformResult
       );
     }
-  });
+  };
 }
 
 // ---------------------------------------------------------------------------

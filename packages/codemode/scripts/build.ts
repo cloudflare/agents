@@ -1,5 +1,27 @@
+import { readFileSync } from "node:fs";
 import { build } from "tsdown";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
+
+function assertFrameworkFreeRootEntry() {
+  const optionalFrameworkPeers = ["ai", "zod", "@tanstack/ai"];
+
+  for (const file of ["dist/index.js", "dist/index.d.ts"]) {
+    const rootEntry = readFileSync(file, "utf8");
+    const frameworkImport = optionalFrameworkPeers.find(
+      (peer) =>
+        rootEntry.includes(`from "${peer}"`) ||
+        rootEntry.includes(`from '${peer}'`) ||
+        rootEntry.includes(`import("${peer}")`) ||
+        rootEntry.includes(`import('${peer}')`)
+    );
+
+    if (frameworkImport) {
+      throw new Error(
+        `${file} must not import optional framework peer "${frameworkImport}"`
+      );
+    }
+  }
+}
 
 async function main() {
   await build({
@@ -21,6 +43,8 @@ async function main() {
     sourcemap: true,
     fixedExtension: false
   });
+
+  assertFrameworkFreeRootEntry();
 
   // then run oxfmt on the generated .d.ts files
   formatDeclarationFiles();

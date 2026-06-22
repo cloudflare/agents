@@ -1,3 +1,4 @@
+import { asSchema } from "ai";
 import { describe, expect, it, vi } from "vitest";
 import type { Executor } from "../executor";
 import { createCodemodeRuntime } from "../runtime-handle";
@@ -46,7 +47,7 @@ describe("createCodemodeRuntime", () => {
     ).not.toThrow();
   });
 
-  it("exposes the model-facing tool from the runtime handle", () => {
+  it("exposes the model-facing tool from the runtime handle", async () => {
     const runtimeStub = {};
     const ctx = createMockCtx(runtimeStub);
     const executor = createMockExecutor();
@@ -61,6 +62,20 @@ describe("createCodemodeRuntime", () => {
 
     expect(codemode).toBeDefined();
     expect(codemode.execute).toBeDefined();
+
+    const inputSchema = asSchema(codemode.inputSchema);
+    expect(inputSchema.jsonSchema).toEqual({
+      type: "object",
+      properties: { code: { type: "string" } },
+      required: ["code"],
+      additionalProperties: false
+    });
+    await expect(inputSchema.validate?.({ code: "return 1" })).resolves.toEqual(
+      { success: true, value: { code: "return 1" } }
+    );
+    await expect(inputSchema.validate?.({ code: 1 })).resolves.toMatchObject({
+      success: false
+    });
   });
 
   it("approves a paused execution using the runtime's executor and connectors", async () => {
