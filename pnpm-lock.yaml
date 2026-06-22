@@ -1224,6 +1224,34 @@ importers:
         specifier: ^4.100.0
         version: 4.100.0(@cloudflare/workers-types@4.20260612.1)
 
+  examples/dynamic-think-workflows:
+    dependencies:
+      '@cloudflare/think':
+        specifier: '*'
+        version: link:../../packages/think
+      agents:
+        specifier: '*'
+        version: link:../../packages/agents
+      ai:
+        specifier: ^6.0.202
+        version: 6.0.202(zod@4.4.3)
+      workers-ai-provider:
+        specifier: ^3.2.0
+        version: 3.2.0(@ai-sdk/anthropic@3.0.83(zod@4.4.3))(@ai-sdk/google@3.0.81(zod@4.4.3))(@ai-sdk/openai@3.0.70(zod@4.4.3))(@ai-sdk/provider@3.0.10)(ai@6.0.202(zod@4.4.3))
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^4.20260612.1
+        version: 4.20260612.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      wrangler:
+        specifier: ^4.100.0
+        version: 4.100.0(@cloudflare/workers-types@4.20260612.1)
+
   examples/dynamic-tools:
     dependencies:
       '@cloudflare/ai-chat':
@@ -3877,6 +3905,9 @@ importers:
       '@cloudflare/codemode':
         specifier: '>=0.4.0'
         version: link:../codemode
+      '@cloudflare/dynamic-workflows':
+        specifier: '>=0.1.1'
+        version: 0.1.1
       '@cloudflare/shell':
         specifier: '>=0.4.0'
         version: link:../shell
@@ -3917,6 +3948,9 @@ importers:
       '@cloudflare/kumo':
         specifier: ^2.5.2
         version: 2.5.2(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
+      '@cloudflare/worker-bundler':
+        specifier: workspace:*
+        version: link:../worker-bundler
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -5170,6 +5204,10 @@ packages:
   '@clack/prompts@1.5.1':
     resolution: {integrity: sha512-zccHj2z2oCCO4yrDiRSlFOxWerGqRiysP7a5jPK6uoI9URKAquwY42Dd/iUP8JWHxEzdRe4TlbvZCo8z1/mhrw==}
     engines: {node: '>= 20.12.0'}
+
+  '@cloudflare/dynamic-workflows@0.1.1':
+    resolution: {integrity: sha512-sVomQI/cCOHr/Tu/qefnpECctG38ayrePxsUJm8UqllV1HCX9hQ1EW0cFo4HCdU+avQsPVfPiknnlk0oRySlig==}
+    engines: {node: '>=22'}
 
   '@cloudflare/kumo@2.5.2':
     resolution: {integrity: sha512-HUNi40VG3ExJ7lV8HjqPQcGpCmm2CqG/SzjJ+K+NhCwZRYTBvagdoMDPX2XZ8AW/ZPEeuFoId0VYmzrX+luyXQ==}
@@ -12974,6 +13012,8 @@ snapshots:
       fast-string-width: 3.0.2
       fast-wrap-ansi: 0.2.2
       sisteransi: 1.0.5
+
+  '@cloudflare/dynamic-workflows@0.1.1': {}
 
   '@cloudflare/kumo@2.5.2(@date-fns/tz@1.5.0)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)':
     dependencies:
