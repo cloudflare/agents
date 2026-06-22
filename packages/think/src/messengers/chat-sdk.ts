@@ -473,10 +473,12 @@ export class ThinkMessengerRuntime {
 
   /**
    * Resolve a live delivery surface for an out-of-turn notice (e.g. a scheduled
-   * task or webhook handler calling `deliverNotice`). Best-effort: reconstructs
-   * the thread from the channel's adapter via `fetchThread(threadId)`. Returns
-   * `undefined` when the channel/thread cannot be resolved so the caller can
-   * fail fast.
+   * task or webhook handler calling `deliverNotice`). Uses `chat.thread(id)` —
+   * the chat SDK's supported "post from outside a webhook" primitive, which
+   * returns a postable {@link ChatThread} and infers the adapter from the
+   * thread-id prefix, so it works for every chat-sdk adapter with no per-adapter
+   * wiring. Returns `undefined` when the channel is unregistered or no `threadId`
+   * was supplied so the caller can fail fast.
    */
   async resolveDeliverySurface(
     channelId: string,
@@ -486,13 +488,8 @@ export class ThinkMessengerRuntime {
     if (!definition || !threadId) {
       return undefined;
     }
-    const adapter = definition.adapter as unknown as {
-      fetchThread?: (id: string) => Promise<MessengerDeliverySurface>;
-    };
-    if (typeof adapter.fetchThread !== "function") {
-      return undefined;
-    }
-    return adapter.fetchThread(threadId);
+    const chat = this.chat ?? this.createChat();
+    return chat.thread(threadId) satisfies MessengerDeliverySurface;
   }
 
   private async resolveTarget(

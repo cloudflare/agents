@@ -9,6 +9,17 @@
 Running record of completed steps (newest first). Each entry links the phase,
 the change, and the key review findings.
 
+- _Cross-RFC breadcrumb — Channels v1 persists channel id in turn metadata (docs,
+  no code)_ — The [Channels RFC](./rfc-think-channels.md) shipped per-channel
+  policy (instructions / tool-narrowing / `maxTurns`) as a turn-scoped
+  `_activeChannelContext`, and to survive recovery it persists the channel **id**
+  on the user message metadata (`metadata.channel`). `continueLastTurn` /
+  `_chatRecoveryContinue` re-resolve the channel from that stamp on wake and
+  re-apply policy — there is deliberately **no** serialized `TurnSpec.channelContext`.
+  **Implication for the recovery-engine convergence:** any unified turn-metadata /
+  persistence model must preserve `metadata.channel` (and the re-resolve-on-wake
+  step) so per-channel policy keeps applying after a recovered turn. Flagged here
+  so convergence does not drop it.
 - _Phase 7 — chat-shared-layer.md: recovery-engine ownership (docs, no code)_ —
   Updated `design/chat-shared-layer.md` (which predated the whole chat-recovery
   foundation) to document the shared recovery layer. Added a `recovery-engine.ts`

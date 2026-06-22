@@ -3796,8 +3796,8 @@ export class Think<
             hint = `; channel "${channelId}" is not registered`;
           } else if (kindOf === "messenger") {
             hint = options?.thread
-              ? ` (thread "${options.thread}"); the adapter must implement fetchThread() for out-of-turn notices`
-              : "; pass { thread } for out-of-turn messenger notices (and the adapter must implement fetchThread())";
+              ? ` (thread "${options.thread}")`
+              : "; pass { thread } for out-of-turn messenger notices";
           } else {
             hint = `; channel kind "${kindOf}" has no out-of-turn delivery surface yet`;
           }

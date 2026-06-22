@@ -324,8 +324,10 @@ Semantics:
   - **messenger: `surface.post(...)`** on a live delivery surface. During an
     active turn the surface is stashed turn-scoped as `_activeDeliverySurface`
     (set while `deliverMessengerReply` runs). Out of turn, the surface is
-    reconstructed via the adapter's `fetchThread(thread)`, which is why an
-    out-of-turn messenger notice **requires** `{ thread }`.
+    resolved via `chat.thread(threadId)` (the chat SDK's "post from outside a
+    webhook" primitive, which infers the adapter from the thread-id prefix and
+    works for every adapter), which is why an out-of-turn messenger notice
+    **requires** `{ thread }`.
   - **voice: TTS** (seam — filled by the Voice spike).
 - **`informModel`** controls the model-legible annotation. When `true`, the
   delivered text is wrapped as `"[Delivered to the user out of band] <text>"` so
@@ -581,7 +583,22 @@ Still open:
   can Think generate/manage gateways for common channels? Keep the thin
   awaited-durable-handoff invariant either way (parent plan).
 
-## Deferred follow-ups (tracked, not built in v1)
+## Follow-up tracker (post Channels v1)
+
+The authoritative list of work that falls out of Channels v1. Items are seams or
+deferrals, not regressions. Status: `[ ]` not started, `[x]` done.
+
+| #   | Item                                                                                                                               | Status | Home                                                                                   |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------- | ------ | -------------------------------------------------------------------------------------- |
+| 1   | Recovery-progress breadcrumb — note that per-channel policy depends on `metadata.channel` so the recovery convergence preserves it | `[x]`  | [rfc-chat-recovery-foundation-progress.md](./rfc-chat-recovery-foundation-progress.md) |
+| 2   | Out-of-turn messenger notices via `chat.thread(id)` (works for all adapters; no per-adapter `fetchThread` needed)                  | `[x]`  | this doc (below) + `messengers/chat-sdk.ts`                                            |
+| 3   | `DeliveryKind` on the delivery wire (`post()` contract)                                                                            | `[ ]`  | this doc (below)                                                                       |
+| 4   | Sub-agent channels (inherit vs own registry; notice routing to originating channel)                                                | `[ ]`  | this doc (below)                                                                       |
+| 5   | Attachment delivery ordering (trailing-message model)                                                                              | `[ ]`  | this doc (below)                                                                       |
+| 6   | Voice transport spike (now unblocked by the `kind:"voice"` seam)                                                                   | `[ ]`  | [rfc-think-voice.md](./rfc-think-voice.md)                                             |
+| —   | **Turns recovery-engine convergence** (the headline next effort)                                                                   | `[ ]`  | [rfc-chat-recovery-foundation.md](./rfc-chat-recovery-foundation.md)                   |
+
+### Channel follow-ups (detail)
 
 These are known gaps in the shipped slice. They are seams, not regressions —
 flagged here so a follow-up can pick them up:
@@ -601,11 +618,12 @@ flagged here so a follow-up can pick them up:
   only text — a notice's `kind`/`DeliveryTag` does not reach the messenger/voice
   wire. Carrying the tag to `post()` is an adapter-contract change (every adapter
   must thread it); deferred until a surface (voice/CLI) actually consumes it.
-- **Bundled adapters: `fetchThread`.** Out-of-turn messenger `deliverNotice`
-  requires the channel adapter to implement `fetchThread(threadId)`. No bundled
-  adapter (Telegram, `chatSdkMessenger`) implements it yet — only test fixtures
-  do — so out-of-turn messenger notices are a working seam only for adapters that
-  opt in. Implement it on the bundled adapters to make the path real.
+- **Out-of-turn messenger notices — resolved.** `resolveDeliverySurface` now uses
+  `chat.thread(threadId)` (the chat SDK's "post from outside a webhook"
+  primitive), so an out-of-turn `deliverNotice({ channel, thread })` posts to any
+  chat-sdk adapter with no per-adapter `fetchThread` wiring. The thread id prefix
+  selects the adapter; `{ thread }` is still required (without it the target is
+  ambiguous and `deliverNotice` throws).
 - **Attachment delivery ordering.** Reply attachments render in
   `_fireResponseHook` via `deliverNotice(..., { kind: "interim" })` _after_ the
   turn's final answer, so on web they appear as trailing assistant messages and
