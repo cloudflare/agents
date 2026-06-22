@@ -667,6 +667,47 @@ export class AIChatAgent<
     return runId;
   }
 
+  /**
+   * Re-bind this facet's in-flight agent-tool child run to the CURRENT turn's
+   * request id. Parity with `@cloudflare/think`'s
+   * `_rebindAgentToolChildRunRequestId`.
+   *
+   * When this facet runs as an agent-tool child and its turn is interrupted, the
+   * recovery continuation (`continueLastTurn` / `_retryLastUserTurn`) mints a NEW
+   * request id but never flows through `startAgentToolRun`'s
+   * `_registerAgentToolTurn`. So `cf_ai_chat_agent_tool_runs.request_id` (and the
+   * in-memory attribution map) still point at the pre-eviction turn, and
+   * `broadcast` can no longer attribute the recovered turn's frames to the run.
+   * A long-running child then forwards nothing to the parent's re-attach tail,
+   * its no-progress budget elapses, and a healthy child is abandoned as
+   * `interrupted`. Re-binding keeps attribution alive across recovery.
+   *
+   * No-op for facets that never ran as an agent-tool child (no table) or whose
+   * run already settled (no `running` row).
+   */
+  private _rebindAgentToolChildRunRequestId(requestId: string): void {
+    let runId: string | undefined;
+    try {
+      const rows = this.sql<{ run_id: string }>`
+        select run_id from cf_ai_chat_agent_tool_runs
+        where status = 'running'
+        order by started_at desc
+        limit 1
+      `;
+      runId = rows?.[0]?.run_id;
+    } catch {
+      // No child-run table on this facet (it never ran as a child).
+      return;
+    }
+    if (!runId) return;
+    this._agentToolRunsByRequestId.set(requestId, runId);
+    this.sql`
+      update cf_ai_chat_agent_tool_runs
+      set request_id = ${requestId}
+      where run_id = ${runId}
+    `;
+  }
+
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
     this.sql`create table if not exists cf_ai_chat_agent_messages (
@@ -3340,6 +3381,10 @@ export class AIChatAgent<
     }
 
     const requestId = nanoid();
+    // If this facet is an agent-tool child being recovered, re-bind its run row
+    // to this turn's request id so the parent's re-attach tail keeps attributing
+    // the continued turn's frames (no-op otherwise).
+    this._rebindAgentToolChildRunRequestId(requestId);
     const clientTools = this._lastClientTools;
     const resolvedBody = body ?? this._lastBody;
     const epoch = this._turnQueue.generation;
@@ -3435,6 +3480,10 @@ export class AIChatAgent<
     }
 
     const requestId = nanoid();
+    // If this facet is an agent-tool child being recovered, re-bind its run row
+    // to this turn's request id so the parent's re-attach tail keeps attributing
+    // the retried turn's frames (no-op otherwise).
+    this._rebindAgentToolChildRunRequestId(requestId);
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;

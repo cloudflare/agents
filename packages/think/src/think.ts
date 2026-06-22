@@ -3332,6 +3332,49 @@ export class Think<
     return runId;
   }
 
+  /**
+   * Re-bind this facet's in-flight agent-tool child run to the CURRENT turn's
+   * request id.
+   *
+   * When this facet is itself running as an agent-tool child and its turn is
+   * interrupted (e.g. a deploy evicts it mid-run), the recovery continuation
+   * (`continueLastTurn` / `_retryLastUserTurn`) mints a NEW request id. The
+   * `cf_agent_tool_child_runs.request_id` column — and the in-memory attribution
+   * map — still point at the pre-eviction turn, so `broadcast` can no longer
+   * attribute the recovered turn's frames to the run. The parent's re-attach
+   * tail then sees no forwarded chunks, its no-progress budget elapses, and it
+   * abandons a healthy, still-advancing child as `interrupted`
+   * (`agentToolReattachNoProgressTimeoutMs`). Re-binding the row to the recovery
+   * turn's request id keeps frame attribution alive across recovery so the
+   * parent re-attaches and follows the child to its real terminal.
+   *
+   * A no-op for the common case: facets that never ran as an agent-tool child
+   * have no `cf_agent_tool_child_runs` table (the SELECT is guarded), and a
+   * facet whose run already settled has no incomplete row.
+   */
+  private _rebindAgentToolChildRunRequestId(requestId: string): void {
+    let runId: string | undefined;
+    try {
+      const rows = this.sql<{ run_id: string }>`
+        SELECT run_id FROM cf_agent_tool_child_runs
+        WHERE completed_at IS NULL
+        ORDER BY started_at DESC
+        LIMIT 1
+      `;
+      runId = rows[0]?.run_id;
+    } catch {
+      // No child-run table on facets that never ran as an agent tool.
+      return;
+    }
+    if (!runId) return;
+    this._agentToolRunsByRequestId.set(requestId, runId);
+    this.sql`
+      UPDATE cf_agent_tool_child_runs
+      SET request_id = ${requestId}
+      WHERE run_id = ${runId}
+    `;
+  }
+
   override async alarm(): Promise<void> {
     await super.alarm();
     this._startWorkflowNotificationDrain();
@@ -9465,6 +9508,10 @@ export class Think<
     }
 
     const requestId = crypto.randomUUID();
+    // If this facet is itself an agent-tool child being recovered, re-bind its
+    // run row to this turn's request id so the parent's re-attach tail keeps
+    // attributing the continued turn's frames (no-op otherwise).
+    this._rebindAgentToolChildRunRequestId(requestId);
     const clientTools = this._lastClientTools;
     const resolvedBody = body ?? this._lastBody;
     const epoch = this._turnQueue.generation;
@@ -9563,6 +9610,10 @@ export class Think<
     }
 
     const requestId = crypto.randomUUID();
+    // If this facet is itself an agent-tool child being recovered, re-bind its
+    // run row to this turn's request id so the parent's re-attach tail keeps
+    // attributing the retried turn's frames (no-op otherwise).
+    this._rebindAgentToolChildRunRequestId(requestId);
     const epoch = this._turnQueue.generation;
     // Re-resolve the channel from the persisted user message so a recovered
     // retry re-applies per-channel policy, exactly like `continueLastTurn`. The

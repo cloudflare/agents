@@ -1,34 +1,38 @@
 /**
- * E2E (FAILING ON `main` — regression gate): a deploy that interrupts a child
- * `runAgentTool` run mid-flight causes the parent to seal the run `interrupted`
- * once the re-attach budget elapses, even though the child is HEALTHY and still
- * making forward progress.
+ * E2E (regression gate): a deploy that interrupts a child `runAgentTool` run
+ * mid-flight must NOT cause the parent to seal the run `interrupted` while the
+ * child is HEALTHY and still making forward progress.
+ *
+ * Root cause (now fixed): the parent's re-attach is no-progress–keyed off the
+ * child's forwarded stream chunks (not a flat wall clock). But a recovered child
+ * turn minted a NEW request id via `continueLastTurn` / `_retryLastUserTurn`
+ * without updating `cf_agent_tool_child_runs.request_id`, so
+ * `_agentToolRunForRequest` could no longer attribute the recovered turn's
+ * broadcast frames to the run. No frames reached the parent's tail, its
+ * no-progress budget (`agentToolReattachNoProgressTimeoutMs`, 120s) elapsed, and
+ * a still-advancing child was abandoned as `interrupted`. The fix
+ * (`_rebindAgentToolChildRunRequestId`) re-binds the row + in-memory attribution
+ * map to the recovery turn's request id, keeping frames flowing across recovery.
  *
  * Why this is the faithful repro (and why the other task agents don't catch it):
- *   - The re-attach budget (`DEFAULT_AGENT_TOOL_REATTACH_TIMEOUT_MS`, 120s) is a
- *     flat WALL-CLOCK timer — it is NOT reset by child forward-progress.
  *   - A child facet cannot arm its own physical alarm (facets share the root
  *     isolate), so it cannot self-drive its recovery the way the parent turn can.
  *   - `ThinkSlowChildParentE2EAgent` / `ThinkSlowChildE2EAgent` use the
- *     PRODUCTION-DEFAULT keepAlive (30s). The rollback/task agents override it to
- *     2s, which drives facet recovery ~15x faster and lets the child finish
- *     inside the budget — masking the bug.
+ *     PRODUCTION-DEFAULT keepAlive. The rollback/task agents override it to 2s,
+ *     which drives facet recovery ~15x faster and lets the child finish inside
+ *     the budget — masking the bug.
  *
  * Scenario: parent turn calls one `runTask` (→ child via the natural agentTool()
  * path, stable runId `agent-tool:task-1`). The child is a 60-step ledger loop
  * (~162s of continuous work). We let a few steps land, do ONE deploy (SIGKILL +
  * restart), then watch the parent's collected status for the child run.
  *
- * EXPECTED (post-fix): parent re-attaches/re-arms until the healthy child reaches
- * its real terminal → `parentChildStatus === "completed"`.
- * OBSERVED (`main`): the 120s budget elapses while the child is still advancing →
- * `parentChildStatus === "interrupted"` ("...did not reach a terminal result
- * within the re-attach budget."). The single hard assertion below fails on `main`
- * and will go green when the re-attach is made progress-aware / durable.
+ * EXPECTED: parent re-attaches/re-arms until the healthy child reaches its real
+ * terminal → `parentChildStatus === "completed"`.
  *
- * NOTE: This test is expected RED on `main` until the fix lands. It lives in the
- * manual `think-e2e` project (not the default CI gate). Once the fix lands it
- * should pass without modification.
+ * NOTE: lives in the manual `think-e2e` project (not the default PR gate).
+ * Deterministic unit coverage of the request_id rebind is in
+ * `packages/think/src/tests/agent-tool-reattach-recovery.test.ts`.
  */
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
@@ -301,14 +305,15 @@ describe("agent-tool re-attach budget under a single deploy", () => {
     }
   });
 
-  // SKIPPED: known-red gate for an unrelated bug — the flat wall-clock re-attach
-  // budget (`DEFAULT_AGENT_TOOL_REATTACH_TIMEOUT_MS`) still abandons a healthy,
-  // still-progressing child as `interrupted` after a deploy. A prior fix
-  // (#1670, "progress-keyed agent-tool re-attach") only partially closed this;
-  // making the re-attach fully progress-aware/durable is its own task. This is
-  // NOT part of the chat-recovery extraction. Re-enable (drop `.skip`) once that
-  // fix lands — the assertion below should then pass unchanged.
-  it.skip("does not abandon a still-progressing child as `interrupted` when the re-attach budget elapses after a deploy", async () => {
+  // Re-enabled: the root cause was that a recovered child turn minted a NEW
+  // request id without re-binding `cf_agent_tool_child_runs.request_id`, so the
+  // parent's re-attach tail could no longer attribute the child's frames and its
+  // no-progress budget elapsed against a healthy, still-advancing child. The fix
+  // (`_rebindAgentToolChildRunRequestId`, called from `continueLastTurn` /
+  // `_retryLastUserTurn`) keeps attribution alive across recovery. Deterministic
+  // coverage of the rebind lives in
+  // `packages/think/src/tests/agent-tool-reattach-recovery.test.ts`.
+  it("does not abandon a still-progressing child as `interrupted` when the re-attach budget elapses after a deploy", async () => {
     wrangler = startWrangler();
     await waitForReady();
 

@@ -6893,6 +6893,46 @@ export class ThinkRecoveryTestAgent extends Think {
   }
 
   /**
+   * Seed an in-flight (not-yet-completed) `cf_agent_tool_child_runs` row, as if
+   * this facet were running as an agent-tool child whose turn was interrupted
+   * before completing. Used to assert the recovery continuation re-binds the
+   * row's `request_id` so the parent's re-attach tail keeps attributing frames.
+   */
+  async seedAgentToolChildRunForTest(
+    runId: string,
+    requestId: string
+  ): Promise<void> {
+    (
+      this as unknown as { _ensureAgentToolChildRunTable(): void }
+    )._ensureAgentToolChildRunTable();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs (run_id, request_id, status, started_at)
+      VALUES (${runId}, ${requestId}, 'running', ${Date.now()})
+    `;
+  }
+
+  /** The `request_id` currently bound to an agent-tool child run row. */
+  async getAgentToolChildRunRequestIdForTest(
+    runId: string
+  ): Promise<string | null> {
+    const rows = this.sql<{ request_id: string | null }>`
+      SELECT request_id FROM cf_agent_tool_child_runs WHERE run_id = ${runId}
+    `;
+    return rows[0]?.request_id ?? null;
+  }
+
+  /** Resolve which agent-tool run a request id is attributed to (frame routing). */
+  async resolveAgentToolRunForRequestForTest(
+    requestId: string
+  ): Promise<string | null> {
+    return (
+      this as unknown as {
+        _agentToolRunForRequest(requestId: string): string | null;
+      }
+    )._agentToolRunForRequest(requestId);
+  }
+
+  /**
    * Seed the in-flight `_streamingAssistant` accumulator with `parts` (or clear
    * it with `null`), simulating a mid-stream turn whose partial hasn't been
    * persisted to `this.messages` yet — e.g. a parallel tool batch where a
