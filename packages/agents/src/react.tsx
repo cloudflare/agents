@@ -20,6 +20,7 @@ import {
   createAgentToolEventState,
   type AgentToolEventMessage,
   type AgentToolEventState,
+  type AgentToolRunPart,
   type AgentToolRunState
 } from "./chat/agent-tools";
 
@@ -1002,16 +1003,20 @@ function agentToolDedupeKey(message: AgentToolEventMessage): string {
   ].join("\0");
 }
 
-export function useAgentToolEvents(options: { agent: AgentToolEventAgent }): {
-  runsById: Record<string, AgentToolRunState>;
-  runsByToolCallId: Record<string, AgentToolRunState[]>;
-  unboundRuns: AgentToolRunState[];
-  getRunsForToolCall(toolCallId: string): AgentToolRunState[];
+export function useAgentToolEvents<
+  Part extends object = AgentToolRunPart
+>(options: {
+  agent: AgentToolEventAgent;
+}): {
+  runsById: Record<string, AgentToolRunState<Part>>;
+  runsByToolCallId: Record<string, AgentToolRunState<Part>[]>;
+  unboundRuns: AgentToolRunState<Part>[];
+  getRunsForToolCall(toolCallId: string): AgentToolRunState<Part>[];
   resetLocalState(): void;
 } {
   const { agent } = options;
-  const [state, setState] = useState<AgentToolEventState>(() =>
-    createAgentToolEventState()
+  const [state, setState] = useState<AgentToolEventState<Part>>(() =>
+    createAgentToolEventState<Part>()
   );
   const seenRef = useRef(new Set<string>());
 
@@ -1028,7 +1033,7 @@ export function useAgentToolEvents(options: { agent: AgentToolEventAgent }): {
       const key = agentToolDedupeKey(message);
       if (seenRef.current.has(key)) return;
       seenRef.current.add(key);
-      setState((prev) => applyAgentToolEvent(prev, message));
+      setState((prev) => applyAgentToolEvent<Part>(prev, message));
     };
 
     agent.addEventListener("message", onMessage);
@@ -1037,7 +1042,7 @@ export function useAgentToolEvents(options: { agent: AgentToolEventAgent }): {
 
   const resetLocalState = useCallback(() => {
     seenRef.current.clear();
-    setState(createAgentToolEventState());
+    setState(createAgentToolEventState<Part>());
   }, []);
 
   const getRunsForToolCall = useCallback(

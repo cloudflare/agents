@@ -79,6 +79,9 @@
     "@x402/evm": {
       "optional": true
     },
+    "ai": {
+      "optional": true
+    },
     "chat": {
       "optional": true
     },

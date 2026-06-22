@@ -132,7 +132,9 @@ type HelperState = {
   error?: string;
 };
 
-function toHelperState(run: AgentToolRunState): HelperState {
+function toHelperState(
+  run: AgentToolRunState<UIMessage["parts"][number]>
+): HelperState {
   const label = run.display?.name ?? run.agentType;
   const preview =
     typeof run.inputPreview === "string"
@@ -795,7 +797,7 @@ export default function App() {
     agent,
     experimental_throttle: 100
   });
-  const agentTools = useAgentToolEvents({ agent });
+  const agentTools = useAgentToolEvents<UIMessage["parts"][number]>({ agent });
   const { runsByToolCallId, resetLocalState } = agentTools;
   const helperStateByToolCall = useMemo<Record<string, HelperBucket>>(() => {
     return Object.fromEntries(

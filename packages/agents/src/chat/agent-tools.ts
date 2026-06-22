@@ -1,23 +1,26 @@
-import { applyChunkToParts } from "./message-builder";
+import { applyChunkToParts, type MessagePart } from "./message-builder";
 import type {
   AgentToolEventMessage,
   AgentToolEventState,
+  AgentToolRunPart,
   AgentToolRunState,
   AgentToolStoredChunk
 } from "../agent-tool-types";
 
-function sortRuns(runs: AgentToolRunState[]): AgentToolRunState[] {
+function sortRuns<Part extends object>(
+  runs: AgentToolRunState<Part>[]
+): AgentToolRunState<Part>[] {
   return [...runs].sort((a, b) => {
     if (a.order !== b.order) return a.order - b.order;
     return a.runId.localeCompare(b.runId);
   });
 }
 
-function rebuildIndexes(
-  runsById: Record<string, AgentToolRunState>
-): Pick<AgentToolEventState, "runsByToolCallId" | "unboundRuns"> {
-  const grouped: Record<string, AgentToolRunState[]> = {};
-  const unboundRuns: AgentToolRunState[] = [];
+function rebuildIndexes<Part extends object>(
+  runsById: Record<string, AgentToolRunState<Part>>
+): Pick<AgentToolEventState<Part>, "runsByToolCallId" | "unboundRuns"> {
+  const grouped: Record<string, AgentToolRunState<Part>[]> = {};
+  const unboundRuns: AgentToolRunState<Part>[] = [];
   for (const run of Object.values(runsById)) {
     if (run.parentToolCallId) {
       grouped[run.parentToolCallId] = grouped[run.parentToolCallId] ?? [];
@@ -32,9 +35,9 @@ function rebuildIndexes(
   return { runsByToolCallId: grouped, unboundRuns: sortRuns(unboundRuns) };
 }
 
-function emptyRun(
+function emptyRun<Part extends object>(
   message: AgentToolEventMessage
-): AgentToolRunState | undefined {
+): AgentToolRunState<Part> | undefined {
   const { event } = message;
   if (event.kind === "started") {
     return {
@@ -52,10 +55,10 @@ function emptyRun(
   return undefined;
 }
 
-function applyToRun(
-  prev: AgentToolRunState | undefined,
+function applyToRun<Part extends object>(
+  prev: AgentToolRunState<Part> | undefined,
   message: AgentToolEventMessage
-): AgentToolRunState | undefined {
+): AgentToolRunState<Part> | undefined {
   const seeded = prev ?? emptyRun(message);
   const { event } = message;
 
@@ -85,7 +88,7 @@ function applyToRun(
       if (!seeded) return undefined;
       const parts = [...seeded.parts];
       try {
-        applyChunkToParts(parts, JSON.parse(event.body));
+        applyChunkToParts(parts as MessagePart[], JSON.parse(event.body));
       } catch {
         return seeded;
       }
@@ -117,7 +120,9 @@ function applyToRun(
   }
 }
 
-export function createAgentToolEventState(): AgentToolEventState {
+export function createAgentToolEventState<
+  Part extends object = AgentToolRunPart
+>(): AgentToolEventState<Part> {
   return {
     runsById: {},
     runsByToolCallId: {},
@@ -125,10 +130,10 @@ export function createAgentToolEventState(): AgentToolEventState {
   };
 }
 
-export function applyAgentToolEvent(
-  state: AgentToolEventState,
+export function applyAgentToolEvent<Part extends object = AgentToolRunPart>(
+  state: AgentToolEventState<Part>,
   message: AgentToolEventMessage
-): AgentToolEventState {
+): AgentToolEventState<Part> {
   if (message.type !== "agent-tool-event") return state;
   const runId = message.event.runId;
   const nextRun = applyToRun(state.runsById[runId], message);
@@ -142,6 +147,7 @@ export type {
   AgentToolEvent,
   AgentToolEventMessage,
   AgentToolEventState,
+  AgentToolRunPart,
   AgentToolRunState
 } from "../agent-tool-types";
 

@@ -13,7 +13,6 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 import { type RetryOptions, tryN } from "../retries";
-import type { ToolSet } from "ai";
 import { z } from "zod";
 import { nanoid } from "nanoid";
 import { Emitter, type Event, DisposableStore } from "../core/events";
@@ -33,6 +32,24 @@ import { DurableObjectOAuthClientProvider } from "./do-oauth-client-provider";
 const defaultClientOptions: ConstructorParameters<typeof Client>[1] = {
   jsonSchemaValidator: new CfWorkerJsonSchemaValidator()
 };
+
+export type MCPAITool = {
+  description?: string;
+  title?: string;
+  execute: (
+    args: Record<string, unknown>,
+    options?: unknown
+  ) => Promise<unknown>;
+  inputSchema: z.ZodType;
+  outputSchema?: z.ZodType;
+};
+
+/**
+ * Structural tool set returned by {@link MCPClientManager.getAITools}.
+ * Compatible with the AI SDK without importing its types into the core
+ * `agents` declaration graph.
+ */
+export type MCPAIToolSet = Record<string, MCPAITool>;
 
 /** Maximum length of a normalized MCP server id. */
 export const MCP_SERVER_ID_MAX_LENGTH = 64;
@@ -1606,7 +1623,7 @@ export class MCPClientManager {
    * @param filter - Optional filter to scope results to specific servers
    * @returns a set of tools that you can use with the AI SDK
    */
-  getAITools(filter?: MCPServerFilter): ToolSet {
+  getAITools(filter?: MCPServerFilter): MCPAIToolSet {
     const connections = this.filterConnections(filter);
 
     for (const [id, conn] of Object.entries(connections)) {
@@ -1620,7 +1637,7 @@ export class MCPClientManager {
       }
     }
 
-    const entries: [string, ToolSet[string]][] = [];
+    const entries: [string, MCPAITool][] = [];
     for (const tool of getNamespacedData(connections, "tools")) {
       try {
         const toolKey = `tool_${tool.serverId.replace(/-/g, "")}_${tool.name}`;
@@ -1675,7 +1692,7 @@ export class MCPClientManager {
    * @param filter - Optional filter to scope results to specific servers
    * @returns a set of tools that you can use with the AI SDK
    */
-  unstable_getAITools(filter?: MCPServerFilter): ToolSet {
+  unstable_getAITools(filter?: MCPServerFilter): MCPAIToolSet {
     if (!this._didWarnAboutUnstableGetAITools) {
       this._didWarnAboutUnstableGetAITools = true;
       console.warn(

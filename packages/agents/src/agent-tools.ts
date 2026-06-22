@@ -171,6 +171,7 @@ export type {
   AgentToolLifecycleResult,
   AgentToolRunInfo,
   AgentToolRunInspection,
+  AgentToolRunPart,
   AgentToolRunState,
   AgentToolRunStatus,
   AgentToolStoredChunk,

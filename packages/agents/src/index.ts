@@ -109,6 +109,7 @@ export type {
   AgentToolLifecycleResult,
   AgentToolRunInfo,
   AgentToolRunInspection,
+  AgentToolRunPart,
   AgentToolRunState,
   AgentToolRunStatus,
   AgentToolStoredChunk,
@@ -834,7 +835,12 @@ function getNextCronTime(cron: string) {
 
 export type { TransportType } from "./mcp/types";
 export type { RetryOptions } from "./retries";
-export { normalizeServerId, MCP_SERVER_ID_MAX_LENGTH } from "./mcp/client";
+export {
+  normalizeServerId,
+  MCP_SERVER_ID_MAX_LENGTH,
+  type MCPAITool,
+  type MCPAIToolSet
+} from "./mcp/client";
 export {
   DurableObjectOAuthClientProvider,
   type AgentMcpOAuthProvider,
