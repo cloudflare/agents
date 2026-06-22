@@ -96,6 +96,10 @@
         "name": "ThinkAgentToolParent"
       },
       {
+        "class_name": "ThinkNestedMiddleAgent",
+        "name": "ThinkNestedMiddleAgent"
+      },
+      {
         "class_name": "StuckThinkAgentToolChild",
         "name": "StuckThinkAgentToolChild"
       },
@@ -170,6 +174,7 @@
         "ThinkRecoveryTestAgent",
         "ThinkNonRecoveryTestAgent",
         "ThinkAgentToolParent",
+        "ThinkNestedMiddleAgent",
         "StuckThinkAgentToolChild",
         "ThinkExtensionHookAgent",
         "ThinkMessengerRouteTestAgent",

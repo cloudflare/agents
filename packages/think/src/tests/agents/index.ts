@@ -20,6 +20,7 @@ export {
   ThinkRecoveryTestAgent,
   ThinkNonRecoveryTestAgent,
   ThinkAgentToolParent,
+  ThinkNestedMiddleAgent,
   StuckThinkAgentToolChild,
   ThinkOnStartReconcileFailureAgent,
   ThinkOnStartHydrationFailureAgent,

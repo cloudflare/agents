@@ -1959,6 +1959,37 @@ export class StuckThinkAgentToolChild extends Agent {
   }
 }
 
+/**
+ * Middle layer for nested agent-tools (grandparent → middle → grandchild). As a
+ * valid agent-tool CHILD it inherits the full child adapter from
+ * {@link ThinkTestAgent}; as a PARENT it dispatches its own grandchild run via
+ * `runAgentTool` at the start of its run. The grandchild's frames are observed
+ * only by the middle (its immediate parent) — observation does not bridge up to
+ * the grandparent.
+ */
+export class ThinkNestedMiddleAgent extends ThinkTestAgent {
+  override async startAgentToolRun(
+    input: unknown,
+    options: { runId: string }
+  ): Promise<AgentToolRunInspection> {
+    await this.runAgentTool(ThinkTestAgent, {
+      runId: `${options.runId}-grandchild`,
+      parentToolCallId: "nested-grandchild-call",
+      input: "grandchild work",
+      inputPreview: "grandchild work"
+    });
+    return super.startAgentToolRun(input, options);
+  }
+
+  /** This facet's OWN parent registry rows (the grandchild runs it dispatched). */
+  getAgentToolRunStatusesForTest(): Array<{ runId: string; status: string }> {
+    const rows = this.sql<{ run_id: string; status: string }>`
+      SELECT run_id, status FROM cf_agent_tool_runs ORDER BY started_at ASC
+    `;
+    return rows.map((r) => ({ runId: r.run_id, status: r.status }));
+  }
+}
+
 export class ThinkAgentToolParent extends Agent {
   // Distinctive non-default re-attach budgets so a behavioral test can prove
   // the public `AgentStaticOptions` knobs are honored (resolved + used by
@@ -2049,6 +2080,79 @@ export class ThinkAgentToolParent extends Agent {
       input,
       inputPreview: input
     });
+  }
+
+  /** Set the parent's concurrency cap at runtime (default `Infinity`). */
+  async setMaxConcurrentAgentToolsForTest(limit: number): Promise<void> {
+    this.maxConcurrentAgentTools = limit;
+  }
+
+  /**
+   * Run a nested agent-tool chain (this parent → middle → grandchild) and report
+   * the middle's terminal status, the run ids this parent observed via
+   * agent-tool events, and the middle's own grandchild run rows. Asserts the
+   * nesting works and that grandchild observation does not bridge up to here.
+   */
+  async runNestedMiddleForTest(runId: string): Promise<{
+    middleStatus: string;
+    middleError?: string;
+    parentEventRunIds: string[];
+    grandchildRuns: Array<{ runId: string; status: string }>;
+  }> {
+    this.events = [];
+    this.finishes = [];
+    const result = await this.runAgentTool(ThinkNestedMiddleAgent, {
+      runId,
+      parentToolCallId: "nested-middle-call",
+      input: "middle work",
+      inputPreview: "middle work"
+    });
+    const parentEventRunIds = Array.from(
+      new Set(this.events.map((e) => e.event.runId))
+    );
+    const middle = await this.subAgent(ThinkNestedMiddleAgent, runId);
+    const grandchildRuns = await middle.getAgentToolRunStatusesForTest();
+    return {
+      middleStatus: result.status,
+      ...(result.error !== undefined && { middleError: result.error }),
+      parentEventRunIds,
+      grandchildRuns
+    };
+  }
+
+  /**
+   * Launch `count` Think children concurrently against the current
+   * `maxConcurrentAgentTools` cap and return each run's terminal status. The cap
+   * is enforced synchronously at admission (before any await), so over-limit
+   * launches reject deterministically (`status: "error"`, no queue) without
+   * needing slow children.
+   */
+  async runConcurrentThinkChildrenForTest(
+    count: number
+  ): Promise<Array<{ runId: string; status: string; error?: string }>> {
+    this.events = [];
+    this.finishes = [];
+    const runIds = Array.from(
+      { length: count },
+      (_, i) => `concurrency-${i}-${crypto.randomUUID()}`
+    );
+    return Promise.all(
+      runIds.map((runId) =>
+        this.runAgentTool(ThinkTestAgent, {
+          runId,
+          parentToolCallId: `concurrency-${runId}`,
+          input: "concurrent child",
+          inputPreview: "concurrent child"
+        }).then(
+          (r) => ({ runId, status: r.status, error: r.error }),
+          (e: unknown) => ({
+            runId,
+            status: "throw",
+            error: e instanceof Error ? e.message : String(e)
+          })
+        )
+      )
+    );
   }
 
   /**
@@ -4196,6 +4300,71 @@ export class ThinkToolsTestAgent extends Think {
 
   async getStoredMessages(): Promise<UIMessage[]> {
     return this.getMessages();
+  }
+
+  // ── Recovery-simulation helpers (for action-pause × recovery) ─────
+
+  async persistTestMessage(msg: UIMessage): Promise<void> {
+    await this.session.appendMessage(msg);
+  }
+
+  async hasPendingInteractionForTest(): Promise<boolean> {
+    return this.hasPendingInteraction();
+  }
+
+  async insertInterruptedFiber(
+    name: string,
+    snapshot?: unknown
+  ): Promise<void> {
+    const id = `fiber-${crypto.randomUUID()}`;
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
+    `;
+  }
+
+  async triggerFiberRecovery(): Promise<void> {
+    await (
+      this as unknown as { _checkRunFibers(): Promise<void> }
+    )._checkRunFibers();
+  }
+
+  async getScheduledChatRecoveryCountForTest(
+    callback = "_chatRecoveryContinue"
+  ): Promise<number> {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_schedules WHERE callback = ${callback}
+    `;
+    return rows[0]?.count ?? 0;
+  }
+
+  async runScheduledRecoveryRetryForTest(): Promise<void> {
+    const rows = this.sql<{ payload: string }>`
+      SELECT payload FROM cf_agents_schedules
+      WHERE callback = '_chatRecoveryRetry'
+      ORDER BY time ASC
+      LIMIT 1
+    `;
+    if (!rows[0]) return;
+    await (
+      this as unknown as {
+        _chatRecoveryRetry(d: {
+          targetUserId?: string;
+          lastBody?: Record<string, unknown>;
+        }): Promise<void>;
+      }
+    )._chatRecoveryRetry(
+      JSON.parse(rows[0].payload) as {
+        targetUserId?: string;
+        lastBody?: Record<string, unknown>;
+      }
+    );
+  }
+
+  async getActiveFibers(): Promise<Array<{ id: string; name: string }>> {
+    return this.sql<{ id: string; name: string }>`
+      SELECT id, name FROM cf_agents_runs
+    `;
   }
 }
 
@@ -6653,6 +6822,18 @@ export class ThinkRecoveryTestAgent extends Think {
         parts: [{ type: "text", text }]
       }
     ]);
+  }
+
+  /** Drive a programmatic turn via the unified `runTurn` (wait mode) API. */
+  async testRunTurnWait(
+    text: string,
+    options?: { channel?: string }
+  ): Promise<{ status: string; continuation: boolean }> {
+    const result = await this.runTurn({
+      input: text,
+      ...(options?.channel !== undefined && { channel: options.channel })
+    });
+    return { status: result.status, continuation: result.continuation };
   }
 
   async testContinueLastTurn(): Promise<SaveMessagesResult> {
