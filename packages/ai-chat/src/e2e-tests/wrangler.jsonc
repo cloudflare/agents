@@ -36,6 +36,14 @@
       {
         "name": "ChatHangingRecoveryAgent",
         "class_name": "ChatHangingRecoveryAgent"
+      },
+      {
+        "name": "ChatRecoveryHelperChild",
+        "class_name": "ChatRecoveryHelperChild"
+      },
+      {
+        "name": "ChatRecoveryHelperParent",
+        "class_name": "ChatRecoveryHelperParent"
       }
     ]
   },
@@ -69,6 +77,13 @@
     {
       "tag": "v6",
       "new_sqlite_classes": ["ChatHangingRecoveryAgent"]
+    },
+    {
+      "tag": "v7",
+      "new_sqlite_classes": [
+        "ChatRecoveryHelperChild",
+        "ChatRecoveryHelperParent"
+      ]
     }
   ]
 }

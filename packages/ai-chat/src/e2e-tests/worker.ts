@@ -15,7 +15,7 @@ import {
   type ChatRecoveryOptions,
   type OnChatMessageOptions
 } from "@cloudflare/ai-chat";
-import { callable, routeAgentRequest } from "agents";
+import { Agent, callable, routeAgentRequest } from "agents";
 import type { UIMessage as ChatMessage } from "ai";
 
 type Env = {
@@ -27,6 +27,8 @@ type Env = {
   ChatNoPersistNoContinueAgent: DurableObjectNamespace<ChatNoPersistNoContinueAgent>;
   ChatBufferCleanupAgent: DurableObjectNamespace<ChatBufferCleanupAgent>;
   ChatHangingRecoveryAgent: DurableObjectNamespace<ChatHangingRecoveryAgent>;
+  ChatRecoveryHelperChild: DurableObjectNamespace<ChatRecoveryHelperChild>;
+  ChatRecoveryHelperParent: DurableObjectNamespace<ChatRecoveryHelperParent>;
 };
 
 const EXHAUSTED_LOG_KEY = "test:exhausted-log";
@@ -495,6 +497,79 @@ export class ChatHangingRecoveryAgent extends ChatRecoveryTestAgent {
     return new Response(stream, {
       headers: { "Content-Type": "text/event-stream" }
     });
+  }
+}
+
+/**
+ * Sub-agent SIGKILL parity (Think has this, ai-chat didn't): an `AIChatAgent`
+ * run as an agent-tool CHILD. It inherits `ChatRecoveryTestAgent`'s slow finite
+ * stream (~10s) + `chatRecovery = true` + default `onChatRecovery` (continue),
+ * so a SIGKILL mid agent-tool run leaves the child's turn interrupted, and on
+ * restart the child self-heals via continue recovery while the parent
+ * re-attaches to its still-running run and collects the real terminal (#1630).
+ */
+export class ChatRecoveryHelperChild extends ChatRecoveryTestAgent {
+  override formatAgentToolInput(
+    input: { prompt: string },
+    request: { runId: string }
+  ): ChatMessage {
+    return {
+      id: `tool-input-${request.runId}`,
+      role: "user",
+      parts: [{ type: "text", text: input.prompt }]
+    };
+  }
+}
+
+type AgentToolRunStatus = {
+  runId: string;
+  status: string;
+  error: string | null;
+};
+
+/**
+ * Plain `Agent` parent that drives a child agent-tool run and exposes the
+ * parent-side `cf_agent_tool_runs` ledger, mirroring Think's
+ * `ThinkRecoveryHelperParent`. The faithful ai-chat path is `runAgentTool`
+ * re-attach (not Think's `chat()` RPC), so the parent starts the run, lets it
+ * stream, and the test kills/restarts wrangler mid-run.
+ */
+export class ChatRecoveryHelperParent extends Agent<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+
+  @callable()
+  async startHelperAgentToolRun(
+    runId: string,
+    prompt: string
+  ): Promise<string> {
+    // The child facet is named by `runId` (runAgentTool resolves it via
+    // subAgent(cls, runId)) and self-heals on recovery by default
+    // (ChatRecoveryTestAgent.onChatRecovery returns {} = continue), so a
+    // re-attached parent collects the child's REAL terminal after a restart
+    // instead of abandoning it as interrupted.
+    void this.runAgentTool(ChatRecoveryHelperChild, {
+      runId,
+      input: { prompt }
+    }).catch((error) => {
+      console.error("[test] helper agent-tool run failed:", error);
+    });
+
+    for (let i = 0; i < 20; i++) {
+      const rows = this.getAgentToolRuns();
+      if (rows.some((row) => row.runId === runId)) return runId;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    throw new Error("Timed out waiting for helper agent-tool row");
+  }
+
+  @callable()
+  getAgentToolRuns(): AgentToolRunStatus[] {
+    return this.sql<AgentToolRunStatus>`
+      SELECT run_id as runId, status, error_message as error
+      FROM cf_agent_tool_runs
+      ORDER BY started_at ASC
+    `;
   }
 }
 
