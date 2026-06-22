@@ -159,6 +159,14 @@ export function resolveChannels(
   }
 
   for (const [id, definition] of Object.entries(messengers)) {
+    // Same reservation as the configureChannels() path: a messenger named
+    // "web" would overwrite the built-in WebSocket chat surface with a
+    // kind: "messenger" channel and break native chat ingress/delivery.
+    if (id === "web") {
+      throw new Error(
+        `Channel "web" is reserved for the built-in WebSocket chat surface and cannot be declared as a messenger via getMessengers()`
+      );
+    }
     if (Object.prototype.hasOwnProperty.call(configured, id)) {
       throw new Error(
         `Channel id "${id}" is declared by both configureChannels() and getMessengers(); channel ids must be unique`

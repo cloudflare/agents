@@ -74,6 +74,12 @@ describe("resolveChannels", () => {
     );
   });
 
+  it("throws when getMessengers() declares a messenger named web", () => {
+    expect(() => resolveChannels({}, { web: telegram() })).toThrow(
+      /reserved for the built-in WebSocket chat surface/
+    );
+  });
+
   it("throws on a duplicate id across configureChannels() and getMessengers()", () => {
     const configured = defineChannels({
       telegram: { kind: "voice", ingress: { transport: "voice" } }
