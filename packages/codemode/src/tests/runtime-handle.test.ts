@@ -1,4 +1,5 @@
-import { asSchema } from "ai";
+import { asSchema, streamText } from "ai";
+import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import { describe, expect, it, vi } from "vitest";
 import type { Executor } from "../executor";
 import { createCodemodeRuntime } from "../runtime-handle";
@@ -76,6 +77,74 @@ describe("createCodemodeRuntime", () => {
     await expect(inputSchema.validate?.({ code: 1 })).resolves.toMatchObject({
       success: false
     });
+  });
+
+  it("executes as a plain tool through AI SDK streamText", async () => {
+    const runtimeStub = {
+      begin: vi.fn(async () => "exec_1"),
+      getExecution: vi.fn(async () => null),
+      complete: vi.fn(async () => undefined)
+    };
+    const executor = createMockExecutor("executed");
+    const runtime = createCodemodeRuntime({
+      ctx: createMockCtx(runtimeStub),
+      executor,
+      connectors: []
+    });
+    const model = new MockLanguageModelV3({
+      doStream: {
+        stream: simulateReadableStream({
+          chunks: [
+            { type: "stream-start", warnings: [] },
+            {
+              type: "tool-call",
+              toolCallId: "call_1",
+              toolName: "codemode",
+              input: JSON.stringify({ code: "return 1" })
+            },
+            {
+              type: "finish",
+              finishReason: { unified: "tool-calls", raw: undefined },
+              usage: {
+                inputTokens: {
+                  total: 1,
+                  noCache: 1,
+                  cacheRead: 0,
+                  cacheWrite: 0
+                },
+                outputTokens: { total: 1, text: 1, reasoning: 0 }
+              }
+            }
+          ]
+        })
+      }
+    });
+
+    const result = streamText({
+      model,
+      prompt: "Execute the code",
+      tools: { codemode: runtime.tool() }
+    });
+
+    await expect(result.toolResults).resolves.toEqual([
+      expect.objectContaining({
+        toolCallId: "call_1",
+        toolName: "codemode",
+        input: { code: "return 1" },
+        output: {
+          status: "completed",
+          executionId: "exec_1",
+          result: "executed",
+          logs: undefined
+        }
+      })
+    ]);
+    expect(executor.execute).toHaveBeenCalled();
+    expect(runtimeStub.complete).toHaveBeenCalledWith(
+      "exec_1",
+      "executed",
+      undefined
+    );
   });
 
   it("approves a paused execution using the runtime's executor and connectors", async () => {
