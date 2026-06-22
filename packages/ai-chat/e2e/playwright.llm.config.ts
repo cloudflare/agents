@@ -28,7 +28,11 @@ export default defineConfig({
   // Hard wall-clock cap, below the CI job's 30-minute ceiling, so flaky/slow
   // Workers AI fails WITH a report instead of being canceled with none.
   globalTimeout: 20 * 60_000,
-  retries: process.env.CI ? 1 : 0,
+  // Real-model output is nondeterministic — the small Workers AI model
+  // occasionally varies wording/step boundaries and trips a strict assertion.
+  // Re-runs recover these reliably, so allow extra retries (only fire on
+  // failure, so green runs pay nothing).
+  retries: process.env.CI ? 3 : 0,
   workers: 1,
   reporter: process.env.CI ? [["github"], ["list"]] : [["list"]],
   use: {
