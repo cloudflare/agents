@@ -193,12 +193,14 @@ jobs:
 
   # ── DEPLOYED (Layer-5) recovery suites ──────────────────────────────────────
   # These deploy REAL, billable Workers and drive recovery on Cloudflare's edge
-  # (not local workerd). They are OPT-IN: skipped unless the repo variable
-  # `RUN_DEPLOYED_E2E` is `1`, or a manual run sets the `run_deployed` input.
-  # Each suite uniquely names its throwaway Worker and always deletes it.
+  # (not local workerd). They run on the nightly SCHEDULE. For manual
+  # `workflow_dispatch` runs they stay opt-in (set the `run_deployed` input, or
+  # the `RUN_DEPLOYED_E2E` repo variable) so ad-hoc debugging runs don't deploy
+  # billable Workers unintentionally. Each suite uniquely names its throwaway
+  # Worker and always deletes it.
   e2e-deployed-ai-chat:
     name: "E2E (deployed): ai-chat recovery on real edge"
-    if: ${{ vars.RUN_DEPLOYED_E2E == '1' || github.event.inputs.run_deployed == 'true' }}
+    if: ${{ github.event_name == 'schedule' || vars.RUN_DEPLOYED_E2E == '1' || github.event.inputs.run_deployed == 'true' }}
     timeout-minutes: 30
     runs-on: ubuntu-24.04
     steps:
@@ -223,7 +225,7 @@ jobs:
 
   e2e-deployed-think-probe:
     name: "E2E (deployed): Think recovery probe on real edge"
-    if: ${{ vars.RUN_DEPLOYED_E2E == '1' || github.event.inputs.run_deployed == 'true' }}
+    if: ${{ github.event_name == 'schedule' || vars.RUN_DEPLOYED_E2E == '1' || github.event.inputs.run_deployed == 'true' }}
     timeout-minutes: 30
     runs-on: ubuntu-24.04
     steps:
