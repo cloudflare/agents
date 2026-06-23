@@ -554,7 +554,7 @@ describe("think CLI", () => {
     // Template scaffold (not augment): a full starter app in the subfolder.
     expect(
       await readFile(path.join(root, "app/package.json"), "utf8")
-    ).toContain("@cloudflare/ai-chat");
+    ).toContain("@cloudflare/kumo");
     // The existing project's package.json is left untouched.
     const outer = JSON.parse(
       await readFile(path.join(root, "package.json"), "utf8")
