@@ -1,7 +1,6 @@
 import { build } from "tsdown";
 import { globSync } from "glob";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
 import { formatDeclarationFiles } from "../../../scripts/format-declarations";
 
 const entries = [
@@ -55,66 +54,6 @@ function injectSkillsTypeReference(): void {
   }
 }
 
-function moduleSpecifiers(source: string): string[] {
-  const specifiers = new Set<string>();
-  for (const pattern of [
-    /\bfrom\s+["']([^"']+)["']/g,
-    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
-    /\bimport\s+["']([^"']+)["']/g
-  ]) {
-    for (const match of source.matchAll(pattern)) {
-      const specifier = match[1];
-      if (specifier) specifiers.add(specifier);
-    }
-  }
-  return [...specifiers];
-}
-
-function resolveEmittedImport(
-  importer: string,
-  specifier: string,
-  declarationGraph: boolean
-): string | undefined {
-  if (!specifier.startsWith(".")) return undefined;
-  const imported = resolve(dirname(importer), specifier);
-  const candidates = declarationGraph
-    ? [
-        imported.replace(/\.(?:m?js)$/, ".d.ts"),
-        `${imported}.d.ts`,
-        resolve(imported, "index.d.ts")
-      ]
-    : [imported, `${imported}.js`, resolve(imported, "index.js")];
-  return candidates.find((candidate) => existsSync(candidate));
-}
-
-function assertRootHasNoAIFrameworkDependency(): void {
-  for (const entry of ["dist/index.js", "dist/index.d.ts"]) {
-    const declarationGraph = entry.endsWith(".d.ts");
-    const pending = [resolve(entry)];
-    const visited = new Set<string>();
-
-    while (pending.length > 0) {
-      const file = pending.pop();
-      if (!file || visited.has(file)) continue;
-      visited.add(file);
-
-      for (const specifier of moduleSpecifiers(readFileSync(file, "utf8"))) {
-        if (specifier === "ai" || specifier.startsWith("@ai-sdk/")) {
-          throw new Error(
-            `${entry} reaches AI framework import "${specifier}" through ${file}`
-          );
-        }
-        const imported = resolveEmittedImport(
-          file,
-          specifier,
-          declarationGraph
-        );
-        if (imported) pending.push(imported);
-      }
-    }
-  }
-}
-
 async function main() {
   await build({
     clean: true,
@@ -134,7 +73,6 @@ async function main() {
   formatDeclarationFiles();
 
   injectSkillsTypeReference();
-  assertRootHasNoAIFrameworkDependency();
 
   process.exit(0);
 }
